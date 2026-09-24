@@ -23,8 +23,10 @@ not on `PATH`). Installing it also arms the credential half of the `pre-push`
 hook, which is worth having before you push anything.
 
 The Python and shell suites are also the CI gate, across Python 3.10 to 3.13 on
-Linux; the macOS cells run on demand from the Actions tab (they are billed even
-on a public repo, so they are not part of the per-push matrix).
+Linux; the macOS cells run on demand from the Actions tab (every cell bills the
+organisation's Actions minutes now that the repository is internal, and a macOS
+minute costs about ten times a Linux one, so they are not part of the per-push
+matrix).
 
 ## Measuring dashboard pane performance
 

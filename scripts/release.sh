@@ -48,7 +48,7 @@ GH="${ROMP_GH:-gh}"                       # overridable so tests can stub the Gi
 PYTEST="${ROMP_RELEASE_PYTEST:-}"         # overridable suite runner (tests); empty → resolve below
 POLL="${ROMP_RELEASE_POLL:-5}"            # seconds between checks while the run starts
 REF="${ROMP_RELEASE_REF:-main}"
-UPSTREAM="${ROMP_RELEASE_UPSTREAM:-romp-on/romp}"
+UPSTREAM="${ROMP_RELEASE_UPSTREAM:-safety-research/romp}"
 
 # Which git remote is the canonical repo, and which one takes the branch push. The convention
 # (the user 2026-09-06): in a clone with a fork, `origin` is the fork and `upstream` is the
@@ -165,8 +165,8 @@ on_branch="$(git symbolic-ref -q --short HEAD || true)"
 # bump PR landed earlier. That makes a half-finished release resumable: re-running picks up
 # where it stopped instead of insisting on starting over.
 if [ "$current" != "$target" ]; then
-    # Branch pushes to the upstream are blocked by rulesets, so publishing is always
-    # push-to-a-fork then PR. remote.pushDefault is the configured answer when there is one.
+    # Only main requires a pull request on the upstream, so publishing is push a branch (to a
+    # fork or to the upstream) then PR. remote.pushDefault is the configured answer when there is one.
     publish="$(publish_remote)"
     branch="release-$target"
     say "VERSION $current → $target, via a PR on $branch (pushing to '$publish')."
@@ -182,7 +182,7 @@ if [ "$current" != "$target" ]; then
         git push -q -u "$publish" "$branch" || die "could not push $branch to $publish."
         # Address the PR by NUMBER, taken from the URL `gh pr create` prints (the user 2026-08-01).
         # `gh pr merge <branch>` resolves the branch WITHIN --repo, and the branch lives on the FORK
-        # (rulesets block branch pushes upstream, so every PR here is fork-headed) — so it answered
+        # (a PR here may be fork-headed; only main requires a pull request upstream): so it answered
         # "no pull requests found for branch release-0.3.0" and the release died one step after
         # opening the PR, leaving VERSION merged-but-untagged, exactly the half-finished state this
         # script exists to prevent. A number is unambiguous in any repo.
@@ -406,8 +406,8 @@ prev="$(git tag -l 'v*' --sort=-v:refname | head -n1 || true)"
 step git tag -a "$tag" -m "romp $tag"
 say "created tag $tag."
 
-# The tag goes to the CANONICAL repo (`upstream` in a fork layout, else `origin`): rulesets
-# block branch pushes there, but a tag is how a release is published, and a tag that lands
+# The tag goes to the CANONICAL repo (`upstream` in a fork layout, else `origin`): only main
+# requires a pull request there, and a tag is how a release is published, so a tag that lands
 # only on the fork, or only locally, installs for nobody.
 canonical="$(canonical_remote)"
 step git push -q "$canonical" "$tag" || die "could not push $tag to $canonical."

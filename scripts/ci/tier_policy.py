@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The PR tier POLICY as a pure function for romp-on/romp: the repository owner's rules of 2026-09-08, by
+"""The PR tier POLICY as a pure function for safety-research/romp: the repository owner's rules of 2026-09-08, by
 tier and by the AUTHOR's role (replacing the maintainers' text of 2026-09-07 and its seven-day clock).
 
 `evaluate(pr)` takes a PR record (the workflow's fetcher builds it from the GitHub API; tests build it by
@@ -76,7 +76,7 @@ TRUNCATED = "files beyond the API's 3000-entry listing"
 # gate's own workflow and code (a PR that rewrote the policy and merged on green would have graded itself)
 GUARDED_PREFIXES = (".github/", "scripts/ci/")
 import re
-_ISSUE_REF = re.compile(r"(?:^|[^\w/])#(\d+)\b|github\.com/romp-on/romp/issues/(\d+)\b")
+_ISSUE_REF = re.compile(r"(?:^|[^\w/])#(\d+)\b|github\.com/safety-research/romp/issues/(\d+)\b")
 # the body's tier line (T273, the owner 2026-09-08): `Tier: fix` on a line of its own, read case-insensitively
 # with bold, backticks or a list marker tolerated; HTML comments are cut out first, so the PR template's
 # explanation of the tiers never parses. A read-only contributor cannot label their own PR (labeling needs
@@ -233,12 +233,12 @@ def _changes_requested(pr):
 
 
 def _linked_issue_discussed(pr):
-    """(True, n) when the body references an issue in romp-on/romp that exists, is not a PR, and carries a
+    """(True, n) when the body references an issue in safety-research/romp that exists, is not a PR, and carries a
     COMMENT by someone other than the author (bots filtered by the fetcher). The opener does not count on
     their own: an issue filed and never answered is not a discussion (the maintainers, 2026-09-07)."""
     refs = [int(a or b) for a, b in _ISSUE_REF.findall(pr.get("body") or "")]
     if not refs:
-        return False, "the body links no issue (#N or a romp-on/romp issue URL)"
+        return False, "the body links no issue (#N or a safety-research/romp issue URL)"
     issues = pr.get("issues") or {}
     for n in refs:
         info = issues.get(n) or issues.get(str(n))

@@ -69,11 +69,11 @@ case "\$1 \$2" in
   "release create")
       n=\$(( \$(cat "$TEST_DIR/creates" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$TEST_DIR/creates"
       if [ "\$n" -le "\${STUB_RELEASE_422:-0}" ]; then
-          echo "HTTP 422: Validation Failed (https://api.github.com/repos/romp-on/romp/releases)" >&2
+          echo "HTTP 422: Validation Failed (https://api.github.com/repos/safety-research/romp/releases)" >&2
           echo "body is too long (maximum is 125000 characters)" >&2
           exit 1
       fi ;;
-  "pr create")  echo "https://github.com/romp-on/romp/pull/4242" ;;
+  "pr create")  echo "https://github.com/safety-research/romp/pull/4242" ;;
   "pr merge")   if [ "\${STUB_PR_STATE:-MERGED}" = "MERGED" ]; then
                     git -C "$REPO" push -q "\${STUB_MERGE_REMOTE:-origin}" HEAD:main
                 fi ;;
@@ -131,8 +131,8 @@ STUB
     # And the body says the tier too, the road a contributor who cannot label uses, so the tier
     # workflow can re-apply the label should its name move again.
     grep -q "Tier: docs" "$GH_LOG"
-    # BY NUMBER, never by branch name (the user 2026-08-01): every PR here is fork-headed, because
-    # rulesets block branch pushes upstream — and `gh pr merge <branch> --repo <upstream>` cannot
+    # BY NUMBER, never by branch name (the user 2026-08-01): a PR here may be fork-headed (only
+    # main requires a pull request upstream), and `gh pr merge <branch> --repo <upstream>` cannot
     # resolve a branch that lives on the fork. It failed with "no pull requests found for branch
     # release-0.3.0" one step after opening the PR, leaving VERSION merged but UNTAGGED: the exact
     # half-finished release this script exists to prevent.
@@ -306,7 +306,7 @@ STUB
     [ "$(grep -c "release create v0.1.0" "$GH_LOG")" -eq 2 ]
     grep -q -- "release create v0.1.0 .*--generate-notes --notes-start-tag v0.0.9" "$GH_LOG"
     grep -q -- "release create v0.1.0 .*--notes romp v0.1.0" "$GH_LOG"
-    grep -q -- "pull requests merged since v0.0.9. The full list: https://github.com/romp-on/romp/compare/v0.0.9...v0.1.0" "$GH_LOG"
+    grep -q -- "pull requests merged since v0.0.9. The full list: https://github.com/safety-research/romp/compare/v0.0.9...v0.1.0" "$GH_LOG"
     run git -C "$TEST_DIR/origin.git" tag -l
     [ "$output" = "v0.1.0" ]
 }

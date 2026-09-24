@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
 # ./bootstrap.sh — the one-line installer:
-#   curl -fsSL .../bootstrap.sh | bash
+#   gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
 # Hermetic: HOME points at a temp dir and the "origin" is a local fixture repo whose install.sh is
 # a stub, so the real install.sh never runs (it would symlink this machine's ~/.claude at the temp
 # clone and break Claude Code when the temp dir is removed).
@@ -144,7 +144,7 @@ teardown() { rm -rf "$TEST_DIR"; }
 
 # ── the publishing remote ────────────────────────────────────────────────────
 # CLAUDE.md's worktree rule says publish with `git push -u fork <branch>` and never to
-# origin (upstream rulesets reject a direct push) — but a plain clone has only `origin`,
+# origin (only main requires a pull request upstream): but a plain clone has only `origin`,
 # so a fresh install could not follow the workflow the repo documents.
 
 # ── where the clone lands ────────────────────────────────────────────────────
@@ -166,22 +166,84 @@ teardown() { rm -rf "$TEST_DIR"; }
 # ordinary installer got a remote pointing at a repo they had never created, a `git push`
 # aimed at it, and an unexplained line mid-install (the user 2026-07-27: don't assume the gh
 # CLI, and that is beyond what an installer should configure anyway). These pin the scope so
-# it cannot creep back.
+# it cannot creep back; the 2026-09-24 move to an internal repository let gh CLONE, guarded, and nothing more.
 
-@test "bootstrap.sh: never assumes or invokes the gh CLI" {
-    # A `gh` that fails loudly if called at all. The installer must never reach for it: it is
-    # not a romp dependency, and plenty of machines that run romp will never have it.
+@test "bootstrap.sh: the gh CLI is optional: absent or signed out, plain git clones and gh is asked nothing but whether it is signed in" {
+    # Since the repository became internal to its organisation (2026-09-24) bootstrap MAY clone through a
+    # signed-in gh, which carries the credentials an internal clone needs, but only behind a guard: gh is
+    # still not a romp dependency, a machine without it installs exactly as before (ROMP_REPO, or git's own
+    # credentials), and gh is never asked to configure anything. The stub records every call and reports
+    # itself signed out.
     cat > "$TEST_DIR/gh" <<'EOF'
 #!/usr/bin/env bash
-echo "bootstrap invoked gh" >> "$TEST_DIR/gh-was-called"
+echo "$*" >> "$TEST_DIR/gh-calls"
 exit 1
 EOF
     chmod +x "$TEST_DIR/gh"
 
     PATH="$TEST_DIR:$PATH" ROMP_DIR="$HOME/romp" run bash "$REPO_ROOT/bootstrap.sh"
     [ "$status" -eq 0 ]
-    [ ! -f "$TEST_DIR/gh-was-called" ]
-    ! grep -q 'gh ' "$REPO_ROOT/bootstrap.sh"
+    [ -d "$HOME/romp/.git" ]
+    # with ROMP_REPO naming the origin (as this suite does) gh is not even probed; without it, the only
+    # question bootstrap may put to gh is whether it is signed in
+    if [ -f "$TEST_DIR/gh-calls" ]; then
+        [ "$(grep -c -v -x 'auth status' "$TEST_DIR/gh-calls")" -eq 0 ]
+    fi
+    # the source carries exactly one signed-in probe and one guarded clone through gh, and the guard
+    # itself: no other gh command, so the blast radius stays the clone
+    [ "$(grep -c 'gh auth status' "$REPO_ROOT/bootstrap.sh")" -eq 1 ]
+    [ "$(grep -c 'gh repo clone' "$REPO_ROOT/bootstrap.sh")" -eq 1 ]
+    [ "$(grep -c 'command -v gh' "$REPO_ROOT/bootstrap.sh")" -eq 1 ]
+    # every gh mention in the source, counted wherever it sits on a line: the header one-liner, the
+    # relocation hint, the presence probe, the signed-in probe and the clone: five, and no sixth
+    [ "$(grep -cE '(^|[^a-z])gh ' "$REPO_ROOT/bootstrap.sh")" -eq 5 ]
+}
+
+@test "bootstrap.sh: with no ROMP_REPO and a signed-in gh, the clone runs through gh over https and lands at ROMP_DIR with origin alone" {
+    # The stub gh answers signed in and performs the clone from the fixture origin into the directory it
+    # is handed, recording the whole call; the recorded shape is the contract (an explicit https URL, the
+    # directory, then git's own --quiet behind --).
+    cat > "$TEST_DIR/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >> "$TEST_DIR/gh-calls"
+case "\$1 \$2" in
+    "auth status") exit 0 ;;
+    "repo clone") git clone --quiet "$TEST_DIR/origin" "\$4" ;;
+    *) exit 1 ;;
+esac
+EOF
+    chmod +x "$TEST_DIR/gh"
+    PATH="$TEST_DIR:$PATH" ROMP_DIR="$HOME/romp" ROMP_NO_PATH=1 run env -u ROMP_REPO bash "$REPO_ROOT/bootstrap.sh"
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/romp/.git" ]
+    [ "$(cat "$TEST_DIR/gh-calls")" = "auth status
+repo clone https://github.com/safety-research/romp.git $HOME/romp -- --quiet" ]
+    [ "$(git -C "$HOME/romp" remote)" = "origin" ]
+}
+
+@test "bootstrap.sh: with no ROMP_REPO and a signed-out gh, plain git clones the default URL" {
+    # gh answers signed out, so the plain road runs: git clone of the default https URL. A git stub on PATH
+    # records the clone and serves it from the fixture origin (no network in a test), then hands every
+    # other git call to the real binary.
+    REAL_GIT="$(command -v git)"
+    cat > "$TEST_DIR/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+    cat > "$TEST_DIR/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = clone ]; then
+    echo "\$*" >> "$TEST_DIR/git-calls"
+    args=(); for a in "\$@"; do case "\$a" in https://*) a="$TEST_DIR/origin" ;; esac; args+=("\$a"); done
+    exec "$REAL_GIT" "\${args[@]}"
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+    chmod +x "$TEST_DIR/gh" "$TEST_DIR/git"
+    PATH="$TEST_DIR:$PATH" ROMP_DIR="$HOME/romp" ROMP_NO_PATH=1 run env -u ROMP_REPO bash "$REPO_ROOT/bootstrap.sh"
+    [ "$status" -eq 0 ]
+    [ -d "$HOME/romp/.git" ]
+    [ "$(cat "$TEST_DIR/git-calls")" = "clone --quiet https://github.com/safety-research/romp.git $HOME/romp" ]
 }
 
 @test "bootstrap.sh: configures no git remotes or push defaults beyond the clone's own origin" {

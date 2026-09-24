@@ -1,9 +1,9 @@
 site_name: Romp
 site_description: Manages multiple Claude Code sessions, so you don't have to.
 
-site_url: https://romp-on.github.io/romp/
-repo_url: https://github.com/romp-on/romp
-repo_name: romp-on/romp
+site_url: https://safety-research.github.io/romp/
+repo_url: https://github.com/safety-research/romp
+repo_name: safety-research/romp
 
 theme:
   name: material

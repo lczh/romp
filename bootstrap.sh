@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-line install for romp:
-#   curl -fsSL https://raw.githubusercontent.com/romp-on/romp/main/bootstrap.sh | bash
+#   gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
+# (the repository is internal to its organisation, so the signed-in GitHub CLI fetches the script and clones)
 #
 # Clones romp, checks out the newest release, runs install.sh, and puts bin/ on
 # your PATH. The clone IS the installation (install.sh symlinks the hooks, MCP
@@ -11,10 +12,12 @@
 #   ROMP_DIR=~/romp     where to clone (default ~/romp)
 #   ROMP_REF=main       install a specific tag/branch instead of the newest release
 #   ROMP_NO_PATH=1      don't touch your shell rc
+#   ROMP_REPO=<url>     clone this URL with plain git (an SSH one, say); setting it also turns the gh road off
 # install.sh's own switches (ROMP_NO_EXT, ROMP_NO_SERVICE, ROMP_NO_SDK) pass through.
 set -euo pipefail
 
-REPO="${ROMP_REPO:-https://github.com/romp-on/romp.git}"
+SLUG="safety-research/romp"
+REPO="${ROMP_REPO:-https://github.com/$SLUG.git}"
 DIR="${ROMP_DIR:-$HOME/romp}"
 
 command -v git >/dev/null 2>&1 || {
@@ -30,7 +33,7 @@ if [ -e "$DIR" ]; then
     else
         echo "romp: $DIR exists and is not a romp clone. Refusing to write into it." >&2
         echo "  Move it aside, or choose another location:" >&2
-        echo "    curl -fsSL <url> | ROMP_DIR=\"\$HOME/elsewhere\" bash" >&2
+        echo "    gh api -H 'Accept: application/vnd.github.raw' repos/$SLUG/contents/bootstrap.sh | ROMP_DIR=\"\$HOME/elsewhere\" bash" >&2
         exit 1
     fi
 else
@@ -39,7 +42,13 @@ else
     # (your cwd could be /, /tmp, or somebody else's repo), but surprising if unstated
     # (the user 2026-07-27 asked whether it installs into the current directory).
     echo "==> Cloning romp into $DIR   (override with ROMP_DIR=/path)"
-    git clone --quiet "$REPO" "$DIR"
+    # An internal repository needs credentials: the signed-in GitHub CLI clones with its own (and its
+    # configured protocol); ROMP_REPO names another URL (an SSH one, say) for plain git to clone.
+    if [ -z "${ROMP_REPO:-}" ] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        gh repo clone "https://github.com/$SLUG.git" "$DIR" -- --quiet
+    else
+        git clone --quiet "$REPO" "$DIR"
+    fi
 fi
 
 # Pick the ref. A release is exactly `vMAJOR.MINOR.PATCH`, so match on that
