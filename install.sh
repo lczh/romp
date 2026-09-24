@@ -19,7 +19,7 @@ if [[ ! -x "$ROMP_DIR/bin/romp" ]]; then
     echo "install.sh: this doesn't look like a romp clone ($ROMP_DIR)." >&2
     echo "  install.sh installs the clone it lives in; it cannot be piped from curl." >&2
     echo "  To install from scratch:" >&2
-    echo "    curl -fsSL https://raw.githubusercontent.com/romp-on/romp/main/bootstrap.sh | bash" >&2
+    echo "    gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash" >&2
     exit 1
 fi
 

@@ -130,18 +130,16 @@ broad `git add` will sweep up your work). Conventions:
   docs commits stranded on local `main`, already duplicated on a PR branch, blocking two
   other sessions).
 - **Standing green light to publish.** When the work is done and tests pass, publish it
-  without asking — through the fork (user rule, 2026-07-27): rulesets on the upstream
-  block EVERY direct branch push (`main` and feature branches alike, no bypass; the one
-  exception since 2026-09-10 is the `stack/**` namespace, a staging area for GitHub's stacked
-  pull requests, unprotected and deleted on merge, see `docs/pr-tiers.md`), so
-  publishing is always push-then-PR:
-  1. `git push -u origin <branch>`: `origin` is the maintainer's **fork** and `upstream`
-     is romp-on/romp (remote convention, the user 2026-09-06; a plain install has only
-     `origin`, which is then romp-on itself). `remote.pushDefault` points at `origin`,
-     so a bare `git push` does the same. Never push to `upstream`: the server rejects
-     a push to every branch but `stack/**` (the stacked-pull-request staging area above), and
-     naming it in scripts bakes in a failure.
-  2. `gh pr create --repo romp-on/romp --label <tier>` (gh detects the fork head; a
+  without asking (user rule, 2026-07-27): the canonical repository takes feature branches
+  directly since the move to safety-research/romp on 2026-09-24 (a fork as `origin` still
+  works), while its ruleset takes changes to `main` only through a pull request with green
+  checks (see `docs/pr-tiers.md`), so publishing is always push-then-PR:
+  1. `git push -u upstream <branch>`: `upstream` is the canonical repository,
+     safety-research/romp (remote convention, the user 2026-09-06; a plain install has only
+     `origin`, which is then that repository itself), and a clone that keeps a fork as
+     `origin` pushes there instead. Never push to its `main`: the server takes changes to
+     `main` only through a pull request.
+  2. `gh pr create --repo safety-research/romp --label <tier>` (gh detects the head's repository; a
      contributor who cannot label writes `Tier: fix` on a line of the body instead, and the
      tier workflow applies the label), then
      `gh pr merge --auto --merge`: it lands itself when the required checks pass, and
@@ -155,7 +153,10 @@ broad `git add` will sweep up your work). Conventions:
   as `upstream` when the clone has one, else `origin` (`_release_remote` in
   `kernel/kernel.py`, `canonical_remote` in `scripts/release.sh`); never a literal
   `origin`, which in a fork layout is a stale mirror nobody advances.
-- **Every PR carries exactly one tier label, and the tier is ENFORCED** (maintainers' rule
+- **Every PR carries exactly one tier label, and the tier is ENFORCED** (on the safety-research
+  copy since 2026-09-24 the two tier checks REPORT but are not required: the owner trusts every
+  member of the organisation, so green CI alone lands any tier, and the rules below describe what
+  the checks report; maintainers' rule
   2026-09-06; the policy decided 2026-09-07 and reset by the repository owner 2026-09-08: the
   gate depends on the tier and on the AUTHOR's role, and no tier has a time-based path). Two
   required checks: "Exactly one tier label" holds a PR with no tier label, or two, red; "Tier

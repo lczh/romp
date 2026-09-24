@@ -5,6 +5,8 @@
 
 - **[Claude Code](https://docs.claude.com/en/docs/claude-code), signed in.**
   Install it and run `claude` once in a terminal to log in.
+- **The [GitHub CLI](https://cli.github.com), signed in to the organisation** (`gh auth login`):
+  Romp's repository is internal to it.
 - **Python 3.10 or newer, and Node.js.**
 
     ```bash
@@ -15,7 +17,7 @@
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/romp-on/romp/main/bootstrap.sh | bash
+gh api -H 'Accept: application/vnd.github.raw' repos/safety-research/romp/contents/bootstrap.sh | bash
 ```
 
 Open a new terminal afterwards, so `~/romp/bin` is on your `PATH`, and type
@@ -35,7 +37,7 @@ Install this way to keep Romp somewhere other than `~/romp`, or to run the
 latest commit rather than the newest release:
 
 ```bash
-git clone https://github.com/romp-on/romp.git ~/romp
+gh repo clone safety-research/romp ~/romp
 cd ~/romp
 git checkout "$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)"   # newest release
 # or:   git checkout main                                        # the latest commit
