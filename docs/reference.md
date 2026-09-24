@@ -198,8 +198,11 @@ session as dead.
 
 If the session is idle, the restart happens with no dialog; the menu row reads
 **Restarting…** until the kernel answers, then goes back. If it is working — a
-turn in flight, a compaction, or background work it dispatched — Romp confirms
-first, naming its open cards and saying that the running turn is cut off. The
+turn in flight (including one paused on a permission or picker prompt, or
+retrying the API), a compaction, or background work it dispatched — Romp confirms
+first, naming its open cards and saying that the running turn is cut off; for a
+session waiting on your answer to a prompt, it also says that the question goes
+away with the turn. The
 turn is interrupted and the relaunch follows at that turn's end, so the program
 is never torn down from under a live turn. Work the old process was running,
 its subagents and its background tasks, ends with it. A message you had queued
@@ -2468,7 +2471,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `multiple`, the measured 10 a decoded document weighs against its gzipped
   bytes, and `capBytes`, a ceiling on that weight of MemTotal / 512 floored at
   64 MiB, `ROMP_ASM_DOC_MEMO_CAP_MB`; unrelated to `checkpoints.docMemo`, the
-  fold documents' read memo), `full` with
+  fold documents' read memo), `restore:asmDocMemo` (a restore whose document
+  decode was served from the same memo, since 2026-09-24: a restore after a
+  descent, rewrite or nonleaf demotion over a document the memo still holds
+  reads none of it, and its checks run per restore as a walk's do), `full` with
   `full:demoted` (an entry the gates demoted, the `g:<reason>` beside it:
   `descent` when the new leaf does not chain to the old through the delta,
   `rewrite` when the leaf's record entry was replaced by a from-zero read
