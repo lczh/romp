@@ -4938,6 +4938,33 @@ backing, the way the Awaiting chip names the session it waits on. Hover it for h
 session is doing; the message itself still carries the `@name` you typed, and so does a
 copy of it.
 
+### Stepping through your messages and comments
+
+The arrows in the chat's bottom-left corner form one narrow column above the go-to-bottom chip, which
+keeps its place below them whether it shows or not. The chip is the column's foot: a short capsule of
+the same width and look, in a neutral grey, one gap below the last group. The column holds up to
+three groups, each an up arrow, an icon naming what it steps through, and a down arrow. From the top:
+
+- **Unread replies** (red, a speech bubble with a dot): the comment threads whose reply you have not
+  read yet. The group shows while any thread has one. The red badge on its corner is how many of
+  those replies sit off screen; a thread in view is not counted, since its highlight already shows.
+- **Comments** (the comment yellow, a speech bubble): every comment thread, read or not. The group
+  shows while the session has any.
+- **Your messages** (the blue of your messages, a person): the messages you typed.
+
+Each step puts its target at the top of the view and flashes it, and fetches the history first when
+the target lies in a part of the conversation the page has not loaded. From the bottom, the first step
+back lands on your last message even when it is on screen. An arrow with nothing that way is dimmed.
+Landing on an unread reply does not mark it read; opening its thread does. The column shows only
+while the conversation is longer than the pane. The arrows rest dim and brighten while the pointer is
+over them or one has focus. On a phone the column and the chip stay narrow and grow taller instead.
+
+The keys, from anywhere in the chat including the message box: **Ctrl+Alt+↑** and **Ctrl+Alt+↓** for
+your messages, **Ctrl+Alt+Shift+↑** and **Ctrl+Alt+Shift+↓** for comments, **Ctrl+Alt+Page Up** and
+**Ctrl+Alt+Page Down** for unread replies (Control+Option on a Mac, where a laptop reaches Page Up as
+Fn+↑). Each is a command in the shortcuts dialog and can be rebound there; a desktop that binds
+Ctrl+Alt+arrows for itself takes them before the page.
+
 ### A message that has not gone yet
 
 Send to a busy session and your message waits as a

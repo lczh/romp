@@ -127,7 +127,8 @@ import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
-import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
+import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
+import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
 import { resolveTabDrop, writesTag, leaveWords, type TabDrop, type LeaveWords } from "./drag-join";
@@ -9893,7 +9894,7 @@ function applyCommentMarks(sid: string): void {
   // the rail cue clears first (idempotent re-apply): a thread viewed, resolved, or removed must
   // drop its turn's tint on this very pass, not linger until the next anchor match
   for (const t of Array.from(v.el.querySelectorAll(".turn.cmt-rail-unread"))) t.classList.remove("cmt-rail-unread");
-  if (!threads.length) { paintCommentOutlines(sid); if (sid === activeId) updateReplyChips(); reopenCommentForReload(sid); return; }   // no threads → no boxes, no chips (the last one resolved/deleted)
+  if (!threads.length) { paintCommentOutlines(sid); if (sid === activeId) updateJumpCluster(); reopenCommentForReload(sid); return; }   // no threads → no boxes, no comment pill (the last one resolved/deleted)
   for (const [uuid, list] of threadsByAnchor(threads)) {
     const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) as HTMLElement | null;
     if (!turn) continue;                       // windowed out — the mark returns when the turn does
@@ -9905,9 +9906,9 @@ function applyCommentMarks(sid: string): void {
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
   paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
-  // the reply chips MEASURE the marks (above/below the viewport), so they recount after this pass has the
-  // highlights back in the DOM — this is the comments frame's and every transcript rebuild's hook for them
-  if (sid === activeId) updateReplyChips();
+  // the jump cluster MEASURES the marks (its unread badge counts those above/below the viewport) and the turns, so it
+  // recounts after this pass has the highlights back in the DOM — the comments frame's and every rebuild's hook for it
+  if (sid === activeId) updateJumpCluster();
   reopenCommentForReload(sid);                 // …and a reload's kept thread reopens on the pass that placed its marks
 }
 
@@ -13815,13 +13816,13 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     }
     document.body.style.removeProperty("--active-accent"); // no session → neutral window border
     updateStatusline();
-    // Take the leaving tab's go-to-bottom and reply chips down with it. They were measured against ITS transcript,
-    // and a tab left at the top of a long one fires none of the chips' events on the switch: no scroll clamp
+    // Take the leaving tab's go-to-bottom chip and jump cluster down with it. They were measured against ITS transcript,
+    // and a tab left at the top of a long one fires none of their events on the switch: no scroll clamp
     // (scrollTop is 0 and stays 0) and no #content resize (the pane's height is the body minus its siblings; hiding
-    // the views changes only its scroll extent). Left up, a stale chip is a click into the wrong tab: the reply
-    // chip's anchor is looked up in the entering tab's view and lands as the couldn't-locate toast when the full
+    // the views changes only its scroll extent). Left up, a stale control is a click into the wrong tab: a cluster
+    // move's anchor is looked up in the entering tab's view and lands as the couldn't-locate toast when the full
     // arrives. With no live session under the active tab, updateJumpBtn's gate hides its chip without a measure and
-    // re-reads the reply chips, whose own gate hides them and clears their signature. The branch's last statement,
+    // re-reads the cluster, whose own gate hides it and clears its signature. The branch's last statement,
     // after its state is settled (skeleton-tabs-wiring.test.ts pins the order).
     updateJumpBtn();
     return;
@@ -14315,26 +14316,29 @@ if (typeof ResizeObserver === "function") {
 // rebuild it mid-click (the click-safety rule satisfied structurally); the snap itself is the
 // acknowledgment. Anchored to #content's bottom edge by measurement, re-run by the content
 // ResizeObserver below (the composer growing moves that edge) — event-based, no polling.
+// The one stemless chevron, up or down (the full arrow fought the short pill, the user 2026-08-31): this chip's glyph and every
+// jump-cluster arrow's, from one builder, so the chip under the column wears the arrows' own size and stroke (the user 2026-09-25).
+const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
+  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
+  + (up ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
 jumpBtn.setAttribute("aria-label", "go to bottom");
 setTip(jumpBtn, "go to bottom — then follow new content");   // the user 2026-09-03's word for it, in the one styled tip
 jumpBtn.hidden = true;
-jumpBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"'
-  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-  + '<polyline points="6 9.5 12 15.5 18 9.5"/></svg>';   // stemless chevron — the full arrow fought the short pill (the user 2026-08-31)
+jumpBtn.innerHTML = jcChevron(false);   // the capsule arrows' down chevron; styles.css sizes it with theirs
 function updateJumpBtn(): void {
   const c = document.getElementById("content");
   if (!c || c.clientHeight <= 0) { jumpBtn.hidden = true; return; }   // hidden pane measures 0 — no chip
   // No live session under the active tab (a loading or skeleton tab's loader, or the no-sessions copy): nothing to
   // go to the bottom of, so the set decides before the measure does. The loader's min-height (60vh, styles.css)
   // overflows a pane under 60vh + 18px, and the measure alone would paint the chip over it (skeleton-tabs-wiring.test.ts).
-  // The reply chips still get their re-read: their own gate hides them over a loader and clears their signature.
-  if (!liveSession(activeId)) { jumpBtn.hidden = true; updateReplyChips(); return; }
+  // The jump cluster still gets its re-read: its own gate hides it over a loader and clears its signature.
+  if (!liveSession(activeId)) { jumpBtn.hidden = true; updateJumpCluster(); return; }
   const off = c.scrollHeight > c.clientHeight + 2 && !atBottom(c);   // the chip: shown the moment the reader leaves the true bottom
   jumpBtn.hidden = !off;
   if (off) jumpBtn.style.bottom = (Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 8) + "px";
-  updateReplyChips();   // the reply chips stack on this chip's slot and count against this scroll position — same events, same measure
+  updateJumpCluster();   // the jump cluster sits over this chip's slot and places its stops against this scroll position — same events, same measure
 }
 jumpBtn.onclick = () => {
   const c = document.getElementById("content");
@@ -14353,58 +14357,182 @@ jumpBtn.onclick = () => {
   }
 }
 window.addEventListener("resize", updateJumpBtn);
-// ── replies ready (the user 2026-09-08) ──────────────────────────────────────────────────────────
-// A reply lands on a comment you scrolled away from, and you forget to come back: the mark's ring and the
-// rail tick say so only where you happen to be looking. Two chips stacked ABOVE the jump chip — "↑ 2 replies
-// unread" / "↓ 1 reply unread" — count the unread landed replies (the kernel's unread bit on an open thread,
-// isReplyReady: the mark's own .unread rule) whose marks sit wholly above / below the viewport; a mark on
-// screen counts in neither. Each chip exists only while its count is > 0. Click = land the NEAREST one in
-// that direction through the chat's own scroll-to-uuid route (scrollToAnchor → landOn's one flash, the rail
-// tick's and the notch's route) and pulse the mark itself — and NOT mark it read: opening the thread does,
-// as today. Same dress and home as #jump-bottom (body-level, fixed, bottom-left, the menu-card vocabulary),
-// placed by measurement over the jump chip's slot so the three never overlap. The box is created once and
-// its two chips update IN PLACE (label, tip, data-tid/uuid), so a re-render can never eat a click (the
-// delegate rides the stable box). Every input is an event the chat already listens for: the jump chip's
-// own update (scroll, resize, the content ResizeObserver, tab switch, append — updateJumpBtn's tail), the
-// comments frame and every transcript rebuild (applyCommentMarks' tail), plus the pane's own size (a pane
-// measuring 0 drops the chips like the jump chip). No timers, no polling; a signature skips unchanged paints.
-const replyChips = el("div", "reply-chips");
-replyChips.id = "reply-chips";
-replyChips.hidden = true;
-const replyChevron = (dir: Dir): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
-  + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
-  + (dir === "above" ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';   // the jump chip's stemless chevron, up or down
-const replyChip = (dir: Dir): HTMLButtonElement => {
-  const b = el("button", "reply-chip") as HTMLButtonElement;
+// ── the jump cluster (the user 2026-09-24) ───────────────────────────────────────────────────────────
+// After new content arrives the reader loses their place and wants to get back to their last message and read
+// everything since, especially on the phone, and to reach comments without hunting on the rail (the user, paraphrased).
+// A small cluster in the pane's bottom-left corner, one column with the go-to-bottom chip, three rows, top to bottom:
+// the threads with an UNREAD reply (previous / next, and how many wait off screen, in the needs-you red; shown only while
+// one waits), every COMMENT thread (previous / next, in the comment ink; shown only while the session has threads), and
+// the reader's OWN messages (previous / next, in their blue; from the bottom, one previous lands on their last message).
+// Stepping through unread replies is its own job, so it has its own row (the user 2026-09-24); the row replaced the two
+// "↑ N replies unread" / "↓ N reply unread" chips (2026-09-08). What counts as unread and when a thread stops being
+// unread are the chips' (isReplyReady; opening the thread reads it, a press never does), and the count is the chips'
+// number: a thread on screen counts in neither direction. The arrows reach every unread thread, in view or not.
+// Every move lands through scrollToAnchor, the chips', the notches' and the rail ticks' one road: the target's top at
+// the viewport top and landOn's one flash, a target outside the rendered window rendered around it, and a comment
+// anchored in history the page has not loaded fetched by it. The reader's own messages are known only as far as the
+// page holds history, so a previous move with nothing loaded above asks for the older history through the page's own
+// loaders (requestOlder, or a gap's requestTurns, the reader's row kept where it was) and resumes when it lands.
+// Quiet by default: the chevrons rest dim and light up on hover or focus; the cluster shows only while the transcript
+// overflows. It holds the go-to-bottom chip's slot below it whether that chip shows or not (CSS margin-bottom), so it never
+// moves under a finger as the chip comes and goes. Click-safe: body-level, created once, buttons updated in place, ONE
+// delegated listener on the stable box. Every update rides events the chat already has (the go-to-bottom chip's update
+// and applyCommentMarks' tail, where the chips' update was); a signature skips unchanged paints. No timers.
+const jumpCluster = el("div", "jump-cluster");
+jumpCluster.id = "jump-cluster";
+jumpCluster.hidden = true;
+const jcGroup = (cls: string, label: string): HTMLElement => {
+  const g = el("div", "jc-group " + cls);
+  g.setAttribute("role", "group");
+  g.setAttribute("aria-label", label);
+  jumpCluster.appendChild(g);
+  return g;
+};
+const jcUnread = jcGroup("jc-unread", "Unread replies");
+const jcCmt = jcGroup("jc-cmt", "Comments");
+const jcMine = jcGroup("jc-mine", "Your messages");
+// Each capsule names what it walks with an icon BETWEEN its chevrons (the user 2026-09-24), in the house 16-unit line style
+// (ctxIcon, NOTICE_GLYPHS: stroke currentColor 1.4, round caps), in the capsule's colour, not a button (the chevrons are):
+// a person for your messages (one head of the notices' teammate glyph), a speech bubble for comments, and the same bubble
+// with a filled dot for the unread replies (their count is the badge on the capsule's corner: at this width a badge ON the
+// icon would bury it). The capsule's aria-label says the same in words.
+const JC_BUBBLE = '<path d="M2.5 4 A1.5 1.5 0 0 1 4 2.5 H12 A1.5 1.5 0 0 1 13.5 4 V9.4 A1.5 1.5 0 0 1 12 10.9 H7.2 L4.4 13.4 V10.9 H4 A1.5 1.5 0 0 1 2.5 9.4 Z"/>';
+const JC_ICONS: Record<"mine" | "comment" | "unread", string> = {
+  mine: '<circle cx="8" cy="5.2" r="2.6"/><path d="M3.2 13.6 C3.2 10.6 5.2 8.9 8 8.9 C10.8 8.9 12.8 10.6 12.8 13.6"/>',
+  comment: JC_BUBBLE,
+  unread: JC_BUBBLE + '<circle cx="12.6" cy="3.4" r="2.2" fill="currentColor" stroke="none"/>',
+};
+const jcIcon = (g: HTMLElement, kind: "mine" | "comment" | "unread"): void => {
+  const i = el("span", "jc-icon");
+  i.setAttribute("aria-hidden", "true");
+  i.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + JC_ICONS[kind] + "</svg>";
+  g.appendChild(i);
+};
+const jcBtn = (g: HTMLElement, move: Move, cls: string, inner: string): HTMLButtonElement => {
+  const b = el("button", cls) as HTMLButtonElement;
   b.type = "button";
-  b.id = "reply-" + dir;
-  b.dataset.act = "replyjump";
-  b.dataset.dir = dir;
-  b.hidden = true;
-  b.innerHTML = replyChevron(dir) + '<span class="reply-chip-label"></span>';
-  replyChips.appendChild(b);
+  b.dataset.act = "jcjump";
+  b.dataset.move = move;
+  b.innerHTML = inner;
+  g.appendChild(b);
   return b;
 };
-const replyAbove = replyChip("above");
-const replyBelow = replyChip("below");
-let replyChipSig = "";
-function dressReplyChip(b: HTMLButtonElement, dir: Dir, chip: ReadyChip | null): void {
-  b.hidden = !chip;
-  if (!chip) return;
-  (b.querySelector(".reply-chip-label") as HTMLElement).textContent = chipLabel(chip.count);
-  b.dataset.tid = chip.nearest.tid;
-  b.dataset.uuid = chip.nearest.uuid;
-  b.setAttribute("aria-label", chipAria(dir, chip.count));
-  setTip(b, chipTip(dir, chip.count, chip.nearest.line));   // the one styled tip; the text swaps per update, wired once
+// each capsule top to bottom: its up chevron, its icon, its down chevron
+const jcPair = (g: HTMLElement, prev: Move, next: Move, icon: "mine" | "comment" | "unread"): [HTMLButtonElement, HTMLButtonElement] => {
+  const up = jcBtn(g, prev, "jc-btn", jcChevron(true));
+  jcIcon(g, icon);
+  return [up, jcBtn(g, next, "jc-btn", jcChevron(false))];
+};
+const [jcPrevUnread, jcNextUnread] = jcPair(jcUnread, "prevUnread", "nextUnread", "unread");
+const [jcPrevComment, jcNextComment] = jcPair(jcCmt, "prevComment", "nextComment", "comment");
+const [jcPrevMine, jcNextMine] = jcPair(jcMine, "prevMine", "nextMine", "mine");
+const jcButtons: Record<Move, HTMLButtonElement> = {
+  prevUnread: jcPrevUnread, nextUnread: jcNextUnread, prevComment: jcPrevComment, nextComment: jcNextComment, prevMine: jcPrevMine, nextMine: jcNextMine,
+};
+// how many unread replies wait off screen (the old chips' number), read-only: a badge on the unread capsule's corner,
+// positioned in the cluster box (the unread capsule is its top), so the capsule's own clip never cuts it
+const jcCount = el("span", "jc-count");
+jcCount.hidden = true;
+jumpCluster.appendChild(jcCount);
+/** A move's command in the shell's registry (commands.ts DEFAULT_CHORDS): the key its tooltip names and the chat's key
+ *  handler below answers to, rebindable in the shortcuts dialog. */
+const jumpCommand = (m: Move): string => "chat." + m;
+// the tooltips name each move's CURRENT key (titleWithKey reads the overrides store), re-dressed on every rebind
+function dressJumpTips(): void {
+  for (const m of MOVES) {
+    const t = titleWithKey(MOVE_TITLE[m], jumpCommand(m));
+    setTip(jcButtons[m], t);
+    jcButtons[m].setAttribute("aria-label", t);
+  }
 }
-function updateReplyChips(): void {
-  const c = document.getElementById("content");
-  const s = activeId ? liveSession(activeId) : null;   // a skeleton tab's stale session shows no chips (skeleton-tabs-wiring.test.ts)
-  const v = activeId ? views.get(activeId) : null;
-  const H = c ? c.clientHeight : 0;
-  const ready = activeId ? (commentThreads.get(activeId) || []).filter(isReplyReady) : [];
-  // no pane to measure, the read-only subagent viewer (no threads can live there), or nothing unread → no chips
-  if (!c || !s || !v || H <= 0 || s.sub || !ready.length) { replyChips.hidden = true; replyChipSig = ""; return; }
+dressJumpTips();
+window.addEventListener(KEYS_EVENT, dressJumpTips);
+window.addEventListener("storage", (e) => { if (e.key === "romp:keys") dressJumpTips(); });
+
+type NavLoad = { gap: { lo: number; hi: number } } | { head: true };
+// the stop the last jump went to (its tab, and the count of the reader's own messages then: a new one of theirs ends it).
+// It orders the next move only while the view still shows that landing where the scroll could not top-align it: at the
+// bottom, the target on screen. Anywhere else the pixels say the same thing (a top-aligned target is HERE) or the reader
+// has moved on, so the view is read again; no gesture bookkeeping is needed to tell the two apart
+let navCursor: { sid: string; uuid: string; rank: number; mine: number } | null = null;
+let navResume: { sid: string; move: Move } | null = null;   // a move that asked for older history, resumed when it lands
+/** The event indices of the reader's OWN messages: the scroll notches' filter (paintScrollMarks) with the "user" verdict
+ *  only, so a romp or tagged machine send is not a message of theirs to step to. */
+function ownTurnIndices(s: Session): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < s.events.length; i++) {
+    const ev = s.events[i] as ChatEvent & { canned?: string; md?: string };
+    if (ev.kind !== "user" || !ev.uuid || senderKind(ev) !== "user") continue;
+    const md = (ev.md || "").trim();
+    if (!md || ev.canned === "continue" || SLASH_CMD_RE.test(md)) continue;
+    out.push(i);
+  }
+  return out;
+}
+/** The comment threads a move steps through (the rail's set: open, resolved, merged), each at its anchor's display unit
+ *  (-1: anchored in history the page has not loaded) and ranked within its unit by creation, so two threads on one
+ *  passage are both reachable. */
+function navThreads(s: Session, evUnit: Int32Array): Array<{ th: CommentThread; unit: number; rank: number }> {
+  const list = (commentThreads.get(s.id) || []).filter((t) => t.status === "open" || t.status === "resolved" || t.status === "merged")
+    .map((th) => { const i = s.events.findIndex((e) => e.uuid === th.anchorUuid); return { th, unit: i >= 0 ? evUnit[i] : -1, rank: 0 }; })
+    .sort((a, b) => a.unit - b.unit || a.th.createdT - b.th.createdT || (a.th.tid < b.th.tid ? -1 : 1));
+  for (let k = 1; k < list.length; k++) if (list[k].unit === list[k - 1].unit) list[k].rank = list[k - 1].rank + 1;
+  return list;
+}
+/** The rendered turn a stop lands on: the turn carrying the uuid, or the folded run that holds it (scrollToAnchor's lookup). */
+function navTurn(v: View, uuid: string): HTMLElement | null {
+  return (v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) || v.el.querySelector(`.turn[data-uuids~="${cssEscape(uuid)}"]`)) as HTMLElement | null;
+}
+/** Every stop of one kind (the reader's messages, every comment thread, or the threads with an unread reply) placed
+ *  against the reader's position (jump-nav.ts): by order against the remembered landing
+ *  while it stands; else a rendered stop by its top against the viewport's top (its bottom when the reader is at the
+ *  bottom), a windowed-out one by its unit against the rendered window. The reader's messages add their barriers: a gap
+ *  of unloaded history, or the older history a regions-less session has not streamed in yet (above everything). */
+function navStops(kind: "mine" | "comment" | "unread", s: Session, v: View, content: HTMLElement, evUnit: Int32Array = eventUnitIndex(s)): { stops: NavStop<NavLoad>[]; mine: number } {
+  const own = ownTurnIndices(s);
+  if (navCursor && (navCursor.sid !== s.id || navCursor.mine !== own.length)) navCursor = null;
+  const cands: Array<{ uuid: string; unit: number; rank: number; tid?: string }> = kind === "mine"
+    ? own.filter((i) => evUnit[i] >= 0).map((i) => ({ uuid: s.events[i].uuid as string, unit: evUnit[i], rank: 0 }))
+    : navThreads(s, evUnit).filter((t) => kind === "comment" || isReplyReady(t.th))   // the unread row: a reply waits (the chips' predicate)
+      .map((t) => ({ uuid: t.th.anchorUuid, unit: t.unit, rank: t.rank, tid: t.th.tid }));
+  const cr = content.getBoundingClientRect();
+  let cur: { unit: number; rank: number } | null = null;
+  if (navCursor && atBottom(content)) {   // the landing the scroll clamped at the bottom, its target still on screen
+    const at = navCursor.uuid, t = navTurn(v, at);
+    const i = s.events.findIndex((e) => e.uuid === at);
+    const r = t ? t.getBoundingClientRect() : null;
+    if (r && i >= 0 && evUnit[i] >= 0 && r.bottom > cr.top && r.top < cr.bottom) cur = { unit: evUnit[i], rank: navCursor.rank };
+  }
+  const bottom = !cur && atBottom(content);
+  const line = bottom ? content.clientHeight : 0, here = bottom ? 0 : HERE_PX;
+  const winStart = v.winStart ?? 0, winEnd = v.winEnd ?? winStart;
+  const unplaced = (unit: number): Place => placeUnplaced(unit, winStart, winEnd);
+  const stops: NavStop<NavLoad>[] = cands.map((c) => {
+    if (cur) return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: placeByOrder(c.unit, c.rank, cur) };
+    const t = c.unit >= winStart && c.unit < winEnd ? navTurn(v, c.uuid) : null;   // only the rendered window has turns to measure
+    return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: t ? placeRendered(t.getBoundingClientRect().top - cr.top, line, here) : unplaced(c.unit) };
+  });
+  if (kind === "mine") {
+    if (s.regions && s.regions.some((r) => r.kind === "gap")) {
+      const items = displayItems(s);
+      for (let u = 0; u < items.length; u++) {
+        const it = items[u];
+        if (it.kind !== "gap") continue;
+        const g = v.el.querySelector(`.tx-gap[data-lo="${it.lo}"][data-hi="${it.hi}"]`) as HTMLElement | null;
+        const gr = g ? g.getBoundingClientRect() : null;
+        stops.push({ uuid: "", load: { gap: { lo: it.lo, hi: it.hi } },
+                     place: cur ? placeByOrder(u, 0, cur) : gr ? placeSpan(gr.top - cr.top, gr.bottom - cr.top, line, here) : unplaced(u) });
+      }
+    } else if (olderOnServer(s)) stops.push({ uuid: "", load: { head: true }, place: { dir: "above", dist: HEAD_DIST } });
+  }
+  return { stops, mine: own.length };
+}
+/** The unread replies off screen, per direction, with the nearest of each: the old chips' measure verbatim (a rendered
+ *  mark by its own box, a windowed-out anchor by event order against the rendered window). */
+function readyAround(s: Session, v: View, c: HTMLElement): { above: ReadyChip | null; below: ReadyChip | null } {
+  const ready = (commentThreads.get(s.id) || []).filter(isReplyReady);
+  const H = c.clientHeight;
   const cr = c.getBoundingClientRect();
   const marks: ReadyMark[] = [];
   let evUnit: Int32Array | null = null;
@@ -14417,48 +14545,122 @@ function updateReplyChips(): void {
       const r = node.getBoundingClientRect();
       marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeMark(r.top - cr.top, r.bottom - cr.top, H) });
     } else {
-      // windowed out: which side of the rendered window the anchor lies on IS its direction (event order,
-      // translated to display units like the notches), a tier farther than any rendered mark
       const idx = s.events.findIndex((e) => e.uuid === th.anchorUuid);
       if (!evUnit) evUnit = eventUnitIndex(s);
-      marks.push({ tid: th.tid, uuid: th.anchorUuid, line,
-        ...placeWindowed(idx >= 0 ? evUnit[idx] : -1, v.winStart, v.winEnd ?? v.winStart) });
+      marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeWindowed(idx >= 0 ? evUnit[idx] : -1, v.winStart, v.winEnd ?? v.winStart) });
     }
   }
-  const { above, below } = readyChips(marks);
-  // the slot: the jump chip's own bottom measure, lifted over the jump chip while it shows (its real height —
-  // the coarse-pointer media query makes it taller — plus the stack gap)
-  const bottom = Math.max(0, window.innerHeight - cr.bottom) + 8 + (jumpBtn.hidden ? 0 : jumpBtn.offsetHeight + 6);
-  const sig = activeId + "|" + (above ? above.count + ":" + above.nearest.tid : "") + "|" + (below ? below.count + ":" + below.nearest.tid : "") + "|" + bottom;
-  if (sig === replyChipSig) return;
-  replyChipSig = sig;
-  dressReplyChip(replyAbove, "above", above);
-  dressReplyChip(replyBelow, "below", below);
-  replyChips.hidden = !above && !below;
-  replyChips.style.bottom = bottom + "px";
+  return readyChips(marks);
+}
+/** Land a comment thread: the chips' landing verbatim (a fresh navigation's one flash on the turn, the uuid route, the
+ *  mark's own pulse once its highlight is back) and NOT marked read: reading it is opening the thread. */
+function landThread(sid: string, tid: string, uuid: string): void {
+  flashedAnchor = null;                  // fresh navigation → landOn's one flash on the turn
+  if (scrollToAnchor(uuid)) {
+    applyCommentMarks(sid);              // a re-windowed anchor turn gets its highlight back before the pulse
+    const m = views.get(sid)?.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
+    if (m) flash(m);                     // …and the mark itself pulses once (.romp-acted) — the thing you came for
+  }
+  // deliberately NO commentSeen here: the cluster brings you to the reply; reading it is opening the thread
+}
+/** One move of the cluster (a press, a key, or a resume once older history landed). The cluster re-reads its stops after
+ *  it: a landing the scroll cannot move (near the end, the view already at the bottom) fires no scroll event, and the
+ *  move itself is the new information (the remembered landing changed). */
+function runJump(move: Move): void {
+  jumpMove(move);
+  updateJumpCluster();
+}
+function jumpMove(move: Move): void {
+  const sid = activeId;
+  const c = document.getElementById("content");
+  const s = sid ? liveSession(sid) : null;
+  const v = sid ? views.get(sid) : null;
+  if (!sid || !c || !s || !v || s.sub) return;
+  const kind = move === "prevMine" || move === "nextMine" ? "mine" : move === "prevComment" || move === "nextComment" ? "comment" : "unread";
+  const dir: Dir = move === "prevMine" || move === "prevComment" || move === "prevUnread" ? "above" : "below";
+  const { stops, mine } = navStops(kind, s, v, c);
+  const hit = pickNav(stops, dir);
+  if (!hit) { navResume = null; return; }
+  if (hit.load) {
+    // unloaded history stands between the reader and their next message: ask for it the way scrolling there would (the
+    // reader's row kept where it is), and resume this move when it lands (updateJumpCluster); nothing asked, nothing owed
+    if ("gap" in hit.load) requestTurns(sid, hit.load.gap, dir === "above" ? "bottom" : "top");
+    else requestOlder(sid, v, c);
+    const asked = "gap" in hit.load ? gapHasAsk(sid, hit.load.gap) : loadingOlder.has(sid);
+    navResume = asked ? { sid, move } : null;
+    return;
+  }
+  navCursor = { sid, uuid: hit.uuid, rank: hit.rank ?? 0, mine };
+  navResume = null;
+  if (kind !== "mine" && hit.tid) landThread(sid, hit.tid, hit.uuid);   // a thread, from either comment row
+  else { flashedAnchor = null; scrollToAnchor(hit.uuid); }   // fresh navigation → landOn's one flash, the notch's route
+}
+let jumpClusterSig = "";
+function updateJumpCluster(): void {
+  const c = document.getElementById("content");
+  const s = activeId ? liveSession(activeId) : null;   // a skeleton tab's stale session shows no cluster (skeleton-tabs-wiring.test.ts)
+  const v = activeId ? views.get(activeId) : null;
+  const H = c ? c.clientHeight : 0;
+  // no pane to measure, the read-only subagent viewer, or a transcript that fits on screen → no cluster
+  if (!c || !s || !v || H <= 0 || s.sub || c.scrollHeight <= H + 2) { jumpCluster.hidden = true; jumpClusterSig = ""; return; }
+  if (navCursor && navCursor.sid !== activeId) navCursor = null;
+  if (navResume && navResume.sid !== activeId) navResume = null;   // a tab left mid-load: its move is not resumed on the way back
+  // a move that asked for older history resumes once nothing of this session is on the wire and the view is built
+  if (navResume && navResume.sid === activeId && !loadingOlder.has(activeId!) && pendingBuildRaf == null
+      && !Array.from(gapLoading).some((k) => parseGapKey(k).sid === activeId)) { const m = navResume.move; navResume = null; jumpMove(m); }
+  const evUnit = eventUnitIndex(s);   // once per update: both kinds place their stops in the same units
+  const mine = navStops("mine", s, v, c, evUnit);
+  const threads = commentThreads.get(s.id) || [];
+  const threadsHere = threads.some((t) => t.status === "open" || t.status === "resolved" || t.status === "merged");
+  const unreadHere = threads.some(isReplyReady);   // the unread row shows while any thread's reply waits
+  const cmt = threadsHere ? navStops("comment", s, v, c, evUnit).stops : [];
+  const unread = unreadHere ? navStops("unread", s, v, c, evUnit).stops : [];
+  const n = unreadHere ? unreadCount(readyAround(s, v, c)) : 0;   // the chips' number: off screen only
+  const able = {
+    prevMine: !!pickNav(mine.stops, "above"), nextMine: !!pickNav(mine.stops, "below"),
+    prevComment: !!pickNav(cmt, "above"), nextComment: !!pickNav(cmt, "below"),
+    prevUnread: !!pickNav(unread, "above"), nextUnread: !!pickNav(unread, "below"),
+  };
+  const mineHere = mine.stops.length > 0;
+  const bottom = Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 8;   // the go-to-bottom chip's own measure
+  const sig = [activeId, bottom, mineHere ? 1 : 0, threadsHere ? 1 : 0, unreadHere ? 1 : 0, ...MOVES.map((m) => able[m]), n].join("|");
+  if (sig === jumpClusterSig) return;
+  jumpClusterSig = sig;
+  jcMine.hidden = !mineHere;
+  jcCmt.hidden = !threadsHere;
+  jcUnread.hidden = !unreadHere;
+  for (const m of MOVES) jcButtons[m].disabled = !able[m];
+  jcCount.hidden = n === 0;   // every unread thread in view: no number (the chips hid at 0), the arrows still reach them
+  if (n) { jcCount.textContent = String(n); setTip(jcCount, countTip(n)); jcCount.setAttribute("aria-label", countTip(n)); }   // the one styled tip; the text swaps per update
+  jumpCluster.hidden = !mineHere && !threadsHere;
+  jumpCluster.style.bottom = bottom + "px";
 }
 {
   const c = document.getElementById("content");
   if (c) {
-    document.body.appendChild(replyChips);
-    // the click is delegated on the stable box (click-safe by construction), keyed off data-act; the press
-    // pulse is the delegate's own
-    delegate(replyChips, {
-      replyjump: (elx) => {
-        const tid = elx.dataset.tid, uuid = elx.dataset.uuid;
-        if (!tid || !uuid || !activeId) return;
-        flashedAnchor = null;                  // fresh navigation → landOn's one flash on the turn
-        if (scrollToAnchor(uuid)) {
-          applyCommentMarks(activeId);         // a re-windowed anchor turn gets its highlight back before the pulse
-          const m = views.get(activeId)?.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
-          if (m) flash(m);                     // …and the mark itself pulses once (.romp-acted) — the thing you came for
-        }
-        // deliberately NO commentSeen here: the chip brings you to the reply; reading it is opening the thread
-      },
-    });
-    if (typeof ResizeObserver === "function") new ResizeObserver(updateReplyChips).observe(c);   // a pane measuring 0 drops the chips
+    document.body.appendChild(jumpCluster);
+    // the click is delegated on the stable box (click-safe by construction), keyed off data-act; the press pulse is the delegate's own
+    delegate(jumpCluster, { jcjump: (elx) => { const m = elx.dataset.move as Move | undefined; if (m && (MOVES as readonly string[]).includes(m)) runJump(m); } });
+    if (typeof ResizeObserver === "function") new ResizeObserver(updateJumpCluster).observe(c);   // a pane measuring 0 drops the cluster
   }
 }
+// The keys (desktop): each move is a command in the shell's registry (commands.ts DEFAULT_CHORDS: Ctrl+Alt+↑/↓ your
+// messages, Ctrl+Alt+Shift+↑/↓ comments, Ctrl+Alt+PageUp/PageDown the unread replies; Alt+Arrow alone is the shell's
+// pane focus and Ctrl+Alt+←/→ the session pair). With focus in the chat this capture handler answers, reading the same
+// overrides store per press, so a rebind in the shortcuts dialog moves it too (the chat.navBack pattern); with focus in
+// the shell the command's run posts chatJump here. The button pulses, the acknowledgement a click would give.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a jump
+  const ch = chordOf(e);
+  if (!ch || !ch.includes("+")) return;
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  const ov = loadOverrides();
+  const m = MOVES.find((mv) => ch === effectiveChord(jumpCommand(mv), DEFAULT_CHORDS[jumpCommand(mv)], ov, mac));
+  if (!m) return;
+  e.preventDefault(); e.stopPropagation();
+  if (!jumpCluster.hidden && !jcButtons[m].disabled) flash(jcButtons[m]);
+  runJump(m);
+}, true);
 // The per-view saved spot FOLLOWS the reader (T249, the user 2026-09-07). landActive lands every show no
 // anchor scrolled on `v.stick ? bottom : v.scrollTop`, and until now those were written only by a tab
 // switch (the tab being LEFT), the jump button, the box-resize compensation and the nav trail — never by
@@ -19892,6 +20094,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   // the shell's palette / shell-focus chords: the chat owns the nav trail, the shell just asks
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
+  // the shell's palette / shell-focus chords for the jump cluster's moves (palette-main.ts chat.prevMine and the rest)
+  if (m.romp === "chatJump") { if ((MOVES as readonly string[]).includes(m.move)) runJump(m.move as Move); return; }
   // a moved tab's drafts (the chat split): the shell took them from the source page (__rompTakeSessionState) and
   // hands them to this page, the session's column now — into the maps, persisted, and into the box when it is active
   if (m.romp === "adopt") { adoptSessionState(m.sid, m.state); return; }
