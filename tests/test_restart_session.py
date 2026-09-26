@@ -232,8 +232,9 @@ class RelaunchNeverClimbsTheStopLadder(unittest.TestCase):
     #2059, 2026-09-24). relaunch rode Stop's interrupt, which climbs control request, SIGINT, SIGKILL on each
     press: clicking Restart again on a CLI that ignored the request killed it on the third click, or on the
     second after an unsettled Stop, and the armed reconnect waits for a result that then never comes, so the
-    session was left with no CLI. A real SdkSession, its channel up and its turn ignoring every request; the
-    signal rung is recorded instead of sent."""
+    session was left with no CLI. A Restart marks the turn idle only when it sent the request (the review of
+    #2138, 2026-09-24). A real SdkSession, its channel up unless a case takes it down, and its turn ignoring
+    every request; the signal rung is recorded instead of sent."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -267,6 +268,38 @@ class RelaunchNeverClimbsTheStopLadder(unittest.TestCase):
         self.s.interrupt()
         self.s.interrupt()
         self.assertEqual(self.signals, ["sigint", "sigkill"])
+
+    def _interrupt_rows(self):
+        """The rows the backend wrote to this session's state log to settle a turn it asked to stop."""
+        p = Path(self.d, "states", SID + ".jsonl")
+        rows = [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+        return [(r.get("state"), r.get("by")) for r in rows if r.get("by") == "interrupt"]
+
+    def test_repeated_restarts_mark_the_turn_idle_once(self):
+        # the idle row settles a turn romp asked to stop, so it belongs to the press that sent the request: a
+        # Restart that sent nothing has nothing to settle, and each further row would settle again a turn that
+        # ignored the request and is still running
+        for _ in range(3):
+            self.assertEqual(self.be.relaunch(SID), "")
+        self.assertEqual(self._interrupt_rows(), [("idle", "interrupt")],
+                         "one idle row, written by the one Restart that sent the request")
+
+    def test_a_restart_that_sends_nothing_says_so_and_marks_nothing(self):
+        self.assertTrue(self.be.interrupt(SID))            # Stop: the episode's polite rung, which the CLI ignores
+        self.assertEqual(self._interrupt_rows(), [("idle", "interrupt")])   # Stop's own row
+        log = Path(self.d, "states", SID + ".jsonl")
+        before = log.read_text()
+        self.assertFalse(self.be.interrupt(SID, climb=False), "a Restart's ask on a spent rung sent nothing")
+        self.assertEqual(log.read_text(), before, "so it adds nothing to the state log")
+        self.assertEqual((self.signals, self.s.loop.scheduled), ([], 1))
+
+    def test_a_restart_with_the_channel_down_sends_nothing_and_marks_nothing(self):
+        # the other road where a Restart has nothing to send: with no control channel the ladder's first rung is
+        # SIGINT, which a Restart never sends, so there is no request, no signal and no turn to settle
+        self.s.client = None
+        for _ in range(2):
+            self.assertEqual(self.be.relaunch(SID), "")
+        self.assertEqual((self.signals, self.s.loop.scheduled, self._interrupt_rows()), ([], 0, []))
 
 
 def _timed_out():
