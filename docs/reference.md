@@ -206,10 +206,15 @@ away with the turn. The
 turn is interrupted and the relaunch follows at that turn's end, so the program
 is never torn down from under a live turn. Work the old process was running,
 its subagents and its background tasks, ends with it. A message you had queued
-survives. The relaunch follows the first turn to end with nothing the old
-process has picked up: a message you had queued runs in the old process while
-it keeps taking your queue, and one still waiting at that turn's end is
-delivered by the new one.
+survives. One the session has already taken runs in the old process, and the
+relaunch follows the first turn to end with every message the old process has
+taken already in the conversation. Before that the old process keeps taking your
+queue, except during the rest of the turn that was running when you asked for
+the restart; a message still waiting in the queue when the relaunch comes is
+delivered by the new one. Until a taken message lands in the conversation, the
+window you sent it from shows it under a header that reads **with the session**,
+and any other window, or the sending one after a reload, shows it as a dashed
+bubble captioned **sending…**.
 
 A session that is not running has nothing to restart: the row refuses and
 points at Revive, which is the same thing for a closed session. A running
