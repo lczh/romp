@@ -6175,15 +6175,25 @@ class SdkSession:
         climb=False is a Restart's ask (SdkBackend.relaunch): the polite rung when this episode has not
         used it, and never a signal. A restart is not a kill, and a CLI the ladder killed under an armed
         reconnect left the session with no CLI, since the reconnect waits for a result that never comes
-        (the post-merge review of #2059, 2026-09-24). False when that ask sent nothing."""
+        (the post-merge review of #2059, 2026-09-24).
+
+        Returns what the press did, so a caller's log can say that and no more (the post-merge review of
+        #2138, 2026-09-24): "sent" once the control request is scheduled, which says nothing yet of its
+        answer (_do_interrupt logs a failure); Stop's signal rung, "sigint" or "sigkill", which says nothing
+        of its delivery either (_signal_cli logs a skip or a missing CLI); and for a Restart's ask that sent
+        nothing, why: "spent" when an earlier press this stop episode already took a rung, whatever that rung
+        reached (its request can fail, and its signal can be skipped on a detached session or find no CLI
+        process), "no channel" when none did and there is no control channel to ask on. The rung records the
+        press, not its delivery, so "spent" never means the turn was reached."""
         with self._lock:
+            spent = self._intr_level > 0
             action, level = interrupt_action(self._intr_level, bool(self.loop and self.client))
             if climb or action == "control":
                 self._intr_level = level
         if not climb and action != "control":
             self.backend._log("interrupt (%s): a restart asks a turn to stop politely only; %s not sent"
                               % (self.name, action))
-            return False
+            return "spent" if spent else "no channel"
         if action == "control":
             # Flip the in-flight flag SYNCHRONOUSLY, here on the kernel thread, before scheduling the async
             # _do_interrupt. The kernel stamps _interrupt_clicked and pushes the instant it returns from this
@@ -6193,9 +6203,9 @@ class SdkSession:
             self._interrupted = True
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._do_interrupt(climb)))
-            return True
+            return "sent"
         self._signal_cli(signal.SIGINT if action == "sigint" else signal.SIGKILL, action)
-        return True
+        return action
 
     def _signal_cli(self, sig, action):
         """Deliver an escalated interrupt as a real signal to this session's own CLI (the child of THIS
@@ -15442,13 +15452,24 @@ class SdkBackend:
         s = self.sessions.get(sid)
         if not s:
             return False
-        if climb:
-            s.interrupt()
-        elif not s.interrupt(climb=False):       # a Restart's ask (relaunch): nothing was sent, so nothing to mark
-            return False
+        if not climb:
+            # a Restart's ask: False when nothing was sent. relaunch calls _restart_ask itself, so no kernel caller
+            # passes climb=False today; the form keeps its contract for any that come
+            return self._restart_ask(s, sid) == "sent"
+        s.interrupt()
         append_state(self.state_dir, sid, "idle", int(time.time()) - 1, by="interrupt")
         self._poke()
         return True
+
+    def _restart_ask(self, s, sid: str) -> str:
+        """A Restart's ask to stop the running turn (SdkSession.interrupt with climb=False), marked idle by
+        interrupt as a Stop is, and only when the request went out: an ask that sent nothing has nothing to
+        mark. Returns the session's report, "sent", "spent" or "no channel", which relaunch's log line words."""
+        did = s.interrupt(climb=False)
+        if did == "sent":
+            append_state(self.state_dir, sid, "idle", int(time.time()) - 1, by="interrupt")
+            self._poke()
+        return did
 
     def forwards_sends(self) -> bool:
         """True (see SessionBackend.forwards_sends): the SDK holds queued turns in _pending and its inputs()
@@ -15974,12 +15995,21 @@ class SdkBackend:
             running = s.inflight > 0          # a turn in flight NOW (busy() also counts a queued one: nothing to cut there)
         s.request_reconnect()                 # armed first — see the docstring's order
         # the polite rung only, never Stop's ladder: a click again while the CLI ignores the request must not
-        # signal it (SdkSession.interrupt's climb=False; the post-merge review of #2059, 2026-09-24)
-        asked = running and self.interrupt(sid, climb=False)
+        # signal it (SdkSession.interrupt's climb=False; the post-merge review of #2059, 2026-09-24). The line
+        # says what this ask did and no more: a sent request has not been answered yet, and one that fails logs
+        # its own line, after which the turn runs to its end. A spent rung says an earlier stop tried, never that
+        # the turn was asked: the rung records a press, and that press may have reached nothing (a failed
+        # request, a signal skipped on a detached session or with no CLI to reach, each on its own line). With no
+        # control channel it says only that this ask sent nothing, never whether the turn was asked before: the stop
+        # episode is reset when the kernel connects again (_reconcile_stranded), so a Stop's request from before a
+        # reattach to a session host leaves no record here (the post-merge review of #2138, 2026-09-24)
+        asked = self._restart_ask(s, sid) if running else ""
         self._log("relaunch (%s): %s; its CLI is replaced by a fresh one resuming the same conversation"
-                  % (s.name, "the running turn is cut" if asked else
-                     "the running turn was already asked to stop, and the fresh CLI comes up when it ends" if running else
-                     "idle, reconnecting now"))
+                  % (s.name, "idle, reconnecting now" if not running else
+                     "asked the running turn to stop, and the fresh CLI comes up when it ends" if asked == "sent" else
+                     "sent the running turn nothing, since an earlier stop already tried to end it, and the fresh "
+                     "CLI comes up when it ends" if asked == "spent" else
+                     "sent the running turn nothing, since there is no control channel"))
         self._poke()
         return ""
 

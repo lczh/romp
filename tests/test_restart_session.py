@@ -118,7 +118,7 @@ class _Sess:
 
     def interrupt(self, climb=True):
         self.calls.append(("interrupt",) if climb else ("interrupt", "polite only"))
-        return True
+        return "sent"                                   # SdkSession.interrupt's report: the request went out
 
 
 class RelaunchPrimitive(unittest.TestCase):
@@ -617,6 +617,190 @@ class RestartDoor(unittest.TestCase):
         km.Handler._dispatch_ws(None, {"type": "restartSession"}, client)
         self.assertEqual(self.be.calls, [])
         self.assertEqual([m.get("type") for m in sent], ["unknownOp"])
+
+
+class _AnsweringControl:
+    """The SDK client as _do_interrupt awaits it: every control request is answered (the CLI took the stop)."""
+
+    def __init__(self):
+        self.requests = 0
+
+    async def interrupt(self):
+        self.requests += 1
+
+
+class RelaunchLogsWhatItsAskDid(unittest.TestCase):
+    """relaunch's log line says what the Restart's ask did, never an outcome it does not know (the post-merge review
+    of #2138, 2026-09-24). It read "the running turn is cut" as soon as the polite request was scheduled, the same
+    words for a request that then failed and left the turn running, and "the running turn was already asked to stop"
+    for every ask that sent nothing, including a session with no control channel, where that Restart sent nothing and
+    the kernel held no record of an earlier ask. The line now says whether the request went out, and why not when it
+    did not; whether it worked is the request's own line (_do_interrupt logs a failure). An ask on a spent rung says
+    an earlier stop tried, not that the turn was asked: the rung records a press, and a Stop's signal can be skipped
+    or find no CLI. An ask with no control channel says it sent nothing and no more: the stop episode is reset when
+    the kernel connects again, so a Stop may have asked this turn before a reattach. A real SdkSession on a real
+    event loop, its turn in flight; the signal rung is recorded instead of sent, except where the real one runs."""
+
+    EARLIER = "an earlier stop already tried to end it"       # the spent rung's words, which claim no delivery
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.be = _backend(self.d)
+        self.lines = []
+        self.be._log_cb = self.lines.append
+        _reg(self.d)
+        s = self.s = sb.SdkSession(self.be, sb.read_reg(Path(self.d), SID))
+        self.be.sessions[SID] = s
+        s.inflight = 1
+        self.signals = []
+        s._signal_cli = lambda sig, action: self.signals.append(action)
+        s.request_reconnect = lambda defer=True: None      # the arm; RelaunchPrimitive pins its order
+        s.client = _AnsweringControl()
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, name="restart-log-test-loop", daemon=True)
+        self.thread.start()
+        s.loop = self.loop
+        self.addCleanup(self._close_loop)
+
+    def _close_loop(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(timeout=10)
+        self.loop.close()
+
+    def _drain(self, requests):
+        """Wait until the client has seen `requests` control requests and the loop steps that ran them are done."""
+        deadline = time.monotonic() + 10
+        while getattr(self.s.client, "requests", 0) < requests:
+            if time.monotonic() > deadline:
+                self.fail("the control request never ran; log %r" % self.lines[-6:])
+            time.sleep(0.01)
+        for _ in range(3):
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), self.loop).result(timeout=10)
+
+    def _restart(self):
+        """One Restart; the relaunch line it logged."""
+        before = len(self.lines)
+        self.assertEqual(self.be.relaunch(SID), "")
+        mine = [m for m in self.lines[before:] if m.startswith("relaunch (web)")]
+        self.assertEqual(len(mine), 1, "one relaunch line per Restart; log %r" % self.lines[before:])
+        return mine[0]
+
+    def _interrupt_rows(self):
+        p = Path(self.d, "states", SID + ".jsonl")
+        rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
+        return [r for r in rows if r.get("by") == "interrupt"]
+
+    def test_a_restart_that_sends_the_request_says_it_asked_not_that_the_turn_is_cut(self):
+        line = self._restart()
+        self._drain(1)
+        self.assertIn("asked the running turn to stop", line)
+        self.assertNotIn("is cut", line, "the request was only scheduled: the turn ends when the CLI answers it")
+
+    def test_a_restart_whose_request_then_fails_never_said_the_turn_was_cut(self):
+        self.s.client = _FailingControl(_timed_out)
+        line = self._restart()
+        self._drain(1)
+        self.assertIn("asked the running turn to stop", line)
+        self.assertTrue(any("control request failed" in m for m in self.lines), "the failure has its own line")
+        self.assertFalse(any("is cut" in m for m in self.lines), "no line claims a cut that never happened")
+        self.assertEqual(self.signals, [])
+
+    def test_a_restart_on_a_spent_rung_says_an_earlier_stop_tried(self):
+        self._restart()
+        self._drain(1)
+        line = self._restart()                               # the episode's polite request went out above
+        self.assertIn(self.EARLIER, line)
+        self.assertNotIn("asked", line, "the rung records a press, not a reached turn; log %r" % line)
+        self.assertEqual(self.s.interrupt(), "sigint")       # Stop: SIGINT, recorded; the rung is past the polite one
+        line = self._restart()                               # past Stop's SIGINT: still the spent line
+        self.assertIn(self.EARLIER, line)
+        self.assertNotIn("asked", line, "log %r" % line)
+        self.assertEqual((self.s.client.requests, self.signals), (1, ["sigint"]))
+
+    def test_a_request_that_went_out_before_the_channel_closed_still_reads_an_earlier_stop(self):
+        # the report keys on the stop episode, not on the channel alone: a request went out, so a Restart after the
+        # channel closed says an earlier stop tried, not that there was no channel to ask on
+        self.assertTrue(self.be.interrupt(SID))              # Stop: the polite request
+        self._drain(1)
+        self.s.client = None
+        line = self._restart()
+        self.assertIn(self.EARLIER, line)
+        self.assertNotIn("no control channel", line)
+        self.assertEqual(self.signals, [])
+
+    def _restart_after_a_stop_that_reached_nothing(self, its_line):
+        del self.s._signal_cli                               # the real signal rung, which here has nothing to signal
+        self.s.client = None                                 # no channel, so Stop takes the SIGINT rung at once
+        self.assertEqual(self.s.interrupt(), "sigint")
+        self.assertTrue(any(its_line in m for m in self.lines), "the Stop's own line says it reached nothing; log %r"
+                        % self.lines)
+        line = self._restart()
+        self.assertIn(self.EARLIER, line)
+        self.assertNotIn("asked", line, "nothing reached this turn, so its Restart may not say it was asked; log %r"
+                         % line)
+
+    def test_a_restart_after_a_stop_that_found_no_cli_never_says_the_turn_was_asked(self):
+        self.be._session_cli_pid = lambda session: None
+        self._restart_after_a_stop_that_reached_nothing("found no CLI process")
+
+    def test_a_restart_after_a_stop_skipped_on_a_detached_session_never_says_the_turn_was_asked(self):
+        self.s.detached = True
+        self._restart_after_a_stop_that_reached_nothing("escalation skipped")
+
+    def test_a_restart_with_no_control_channel_says_it_sent_nothing(self):
+        # the whole line, word for word: it says what this ask did (nothing went out, for want of a channel) and
+        # nothing of the turn's history, which the kernel does not keep across a reconnect
+        self.s.client = None                                 # the loop is up, the client is not: nothing to ask on
+        self.assertEqual(self._restart(), "relaunch (web): sent the running turn nothing, since there is no control "
+                         "channel; its CLI is replaced by a fresh one resuming the same conversation")
+        self.assertEqual(self.signals, [])
+
+    def test_each_press_reports_what_it_did(self):
+        # the report values SdkSession.interrupt documents, over one stop episode: a Restart's request, a Restart on
+        # the spent rung, Stop's two signal rungs, and a Restart past them
+        self.assertEqual(self.s.interrupt(climb=False), "sent")
+        self._drain(1)
+        self.assertEqual(self.s.interrupt(climb=False), "spent")
+        self.assertEqual(self.s.interrupt(), "sigint")
+        self.assertEqual(self.s.interrupt(), "sigkill")
+        self.assertEqual(self.s.interrupt(climb=False), "spent")
+        self.assertEqual((self.s.client.requests, self.signals), (1, ["sigint", "sigkill"]))
+
+    def test_no_channel_is_reported_until_a_press_takes_a_rung(self):
+        # an ask with no channel sends nothing and takes no rung, so the next press with a channel is the polite one
+        self.s.client = None
+        self.assertEqual(self.s.interrupt(climb=False), "no channel")
+        self.assertEqual(self.s.interrupt(climb=False), "no channel")
+        self.s.client = _AnsweringControl()
+        self.assertEqual(self.s.interrupt(), "sent")         # Stop: the polite request
+        self._drain(1)
+        self.assertEqual(self.s.interrupt(climb=False), "spent")
+        self.assertEqual(self.signals, [])
+
+    def test_a_restart_that_sends_nothing_marks_nothing(self):
+        # relaunch marks the session idle for its ask, as a Stop is marked, only when the request went out; a Restart
+        # on the spent rung sends nothing and leaves the state file alone. SdkBackend.interrupt(climb=False), which no
+        # kernel caller passes since relaunch calls _restart_ask itself, keeps the same contract: False here
+        self._restart()
+        self._drain(1)
+        self.assertEqual(len(self._interrupt_rows()), 1)
+        self._restart()
+        self.assertEqual(len(self._interrupt_rows()), 1, "a spent rung marks nothing")
+        self.assertFalse(self.be.interrupt(SID, climb=False))
+        self.assertEqual(len(self._interrupt_rows()), 1)
+        self.assertEqual(self.s.client.requests, 1)
+
+    def test_a_restart_with_no_control_channel_marks_nothing(self):
+        self.s.client = None
+        self._restart()
+        self.assertEqual(self._interrupt_rows(), [])
+        self.assertFalse(self.be.interrupt(SID, climb=False))
+        self.assertEqual(self._interrupt_rows(), [])
+        self.s.client = _AnsweringControl()                  # the channel is back and the polite rung still unused
+        self.assertTrue(self.be.interrupt(SID, climb=False))
+        self._drain(1)
+        self.assertEqual(len(self._interrupt_rows()), 1)
+        self.assertEqual(self.signals, [])
 
 
 if __name__ == "__main__":
