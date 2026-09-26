@@ -74928,6 +74928,15 @@ class Handler(BaseHTTPRequestHandler):
                  "Host: 127.0.0.1:%d" % int(port)]
         for hn in ("Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version",
                    "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"):
+            if hn == "Sec-WebSocket-Extensions" and not _WS_DEFLATE_ON:
+                # this kernel's kill switch covers the panes it relays too: ROMP_WS_DEFLATE=0 is the lever for a proxy that
+                # mishandles compressed frames, and that proxy sits between the browser and this kernel, since the leg on to
+                # the attached host is an ssh tunnel on loopback: this kernel's own -L to a host it attached, or, for a
+                # checked-in host, the -R that host's own ssh opened here (its row's local_port is that forward's port).
+                # Forwarded, the offer let the host negotiate on its own switch, and its panes stayed compressed across
+                # that proxy (post-merge note on #2127, 2026-09-24); with no offer the host answers plain, as a direct
+                # dial that offered nothing gets
+                continue
             if hn == "Sec-WebSocket-Extensions" and hasattr(self.headers, "get_all"):
                 # the list may come as several lines (RFC 6455 §11.3.2), which the direct handshake reads together: the
                 # remote must see them all, or an offer past the first line upgrades plain through the hub where it
