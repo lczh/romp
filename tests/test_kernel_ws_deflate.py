@@ -27,7 +27,8 @@ fell megabytes behind on the feed and was dropped. Pinned here:
 - the federated relay, executed: a browser dialing a remote kernel through the hub negotiates with the remote,
   which sees every Extensions line the browser sent, in its order, and each on a line of its own, so lines too
   long to join under the remote's line limit still upgrade through the hub as they do direct, and no more lines
-  than the browser sent, so a request at the remote's header-count limit does too.
+  than the browser sent, so a request at the remote's header-count limit does too; a hub whose own kill switch
+  is off forwards no offer, so an attached host's pane through it runs plain like the hub's own.
 
 Synthetic only: invented frame text, no session data.
 """
@@ -58,8 +59,21 @@ os.environ.pop("ROMP_WS_DEFLATE_LEVEL", None)
 # pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
+# this root is the module's own, outside the one conftest floors, so it carries its own session-hosts off (CLAUDE.md,
+# Testing): both kernel copies below resolve it, and neither may start a real session host
+os.makedirs(os.path.join(os.environ["XDG_STATE_HOME"], "romp"), exist_ok=True)
+with open(os.path.join(os.environ["XDG_STATE_HOME"], "romp", "session-hosts"), "w") as _f:
+    _f.write("off\n")
 load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+# The hub of RelayUnderTheHubsSwitch: a second kernel copy, loaded the way a kernel runs with ROMP_WS_DEFLATE=0 in its
+# service.env, while `km` stands in for the attached host and keeps the default. Loaded BEFORE `km`, so the hooks a
+# kernel load installs in the shared event-model and judge modules are km's, as they are without this copy
+os.environ["ROMP_WS_DEFLATE"] = "0"
+try:
+    hub_km = load_source("romp_kernel_wsdeflate_hub_off", os.path.join(BIN, "romp-kernel"))
+finally:
+    os.environ.pop("ROMP_WS_DEFLATE", None)
 km = load_source("romp_kernel_wsdeflate", os.path.join(BIN, "romp-kernel"))
 
 TAIL = b"\x00\x00\xff\xff"
@@ -787,6 +801,69 @@ class RelayExecuted(unittest.TestCase):
         self.assertEqual(status, 101, "the request the direct dial upgrades must upgrade through the hub too")
         self.assertEqual(headers.get("sec-websocket-extensions"), ACCEPT)
         self.assertEqual(kernel_client(wid).get("deflate"), {"wbits": 15, "bounded": False})
+
+
+class RelayUnderTheHubsSwitch(unittest.TestCase):
+    """ROMP_WS_DEFLATE=0 is the lever for a proxy that mishandles compressed frames, and the reference promises it makes
+    every pane run plain. The hub's relay forwarded the browser's offer to the attached host regardless and passed the
+    host's 101 back, so the host, whose own switch was on, negotiated: an attached host's panes stayed compressed across
+    the very proxy the hub's switch was set to route around, while the hub's own panes ran plain (post-merge note on
+    #2127, 2026-09-24). Run as RelayExecuted runs it, with the hub a kernel copy loaded with the switch off (`hub_km`)
+    and `km`, loaded with it on, as the host behind the forwarded port."""
+
+    OFFER = "permessage-deflate; client_max_window_bits"
+
+    def setUp(self):
+        self.hub = ThreadingHTTPServer(("127.0.0.1", 0), hub_km.Handler)
+        self.remote = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        for srv in (self.hub, self.remote):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        with hub_km._remotes_lock:
+            self._saved = dict(hub_km._remotes)
+            hub_km._remotes["gpu1"] = {"host": "gpu1", "kernel_port": 29855, "local_port": self.remote.server_address[1],
+                                       "token": km.TOKEN, "status": "up"}
+        self.socks = []
+
+    def tearDown(self):
+        for s in self.socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+        with hub_km._remotes_lock:
+            hub_km._remotes.clear()
+            hub_km._remotes.update(self._saved)
+        for srv in (self.hub, self.remote):
+            srv.shutdown()
+            srv.server_close()
+
+    def test_the_two_copies_were_loaded_with_the_switch_off_and_on(self):
+        self.assertIs(hub_km._WS_DEFLATE_ON, False, "the hub copy read ROMP_WS_DEFLATE=0 at its load")
+        self.assertIs(km._WS_DEFLATE_ON, True, "the host copy loaded with neither knob set")
+
+    def test_an_attached_hosts_pane_through_a_hub_with_the_switch_off_runs_plain(self):
+        # the controls: the host dialed direct takes this offer, and the hub's own pane declines it
+        status, headers, s, _ = upgrade(self.remote.server_address[1], self.OFFER, wid="w-switch-host-direct")
+        self.socks.append(s)
+        self.assertEqual((status, headers.get("sec-websocket-extensions")), (101, ACCEPT), "the host negotiates on its own switch")
+        status, headers, s, _ = upgrade(self.hub.server_address[1], self.OFFER,
+                                        path="/ws?app=feed&wid=w-switch-hub-own&token=%s" % hub_km.TOKEN)
+        self.socks.append(s)
+        self.assertEqual((status, headers.get("sec-websocket-extensions")), (101, None), "the hub's own pane runs plain")
+        # through the relay the host must not negotiate, whether the offer comes on one line or on the second of two
+        for i, offer in enumerate((self.OFFER, ["x-webkit-deflate-frame", self.OFFER])):
+            wid = "w-switch-relay-%d" % i
+            status, headers, s, rest = upgrade(self.hub.server_address[1], offer,
+                                               path="/remote/gpu1/ws?app=feed&wid=%s&token=%s" % (wid, hub_km.TOKEN))
+            self.socks.append(s)
+            self.assertEqual(status, 101, offer)
+            self.assertNotIn("sec-websocket-extensions", headers, "the hub's switch is off, yet the relayed pane negotiated: %r" % (offer,))
+            host_client = kernel_client(wid)                  # the host's record of this browser
+            self.assertEqual(host_client.get("kind"), "relay")
+            self.assertIsNone(host_client.get("deflate"), "the host must not compress for a pane relayed by a hub with the switch off")
+            text = big_text()
+            host_client["send"](text)
+            self.assertEqual(_Reader(s, rest).frame(), (0x81, text.encode()), "a plain frame, no RSV1")
 
 
 if __name__ == "__main__":
