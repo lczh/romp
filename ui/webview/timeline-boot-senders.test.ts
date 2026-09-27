@@ -6,9 +6,9 @@
 // kernel's boot is run as served, once over each receiving window below, and its one window message listener is handed
 // a data frame from every sender and origin below; the frame must be drawn exactly when windowSender, reading the same
 // window, does not name the sender foreign. So the pair cannot drift apart for any sender the grid can express: a
-// window that opened this one, a window this one opened, a sibling or child frame, an origin whose text overlaps this
-// one's or drops its port, a sourceless post with the opaque origin, a page whose own origin is opaque, a window with no
-// location, a missing event.
+// window that opened this one, a window this one opened, a sibling or child frame (each under this window's top, the
+// child listed in its frames as a browser lists it), an origin whose text overlaps this one's or drops its port, a
+// sourceless post with the opaque origin, a page whose own origin is opaque, a window with no location, a missing event.
 // The grid runs twice: without a performance collector, and with a real one (perf-telemetry.ts) on window.__rompPerf,
 // as federation.js publishes it on the kernel's page. Both hosts wrap the frame listener in that collector and run the
 // sender check outside the wrapper, so a foreign message is neither drawn nor counted in the page's telemetry.
@@ -81,11 +81,19 @@ function receivers(): Win[] {
     win("a VS Code webview frame whose parent is deleted", { parent: undefined, top: undefined, opener: null, location: { origin: VSCODE_ORIGIN } }),
   ];
 }
+/** Lists `child` as `w`'s frame 0, as a browser does: window.frames is the window, its children at its indices and their
+ *  count in length. Non-enumerable, like every other edge, so a dump of the window stays its name. */
+function framedIn(w: Win, child: Win): Win {
+  for (const [k, v] of [["frames", w], ["0", child], ["length", 1]] as const) {
+    Object.defineProperty(w, k, { value: v, enumerable: false, configurable: true, writable: true });
+  }
+  return child;
+}
 /** The senders, relative to the receiving window. */
 function sources(w: Win): Array<[string, unknown]> {
   return [
-    ["this window", w], ["its parent", w.parent], ["a sibling frame", win("a sibling frame", { parent: w.parent })],
-    ["a frame inside it", win("a frame inside it", { parent: w })], ["the page that opened it", w.opener],
+    ["this window", w], ["its parent", w.parent], ["a sibling frame", win("a sibling frame", { parent: w.parent, top: w.top })],
+    ["a frame inside it", framedIn(w, win("a frame inside it", { parent: w, top: w.top }))], ["the page that opened it", w.opener],
     ["a window it opened", win("a window it opened", { opener: w })], ["its top window", w.top],
     ["the shell's parent", GRAND], ["a window it does not know", win("a stray window")],
     ["null", null], ["undefined", undefined], ["no source key", ABSENT],

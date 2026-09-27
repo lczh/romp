@@ -54,6 +54,12 @@ global.parent = SHELL;
 global.top = GRAND;
 const OPENER = { name: 'a page on another origin that opened /timeline' };
 global.opener = OPENER;
+// a sandboxed frame inside this one, listed as a browser lists it: window.frames is the window, its children at its
+// indices and their count in length; like every frame in the tab, its top is this window's top
+const CHILD = { name: 'a sandboxed frame inside this one', parent: global, top: GRAND };
+global.frames = global;
+global.length = 1;
+global[0] = CHILD;
 global.location = OWN === '-' ? undefined : { origin: OWN };
 global.acquireVsCodeApi = () => ({ postMessage() {} });
 global.addEventListener = (t, f) => { if (t === 'message') LISTENERS.push(f); };
@@ -73,8 +79,8 @@ const SENDERS = {
   top: [GRAND, OTHER],            // the top window, the shell's own parent on another origin: not this frame's parent
   stranger: [{}, OTHER],          // a window on another origin this one does not know
   sandboxed: [{}, 'null'],        // a sandboxed frame
-  sandboxedSibling: [{ parent: SHELL }, 'null'],   // a sandboxed frame beside this one in the shell
-  sandboxedChild: [{ parent: window }, 'null'],    // a sandboxed frame inside this one
+  sandboxedSibling: [{ parent: SHELL, top: GRAND }, 'null'],   // a sandboxed frame beside this one in the shell
+  sandboxedChild: [CHILD, 'null'],                 // a sandboxed frame inside this one, listed in window.frames
   overlappingOrigin: [{}, ORIGIN + '0'],           // another port whose text begins with this origin
   noPort: [{}, 'http://127.0.0.1'],                // this origin's scheme and host on another port (the default)
   otherPort: [{}, 'http://127.0.0.1:7778'],        // this origin's scheme and host on another port

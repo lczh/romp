@@ -201,3 +201,22 @@ test("a window related to this one other than as its parent is judged by its ori
     assert.equal(windowSender({ source: src, origin: ORIGIN }, w), "peer", who + ", this origin");
   }
 });
+
+// A frame in this window's tab, reached the ways a browser exposes it. A browser lists this window's child frames on the
+// window itself (window.frames is the window; its children sit at its indices, their count in length), and every frame
+// in the tab shares this window's top. Neither relation makes a sender: a rule that heard a child found through
+// window.frames, or any frame under this window's top, would hear a sandboxed frame in the tab.
+test("a frame in this window's tab is judged by its origin however a rule reaches it: through this window's indexed frames, or by sharing its top", () => {
+  const grand = { name: "the shell's parent" };
+  const shell = { name: "the shell", parent: grand, top: grand };
+  const w: any = { parent: shell, top: grand, location: { origin: ORIGIN } };
+  const child = { name: "a frame inside this window", parent: w, top: grand };
+  const sibling = { name: "a frame beside this one in the shell", parent: shell, top: grand };
+  w.frames = w; w.length = 1; w[0] = child;
+  assert.equal(Array.prototype.indexOf.call(w.frames, child), 0, "the child is this window's frame 0, as a browser lists it");
+  for (const [who, src] of [["a frame inside this window", child], ["a frame beside this one", sibling]] as const) {
+    assert.equal(windowSender({ source: src, origin: "null" }, w), "foreign", who + ", opaque origin");
+    assert.equal(windowSender({ source: src, origin: "https://example.invalid" }, w), "foreign", who + ", another origin");
+    assert.equal(windowSender({ source: src, origin: ORIGIN }, w), "peer", who + ", this origin");
+  }
+});
