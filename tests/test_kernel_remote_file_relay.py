@@ -113,6 +113,17 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
             if not head:
                 self.wfile.write(PY_BYTES)
             return
+        if "torn.png" in self.path:
+            # a lying remote: a partial reply, asked for or not, whose Content-Range is not the bytes N-M/T the relay
+            # mirrors, so the relay refuses it with its own 502
+            self.send_response(206)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Range", "bytes 3-/99")
+            self.send_header("Content-Length", str(len(PNG_BYTES)))
+            self.end_headers()
+            if not head:
+                self.wfile.write(PNG_BYTES)
+            return
         if "big.pdf" in self.path:
             # the remote's own size cap: its _file_preview's prose verdict, text/plain, no disposition
             body = b"too large to show: /tmp/big.pdf (95.4 MB, limit 47.7 MB)"
@@ -263,7 +274,8 @@ class RemoteFileRelay(unittest.TestCase):
     # (_FakeRemoteFileHandler._opener_policy), so a relay that mirrored the remote's header beside its own fails here.
     # One test per shape, since each one's extra headers (the mirrored mtimes, the SVG sandbox, the PDF's name, the 413
     # page) come from its own code, and so do the relay's own refusals: a host that is not attached (detached), an
-    # extension the relay will not preview (unviewable), a tunnel that does not answer (502).
+    # extension the relay will not preview (unviewable), a tunnel that does not answer (502), a remote reply longer than
+    # the local cap (the backstop 413), and a partial reply whose Content-Range is not byte arithmetic (malformed 502).
     def _coop_each(self, path, want_status):
         """GET `path` once per NAVIGATIONS entry; assert the status and one COOP header, OPENER_POLICY, each time. Returns
         {entry: (body, header message)}."""
@@ -328,6 +340,21 @@ class RemoteFileRelay(unittest.TestCase):
         for how, (body, _) in self._coop_each("/remote/gpu1/file?path=%2Ftmp%2Fdata.bin", 404).items():
             self.assertEqual(body, b"not found", how)
         self.assertEqual(_FakeRemoteFileHandler.requests, [], "the remote was not asked")
+
+    def test_the_relays_backstop_413_carries_the_openers_policy_once(self):
+        # the remote answered 200 with more bytes than the local cap (a stand-in for _PREVIEW_MAX_BYTES here, the remote's
+        # own cap being what normally refuses first): the relay's own refusal, from its own _send
+        from unittest import mock
+        with mock.patch.object(km, "_PREVIEW_MAX_BYTES", 4):
+            self.assertGreater(len(PNG_BYTES), 4)
+            for how, (body, msg) in self._relayed_coop("/tmp/plot.png", 413).items():
+                self.assertEqual(body, b"too large to preview", how)
+                self.assertEqual(msg.get("Content-Type"), "text/plain", how)
+
+    def test_the_relays_malformed_partial_reply_refusal_carries_the_openers_policy_once(self):
+        # a 206 whose Content-Range is not byte arithmetic: the relay mirrors none of it and answers its own 502
+        for how, (body, _) in self._relayed_coop("/tmp/torn.png", 502).items():
+            self.assertEqual(body, b"malformed partial reply from gpu1", how)
 
     def test_the_relays_dead_tunnel_refusal_carries_the_openers_policy_once(self):
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
