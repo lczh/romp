@@ -40,6 +40,9 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 REMOTE_TOKEN = "remote-token-DO-NOT-USE"
+# The opener policy Handler._send declares (tests/test_kernel_auth_hardening.py OpenerIsolation holds the local routes to
+# it), written out rather than read from the kernel, so a change to the value is a change to this test.
+OPENER_POLICY = "same-origin-allow-popups"
 PNG_BYTES = b"\x89PNG\r\n\x1a\nfake-png-bytes"
 PDF_BYTES = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"   # a minimal synthetic PDF
 PY_BYTES = b"print('hello from the remote box')\n"
@@ -61,11 +64,11 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
     dl_truncate = False         # short body then a clean close, as _file_download sends when the file shrank
 
     def _opener_policy(self):
-        # A real romp kernel answers through Handler._send, which sends Cross-Origin-Opener-Policy: same-origin on every
-        # response it builds: the GET 200 of a file and every refusal (404, 413). Its HEAD and 206 replies are written
-        # header by header and carry none. The relay sends its own copy through its own _send, so a relay that also
-        # mirrored the remote's would send the header twice, and a browser applies no policy from a doubled header.
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        # A real romp kernel answers through Handler._send, which sends Cross-Origin-Opener-Policy on every response it
+        # builds: the GET 200 of a file and every refusal (404, 413). Its HEAD and 206 replies are written header by
+        # header and carry none. The relay sends its own copy through its own _send, so a relay that also mirrored the
+        # remote's would send the header twice, and a browser applies no policy from a doubled header.
+        self.send_header("Cross-Origin-Opener-Policy", OPENER_POLICY)
 
     def _serve(self, head):
         _FakeRemoteFileHandler.requests.append(self.path)
@@ -249,7 +252,7 @@ class RemoteFileRelay(unittest.TestCase):
         self.assertIn("sid=11111111-2222-3333-4444-555555555555", req)
 
     # A remote session's file opened in a tab of its own is a document on this origin too, so each shape the relay
-    # answers through _send declares Cross-Origin-Opener-Policy: same-origin as the local /file route does
+    # answers through _send declares Cross-Origin-Opener-Policy: same-origin-allow-popups as the local /file route does
     # (tests/test_kernel_auth_hardening.py OpenerIsolation), so the dashboard's window.open still returns a handle. Read
     # off the wire, every copy: exactly one header, since a browser that receives two cannot parse it and applies no
     # policy (a dict of the headers keeps one copy and would hide the second). Each shape is asked once per entry of
@@ -262,14 +265,14 @@ class RemoteFileRelay(unittest.TestCase):
     # page) come from its own code, and so do the relay's own refusals: a host that is not attached (detached), an
     # extension the relay will not preview (unviewable), a tunnel that does not answer (502).
     def _coop_each(self, path, want_status):
-        """GET `path` once per NAVIGATIONS entry; assert the status and one COOP header, same-origin, each time. Returns
+        """GET `path` once per NAVIGATIONS entry; assert the status and one COOP header, OPENER_POLICY, each time. Returns
         {entry: (body, header message)}."""
         seen = {}
         for how, nav in NAVIGATIONS:
             status, body, msg = self._get_msg(path, headers=dict(nav, **credential(nav, km.TOKEN)), token=False)
             self.assertEqual(status, want_status, "%s: %r" % (how, body[:80]))
-            self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), ["same-origin"],
-                             how + ": one Cross-Origin-Opener-Policy header on the wire, same-origin")
+            self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), [OPENER_POLICY],
+                             how + ": one Cross-Origin-Opener-Policy header on the wire, " + OPENER_POLICY)
             seen[how] = (body, msg)
         return seen
 

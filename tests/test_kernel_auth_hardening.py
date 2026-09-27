@@ -236,7 +236,7 @@ class ResponseHardeningHeaders(unittest.TestCase):
         self.assertIn('"X-Frame-Options", "SAMEORIGIN"', src)
         self.assertIn("frame-ancestors 'self'", src)
         self.assertIn('"Referrer-Policy", "same-origin"', src)   # executed by TokenLeavesTheUrl below
-        self.assertIn('"Cross-Origin-Opener-Policy", "same-origin"', src)   # executed by OpenerIsolation below
+        self.assertIn('"Cross-Origin-Opener-Policy", "same-origin-allow-popups"', src)   # executed by OpenerIsolation below
 
     def test_remote_relay_derives_its_own_mime_and_discards_the_remotes(self):
         # the /remote/<host>/file relay must decide the Content-Type from the requested extension
@@ -351,21 +351,28 @@ def _wire_get(port, path, headers=None):
         conn.close()
 
 
+# The opener policy Handler._send declares, written out here rather than read from the kernel, so a change to the value
+# is a change to this test.
+OPENER_POLICY = "same-origin-allow-popups"
+
+
 class OpenerIsolation(unittest.TestCase):
-    """Every document the kernel serves declares Cross-Origin-Opener-Policy: same-origin (2026-09-27), so a page on
-    another origin that opens a dashboard page gets no live handle to it, and a handle is what a window message
-    needs. It rides _send, so every page carries it, and so do the dashboard's own tabs: a /file image or PDF it opens
-    with window.open is a same-origin document with the same policy, so window.open still returns a handle
-    (ui/webview/preview.ts openFileTab reads only that). Executed on the shell, every pane page, the sign-in page, a
-    static asset, and each document shape the /file route builds: an image, every shape that hands _send extra headers
-    of its own (an SVG, with its sandbox policy; a PDF, with its name; a text file, with its mtimes), a 404, the 413 page
-    a PDF's own tab shows, and both 415 refusals (a file no view shows, a text-named file that is not text). Each shape
-    is served once per entry of NAVIGATIONS (tests/document_navigations.py): bare, and with the headers a browser sends
-    on a navigation typed, opened by the dashboard, and opened by another origin, which is where a browser reads the
-    policy, signed in by the romp_token cookie as a browser's navigation is. Read off a live socket (_wire_get), so a
-    header written anywhere, a send_response or end_headers override included, is seen, and each carries it exactly
-    once: a second copy, even of the same value, leaves a browser with a header it cannot parse and so with no policy.
-    The /remote/<host>/file relay's shapes are tests/test_kernel_remote_file_relay.py's, read the same way."""
+    """Every document the kernel serves declares Cross-Origin-Opener-Policy: same-origin-allow-popups (2026-09-27), so
+    a page on another origin that opens a dashboard page gets no live handle to it, and a handle is what a window
+    message needs, while a popup a data pane opens keeps its opener (same-origin would sever it; the _send comment
+    says why, and tests/test_pane_popup_opener_served.py drives both in a browser). It rides _send, so every page
+    carries it, and so do the dashboard's own tabs: a /file image or PDF it opens with window.open is a same-origin
+    document with the same policy, so window.open still returns a handle (ui/webview/preview.ts openFileTab reads
+    only that). Executed on the shell, every pane page, the sign-in page, a static asset, and each document shape
+    the /file route builds: an image, every shape that hands _send extra headers of its own (an SVG, with its
+    sandbox policy; a PDF, with its name; a text file, with its mtimes), a 404, the 413 page a PDF's own tab shows,
+    and both 415 refusals (a file no view shows, a text-named file that is not text). Each shape is served once per
+    entry of NAVIGATIONS (tests/document_navigations.py): bare, and with the headers a browser sends on a navigation
+    typed, opened by the dashboard, and opened by another origin, which is where a browser reads the policy, signed
+    in by the romp_token cookie as a browser's navigation is. Read off a live socket (_wire_get), so a header
+    written anywhere, a send_response or end_headers override included, is seen, and each carries it exactly once: a
+    second copy, even of the same value, leaves a browser with a header it cannot parse and so with no policy. The
+    /remote/<host>/file relay's shapes are tests/test_kernel_remote_file_relay.py's, read the same way."""
 
     @classmethod
     def setUpClass(cls):
@@ -381,17 +388,17 @@ class OpenerIsolation(unittest.TestCase):
     def _coop(self, path, want_status, signed_in=True):
         """GET `path` once per NAVIGATIONS entry, with that entry's credential when `signed_in` (a navigation's cookie, a
         bare request's header: credential); assert the status and exactly one Cross-Origin-Opener-Policy header,
-        same-origin, each time. Returns {entry: (header message, body)}."""
+        same-origin-allow-popups, each time. Returns {entry: (header message, body)}."""
         seen = {}
         for how, nav in NAVIGATIONS:
             status, msg, body = _wire_get(self.port, path, dict(nav, **(credential(nav, TOK) if signed_in else {})))
             self.assertEqual(status, want_status, "%s, %s: %r" % (path[:60], how, body[:120]))
-            self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), ["same-origin"],
-                             "%s, %s: one header, same-origin" % (path[:60], how))
+            self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), [OPENER_POLICY],
+                             "%s, %s: one header, %s" % (path[:60], how, OPENER_POLICY))
             seen[how] = (msg, body)
         return seen
 
-    def test_every_page_the_kernel_serves_carries_coop_same_origin(self):
+    def test_every_page_the_kernel_serves_carries_the_opener_policy(self):
         self._coop("/?token=" + TOK, 200, signed_in=False)   # the shell's bootstrap: the token rides the URL
         for path in ("/chat", "/feed", "/fleet", "/files", "/artifacts", "/timeline", "/settings",
                      "/media/romp-swirl-glyph.svg"):
@@ -471,11 +478,11 @@ class _DoublingHandler(km.Handler):
     def send_response(self, code, message=None):
         super().send_response(code, message)
         if self.headers.get("X-Test-Double") == "send_response":
-            self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+            self.send_header("Cross-Origin-Opener-Policy", OPENER_POLICY)
 
     def end_headers(self):
         if self.headers.get("X-Test-Double") == "end_headers":
-            self.send_header("cross-origin-opener-policy", "same-origin")
+            self.send_header("cross-origin-opener-policy", OPENER_POLICY)
         super().end_headers()
 
 
@@ -496,8 +503,8 @@ class OpenerIsolationWireWitness(unittest.TestCase):
         cls.srv.server_close()
 
     def test_the_wire_shows_a_header_written_twice_as_two_wherever_it_was_written(self):
-        for where, want in (("send_response", ["same-origin", "same-origin"]), ("end_headers", ["same-origin", "same-origin"]),
-                            ("nowhere", ["same-origin"])):
+        for where, want in (("send_response", [OPENER_POLICY] * 2), ("end_headers", [OPENER_POLICY] * 2),
+                            ("nowhere", [OPENER_POLICY])):
             with self.subTest(where=where):
                 status, msg, _ = _wire_get(self.port, "/chat", {"X-Romp-Token": TOK, "X-Test-Double": where})
                 self.assertEqual(status, 200)

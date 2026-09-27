@@ -65124,7 +65124,7 @@ window.addEventListener("message",function(e){if(!heardSender(e))return;frameLis
 if(window.__rompFed&&window.__rompFed.onFrame)window.__rompFed.onFrame(frameListener);
 window.__rompTimelineOpenExternal=function(url){try{var u=new URL(url);if(u.protocol==="vscode:"){var q=u.searchParams;
 post({type:"deepLink",session:q.get("session"),anchor:q.get("anchor")||undefined,anchorT:Number(q.get("anchorT"))||undefined,anchorKind:q.get("anchorKind")||undefined,compose:q.get("compose")==="1"});
-if(window.parent!==window)window.parent.postMessage({romp:"reveal",pane:"chat"},"*");return;}}catch(e){}window.open(url,"_blank");};
+if(window.parent!==window)window.parent.postMessage({romp:"reveal",pane:"chat"},"*");return;}}catch(e){}window.open(url,"_blank","noopener,noreferrer");};
 window.__rompTimelineWriteOrder=function(order){if(window.__rompWriteOrder)window.__rompWriteOrder(order);};
 window.__rompTimelineCompact=function(name){post({type:"compact",name:name});};
 window.__rompTimelineSendCommand=function(name,cmd,extra){post(Object.assign({type:"sendCommand",name:name,cmd:cmd},extra||{}));};
@@ -70742,15 +70742,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
         # Opener isolation (2026-09-27): a page on another origin that opens a dashboard page with window.open keeps
-        # a handle to it, and a handle is what lets that page post window messages to it. same-origin puts every
-        # top-level document this origin serves in a browsing context group of its own: an opener on another origin
-        # gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file image or PDF it opens
-        # with window.open) are documents on this origin carrying the same policy, so window.open still returns a
-        # handle and the in-app view does not take over (preview.ts openFileTab reads only whether it got one).
-        # Browsers enforce it only on secure contexts (https, localhost); on a plain-http tailnet address it is
+        # a handle to it, and a handle is what lets that page post window messages to it. Under this policy a
+        # top-level document this origin serves, opened by a page on another origin, starts a browsing context group
+        # of its own: the opener gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file
+        # image or PDF it opens with window.open) are documents on this origin carrying the same policy, so window.open
+        # still returns a handle and the in-app view does not take over (preview.ts openFileTab reads only whether it
+        # got one).
+        # same-origin-allow-popups, not same-origin: a data pane (plans/panes-as-data.md) may open a popup and hear back
+        # from it through window.opener, as a sign-in or a picker does; a URL pane's frame is sandboxed with
+        # allow-popups for that. Under same-origin, a URL pane's window.open returns null and a state-root pane's
+        # popup on another origin leaves it a closed handle, and neither pane hears from its popup. What allow-popups
+        # gives up is the other direction: a popup the dashboard opens onto another origin keeps its opener. So every
+        # window.open in romp's own pages passes noopener (render.ts, pr-links.ts, file-view.ts, the timeline boot's
+        # fallback) or severs the opener on the handle it gets back (preview.ts openFileTab, which needs the handle to
+        # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
+        # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
+        # a browser.
+        # Residual: a URL pane cannot open one of this kernel's pages in a tab. Its popup inherits the frame's sandbox,
+        # and a browser shows a sandboxed navigation's response only when its opener policy is unsafe-none, so the tab
+        # shows an error page, as it did under same-origin (witness: test_pane_popup_opener_served.py
+        # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page). Allowing it would take
+        # allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes every popup the pane opens.
+        # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
         # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
         # document navigations only, so it is inert on JSON, assets and sockets.
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
         # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
         # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
         # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
