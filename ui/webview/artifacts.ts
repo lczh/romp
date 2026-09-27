@@ -36,6 +36,7 @@ import { watchOverlayScrollbars } from "./overlay-scrollbars";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
 import { sessionLabelNodes, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
 import { menuCard, showMenuCard, closeContextMenu } from "./ctx-menu";
+import { windowSender } from "./window-sender";   // the pane's window listener hears no foreign sender
 
 interface Listing { items: ArtifactItem[]; capped: boolean; max: number; error: string; sid: string; sig: string }
 
@@ -289,9 +290,13 @@ if (root) delegate(root, {
   "art-open": (e) => openLarge(Number((e as HTMLElement).dataset.i)),
   "art-row": (e) => openRow(Number((e as HTMLElement).dataset.i)),
 });
+// Every sender of these messages is the shell (this pane's embedder: panes, chatTabs, activeChat), this document's own
+// dispatch of a kernel frame (the pane shim's and federation.js's, with no source and no origin) or a window on its
+// origin; a message from a foreign sender (window-sender.ts) picks no session, asks for no listing and paints nothing.
 window.addEventListener("message", (ev) => {
   const m = ev.data;
   if (!m) return;
+  if (windowSender(ev) === "foreign") return;
   if (m.romp === "panes") {
     panesOn = m.on || {}; panesAvail = m.avail || {};
     if (onScreen() && sel.sid && !loading && (stale || !listing)) requestListing();   // shown again: a stale listing (a growth while off screen) is re-asked here, never under an ask in flight
