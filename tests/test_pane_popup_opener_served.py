@@ -1,24 +1,38 @@
 #!/usr/bin/env python3
 """The opener policy on the REAL dashboard, both directions (2026-09-27). Handler._send declares
-Cross-Origin-Opener-Policy: same-origin-allow-popups; its comment says why that value and not same-origin. A hermetic
-kernel serves the dashboard on 127.0.0.1, a secure context where Chromium enforces the policy, with two data panes
-(plans/panes-as-data.md): a state-root pane (pane:notes, a page under STATE/panes/notes/, framed on this origin) and a
-URL pane (a page a second origin serves, framed sandboxed with allow-popups). That second origin also serves a page
-that posts back to window.opener, and a page that opens windows. A Chromium driver reads:
+Cross-Origin-Opener-Policy: same-origin-allow-popups on every response but a state-root pane's own files; its comment
+says why that value and not same-origin, and why those files carry none. A hermetic kernel serves the dashboard on
+127.0.0.1, a secure context where browsers enforce the policy, with two data panes (plans/panes-as-data.md): a
+state-root pane (pane:notes, a page and a callback page under STATE/panes/notes/, framed on this origin) and a URL pane
+(a page a second origin serves, framed sandboxed with allow-popups). That second origin also serves a page that posts
+back to window.opener, a page that opens windows, and a sign-in provider that sends its popup back. A Chromium driver
+reads:
   1. a popup the URL pane opens: window.open returns a handle, the popup has an opener, and the pane hears its post;
   2. a popup the state-root pane opens onto the second origin: the handle stays open, the popup has an opener, and the
      pane hears its post. Under same-origin, 1 got a null handle and 2 a closed one, and neither pane heard its popup;
   3. a page on the second origin that opens the dashboard's shell gets a closed handle and the shell gets no opener: the
      isolation the policy exists for (with no policy the handle stays open and the shell's opener is that page);
-  4. the RESIDUAL the _send comment discloses: a tab the URL pane opens onto one of this kernel's pages (a /file text)
-     shows an error page, not the file, because the popup inherits the pane's sandbox and a browser shows a sandboxed
+  4. the RESIDUAL the _send comment discloses: a tab the URL pane opens onto one of the dashboard's pages (a /file
+     text) shows no page, not the file, because the popup inherits the pane's sandbox and a browser shows a sandboxed
      navigation's response only under the unsafe-none policy. The same /file opened by the state-root pane shows the
-     file with its handle open, so the refusal is the sandbox's, not the route's. This leg is the disclosure's witness:
-     it turns red if the refusal ever lifts (the frame's sandbox gains allow-popups-to-escape-sandbox, or the header
-     goes), and the disclosure is then to be revisited;
+     file with its handle open, so the refusal is the sandbox's, not the route's; and the URL pane's tab onto a
+     state-root pane's own page, which carries no policy (6), shows it. This leg is the disclosure's witness: it turns
+     red if the refusal ever lifts (the frame's sandbox gains allow-popups-to-escape-sandbox, or the header goes), and
+     the disclosure is then to be revisited. Engines differ in what they show instead, and the leg asserts only the
+     absence of the file: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit
+     an empty one, each leaving the handle open (LAB_ENGINE=firefox or webkit runs the driver in that engine);
   5. the timeline page's external-link fallback opens a tab on the second origin with no opener: the direction the
-     policy leaves to each call (a popup this origin opens keeps its opener unless the call passes noopener).
-Runs when ROMP_SERVED_TESTS_REQUIRE=1 (CI); skips where no Chromium is installed. Synthetic fixtures only."""
+     policy leaves to each call (a popup this origin opens keeps its opener unless the call passes noopener);
+  6. a sign-in round trip: the state-root pane's popup goes to the second origin, which sends it back to a callback page
+     the pane serves beside its own page on this origin, once by a script redirect and once by a 302; the callback
+     posts to its opener and the pane hears it. A state-root pane's own files carry no opener policy for this: a
+     callback that declared one would start a browsing context group of its own on arrival (its policy does not match
+     the second origin's page it replaces), leaving it no opener and the pane a closed handle;
+  7. the cost of 6, and its bound: a page on the second origin that opens a state-root pane's page keeps a live handle
+     to it (the pane shim has no window listener; the page's own are its author's), and when it sends that window on
+     to the shell, the shell's policy severs the handle and the shell has no opener.
+Runs when ROMP_SERVED_TESTS_REQUIRE=1 (CI); skips where no Chromium is installed. LAB_ENGINE picks another Playwright
+engine for a manual run; CI runs Chromium. Synthetic fixtures only."""
 import http.server
 import json
 import os
@@ -33,6 +47,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from tests.dist_copy import copy_dist
 
@@ -85,16 +100,25 @@ OPENER_PAGE = "<!doctype html><html><head><meta charset=utf-8></head><body><h1>E
 BACK_PAGE = ("<!doctype html><html><head><meta charset=utf-8></head><body><script>var had=!!window.opener;"
              "try{if(window.opener)window.opener.postMessage({lab:'back'},'*');}catch(e){}"
              "document.title='back:'+had;</script></body></html>")
+# a sign-in provider's page that sends the popup back to the callback named in its ?next=, as a provider does once the
+# user has signed in
+SIGNIN_PAGE = ("<!doctype html><html><head><meta charset=utf-8></head><body><script>"
+               "location.replace(new URLSearchParams(location.search).get('next'));</script></body></html>")
 
 
 class _Elsewhere(http.server.BaseHTTPRequestHandler):
-    """The second origin: the URL pane's page, the popup that posts back, and a page that opens windows."""
+    """The second origin: the URL pane's page, the popup that posts back, a page that opens windows, and a sign-in
+    provider that sends its popup back to ?next=, by a script (/signin.html) or by a 302 (/redirect)."""
 
     def log_message(self, *a):
         pass
 
     def do_GET(self):
-        page = {"/docs/": DOCS_PAGE, "/back.html": BACK_PAGE, "/opener.html": OPENER_PAGE}.get(self.path.split("?")[0])
+        path, _, query = self.path.partition("?")
+        if path == "/redirect":
+            self.send_response(302); self.send_header("Location", parse_qs(query)["next"][0]); self.send_header("Content-Length", "0"); self.end_headers()
+            return
+        page = {"/docs/": DOCS_PAGE, "/back.html": BACK_PAGE, "/opener.html": OPENER_PAGE, "/signin.html": SIGNIN_PAGE}.get(path)
         if page is None:
             self.send_response(404); self.end_headers(); return
         body = page.encode()
@@ -106,10 +130,10 @@ DRIVER = r"""
 import { createRequire } from "node:module";
 import fs from "node:fs";
 const require = createRequire(process.env.EXT_PKG);
-const { chromium } = require("playwright");
+const engines = require("playwright");
 const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
-try { browser = await chromium.launch(); }
+try { browser = await engines[process.env.LAB_ENGINE || "chromium"].launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const context = await browser.newContext({ viewport: { width: 1500, height: 900 } });
 const page = await context.newPage();
@@ -118,13 +142,16 @@ const die = async (why) => { fs.writeSync(1, "RESULT:" + JSON.stringify({ ...out
 const frameEnding = async (suffix) => { let fr = null; for (let i = 0; i < 150 && !fr; i++) { fr = page.frames().find((f) => f.url().split("?")[0].endsWith(suffix)); if (!fr) await page.waitForTimeout(100); } return fr; };
 // Open `url` from `frame` (its page's __labOpen) and follow the window it opens: whether window.open returned a handle,
 // the popup's title and address once it has loaded, the text it shows, and whether the opening page heard its post.
-const openFrom = async (frame, url) => {
+// `until`, when given, is the path the popup is to end on: the popup is followed there first (arrived), for a popup that
+// is sent on from the page it opened on.
+const openFrom = async (frame, url, until) => {
   await frame.evaluate(() => { window.__labMsgs = []; window.__labW = null; });   // this open's messages and handle only
   const next = context.waitForEvent("page", { timeout: 15000 }).catch(() => null);
   const got = await frame.evaluate((u) => window.__labOpen(u), url);
   const pop = await next;
   const r = { got, opened: !!pop };
   if (pop) {
+    if (until) r.arrived = await pop.waitForURL((a) => a.pathname === until, { timeout: 15000 }).then(() => true).catch(() => false);
     await pop.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
     r.url = pop.url();
     r.title = await pop.title().catch(() => null);
@@ -183,6 +210,9 @@ if (res.pop) await res.pop.close();
 const own = await openFrom(nf, cfg.api + cfg.fileQuery);
 out.ownTab = record(own);
 if (own.pop) await own.pop.close();
+const toPane = await openFrom(df, cfg.api + "/pane/notes/back.html");
+out.urlPaneToPane = record(toPane);
+if (toPane.pop) await toPane.pop.close();
 
 // ---- 5. the timeline's external link: a tab romp's own code opens onto another origin ----
 const tp = await context.newPage();
@@ -201,6 +231,36 @@ if (hook) {
   }
 }
 await tp.close();
+
+// ---- 6. a sign-in round trip back to a callback page the state-root pane serves on this origin ----
+const callback = encodeURIComponent(cfg.api + "/pane/notes/back.html");
+const byScript = await openFrom(nf, cfg.elsewhere + "/signin.html?next=" + callback, "/pane/notes/back.html");
+out.signInScript = record(byScript);
+if (byScript.pop) await byScript.pop.close();
+const by302 = await openFrom(nf, cfg.elsewhere + "/redirect?next=" + callback, "/pane/notes/back.html");
+out.signInRedirect = record(by302);
+if (by302.pop) await by302.pop.close();
+
+// ---- 7. a page on the second origin opens the state-root pane's page, then sends that window on to the shell ----
+const fq = await context.newPage();
+await fq.goto(cfg.elsewhere + "/opener.html");
+await fq.waitForFunction(() => typeof window.__labOpen === "function", null, { timeout: 15000 }).catch(() => {});
+const nextPane = context.waitForEvent("page", { timeout: 15000 }).catch(() => null);
+const gotPane = await fq.evaluate((url) => window.__labOpen(url), cfg.api + "/pane/notes/back.html");
+const pw = await nextPane;
+out.foreignPane = { got: gotPane, opened: !!pw };
+if (pw) {
+  await pw.waitForLoadState("load", { timeout: 15000 }).catch(() => {});
+  out.foreignPane.title = await pw.title().catch(() => null);
+  out.foreignPane.heard = await fq.waitForFunction(() => (window.__labMsgs || []).some((m) => m && m.lab === "back"), null, { timeout: 5000 }).then(() => true).catch(() => false);
+  out.foreignPane.openBefore = await fq.evaluate(() => !!window.__labW && !window.__labW.closed);
+  out.foreignPane.sent = await fq.evaluate((u) => { try { window.__labW.location.href = u; return true; } catch (e) { return String(e); } }, cfg.api + "/");
+  out.foreignPane.shellBooted = await pw.waitForSelector("#chat-pane", { timeout: 15000 }).then(() => true).catch(() => false);
+  out.foreignPane.shellOpener = await pw.evaluate(() => (window.opener === null ? "none" : "a window")).catch((e) => "unread: " + e);
+  out.foreignPane.closedAfter = await fq.waitForFunction(() => !!window.__labW && window.__labW.closed, null, { timeout: 5000 }).then(() => true).catch(() => false);
+  await pw.close();
+}
+await fq.close();
 
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -247,6 +307,7 @@ class ServedPanePopupOpener(unittest.TestCase):
         (panes / "notes.json").write_text(json.dumps({"id": "notes", "title": "Notes", "source": "pane:notes", "on": True, "experimental": False, "protocol": "romp"}))
         (panes / "docs.json").write_text(json.dumps({"id": "docs", "title": "Docs", "source": cls.elsewhere + "/docs/", "on": True, "experimental": False, "protocol": "none"}))
         (panes / "notes" / "index.html").write_text(NOTES_PAGE)
+        (panes / "notes" / "back.html").write_text(BACK_PAGE)   # the pane's own callback page, beside its index
         cls.port = _free_port()
         cls.token = "testtok-panepopup"
         cls.env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token)
@@ -296,7 +357,7 @@ class ServedPanePopupOpener(unittest.TestCase):
             self.fail("driver timed out; partial output:\n%s" % so[-3000:])
         if p.returncode == 3:
             if REQUIRE:
-                self.fail("ROMP_SERVED_TESTS_REQUIRE=1 but no Chromium launched: " + p.stderr[-500:])
+                self.fail("ROMP_SERVED_TESTS_REQUIRE=1 but no browser launched: " + p.stderr[-500:])
             raise unittest.SkipTest("no playwright browser on this box: the served leg needs one")
         self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:])
         line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
@@ -358,6 +419,37 @@ class ServedPanePopupOpener(unittest.TestCase):
         self.assertTrue(r["opened"], "the URL pane's popup opened: %r" % r)
         self.assertNotIn(MARK, r["text"] or "", "the URL pane's tab onto /file shows no file (the disclosed residual): %r" % r)
         self.assertEqual(self._result()["docsSandbox"], "allow-scripts allow-forms allow-popups", "the frame as the kernel renders it")
+        # the refusal's bound: a state-root pane's own page carries no policy, so the URL pane's tab onto it shows it
+        p = self._result()["urlPaneToPane"]
+        self.assertEqual(p["title"], "back:true", "the URL pane's tab onto a state-root pane's page shows it, with an opener: %r" % p)
+        self.assertTrue(p["heard"], "the URL pane heard that page's post: %r" % p)
+
+    def _round_trip(self, key):
+        r = self._result()[key]
+        self.assertTrue(r["opened"] and r["got"], "the popup opened and window.open returned a handle: %r" % r)
+        self.assertTrue(r["arrived"], "the provider sent the popup back to the pane's callback page: %r" % r)
+        self.assertEqual(r["title"], "back:true", "the callback page has an opener to post to: %r" % r)
+        self.assertTrue(r["heard"], "the pane heard its callback's post: %r" % r)
+        self.assertIs(r["closed"], False, "the pane's handle to its popup is still open: %r" % r)
+
+    def test_a_sign_in_round_trip_back_to_the_state_root_panes_own_callback_reaches_the_pane(self):
+        self._round_trip("signInScript")
+
+    def test_a_sign_in_round_trip_whose_provider_answers_with_a_302_reaches_the_pane_too(self):
+        self._round_trip("signInRedirect")
+
+    def test_a_page_on_another_origin_keeps_its_handle_to_a_panes_page_but_not_once_it_sends_it_to_the_shell(self):
+        r = self._result()["foreignPane"]
+        self.assertTrue(r["opened"] and r["got"], "the pane's page opened: %r" % r)
+        # the disclosed cost of 6: a state-root pane's own page carries no policy, so a page on another origin that
+        # opens it keeps its handle, and the page has it as its opener
+        self.assertEqual(r["title"], "back:true", "the pane's page has the opening page as its opener: %r" % r)
+        self.assertTrue(r["heard"] and r["openBefore"], "the opening page's handle is live and hears the page: %r" % r)
+        # its bound: the shell declares the policy, so sending that window on to it starts a group of its own
+        self.assertIs(r["sent"], True, "the opening page sent the window on to the shell: %r" % r)
+        self.assertTrue(r["shellBooted"], "the shell loaded in that window and booted: %r" % r)
+        self.assertEqual(r["shellOpener"], "none", "the shell has no opener: %r" % r)
+        self.assertTrue(r["closedAfter"], "the opening page's handle is closed once the shell loads: %r" % r)
 
 
 if __name__ == "__main__":

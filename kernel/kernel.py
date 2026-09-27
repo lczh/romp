@@ -70722,7 +70722,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype, cache=None, headers=None):
+    def _send(self, code, body, ctype, cache=None, headers=None, opener_policy=True):
         body = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -70758,15 +70758,30 @@ class Handler(BaseHTTPRequestHandler):
         # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
         # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
         # a browser.
-        # Residual: a URL pane cannot open one of this kernel's pages in a tab. Its popup inherits the frame's sandbox,
-        # and a browser shows a sandboxed navigation's response only when its opener policy is unsafe-none, so the tab
-        # shows an error page, as it did under same-origin (witness: test_pane_popup_opener_served.py
-        # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page). Allowing it would take
-        # allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes every popup the pane opens.
+        # One exemption, opener_policy=False: a state-root pane's own files (/pane/<id>/ and the files under its
+        # directory, the pane author's documents). A sign-in popup a pane opens comes back to a callback page, and a
+        # state-root pane's callback naturally lives beside its page, on this origin. A callback that declared this
+        # policy would start a browsing context group of its own on arrival, because its policy does not match the
+        # provider's page it replaces: the popup would lose its opener and the pane would hold a closed handle
+        # (Chromium and WebKit, whether the provider sends it back by a script or a 302; Firefox, by a script). The
+        # cost: a page on another origin that opens a pane author's document keeps a handle to it. The pane shim has
+        # no window listener, and the page's own listeners are its author's. The handle reaches no romp page: sending
+        # that window on to one lands on a document with this policy, which severs it. The pane's shim, its theme and
+        # every other response the route makes are the kernel's own and keep the header. The served lab's legs 6 and 7
+        # witness the round trip, the cost and its bound (the shell).
+        # Residual: a URL pane cannot open one of the dashboard's pages in a tab (a state-root pane's own files, which
+        # carry no policy, it can). Its popup inherits the frame's sandbox, and a browser shows a sandboxed
+        # navigation's response only when its opener policy is unsafe-none, so the tab shows no page, as it did under
+        # same-origin: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit an
+        # empty one, each leaving the handle open (witness: test_pane_popup_opener_served.py
+        # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page, which asserts only that the file is not
+        # shown). Allowing it would take allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes
+        # every popup the pane opens.
         # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
         # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
         # document navigations only, so it is inert on JSON, assets and sockets.
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+        if opener_policy:
+            self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
         # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
         # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
         # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
@@ -71746,7 +71761,9 @@ class Handler(BaseHTTPRequestHandler):
                 ct = {"js": "text/javascript", "css": "text/css", "svg": "image/svg+xml", "html": "text/html; charset=utf-8",
                       "json": "application/json", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
                       "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf", "map": "application/json"}.get(fp.suffix.lstrip("."), "text/plain")
-                return self._send(200, fp.read_bytes(), ct, cache="no-cache")
+                # the pane author's own file: no opener policy, so a sign-in popup the pane opens keeps its opener when it
+                # comes back to a callback page here (Handler._send's comment says why, and what that costs)
+                return self._send(200, fp.read_bytes(), ct, cache="no-cache", opener_policy=False)
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
                 fp = (base / p.split("/", 2)[2]).resolve()

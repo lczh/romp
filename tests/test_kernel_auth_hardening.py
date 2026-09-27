@@ -238,6 +238,41 @@ class ResponseHardeningHeaders(unittest.TestCase):
         self.assertIn('"Referrer-Policy", "same-origin"', src)   # executed by TokenLeavesTheUrl below
         self.assertIn('"Cross-Origin-Opener-Policy", "same-origin-allow-popups"', src)   # executed by OpenerIsolation below
 
+    def test_the_opener_policy_is_turned_off_by_one_call_the_pane_routes_author_file(self):
+        # A where-pin: it guards that the one exemption from the opener policy (_send's opener_policy=False) is passed by
+        # one call, the /pane/ route's return of a pane author's file, and by no other route, where it would take the
+        # header off a response no executed test may name. What that call serves is executed by OpenerIsolation's
+        # test_a_state_root_panes_own_files_carry_no_opener_policy_and_its_shim_and_theme_keep_it.
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(km.Handler)))
+        found = []
+
+        def visit(node, branches):
+            # branches: the tests of the ifs whose body holds this node (an else branch does not count as inside its if)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_send":
+                self.assertLessEqual(len(node.args), 5, "a _send call passes opener_policy by position: " + ast.unparse(node))
+                self.assertFalse(any(k.arg is None for k in node.keywords), "a _send call splats keywords: " + ast.unparse(node))
+                found.extend((ast.unparse(k.value), ast.unparse(node), branches) for k in node.keywords if k.arg == "opener_policy")
+            if isinstance(node, ast.If):
+                visit(node.test, branches)
+                for c in node.body:
+                    visit(c, branches + [ast.unparse(node.test)])
+                for c in node.orelse:
+                    visit(c, branches)
+                return
+            for c in ast.iter_child_nodes(node):
+                visit(c, branches)
+
+        visit(tree, [])
+        self.assertEqual(len(found), 1, "one call passes opener_policy: %r" % found)
+        value, call, branches = found[0]
+        self.assertEqual(value, "False")
+        self.assertEqual(call, "self._send(200, fp.read_bytes(), ct, cache='no-cache', opener_policy=False)",
+                         "the pane author's file, read from the pane's directory")
+        self.assertIn("p.startswith('/pane/')", branches, "inside the /pane/ route")
+
     def test_remote_relay_derives_its_own_mime_and_discards_the_remotes(self):
         # the /remote/<host>/file relay must decide the Content-Type from the requested extension
         # (_PREVIEW_MIME) and never mirror the remote's — a remote answering text/html for a .pdf
@@ -357,10 +392,11 @@ OPENER_POLICY = "same-origin-allow-popups"
 
 
 class OpenerIsolation(unittest.TestCase):
-    """Every document the kernel serves declares Cross-Origin-Opener-Policy: same-origin-allow-popups (2026-09-27), so
-    a page on another origin that opens a dashboard page gets no live handle to it, and a handle is what a window
-    message needs, while a popup a data pane opens keeps its opener (same-origin would sever it; the _send comment
-    says why, and tests/test_pane_popup_opener_served.py drives both in a browser). It rides _send, so every page
+    """Every document the kernel serves, but a state-root pane's own files (the last test below says why), declares
+    Cross-Origin-Opener-Policy: same-origin-allow-popups (2026-09-27), so a page on another origin that opens a
+    dashboard page gets no live handle to it, and a handle is what a window message needs, while a popup a data pane
+    opens keeps its opener (same-origin would sever it; the _send comment says why, and
+    tests/test_pane_popup_opener_served.py drives both in a browser). It rides _send, so every page
     carries it, and so do the dashboard's own tabs: a /file image or PDF it opens with window.open is a same-origin
     document with the same policy, so window.open still returns a handle (ui/webview/preview.ts openFileTab reads
     only that). Executed on the shell, every pane page, the sign-in page, a static asset, and each document shape
@@ -468,6 +504,37 @@ class OpenerIsolation(unittest.TestCase):
     def test_a_text_named_file_that_is_not_text_carries_it_once_on_its_415(self):
         for how, (_msg, body) in self._file_coop("notes.md", b"# notes-api\x00\x00\x00", 415).items():
             self.assertIn(b"not a text file", body, how)
+
+    def test_a_state_root_panes_own_files_carry_no_opener_policy_and_its_shim_and_theme_keep_it(self):
+        # The one exemption (the _send comment; Handler.do_GET's /pane/ route): a state-root pane's own files, its page
+        # and a callback page beside it, are served with no opener policy, so a popup the pane opens that a sign-in
+        # provider sends back to that callback keeps its opener (tests/test_pane_popup_opener_served.py drives the round
+        # trip in a browser). Every other response of the route is the kernel's own and keeps the header once: the
+        # shim and theme it serves the pane, and a file the pane does not have.
+        import shutil
+        pid = "coopnotes"   # a pane id of this test's own, so no other test's pane under the same state root is touched
+        pdir = km._pane_dir()
+        (pdir / pid).mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, str(pdir / pid), True)
+        (pdir / (pid + ".json")).write_text(json.dumps({"id": pid, "title": "Notes", "source": "pane:" + pid, "on": True,
+                                                         "experimental": False, "protocol": "romp"}))
+        self.addCleanup(lambda: (pdir / (pid + ".json")).unlink(missing_ok=True))
+        page = b"<!doctype html><title>notes-api</title><script src=shim.js></script>"
+        back = b"<!doctype html><script>try{window.opener.postMessage({lab:'back'},'*');}catch(e){}</script>"
+        (pdir / pid / "index.html").write_bytes(page)
+        (pdir / pid / "back.html").write_bytes(back)
+        for path, want in (("/pane/%s/" % pid, page), ("/pane/%s/index.html" % pid, page), ("/pane/%s/back.html" % pid, back)):
+            for how, nav in NAVIGATIONS:
+                with self.subTest(path=path, how=how):
+                    status, msg, body = _wire_get(self.port, path, dict(nav, **credential(nav, TOK)))
+                    self.assertEqual((status, body), (200, want), "the pane's own file is served")
+                    self.assertEqual(msg.get("Content-Type"), "text/html; charset=utf-8")
+                    self.assertIsNone(msg.get_all("Cross-Origin-Opener-Policy"), "a state-root pane's own file: no opener policy")
+                    self.assertEqual(msg.get_all("X-Frame-Options"), ["SAMEORIGIN"], "the rest of _send's headers still ride it")
+                    self.assertEqual(msg.get_all("Referrer-Policy"), ["same-origin"])
+        for path, status in (("/pane/%s/shim.js" % pid, 200), ("/pane/%s/theme.css" % pid, 200), ("/pane/%s/gone.html" % pid, 404)):
+            with self.subTest(path=path):
+                self._coop(path, status)
 
 
 class _DoublingHandler(km.Handler):
