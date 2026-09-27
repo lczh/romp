@@ -12,7 +12,7 @@
 // The grid runs twice: without a performance collector, and with a real one (perf-telemetry.ts) on window.__rompPerf,
 // as federation.js publishes it on the kernel's page. Both hosts wrap the frame listener in that collector and run the
 // sender check outside the wrapper, so a foreign message is neither drawn nor counted in the page's telemetry.
-// tests/test_timeline_boot_shim.py runs the same boot from the kernel's own suite, over named rows.
+// tests/test_timeline_boot_senders.py runs the same boot from the kernel's own suite, over named rows.
 // Synthetic world only: loopback and example origins, a placeholder webview id.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";

@@ -710,7 +710,7 @@ test("the binding census reads what it claims: a local, a parameter, an aliased 
 // registration that reaches the method any other way escapes it: through .call or .apply
 // (EventTarget.prototype.addEventListener.call(window, "message", f)), an alias or a bound copy
 // (const add = window.addEventListener.bind(window); add("message", f)), a destructured name, or a call whose event type
-// is not a literal (window.addEventListener(type, f)). tests/test_shell_source_check.py refuses those in kernel.py
+// is not a literal (window.addEventListener(type, f)). tests/test_shell_source_lock.py refuses those in kernel.py
 // (_loose_add_tokens); this is the same rule for ui/, read by the TypeScript parser, so a spelling in a comment or inside
 // a longer string is none. Every addEventListener in a ui/ source file (tests excluded) must be one of:
 //   - the method called directly with a string literal for its event type (the census above reads the "message" ones);
@@ -1113,7 +1113,8 @@ test("the addEventListener census reads what it claims: every way around the lit
 //     window named as the first argument (or the second, on a .call or .apply of .call or .apply), and Reflect.apply with
 //     the window as its second. A method of any other EventTarget (an element, the document) read by a computed name
 //     registers on the window this way, or with no receiver at all (below). `this` does not count as the window here:
-//     a wrapper passes its own `this` on (md-block-start.ts's, which marked calls with its lexer), and that is disclosed;
+//     a wrapper passes its own `this` on (a function that calls the one it wraps with orig.apply(this, a)), and that is
+//     disclosed;
 //   - an onmessage handler set any way but a plain assignment the census above reads: the name onmessage may be an
 //     assignment's target (x.onmessage = f; on the window that is a census site), a member of a type, or a read that is
 //     only tested, and nothing else (Object.assign(window, { onmessage: f }), Reflect.set(window, "onmessage", f),
@@ -1471,7 +1472,7 @@ test("the road census reads what it claims: every road around the spelled regist
     ["function g(f: Function) { return f; } interface I extends Function { x: 1 } // eval in a comment, and \"eval\" in a string"],
     ["const s = \"new Function\"; const evaluate = 1; const r = evaluate + 1;"],
     // a descriptor read off an object that is no window and no prototype (ui/test-dom-shim.ts), a local named frames or
-    // parent, a class's own this, a wrapper passing its own this on (ui/webview/md-block-start.ts), a call on another object
+    // parent, a class's own this, a wrapper passing its own this on (orig.apply(this, a)), a call on another object
     ["function h(n: object, k: string) { return Object.getOwnPropertyDescriptor(n, k); } const d = Reflect.get(obj, k);"],
     ["function p(parent: any, top: any[], k: number) { return [parent[k], top[k]]; } const frames: number[] = []; frames[k] = 1;"],
     ["const o = { defaultView: 1 }; const { [k]: v } = obj; ({ [k]: v } = other);"],
