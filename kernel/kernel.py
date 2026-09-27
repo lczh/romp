@@ -65457,6 +65457,13 @@ else window.__rompPaneToggle('fleet');});})();
 # Boot splash dismissal (the user 2026-06-26): fade #romp-boot the moment ANY pane signals first content
 # ({romp:'ready'}) — the timeline lanes render first (no parse), so the splash clears fast — with a 5s
 # backstop so a slow/closed pane can never trap the user behind it. Removed from the DOM after the fade.
+#
+# THE LOCK (2026-09-27): the line right after the source check's definition makes window.__rompPaneSourceOk read-only
+# and non-configurable once defined, so no later script (another inline script, a bundle, a callback, a listener's
+# arm) can replace, redefine or delete it under any spelling: a sloppy-mode write is ignored and a strict-mode one
+# throws, so every listener's read reaches the defined function. The definition's three lines are not edited. The
+# try/catch keeps the boot running if the property cannot be locked. tests/test_shell_source_lock.py CheckLocked reads
+# the property's descriptor after boot and tries each way a script can replace it.
 _LANDING_BOOT_JS = """
 // THE PANE PROTOCOL'S SOURCE CHECK (plans/panes-as-data.md, section 5): a message the shell acts on must come from a
 // same-origin iframe of THIS document, the message's IMMEDIATE source, whose iframe is not marked data-protocol=none (a
@@ -65467,6 +65474,7 @@ _LANDING_BOOT_JS = """
 window.__rompPaneSourceOk=function(e){try{if(!e||!e.source||e.source===window||e.origin!==location.origin)return false;
 var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){if(fs[i].contentWindow===e.source)return fs[i].getAttribute('data-protocol')!=='none';}
 return false;}catch(x){return false;}};
+try{Object.defineProperty(window,'__rompPaneSourceOk',{writable:false,configurable:false});}catch(x){}
 (function(){var boot=document.getElementById('romp-boot');if(!boot)return;var done=false;
 function hide(){if(done)return;done=true;boot.classList.add('gone');
 setTimeout(function(){if(boot.parentNode)boot.parentNode.removeChild(boot);},450);}
