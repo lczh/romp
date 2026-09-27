@@ -69,6 +69,7 @@ const SENDERS = {
   embedder: [SHELL, ORIGIN],      // the shell, this frame's parent
   peer: [{}, ORIGIN],             // another window on this origin
   opener: [OPENER, OTHER],        // the page on another origin that opened /timeline: this window's opener
+  popup: [{ opener: window }, OTHER],   // a page on another origin this one opened (the boot's external links open tabs)
   top: [GRAND, OTHER],            // the top window, the shell's own parent on another origin: not this frame's parent
   stranger: [{}, OTHER],          // a window on another origin this one does not know
   sandboxed: [{}, 'null'],        // a sandboxed frame
@@ -125,7 +126,7 @@ class TimelineBootSenders(unittest.TestCase):
         self.assertEqual(got["listeners"], 1, "the boot registers one window message listener")
         self.assertEqual(got["updates"], _HEARD,
                          "drawn once from each heard sender, never from a page on another origin (the one that opened "
-                         "this page included), the top window above the shell, a sandboxed frame (beside or inside this "
+                         "this page and one this page opened included), the top window above the shell, a sandboxed frame (beside or inside this "
                          "one, or gone after it posted), an origin that overlaps this one's text or differs only in its "
                          "port, or a sourceless post that names another origin")
 

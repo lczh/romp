@@ -870,10 +870,14 @@ class ShellListenersExecuted(unittest.TestCase):
     # A write of the check under a computed name, planted on each road the exercise drives. On the shell without its lock,
     # each is heard and replaces the defined function before the listeners are tested (what the tests above would then
     # red on), so the exercise reaches every road. On the shell as served, each road runs (the plant's counter says so)
-    # and the lock leaves the defined function in place (CheckLocked tries every other spelling)
+    # and the lock leaves the defined function in place (CheckLocked tries every other spelling). The first road is a
+    # later inline script's own body, which runs when the parser reaches it, before the page's load event and possibly
+    # before a timer the boot script set: a lock the boot script deferred to either would run after the write and lock
+    # the planted function in (the harness runs every script before any callback, the order that shows it).
     PLANT_WRITE = "window['__romp'+'PaneSourceOk']=function(e){return !!e;};"
     PLANT_REACH = "window.__hReached=(window.__hReached||0)+1;"
     PLANTS = {
+        "a later inline script's body": "WRITE",
         "a window listener (resize)": "window.addEventListener('resize',function(){WRITE});",
         "a document listener (visibilitychange)": "document.addEventListener('visibilitychange',function(){WRITE});",
         "an element's listener (click)": "document.getElementById('none').addEventListener('click',function(){WRITE});",

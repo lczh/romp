@@ -6,8 +6,9 @@
 // kernel's boot is run as served, once over each receiving window below, and its one window message listener is handed
 // a data frame from every sender and origin below; the frame must be drawn exactly when windowSender, reading the same
 // window, does not name the sender foreign. So the pair cannot drift apart for any sender the grid can express: a
-// window that opened this one, a sibling or child frame, an origin whose text overlaps this one's or drops its port, a
-// sourceless post with the opaque origin, a page whose own origin is opaque, a window with no location, a missing event.
+// window that opened this one, a window this one opened, a sibling or child frame, an origin whose text overlaps this
+// one's or drops its port, a sourceless post with the opaque origin, a page whose own origin is opaque, a window with no
+// location, a missing event.
 // The grid runs twice: without a performance collector, and with a real one (perf-telemetry.ts) on window.__rompPerf,
 // as federation.js publishes it on the kernel's page. Both hosts wrap the frame listener in that collector and run the
 // sender check outside the wrapper, so a foreign message is neither drawn nor counted in the page's telemetry.
@@ -84,7 +85,8 @@ function receivers(): Win[] {
 function sources(w: Win): Array<[string, unknown]> {
   return [
     ["this window", w], ["its parent", w.parent], ["a sibling frame", win("a sibling frame", { parent: w.parent })],
-    ["a frame inside it", win("a frame inside it", { parent: w })], ["the page that opened it", w.opener], ["its top window", w.top],
+    ["a frame inside it", win("a frame inside it", { parent: w })], ["the page that opened it", w.opener],
+    ["a window it opened", win("a window it opened", { opener: w })], ["its top window", w.top],
     ["the shell's parent", GRAND], ["a window it does not know", win("a stray window")],
     ["null", null], ["undefined", undefined], ["no source key", ABSENT],
   ];

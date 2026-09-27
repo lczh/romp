@@ -180,18 +180,20 @@ test("with no window argument, windowSender reads the global window", () => {
 });
 
 // The window object decides only for this window (self) and its parent (embedder). A window related to this one in any
-// other way (a frame inside it, a window it opened, the window that opened it, its parent's parent) is judged by its
-// origin like any other window, so a sandboxed or foreign one is foreign: a page on another origin that opens the chat
-// as a top-level page becomes its opener, and a frame inside the chat may be sandboxed.
+// other way (a frame inside it, a window it opened, the window that opened it, its parent's parent, which is also its
+// top window here) is judged by its origin like any other window, so a sandboxed or foreign one is foreign: a page on
+// another origin that opens the chat as a top-level page becomes its opener, and a frame inside the chat may be
+// sandboxed. The pane's top is a window other than its parent and itself, so a rule that heard window.top would fail.
 test("a window related to this one other than as its parent is judged by its origin", () => {
   const grand = { name: "the shell's parent" };
   const opener = { name: "the window that opened this one" };
-  const w = { parent: { name: "the shell", parent: grand }, opener, location: { origin: ORIGIN } };
+  const w = { parent: { name: "the shell", parent: grand }, top: grand, opener, location: { origin: ORIGIN } };
+  assert.ok(w.top !== w.parent && w.top !== (w as unknown), "the top window is neither the parent nor this window");
   const RELATED: [string, unknown][] = [
     ["a frame inside this window", { name: "a child frame", parent: w }],
     ["a window this window opened", { name: "a popup", opener: w }],
     ["the window that opened this one", opener],
-    ["the parent's parent", grand],
+    ["the parent's parent, the top window", grand],
   ];
   for (const [who, src] of RELATED) {
     assert.equal(windowSender({ source: src, origin: "null" }, w), "foreign", who + ", opaque origin");

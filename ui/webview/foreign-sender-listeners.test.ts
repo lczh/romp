@@ -419,6 +419,20 @@ for (const leg of LIFTED) {
     const missed = (leg.heard || HEARD).map((row) => [row.who, runLifted(leg, row)] as const).filter(([, n]) => n !== 1).map(([who, n]) => who + " (" + n + ")");
     assert.deepEqual(missed, [], label + ": a heard sender did not reach the effect once: " + missed.join("; "));
   });
+  // A shell bundle's listener hears a pane of the shell alone: every other sender windowSender hears (the shell's own
+  // page, a second column, a dispatch, the VS Code host) reaches nothing, so a listener that read windowSender in place
+  // of the shell's check would fail here, not only in the census below.
+  const shellOnly = leg.heard;
+  if (shellOnly) {
+    test(label + ": " + leg.what + " from a sender windowSender hears that is not a pane of the shell reaches nothing", () => {
+      const others = HEARD.filter((row) => !shellOnly.includes(row));
+      assert.ok(others.some((row) => row.ctx === "shell"), "a sender on the shell's own page is among them");
+      assert.ok(others.every((row) => { const w = receiver(row.ctx); return windowSender({ source: row.source(w), origin: row.origin }, w) !== "foreign"; }),
+        "windowSender hears every one of them");
+      const reached = others.filter((row) => runLifted(leg, row) !== 0).map((row) => row.who);
+      assert.deepEqual(reached, [], label + ": a sender that is not a pane of the shell reached the effect: " + reached.join("; "));
+    });
+  }
 }
 
 // ── the census: every window message listener in ui/ ──
