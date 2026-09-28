@@ -134,6 +134,7 @@ import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
 import { resolveTabDrop, writesTag, leaveWords, type TabDrop, type LeaveWords } from "./drag-join";
 import { perfFrameHandler } from "./perf-telemetry";
+import { windowSender } from "./window-sender";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
 import { SETTLE_MS, SETTLE_FIRST_PAINT_MS, SETTLE_ROW_VIEWPORT_CAP, settleStep, settleRowFields, reachableOffset, gestureEvidence, scrollerGrab, writerIsReader, type SettleSample } from "./landing-settle";   // a deep-link landing settles before its row is filed (T386 stage 1)
 import { listenForFrames, federationMissing, federationLoadEntry, fedRetryKey, paneArranges } from "./frame-listener";
@@ -20088,6 +20089,7 @@ const fedMissing = federationMissing(window as any);
 listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: MessageEvent) => {
   const m = e.data;
   if (!m) return;
+  if (windowSender(e) === "foreign") return;   // a message from any window but this one, its embedder or one on its origin is ignored (window-sender.ts)
   // the shell's palette: "Fork this session…" → the fork modal for the ACTIVE session, from the tip
   if (m.romp === "forkSession") {
     if (activeId && !isProvisionalId(activeId) && sessions.get(activeId)) showForkPrompt(activeId, "");

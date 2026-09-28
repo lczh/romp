@@ -65084,6 +65084,17 @@ if(!P.createDiv)P.createDiv=function(o){return this.createEl('div',o);};
 if(!P.createSpan)P.createSpan=function(o){return this.createEl('span',o);};})();
 (function(){var api=window.acquireVsCodeApi(),panel=null;
 function post(m){api.postMessage(m);}
+// A window message counts only from the senders ui/webview/window-sender.ts's windowSender hears: this page's own
+// dispatch (the shim's and federation.js's frames, a MessageEvent with no source and no origin), this window, its parent
+// (the shell), or a window on this page's origin. Any other sender is foreign and its message is dropped at the window
+// listener below, ahead of the performance collector, so it is neither drawn nor counted: a page on another origin that
+// opened this one, a sandboxed frame (origin "null"). tests/test_timeline_boot_senders.py runs it, and
+// ui/webview/timeline-boot-senders.test.ts runs this boot against windowSender itself over every window, sender and
+// origin, with and without a collector.
+function heardSender(e){if(!e)return false;var s=e.source;
+if(s===null||s===undefined){if(e.origin===undefined||e.origin===null||e.origin==="")return true;}
+else{if(s===window)return true;if(window.parent&&window.parent!==window&&s===window.parent)return true;}
+var o=window.location&&window.location.origin;return typeof o==="string"&&o!=="null"&&e.origin===o;}
 // the frame listener, wrapped like every pane's through the page's performance collector when there is one
 // (ui/webview/perf-telemetry.ts, published on window.__rompPerf by federation.js, which loads before this boot),
 // so each frame's handling is timed by type; without a collector the plain listener
@@ -65104,13 +65115,16 @@ else if(m.type==="unknownOp"&&panel.unknownOp)panel.unknownOp(m);
 else if(m.type==="tagEditFailed"&&panel.tagEditFailed)panel.tagEditFailed(m);
 else if(m.type==="openViewsDialog"&&panel._openViewsDialog)panel._openViewsDialog(null);};
 var frameListener=(window.__rompPerf&&window.__rompPerf.wrapFrameHandler)?window.__rompPerf.wrapFrameHandler(onFrame):onFrame;
-window.addEventListener("message",frameListener);
+// the window path hears every window that can post to this page, so it hands the listener only a heard sender's message,
+// the sender check outside the collector's wrapper, as frame-listener.ts's listenForFrames installs every pane's
+window.addEventListener("message",function(e){if(!heardSender(e))return;frameListener(e);});
 // the merged data/bars frames come by direct call from federation.js once the listener is registered with it (federation.ts
-// onFrame/emit; the pane bundles register through frame-listener.ts) — without the registry the window dispatch carries them
+// onFrame/emit; the pane bundles register through frame-listener.ts) — without the registry the window dispatch carries them.
+// Only federation.js calls that path, with a MessageEvent it built itself, so the registry holds the listener as it is
 if(window.__rompFed&&window.__rompFed.onFrame)window.__rompFed.onFrame(frameListener);
 window.__rompTimelineOpenExternal=function(url){try{var u=new URL(url);if(u.protocol==="vscode:"){var q=u.searchParams;
 post({type:"deepLink",session:q.get("session"),anchor:q.get("anchor")||undefined,anchorT:Number(q.get("anchorT"))||undefined,anchorKind:q.get("anchorKind")||undefined,compose:q.get("compose")==="1"});
-if(window.parent!==window)window.parent.postMessage({romp:"reveal",pane:"chat"},"*");return;}}catch(e){}window.open(url,"_blank");};
+if(window.parent!==window)window.parent.postMessage({romp:"reveal",pane:"chat"},"*");return;}}catch(e){}window.open(url,"_blank","noopener,noreferrer");};
 window.__rompTimelineWriteOrder=function(order){if(window.__rompWriteOrder)window.__rompWriteOrder(order);};
 window.__rompTimelineCompact=function(name){post({type:"compact",name:name});};
 window.__rompTimelineSendCommand=function(name,cmd,extra){post(Object.assign({type:"sendCommand",name:name,cmd:cmd},extra||{}));};
@@ -65443,6 +65457,13 @@ else window.__rompPaneToggle('fleet');});})();
 # Boot splash dismissal (the user 2026-06-26): fade #romp-boot the moment ANY pane signals first content
 # ({romp:'ready'}) — the timeline lanes render first (no parse), so the splash clears fast — with a 5s
 # backstop so a slow/closed pane can never trap the user behind it. Removed from the DOM after the fade.
+#
+# THE LOCK (2026-09-27): the line right after the source check's definition makes window.__rompPaneSourceOk read-only
+# and non-configurable once defined, so no later script (another inline script, a bundle, a callback, a listener's
+# arm) can replace, redefine or delete it under any spelling: a sloppy-mode write is ignored and a strict-mode one
+# throws, so every listener's read reaches the defined function. The definition's three lines are not edited. The
+# try/catch keeps the boot running if the property cannot be locked. tests/test_shell_source_lock.py CheckLocked reads
+# the property's descriptor after boot and tries each way a script can replace it.
 _LANDING_BOOT_JS = """
 // THE PANE PROTOCOL'S SOURCE CHECK (plans/panes-as-data.md, section 5): a message the shell acts on must come from a
 // same-origin iframe of THIS document, the message's IMMEDIATE source, whose iframe is not marked data-protocol=none (a
@@ -65453,6 +65474,7 @@ _LANDING_BOOT_JS = """
 window.__rompPaneSourceOk=function(e){try{if(!e||!e.source||e.source===window||e.origin!==location.origin)return false;
 var fs=document.querySelectorAll('iframe');for(var i=0;i<fs.length;i++){if(fs[i].contentWindow===e.source)return fs[i].getAttribute('data-protocol')!=='none';}
 return false;}catch(x){return false;}};
+try{Object.defineProperty(window,'__rompPaneSourceOk',{writable:false,configurable:false});}catch(x){}
 (function(){var boot=document.getElementById('romp-boot');if(!boot)return;var done=false;
 function hide(){if(done)return;done=true;boot.classList.add('gone');
 setTimeout(function(){if(boot.parentNode)boot.parentNode.removeChild(boot);},450);}
@@ -70700,7 +70722,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype, cache=None, headers=None):
+    def _send(self, code, body, ctype, cache=None, headers=None, opener_policy=True):
         body = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -70719,6 +70741,47 @@ class Handler(BaseHTTPRequestHandler):
         # Phone and tailnet frame the kernel's own origin, which 'self' permits.
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
+        # Opener isolation (2026-09-27): a page on another origin that opens a dashboard page with window.open keeps
+        # a handle to it, and a handle is what lets that page post window messages to it. Under this policy a
+        # top-level document this origin serves, opened by a page on another origin, starts a browsing context group
+        # of its own: the opener gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file
+        # image or PDF it opens with window.open) are documents on this origin carrying the same policy, so window.open
+        # still returns a handle and the in-app view does not take over (preview.ts openFileTab reads only whether it
+        # got one).
+        # same-origin-allow-popups, not same-origin: a data pane (plans/panes-as-data.md) may open a popup and hear back
+        # from it through window.opener, as a sign-in or a picker does; a URL pane's frame is sandboxed with
+        # allow-popups for that. Under same-origin, a URL pane's window.open returns null and a state-root pane's
+        # popup on another origin leaves it a closed handle, and neither pane hears from its popup. What allow-popups
+        # gives up is the other direction: a popup the dashboard opens onto another origin keeps its opener. So every
+        # window.open in romp's own pages passes noopener (render.ts, pr-links.ts, file-view.ts, the timeline boot's
+        # fallback) or severs the opener on the handle it gets back (preview.ts openFileTab, which needs the handle to
+        # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
+        # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
+        # a browser.
+        # One exemption, opener_policy=False: a state-root pane's own files (/pane/<id>/ and the files under its
+        # directory, the pane author's documents). A sign-in popup a pane opens comes back to a callback page, and a
+        # state-root pane's callback naturally lives beside its page, on this origin. A callback that declared this
+        # policy would start a browsing context group of its own on arrival, because its policy does not match the
+        # provider's page it replaces: the popup would lose its opener and the pane would hold a closed handle
+        # (Chromium and WebKit, whether the provider sends it back by a script or a 302; Firefox, by a script). The
+        # cost: a page on another origin that opens a pane author's document keeps a handle to it. The pane shim has
+        # no window listener, and the page's own listeners are its author's. The handle reaches no romp page: sending
+        # that window on to one lands on a document with this policy, which severs it. The pane's shim, its theme and
+        # every other response the route makes are the kernel's own and keep the header. The served lab's legs 6 and 7
+        # witness the round trip, the cost and its bound (the shell).
+        # Residual: a URL pane cannot open one of the dashboard's pages in a tab (a state-root pane's own files, which
+        # carry no policy, it can). Its popup inherits the frame's sandbox, and a browser shows a sandboxed
+        # navigation's response only when its opener policy is unsafe-none, so the tab shows no page, as it did under
+        # same-origin: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit an
+        # empty one, each leaving the handle open (witness: test_pane_popup_opener_served.py
+        # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page, which asserts only that the file is not
+        # shown). Allowing it would take allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes
+        # every popup the pane opens.
+        # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
+        # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
+        # document navigations only, so it is inert on JSON, assets and sockets.
+        if opener_policy:
+            self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
         # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
         # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
         # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
@@ -71698,7 +71761,9 @@ class Handler(BaseHTTPRequestHandler):
                 ct = {"js": "text/javascript", "css": "text/css", "svg": "image/svg+xml", "html": "text/html; charset=utf-8",
                       "json": "application/json", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
                       "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf", "map": "application/json"}.get(fp.suffix.lstrip("."), "text/plain")
-                return self._send(200, fp.read_bytes(), ct, cache="no-cache")
+                # the pane author's own file: no opener policy, so a sign-in popup the pane opens keeps its opener when it
+                # comes back to a callback page here (Handler._send's comment says why, and what that costs)
+                return self._send(200, fp.read_bytes(), ct, cache="no-cache", opener_policy=False)
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
                 fp = (base / p.split("/", 2)[2]).resolve()

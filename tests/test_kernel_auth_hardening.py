@@ -27,6 +27,7 @@ import unittest
 from http.client import HTTPMessage
 from http.server import ThreadingHTTPServer
 from romp_load import load_source
+from tests.document_navigations import NAVIGATIONS, credential   # the navigations each opener-policy shape is served under
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -235,6 +236,42 @@ class ResponseHardeningHeaders(unittest.TestCase):
         self.assertIn('"X-Frame-Options", "SAMEORIGIN"', src)
         self.assertIn("frame-ancestors 'self'", src)
         self.assertIn('"Referrer-Policy", "same-origin"', src)   # executed by TokenLeavesTheUrl below
+        self.assertIn('"Cross-Origin-Opener-Policy", "same-origin-allow-popups"', src)   # executed by OpenerIsolation below
+
+    def test_the_opener_policy_is_turned_off_by_one_call_the_pane_routes_author_file(self):
+        # A where-pin: it guards that the one exemption from the opener policy (_send's opener_policy=False) is passed by
+        # one call, the /pane/ route's return of a pane author's file, and by no other route, where it would take the
+        # header off a response no executed test may name. What that call serves is executed by OpenerIsolation's
+        # test_a_state_root_panes_own_files_carry_no_opener_policy_and_its_shim_and_theme_keep_it.
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(km.Handler)))
+        found = []
+
+        def visit(node, branches):
+            # branches: the tests of the ifs whose body holds this node (an else branch does not count as inside its if)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "_send":
+                self.assertLessEqual(len(node.args), 5, "a _send call passes opener_policy by position: " + ast.unparse(node))
+                self.assertFalse(any(k.arg is None for k in node.keywords), "a _send call splats keywords: " + ast.unparse(node))
+                found.extend((ast.unparse(k.value), ast.unparse(node), branches) for k in node.keywords if k.arg == "opener_policy")
+            if isinstance(node, ast.If):
+                visit(node.test, branches)
+                for c in node.body:
+                    visit(c, branches + [ast.unparse(node.test)])
+                for c in node.orelse:
+                    visit(c, branches)
+                return
+            for c in ast.iter_child_nodes(node):
+                visit(c, branches)
+
+        visit(tree, [])
+        self.assertEqual(len(found), 1, "one call passes opener_policy: %r" % found)
+        value, call, branches = found[0]
+        self.assertEqual(value, "False")
+        self.assertEqual(call, "self._send(200, fp.read_bytes(), ct, cache='no-cache', opener_policy=False)",
+                         "the pane author's file, read from the pane's directory")
+        self.assertIn("p.startswith('/pane/')", branches, "inside the /pane/ route")
 
     def test_remote_relay_derives_its_own_mime_and_discards_the_remotes(self):
         # the /remote/<host>/file relay must decide the Content-Type from the requested extension
@@ -333,6 +370,212 @@ class TokenLeavesTheUrl(unittest.TestCase):
                 status, sent, _ = _serve_get_full(path, headers={"X-Romp-Token": TOK})
                 self.assertEqual(status, 200)
                 self.assertEqual(sent.get("Referrer-Policy"), "same-origin")
+
+
+def _wire_get(port, path, headers=None):
+    """GET `path` from a live kernel on `port` over a real socket: (status, the response's header message, body bytes). The
+    headers are read off the wire, every copy of each (message.get_all, which matches names without regard to case),
+    whatever wrote them: _send, a route's own send_header calls, or an override of send_response or end_headers."""
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    try:
+        conn.request("GET", path, headers=dict(headers or {}))
+        r = conn.getresponse()
+        return r.status, r.msg, r.read()
+    finally:
+        conn.close()
+
+
+# The opener policy Handler._send declares, written out here rather than read from the kernel, so a change to the value
+# is a change to this test.
+OPENER_POLICY = "same-origin-allow-popups"
+
+
+class OpenerIsolation(unittest.TestCase):
+    """Every document the kernel serves, but a state-root pane's own files (the last test below says why), declares
+    Cross-Origin-Opener-Policy: same-origin-allow-popups (2026-09-27), so a page on another origin that opens a
+    dashboard page gets no live handle to it, and a handle is what a window message needs, while a popup a data pane
+    opens keeps its opener (same-origin would sever it; the _send comment says why, and
+    tests/test_pane_popup_opener_served.py drives both in a browser). It rides _send, so every page
+    carries it, and so do the dashboard's own tabs: a /file image or PDF it opens with window.open is a same-origin
+    document with the same policy, so window.open still returns a handle (ui/webview/preview.ts openFileTab reads
+    only that). Executed on the shell, every pane page, the sign-in page, a static asset, and each document shape
+    the /file route builds: an image, every shape that hands _send extra headers of its own (an SVG, with its
+    sandbox policy; a PDF, with its name; a text file, with its mtimes), a 404, the 413 page a PDF's own tab shows,
+    and both 415 refusals (a file no view shows, a text-named file that is not text). Each shape is served once per
+    entry of NAVIGATIONS (tests/document_navigations.py): bare, and with the headers a browser sends on a navigation
+    typed, opened by the dashboard, and opened by another origin, which is where a browser reads the policy, signed
+    in by the romp_token cookie as a browser's navigation is. Read off a live socket (_wire_get), so a header
+    written anywhere, a send_response or end_headers override included, is seen, and each carries it exactly once: a
+    second copy, even of the same value, leaves a browser with a header it cannot parse and so with no policy. The
+    /remote/<host>/file relay's shapes are tests/test_kernel_remote_file_relay.py's, read the same way."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def _coop(self, path, want_status, signed_in=True):
+        """GET `path` once per NAVIGATIONS entry, with that entry's credential when `signed_in` (a navigation's cookie, a
+        bare request's header: credential); assert the status and exactly one Cross-Origin-Opener-Policy header,
+        same-origin-allow-popups, each time. Returns {entry: (header message, body)}."""
+        seen = {}
+        for how, nav in NAVIGATIONS:
+            status, msg, body = _wire_get(self.port, path, dict(nav, **(credential(nav, TOK) if signed_in else {})))
+            self.assertEqual(status, want_status, "%s, %s: %r" % (path[:60], how, body[:120]))
+            self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), [OPENER_POLICY],
+                             "%s, %s: one header, %s" % (path[:60], how, OPENER_POLICY))
+            seen[how] = (msg, body)
+        return seen
+
+    def test_every_page_the_kernel_serves_carries_the_opener_policy(self):
+        self._coop("/?token=" + TOK, 200, signed_in=False)   # the shell's bootstrap: the token rides the URL
+        for path in ("/chat", "/feed", "/fleet", "/files", "/artifacts", "/timeline", "/settings",
+                     "/media/romp-swirl-glyph.svg"):
+            with self.subTest(path=path):
+                self._coop(path, 200)
+
+    def test_the_sign_in_page_carries_it_too(self):
+        # an unauthorized browser load of the shell gets the token sign-in page: a top-level document as well
+        for how, (_msg, body) in self._coop("/", 200, signed_in=False).items():
+            self.assertEqual(body.decode("utf-8"), km._TOKEN_LOGIN_HTML, how + ": no credential, the sign-in page, not the dashboard")
+
+    def _file_coop(self, name, data, want_status, cap=None):
+        """Serve `data`, written to a file called `name`, through /file once per NAVIGATIONS entry (_coop). `cap` stands
+        in for the media size cap. Returns {entry: (header message, body)}."""
+        from unittest import mock
+        from urllib.parse import quote
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, name)
+            if data is not None:
+                with open(p, "wb") as f:
+                    f.write(data)
+            with mock.patch.object(km, "_PREVIEW_MAX_BYTES", cap if cap is not None else km._PREVIEW_MAX_BYTES):
+                return self._coop("/file?path=" + quote(p), want_status)
+
+    def test_a_file_the_dashboard_opens_in_its_own_tab_carries_the_same_policy(self):
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082")
+        for how, (msg, _body) in self._file_coop("plot.png", png, 200).items():
+            self.assertEqual(msg.get("Content-Type"), "image/png", how)
+
+    def test_an_svg_file_carries_it_once_beside_its_sandbox_policy(self):
+        # _media_policy_headers hands _send `Content-Security-Policy: sandbox` for an SVG
+        for how, (msg, _body) in self._file_coop("fig.svg", b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>', 200).items():
+            self.assertEqual(msg.get("Content-Type"), "image/svg+xml", how)
+            self.assertIn("sandbox", msg.get_all("Content-Security-Policy"), how + ": the SVG's own extra header is sent")
+
+    def test_a_pdf_file_carries_it_once_beside_its_name(self):
+        for how, (msg, _body) in self._file_coop("paper.pdf", b"%PDF-1.4\n%%EOF\n", 200).items():
+            self.assertEqual(msg.get("Content-Type"), "application/pdf", how)
+            self.assertEqual(msg.get("Content-Disposition"), 'inline; filename="paper.pdf"', how)
+
+    def test_a_text_file_carries_it_once_beside_its_mtimes(self):
+        for how, (msg, body) in self._file_coop("notes.md", b"# notes-api\n", 200).items():
+            self.assertTrue((msg.get("Content-Type") or "").startswith("text/plain"), how)
+            self.assertEqual(msg.get("X-Romp-Text-Utf8"), "1", how + ": the text shape's extra headers are sent")
+            self.assertEqual(body, b"# notes-api\n", how)
+
+    def test_the_page_an_oversize_pdfs_own_tab_shows_carries_it_once(self):
+        # past the cap: a navigation gets the 413 page (_too_large_page), a bare request the plain refusal it parses
+        for how, (msg, body) in self._file_coop("paper.pdf", b"%PDF-1.4\n%%EOF\n", 413, cap=4).items():
+            if how == "a bare request":
+                self.assertTrue((msg.get("Content-Type") or "").startswith("text/plain"), how + ": the plain refusal")
+            else:
+                self.assertTrue((msg.get("Content-Type") or "").startswith("text/html"), how + ": the way-out page, a document")
+                self.assertIn(b"too large to show", body, how)
+
+    def test_a_missing_file_carries_it_once(self):
+        for how, (_msg, body) in self._file_coop("gone.png", None, 404).items():
+            self.assertIn(b"not found: ", body, how)
+
+    def test_a_file_no_view_shows_carries_it_once_on_its_415(self):
+        # a file on neither view allowlist: its own status, the one that offers the download instead
+        for how, (_msg, body) in self._file_coop("bundle.zip", b"PK\x03\x04 not really a zip", 415).items():
+            self.assertIn(b"not viewable in the browser", body, how)
+
+    def test_a_text_named_file_that_is_not_text_carries_it_once_on_its_415(self):
+        for how, (_msg, body) in self._file_coop("notes.md", b"# notes-api\x00\x00\x00", 415).items():
+            self.assertIn(b"not a text file", body, how)
+
+    def test_a_state_root_panes_own_files_carry_no_opener_policy_and_its_shim_and_theme_keep_it(self):
+        # The one exemption (the _send comment; Handler.do_GET's /pane/ route): a state-root pane's own files, its page
+        # and a callback page beside it, are served with no opener policy, so a popup the pane opens that a sign-in
+        # provider sends back to that callback keeps its opener (tests/test_pane_popup_opener_served.py drives the round
+        # trip in a browser). Every other response of the route is the kernel's own and keeps the header once: the
+        # shim and theme it serves the pane, and a file the pane does not have.
+        import shutil
+        pid = "coopnotes"   # a pane id of this test's own, so no other test's pane under the same state root is touched
+        pdir = km._pane_dir()
+        (pdir / pid).mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, str(pdir / pid), True)
+        (pdir / (pid + ".json")).write_text(json.dumps({"id": pid, "title": "Notes", "source": "pane:" + pid, "on": True,
+                                                         "experimental": False, "protocol": "romp"}))
+        self.addCleanup(lambda: (pdir / (pid + ".json")).unlink(missing_ok=True))
+        page = b"<!doctype html><title>notes-api</title><script src=shim.js></script>"
+        back = b"<!doctype html><script>try{window.opener.postMessage({lab:'back'},'*');}catch(e){}</script>"
+        (pdir / pid / "index.html").write_bytes(page)
+        (pdir / pid / "back.html").write_bytes(back)
+        for path, want in (("/pane/%s/" % pid, page), ("/pane/%s/index.html" % pid, page), ("/pane/%s/back.html" % pid, back)):
+            for how, nav in NAVIGATIONS:
+                with self.subTest(path=path, how=how):
+                    status, msg, body = _wire_get(self.port, path, dict(nav, **credential(nav, TOK)))
+                    self.assertEqual((status, body), (200, want), "the pane's own file is served")
+                    self.assertEqual(msg.get("Content-Type"), "text/html; charset=utf-8")
+                    self.assertIsNone(msg.get_all("Cross-Origin-Opener-Policy"), "a state-root pane's own file: no opener policy")
+                    self.assertEqual(msg.get_all("X-Frame-Options"), ["SAMEORIGIN"], "the rest of _send's headers still ride it")
+                    self.assertEqual(msg.get_all("Referrer-Policy"), ["same-origin"])
+        for path, status in (("/pane/%s/shim.js" % pid, 200), ("/pane/%s/theme.css" % pid, 200), ("/pane/%s/gone.html" % pid, 404)):
+            with self.subTest(path=path):
+                self._coop(path, status)
+
+
+class _DoublingHandler(km.Handler):
+    """The kernel's handler with a second Cross-Origin-Opener-Policy header written where a recorder of the handler's
+    send_header calls before end_headers never looked: in send_response, or in end_headers, chosen per request by the
+    X-Test-Double header. OpenerIsolationWireWitness serves through it."""
+
+    def send_response(self, code, message=None):
+        super().send_response(code, message)
+        if self.headers.get("X-Test-Double") == "send_response":
+            self.send_header("Cross-Origin-Opener-Policy", OPENER_POLICY)
+
+    def end_headers(self):
+        if self.headers.get("X-Test-Double") == "end_headers":
+            self.send_header("cross-origin-opener-policy", OPENER_POLICY)
+        super().end_headers()
+
+
+class OpenerIsolationWireWitness(unittest.TestCase):
+    """OpenerIsolation reads the headers off the socket, so a second copy is seen wherever it was written. Witnessed here
+    on a handler that writes one in send_response or in end_headers (_DoublingHandler): the read shows both copies, and
+    without the doubling one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), _DoublingHandler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def test_the_wire_shows_a_header_written_twice_as_two_wherever_it_was_written(self):
+        for where, want in (("send_response", [OPENER_POLICY] * 2), ("end_headers", [OPENER_POLICY] * 2),
+                            ("nowhere", [OPENER_POLICY])):
+            with self.subTest(where=where):
+                status, msg, _ = _wire_get(self.port, "/chat", {"X-Romp-Token": TOK, "X-Test-Double": where})
+                self.assertEqual(status, 200)
+                self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), want)
 
 
 class _DrainSpy:
