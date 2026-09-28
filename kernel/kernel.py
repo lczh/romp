@@ -1249,7 +1249,8 @@ _PERF_STATS = _PerfStats()
 # idled never folded in); a RELEASE reclaim, at an idle cycle, is owed when an ended session, registered
 # by weakref at its pop, is observed still alive with its worker thread finished (a surviving cycle, or a ref a live root keeps,
 # which reads the same, costs one reclaim and is counted a survivor); a bounded fold-in backstop reclaims on an idle cycle,
-# or on a busy one past twice its bound. The frozen-heap walks are paid with no browser waiting. Default on; ROMP_GC_FREEZE=off.
+# or on a busy one past twice its bound. The frozen-heap walks wait for an idle cycle, except that busy backstop past twice
+# its bound. Default on; ROMP_GC_FREEZE=off.
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)

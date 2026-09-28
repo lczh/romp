@@ -2305,9 +2305,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   that owed nothing does; a full release also
   writes one stderr line, "reclaimed" when nothing survived and otherwise naming the kept sids),
   `totalReconcileMs` and `errors` (a reconcile that raised is counted here and
-  said once on stderr, never ending the pusher). The reconcile's own collection
-  pause lands after the cycle closed its ring row, so the pusher and jobs rings
-  never show it; `lastReconcileMs` is where a reconcile's pause is read. The
+  said once on stderr, never ending the pusher). The reconcile runs on the
+  pusher thread after the pusher cycle closed its ring row, so the pusher ring
+  never shows its pause. A jobs row can: when a jobs pass was open across the
+  reconcile (common on a busy kernel, where the jobs thread is working when the
+  pusher reconciles), the row's `n2` and `ms2` count the controller's
+  collection along with any automatic one. `lastReconcileMs` is where a
+  reconcile's pause is read. The
   freeze is on by default; `ROMP_GC_FREEZE=off` (or `0`/`false`) turns it off
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
