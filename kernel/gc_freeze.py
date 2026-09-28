@@ -116,7 +116,7 @@ class GcFreeze:
         self.reclaims = 0            # unfreeze/collect/re-freeze passes (a cyclic ended ref, or the backstop)
         self.busy_runs = 0           # of all the runs, those a BUSY cycle ran (an initial freeze, a load fold-in, the busy backstop)
         self.survivors = 0           # owed refs still alive after a reclaim's collect: kept by a LIVE ROOT, not a cycle (a wasted pause), counted once and dropped
-        self.last_release_sids = []  # first 8 chars of each sid a reclaim was owed for, set under the ended lock, cleared per judgement
+        self.last_release_sids = []  # first 8 chars of each sid a reclaim was owed for, set under the ended lock, cleared per judgement and per busy run after the first freeze
         self.last_release_survivors = 0   # of the LAST RUN's owed refs, how many a live root kept through it (0 when the reclaim freed
         #                                   them, and 0 on any run that owed none, e.g. a load after a live-root release: read right after a release)
         self.last_kept_sids = []     # the sids of those survivors, likewise rebound each run (cleared to [] by a run that owed none); named kept-by-a-live-root in the release line
@@ -183,17 +183,23 @@ class GcFreeze:
         """One BUSY-cycle pass (2026-09-28): the initial freeze once anything is loaded, the load fold-in on a material load,
         and the backstop only once the fold-ins reach twice `backstop_foldins` (a full window passed with no idle cycle to
         take it). Never judges the ended sessions: a release, and the frozen-heap walk a survivor drives, waits for the idle
-        `tick`. Returns the kind run, or None."""
+        `tick`. A busy load or backstop judged nothing and owed nothing, so it clears `last_release_sids` (under the ended
+        lock, where the judgement sets it): /perf's sids, survivors and kind then describe the same run, never a load beside
+        the sids of an earlier release (the 2026-09-28 review). Returns the kind run, or None."""
         if not self.enabled:
             return None
         if not self.frozen:
             kind = self._run("initial", inserts, []) if inserts > 0 else None
-        elif self._foldins >= 2 * self.backstop_foldins:
-            kind = self._run("backstop", inserts, [])
-        elif (inserts - self._ins_mark) >= self.load_trees:
-            kind = self._run("load", inserts, [])
         else:
-            kind = None
+            if self._foldins >= 2 * self.backstop_foldins:
+                kind = self._run("backstop", inserts, [])
+            elif (inserts - self._ins_mark) >= self.load_trees:
+                kind = self._run("load", inserts, [])
+            else:
+                kind = None
+            if kind is not None:
+                with self._ended_lock:
+                    self.last_release_sids = []      # this run owed no reclaim: no sids, as its survivor count is 0
         if kind is not None:
             self.busy_runs += 1
         return kind

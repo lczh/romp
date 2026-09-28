@@ -2296,7 +2296,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   run, so a load after a live-root release reads it back at 0, like `lastReleaseSids`),
   `lastReleaseSids` (the first eight characters of the sids the LAST JUDGEMENT
   owed a reclaim for, cleared each judgement, so a tick that owed nothing clears
-  it and a cheap-collect release judged `load` shows them too; a full release also
+  it and a cheap-collect release judged `load` shows them too; a busy load or
+  backstop judges nothing and clears them as well, so a busy run after a
+  live-root release reads no sids, 0 survivors and its own kind, as an idle run
+  that owed nothing does; a full release also
   writes one stderr line, "reclaimed" when nothing survived and otherwise naming the kept sids),
   `totalReconcileMs` and `errors` (a reconcile that raised is counted here and
   said once on stderr, never ending the pusher). The reconcile's own collection

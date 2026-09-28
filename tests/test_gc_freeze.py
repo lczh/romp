@@ -53,6 +53,19 @@ class FakeGc:
         self.calls.append("unfreeze")
 
 
+class TakingGc(FakeGc):
+    """A FakeGc whose next collect empties the list set on `take`, the way the real collector takes an unreachable cycle:
+    an owner held only there then dies by reference counting, so a release's cheap stage sees it gone."""
+    def __init__(self):
+        super().__init__()
+        self.take = None
+    def collect(self, *a):
+        super().collect(*a)
+        if self.take is not None:
+            self.take.clear()
+            self.take = None
+
+
 class TriggerLogic(unittest.TestCase):
     def test_the_load_fold_in_and_the_backstop(self):
         fake = FakeGc()
@@ -408,6 +421,39 @@ class PusherTick(unittest.TestCase):
         self.assertNotIn("unfreeze", fake.calls, "a busy cycle never walks the frozen heap for a release")
         self.assertEqual(t(True, False, 48), "release", "the next idle cycle judges it and releases")
         self.assertEqual(c._ended, [])
+        self.assertEqual(errs, [])
+
+    def test_a_busy_run_clears_the_last_release_sids(self):
+        """Review 2026-09-28: after the first freeze a busy cycle judges nothing, so a busy load right after a live-root
+        release left `lastReleaseSids` naming the released session beside the load's kind and the survivor count every run
+        rebinds (0). On /perf that is the shape of a cheap-collect release of that session, where a full-heap pause had
+        freed nothing. A busy run judged nothing and owed nothing, so it clears the sids: the three fields then describe one
+        run, a busy load reading no sids, 0 survivors and `load`, a busy backstop the same with `backstop`."""
+        fake, errs = TakingGc(), []
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=1, gc=fake, clock=lambda: 0.0)
+        t = self._seam(c, errs)
+        def fields():
+            pf = c.perf()
+            return (pf["lastReleaseSids"], pf["lastReleaseSurvivors"], pf["lastReconcileKind"])
+        t(True, True, 40)
+        self.assertEqual(t(True, False, 40), "initial")
+        root = _Owner(); root.sid = "abcdef12-3456-7890-abcd-ef1234567890"   # held in a local: a live root keeps it through the reclaim
+        fin = _FakeThread(alive=False)
+        c.note_ended(root, thread=fin)
+        self.assertEqual(t(True, False, 40), "release", "an idle cycle releases the owed ref")
+        self.assertEqual(fields(), (["abcdef12"], 1, "release"), "a live-root release: its sid, one survivor, the kind: %r" % c.perf())
+        self.assertEqual(t(False, False, 48), "load", "a busy cycle folds the next load in")
+        self.assertEqual(fields(), ([], 0, "load"), "the busy load owed nothing: no sids, no survivor, a load: %r" % c.perf())
+        # a cheap-collect release (judged `load`) names its owed sid and brings the fold-ins to twice the bound, so the next
+        # busy cycle runs the backstop, which judged nothing either and clears the sids too
+        held = [_Owner()]; held[0].sid = "beadfeed-1234-5678-9abc-def012345678"   # held only in the list the next collect empties
+        fin2 = _FakeThread(alive=False)
+        c.note_ended(held[0], thread=fin2)
+        fake.take = held
+        self.assertEqual(t(True, False, 48), "load", "the cheap collect took the released owner whole: a load pass")
+        self.assertEqual(fields(), (["beadfeed"], 0, "load"), "a cheap-collect release names its owed sid: %r" % c.perf())
+        self.assertEqual(t(False, False, 48), "backstop", "two fold-ins since the reclaim, twice the bound: the busy backstop")
+        self.assertEqual(fields(), ([], 0, "backstop"), "the busy backstop owed nothing: no sids, no survivor, the kind: %r" % c.perf())
         self.assertEqual(errs, [])
 
     def test_the_kernels_tick_wrapper_ticks_and_counts_a_raising_tick(self):
