@@ -2274,7 +2274,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   registered is bounded by the next thousand loads, not the process lifetime.
   The backstop walks the frozen heap, so an idle cycle runs it; a busy cycle
   runs it only once the fold-ins reach twice `backstopFoldins`, so a pusher that
-  never idles still bounds it. A busy cycle never judges an ended session. The
+  never idles still bounds it. A busy cycle judges the ended sessions only
+  before the first freeze, as an idle one does: the initial freeze's collect
+  takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
+  a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the integer `frozen` above, which is `gc.get_freeze_count()`),
   `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the

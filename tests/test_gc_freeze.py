@@ -8,7 +8,7 @@ still runs is kept; a live ref whose thread finished is a surviving cycle to rec
 that judgement's truth table on synthetic refs and a real SdkSession, that every session-end pop
 registers the ended session, plus the load fold-in, the backstop, the safe knob parse, the env
 switch, a weakref oracle over the freeze, and the pusher glue, busy cycles included (a busy cycle folds a
-load in and bounds the backstop, never judges an ended session). Every fixture is synthetic. Real-collector
+load in and bounds the backstop, and judges an ended session only before the first freeze). Every fixture is synthetic. Real-collector
 tests unfreeze in tearDown so the freeze never leaks to another test.
 """
 import gc
@@ -111,6 +111,24 @@ class TriggerLogic(unittest.TestCase):
         self.assertEqual(fake.calls, ["collect", "freeze"], "no unfreeze: the initial collect already took any pre-freeze garbage")
         self.assertEqual(c._ended, [], "the pre-freeze refs are consumed by the initial judgement, never carried")
         self.assertIsNone(c.tick(inserts=3), "a second tick with nothing new is None: the pre-freeze refs did not linger into a reclaim")
+
+    def test_a_pre_freeze_ended_ref_is_taken_by_the_busy_initial_collect_too(self):
+        """The busy twin of the test above (review 2026-09-28). On a pusher that never idles the first freeze lands on a busy
+        cycle. Left unjudged there, a pre-freeze ref a live root keeps, its worker finished, is frozen with the heap and costs
+        a full release (an unfreeze and a walk of the whole frozen heap) at the first idle cycle, possibly much later, where
+        the idle initial freeze drops it at no cost. The busy initial freeze judges the pre-freeze refs the same way."""
+        fake = FakeGc()
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
+        dead = _Owner()
+        c.note_ended(dead, thread=None)
+        del dead                                     # the ref is now dead: acyclic, gone
+        live = _Owner(); fin = _FakeThread(alive=False)   # a LIVE pre-freeze ref with a finished worker, both in locals
+        c.note_ended(live, thread=fin)
+        self.assertEqual(c.tick_busy(inserts=3), "initial", "the first busy tick with anything loaded freezes")
+        self.assertEqual(fake.calls, ["collect", "freeze"], "no unfreeze: the initial collect already took any pre-freeze garbage")
+        self.assertEqual(c._ended, [], "the busy initial freeze consumed the pre-freeze refs as the idle one does, never carried")
+        self.assertIsNone(c.tick(inserts=3), "the first idle cycle after it owes no release: the pre-freeze ref was dropped")
+        self.assertEqual(fake.calls, ["collect", "freeze"], "and nothing walked the frozen heap for it")
 
     def test_the_env_switch_turns_it_off(self):
         self.assertFalse(gf.enabled_from_env({"ROMP_GC_FREEZE": "off"}))
@@ -405,9 +423,10 @@ class PusherTick(unittest.TestCase):
         self.assertIsNone(t(False, False, 81), "nothing due right after the backstop: its re-freeze folded the load in")
         self.assertEqual(errs, [])
 
-    def test_a_busy_cycle_never_judges_the_ended_sessions(self):
-        """2026-09-28: the release (and the unfreeze its survivor drives) stays on the idle boundary. A busy cycle folds a load
-        in with an owed ended session registered, leaves it registered, never unfreezes; the next idle cycle releases it."""
+    def test_a_busy_cycle_after_the_first_freeze_never_judges_the_ended_sessions(self):
+        """2026-09-28: the release (and the unfreeze its survivor drives) stays on the idle boundary. Once a freeze is held, a
+        busy cycle folds a load in with an owed ended session registered, leaves it registered, never unfreezes; the next idle
+        cycle releases it (before the first freeze a busy cycle judges them, as the idle one does, pinned in TriggerLogic)."""
         fake, errs = FakeGc(), []
         c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
         t = self._seam(c, errs)

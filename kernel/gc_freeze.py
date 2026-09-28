@@ -40,7 +40,9 @@ such, then drop them). Exact on every path, no per-path reasoning. A BOUNDED BAC
 too, so an idle cycle runs it; a busy cycle runs it only once the fold-ins reach TWICE
 `backstop_foldins`, a full window with no idle cycle to take it (2026-09-28: a busy fold-in can freeze a
 live cycle that dies later, and on a pusher that never idles nothing else would ever reclaim it). A busy
-cycle never judges the ended sessions: their release waits for the idle tick. The record cache's
+cycle judges the ended sessions only before the first freeze, as the idle tick does: the initial freeze's
+collect takes their pre-freeze garbage, so the owed refs are dropped at no cost. Once a freeze is held, a
+busy cycle never judges them: their release waits for the idle tick. The record cache's
 `released` counter is a /perf statistic, never a trigger: its entries are acyclic.
 
 The thread test rests on CPython's own threading: a running session and its worker Thread reference each
@@ -182,13 +184,17 @@ class GcFreeze:
     def tick_busy(self, inserts):
         """One BUSY-cycle pass (2026-09-28): the initial freeze once anything is loaded, the load fold-in on a material load,
         and the backstop only once the fold-ins reach twice `backstop_foldins` (a full window passed with no idle cycle to
-        take it). Never judges the ended sessions: a release, and the frozen-heap walk a survivor drives, waits for the idle
-        `tick`. A busy load or backstop judged nothing and owed nothing, so it clears `last_release_sids` (under the ended
-        lock, where the judgement sets it): /perf's sids, survivors and kind then describe the same run, never a load beside
-        the sids of an earlier release (the 2026-09-28 review). Returns the kind run, or None."""
+        take it). Judges the ended sessions only while no freeze is held, as the idle `tick` does there: the initial
+        freeze's collect takes their pre-freeze garbage, so the owed refs are dropped at no cost (left unjudged, a ref a
+        live root keeps would be frozen with the heap and cost a full release at the first idle cycle; the 2026-09-28
+        review). Once a freeze is held it never judges them: a release, and the frozen-heap walk a survivor drives, waits
+        for the idle `tick`. A busy load or backstop judged nothing and owed nothing, so it clears `last_release_sids` (under
+        the ended lock, where the judgement sets it): /perf's sids, survivors and kind then describe the same run, never a
+        load beside the sids of an earlier release (the same review). Returns the kind run, or None."""
         if not self.enabled:
             return None
         if not self.frozen:
+            self.resolve_ended()                     # no frozen heap yet: judge the pre-freeze refs and drop the owed, as the idle tick does
             kind = self._run("initial", inserts, []) if inserts > 0 else None
         else:
             if self._foldins >= 2 * self.backstop_foldins:
