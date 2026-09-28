@@ -390,15 +390,18 @@ class PusherTick(unittest.TestCase):
 
     def test_a_pusher_that_never_idles_still_freezes(self):
         """2026-09-28: the initial freeze used to wait for an idle cycle, so a kernel with no idle cycle after its first never
-        froze at all. A busy cycle makes the initial freeze once anything is loaded, and keeps folding in after it."""
+        froze at all. A busy cycle makes the initial freeze once anything is loaded, and keeps folding in after it. The first
+        busy freeze lands under the load bound (3 inserts of 8), since a freeze of an unfrozen controller at a load past the
+        bound reads `initial` through the load branch too, so a pin past the bound could not tell the initial branch was gone
+        (review 2026-09-28: a busy pusher with 1 to 7 inserts then made no freeze until the 8th)."""
         fake, errs = FakeGc(), []
         c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
         t = self._seam(c, errs)
-        self.assertIsNone(t(False, True, 40), "the boot's first cycle never reconciles, busy or not")
+        self.assertIsNone(t(False, True, 3), "the boot's first cycle never reconciles, busy or not")
         self.assertIsNone(gf.pusher_tick(c, idle=False, first=False, stats_fn=lambda: {"inserts": 0}, on_error=errs.append),
                           "nothing loaded yet: a busy cycle makes no freeze")
-        self.assertEqual(t(False, False, 41), "initial", "the first busy cycle with anything loaded makes the initial freeze")
-        self.assertEqual(t(False, False, 49), "load", "and the busy cycles fold in after it")
+        self.assertEqual(t(False, False, 3), "initial", "the first busy cycle with anything loaded makes the initial freeze, under the load bound")
+        self.assertEqual(t(False, False, 11), "load", "and the busy cycles fold in after it")
         self.assertEqual(fake.calls, ["collect", "freeze"] * 2)
         self.assertEqual(c.perf()["busyRuns"], 2, "a busy initial freeze counts as a busy run: %r" % c.perf())
         self.assertEqual(errs, [])
