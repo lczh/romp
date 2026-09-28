@@ -1242,12 +1242,14 @@ class _PerfStats:
 
 _PERF_STATS = _PerfStats()
 
-# Road B for #1735: the freeze controller and the pusher's idle-boundary tick. The controller keeps the loaded
+# Road B for #1735: the freeze controller and the pusher's end-of-cycle tick. The controller keeps the loaded
 # decoded heap out of the cycle collector's walk (a warm full collection over 5.6M loaded objects fell from
-# 2.83 s to 0.1 ms once frozen; plans/gc-full-collection-pause.md); it reconciles at the idle boundary. A LOAD
-# fold-in keys on the record cache's insert counter; a RELEASE reclaim is owed when an ended session, registered
+# 2.83 s to 0.1 ms once frozen; plans/gc-full-collection-pause.md); it reconciles at the end of each pusher cycle. A LOAD
+# fold-in keys on the record cache's insert counter, on a busy cycle too (2026-09-28: idle-only, a pusher that almost never
+# idled never folded in); a RELEASE reclaim, at an idle cycle, is owed when an ended session, registered
 # by weakref at its pop, is observed still alive with its worker thread finished (a surviving cycle, or a ref a live root keeps,
-# which reads the same, costs one reclaim and is counted a survivor), or by a bounded fold-in backstop. The reconcile's pause is paid with no browser waiting. Default on; ROMP_GC_FREEZE=off.
+# which reads the same, costs one reclaim and is counted a survivor); a bounded fold-in backstop reclaims on an idle cycle,
+# or on a busy one past twice its bound. The frozen-heap walks are paid with no browser waiting. Default on; ROMP_GC_FREEZE=off.
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)
@@ -1262,9 +1264,10 @@ if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell b
 
 
 def _gc_freeze_tick(idle, first):
-    """The pusher's idle-boundary call (the reconcile logic is gcf.pusher_tick, pinned in-process): fold in a
-    material load (the record cache's insert counter), reclaim when an ended session is observed cyclic or the
-    backstop fires. Cheap when nothing is due. A failure never ends the pusher: counted for /perf, said once."""
+    """The pusher's end-of-cycle call (the reconcile logic is gcf.pusher_tick, pinned in-process): fold in a
+    material load (the record cache's insert counter) on any cycle but the first, and on an idle one reclaim when an
+    ended session is observed cyclic or the backstop is due (a busy one runs the backstop only past twice its bound).
+    Cheap when nothing is due. A failure never ends the pusher: counted for /perf, said once."""
     def on_error(e):
         _GC_FREEZE_ERRORS[0] += 1
         if not _GC_FREEZE_SAID[0]:
@@ -63195,7 +63198,7 @@ def _pusher_cycle():
             _boot_health_first_cycle(time.monotonic() - _t_cycle)   # the boot's first cycle, on the record (a no-op after)
         elif not _BOOT_HEALTH_DONE[0]:
             _boot_health_row_backstop(time.monotonic())         # the jobs pass still open long after: the row without it
-        _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze at the idle boundary (the guard is inside pusher_tick)
+        _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze (the fold-in on any cycle, the release when idle; the guard is inside pusher_tick)
 
 
 @contextlib.contextmanager

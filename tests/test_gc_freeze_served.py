@@ -2,8 +2,9 @@
 """Issue #1735, served: a REAL hermetic kernel with the freeze ON proves the live wiring the unit tests cannot.
 
 The judges parse the living sessions at boot (no browser needed; the boot-parses lab pins that), so the record
-cache fills and, at the pusher's idle boundary, the freeze fires: /perf's gc.freeze shows `active` with `freezes`
-at least one. Then a transcript is appended and re-read repeatedly (each re-read REPLACES its acyclic cache entry,
+cache fills and, at the end of a pusher cycle (busy or idle, never the boot's first), the freeze fires: /perf's
+gc.freeze shows `active` with `freezes` at least one.
+Then a transcript is appended and re-read repeatedly (each re-read REPLACES its acyclic cache entry,
 a record-cache pop) and `reclaims` stays put: under the corrected trigger a pop is not a cyclic release and drives
 no unfreeze pause. The gen-2 arithmetic: this lab drives no release, so it asserts the INEQUALITIES that hold for any
 run (`gen."2".collections` at least the controller's `collections`, which is itself at least `freezes` + `reclaims`);
@@ -131,7 +132,7 @@ class ServedGcFreeze(unittest.TestCase):
         return self._perf()
 
     def test_the_freeze_fires_live_and_steady_re_reads_never_reclaim(self):
-        # the judges' boot parse loads the sessions; at an idle cycle the freeze fires
+        # the judges' boot parse loads the sessions; at the end of a pusher cycle the freeze fires
         pf = self._wait(lambda pf: (pf.get("gc", {}).get("freeze", {}).get("freezes") or 0) >= 1)
         fr = pf["gc"]["freeze"]
         self.assertTrue(fr["enabled"] and fr["active"], "the freeze is on and holds a freeze: %r" % fr)
