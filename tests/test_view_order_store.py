@@ -284,8 +284,8 @@ class ViewFoldsStore(ViewOrderStore):
     # A page that folded two groups inside one round trip heard the answer to its first fold after publishing the
     # second, and adopting it reopened the second group. Each publish now carries its name, {browser, n}, and the frame
     # names the last publish this kernel handled (`foldsBy`), so the page can pass over its own earlier state coming back.
-    B = "0123456789abcdef0123456789abcdef"
-    C = "fedcba9876543210fedcba9876543210"
+    B = "b" * 32                                   # two browsers' ids (a page mints 32 hex characters)
+    C = "c" * 32
 
     def dispatch(self, *msgs):
         """Each message through the real dispatcher, from the desktop's socket, with the phone and the desktop connected:
