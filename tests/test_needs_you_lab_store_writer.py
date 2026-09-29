@@ -19,8 +19,8 @@ written. At each hold the test acts as the kernel, then lets the writer go:
     which tell two files at one inode apart, as they must on ext4, where a freed inode comes back);
   - a store that moves under every round ends in a named error after twenty rounds, nothing published and no temp left;
   - a node gone from the store is named (the store's revision, its node ids, any store moved aside), never a bare TypeError.
-One more test holds the writer earlier, at its read of the store through the descriptor it opened, and publishes there as the kernel:
-the edit is kept, because the identity comes from that descriptor, not from the path.
+One more test holds the writer earlier, right after it opens the store, and publishes there as the kernel: the edit is kept, because the
+identity comes from that descriptor, not from the path.
 NoInPlaceWrites pins the source, by the spellings its constants list: neither driver that writes a file the kernel reads writes one in
 place, each such write is a publishJson call, and every scene edit of the needs-you driver reads its node through nodeOf.
 TornStoreChain walks the kernel half of the CI red step by step; it describes the kernel, so it passes before the fix and after it
@@ -60,10 +60,12 @@ NEW_BRIEF = "the CI job runs the Postgres loader first and the SQLite loader aga
 ASIDE = SID + ".json.corrupt-20260101T000000Z"   # a store the kernel moved aside earlier, named as its quarantine names one
 # node's writers that open a file and fill it in place (truncating it first, or filling it in steps): any of them on a file the kernel reads
 # reopens the window the CI red fell into, so NoInPlaceWrites looks for each, not only the one the driver happened to use. It matches these
-# exact spellings on a line of a driver: writeFile (sync, callback and promise), truncateSync, createWriteStream, copyFile in the same three
-# (a copy truncates the target and keeps its inode), and TRUNCATING_OPEN below. A writer reached through an alias of fs is not matched.
-IN_PLACE_WRITES = ("fs.writeFileSync(", "fs.writeFile(", "fs.promises.writeFile(", "fs.truncateSync(", "fs.createWriteStream(",
-                   "fs.copyFileSync(", "fs.copyFile(", "fs.promises.copyFile(")
+# exact spellings on a line of a driver: writeFile (sync, callback and promise), truncate and cp in the same three forms, copyFile in the
+# same three (a copy truncates the target and keeps its inode), createWriteStream, and TRUNCATING_OPEN below. A writer reached through an
+# alias of fs is not matched, and an "r+" open and a numeric flag are not matched.
+IN_PLACE_WRITES = ("fs.writeFileSync(", "fs.writeFile(", "fs.promises.writeFile(", "fs.truncateSync(", "fs.truncate(", "fs.promises.truncate(",
+                   "fs.createWriteStream(", "fs.copyFileSync(", "fs.copyFile(", "fs.promises.copyFile(", "fs.cpSync(", "fs.cp(",
+                   "fs.promises.cp(")
 # an open that truncates, to be followed by a write (the harness's own in-place shape): fs.openSync, fs.open or fs.promises.open with the
 # flag "w" or "w+". It keys on the flag, since a bare `fs.openSync(` would match the writer's own read-only open of the store too.
 TRUNCATING_OPEN = re.compile(r"""fs\.(?:openSync|open|promises\.open)\([^;]*?,\s*(["'`])w\+?\1""")
@@ -113,10 +115,9 @@ def _seed():
 # The node side of the run. The driver's writer and what it needs from the driver (the shared publisher, nodeOf) are spliced in at
 # CODE; kernelFeed, the driver's GET /feed.json read before a write, answers null since no kernel serves here. THE HOLDS, chosen by
 # cfg.holdAt: at "write" (the default), a write of a file in the goals directory opens the file (an in-place write empties the store
-# right there), says HELD on stdout and reads the test's word on stdin before a byte goes in; at "read", a read through a descriptor
-# (the writer's read of the store it opened) says HELD and waits the same way before it reads. Every other write and read passes
-# through. The edit is the lab's own shape: a brief and its family stamp on an existing node, or (`missing`) a node read through nodeOf
-# that the store does not hold.
+# right there), says HELD on stdout and reads the test's word on stdin before a byte goes in; at "open", the writer's open of the store
+# says HELD and waits right after the descriptor comes back. Every other write and open passes through. The edit is the lab's own shape:
+# a brief and its family stamp on an existing node, or (`missing`) a node read through nodeOf that the store does not hold.
 HARNESS = r"""
 import fs from "node:fs";
 const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
@@ -130,10 +131,11 @@ fs.writeFileSync = (p, data, ...rest) => {
   hold("write", { path: p });
   try { fs.writeSync(fd, String(data)); } finally { fs.closeSync(fd); }
 };
-const passRead = fs.readFileSync;
-fs.readFileSync = (p, ...rest) => {
-  if (cfg.holdAt.includes("read") && typeof p === "number") hold("read", { fd: p });
-  return passRead(p, ...rest);
+const passOpen = fs.openSync;
+fs.openSync = (p, ...rest) => {
+  const fd = passOpen(p, ...rest);
+  if (cfg.holdAt.includes("open") && p === cfg.store) hold("open", { path: p });
+  return fd;
 };
 /*CODE*/
 try {
@@ -224,7 +226,7 @@ class LabStoreWriter(unittest.TestCase):
                 kind, _, rest = line.rstrip("\n").partition(" ")
                 if kind == "HELD":
                     info = json.loads(rest)
-                    rec = {"at": info["at"], "path": info.get("path")}   # a read hold has no path: it reads through a descriptor
+                    rec = {"at": info["at"], "path": info.get("path")}
                     rec.update(at_hold(len(holds), rec["path"]) or {})
                     holds.append(rec)
                     p.stdin.write("go\n")
@@ -294,20 +296,21 @@ class LabStoreWriter(unittest.TestCase):
         self.assertEqual(self._temps(), [], "the stood-down round's temp was removed")
 
     def test_a_kernel_publication_between_the_labs_open_and_its_read_is_kept_because_the_identity_is_the_descriptors(self):
-        """The identity is taken from the descriptor the bytes are read through. Here the writer is held at that read, after it opened the
-        store, and the kernel publishes: the writer reads the file it opened, the old one, and holds that file's identity, so its rename
-        stands down and the edit goes round again on the kernel's bytes. An identity taken by path after the read would be the kernel's
-        new file while the bytes are the old one's, and the rename would publish them over the kernel's card. (The hold comes after the
-        identity is taken, so an identity taken by path between the open and the read is outside what this test tells apart.)"""
+        """The identity is taken from the descriptor the bytes are read through. Here the writer is held right after it opens the store,
+        before the identity is taken or a byte is read, and the kernel publishes: the writer reads the file it opened, the old one, and
+        holds that file's identity, so its rename stands down and the edit goes round again on the kernel's bytes. An identity taken by
+        path, before the read or after it, would be the kernel's new file while the bytes are the old one's, and the rename would publish
+        them over the kernel's card."""
         holds, end, other = self._drive(lambda n, path: self._publish(G7, "which fixture owns the port the api listens on?") if n == 0 else {},
-                                        holdAt=["read"])
+                                        holdAt=["open"])
         self.assertEqual(end and end[0], "DONE", "the writer finished: %r %s" % (end, other))
-        self.assertTrue(holds and all(h["at"] == "read" for h in holds), "premise: the writer was held at its reads of the store: %r" % holds)
+        self.assertTrue(holds and all(h["at"] == "open" for h in holds), "premise: the writer was held right after each open of the store: %r"
+                        % holds)
         final = jd.load_goals(SID)
         self.assertEqual((G7 in final["nodes"], (final["nodes"].get(G6) or {}).get("blockSummary"), self._aside()), (True, NEW_BRIEF, []),
                          "the kernel's card published between the lab's open and its read stands and the lab's edit landed on top of it (an "
-                         "identity taken by path after the read names the kernel's file, not the one the bytes came from, and the rename "
-                         "publishes over the card): nodes %r, holds %r" % (sorted(final["nodes"]), holds))
+                         "identity taken by path, before the read or after it, names the kernel's file, not the one the bytes came from, and "
+                         "the rename publishes over the card): nodes %r, holds %r" % (sorted(final["nodes"]), holds))
         self.assertEqual(len(holds), 2, "the first round read the old file and stood down, the second read the kernel's: %r" % holds)
         self.assertEqual(final.get("rev"), holds[0]["kernelRev"] + 1, "one revision past the kernel's publication")
         self.assertEqual(self._temps(), [], "the stood-down round's temp was removed")
@@ -354,13 +357,14 @@ class NoInPlaceWrites(unittest.TestCase):
             in_place = [ln.strip()[:160] for ln in _read_const(path, "DRIVER").splitlines()
                         if any(m in ln for m in IN_PLACE_WRITES) or TRUNCATING_OPEN.search(ln)]
             # the lines themselves, never the whole driver
-            self.assertEqual(in_place, [], "%s: its driver writes no file in place (the spellings checked: %s)" % (name, spellings))
+            self.assertEqual(in_place, [], "%s: its driver writes no file in place (the spellings checked: %s) (an alias of fs is not matched)"
+                             % (name, spellings))
             self.assertTrue("_lab.PUBLISH_JSON_JS + " in src, "%s: its driver is written with the shared publisher in front" % name)
         self.assertTrue("publishJson(cfg.judgeAuth, " in _read_const(BOX, "DRIVER"), "the judge-auth seed is published too")
         self.assertTrue("publishJson(cfg.store, " in _read_const(REOPEN, "DRIVER"), "the comment-reopen lab's comments store is published too")
         bare = [ln.strip()[:160] for ln in _read_const(BOX, "DRIVER").splitlines() if BARE_NODE.search(ln)]
         self.assertEqual(bare, [], "every scene edit reads the node it edits through nodeOf, so a lost node is named (the spellings checked: "
-                         'st.nodes[<key>] and st["nodes"][<key>] other than a node\'s creation)')
+                         'st.nodes[<key>] and st["nodes"][<key>] other than a node\'s creation) (an alias of st.nodes is not matched)')
 
 
 class TornStoreChain(unittest.TestCase):
