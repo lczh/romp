@@ -11,9 +11,11 @@ run (`gen."2".collections` at least the controller's `collections`, which is its
 the EXACT equality, organic full collections = gen-2 collections less the controller's `collections`, is unit-tested
 (test_the_organic_arithmetic_is_exact_via_the_collections_count). The reclaim of a measured cyclic ended session (a weakref judged at the idle tick) is covered by the unit tests.
 A second case attaches a chat client (the websocket client the other served tests use) to one session and appends
-turns to it, so the pusher's cycles send to the client and read BUSY: /perf's `busyRuns` grows and `freezes` passes
-the freeze the client found, the busy fold-in reached through the kernel's own wrapper with a served cycle's own idle
-flag (the unit tests drive the seam in-process and pin the kernel's call site only by its text).
+turns to it, so the cycles that push them to the client read BUSY: /perf's `busyRuns` grows and `freezes` passes the
+freeze the client found, the busy fold-in reached through the kernel's own wrapper with a served cycle's own idle flag
+(the unit tests drive the seam in-process and pin the kernel's call site only by its text). Some cycles between the
+pushes still read idle and can fold a load in on the idle path, so `freezes` can grow without the busy path, even
+with the client attached; `busyRuns` is the assertion that says the busy path ran.
 The freeze is set ON in the kernel's own env here; the suite floors it OFF everywhere else. Synthetic only:
 invented text, placeholder uuids, TESTHOST.
 """
