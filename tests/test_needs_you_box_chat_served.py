@@ -692,7 +692,7 @@ def _overrun_record(stdout):
         return tail
     pane = rec.get("hiddenPane")
     if not isinstance(pane, dict):
-        said = "not reached (the driver had not opened the shell's chat pane)"
+        said = "not reached (the last PARTIAL line was written before the driver opened the shell's chat pane)"
     elif "premise" not in pane:
         said = "not recorded (the shell's chat frame found: %r)" % (pane.get("frame"),)
     else:
@@ -1345,7 +1345,7 @@ class OverrunRecord(unittest.TestCase):
         line = self._line({"errors": [], "premise": missed, "on": {"filler": "z" * 4000}})
         msg = _overrun_record(line + "\n")
         self.assertIn("on the standalone page, web's tab NOT active, the page having first opened on no tab (none was active within 15 s): %r" % missed, msg)
-        self.assertIn("in the shell's chat pane, not reached (the driver had not opened the shell's chat pane)", msg)
+        self.assertIn("in the shell's chat pane, not reached (the last PARTIAL line was written before the driver opened the shell's chat pane)", msg)
         self.assertLess(msg.index("in the shell's chat pane"), msg.index("its record so far:"))
         self.assertTrue(msg.endswith("its record so far: " + line[-3000:]))
 
