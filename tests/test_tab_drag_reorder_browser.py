@@ -615,18 +615,20 @@ out.joinEnd = { tags: tagsOf(), rows: (await layout()).rows.map((r) => r.map((t)
 //    open; the re-fold's header then offers the way back, which is taken exactly once, and the click after it folds.
 const wbCase = { group: "qa", setup: [], wayBacks: [] };
 out.wayBackCase = wbCase;
-wbCase.start = await headState("qa");
-if (wbCase.start && wbCase.start.folded === "1") await foldGroup("qa", false, wbCase.setup);   // opened first if a phase left it folded
-wbCase.member = await page.evaluate(() => { const t = document.querySelector('#tabs .tab[data-copy="qa"][data-id]'); return t ? t.dataset.id : null; });
-if (!wbCase.member) throw new Error("the way-back case: qa shows no member to pick: " + JSON.stringify(await layout()));
-await page.click(`#tabs .tab[data-copy="qa"][data-id="${wbCase.member}"] .tab-label`);
-wbCase.picked = await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active");
-  return !!a && a.dataset.id === sid && !document.querySelector("#tabs .tab-group-head.snap-shown"); }, wbCase.member, { timeout: 10000 }).then(() => true).catch(() => false);
-await foldGroup("qa", true, wbCase.setup);
-await foldGroup("qa", false, wbCase.setup);
-wbCase.offered = await headState("qa");   // what the re-fold's header offers before the press
-await foldGroup("qa", true, wbCase.wayBacks);
-wbCase.after = await headState("qa");
+try {   // recorded, not thrown: every case above already has its result, and a throw here would fail them all with this phase
+  wbCase.start = await headState("qa");
+  if (wbCase.start && wbCase.start.folded === "1") await foldGroup("qa", false, wbCase.setup);   // opened first if a phase left it folded
+  wbCase.member = await page.evaluate(() => { const t = document.querySelector('#tabs .tab[data-copy="qa"][data-id]'); return t ? t.dataset.id : null; });
+  if (!wbCase.member) throw new Error("the way-back case: qa shows no member to pick: " + JSON.stringify(await layout()));
+  await page.click(`#tabs .tab[data-copy="qa"][data-id="${wbCase.member}"] .tab-label`);
+  wbCase.picked = await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active");
+    return !!a && a.dataset.id === sid && !document.querySelector("#tabs .tab-group-head.snap-shown"); }, wbCase.member, { timeout: 10000 }).then(() => true).catch(() => false);
+  await foldGroup("qa", true, wbCase.setup);
+  await foldGroup("qa", false, wbCase.setup);
+  wbCase.offered = await headState("qa");   // what the re-fold's header offers before the press
+  await foldGroup("qa", true, wbCase.wayBacks);
+  wbCase.after = await headState("qa");
+} catch (e) { wbCase.error = String((e && e.stack) || e); }
 out.cases = cases;
 fs.writeFileSync(cfg.out, JSON.stringify(out));   // a file, not stdout: the per-case logs outgrow one pipe write
 fs.writeSync(1, "RESULT:" + cfg.out + "\n");
@@ -1135,6 +1137,7 @@ class ServedTabDragReorder(unittest.TestCase):
     def test_the_way_back_is_one_click_and_the_click_after_it_folds(self):
         c = self._run()["wayBackCase"]
         detail = "\n  %r" % (c,)
+        self.assertIsNone(c.get("error"), "the way-back phase ran to its end" + detail)
         self.assertTrue(c["picked"], "the pick opened a qa member and ended the pane's section view" + detail)
         self.assertEqual(c["setup"], [], "the fold and the open ahead of the re-fold are plain fold clicks" + detail)
         self.assertEqual(c["offered"]["act"], "show-transcript",
