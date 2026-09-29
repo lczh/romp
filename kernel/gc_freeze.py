@@ -189,7 +189,7 @@ class GcFreeze:
         live root keeps would be frozen with the heap and cost a full release at the first idle cycle; the 2026-09-28
         review). Once a freeze is held it never judges them: a release, and the frozen-heap walk a survivor drives, waits
         for the idle `tick`. A busy load or backstop judged nothing and owed nothing, so it clears `last_release_sids` (under
-        the ended lock, where the judgement sets it): /perf's sids, survivors and kind then describe the same run, never a
+        the ended lock, where `resolve_ended` sets it): /perf's sids, survivors and kind then describe the same run, never a
         load beside the sids of an earlier release (the same review). Returns the kind run, or None."""
         if not self.enabled:
             return None
