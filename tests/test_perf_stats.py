@@ -1137,21 +1137,29 @@ class PerfRoutes(unittest.TestCase):
     def test_get_perf_walks_the_heap_only_when_asked(self):
         """The two reads whose cost grows with the whole heap (the allocator's block count, the frozen generation's size) run
         on a GET that says ?walk=1 and never on a plain one (the macOS runner flake, 2026-09-29: each is one C call that
-        holds the interpreter lock, and holds it far longer where the heap is paged out). The handler's thread makes the
-        calls, so the recorders count every thread's; the snapshot's one caller in the kernel is this route."""
+        holds the interpreter lock, and holds it far longer where the heap is paged out). Each request's handler runs on a
+        thread the server starts for it, so the recorder is a profile function every thread started meanwhile runs
+        (threading.setprofile), and it matches the builtin a call reaches by identity (the "c_call" event), so a module-level
+        alias or a from-import in the kernel is seen like an attribute lookup (review round one, 2026-09-29: patching the
+        two module attributes missed a call through an alias bound at import time). The snapshot's one caller in the kernel
+        is this route."""
         calls = []
+        walks = {id(f): (f, name) for f, name in ((sys.getallocatedblocks, "getallocatedblocks"),
+                                                   (km.gc.get_freeze_count, "get_freeze_count"))}
 
-        def recorder(name, real):
-            def rec(*a, **kw):
-                calls.append(name)
-                return real(*a, **kw)
-            return rec
-        with mock.patch.object(sys, "getallocatedblocks", recorder("getallocatedblocks", sys.getallocatedblocks)), \
-             mock.patch.object(km.gc, "get_freeze_count", recorder("get_freeze_count", km.gc.get_freeze_count)):
+        def hook(frame, event, arg):
+            hit = walks.get(id(arg)) if event == "c_call" else None
+            if hit is not None and hit[0] is arg:
+                calls.append(hit[1])
+        prev = threading.getprofile()
+        threading.setprofile(hook)
+        try:
             st, plain = self._req("GET", "/perf")
             plain_calls = list(calls)
             st2, walked = self._req("GET", "/perf?walk=1")
             st3, _ = self._req("GET", "/perf?walk=1", token=False)
+        finally:
+            threading.setprofile(prev)
         self.assertEqual((st, st2, st3), (200, 200, 403))
         self.assertEqual(plain_calls, [], "a plain GET walks nothing")
         self.assertIsNone(plain["heap"]["allocatedBlocks"])

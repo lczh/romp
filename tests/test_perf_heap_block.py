@@ -21,7 +21,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import tracemalloc
 import types
 import unittest
@@ -97,23 +96,47 @@ HEAP_WALKS = ((sys, "getallocatedblocks"), (sys, "_debugmallocstats"), (gc, "get
               (gc, "get_referrers"), (gc, "collect"), (tracemalloc, "take_snapshot"))
 
 
+def _walk_hook(calls):
+    """A profile function (sys.setprofile) that appends the name of each heap-wide read above the thread calls, matched by
+    identity, not by name: a C function by the object the call reaches (the "c_call" event hands it over), a Python one
+    (tracemalloc.take_snapshot) by its code object (the "call" event's frame). So a call from Python code is seen however
+    the kernel spells it, an attribute lookup, a module-level alias or a from-import (review round one, 2026-09-29: the
+    recorder before this patched the module attributes, and an alias bound at import time called straight past it). A name
+    this runtime lacks is skipped."""
+    c_funcs, codes = {}, {}
+    for mod, name in HEAP_WALKS:
+        fn = getattr(mod, name, None)
+        if fn is None:
+            continue
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            codes[id(code)] = (code, name)
+        else:
+            c_funcs[id(fn)] = (fn, name)
+
+    def hook(frame, event, arg):
+        if event == "c_call":
+            hit = c_funcs.get(id(arg))
+            if hit is not None and hit[0] is arg:
+                calls.append(hit[1])
+        elif event == "call":
+            hit = codes.get(id(frame.f_code))
+            if hit is not None and hit[0] is frame.f_code:
+                calls.append(hit[1])
+    return hook
+
+
 @contextlib.contextmanager
 def _walks_recorded():
-    """Each heap-wide read above replaced by a pass-through that records its name when the entering thread calls it (another
-    thread's walk never lands here), yielding the list; a name this runtime lacks is skipped."""
-    me, calls = threading.get_ident(), []
-    with contextlib.ExitStack() as stack:
-        for mod, name in HEAP_WALKS:
-            real = getattr(mod, name, None)
-            if real is None:
-                continue
-
-            def rec(*a, _real=real, _name=name, **kw):
-                if threading.get_ident() == me:
-                    calls.append(_name)
-                return _real(*a, **kw)
-            stack.enter_context(mock.patch.object(mod, name, rec))
+    """The heap-wide reads the entering thread makes inside the block, by name (_walk_hook), yielding the list. The hook is
+    this thread's own profile function, so another thread's walk never lands here, and the thread's previous profile
+    function is put back on exit."""
+    calls, prev = [], sys.getprofile()
+    sys.setprofile(_walk_hook(calls))
+    try:
         yield calls
+    finally:
+        sys.setprofile(prev)
 
 
 class _Caches(unittest.TestCase):
@@ -424,6 +447,21 @@ class Overhead(_Caches):
         self.assertGreater(snap["heap"]["allocatedBlocks"], 0)
         self.assertIsInstance(snap["gc"]["frozen"], int)
         json.dumps(snap)
+
+    def test_the_recorder_sees_a_walk_however_the_call_is_spelled(self):
+        """The recorder's own control (review round one, 2026-09-29): a walk called through a from-import or a name bound
+        before the block opened is seen like an attribute lookup, and tracemalloc's snapshot, a Python function, by its
+        code, so the empty list above does not depend on how the kernel spells a call."""
+        from sys import getallocatedblocks as imported
+        alias = gc.get_freeze_count
+        tracing = tracemalloc.is_tracing()
+        with _walks_recorded() as calls:
+            imported()
+            alias()
+            if not tracing:                               # untraced, the snapshot refuses at once, after its call event
+                with contextlib.suppress(RuntimeError):
+                    tracemalloc.take_snapshot()
+        self.assertEqual(calls, ["getallocatedblocks", "get_freeze_count"] + ([] if tracing else ["take_snapshot"]))
 
 
 class ShapeChange(_Caches):
