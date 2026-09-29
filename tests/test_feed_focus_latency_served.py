@@ -253,11 +253,13 @@ const runLayout = async (tag, width) => {
   // the reader's "session name in the feed": the session header's name
   const clickName = async (name) => { const fr = await feedFrame(); await fr.locator(".feed-sess-head .fname", { hasText: name }).first().click({ timeout: 8000 }); };
   const clickTitle = async (itemId) => { const fr = await feedFrame(); await fr.locator(feedCard(itemId) + " .fcard-title").first().click({ timeout: 8000 }); };
-  // after a switch: the kernel's frame for `sid` has landed (or 3 s passed), then a beat; what the head says then
+  // after a switch: the kernel's frame for `sid` has landed (or 3 s passed), then a beat; what the head says then, and whether that frame
+  // landed at all (2026-09-29: the wait was swallowed, so a frame that came after the read, or never, read as one that flipped nothing back)
   const settled = async (sid) => {
-    await page.waitForFunction((sid) => (document.getElementById("f-feed").contentWindow.__hops || []).some((h) => h.ev === "recv:activeChat" && h.id === sid), sid, { timeout: 3000 }).catch(() => null);
+    const frameLanded = await page.waitForFunction((sid) => (document.getElementById("f-feed").contentWindow.__hops || []).some((h) => h.ev === "recv:activeChat" && h.id === sid), sid, { timeout: 3000 })
+      .then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
     await page.waitForTimeout(200);
-    return headName();
+    return { settled: await headName(), frameLanded };
   };
   const confirmShown = () => page.evaluate(() => { const d = document.getElementById("f-chat").contentDocument; const o = d && d.querySelector(".picker-overlay"); return o ? (o.textContent || "").slice(0, 120) : null; });
   const dismissConfirm = async () => {
@@ -299,10 +301,10 @@ const runLayout = async (tag, width) => {
     await clickName("api");
     const within = await waitHead("api", 2500);
     const tMove = await clock();
-    const settledName = await settled(cfg.api);
+    const st = await settled(cfg.api);
     await page.mouse.move(2, 2);
     const afterLeave = await waitHead("api", 5000);
-    return { within, tMove, settled: settledName, afterLeave, headNow: await headName() };
+    return { within, tMove, ...st, afterLeave, headNow: await headName() };
   });
   // b. the same click, the pointer leaving the header at once
   await settle(cfg.web, "web");
@@ -310,7 +312,7 @@ const runLayout = async (tag, width) => {
     await clickName("api");
     await page.mouse.move(2, 2);
     const within = await waitHead("api", 5000);
-    return { within, settled: await settled(cfg.api), headNow: await headName() };
+    return { within, ...(await settled(cfg.api)), headNow: await headName() };
   });
   // c. a card title clicked in the feed (the timeline jump: showOnTimeline), the pointer left on the card
   await settle(cfg.web, "web");
@@ -318,17 +320,17 @@ const runLayout = async (tag, width) => {
     await clickTitle(cfg.apiDone);
     const within = await waitHead("api", 2500);
     const tMove = await clock();
-    const settledName = await settled(cfg.api);
+    const st = await settled(cfg.api);
     await page.mouse.move(2, 2);
     const afterLeave = await waitHead("api", 5000);
-    return { within, tMove, settled: settledName, afterLeave, headNow: await headName() };
+    return { within, tMove, ...st, afterLeave, headNow: await headName() };
   });
   // d. a tab clicked in the chat's strip
   await settle(cfg.api, "api");
   await road("d_strip_click", async () => {
     await clickTab(cfg.web);
     const within = await waitHead("web", 5000);
-    return { within, settled: await settled(cfg.web), headNow: await headName() };
+    return { within, ...(await settled(cfg.web)), headNow: await headName() };
   });
   // e. a hot key in the chat: ArrowRight steps to the next tab
   await settle(cfg.web, "web");
@@ -340,7 +342,7 @@ const runLayout = async (tag, width) => {
     await page.keyboard.press("ArrowRight");
     const within = await page.waitForFunction((before) => { const d = document.getElementById("f-feed").contentDocument; const n = d && d.querySelector("#feed-focus .feed-focus-head .fname"); return !!n && n.textContent !== before; }, before, { timeout: 5000 }).then(() => true).catch(() => false);
     const to = await page.evaluate(() => { const d = document.getElementById("f-chat").contentDocument; const t = d.querySelector("#tabs .tab.active[data-id]"); return t ? t.dataset.id : null; });
-    return { within, before, to, settled: await settled(to), headNow: await headName() };
+    return { within, before, to, ...(await settled(to)), headNow: await headName() };
   });
   // d2/e2. the same two with the kernel's activeChat frames withheld from the feed (a slow link): the shell's relay alone
   await settle(cfg.api, "api");
@@ -574,6 +576,7 @@ class FeedFocusLatencyServed(unittest.TestCase):
         recvs = [h["t"] for h in road["hops"] if h["ev"] == "recv:activeChat" and h["f"] == "/feed"]
         self.assertTrue(recvs, "%s/%s: the kernel's frame never arrived:\n%s" % (tag, key, legs))
         self.assertLess(head, min(recvs), "%s/%s: the section moved on the kernel's frame, not on the local signal:\n%s" % (tag, key, legs))
+        self.assertTrue(road["frameLanded"], "%s/%s: the kernel's frame for %s reached the feed before the settled read:\n%s" % (tag, key, target, legs))
         self.assertEqual(road["settled"], target, "%s/%s: the kernel's frame flipped the section back: %r" % (tag, key, road["settled"]))
 
     def test_1_a_session_name_clicked_in_the_feed_moves_the_section_at_once_with_the_pointer_left_on_the_header(self):
@@ -610,6 +613,7 @@ class FeedFocusLatencyServed(unittest.TestCase):
             self.assertIsNotNone(_t(road, "dropped:activeChat", id=sid), "%s/%s: the kernel's frame was withheld as the road meant:\n%s" % (tag, key, legs))
             self.assertIsNone(_t(road, "recv:activeChat", id=sid), "%s/%s: no kernel frame for the new tab reached the feed's handler:\n%s" % (tag, key, legs))
         else:
+            self.assertTrue(road["frameLanded"], "%s/%s: the kernel's frame for %s reached the feed before the settled read:\n%s" % (tag, key, target, legs))
             self.assertEqual(road["settled"], target, "%s/%s: the kernel's frame flipped the section back: %r" % (tag, key, road["settled"]))
 
     def test_3_a_strip_click_and_a_hot_key_in_the_chat_move_the_section_within_one_frame_of_the_tab_change(self):
