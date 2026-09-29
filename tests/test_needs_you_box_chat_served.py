@@ -376,8 +376,11 @@ out.hiddenPane = { frame: !!fr };
 if (fr) {
   // THE SAME PREMISE in the shell's chat pane (a review of this fix, 2026-09-29): a fresh page with no saved choice as well, and the kernel can
   // send api's frame before any strip reaches it, which the page adopts before the stale-active fallback (the strip's first member) can act.
-  // The hidden-pane, keyboard-order and content scenes read web's rows here, so the driver picks web's tab first. Recorded in the scene's
-  // record, which the hidden-pane test prints, and asserted by no test yet: no run has forced api first on this page
+  // The hidden-pane, keyboard-order and content scenes read web's rows here, so the driver picks web's tab first. The first review round of
+  // this fix forced api first here: with the saved session order (setUpClass) written api first, this pane and the standalone page both
+  // opened on api's tab (this one perhaps through that fallback, the strip's first member then being api), the pick moved each to web, and
+  // these scenes passed. Recorded in the scene's record, which the hidden-pane test prints, and on the PARTIAL line below for a run that
+  // overruns its budget; asserted by no test
   out.hiddenPane.premise = await pickWeb(fr);
   mark();   // the pane's premise on a PARTIAL line at once: a driver that overruns its budget in the scenes below still names it (_overrun_record)
   out.hiddenPane.loaded = await fr.waitForSelector("#notices .ntc-head", { timeout: 60000 }).then(() => true).catch(() => false);   // the box on screen once, collapsed to its header line (a fresh page)
