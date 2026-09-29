@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { mergeWindow, keyOf, prependHead } from "./chat-window";
 import { OVERLAY_KINDS, insertRun, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Region } from "./chat-regions";
 import { frameOlder, droppedLandedHuman, dropsLandedRow } from "./frame-guard";   // the frame watermark guard (2026-09-22): upsert reads it
+import { isOptimisticUuid, isKernelEchoUuid } from "./send-pending";   // the uuid tests render.ts imports (the lifted predicates and upsert read them)
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -57,9 +58,13 @@ test("renderEvent stamps an orphan note's record uuid on its turn beside the not
 });
 
 // ── upsert: the tail run's regions (T386 stage 2) ────────────────────────────────────────────────
-// the client's own injections, as render.ts tells them (the optimistic group's and the held group's uuid prefixes)
-const isOptimistic = (e: any) => typeof e.uuid === "string" && e.uuid.startsWith("optimistic:");
-const isHeldGroup = (e: any) => e.kind === "queued" && typeof e.uuid === "string" && e.uuid.startsWith("held:");
+// the client's own injections, as render.ts tells them (the optimistic group's and the held group's uuid prefixes): its own two
+// predicates, lifted whole with the uuid test render.ts imports for the first and its HELD_PREFIX for the second, so an edit to
+// either in render.ts reaches every test below (the harness ran copies of its own, which kept the module green while render.ts's
+// isHeldGroup answered false, 2026-09-29)
+const liftLine = (anchor: string) => liftBetween(anchor, "\n");
+const { isOptimistic, isHeldGroup } = liftWith(liftLine("const isOptimistic = (e: ChatEvent): boolean =>") + liftLine("const HELD_PREFIX = ")
+  + liftLine("const isHeldGroup = (e: ChatEvent): boolean =>"), { isOptimisticUuid }, ["isOptimistic", "isHeldGroup"]);
 // render.ts's own same-transcript reading (a fork shares no uuid), lifted whole: the harness used to answer it with the Proxy's no-op, so
 // PR 1860's guard 3 (which reads it) never ran here and its refusal was untestable in this file (the note on PR 1877, 2026-09-19)
 const sharesAnyUuid = liftWith(liftBetween("function sharesAnyUuid(a: ChatEvent[], b: ChatEvent[]): boolean {", "\n\n/** One client-diag row"), {}, ["sharesAnyUuid"]).sharesAnyUuid;
@@ -73,6 +78,7 @@ function liftUpsert(sessions: Map<string, any>, pendingFullWhy: Map<string, stri
     keepResidentEvents: () => false, onFull: () => false, hostOf: () => "", mergeWindow, keyOf, regionsFromRuns, runsOf, insertRun, turnsBeforeTail, stripOptimistic: () => {},
     // the merge guard's rules (2026-09-19): the real split, the real overlay set, the client's injection tells, and the diag rows recorded
     splitHeldAgainstFrame, OVERLAY_KINDS, isOptimistic, isHeldGroup, chatDiagRow: (what: string, data: any) => rows.push({ what, data }),
+    isOptimisticUuid, isKernelEchoUuid,   // render.ts's imports from send-pending.ts, the real ones, so an edit to upsert that reads a uuid's kind by them runs here
     // PR 1860's guard 3 onto 1877: the real same-transcript reading, its latch, the rows it posts directly and the full-frame asks it makes
     sharesAnyUuid, refusedFrameLatch: new Map(), clearRefusedLatch: () => {}, requestFullSession: (id: string, why: string) => asks.push([id, why]),
     vscodeApi: { postMessage: (m: any) => rows.push({ what: m.what, data: m.data }) },
