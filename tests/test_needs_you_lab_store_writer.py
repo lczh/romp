@@ -17,8 +17,9 @@ written. At each hold the test acts as the kernel, then lets the writer go:
   - a kernel PUBLICATION there is kept: the writer's rename stands down and its edit goes round again on the new bytes;
   - a store that moves under every round ends in a named error after twenty rounds, nothing published and no temp left;
   - a node gone from the store is named (the store's revision, its node ids, any store moved aside), never a bare TypeError.
-NoInPlaceWrites pins the source: neither driver that writes a file the kernel reads writes one in place. TornStoreChain walks the
-kernel half of the CI red step by step; it describes the kernel, so it passes before the fix and after it alike.
+NoInPlaceWrites pins the source: neither driver that writes a file the kernel reads writes one in place, and every scene edit of the
+needs-you driver reads its node through nodeOf. TornStoreChain walks the kernel half of the CI red step by step; it describes the
+kernel, so it passes before the fix and after it alike.
 
 Needs node (the lab's own runtime) and skips without it. Synthetic only: a private placeholder sid, invented text."""
 import ast
@@ -26,6 +27,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -51,6 +53,12 @@ G1, G6, G7, G9 = (SID + ":g%d" % i for i in (1, 6, 7, 9))
 T0 = 1781100000
 NEW_BRIEF = "the CI job runs the Postgres loader first and the SQLite loader against its fixtures"
 ASIDE = SID + ".json.corrupt-20260101T000000Z"   # a store the kernel moved aside earlier, named as its quarantine names one
+# node's writers that open a file and fill it in place (truncating it first, or filling it in steps): any of them on a file the kernel reads
+# reopens the window the CI red fell into, so NoInPlaceWrites looks for each, not only the one the driver happened to use
+IN_PLACE_WRITES = ("fs.writeFileSync(", "fs.writeFile(", "fs.promises.writeFile(", "fs.truncateSync(", "fs.createWriteStream(")
+# a scene edit that reaches a node without nodeOf (`st.nodes[cfg.g6].blockSummary = ...`); the lookahead leaves out a node's creation
+# (`st.nodes[cfg.g6c] = {`), the only other shape the driver writes
+BARE_NODE = re.compile(r"st\.nodes\[cfg\.\w+\](?!\s*=\s*\{)")
 
 
 def _read_const(path, name):
@@ -262,15 +270,18 @@ class LabStoreWriter(unittest.TestCase):
 class NoInPlaceWrites(unittest.TestCase):
     def test_the_labs_write_no_file_the_kernel_reads_in_place(self):
         """Every file these two drivers write for the kernel (the goal store, the judge-auth latch, a comments store) goes through the
-        shared publisher; an in-place write anywhere in them reopens the window the CI red fell into."""
+        shared publisher; an in-place write anywhere in them, by any of node's in-place writers, reopens the window the CI red fell into.
+        And every scene edit of the needs-you driver reads its node through nodeOf, so a lost node is named, never a bare TypeError again."""
         for path in (BOX, REOPEN):
             name = os.path.basename(path)
             with open(path, encoding="utf-8") as f:
                 src = f.read()
-            in_place = [ln.strip()[:160] for ln in _read_const(path, "DRIVER").splitlines() if "fs.writeFileSync(" in ln]
+            in_place = [ln.strip()[:160] for ln in _read_const(path, "DRIVER").splitlines() if any(m in ln for m in IN_PLACE_WRITES)]
             self.assertEqual(in_place, [], "%s: its driver writes no file in place" % name)   # the lines themselves, never the whole driver
             self.assertTrue("_lab.PUBLISH_JSON_JS + " in src, "%s: its driver is written with the shared publisher in front" % name)
         self.assertTrue("publishJson(cfg.judgeAuth, " in _read_const(BOX, "DRIVER"), "the judge-auth seed is published too")
+        bare = [ln.strip()[:160] for ln in _read_const(BOX, "DRIVER").splitlines() if BARE_NODE.search(ln)]
+        self.assertEqual(bare, [], "every scene edit reads the node it edits through nodeOf, so a lost node is named")
 
 
 class TornStoreChain(unittest.TestCase):
