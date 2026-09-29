@@ -2251,11 +2251,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   freeze controller (issue #1735): the kernel keeps the loaded decoded heap
   out of the collector's walk with `gc.freeze`, so a warm full collection
   walks only what was allocated since and no longer pauses the pusher for
-  seconds. It reconciles at the pusher's idle boundary, never on a timer: a
-  LOAD fold-in (`collect` then `freeze`, walking only the unfrozen) when the
-  record cache's insert counter grows by a material number of trees, and a
-  RELEASE reclaim when an ended session is observed to be a surviving cycle, or
-  the backstop fires. The release is STAGED: a cheap `collect` with the freeze in
+  seconds. It reconciles at the end of a pusher cycle, never on a timer. A
+  LOAD fold-in (`collect` then `freeze`, walking only the unfrozen) runs when the
+  record cache's insert counter grows by a material number of trees, on any
+  cycle but the boot's first, busy or idle: an automatic full collection walks
+  those same unfrozen objects anyway, and would walk them again and again until
+  they are folded in. The first freeze likewise waits for no idle cycle: the
+  first cycle after the boot's first with anything loaded makes it. A RELEASE
+  reclaim runs on an idle cycle only, when
+  an ended session is observed to be a surviving cycle (the
+  backstop reclaim has its own rule, below). The release is STAGED: a cheap
+  `collect` with the freeze in
   place first (it takes a released cycle allocated since the last freeze), and only
   a survivor of that then drives `unfreeze`, a full collection and `freeze` (the
   frozen-heap walk); a release the cheap walk took whole counts as a load pass, so
@@ -2273,11 +2279,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   trigger: its decoded json is acyclic and dies by reference counting, so
   `recordCache.released` is a statistic. A BACKSTOP reclaim runs after `backstopFoldins`
   load fold-ins since the last reclaim (default 1000, about ten hours at the
-  measured ~97 fold-ins an hour), so a cycle released by an owner nobody
-  registered is bounded by the next thousand loads, not the process lifetime. The
+  ~97 fold-ins an hour measured when fold-ins ran only on idle cycles; fold-ins
+  on busy cycles come more often), so a cycle released by an owner nobody
+  registered is bounded by the next thousand loads, not the process lifetime.
+  The backstop walks the frozen heap, so an idle cycle runs it; a busy cycle
+  runs it only once the fold-ins reach twice `backstopFoldins`, so a pusher that
+  never idles still bounds it. A busy cycle judges the ended sessions only
+  before the first freeze, as an idle one does: the initial freeze's collect
+  takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
+  a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `freezes` and
+  `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the
+  runs, those a busy cycle made: a first freeze, load fold-ins and a busy
+  backstop), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
   release that unfroze runs TWO generation-2 collections for its one reclaim, so
   `reclaims` alone cannot derive the organic count), `collections` (every
@@ -2293,20 +2308,28 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   "reclaimed", else the count the line names as kept by a live root; rebound each
   run, so a load after a live-root release reads it back at 0, like `lastReleaseSids`),
   `lastReleaseSids` (the first eight characters of the sids the LAST JUDGEMENT
-  owed a reclaim for, cleared each judgement, so a tick that owed nothing clears
-  it and a cheap-collect release judged `load` shows them too; a full release also
+  owed a reclaim for, cleared each judgement, so an idle tick that owed nothing clears
+  it and a cheap-collect release judged `load` shows them too; a busy load or
+  backstop judges nothing and clears them as well, so a busy run after a
+  live-root release reads no sids, 0 survivors and its own kind, as an idle run
+  that owed nothing does; a full release also
   writes one stderr line, "reclaimed" when nothing survived and otherwise naming the kept sids),
   `totalReconcileMs` and `errors` (a reconcile that raised is counted here and
-  said once on stderr, never ending the pusher). The reconcile's own collection
-  pause lands after the cycle closed its ring row, so the pusher and jobs rings
-  never show it; `lastReconcileMs` is where a reconcile's pause is read. The
+  said once on stderr, never ending the pusher). The reconcile runs on the
+  pusher thread after the pusher cycle closed its ring row, so the pusher ring
+  never shows its pause. A jobs row can: when a jobs pass was open across the
+  reconcile (common on a busy kernel, where the jobs thread is working when the
+  pusher reconciles), the row's `n2` and `ms2` count the controller's
+  collection along with any automatic one. `lastReconcileMs` is where a
+  reconcile's pause is read. The
   freeze is on by default; `ROMP_GC_FREEZE=off` (or `0`/`false`) turns it off
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every idle cycle). A request that arrives during a reconcile waits that
-  one collection; the idle boundary is the best moment for it, not a guarantee
-  none arrives. To read a slow cycle: find
+  fire every cycle). A request that arrives during a reconcile waits that
+  one collection. The idle boundary is the best moment for the frozen-heap
+  walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an
+  automatic full collection would have walked anyway. To read a slow cycle: find
   its row in `pusher.stageRing` (or `jobs.stageRing`) and read the row's `gc`
   (`null` when the cycle closed without an opening mark): `n0`, `n1` and
   `n2`, the collections per generation that ran anywhere in the process
