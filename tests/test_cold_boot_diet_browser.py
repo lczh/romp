@@ -78,7 +78,14 @@ await page.addInitScript(() => {
   window.__frames = []; window.__t0 = performance.now(); window.__idles = 0;
   window.__sent = []; const send = WebSocket.prototype.send;   // every frame the page sends its kernel (the prefetch's needFull asks among them)
   WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type) window.__sent.push(m); } catch (e) { /* not a frame */ } return send.call(this, d); };
-  const ric = window.requestIdleCallback; if (typeof ric === "function") window.requestIdleCallback = function (cb, o) { window.__idles++; return ric.call(window, cb, o); };
+  // idle callbacks: every request counted (__idles), and the ones queued and not yet run held by handle (__idlePending, 2026-09-29). The
+  // page's one idle user is the prefetch pass (render.ts schedulePrebuild), so an empty queue read after a fill says the pass the fill
+  // queued has had its turn: a callback leaves the queue by running, or by a cancel
+  window.__idlePending = new Set();
+  const ric = window.requestIdleCallback, cic = window.cancelIdleCallback;
+  if (typeof ric === "function") window.requestIdleCallback = function (cb, o) { window.__idles++;
+    const h = ric.call(window, (d) => { window.__idlePending.delete(h); return cb(d); }, o); window.__idlePending.add(h); return h; };
+  if (typeof cic === "function") window.cancelIdleCallback = function (h) { window.__idlePending.delete(h); return cic.call(window, h); };
   try { window.__loads = Number(sessionStorage.getItem("romp-lab:loads") || "0") + 1; sessionStorage.setItem("romp-lab:loads", String(window.__loads)); } catch (e) { window.__loads = -1; }
   window.addEventListener("message", (e) => { const m = e.data; if (!m || !m.type) return;
     window.__frames.push({ t: Math.round(performance.now() - window.__t0), type: m.type, id: m.id || null, n: Array.isArray(m.events) ? m.events.length : null, skel: Array.isArray(m.skeleton) ? m.skeleton.length : null }); });
@@ -102,6 +109,11 @@ const waitFulls = (k, ms) => page.waitForFunction((k) => { const s = new Set(); 
 await waitFulls(sids.length, 60000);
 const skelOf = () => page.evaluate(() => { const f = window.__frames.find((x) => x.skel !== null); return f ? { type: f.type, n: f.skel, t: f.t } : null; });
 const painted = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
+// the prefetch at rest: no idle pass queued (2026-09-29). Read once the shown skeletons filled, it says the pass the last fill queued has
+// run, so a folded or hidden tab that pass would ask for has been asked for by then. It replaces a 1.5 s window with no frame, which
+// passed whenever that pass had not run yet; both outcomes are recorded and asserted
+const timedOut = (e) => { if (e && e.name === "TimeoutError") return false; throw e; };
+const atRest = () => page.waitForFunction(() => window.__idlePending.size === 0, null, { timeout: 30000 }).then(() => true, timedOut);
 const nav = () => page.evaluate(() => ({ loads: window.__loads, href: location.href.replace(/token=[^&]*/, "token=X"), types: Array.from(new Set(window.__frames.map((f) => f.type))) }));
 const fresh = { dial: (await page.evaluate(() => window.__dials[0] || null)), paint: await page.evaluate(() => window.__paint), allBuilt: await allBuiltT(), fulls: Object.keys(await fullsBy()).length,
   first: await firstFrames(40), skel: await skelOf(), nav: await nav() };
@@ -136,8 +148,12 @@ await page.waitForFunction(() => document.querySelectorAll("#tabs .tab, #tabs [d
 await painted();
 const hiddenStart = { tabs: await tabCount(), skel: await skelCount() };
 await page.waitForFunction(() => document.querySelectorAll("#tabs .tab-skeleton").length === 0, null, { timeout: 40000 }).catch(() => {});   // the visible skeletons fill on idle callbacks
-await page.waitForTimeout(1500);   // idle callbacks past the visible set: a hidden tab built by mistake would show as a loaded tab when the filter lifts
-const hidden = { dial: (await page.evaluate(() => window.__dials[0] || null)), start: hiddenStart, tabs: await tabCount(), skelVisibleAfterWait: await skelCount(), nav: await nav() };
+// the pass past the visible set has run (at rest), and what it would have done wrong is read off its ASKS: a hidden tab asked for by
+// mistake shows there at once, where the strip shows it loaded only once the answer lands (the reveal below could come first)
+const rested3b = await atRest();
+const hiddenSids = sids.filter((s, i) => !cfg.names[i].startsWith("web"));
+const hidden = { dial: (await page.evaluate(() => window.__dials[0] || null)), start: hiddenStart, tabs: await tabCount(), skelVisibleAfterWait: await skelCount(), rested: rested3b,
+  hiddenAsks: await page.evaluate((hs) => window.__sent.filter((m) => m.type === "needFull" && hs.includes(m.id)).length, hiddenSids), nav: await nav() };
 await page.evaluate(() => { location.hash = ""; });
 await page.waitForFunction(() => document.querySelectorAll("#tabs .tab, #tabs [data-sid]").length >= 27, null, { timeout: 15000 }).catch(() => {});
 const skelAfterReveal = await skelCount();   // the tabs the filter hid come back: skeletons at the head (never built while hidden), loaded tabs at the base
@@ -197,11 +213,12 @@ await page.evaluate(() => { sessionStorage.setItem("romp:reloadReason", JSON.str
 await page.reload();
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
 await page.waitForFunction(() => { const h = document.querySelector('[data-act="toggle-group"][data-group="api"]'); return !!h && h.dataset.folded === "1"; }, null, { timeout: 10000 }).catch(() => {});
-await page.waitForFunction((api) => { const shown = Array.from(document.querySelectorAll("#tabs .tab-skeleton")).map((e) => e.getAttribute("data-id")).filter((id) => id && !api.includes(id)); return shown.length === 0; }, cfg.apiSids, { timeout: 40000 }).catch(() => {});   // the shown skeletons filled
-await page.waitForFunction(() => { const f = window.__frames; const last = f.length ? f[f.length - 1].t : 0; return performance.now() - window.__t0 - last > 1500; }, null, { timeout: 30000 }).catch(() => {});   // the wire quiet
+const shownFilled9 = await page.waitForFunction((api) => { const shown = Array.from(document.querySelectorAll("#tabs .tab-skeleton")).map((e) => e.getAttribute("data-id")).filter((id) => id && !api.includes(id)); return shown.length === 0; }, cfg.apiSids, { timeout: 40000 }).then(() => true, timedOut);   // the shown skeletons filled
+const rested9 = await atRest();   // …and the pass the last fill queued has run: a folded tab it asked for is in the asks read below
 const folded = await page.evaluate((api) => ({ header: (document.querySelector('[data-act="toggle-group"][data-group="api"]') || {}).dataset ? document.querySelector('[data-act="toggle-group"][data-group="api"]').dataset.folded : null,
   apiFulls: window.__frames.filter((f) => f.type === "session" && f.n && api.includes(f.id)).length, apiAsks: window.__sent.filter((m) => m.type === "needFull" && api.includes(m.id)).length,
   idles: window.__idles, frames: window.__frames.length, needFull: window.__sent.filter((m) => m.type === "needFull").length }), cfg.apiSids);
+folded.shownFilled = shownFilled9; folded.rested = rested9;
 await page.evaluate(() => { const h = document.querySelector('[data-act="toggle-group"][data-group="api"]'); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true })); });   // opened
 await page.waitForFunction((n) => window.__sent.filter((m) => m.type === "needFull").length > n, folded.needFull, { timeout: 10000 }).catch(() => {});
 const unfolded = await page.evaluate(([b, api]) => { const asks = window.__sent.filter((m) => m.type === "needFull"); const firstAsk = asks.length > b.needFull ? asks[b.needFull] : null;
@@ -219,9 +236,10 @@ await page.waitForFunction(() => { const h = document.querySelector('[data-act="
 await page.evaluate(() => { sessionStorage.setItem("romp:reloadReason", JSON.stringify({ reason: "restart", path: "/chat", t: Date.now() })); });
 await page.reload();
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
-await page.waitForFunction((api) => { const shown = Array.from(document.querySelectorAll("#tabs .tab-skeleton")).map((e) => e.getAttribute("data-id")).filter((id) => id && !api.includes(id)); return shown.length === 0; }, cfg.apiSids, { timeout: 40000 }).catch(() => {});
-await page.waitForFunction(() => { const f = window.__frames; const last = f.length ? f[f.length - 1].t : 0; return performance.now() - window.__t0 - last > 1500; }, null, { timeout: 30000 }).catch(() => {});
+const shownFilled10 = await page.waitForFunction((api) => { const shown = Array.from(document.querySelectorAll("#tabs .tab-skeleton")).map((e) => e.getAttribute("data-id")).filter((id) => id && !api.includes(id)); return shown.length === 0; }, cfg.apiSids, { timeout: 40000 }).then(() => true, timedOut);
+const rested10 = await atRest();   // the pass the last fill queued has run, as on road 9
 const siblingBefore = await page.evaluate((api) => ({ header: (document.querySelector('[data-act="toggle-group"][data-group="api"]') || { dataset: {} }).dataset.folded, idles: window.__idles, frames: window.__frames.length, needFull: window.__sent.filter((m) => m.type === "needFull").length, apiAsks: window.__sent.filter((m) => m.type === "needFull" && api.includes(m.id)).length }), cfg.apiSids);
+siblingBefore.shownFilled = shownFilled10; siblingBefore.rested = rested10;
 const sibling = await context.newPage();
 await sibling.goto(cfg.chat);
 await sibling.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
@@ -524,6 +542,8 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(rv_tabs := r["revealed"]["tabs"], h["start"]["tabs"] + hidden_n, "the filter hid the eighteen api and tests tabs and showed the nine web tabs: %r then %r" % (h["start"], r["revealed"]))
         self.assertGreaterEqual(h["start"]["skel"], 1, "the shown tabs other than the selected start as skeletons: %r" % h["start"])
         self.assertEqual(h["skelVisibleAfterWait"], 0, "the shown skeletons filled on idle callbacks: %r" % h)
+        self.assertTrue(h["rested"], "the prefetch came to rest after the fill (the pass past the visible set ran): %r" % h)
+        self.assertEqual(h["hiddenAsks"], 0, "…and asked for no tab the filter hides: %r" % h)
         rv = r["revealed"]
         self.assertGreaterEqual(rv["tabs"], N_SESSIONS, "lifting the filter shows every tab: %r" % rv)
         self.assertEqual(rv["skelAfterReveal"], hidden_n, "the tabs the filter hid come back as SKELETONS: none was built while hidden (at the base they came back loaded): %r" % rv)
@@ -555,7 +575,9 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(r["foldedBefore"], "1", "the api section folded on the header's click before the reload: %r" % r["foldedBefore"])
         f = r["folded"]
         self.assertEqual(f["header"], "1", "the fold survived the restart reload: %r" % f)
-        self.assertEqual((f["apiFulls"], f["apiAsks"]), (0, 0), "no folded tab was built or asked for while folded (the shown skeletons filled and the wire went quiet): %r" % f)
+        self.assertTrue(f["shownFilled"], "the shown skeletons filled: %r" % f)
+        self.assertTrue(f["rested"], "…and the prefetch came to rest after the fill (the pass that would reach a folded tab ran): %r" % f)
+        self.assertEqual((f["apiFulls"], f["apiAsks"]), (0, 0), "no folded tab was built or asked for while folded: %r" % f)
         u = r["unfolded"]
         self.assertEqual(u["header"], "0", "the header's click opened the section: %r" % u)
         self.assertGreater(u["idles"], f["idles"], "opening the section scheduled an idle pass: %r -> %r" % (f, u))
@@ -597,6 +619,7 @@ class ColdBootDiet(unittest.TestCase):
         r = self._result()
         b, a = r["siblingBefore"], r["siblingAfter"]
         self.assertEqual(b["header"], "1", "the api section folded again on this page before the sibling opened it: %r" % b)
+        self.assertTrue(b["shownFilled"] and b["rested"], "the shown skeletons filled and the prefetch came to rest after the fill: %r" % b)
         self.assertEqual(b["apiAsks"], 0, "no folded tab asked for while folded: %r" % b)
         self.assertEqual(a["header"], "0", "the sibling's click opened the section here (the store's storage event repainted): %r" % a)
         self.assertGreater(a["idles"], b["idles"], "…and this page scheduled an idle pass: %r -> %r" % (b, a))
