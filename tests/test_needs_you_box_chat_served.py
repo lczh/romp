@@ -75,8 +75,9 @@ const rowSel = (id) => '#notices .ntc-row[data-item="' + id + '"]';
 const readBox = () => page.evaluate(() => {
   const box = document.getElementById("notices"); const cs = box ? getComputedStyle(box) : null;
   const rows = box ? Array.from(box.querySelectorAll(".ntc-row")) : [];
-  const tab = document.querySelector('#tabs .tab[data-id]');
-  const tabs = Object.fromEntries(Array.from(document.querySelectorAll('#tabs .tab[data-id]')).map((t) => [t.getAttribute("data-id"), t.className]));   // every tab's classes by sid: the rings
+  // every tab's classes by sid, the rings, read BY ID (the first review round of this fix: the strip's first tab, which this record carried as
+  // web's, is api's under a saved order that puts api first, while the pick has moved the page to web)
+  const tabs = Object.fromEntries(Array.from(document.querySelectorAll('#tabs .tab[data-id]')).map((t) => [t.getAttribute("data-id"), t.className]));
   const vis = (el) => !!el && getComputedStyle(el).display !== "none";
   const level = box ? ["ntc-l0", "ntc-l1", "ntc-l2"].findIndex((c) => box.classList.contains(c)) : null;   // the box's level class (-1: none)
   return { shown: !!box && box.style.display !== "none" && !!cs && cs.display !== "none", border: cs ? cs.borderTopColor : null, borderLeft: cs ? cs.borderLeftWidth : null,
@@ -90,7 +91,7 @@ const readBox = () => page.evaluate(() => {
            theme: document.body.classList.contains("theme-light") ? "light" : "dark",
            rows: rows.map((r) => ({ id: r.getAttribute("data-item"), title: (r.querySelector(".ntc-title") || {}).textContent, body: ((r.querySelector(".ntc-secs > .fask-distill") || r.querySelector(".ntc-body")) || {}).textContent,
                                    buttons: Array.from(r.querySelectorAll(".ntc-actions button")).map((b) => b.textContent), disabled: Array.from(r.querySelectorAll(".ntc-actions button")).map((b) => b.disabled) })),
-           tabClasses: tab ? tab.className : null, tabs };
+           tabs };
 });
 const waitRows = (n, ms) => page.waitForFunction((n) => document.querySelectorAll("#notices .ntc-row").length === n, n, { timeout: ms }).then(() => true).catch(() => false);
 await page.goto(cfg.chat);
@@ -896,7 +897,7 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             self.assertEqual(row["buttons"], ["Reply", "Clear"], "a live session's question: Reply and Clear (the user 2026-09-23: no Continue button for now)")
             self.assertEqual(row["disabled"], [False, False], "two buttons, both live")
         self.assertEqual(b["rows"][3]["buttons"], ["Approve", "Deny"], "the held message keeps its stored actions")
-        self.assertIn("ring-needs-you", b["tabClasses"] or "", "the tab wears the red Blocked ring for the hard stop (it outranks the Needs you ring): %r" % b["tabClasses"])
+        self.assertIn("ring-needs-you", (b["tabs"] or {}).get(SID) or "", "web's tab wears the red Blocked ring for the hard stop (it outranks the Needs you ring): %r" % b["tabs"])
         self.assertIn("ring-waiting-on-you", (b["tabs"] or {}).get(API) or "", "api's tab, a question and no hard stop, wears the Needs you ring: %r" % b["tabs"])
 
     def test_a_brief_landing_on_a_card_reaches_its_row_with_no_gesture(self):
@@ -1302,7 +1303,7 @@ class NeedsYouBoxChatServed(unittest.TestCase):
         self.assertEqual((sw["pane"], sw["label"], sw["head"], sw["headSection"], sw["checked"]), ("chat", "Needs you box", "Boxes below the transcript", "boxes", True), "a plainly labelled row under its own head, on by default: %r" % sw)
         self.assertTrue(sw.get("rendered"), "the card OPENED and the row is on screen, so the clicks that follow are real ones (the second contributor's post-merge review of PR 2093: the card never opened before): %r" % sw)
         self.assertTrue(r["off"]["hidden"], "the box hides on the row's save: %r" % r["off"]["box"])
-        self.assertIn("ring-needs-you", r["off"]["box"]["tabClasses"] or "", "the red ring stays: the switch is the box's alone")
+        self.assertIn("ring-needs-you", (r["off"]["box"]["tabs"] or {}).get(SID) or "", "the red ring on web's tab stays: the switch is the box's alone: %r" % r["off"]["box"]["tabs"])
         self.assertIn("ring-waiting-on-you", (r["off"]["box"]["tabs"] or {}).get(API) or "", "and the Needs you ring on api's tab stays too: %r" % r["off"]["box"]["tabs"])
         self.assertTrue(r["on"]["shown"], "back on, the box returns with its rows: %r" % r["on"]["box"])
         self.assertEqual(r["on"]["levelKept"], 2, "at the level the page held for the session, read before any click (the same review: two mutants resetting the level on rebuild passed a read after a fold)")
