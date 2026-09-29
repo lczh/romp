@@ -970,7 +970,7 @@ class HostProcess(unittest.TestCase):
         res = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result")
         # the fault frame and its host.log row come from the journal writer, which may still be behind the result's frame:
         # wait for the frame itself (the row is written just before it), and read the journal at its landed records
-        k.recv_until(lambda f: f.get("t") == "fault")
+        k.recv_until(lambda f: f.get("t") == "fault" and f.get("kind") == "journal-write-failed")
         faults = [f for f in k.frames if f.get("t") == "fault"]
         self.assertEqual([f["kind"] for f in faults], ["journal-write-failed"])
         self.assertIsNone(host.poll(), "the host and its CLI are still running")
@@ -1126,9 +1126,9 @@ class LiveJournalReads(unittest.TestCase):
     arrived. The host forwards each record to the kernel at once and journals it on its own writer task, so a frame says
     nothing about the disk (by design: the reader never waits for the disk, and an attach is served the unwritten records
     from memory). The 2026-09-16 fix moved the turn test onto `_journal_landed`; the re-exec test, added two days later,
-    read the journal at the frame again and failed the same way on 2026-09-24 and 09-26. So inside HostProcess a live
-    host's journal is read only through `_journal_landed`, the wait on the writer's n-th record, except in the one test
-    that reads at the frame on purpose, to show the disk trailing the socket."""
+    read the journal at the frame again and failed the same way on 2026-09-24 and 09-26. So inside HostProcess
+    `read_journal_dir` runs on a live host's journal only inside `_journal_landed`, the wait on the writer's n-th record,
+    except in the one test that reads at the frame on purpose, to show the disk trailing the socket."""
 
     AT_THE_FRAME_ON_PURPOSE = {"test_the_journal_lands_every_record_behind_the_socket_when_the_writer_lags"}
 
