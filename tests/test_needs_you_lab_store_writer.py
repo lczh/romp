@@ -61,8 +61,8 @@ ASIDE = SID + ".json.corrupt-20260101T000000Z"   # a store the kernel moved asid
 # node's writers that open a file and fill it in place (truncating it first, or filling it in steps): any of them on a file the kernel reads
 # reopens the window the CI red fell into, so NoInPlaceWrites looks for each, not only the one the driver happened to use. It matches these
 # exact spellings on a line of a driver: writeFile (sync, callback and promise), truncate and cp in the same three forms, copyFile in the
-# same three (a copy truncates the target and keeps its inode), createWriteStream, and TRUNCATING_OPEN below. A writer reached through an
-# alias of fs is not matched, and an "r+" open and a numeric flag are not matched.
+# same three (copyFile truncates the target and keeps its inode; cp puts a new file at the path instead), createWriteStream, and
+# TRUNCATING_OPEN below. A writer reached through an alias of fs is not matched, and an "r+" open and a numeric flag are not matched.
 IN_PLACE_WRITES = ("fs.writeFileSync(", "fs.writeFile(", "fs.promises.writeFile(", "fs.truncateSync(", "fs.truncate(", "fs.promises.truncate(",
                    "fs.createWriteStream(", "fs.copyFileSync(", "fs.copyFile(", "fs.promises.copyFile(", "fs.cpSync(", "fs.cp(",
                    "fs.promises.cp(")
@@ -299,8 +299,8 @@ class LabStoreWriter(unittest.TestCase):
         """The identity is taken from the descriptor the bytes are read through. Here the writer is held right after it opens the store,
         before the identity is taken or a byte is read, and the kernel publishes: the writer reads the file it opened, the old one, and
         holds that file's identity, so its rename stands down and the edit goes round again on the kernel's bytes. An identity taken by
-        path, before the read or after it, would be the kernel's new file while the bytes are the old one's, and the rename would publish
-        them over the kernel's card."""
+        path after the open, before the read or after it, would be the kernel's new file while the bytes are the old one's, and the
+        rename would publish them over the kernel's card."""
         holds, end, other = self._drive(lambda n, path: self._publish(G7, "which fixture owns the port the api listens on?") if n == 0 else {},
                                         holdAt=["open"])
         self.assertEqual(end and end[0], "DONE", "the writer finished: %r %s" % (end, other))
@@ -309,7 +309,7 @@ class LabStoreWriter(unittest.TestCase):
         final = jd.load_goals(SID)
         self.assertEqual((G7 in final["nodes"], (final["nodes"].get(G6) or {}).get("blockSummary"), self._aside()), (True, NEW_BRIEF, []),
                          "the kernel's card published between the lab's open and its read stands and the lab's edit landed on top of it (an "
-                         "identity taken by path, before the read or after it, names the kernel's file, not the one the bytes came from, and "
+                         "identity taken by path after the open, before the read or after it, names the kernel's file, not the bytes' own, and "
                          "the rename publishes over the card): nodes %r, holds %r" % (sorted(final["nodes"]), holds))
         self.assertEqual(len(holds), 2, "the first round read the old file and stood down, the second read the kernel's: %r" % holds)
         self.assertEqual(final.get("rev"), holds[0]["kernelRev"] + 1, "one revision past the kernel's publication")
