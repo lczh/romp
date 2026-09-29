@@ -173,8 +173,17 @@ const judgeAfter = await perf();
 // first use, the frame carries its definition, and the pane names the board beside the producer until phase four's view
 const r8 = await post({ id: cfg.sid, key: "figboard", title: "A figure on its own board", producer: "cli", board: "figures", category: "new" });
 const id8 = "notice:" + cfg.sid + ":figboard:" + (r8.notice || {}).rev;
-await page.waitForFunction(() => (window.__feedNotices || []).some((f) => f.some((k) => k.includes(":figboard:"))), null, { timeout: 30000 }).catch(() => {});   // the frame carries the card, the feed shows it not (phase four)
-const onBoard = { post: r8, card: await cardFacts(id8) };
+// the frame carries the card, the feed shows it not (phase four). Both halves are events the read waits on (2026-09-29): the frame
+// carrying the board card is recorded, never swallowed, and a plain card posted after it is waited for in the DOM, so the page has
+// painted a frame at least as new as the board card's before its absence is read (a frame that never came, or a feed not yet
+// painted, read as a filter that worked)
+const timedOut = (e) => { if (e && e.name === "TimeoutError") return false; throw e; };
+const boardFrame = await page.waitForFunction(() => (window.__feedNotices || []).some((f) => f.some((k) => k.includes(":figboard:"))), null, { timeout: 30000 }).then(() => true, timedOut);
+const r9 = await post({ id: cfg.sid, key: "after-board", title: "A plain card after the board's", producer: "cli" });
+const id9 = "notice:" + cfg.sid + ":after-board:" + (r9.notice || {}).rev;
+const plainShown = await page.waitForSelector(sel(id9), { state: "attached", timeout: 60000 }).then(() => true, timedOut);
+const plainFrameHasBoard = await page.evaluate((id) => { const f = (window.__feedNotices || []).find((x) => x.includes(id)); return !!f && f.some((k) => k.includes(":figboard:")); }, id9);
+const onBoard = { post: r8, boardFrame, plainShown, plainFrameHasBoard, card: await cardFacts(id8) };
 process.stdout.write("RESULT:" + JSON.stringify({ first, second, latched, done2, stillThere, toasts, rearmed, afterClear, undone, revision, expiry, refused, errors, diag, r7, ownerless, byName, onBoard, bare, judgeBefore, judgeAfter }) + "\n");
 await browser.close();
 """
@@ -326,6 +335,11 @@ class NoticeCardsServed(unittest.TestCase):
         ob = r["onBoard"]
         self.assertTrue(ob["post"].get("ok"), ob["post"])
         self.assertEqual((ob["post"]["notice"]["board"], ob["post"]["notice"]["category"], ob["post"]["notice"].get("created")), ("figures", "new", "board"))
+        # the absence below is read off a painted feed that had the card: the kernel's frame carried it, and a plain card posted after
+        # it is on the page, brought by a frame that carried the board card too
+        self.assertTrue(ob["boardFrame"], "the kernel's feed frame carried the board card: %r" % ob)
+        self.assertTrue(ob["plainShown"], "a plain card posted after it painted on the feed: %r" % ob)
+        self.assertTrue(ob["plainFrameHasBoard"], "…from a frame that carried the board card as well: %r" % ob)
         self.assertIsNone(ob["card"], "a card on a board of yours is not on the feed: the board's own view shows it (phase four; tests/test_board_view_served.py drives that view)")
 
     def test_a_command_line_card_wears_no_distilling_placeholder_and_the_judges_never_run_for_it(self):
