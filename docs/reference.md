@@ -2298,7 +2298,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   "reclaimed", else the count the line names as kept by a live root; rebound each
   run, so a load after a live-root release reads it back at 0, like `lastReleaseSids`),
   `lastReleaseSids` (the first eight characters of the sids the LAST JUDGEMENT
-  owed a reclaim for, cleared each judgement, so a tick that owed nothing clears
+  owed a reclaim for, cleared each judgement, so an idle tick that owed nothing clears
   it and a cheap-collect release judged `load` shows them too; a busy load or
   backstop judges nothing and clears them as well, so a busy run after a
   live-root release reads no sids, 0 survivors and its own kind, as an idle run
