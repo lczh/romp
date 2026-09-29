@@ -217,9 +217,11 @@ const writeStore = async (mutate) => {   // the feed build id before the write (
   // And it is published whole, never rewritten in place (a CI red on main, 2026-09-24): the in-place write truncated the store first, a kernel
   // read in that instant found it empty, moved it aside as corrupt and started the session fresh, and the next scene's node was gone. So the
   // bytes go through publishJson (a temp file and a rename), and the rename is this writer's own compare-and-swap on the file's identity, taken
-  // from the descriptor the bytes are read from: a kernel publication that lands before the rename sends the edit round again on the new bytes,
-  // twenty rounds at most, then a named error. What stays open is the kernel's side: a save whose check passed before this rename can still
-  // publish over it inside its check-to-rename gap (the kernel takes no file lock); nodeOf names such a loss at the next edit.
+  // from the descriptor the bytes are read from: a kernel publication that lands before the identity check just ahead of the
+  // rename sends the edit round again on the new bytes, twenty rounds at most, then a named error. What stays open is each side's check-to-rename
+  // gap (nothing takes a file lock): a kernel publication landing inside this writer's gap is renamed over, and a kernel save whose check passed
+  // before this rename can publish over it inside its own; nodeOf names a node lost that way at the next edit, and a lost brief shows as the
+  // scene's build wait missing, with the file's revision and brief in its record.
   const b0 = ((await kernelFeed()) || {}).buildId;
   for (let round = 0; round < 20; round++) {   // loop-ok: bounded; a new round only when a kernel publication moved the store after this round's read
     const fd = fs.openSync(cfg.store, "r"); let id0, st;
