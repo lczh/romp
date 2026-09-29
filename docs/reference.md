@@ -33,7 +33,7 @@ These are for scripting and for agents rather than daily use:
 |---|---|
 | `romp url` | Print only the tokened dashboard URL, for piping |
 | `romp sessions [--json]` | The fleet with each session's state, identity colours, directory and backend |
-| `romp perf [--interval <s>] [--json]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
+| `romp perf [--interval <s>] [--json [--walk]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, and `--walk` adds its two heap-wide gauges; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
 | `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
@@ -2162,7 +2162,8 @@ goal-store loads and writes per second, judge passes and their durations,
 memory and thread count. `romp perf --json` prints one raw snapshot. Two
 fields cost time in proportion to the whole heap, `heap.allocatedBlocks` and
 `gc.frozen`, so a plain read leaves them `null` and only `GET /perf?walk=1`
-fills them; the plain read no longer walks the whole heap. If the kernel
+fills them; the plain read no longer walks the whole heap.
+`romp perf --json --walk` prints the snapshot with both filled. If the kernel
 restarted between the two snapshots the counters have started over, so the
 command says so and exits non-zero instead of printing negative rates; a
 refused token is reported as such, not as a dead kernel.
