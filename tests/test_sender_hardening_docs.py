@@ -18,6 +18,9 @@ text cannot state a header value, a file or a sandbox the tree does not have:
     test the popup lab defines; it states the outcome that witness asserts (the tab opens without the page) and no
     engine's refusal page, which nothing asserts; the paragraph follows "The pin:", which pins the bullets above it;
     the URL frame's sandbox in the kernel lacks the token that would lift it.
+Every sentence of the three passages is also read whole, with the values the code sets filled in: while the test read
+fragments, four clauses (the bullet's scope, the parenthetical, the verb of the browser's rule and the cost of lifting
+the limit) could each be reversed with every test green (the 2026-09-29 review).
 Reads the tree only: no kernel, no browser.
 """
 import os
@@ -64,9 +67,29 @@ class SecurityDoc(unittest.TestCase):
         b = _flat(_bullet(hardened, "**Window isolation:**"))
         sent = re.findall(r'send_header\("Cross-Origin-Opener-Policy", "([^"]+)"\)', self.kernel)
         self.assertEqual(sent, ["same-origin-allow-popups"], "Handler._send sends the header once, with this value")
-        self.assertIn("`Cross-Origin-Opener-Policy: %s`" % sent[0], b)
+        self.assertIn("every page the kernel serves carries `Cross-Origin-Opener-Policy: %s` (" % sent[0], b,
+                      "the scope: Handler._send sends the header on every page, not the shell's alone")
         self.assertIn("a state-root pane's own files excepted", b, "the exemption Handler._send's opener_policy=False makes")
         self.assertEqual(self.kernel.count("opener_policy=False)"), 1, "one exempt route: a state-root pane's own files")
+
+    def test_the_window_isolation_bullet_reads_whole(self):
+        # One sentence, read whole with the header value and the cap the code sets: the tests around this one read each
+        # claim against the code, and while they read fragments the scope could be narrowed to the shell page with every
+        # test green (the 2026-09-29 review)
+        hardened = _section(self.doc, "\n## What is already hardened\n", "\n## ")
+        b = _flat(_bullet(hardened, "**Window isolation:**")).strip()
+        sent = re.findall(r'send_header\("Cross-Origin-Opener-Policy", "([^"]+)"\)', self.kernel)
+        cap = re.findall(r"(?m)^export const NOTE_MAX = (\d+);$", _read("ui", "webview", "window-sender.ts"))
+        self.assertEqual((len(sent), len(cap)), (1, 1), "one header value and one cap to fill in")
+        self.assertEqual(
+            b,
+            "- **Window isolation:** every page the kernel serves carries `Cross-Origin-Opener-Policy: %s` (a"
+            " state-root pane's own files excepted), so a page on another origin that opens the dashboard gets no"
+            " handle to post messages through, and every window message listener romp installs in those pages checks"
+            " the sender, acting only on a message from one of the shell's own panes (in the shell) or from the page"
+            " itself, its parent or a window on its origin (in a pane, `ui/webview/window-sender.ts`, where each"
+            " listener's first drop from a given sender origin leaves a diagnostic row, up to %s rows per page"
+            " load)." % (sent[0], cap[0]))
 
     OPENER_WITNESS = "test_a_page_on_another_origin_that_opens_the_shell_gets_a_closed_handle"
 
@@ -111,6 +134,14 @@ class SecurityDoc(unittest.TestCase):
         # both halves: the default address as well as the https route (dropping the first half passed every test, the
         # 2026-09-29 review)
         self.assertIn("The default address and the https route through `tailscale serve` are secure contexts.", b)
+        # and the bullet whole, both sentences, so no clause in it can be reversed while the fragments above still read
+        self.assertEqual(
+            b.strip(),
+            "- On a plain-http address other than `localhost` or `%s` (a LAN or tailnet address set with"
+            " `ROMP_SERVE_HOST`), browsers ignore the opener policy below, since they enforce it only in a secure"
+            " context, and the sender checks in each page's listeners are the remaining protection against another"
+            " window's messages. The default address and the https route through `tailscale serve` are secure"
+            " contexts." % bind[0])
 
     def test_no_em_dash_in_the_new_lines(self):
         for label, head in (("**Window isolation:**", "\n## What is already hardened\n"),
@@ -132,12 +163,24 @@ class PanesPlan(unittest.TestCase):
         return self.sec5[at:end if end >= 0 else len(self.sec5)]
 
     def test_section_five_says_a_url_pane_cannot_open_a_dashboard_page_in_a_tab_and_why(self):
+        # Each sentence whole, the header value as Handler._send sends it: while this read fragments, the parenthetical
+        # (allow-popups does not lift the sandbox), the verb of the browser's rule (renders only when) and the cost of
+        # lifting the limit (unsandbox every popup) could each be reversed with every test green (the 2026-09-29 review)
         p = _flat(self._para())
-        self.assertIn("inherits the frame's sandbox", p)
-        self.assertIn("only when that response's `Cross-Origin-Opener-Policy` is `unsafe-none`", p)
-        self.assertIn("declares `same-origin-allow-popups` except a state-root pane's own files", p)
+        sent = re.findall(r'send_header\("Cross-Origin-Opener-Policy", "([^"]+)"\)', self.kernel)
+        self.assertEqual(len(sent), 1, "Handler._send sends the header once")
+        self.assertIn("A tab the pane opens inherits the frame's sandbox (`allow-popups` lets the pane open it but"
+                      " does not lift the sandbox), and a browser renders a sandboxed navigation's response only"
+                      " when that response's `Cross-Origin-Opener-Policy` is `unsafe-none`.", p,
+                      "why: the tab keeps the frame's sandbox, and a sandboxed navigation renders only under"
+                      " unsafe-none")
+        self.assertIn("Every page the kernel serves declares `%s` except a state-root pane's own files, so a tab"
+                      " onto one of the dashboard's pages opens without showing that page." % sent[0], p,
+                      "the scope of the policy, and the outcome the witness asserts")
         self.assertIn("A URL pane can open a state-root pane's own files.", p)
-        self.assertIn("Short of dropping the policy, lifting the limit would take `allow-popups-to-escape-sandbox` on the frame", p)
+        self.assertIn("Short of dropping the policy, lifting the limit would take"
+                      " `allow-popups-to-escape-sandbox` on the frame, which would unsandbox every popup the pane"
+                      " opens.", p, "the one token that lifts it, and its cost")
         self.assertNotIn("\u2014", p)
 
     def test_the_tab_limit_follows_the_pin_so_the_pin_reads_as_the_bullets_own(self):
@@ -153,7 +196,7 @@ class PanesPlan(unittest.TestCase):
 
     def test_the_named_witness_is_a_test_the_popup_lab_defines(self):
         p = _flat(self._para())
-        self.assertIn("`tests/test_pane_popup_opener_served.py` witnesses the refusal (`%s`)" % self.WITNESS, p)
+        self.assertIn("`tests/test_pane_popup_opener_served.py` witnesses the refusal (`%s`)." % self.WITNESS, p)
         lab = _read("tests", "test_pane_popup_opener_served.py")
         self.assertEqual(len(re.findall(r"(?m)^    def %s\(self\):" % self.WITNESS, lab)), 1)
 
