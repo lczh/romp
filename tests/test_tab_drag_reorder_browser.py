@@ -389,8 +389,9 @@ async function dragAcrossPush(label, fromRow, fromIdx, toRow, toIdx, frac, renam
   const rebuiltMidDrag = log.some((e) => e.k.startsWith("rebuild") && e.t > t0 && e.t < t1);
   Object.assign(cases[cases.length - 1], { rename: ans, pushed, shownDuring, shownAfter, rebuiltMidDrag });
 }
+const out = { grouped: null, yatharth: null };
 // wayBack: every way-back click foldGroup took in the main run (none expected: the open session is in no group)
-const out = { grouped: null, yatharth: null, opened, wayBack: [] };
+Object.assign(out, { opened, wayBack: [] });
 // 1. the CLASSIC theme, the control: row 0 = the infra group, the last row = the untagged trail
 let L = await layout();
 opened.slot = L.rows.length ? L.rows[L.rows.length - 1].findIndex((t) => t.id === opened.active) : null;   // its place on the trail's row
