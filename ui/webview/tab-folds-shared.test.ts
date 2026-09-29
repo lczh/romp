@@ -279,17 +279,17 @@ test("a new connection's first hearing ends the entry of the one before it", () 
   });
 });
 
-test("pagehide ends the current connection's entry: a page that went away will never have its publish answered", () => {
-  withStore({}, (store) => {
+test("pagehide ends the current connection's entry, and only its: a page that went away will never have its publish answered", () => {
+  withStore({ [PUBLISHES]: { browser: "e".repeat(32), n: 1, live: { sibling: 1 } } }, (store) => {
     const sent: Sent[] = [];
     const hear = hearing(sent);
     hear(kernelCopy(NO_FOLDS));
-    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));   // numbers 2 and 3
     writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
     (globalThis as any).window.dispatchEvent(new Event("pagehide"));
-    assert.deepEqual(record(store).live, {});
+    assert.deepEqual(record(store).live, { sibling: 1 }, "a sibling pane's entry stands: its own answer may still be on its socket");
     hear(kernelCopy(sent[0].f), sent[0].by);
-    assert.deepEqual(readTabGroups().collapsed, ["api"], "heard: nothing of this browser's is still out");
+    assert.deepEqual(readTabGroups().collapsed, ["api"], "heard: nothing of this browser's still out is later than it");
   });
 });
 

@@ -380,6 +380,13 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual(stale, [], "dropped: nothing pushed")
         self.assertEqual(self.stored_folds(), FOLDS, "nothing written")
         self.assertEqual(km._view_order_frame().get("foldsBy"), {"browser": self.B, "n": 2}, "and the name served is still the later one")
+        # an EQUAL number is not older: two tabs of one browser racing on its record can both mint it, and only a number
+        # below the one handled is a state that browser has already replaced
+        again = dict(FOLDS, collapsed=["tests"])
+        [equal] = self.dispatch(self.publish(again, {"browser": self.B, "n": 2}))
+        self.assertEqual([(m[0], m[2].get("foldsBy")) for m in equal], [("phone", {"browser": self.B, "n": 2}), ("desktop", {"browser": self.B, "n": 2})],
+                         "an equal number is taken and pushed to every viewer")
+        self.assertEqual(self.stored_folds(), again)
         other = dict(FOLDS, collapsed=["web"])
         [taken] = self.dispatch(self.publish(other, {"browser": self.C, "n": 1}))
         self.assertEqual([m[2].get("foldsBy") for m in taken], [{"browser": self.C, "n": 1}] * 2, "another browser's first publish is its own count")
@@ -402,11 +409,13 @@ class ViewFoldsStore(ViewOrderStore):
 
     def test_the_browsers_remembered_are_bounded_and_the_one_heard_from_longest_ago_goes_first(self):
         cap = getattr(km, "_VIEW_FOLDS_SEEN_CAP", 256)
-        self.dispatch(*[self.publish(FOLDS, {"browser": "b%03d" % i, "n": 5}) for i in range(cap + 1)])
-        [kept] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": "b001", "n": 1}))
-        self.assertEqual(kept, [], "the second browser is still remembered: its older publish is dropped")
-        [forgotten] = self.dispatch(self.publish(dict(FOLDS, collapsed=["web"]), {"browser": "b000", "n": 1}))
-        self.assertEqual(len(forgotten), 2, "the first was forgotten when the %dth arrived: its publish is taken as new" % (cap + 1))
+        self.dispatch(*[self.publish(FOLDS, {"browser": "b%03d" % i, "n": 5}) for i in range(cap)])
+        # the first browser heard from again: it is now the one heard from most recently, and the second the longest ago
+        self.dispatch(self.publish(FOLDS, {"browser": "b000", "n": 6}), self.publish(FOLDS, {"browser": "b%03d" % cap, "n": 5}))
+        [forgotten] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": "b001", "n": 1}))
+        self.assertEqual(len(forgotten), 2, "the second was forgotten when the %dth browser arrived: its publish is taken as new" % (cap + 1))
+        [kept] = self.dispatch(self.publish(dict(FOLDS, collapsed=["web"]), {"browser": "b000", "n": 1}))
+        self.assertEqual(kept, [], "the first, heard from since, is still remembered: its older publish is dropped")
 
 
 if __name__ == "__main__":
