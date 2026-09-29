@@ -63772,6 +63772,7 @@ def _shim(app, v=0, no_stale=False, pv=None, data=None):
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
 var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=null;   // readyProto/readyMsg: the bundle's ready as sent, for the redial's dial term (&proto=) and for a fresh dial after a ready no caps frame answered (the socket died between the kernel's pushes and its frame): onopen posts it again, so the kernel serves the page whole, answers, and the redials after carry the flag (round 3, C); one the flush just sent is not doubled   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
+var queuedForeign=0,FOREIGN_QUEUE_MAX=20;   // of those, the window-sender rows (window-sender.ts noteForeign and the timeline boot's copy), which another page's posts cause: capped on their own count, so they never take one of the DIAG_QUEUE_MAX slots this page's own rows keep (under one cap, a foreign page posting into every frame during an outage cut the page's own record of it, the 2026-09-29 review); counted in queuedDiag as well, so the reload hold and the loss line leave them out like every breadcrumb; the cap is noteForeign's NOTE_MAX
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
 // URLs); otherwise the shell's per-tab id from sessionStorage, which is scoped to the browsing context and
@@ -63999,7 +64000,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;queuedForeign=0;
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -64071,7 +64072,7 @@ function diagStamp(m){var c={};for(var k in m)c[k]=m[k];c.build=LOADEDV;c.boot=B
 function send(m){if(m&&m.type==="clientDiag")m=diagStamp(m);var s=JSON.stringify(m);if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);readyMsg=s;}   // the bundle's listener is installed: from here a redial may declare itself (the dial term in connect)
 if(ws&&ws.readyState===1){ws.send(s);return;}
 if(m&&m.type==="ready")readyQueued=true;   // ...and this one waits for the open: the redial that carries it dials as a fresh page (onopen clears the bit after the flush)
-if(m&&m.type==="clientDiag"){if(queuedDiag>=DIAG_QUEUE_MAX)return;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped; everything else queues as before
+if(m&&m.type==="clientDiag"){var fr=m.surface==="window-sender";if(fr?queuedForeign>=FOREIGN_QUEUE_MAX:queuedDiag-queuedForeign>=DIAG_QUEUE_MAX)return;if(fr)queuedForeign++;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped, this page's own and the window-sender rows each on their own count; everything else queues as before
 queue.push(s);}
 // ONE ordered dispatch FIFO per socket (the user 2026-09-07, whose dashboard froze on return to its tab): a tab
 // that sat hidden or frozen thaws into EVERY frame the browser queued for it, and each used to be parsed AND

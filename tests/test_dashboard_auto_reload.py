@@ -1102,7 +1102,7 @@ class ReloadWiringPinned(unittest.TestCase):
         self.assertIn("if(window.__rompReload&&!window.__rompReload.inShell())window.__rompReload.checkBoot();", js)
         # the pane's queued sends hold the reload, and the flush is the ending event (review find, 2026-09-08)
         self.assertIn('window.__rompPaneBusy=function(){var q=everConnected&&queue.length>queuedDiag;if(!q){sendsSince=0;return "";}if(!sendsSince)sendsSince=Date.now();return Date.now()-sendsSince<SENDS_HOLD_MS?"sends":"";};', js)
-        self.assertIn("queue=[];queuedDiag=0;\ntry{if(window.__rompReload)window.__rompReload.ended();}catch(e){}", js)
+        self.assertIn("queue=[];queuedDiag=0;queuedForeign=0;\ntry{if(window.__rompReload)window.__rompReload.ended();}catch(e){}", js)
         # a standalone page consumes its own marker; nobody else would
         self.assertIn("try{if(window.__rompReload&&!window.__rompReload.inShell())window.__rompReload.announce(null);}catch(e){}", js)
         # …on the RECONNECT branch only: the first open is not a restart

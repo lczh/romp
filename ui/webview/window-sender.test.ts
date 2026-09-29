@@ -277,7 +277,7 @@ test("noteForeign files at most NOTE_MAX rows a page life, however many origins 
   const sent: unknown[] = [];
   const page = { __rompLocalSend: (m: unknown) => { sent.push(m); } };
   for (let i = 0; i < NOTE_MAX + 15; i++) noteForeign("frame-listener", { origin: "https://h" + i + ".example.invalid" }, null, page);
-  assert.equal(NOTE_MAX, 20, "the pane shim's cap on queued breadcrumbs");
+  assert.equal(NOTE_MAX, 20, "the pane shim's FOREIGN_QUEUE_MAX: an outage queues every row one helper files (pane-shim-stale.test.ts)");
   assert.equal(sent.length, NOTE_MAX);
   assert.deepEqual(sent[NOTE_MAX - 1], row("frame-listener", "https://h" + (NOTE_MAX - 1) + ".example.invalid"), "the first twenty, in order");
 });

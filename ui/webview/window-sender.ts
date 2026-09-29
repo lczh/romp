@@ -42,8 +42,10 @@ export function windowSender(e: { source?: unknown; origin?: unknown } | null | 
 // sender origin a page life (surface "window-sender", what "foreign", data { site, origin }): the site's name and the
 // origin the browser stamped on the post, never the message's data. The row goes through the pane shim's send
 // (window.__rompLocalSend, on a kernel page) or else the transport the caller passes (the VS Code api, or a poster that
-// reaches it), and it never throws. At most NOTE_MAX rows a page life, the pane shim's cap on queued breadcrumbs: a
-// page framing many origins cannot flood the journal, and the first rows already name what is refused. The timeline
+// reaches it), and it never throws. At most NOTE_MAX rows a page life: a page framing many origins cannot flood the
+// journal, and the first rows already name what is refused. While a kernel page's socket is down, the pane shim queues
+// these rows under a cap of their own (kernel.py _shim, FOREIGN_QUEUE_MAX, equal to NOTE_MAX), so a foreign page posting
+// during an outage never takes a queued slot from the page's own rows (pane-shim-stale.test.ts runs it). The timeline
 // boot (kernel.py _TIMELINE_BOOT) inlines the same beside heardSender. Kept import-free, like windowSender.
 export const NOTE_MAX = 20;
 export type NoteTransport = ((m: Record<string, unknown>) => unknown) | { postMessage(m: unknown): unknown } | null | undefined;
