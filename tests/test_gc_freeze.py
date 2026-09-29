@@ -450,7 +450,8 @@ class PusherTick(unittest.TestCase):
         release left `lastReleaseSids` naming the released session beside the load's kind and the survivor count every run
         rebinds (0). On /perf that is the shape of a cheap-collect release of that session, where a full-heap pause had
         freed nothing. A busy run judged nothing and owed nothing, so it clears the sids: the three fields then describe one
-        run, a busy load reading no sids, 0 survivors and `load`, a busy backstop the same with `backstop`."""
+        run, a busy load reading no sids, 0 survivors and `load`, a busy backstop the same with `backstop`. A busy cycle with
+        nothing due runs nothing and keeps the last run's row."""
         fake, errs = TakingGc(), []
         c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=1, gc=fake, clock=lambda: 0.0)
         t = self._seam(c, errs)
@@ -464,6 +465,10 @@ class PusherTick(unittest.TestCase):
         c.note_ended(root, thread=fin)
         self.assertEqual(t(True, False, 40), "release", "an idle cycle releases the owed ref")
         self.assertEqual(fields(), (["abcdef12"], 1, "release"), "a live-root release: its sid, one survivor, the kind: %r" % c.perf())
+        # review 2026-09-29: a busy cycle with nothing due ran nothing, so it keeps the release's row, and /perf still names
+        # the session a live root kept through that wasted pause
+        self.assertIsNone(t(False, False, 41), "a busy cycle with nothing due runs nothing")
+        self.assertEqual(fields(), (["abcdef12"], 1, "release"), "and keeps the release's row: its sid, the survivor, the kind: %r" % c.perf())
         self.assertEqual(t(False, False, 48), "load", "a busy cycle folds the next load in")
         self.assertEqual(fields(), ([], 0, "load"), "the busy load owed nothing: no sids, no survivor, a load: %r" % c.perf())
         # a cheap-collect release (judged `load`) names its owed sid and brings the fold-ins to twice the bound, so the next
