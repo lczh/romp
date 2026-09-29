@@ -69,10 +69,10 @@ await page.addInitScript((rid) => {
   try { localStorage.setItem("romp-vscode-state-chat", JSON.stringify({ activeId: rid })); } catch (e) {}
   // count the page's full-frame asks (round two: the needFull storm and the guard-3 refusal both post one): a hook on
   // the socket send, installed before any page script opens one.
-  window.__needFull = 0; window.__diag = [];
+  window.__needFull = 0; window.__diag = []; window.__asks = [];
   try { const W = window.WebSocket, OS = W.prototype.send;
     W.prototype.send = function (d) { try { const m = JSON.parse(d);
-      if (m && m.type === "needFull") { window.__needFull++; return; }
+      if (m && m.type === "needFull") { window.__needFull++; window.__asks.push({ why: m.why || null }); return; }
       if (m && m.type === "clientDiag") window.__diag.push({ what: m.what, why: (m.data || {}).why }); } catch (e) {} return OS.call(this, d); }; } catch (e) {}
 }, cfg.remote);
 
@@ -105,10 +105,28 @@ const park = async () => {
   await page.waitForTimeout(1800);
 };
 
+// What the page files when it REFUSES a frame, the event a refused scenario's read waits on (2026-09-29; a 2500 ms pause stood for it,
+// so a page that dropped or ignored the frame kept the store, the read point and its neighbours, and passed every invariant below): a
+// refused full frame files its desync row (render.ts guard 3, why would-drop-held), the loop's second identical refusal files the loop
+// row, and a refused delta asks for the full frame, or files the refusal row when an ask is already out. The page holds one session,
+// so a gap ask is this frame's. A scenario the page must APPLY keeps the pause: its own assertions are positive, a miss fails them.
+const REFUSED = { taillo_low: "desync", straddle_lying: "desync", tailrun_drop: "desync", loop: "desync-loop", anchor_in_history: "gap-ask", from_into_history: "gap-ask" };
+const marks = () => page.evaluate(() => ({ d0: (window.__diag || []).length, a0: (window.__asks || []).length }));
+const refusedBy = (kind, m) => page.waitForFunction((a) => {
+  const d = (window.__diag || []).slice(a.d0), asks = (window.__asks || []).slice(a.a0);
+  if (a.kind === "desync") return d.some((r) => r.what === "full-frame-desync" && r.why === "would-drop-held");
+  if (a.kind === "desync-loop") return d.some((r) => r.what === "full-frame-desync-loop" && r.why === "would-drop-held");
+  return asks.some((x) => x.why === "gap") || d.some((r) => r.what === "delta-refused" && r.why === "gap");
+}, { kind, ...m }, { timeout: 15000 }).then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
+// the paint after the refusal: the snapshot reads the DOM as well as the store
+const painted = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
+
+// returns whether the page filed the refusal the scenario expects (null for a scenario the page applies)
 const inject = async (name, before) => {
   const base = { id: cfg.remote, ev: cfg.frameEvents, nm: cfg.sessionName, lo: before.readRunLo, hi: before.readRunHi,
                  anchor: before.readRunLast, delta: cfg.deltaEvents, fromHi: cfg.eventsFromHi, fromMid: cfg.eventsFromMid,
                  midLo: cfg.midTailLo, fromLow: cfg.fromLow, tailLo: cfg.tailRunLo, fork: cfg.eventsFork, forkLo: cfg.forkLo };
+  const m0 = await marks();
   if (name === "loop") {
     // round two HIGH: a kernel that answers every needFull with the SAME refused shape. Re-post the guard-3-refused
     // frame five times; the page must latch and stop asking after the second, not storm one ask per frame.
@@ -116,7 +134,9 @@ const inject = async (name, before) => {
       await page.evaluate((a) => window.postMessage({ type: "session", id: a.id, proto: 2, events: a.ev, tailLo: a.lo, headKnown: false, name: a.nm, status: { state: "idle", sinceEpoch: null } }, "*"), base);
       await page.waitForTimeout(200);
     }
-    return;
+    const handled = await refusedBy(REFUSED.loop, m0);
+    await painted();
+    return handled;
   }
   await page.evaluate((a) => {
     const st = { state: "idle", sinceEpoch: null };
@@ -148,16 +168,18 @@ const inject = async (name, before) => {
     else if (a.name === "straddle_lying_rebased") window.postMessage({ type: "session", id: a.id, proto: 2, events: a.ev, tailLo: a.midLo, rebased: true, headKnown: false, name: a.nm, status: st }, "*");
     else if (a.name === "rebased_superset") window.postMessage({ type: "session", id: a.id, proto: 2, events: a.fromMid, tailLo: a.midLo, rebased: true, headKnown: false, name: a.nm, status: st }, "*");
   }, { ...base, name });
+  if (REFUSED[name]) { const handled = await refusedBy(REFUSED[name], m0); await painted(); return handled; }
   await page.waitForTimeout(2500);
+  return null;
 };
 
 try {
   for (const name of cfg.scenarios) {
     await park();
     const before = await snapshot();
-    await inject(name, before);
+    const handled = await inject(name, before);
     const after = await snapshot();
-    out.scenarios[name] = { before, after };
+    out.scenarios[name] = { before, after, handled };
   }
 } catch (e) { out.died = String(e).slice(0, 500); }
 console.log("RESULT:" + JSON.stringify(out));
@@ -324,11 +346,19 @@ class RelayVanishGuards(unittest.TestCase):
             self.fail("the driver ran no %r scenario: %r" % (name, type(self).result))
         return sc["before"], sc["after"]
 
+    def _assert_refused(self, name, before, after):
+        # the invariants that follow are no-change claims: they hold on a page that never handled the frame, so the page's own word
+        # that it refused the frame comes first (the desync row, the loop row, or the refused delta's ask for the full frame)
+        handled = (type(self).result.get("scenarios") or {}).get(name, {}).get("handled")
+        self.assertTrue(handled, "[%s] the page refused the injected frame and said so before the read (its desync row, or its ask for the full frame): needFull %r->%r, handled=%r"
+                        % (name, before.get("needFull"), after.get("needFull"), handled))
+
     def _assert_scenario(self, name, expect_read_drop):
         before, after = self._scenario(name)
         # the scenario must be the user's shape: the read point rendered mid-thread with a real hole to the tail
         self.assertTrue(before.get("readPresent"), "[%s] the read point rendered mid-thread: %r" % (name, before.get("regions")))
         self.assertTrue(before.get("hasGap"), "[%s] a hole lay between the read point and the tail: %r" % (name, before.get("regions")))
+        self._assert_refused(name, before, after)
         # the invariant: the frame the page cannot place must NOT shrink the resident store (no held run discarded)
         self.assertGreaterEqual(after.get("storeCount", 0), before.get("storeCount", 0),
                                 "[%s] the resident store SHRANK across the frame (a held run vanished, the user's bug): before=%d after=%d regions after=%r"
@@ -432,7 +462,9 @@ class RelayVanishGuards(unittest.TestCase):
         before, after = self._scenario("loop")
         asks = after.get("needFull", 0) - before.get("needFull", 0)
         # five identical refused frames: the page latches on the refused coordinates and stops asking after the second
-        # (round two HIGH). Red at bebdc319 (awaitingFull cleared each frame, one ask per frame: a needFull storm).
+        # (round two HIGH). Red at bebdc319 (awaitingFull cleared each frame, one ask per frame: a needFull storm). The latch's
+        # own row first: a page that ignored the five frames asked nothing and kept everything too
+        self._assert_refused("loop", before, after)
         self.assertLessEqual(asks, 2, "[loop] the page stormed needFull on a repeated refused frame (no latch): %d asks across five identical frames" % asks)
         self.assertGreaterEqual(after.get("storeCount", 0), before.get("storeCount", 0),
                                 "[loop] the store held across the loop: before=%d after=%d" % (before.get("storeCount", 0), after.get("storeCount", 0)))
@@ -443,6 +475,7 @@ class RelayVanishGuards(unittest.TestCase):
         self.assertTrue(before.get("readPresent")); self.assertTrue(before.get("hasGap"))
         # a delta whose `from` lands inside the loaded history would truncate the read run away; the page refuses before
         # truncating and keeps the reader's place. Red at bebdc319 (the read point gone, the render halved for good).
+        self._assert_refused("from_into_history", before, after)
         self.assertTrue(after.get("readPresent"),
                         "[from_into_history] a numeric-from truncation ate the parked read point (round two low a): regions after=%r" % after.get("regions"))
         self.assertGreaterEqual(after.get("storeCount", 0), before.get("storeCount", 0),
