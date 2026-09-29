@@ -9,6 +9,11 @@ route pane. A Chromium driver opens the dashboard and reads:
      hears the pane-set broadcast naming it;
   3. the URL pane is a sandboxed iframe with its URL as given (no ?v=, no token), marked protocol none; the forged
      toggleFleet, notify and reveal it posts on load change nothing, and it is told nothing (its beacons say so);
+  3b. the URL pane posts openSettings, a settingsSync with another theme, viewFile and logUnseen into each of the shell's
+     frames but its own (parent.frames, every pane's window and the gear's): the modal stays closed, the settings store is unchanged,
+     no viewer opens and the Open log badge stays empty, and each pane that dropped one filed its trace in the kernel's
+     client-diag journal (ui/webview/window-sender.ts noteForeign: the site and the origin "null", nothing of the
+     message); the same openSettings from the notes pane, a window on the shell's origin, opens the modal;
   4. the gear's Panes section has a row per data pane, the experimental one off; turning it on brings the pane on screen;
   5. a define at the kernel while the page is open: the pane-set revision on the next keepalive stands the reload OFFER
      with the panes' wording, the page does not reload on its own, and the Reload click shows the new pane.
@@ -69,6 +74,7 @@ def _transcript(cwd, pairs):
 NOTES_PAGE = """<!doctype html><html><head><meta charset=utf-8><link rel=stylesheet href=theme.css><script src=shim.js></script></head>
 <body><h1 id=t>Notes</h1><div id=empty data-pane-empty style="height:260px"></div><iframe id=inner src=inner.html></iframe><script>
 window.__labMsgs=[];window.addEventListener('message',function(e){window.__labMsgs.push(e.data);});
+window.__labOpenSettingsAll=function(){var n=0;for(var i=0;i<parent.frames.length;i++){try{parent.frames[i].postMessage({romp:'openSettings'},'*');n++;}catch(e){}}return n;};
 </script></body></html>"""
 
 # a frame NESTED inside the notes pane (same origin as the shell, served from the pane's own directory): it forges the
@@ -84,6 +90,8 @@ DOCS_PAGE = """<!doctype html><html><head><meta charset=utf-8></head><body><h1>D
 try{parent.postMessage({romp:'toggleFleet',to:'fleet'},'*');parent.postMessage({romp:'notify',kind:'error',text:'forged from the docs pane'},'*');parent.postMessage({romp:'reveal',pane:'fleet'},'*');
 parent.postMessage({romp:'openKeys'},'*');parent.postMessage({romp:'hotkeyConfigure',sid:'11111111-2222-4333-8444-000000000301',name:'forged'},'*');}catch(e){}
 window.addEventListener('message',function(e){var i=new Image();i.src='/beacon?m='+encodeURIComponent(JSON.stringify(e.data)).slice(0,300);});
+window.__labPostAll=function(ms){var n=0;for(var i=0;i<parent.frames.length;i++){try{var f=parent.frames[i];if(f===window)continue;
+for(var k=0;k<ms.length;k++)f.postMessage(ms[k],'*');n++;}catch(e){}}return n;};
 </script></body></html>"""
 
 
@@ -150,6 +158,44 @@ out.afterForged = await page.evaluate(() => ({ fleet: document.body.classList.co
   notices: (() => { try { return JSON.parse(localStorage.getItem("romp:notices") || "[]").map((n) => n.text); } catch (e) { return []; } })() }));
 
 if (cfg.shot) await page.screenshot({ path: cfg.shot });   // a picture for a reviewer (ROMP_LAB_SHOT names the file; unset in CI)
+
+// ---- 3b. the URL pane posts into every frame of the shell; the notes pane's same post is the control ----
+// the gear's frame loads on its first open (data-src); give it its src without opening it, so its listeners are up
+await page.evaluate(() => { const f = document.getElementById("f-settings"); if (f && !f.getAttribute("src")) f.setAttribute("src", f.getAttribute("data-src")); });
+const sf = await frameEnding("/settings");
+if (!sf) await die("no /settings frame");
+out.gearUp = await sf.waitForFunction(() => !!document.getElementById("rsettings") && typeof window.__rompSetLogCount === "function" && typeof window.__rompSettingsClose === "function",
+  null, { timeout: 15000 }).then(() => true).catch(() => false);
+await page.waitForTimeout(500);
+// every same-origin frame's modal, viewer and Open log badge (null where the frame has none), and the store they share
+const ownFrames = async () => { const rows = []; for (const f of page.frames()) { if (f === page.mainFrame() || !f.url().startsWith(cfg.api)) continue;
+  const r = await f.evaluate(() => ({ path: location.pathname, modal: (() => { const p = document.getElementById("rsettings"); return p ? !p.hidden : null; })(),
+    viewer: !!document.getElementById("romp-fileview"), badge: (() => { const b = document.querySelector("#rs-log-open .rs-log-n"); return b ? b.textContent : null; })() })).catch(() => null);
+  if (r) rows.push(r); } return rows.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)); };
+const store = () => page.evaluate(() => localStorage.getItem("romp:settings"));
+out.foreignBefore = { store: await store(), frames: await ownFrames() };
+const theme = (() => { try { return JSON.parse(out.foreignBefore.store || "{}").theme || "classic"; } catch (e) { return "classic"; } })();
+out.forgedTheme = theme === "yatharth-light" ? "classic" : "yatharth-light";
+const df = await frameEnding("/docs/");
+if (!df) await die("no /docs/ frame");
+out.shellFrames = await page.evaluate(() => window.frames.length);
+// three passes, each read before the next: logUnseen first and alone, since a shell that hears of new log lines (a viewer
+// that opened on a missing file logs one) posts its own count over the badge, and an open modal asks for it; openSettings
+// last, since the modal toggles
+const postAll = (ms) => df.evaluate((list) => window.__labPostAll(list), ms).catch((e) => "threw: " + e);
+out.foreignPosted = [await postAll([{ romp: "logUnseen", n: 7 }])];
+await page.waitForTimeout(1200);
+out.foreignBadge = { store: await store(), frames: await ownFrames() };
+out.foreignPosted.push(await postAll([{ type: "settingsSync", settings: { theme: out.forgedTheme } }, { romp: "viewFile", path: "notes/forged-from-docs.md" }]));
+await page.waitForTimeout(1500);
+out.foreignMid = { store: await store(), frames: await ownFrames() };
+out.foreignPosted.push(await postAll([{ romp: "openSettings" }]));
+await page.waitForTimeout(1500);
+out.foreignAfter = { store: await store(), frames: await ownFrames() };
+out.controlPosted = await nf.evaluate(() => window.__labOpenSettingsAll()).catch((e) => "threw: " + e);
+out.controlOpened = await sf.waitForFunction(() => { const p = document.getElementById("rsettings"); return !!p && !p.hidden; }, null, { timeout: 8000 }).then(() => true).catch(() => false);
+out.controlClosed = await sf.evaluate(() => window.__rompSettingsClose()).catch(() => false);   // as it was, for the gear's rows below
+await page.waitForTimeout(300);
 
 // ---- 4. the gear's rows ----
 await page.evaluate(() => window.__rompOpenSettings && window.__rompOpenSettings());
@@ -500,6 +546,54 @@ class ServedPaneRegistry(unittest.TestCase):
         self.assertEqual((r["phonePage"] or {}).get("title"), "Notes", "the page is up, its shim with it: %r" % r["phonePage"])
         self.assertEqual(r["phoneRequests"], 1, "the page is requested once, however many times its tab is tapped: %r" % r["phoneRequests"])
         self.assertGreater((r["kitArtifacts"]["rect"] or {"w": 0})["w"], 60, "the Artifacts leaf has a rectangle: %r; after the drop: %r" % (r["kitArtifacts"], r["kitAfterDrop"]["rects"]))
+
+    def test_a_foreign_frame_posting_into_every_pane_changes_nothing_and_leaves_its_trace_and_a_pane_is_heard(self):
+        r = self._result()
+        # 3b. the URL pane (a sandboxed frame, origin "null") posted openSettings, a settingsSync with another theme, viewFile and
+        # logUnseen into each of the shell's frames; the same openSettings from the notes pane (a window on the shell's origin) is
+        # the control that shows the post reaches the gear's listener at all
+        self.assertTrue(r["gearUp"], "the gear's frame loaded and installed its listeners before the posts")
+        before, badged, mid, after = r["foreignBefore"], r["foreignBadge"], r["foreignMid"], r["foreignAfter"]
+        paths = [f["path"] for f in before["frames"]]
+        for need in ("/chat", "/settings", "/pane/notes/"):
+            self.assertIn(need, paths, "the frame the posts must reach is up: %r" % paths)
+        self.assertEqual(r["foreignPosted"], [r["shellFrames"] - 1] * 3, "each pass, the docs page posted into every one of the shell's frames but its own")
+        self.assertGreaterEqual(r["shellFrames"], 6, "the panes and the gear's frame: %r" % paths)
+        gear = [f for f in before["frames"] if f["path"] == "/settings"]
+        print("the gear's frame before and after each pass: %r" % [[f for f in x["frames"] if f["path"] == "/settings"] for x in (before, badged, mid, after)])
+        self.assertEqual([(f["modal"], isinstance(f["badge"], str)) for f in gear], [(False, True)], "before the posts: the modal closed, the badge there: %r" % gear)
+        with self.subTest(post="settingsSync"):
+            self.assertEqual((badged["store"], mid["store"], after["store"]), (before["store"],) * 3, "a foreign settingsSync must not rewrite the settings store (theme %r forged)" % r["forgedTheme"])
+        with self.subTest(post="openSettings"):
+            self.assertEqual([f["path"] for f in after["frames"] if f["modal"]], [], "a foreign openSettings must not open the modal: %r" % after["frames"])
+        with self.subTest(post="viewFile"):
+            self.assertEqual([f["path"] for f in mid["frames"] + after["frames"] if f["viewer"]], [], "a foreign viewFile must not open a viewer: %r" % mid["frames"])
+        with self.subTest(post="logUnseen"):
+            # the badge as it stood before the posts: the shell's own count of the lines the lab's earlier legs logged
+            self.assertEqual([f["badge"] for f in badged["frames"] if f["path"] == "/settings"], [gear[0]["badge"]],
+                             "a foreign logUnseen (n 7) must leave the Open log badge as it was")
+        with self.subTest(what="the trace"):
+            rows = []
+            with open(os.path.join(self.lab, "xdg", "romp", "client-diag.jsonl"), encoding="utf-8") as f:
+                for line in f:
+                    rec = json.loads(line)
+                    if rec.get("surface") == "window-sender":
+                        rows.append(rec)
+            sites = {rec["data"]["site"] for rec in rows}
+            print("traced sites (%d rows): %s" % (len(rows), ", ".join(sorted(sites))))   # read off a passing run's log (-rP)
+            for need in ("frame-listener", "file-view", "settings-sync", "gear:openSettings", "gear:logUnseen", "timeline-boot"):
+                self.assertIn(need, sites, "a pane that dropped a foreign post filed its trace: %r" % sorted(sites))
+            self.assertEqual({(rec["what"], json.dumps(sorted(rec["data"]))) for rec in rows}, {("foreign", '["origin", "site"]')},
+                             "each row names the site and the origin and nothing else")
+            self.assertEqual({rec["data"]["origin"] for rec in rows}, {"null"}, "the sender's origin, as the browser stamped it on a sandboxed frame's post")
+            # the gear's listeners and the timeline boot each run on one page, and each heard four foreign posts from one origin:
+            # one row apiece, so a repeat filed none (the other sites run on several pages, which a row does not tell apart)
+            for one in ("gear:openSettings", "gear:logUnseen", "timeline-boot"):
+                self.assertEqual(sum(1 for rec in rows if rec["data"]["site"] == one), 1, "%s: four posts, one row" % one)
+        # the control: a window on the shell's origin is heard, so the post reaches the gear's listener
+        self.assertIsInstance(r["controlPosted"], int, r["controlPosted"])
+        self.assertTrue(r["controlOpened"], "the notes pane's openSettings opens the modal: the post reaches the gear's listener")
+        self.assertTrue(r["controlClosed"], "and the lab closes it again before the gear's rows are read")
 
     def test_a_hand_row_flipped_in_the_gear_keeps_the_registry_keys(self):
         r = self._result()
