@@ -1210,8 +1210,8 @@ class _PerfStats:
         memos["cleared"] = dict(_CLEARED_STATS)       # the clear set: parsed once per file state, served while it stands (2026-09-09)
         # the collector's collections and pauses (2026-09-16): the hook's tallies per generation, and beside them the collector's
         # own thresholds and counts (repeated from heap.gc so the block reads on its own: how near the next collection is), the
-        # frozen count, the callback failures, and whether this collector's hook is installed at all (zeros with hooked false
-        # say "no hook", not "no collections")
+        # frozen count's slot (None unless GET /perf?walk=1: _perf_walks), the callback failures, and whether this collector's
+        # hook is installed at all (zeros with hooked false say "no hook", not "no collections")
         gc_block = {"gen": {str(g): {"collections": n, "msSum": round(s, 1), "msMax": round(mx, 1), "msLast": round(last, 1),
                                      "collectedLast": col}                # rounded like every ms on the snapshot; the tallies stay exact
                             for g, (n, s, mx, last, col) in sorted(gc_rows.items())},
@@ -1224,7 +1224,7 @@ class _PerfStats:
                     "hooked": _gc_read("hooked", lambda: self.gc_event in gc.callbacks),
                     # #1735: the freeze controller's state and the reconcile trade, so a reconcile collection is told
                     # apart from an organic one (freezes + reclaims ran a collection each; organic = gen 2 collections
-                    # less those), beside the frozen count above
+                    # less those), beside the frozen slot above
                     "freeze": dict(_GC_FREEZE.perf(), errors=_GC_FREEZE_ERRORS[0])}
         now = time.time()
         stacks = _thread_stacks() if os.environ.get("ROMP_PERF_STACKS") else None   # every thread's frames, named and staged: under

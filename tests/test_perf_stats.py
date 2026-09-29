@@ -1137,8 +1137,8 @@ class PerfRoutes(unittest.TestCase):
     def test_get_perf_walks_the_heap_only_when_asked(self):
         """The two reads whose cost grows with the whole heap (the allocator's block count, the frozen generation's size) run
         on a GET that says ?walk=1 and never on a plain one (the macOS runner flake, 2026-09-29: each is one C call that
-        holds the interpreter lock, seconds long where the heap is paged out). The handler's thread makes the calls, so the
-        recorders count every thread's; the snapshot's one caller in the kernel is this route."""
+        holds the interpreter lock, and holds it far longer where the heap is paged out). The handler's thread makes the
+        calls, so the recorders count every thread's; the snapshot's one caller in the kernel is this route."""
         calls = []
 
         def recorder(name, real):

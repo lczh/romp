@@ -2185,14 +2185,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   read only when the request says `GET /perf?walk=1` and is `null` on a
   plain read: counting visits every page the allocator owns, a cost that
   grows with the whole heap (about half a millisecond per GB resident, and
-  seconds where the system has compressed or paged the heap out), inside
-  one call every kernel thread waits for. On `?walk=1` a `null` means the
-  process cannot count them. `gc` is
-  the collector's `enabled`, its `counts` (the young generation's
-  allocations since its last collection, then how many times each younger
-  generation was collected since the older's last) and `thresholds` as
-  lists, and `stats` (per generation: `collections`, `collected`,
-  `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
+  far longer where the system has compressed or paged the heap out), inside
+  one call every kernel thread waits for. On `?walk=1` a `null` is a read
+  that failed (an accessor the runtime lacks), said once on stderr like any
+  gauge. `gc` is the collector's `enabled`, its `counts` (the young
+  generation's allocations since its last collection, then how many times
+  each younger generation was collected since the older's last) and
+  `thresholds` as lists, and `stats` (per generation: `collections`,
+  `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
   lazy bodies read on demand: `entries`, and `bytes`, the records' length on
   disk, which `capBytes` bounds, a proxy that locates the holder without
@@ -2276,7 +2276,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   measured ~97 fold-ins an hour), so a cycle released by an owner nobody
   registered is bounded by the next thousand loads, not the process lifetime. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
-  apart from the integer `frozen` above, which is `gc.get_freeze_count()`),
+  apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
   `loadTrees` and `backstopFoldins` (the two thresholds), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
   release that unfroze runs TWO generation-2 collections for its one reclaim, so

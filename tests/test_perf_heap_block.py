@@ -389,8 +389,8 @@ class Overhead(_Caches):
     """(e) The read stays cheap over populated caches: 1,000 images, 50 tabs with 100 KB strings, 100,000 hydrated entries,
     10,000 LRU slots, 50,000 usage rows (166 microseconds median in the lab). A 5 ms median budget stood here, and it timed
     the runner's memory, not the read (2026-09-29): the allocator's block count walked every pool of a test process of
-    several GB, and on macOS runners whose memory was compressed or paged out the median reached seconds. The pin is now
-    what the read calls: none of the interpreter's heap-wide walks on the plain read, each once on the request that asks."""
+    several GB, and on macOS runners, most likely under memory pressure, the median reached seconds. The pin is now what
+    the read calls: none of the interpreter's heap-wide walks on the plain read, each once on the request that asks."""
 
     def _populate(self):
         self.add_images(1000, 100)
