@@ -287,6 +287,19 @@ test("a page holding kernel events beside its own group: a frame sharing none of
     "the head and the echo are shared kernel content: an append that keeps the view, its render mark and its row average");
 });
 
+test("a first build before the session's view exists (views are built lazily): the fresh-build reset is skipped, and the frame lands", () => {
+  // a background session whose first kernel content arrives before any show built its view: a page holding only its dashed group,
+  // and one holding nothing, each given the clearing frame; the reset reads the view, so without one the call must still return
+  for (const own of [[pendingGroup], []]) {
+    const held = own.length ? "a page holding its dashed group alone" : "a page holding nothing";
+    const views = new Map<string, any>(), sessions = new Map<string, any>([["A", pageHolding([], own)]]);
+    const api = liftUpsert(sessions, new Map(), "B", [], [], { views });
+    assert.doesNotThrow(() => api.upsert(clearingFrame()), held + ": the frame is applied with no view to reset");
+    assert.deepEqual(order(sessions.get("A")), ["system:head", "echo:q-1", "clearing:1"], held + ": the session holds the frame's events");
+    assert.equal(views.size, 0, held + ": no view is made here, the next show builds it");
+  }
+});
+
 test("a frame naming no tail start, adopted as sent: the page's re-injected group is no shared id, so a real fork still drops the view", () => {
   const kernel = [{ kind: "user", uuid: "t1", md: "hi" }, { kind: "assistant", uuid: "a1", md: "hello" }];
   const v: any = { rendered: 3, rediff: false, removed: 0 }; v.el = { remove: () => { v.removed++; } };
