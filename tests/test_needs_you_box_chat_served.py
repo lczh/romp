@@ -100,7 +100,7 @@ await page.goto(cfg.chat);
 // push's ranking, which puts a session named to the cycle or one without a transcript ahead of the strip's order), and no later frame
 // displaces it. So the driver PICKS web's tab, as a user would: the page adopts an arriving frame only while no tab is active, so the pick
 // stands whatever the kernel sent first. The tab the page adopted is kept for test 1's message alone. Each wait fails soft: a throw here ends
-// the driver and fails all thirty tests with no record, where a miss is the premise, which test 1 names
+// the driver and fails every test in the class with no record, where a miss is the premise, which test 1 names
 const webTab = '#tabs .tab[data-id="' + cfg.sid + '"]';
 out.premise = { webTab: await page.waitForSelector(webTab, { timeout: 30000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; }) };
 out.premise.adopted = await page.waitForSelector("#tabs .tab.active[data-id]", { timeout: 15000 }).then((h) => h.getAttribute("data-id")).catch((e) => { if (e.name !== "TimeoutError") throw e; return null; });   // the first arrival's tab (null: none adopted yet, and the pick below comes first)
@@ -821,8 +821,8 @@ class NeedsYouBoxChatServed(unittest.TestCase):
     def test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop(self):
         r = self._result()
         p = r["premise"]
-        adopted = {SID: "web", API: "api"}.get(p.get("adopted"), p.get("adopted"))
-        self.assertTrue(p["webActive"], "premise: web's tab is active before the box is read, the page having adopted %s's first frame (the pick of web's tab moves it there whatever the kernel sent first; every scene before the switch reads web's box): %r" % (adopted, p))
+        opened = {SID: "web's tab", API: "api's tab", None: "no tab (none was active within 15 s)"}.get(p.get("adopted"), "the tab %s" % p.get("adopted"))   # None: the case the message most needs to name
+        self.assertTrue(p["webActive"], "premise: web's tab is active before the box is read; the page first opened on %s (the pick of web's tab moves it there whatever the kernel sent first; every scene before the switch reads web's box): %r" % (opened, p))
         self.assertEqual(r["errors"], [], "no page error")
         self.assertTrue(r["fourRows"], "four rows within a minute: %r (premise: %r; kernel: %s)" % (r["first"], p, self._kernel_tail()))
         b = r["first"]
