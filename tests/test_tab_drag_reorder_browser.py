@@ -114,7 +114,7 @@ TRAIL = [n for n in NAMES if n not in TAGGED and n not in QA]
 # THE OPEN SESSION (2026-09-29): a trail session no phase drags or joins. The trail is newest transcript first, so cache
 # sits 13th of its 15 tabs, and the gestures address only the trail's first six slots (every drag, and the joins from
 # the 3rd and the 5th) and its last tab (the rename); in no group, no header ever holds it, so no fold click meets the
-# way back (foldGroup)
+# way back (foldGroup). The open tab is now never among the dragged tabs; before, it sometimes was, by chance
 PINNED = "cache"
 
 
@@ -164,8 +164,8 @@ await page.addInitScript(() => {
 });
 // THE OPEN SESSION IS CHOSEN, NOT ADOPTED (2026-09-29): with no saved choice the page opens whichever session's frame lands
 // first, which put the fold clicks below at the mercy of the way back whenever that was a grouped session (foldGroup). The
-// shim's saved state names it instead (its activeId is the ?active= connect hint and the tab the page restores on its
-// frame's arrival), written only while the key is absent, so the two reloads keep whatever the page has saved since
+// shim's saved state names it instead (its activeId is the ?active= connect hint and the tab the page restores once it is
+// listed or its frame arrives), written only while the key is absent, so the two reloads keep what the page saved since
 await page.addInitScript((sid) => {
   try { if (localStorage.getItem("romp-vscode-state-chat") === null) localStorage.setItem("romp-vscode-state-chat", JSON.stringify({ activeId: sid })); } catch (e) {}
 }, cfg.active);
