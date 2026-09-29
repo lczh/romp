@@ -18821,9 +18821,9 @@ function upsert(msg: any) {
   // the dashed bubble alone) read the kernel's first frame after the send as a new transcript: it tore the view down
   // and rebuilt it at the next animation frame, the DOM holding only the loader in between (never painted; a served
   // clear lab read the page there). clearBoundarySeen (send-pending.ts) never counts the page's own groups either, but
-  // it reads transcript turns alone, where this reading takes EVERY kernel event (the head, the send's echo, the
-  // kernel's overlay cards): read by turns, a page holding the head and an echo beside its bubble would take every
-  // frame of an empty session's first exchange as a first build (chat-proto2-exec.test.ts executes the difference).
+  // its fork test compares transcript turns alone, where this reading takes EVERY kernel event (the head, the send's
+  // echo, the kernel's overlay cards): read by turns, a page holding the head and an echo beside its bubble would take
+  // every frame of an empty session's first exchange as a first build (chat-proto2-exec.test.ts runs it).
   const prevKernel = prev ? prev.events.filter((e) => !isOptimistic(e) && !isHeldGroup(e)) : [];
   const forked = !!(existed && msg.events && msg.events.length && prev && prevKernel.length
                     && !sharesAnyUuid(msg.events, prevKernel));

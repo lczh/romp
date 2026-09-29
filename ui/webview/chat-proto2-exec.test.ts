@@ -277,10 +277,10 @@ test("a page holding kernel events beside its own group: a frame sharing none of
   assert.deepEqual([fork.v.removed, fork.kept, fork.shows], [1, false, ["show"]], "a real fork still drops the view and lands the new transcript");
   const more = upsertOnPaintedView(pageHolding(kernel, [pendingGroup]), clearingFrame({ status: { state: "working" }, events: [...kernel, { kind: "assistant", uuid: "a2", md: "more" }] }), 3);
   assert.deepEqual([more.v.removed, more.kept, more.shows, more.v.rendered, more.v.rediff, more.v.avgTurnH], [0, true, ["append"], 3, true, 40], "an append keeps the view, its render mark and its row average, and compares its units");
-  // the kernel's head and the send's echo are kernel events too, though neither is a transcript turn (clearBoundarySeen reads turns
-  // alone): a page holding them beside its bubble, given a frame that carries them, appends. Read by turns, it would be a first
-  // build, and every frame of an empty session's first exchange would rebuild the window and land the reader again until a real
-  // turn was resident
+  // the kernel's head and the send's echo are kernel events too, though neither is a transcript turn (clearBoundarySeen's fork test
+  // compares turns alone): a page holding them beside its bubble, given a frame that carries them, appends. Read by turns, it would
+  // be a first build, and every frame of an empty session's first exchange would rebuild the window and land the reader again until
+  // a real turn was resident
   const headAndEcho = [{ kind: "system", uuid: "system:head" }, { kind: "user", uuid: "echo:q-1", md: "/clear" }];
   const echoed = upsertOnPaintedView(pageHolding(headAndEcho, [pendingGroup]), clearingFrame(), 3);
   assert.deepEqual([echoed.v.removed, echoed.kept, echoed.shows, echoed.v.rendered, echoed.v.avgTurnH], [0, true, ["append"], 3, 40],
