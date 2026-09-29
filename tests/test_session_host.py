@@ -435,13 +435,19 @@ class HostProcess(unittest.TestCase):
         """The journal once the writer has landed `n` records: the host forwards a record to the kernel at once and
         journals it on its own writer task, so a frame on the socket says nothing about the disk yet (the writer may
         lag by design, and a slow runner's disk shows it: the macOS cell read three records where the socket had four,
-        2026-09-16). The event waited on is the n-th record on disk, never a fixed pause."""
+        2026-09-16). The event waited on is the n-th record on disk, never a fixed pause. On the deadline it fails, naming
+        how many of the n landed, instead of returning the short journal: a caller's assertion on that would read exactly
+        like the race this wait removes, so a record that never lands would be taken for the flake, and an n one too large
+        would pass once the deadline expired (review of the re-exec fix, 2026-09-29; `_lease_version_becomes` fails the same way)."""
         d = os.path.join(self.state, "hosts", SID)
         deadline = time.time() + timeout
         journal = list(sh.read_journal_dir(d))
         while time.time() < deadline and len(journal) < n:                # loop-ok: the event is the writer's n-th record on disk
             time.sleep(0.005)
             journal = list(sh.read_journal_dir(d))
+        if len(journal) < n:
+            self.fail("the writer landed %d of %d records within %ss: %r"
+                      % (len(journal), n, timeout, [r.get("type") for _, r in journal]))
         return journal
 
     def test_the_lease_and_the_hello_carry_the_clis_spawn_time_once_and_the_specs_login(self):
