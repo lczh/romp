@@ -308,12 +308,12 @@ test("feed, Outline, chat and the VS Code timeline install their frame handler t
   }
   const helper = fs.readFileSync(path.join(UI, "frame-listener.ts"), "utf8");
   // the helper stays free of federation.ts, which would boot a second manager in the pane bundle: its one import is the
-  // sender check, and that module imports nothing, so nothing can reach federation.ts through it
-  assert.deepEqual(helper.match(/^import .*$/gm), ['import { windowSender } from "./window-sender";'],
+  // sender check and its trace, and that module imports nothing, so nothing can reach federation.ts through it
+  assert.deepEqual(helper.match(/^import .*$/gm), ['import { windowSender, noteForeign } from "./window-sender";'],
     "the helper's only import is window-sender.ts");
   assert.doesNotMatch(fs.readFileSync(path.join(UI, "window-sender.ts"), "utf8"), /^import /m, "window-sender.ts imports nothing");
-  const onWindow = helper.indexOf('window.addEventListener("message", (e: MessageEvent) => { if (windowSender(e) === "foreign") return; handler(e); });');
-  assert.ok(onWindow > 0, "the window install hands the handler every message but a foreign sender's (executed in foreign-sender-listeners.test.ts)");
+  const onWindow = helper.indexOf('window.addEventListener("message", (e: MessageEvent) => { if (windowSender(e) === "foreign") { noteForeign("frame-listener", e, api); return; } handler(e); });');
+  assert.ok(onWindow > 0, "the window install hands the handler every message but a foreign sender's, whose drop leaves its trace (executed in foreign-sender-listeners.test.ts)");
   assert.ok(onWindow < helper.indexOf("fed.onFrame(handler)"), "window first, the registry after");
 });
 

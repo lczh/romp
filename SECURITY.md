@@ -89,6 +89,12 @@ UID can read.
 - For defense-in-depth on Linux you can still run romp inside a per-user
   **network namespace** (`unshare -n`) or rootless container, so its loopback is
   not even reachable by other users' processes.
+- On a plain-http address other than `localhost` or `127.0.0.1` (a LAN or
+  tailnet address set with `ROMP_SERVE_HOST`), browsers ignore the opener policy
+  below, since they enforce it only in a secure context, and the sender checks in
+  each page's listeners are the remaining protection against another window's
+  messages. The default address and the https route through `tailscale serve` are
+  secure contexts.
 
 ## What is already hardened
 
@@ -121,6 +127,15 @@ UID can read.
   lays a file out, by `ui/webview/md-sanitize-browser.test.ts`.
 - **No unsafe deserialization:** no `pickle`, `eval`, `exec`, or non-safe YAML on
   untrusted data.
+- **Window isolation:** every page the kernel serves carries
+  `Cross-Origin-Opener-Policy: same-origin-allow-popups` (a state-root pane's own
+  files excepted), so a page on another origin that opens the dashboard gets no
+  handle to post messages through, and every window message listener romp
+  installs in those pages checks the sender, acting only on a message from one of
+  the shell's own panes (in the shell) or from the page itself, its parent or a
+  window on its origin (in a pane, `ui/webview/window-sender.ts`, where each
+  listener's first drop from a given sender origin leaves a diagnostic row, up
+  to 20 rows per page load).
 
 ## Federated messaging: per-host trust
 

@@ -649,7 +649,7 @@ const gclock = require("./gesture-clock.js");
 // in THIS document (the gear listener above).
 initStrip(() => openGear(window),
   (m: Record<string, unknown>) => vscodeApi?.postMessage(m));
-installSettingsSync();   // a gear save in ANOTHER VS Code pane lands here via the host
+installSettingsSync(vscodeApi);   // a gear save in ANOTHER VS Code pane lands here via the host
 // the overall theme applies to THIS document too (2026-08-28): at boot and on every settings
 // write — before this only the chat pane wore the body classes, so a light theme could never
 // reach the feed
@@ -6322,7 +6322,7 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
       ackFollowMove(top ? top.itemId : raw, !!m.ok, bid, ackHost, why);
     }
   }
-}));
+}), vscodeApi);
 
 // ---- the deny-note prompt (the held-mail card's Deny, a notice action of kind quarantine): the one click-time input any
 // action kind takes (plans/notice-cards.md, "Action kinds"): an optional note back to the sender, which the bus mails to

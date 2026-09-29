@@ -227,7 +227,7 @@ class ShellListenerCensus(unittest.TestCase):
 KERNEL_LISTENER_KINDS = {
     "shell (the source check)": ("window.", "addEventListener('message',function(e){" + GATE, len(LISTENERS)),
     "timeline boot (heardSender; tests/test_timeline_boot_senders.py)":
-        ("window.", 'addEventListener("message",function(e){if(!heardSender(e))return;', 1),
+        ("window.", 'addEventListener("message",function(e){if(!heardSender(e)){noteForeign("timeline-boot",e);return;}', 1),
     "the service worker's channel (exempt: no window posts on it)": ("swc.", "addEventListener('message',function(ev){", 1),
 }
 # What each served page carries, by kind: the shell's listeners and the service worker channel on the shell, and the

@@ -31,8 +31,11 @@ var LS = require('./landing-settle.ts');   // gestureEvidence: the chat's rule f
 // Who posted a window message (window-sender.ts). Every window listener below returns first on a foreign sender: its
 // messages come from the kernel (dispatched in this document, or forwarded by the VS Code webview host from a window on
 // its origin), the shell (this document's embedder) or this document itself, never from a sandboxed frame or a page on
-// another origin.
+// another origin. A listener's first return for each sender origin in a page's life leaves a client-diag row naming
+// the listener (noteForeign; a repeat from that origin files none), sent through initGear's poster where the page has
+// no pane shim.
 var windowSender = require('./window-sender.ts').windowSender;
+var noteForeign = require('./window-sender.ts').noteForeign;   // a drop's trace, one per listener and sender origin a page life (window-sender.ts), through the gear's poster
 function kb() { return (typeof window !== 'undefined' && window.__rompKernelBase) || ''; }
 function ku(path) {
   var tok = (typeof window !== 'undefined' && window.__rompKernelToken) || '';
@@ -1164,7 +1167,7 @@ function initGear(post, opts) {
   function tellShellTracking(on) { try { (window.parent !== window ? window.parent : window).postMessage({ romp: 'taskTracking', on: !!on }, '*'); } catch (e) {} }
   if (tk) tk.addEventListener('change', function () { post(scoped({ type: 'setTaskTracking', enabled: tk.checked, gt: gclock.stamp('task-tracking') })); });
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:taskTracking', e, post); return; }
     var m = e.data;
     if (!m || m.type !== 'taskTracking' || typeof m.on !== 'boolean') return;   // the kernel's echo of an applied flip
     if (tk) tk.checked = m.on;
@@ -1586,7 +1589,7 @@ function initGear(post, opts) {
   // The kernel's browseResult (target 'gear') fills the field + persists via the change handler.
   // (This listener lives HERE, with the field — it used to sit in render.ts, a different document.)
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:browseResult', e, post); return; }
     var m = e.data;
     if (m && m.type === 'browseResult' && m.target === 'gear' && typeof m.path === 'string' && dd) {
       dd.value = m.path; dd.dispatchEvent(new Event('change'));
@@ -1737,7 +1740,7 @@ function initGear(post, opts) {
              run: function () { post(Object.assign({}, m.gesture, { gt: gclock.stamp(m.setting) })); } };
   }
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:settingStale', e, post); return; }
     var m = e.data;
     if (!m || m.type !== 'settingStale') return;
     gclock.learn(m.setting, m.storedGt);   // the frame IS new information about that store's clock
@@ -1860,7 +1863,7 @@ function initGear(post, opts) {
   // kernel sends no models frame for a list that changed while it was down. Its rev is seeded from the clock at
   // boot, so the restarted kernel's list is newer than the one this page holds and adoptChoices takes it.
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:models', e, post); return; }
     var m = e.data;
     if (!m || (m.type !== 'models' && m.type !== 'wsup')) return;
     fetch(ku('/models'), { cache: 'no-store' }).then(function (r) { return r.json(); })
@@ -2262,7 +2265,7 @@ function initGear(post, opts) {
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
     p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; tl.checked = !!s.tabsLocked; if (tsb) tsb.checked = (s.tabStateBadge !== false); jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (nb) nb.checked = s.needsBox !== false; if (fsc) fsc.checked = (s.showFilesControl === true); if (pdk) pdk.checked = (s.paneDocking === true); renderRegistryRows(s); (function (p) { Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].checked = p[k]; }); })(panesOf(s)); tcPaint(); paintWidgets(); csPaint(); ttPaint(); if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); if (bk) { bk.value = BN.effectiveDefaultBackend(s.backend); repaintSelectPicks(); } if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); if (section) showSection(section); else clearSectionScroll(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
-  window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') return; if (e.data && e.data.romp === 'openSettings') openSettings(typeof e.data.tab === 'string' ? e.data.tab : undefined, typeof e.data.section === 'string' ? e.data.section : undefined); });   // the tab and its section ride the ask (T379: the strip's gear opens Chat at Tab strip (T415; Tab widgets until then))
+  window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') { noteForeign('gear:openSettings', e, post); return; } if (e.data && e.data.romp === 'openSettings') openSettings(typeof e.data.tab === 'string' ? e.data.tab : undefined, typeof e.data.section === 'string' ? e.data.section : undefined); });   // the tab and its section ride the ask (T379: the strip's gear opens Chat at Tab strip (T415; Tab widgets until then))
   // Escape, relayed by the web shell's Escape chain (_LANDING_ESC_JS captures keydown in this same-origin
   // document and calls this synchronously): close the modal and say so, unless one of its own dialogs is up
   // (the login card, an open house dropdown), which the document's own Escape handlers close one level at a
@@ -2293,7 +2296,7 @@ function initGear(post, opts) {
       lgn.hidden = n <= 0;
       lgn.textContent = n <= 0 ? '' : ' \u00b7 ' + (n > 9 ? '9+' : String(n));
     };
-    window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') return; var m = e.data; if (m && m.romp === 'logUnseen') window.__rompSetLogCount(m.n); });
+    window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') { noteForeign('gear:logUnseen', e, post); return; } var m = e.data; if (m && m.romp === 'logUnseen') window.__rompSetLogCount(m.n); });
   })();
   p.addEventListener('click', function (e) { if (e.target === p) closeSettings(); });   // click the dimmed backdrop (not the card) → close
   document.addEventListener('click', function (e) { if (!p.hidden && e.target !== g && !p.contains(e.target)) closeSettings(); });

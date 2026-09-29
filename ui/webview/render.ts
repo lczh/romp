@@ -134,7 +134,7 @@ import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
 import { resolveTabDrop, writesTag, leaveWords, type TabDrop, type LeaveWords } from "./drag-join";
 import { perfFrameHandler } from "./perf-telemetry";
-import { windowSender } from "./window-sender";
+import { windowSender, noteForeign } from "./window-sender";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
 import { SETTLE_MS, SETTLE_FIRST_PAINT_MS, SETTLE_ROW_VIEWPORT_CAP, settleStep, settleRowFields, reachableOffset, gestureEvidence, scrollerGrab, writerIsReader, type SettleSample } from "./landing-settle";   // a deep-link landing settles before its row is filed (T386 stage 1)
 import { listenForFrames, federationMissing, federationLoadEntry, fedRetryKey, paneArranges } from "./frame-listener";
@@ -437,7 +437,7 @@ if ((window as any).__rompShowStrip) {
 }
 initStrip(() => window.postMessage({ romp: "openSettings" }, "*"),
   (m) => vscodeApi?.postMessage(m));
-installSettingsSync();   // a gear save in ANOTHER VS Code pane lands here via the host
+installSettingsSync(vscodeApi);   // a gear save in ANOTHER VS Code pane lands here via the host
 // Open the settings gear on a NAMED tab, at a named SECTION of it when one is given (T379: the tab-widgets glyph opens
 // the Chat tab scrolled to its Tab strip section (T415; Tab widgets until then)): the same openSettings message every opener posts, with the tab and
 // the section named. Through the shell when this pane sits in one (the kernel's __rompOpenSettings relays it into the
@@ -20089,7 +20089,7 @@ const fedMissing = federationMissing(window as any);
 listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: MessageEvent) => {
   const m = e.data;
   if (!m) return;
-  if (windowSender(e) === "foreign") return;   // a message from any window but this one, its embedder or one on its origin is ignored (window-sender.ts)
+  if (windowSender(e) === "foreign") { noteForeign("chat", e, vscodeApi); return; }   // a message from any window but this one, its embedder or one on its origin is ignored, the first from each sender origin with a trace (window-sender.ts)
   // the shell's palette: "Fork this session…" → the fork modal for the ACTIVE session, from the tip
   if (m.romp === "forkSession") {
     if (activeId && !isProvisionalId(activeId) && sessions.get(activeId)) showForkPrompt(activeId, "");
@@ -20753,7 +20753,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     document.getElementById("cmt-pop")?.remove();
     renderCommentPopover();
   }
-}));
+}), vscodeApi);
 
 // Tick the working timer (the chip color-pulse is pure CSS) and keep the model/ctx
 // meta fresh as status updates land.

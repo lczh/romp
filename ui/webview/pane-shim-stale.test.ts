@@ -14,13 +14,15 @@
 // socket that OPENED and was closed by the browser — an abandoned socket leaves none: the watchdog's own
 // `watchdog-close` row went down the quiet socket before the abandon, and an armed socket's `-quiet` raise
 // rides the redial; the redials an outage refused coalesced into one `wsconnfail` row on the next open)
-// and the cap on queued breadcrumbs.
+// and the caps on queued breadcrumbs (the page's own rows, and the trace rows a foreign sender's posts cause, each on a
+// count of its own).
 // Synthetic only (TESTHOST, no session data).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vm from "node:vm";
+import { noteForeign, NOTE_MAX } from "./window-sender";
 
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 
@@ -446,6 +448,70 @@ test("queued breadcrumbs are capped while the socket is down; other queued messa
   assert.deepEqual(diag.map((m) => m.data.i), [...Array(20).keys()], "the oldest are kept: the rows about the drop that started it");
   assert.equal(h.sent.filter((m) => m.type === "activeTab").length, 1, "a non-diagnostic message is never dropped");
   assert.equal(h.sent.length, 21);
+});
+
+// A window-sender row (window-sender.ts noteForeign, and the timeline boot's inline copy) exists because ANOTHER page
+// posted into this one. While the socket is down it waits under a cap of its own, FOREIGN_QUEUE_MAX, and never takes one
+// of the DIAG_QUEUE_MAX slots the page's own breadcrumbs keep: under one shared cap, a foreign page that posted into every
+// frame of a dashboard during a kernel outage cut the gear page's own record of that outage by its seven trace rows (the
+// 2026-09-29 review, by execution in Chromium). Run with the real noteForeign against this shim's window.
+const GEAR_SITES = ["gear:taskTracking", "gear:browseResult", "gear:settingStale", "gear:models", "gear:openSettings",
+                    "gear:logUnseen", "settings-sync"];
+const ownProbe = (i: number) => ({ type: "clientDiag", surface: "pane-shim", what: "probe", data: { i } });
+const traceRows = (h: Harness) => h.sent.filter((m) => m.type === "clientDiag" && m.surface === "window-sender");
+
+test("a foreign page's trace rows, filed first in an outage, leave the page every one of its own queued breadcrumbs", () => {
+  const h = FEED();                                // never opened yet: everything queues
+  for (const site of GEAR_SITES) noteForeign(site, { origin: "null" }, undefined, h.win);   // the foreign page posts first
+  for (let i = 0; i <= 20; i++) h.win.__rompLocalSend(ownProbe(i));                          // then the page's own rows, one past the cap
+  assert.equal(h.sent.length, 0, "nothing goes up before the open");
+  h.ws.open();
+  assert.deepEqual(h.diags("probe").map((m) => m.data.i), [...Array(20).keys()],
+                   "all DIAG_QUEUE_MAX of the page's own rows ride the reconnect, the oldest kept, as with no foreign page");
+  assert.deepEqual(traceRows(h).map((m) => [m.what, m.data.site, m.data.origin]), GEAR_SITES.map((s) => ["foreign", s, "null"]),
+                   "and every trace row besides them, each naming only its site and the sender's origin");
+});
+
+test("trace rows queue under a cap of their own: every row one noteForeign files in a page life, and no more", () => {
+  const h = FEED();
+  for (let i = 0; i < NOTE_MAX + 5; i++) noteForeign("site-" + i, { origin: "null" }, undefined, h.win);   // the helper stops at NOTE_MAX
+  for (let i = 0; i < 10; i++)                     // a second writer on the page, the timeline boot's copy, past the budget
+    h.win.__rompLocalSend({ type: "clientDiag", surface: "window-sender", what: "foreign", data: { site: "timeline-boot", origin: "https://p" + i + ".example" } });
+  for (let i = 0; i < 25; i++) h.win.__rompLocalSend(ownProbe(i));
+  h.win.__rompLocalSend({ type: "activeTab", id: "TESTSID" });
+  h.ws.open();
+  assert.deepEqual(traceRows(h).map((m) => m.data.site), [...Array(NOTE_MAX).keys()].map((i) => "site-" + i),
+                   "FOREIGN_QUEUE_MAX is NOTE_MAX: the shim drops none of the rows one helper files in a page life, and the budget is then full");
+  assert.deepEqual(h.diags("probe").map((m) => m.data.i), [...Array(20).keys()], "the page's own rows keep all DIAG_QUEUE_MAX slots");
+  assert.equal(h.sent.filter((m) => m.type === "activeTab").length, 1, "a non-diagnostic message is never dropped");
+  assert.equal(h.sent.length, NOTE_MAX + 20 + 1, "nothing else rode the reconnect");
+  // a second outage starts both budgets over: the flush that carried the first queue emptied both counts
+  h.ws.close(); h.runTimers();
+  const n = h.sent.length;
+  for (let i = 0; i < NOTE_MAX + 3; i++)
+    h.win.__rompLocalSend({ type: "clientDiag", surface: "window-sender", what: "foreign", data: { site: "timeline-boot", origin: "https://q" + i + ".example" } });
+  for (let i = 0; i < 25; i++) h.win.__rompLocalSend(ownProbe(100 + i));
+  h.ws.open();
+  const again = h.sent.slice(n).filter((m) => m.type === "clientDiag");
+  assert.equal(again.filter((m) => m.surface === "window-sender").length, NOTE_MAX, "the trace budget is whole again");
+  assert.deepEqual(again.filter((m) => m.surface !== "window-sender").map((m) => m.what), ["wsclose", ...Array(19).fill("probe")],
+                   "and so is the page's own: the close's row and the first nineteen probes");
+});
+
+test("queued trace rows neither hold the reload nor count in the loss line, like every breadcrumb", () => {
+  const h = new Harness(shimJs("chat"));
+  h.ws.open(); h.bundleReady(); h.ws.close();      // a socket that had opened drops: from here the reload hold applies
+  for (const site of GEAR_SITES) noteForeign(site, { origin: "null" }, undefined, h.win);
+  h.win.__rompLocalSend(ownProbe(0));
+  assert.equal(h.win.__rompPaneBusy(), "", "only breadcrumbs queued, trace rows among them: no hold");
+  (h.win.__rompShimPersist || (() => {}))();
+  assert.equal(h.posted.filter((m) => m.romp === "notify").length, 0, "and no loss line at a reload");
+  h.win.__rompLocalSend({ type: "activeTab", id: "t1" });
+  assert.equal(h.win.__rompPaneBusy(), "sends", "a queued message holds");
+  (h.win.__rompShimPersist || (() => {}))();
+  assert.deepEqual(h.posted.filter((m) => m.romp === "notify").map((m) => m.text),
+                   ["1 message queued for the Chat pane could not be sent before the dashboard reloaded; it was not delivered."],
+                   "the line counts the one message, not the breadcrumbs");
 });
 
 // The Files pane's page (kernel.py _files_page) is served with the opt-out: nothing is pushed to app=files

@@ -105,7 +105,7 @@ function paint(): void {
 // boot
 applyTheme(document, loadSettings());
 watchOverlayScrollbars(document, window);   // styles.css's styled scrollbars stand down where the platform overlays its own
-installSettingsSync();
+installSettingsSync(vscodeApi);
 onExternalSettingsChange((s) => applyTheme(document, s));
 
 // the chip's resolver: what the relay told us about the sid, else the kernel's 8-character stub

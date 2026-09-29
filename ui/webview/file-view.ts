@@ -36,7 +36,7 @@ import { readTextCapped, overCapWords, settleUrlResponse } from "./capped-read";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, the chat's own
 import { fenceCopyQueue, type Fence } from "./fence-source";   // what Copy copies: the fence's text as the file holds it, tabs and all
 import "./viewer-grammars";   // six more grammars for a viewed file, registered on the bundle's hljs core (rust, go, c, java, sql, toml)
-import { windowSender } from "./window-sender";   // initFileView's window listener hears no foreign sender
+import { windowSender, noteForeign } from "./window-sender";   // initFileView's window listener hears no foreign sender
 
 // hljs is registered per-bundle. Same language set (and grammar registrations) the chat's fence
 // highlighting uses, dup-guarded, so importing this module alongside render.ts costs nothing.
@@ -1738,7 +1738,7 @@ export function initFileView(poster: (m: Record<string, unknown>) => void,
   window.addEventListener("message", (e: MessageEvent) => {
     const m = e.data;
     if (!m) return;
-    if (windowSender(e) === "foreign") return;
+    if (windowSender(e) === "foreign") { noteForeign("file-view", e, post); return; }
     if (m.romp === "viewFile" && typeof m.path === "string" && m.path) {
       if (onRelay) { onRelay(m); return; }   // this document's own contract (the Files pane) takes the message whole
       openFileView(m.path, typeof m.sid === "string" ? m.sid : null);

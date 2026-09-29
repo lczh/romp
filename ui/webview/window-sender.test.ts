@@ -1,8 +1,11 @@
 // windowSender's truth table (window-sender.ts): which sender a window message is attributed to, from its source and
-// origin, for a framed pane and for a top-level page.
+// origin, for a framed pane and for a top-level page. Then noteForeign, the trace a dropped message leaves: one
+// client-diag row per site and sender origin a page life, through the pane shim's send or the caller's transport, run on
+// its own and through listenForFrames (frame-listener.ts) installed over a stand-in window.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { windowSender } from "./window-sender";
+import { windowSender, noteForeign, NOTE_MAX } from "./window-sender";
+import { listenForFrames } from "./frame-listener";
 
 const ORIGIN = "http://127.0.0.1:1";
 const parent = { name: "the shell" };
@@ -218,5 +221,112 @@ test("a frame in this window's tab is judged by its origin however a rule reache
     assert.equal(windowSender({ source: src, origin: "null" }, w), "foreign", who + ", opaque origin");
     assert.equal(windowSender({ source: src, origin: "https://example.invalid" }, w), "foreign", who + ", another origin");
     assert.equal(windowSender({ source: src, origin: ORIGIN }, w), "peer", who + ", this origin");
+  }
+});
+
+// ── the trace a dropped message leaves (noteForeign) ──
+
+const row = (site: string, origin: string) => ({ type: "clientDiag", surface: "window-sender", what: "foreign", data: { site, origin } });
+
+test("noteForeign files one row per site and sender origin a page life: a repeat files none, another origin or site files one, a fresh page files again", () => {
+  const sent: unknown[] = [];
+  const page = { __rompLocalSend: (m: unknown) => { sent.push(m); } };
+  const post = { data: { romp: "openSettings", secret: "the message's data" }, source: { name: "a sandboxed frame" }, origin: "null" };
+  noteForeign("gear:openSettings", post, null, page);
+  assert.deepEqual(sent, [row("gear:openSettings", "null")], "one row: the site and the origin, nothing of the message");
+  noteForeign("gear:openSettings", post, null, page);
+  noteForeign("gear:openSettings", { origin: "null" }, null, page);
+  assert.equal(sent.length, 1, "a repeat from the same origin at the same site files nothing");
+  noteForeign("gear:openSettings", { origin: "https://example.invalid" }, null, page);
+  noteForeign("settings-sync", { origin: "null" }, null, page);
+  assert.deepEqual(sent.slice(1), [row("gear:openSettings", "https://example.invalid"), row("settings-sync", "null")],
+    "another origin at the same site, and the same origin at another site, each file one");
+  const fresh: unknown[] = [];
+  noteForeign("gear:openSettings", post, null, { __rompLocalSend: (m: unknown) => { fresh.push(m); } });
+  assert.deepEqual(fresh, [row("gear:openSettings", "null")], "a page life is its window: a fresh window files its own row");
+  assert.ok(!JSON.stringify(sent).includes("secret"), "no row carries the message's data");
+});
+
+test("noteForeign sends through the pane shim when the page has one, else through the transport the caller passes: a poster or the VS Code api", () => {
+  const viaShim: unknown[] = [], viaApi: unknown[] = [], viaPoster: unknown[] = [];
+  const api = { postMessage: (m: unknown) => { viaApi.push(m); } };
+  noteForeign("strip", { origin: "null" }, api, { __rompLocalSend: (m: unknown) => { viaShim.push(m); } });
+  assert.deepEqual([viaShim.length, viaApi.length], [1, 0], "a kernel page: the shim's send, never the api beside it");
+  noteForeign("strip", { origin: "null" }, api, {});
+  assert.deepEqual(viaApi, [row("strip", "null")], "a VS Code webview (no shim): the api the caller passes");
+  noteForeign("file-view", { origin: "null" }, (m) => { viaPoster.push(m); }, {});
+  assert.deepEqual(viaPoster, [row("file-view", "null")], "or a poster that reaches it");
+  assert.doesNotThrow(() => noteForeign("chat", { origin: "null" }, undefined, {}), "no transport at all: nothing to send, nothing thrown");
+});
+
+test("noteForeign never throws: a throwing send or transport, an origin that cannot be read as text, no event, no window", () => {
+  const boom = () => { throw new Error("socket closed"); };
+  assert.doesNotThrow(() => noteForeign("a", { origin: "null" }, null, { __rompLocalSend: boom }));
+  assert.doesNotThrow(() => noteForeign("b", { origin: "null" }, boom, {}));
+  assert.doesNotThrow(() => noteForeign("c", { origin: "null" }, { postMessage: boom }, {}));
+  assert.doesNotThrow(() => noteForeign("d", { origin: { toString: boom } }, null, { __rompLocalSend: () => undefined }));
+  const sent: unknown[] = [];
+  noteForeign("e", null, null, { __rompLocalSend: (m: unknown) => { sent.push(m); } });
+  assert.deepEqual(sent, [row("e", "undefined")], "a missing event is still traced, its origin read as undefined");
+  const g = globalThis as { window?: unknown };
+  assert.equal("window" in g, false, "node has no window");
+  assert.doesNotThrow(() => noteForeign("f", { origin: "null" }));
+});
+
+test("noteForeign files at most NOTE_MAX rows a page life, however many origins post", () => {
+  const sent: unknown[] = [];
+  const page = { __rompLocalSend: (m: unknown) => { sent.push(m); } };
+  for (let i = 0; i < NOTE_MAX + 15; i++) noteForeign("frame-listener", { origin: "https://h" + i + ".example.invalid" }, null, page);
+  assert.equal(NOTE_MAX, 20, "the pane shim's FOREIGN_QUEUE_MAX: an outage queues every row one helper files (pane-shim-stale.test.ts)");
+  assert.equal(sent.length, NOTE_MAX);
+  assert.deepEqual(sent[NOTE_MAX - 1], row("frame-listener", "https://h" + (NOTE_MAX - 1) + ".example.invalid"), "the first twenty, in order");
+});
+
+// Installed for real: listenForFrames over a stand-in window as the global window, with the pane shim's send. One foreign
+// post files one row and reaches nothing, a repeat files none, and every heard sender reaches the handler and files none.
+test("through listenForFrames: one foreign post files one row, a repeat files none, and a heard sender files none", () => {
+  const g = globalThis as { window?: unknown };
+  const had = "window" in g, prev = g.window;
+  const sent: unknown[] = [], handled: unknown[] = [], listeners: Array<(e: unknown) => void> = [];
+  const shell = { name: "the romp shell" };
+  const pane: any = { parent: shell, location: { origin: ORIGIN }, __rompLocalSend: (m: unknown) => { sent.push(m); },
+                      addEventListener: (t: string, f: (e: unknown) => void) => { if (t === "message") listeners.push(f); } };
+  g.window = pane;
+  try {
+    listenForFrames((e: MessageEvent) => { handled.push(e.data); });
+    assert.equal(listeners.length, 1);
+    const sandboxed = { name: "a sandboxed frame beside the pane", parent: shell };
+    listeners[0]({ data: { type: "feed", from: "foreign" }, source: sandboxed, origin: "null" });
+    assert.deepEqual(sent, [row("frame-listener", "null")], "one foreign post: one row");
+    assert.deepEqual(handled, [], "and it reached nothing");
+    listeners[0]({ data: { type: "feed", from: "foreign again" }, source: sandboxed, origin: "null" });
+    assert.equal(sent.length, 1, "a repeat from the same origin: no second row");
+    const HEARD_HERE: Array<[string, unknown, string]> = [
+      ["this document", pane, ORIGIN], ["the shell", shell, ORIGIN], ["a second column", { name: "a second column" }, ORIGIN], ["dispatch", null, ""],
+    ];
+    for (const [who, source, origin] of HEARD_HERE) listeners[0]({ data: { from: who }, source, origin });
+    assert.deepEqual(handled, HEARD_HERE.map(([who]) => ({ from: who })), "every heard sender reached the handler");
+    assert.equal(sent.length, 1, "and none of them filed a row");
+  } finally {
+    if (had) g.window = prev; else delete g.window;
+  }
+});
+
+test("through listenForFrames in a VS Code webview (no pane shim): the row goes through the api the pane passes", () => {
+  const g = globalThis as { window?: unknown };
+  const had = "window" in g, prev = g.window;
+  const VSCODE = "vscode-webview://11111111-2222-3333-4444-555555555555";
+  const viaApi: unknown[] = [], listeners: Array<(e: unknown) => void> = [];
+  const frame: any = { location: { origin: VSCODE }, addEventListener: (t: string, f: (e: unknown) => void) => { if (t === "message") listeners.push(f); } };
+  frame.parent = frame;
+  g.window = frame;
+  try {
+    listenForFrames(() => { /* the pane's handler */ }, { postMessage: (m: unknown) => { viaApi.push(m); } });
+    listeners[0]({ data: { type: "session" }, source: { name: "another webview" }, origin: "vscode-webview://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" });
+    assert.deepEqual(viaApi, [row("frame-listener", "vscode-webview://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")]);
+    listeners[0]({ data: { type: "session" }, source: { name: "the VS Code webview host" }, origin: VSCODE });
+    assert.equal(viaApi.length, 1, "the host, a peer, files none");
+  } finally {
+    if (had) g.window = prev; else delete g.window;
   }
 });
