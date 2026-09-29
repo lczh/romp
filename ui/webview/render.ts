@@ -18818,9 +18818,9 @@ function upsert(msg: any) {
   // fork by the ABSENCE of any shared event uuid instead.
   // …among the KERNEL's events the page held (2026-09-29): its own pending group and its held-copies group wear ids
   // the client minted, which no kernel event can share. A page holding nothing else (a send into an empty session:
-  // the dashed bubble alone) read the kernel's first frame after the send as a new transcript, tore the view down and
-  // rebuilt it behind the loader an animation frame later, a state that showed neither the bubble nor the frame's rows
-  // (a served clear lab read the page there). clearBoundarySeen (send-pending.ts) never counts the page's own groups either.
+  // the dashed bubble alone) read the kernel's first frame after the send as a new transcript: it tore the view down
+  // and rebuilt it at the next animation frame, the DOM holding only the loader in between (never painted; a served
+  // clear lab read the page there). clearBoundarySeen (send-pending.ts) never counts the page's own groups either.
   const prevKernel = prev ? prev.events.filter((e) => !isOptimistic(e) && !isHeldGroup(e)) : [];
   const forked = !!(existed && msg.events && msg.events.length && prev && prevKernel.length
                     && !sharesAnyUuid(msg.events, prevKernel));

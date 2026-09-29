@@ -229,11 +229,11 @@ test("guard 3 executed with the real sharesAnyUuid in scope (PR 1860 onto 1877):
 // ── upsert: the fork reading takes the page's KERNEL events (2026-09-29) ─────────────────────────────────────────────────
 // A send into an empty session leaves the page holding its own dashed group alone, and the kernel's first frame after the send (the
 // head, the send's echo, the clearing row) shares no id with it. The reading compared the frame with everything the page held, so
-// that frame read as a new transcript: the view was torn down and rebuilt behind the loader an animation frame later, and the page
-// painted neither the bubble nor the frame's rows in between (a served clear lab read the page there). The frame is the view's
-// first kernel content: the view stays, the first-build show lands it, and its build starts fresh, the tail window a torn-down
-// view got. A page holding kernel events beside its own group reads forks and appends as before; on a frame naming no tail start,
-// its re-injected group no longer counts as a shared id.
+// that frame read as a new transcript: the view was torn down and rebuilt at the next animation frame, the DOM holding only the
+// loader in between (never painted; a served clear lab read the page there). The frame is the view's first kernel content: the
+// view stays, the first-build show lands it, and its build starts fresh, the tail window a torn-down view got. A page holding
+// kernel events beside its own group reads forks and appends as before; on a frame naming no tail start, its re-injected group
+// no longer counts as a shared id.
 const pendingGroup = { kind: "queued", bare: true, texts: [{ md: "/clear", optimistic: true, qid: "q-1" }], uuid: "optimistic:1700000000000" };
 const heldCopies = { kind: "queued", texts: [{ md: "status?", landing: true }], uuid: "held:1700000000000" };
 const clearingFrame = (extra: Record<string, unknown> = {}) => ({ type: "session", id: "A", name: "web", proto: 2, headKnown: true, tailLo: 0, status: { state: "clearing" },
@@ -253,7 +253,7 @@ function upsertOnPaintedView(page: any, frame: any, rendered: number) {
 
 test("a send into an empty session: the kernel's first frame after it is the view's first build, never a fork (the view stays, the first-build show lands it, and it builds fresh)", () => {
   const r = upsertOnPaintedView(pageHolding([], [pendingGroup]), clearingFrame(), 1);
-  assert.deepEqual([r.v.removed, r.kept], [0, true], "the view the bubble is painted in stays (read as a fork, it was removed and rebuilt behind the loader a frame later)");
+  assert.deepEqual([r.v.removed, r.kept], [0, true], "the view the bubble is painted in stays (read as a fork, it was removed and rebuilt at the next animation frame)");
   assert.deepEqual(r.shows, ["show"], "the first-build show lands it, never the append path");
   assert.equal(r.v.rendered, 0, "the build starts fresh, as a placeholder's does: the tail window, never the bubble's one-unit window stretched over the arriving rows");
   assert.equal(r.v.avgTurnH, undefined, "the row average is measured again off the new rows");
