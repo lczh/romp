@@ -7,7 +7,8 @@ tick judges each by observation (dead ref died by refcount, no reclaim; a live r
 still runs is kept; a live ref whose thread finished is a surviving cycle to reclaim, or a ref a live root keeps, which reads the same, costs one reclaim and is counted a survivor). These tests pin
 that judgement's truth table on synthetic refs and a real SdkSession, that every session-end pop
 registers the ended session, plus the load fold-in, the backstop, the safe knob parse, the env
-switch, a weakref oracle over the freeze, and the pusher glue. Every fixture is synthetic. Real-collector
+switch, a weakref oracle over the freeze, and the pusher glue, busy cycles included (a busy cycle folds a
+load in and bounds the backstop, and judges an ended session only before the first freeze). Every fixture is synthetic. Real-collector
 tests unfreeze in tearDown so the freeze never leaks to another test.
 """
 import gc
@@ -50,6 +51,19 @@ class FakeGc:
         self.calls.append("freeze")
     def unfreeze(self):
         self.calls.append("unfreeze")
+
+
+class TakingGc(FakeGc):
+    """A FakeGc whose next collect empties the list set on `take`, the way the real collector takes an unreachable cycle:
+    an owner held only there then dies by reference counting, so a release's cheap stage sees it gone."""
+    def __init__(self):
+        super().__init__()
+        self.take = None
+    def collect(self, *a):
+        super().collect(*a)
+        if self.take is not None:
+            self.take.clear()
+            self.take = None
 
 
 class TriggerLogic(unittest.TestCase):
@@ -97,6 +111,24 @@ class TriggerLogic(unittest.TestCase):
         self.assertEqual(fake.calls, ["collect", "freeze"], "no unfreeze: the initial collect already took any pre-freeze garbage")
         self.assertEqual(c._ended, [], "the pre-freeze refs are consumed by the initial judgement, never carried")
         self.assertIsNone(c.tick(inserts=3), "a second tick with nothing new is None: the pre-freeze refs did not linger into a reclaim")
+
+    def test_a_pre_freeze_ended_ref_is_taken_by_the_busy_initial_collect_too(self):
+        """The busy twin of the test above (review 2026-09-28). On a pusher that never idles the first freeze lands on a busy
+        cycle. Left unjudged there, a pre-freeze ref a live root keeps, its worker finished, is frozen with the heap and costs
+        a full release (an unfreeze and a walk of the whole frozen heap) at the first idle cycle, possibly much later, where
+        the idle initial freeze drops it at no cost. The busy initial freeze judges the pre-freeze refs the same way."""
+        fake = FakeGc()
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
+        dead = _Owner()
+        c.note_ended(dead, thread=None)
+        del dead                                     # the ref is now dead: acyclic, gone
+        live = _Owner(); fin = _FakeThread(alive=False)   # a LIVE pre-freeze ref with a finished worker, both in locals
+        c.note_ended(live, thread=fin)
+        self.assertEqual(c.tick_busy(inserts=3), "initial", "the first busy tick with anything loaded freezes")
+        self.assertEqual(fake.calls, ["collect", "freeze"], "no unfreeze: the initial collect already took any pre-freeze garbage")
+        self.assertEqual(c._ended, [], "the busy initial freeze consumed the pre-freeze refs as the idle one does, never carried")
+        self.assertIsNone(c.tick(inserts=3), "the first idle cycle after it owes no release: the pre-freeze ref was dropped")
+        self.assertEqual(fake.calls, ["collect", "freeze"], "and nothing walked the frozen heap for it")
 
     def test_the_env_switch_turns_it_off(self):
         self.assertFalse(gf.enabled_from_env({"ROMP_GC_FREEZE": "off"}))
@@ -271,36 +303,49 @@ class EndedLockConcurrency(unittest.TestCase):
 
 
 class DoubleController:
-    """Records the tick calls, so the pusher tick's guard and error handling are pinned without the collector."""
+    """Records the tick calls, so the pusher tick's guard and error handling are pinned without the collector. `ticks` are the
+    idle-cycle calls (the full tick), `busy_ticks` the busy-cycle calls (the fold-in-only tick)."""
     def __init__(self, enabled=True, raise_tick=False):
         self.enabled = enabled
         self._raise = raise_tick
         self.ticks = []
+        self.busy_ticks = []
     def tick(self, inserts):
         self.ticks.append(inserts)
         if self._raise:
             raise RuntimeError("tick blew up")
         return "load"
+    def tick_busy(self, inserts):
+        self.busy_ticks.append(inserts)
+        if self._raise:
+            raise RuntimeError("busy tick blew up")
+        return "load"
 
 
 class PusherTick(unittest.TestCase):
-    """The pusher's idle-boundary seam, pinned in-process (the kernel's call site alone had no teeth)."""
+    """The pusher's end-of-cycle seam, pinned in-process (the kernel's call site alone had no teeth)."""
     def _stats(self, inserts=10):
         return lambda: {"inserts": inserts}
 
-    def test_it_ticks_only_on_an_idle_non_first_cycle(self):
+    def test_an_idle_cycle_ticks_a_busy_cycle_ticks_busy_and_the_first_cycle_neither(self):
+        # 2026-09-28: a busy cycle used to skip the reconcile altogether, so a pusher that never idled never folded a load
+        # in; now a busy, non-first cycle calls the fold-in-only tick_busy and an idle one the full tick
         errs = []
         c = DoubleController()
         gf.pusher_tick(c, idle=True, first=False, stats_fn=self._stats(), on_error=errs.append)
-        self.assertEqual(len(c.ticks), 1, "an idle, non-first cycle ticks")
-        self.assertEqual(c.ticks, [10], "and reads the record cache's insert counter")
-        for idle, first in ((True, True), (False, False)):
+        self.assertEqual((c.ticks, c.busy_ticks), ([10], []), "an idle, non-first cycle runs the full tick off the insert counter")
+        c = DoubleController()
+        gf.pusher_tick(c, idle=False, first=False, stats_fn=self._stats(), on_error=errs.append)
+        self.assertEqual((c.ticks, c.busy_ticks), ([], [10]), "a busy, non-first cycle runs tick_busy off the insert counter, never the full tick")
+        for idle in (True, False):
             c = DoubleController()
-            gf.pusher_tick(c, idle=idle, first=first, stats_fn=self._stats(), on_error=errs.append)
-            self.assertEqual(c.ticks, [], "the boot's first cycle and a busy cycle never tick: idle=%r first=%r" % (idle, first))
-        c = DoubleController(enabled=False)
-        gf.pusher_tick(c, idle=True, first=False, stats_fn=self._stats(), on_error=errs.append)
-        self.assertEqual(c.ticks, [], "a disabled controller never ticks")
+            gf.pusher_tick(c, idle=idle, first=True, stats_fn=self._stats(), on_error=errs.append)
+            self.assertEqual((c.ticks, c.busy_ticks), ([], []), "the boot's first cycle never ticks, idle or busy: idle=%r" % idle)
+        for idle in (True, False):
+            c = DoubleController(enabled=False)
+            gf.pusher_tick(c, idle=idle, first=False, stats_fn=self._stats(), on_error=errs.append)
+            self.assertEqual((c.ticks, c.busy_ticks), ([], []), "a disabled controller never ticks: idle=%r" % idle)
+        self.assertIsNone(gf.GcFreeze(enabled=False, gc=FakeGc()).tick_busy(10), "a disabled controller's busy tick is a no-op")
         self.assertEqual(errs, [], "no errors on the happy paths")
 
     def test_a_raising_stats_read_or_tick_is_handed_to_on_error_and_never_propagates(self):
@@ -314,6 +359,129 @@ class PusherTick(unittest.TestCase):
         gf.pusher_tick(c, idle=True, first=False, stats_fn=self._stats(), on_error=errs2.append)   # must not raise
         self.assertEqual(len(errs2), 1, "a raising tick is caught and counted once")
         self.assertEqual(len(c.ticks), 1, "the tick was attempted")
+        errs3 = []
+        c = DoubleController(raise_tick=True)
+        gf.pusher_tick(c, idle=False, first=False, stats_fn=self._stats(), on_error=errs3.append)   # must not raise
+        self.assertEqual(len(errs3), 1, "a raising busy tick is caught and counted once too")
+        self.assertEqual(len(c.busy_ticks), 1, "the busy tick was attempted")
+
+    def _seam(self, c, errs):
+        """One end-of-cycle call through the real seam, with the record cache's insert counter at `ins`."""
+        return lambda idle, first, ins: gf.pusher_tick(c, idle=idle, first=first, stats_fn=lambda: {"inserts": ins},
+                                                       on_error=errs.append)
+
+    def test_a_busy_cycle_folds_in_a_material_load(self):
+        """2026-09-28: a pusher whose cycles are almost never idle never folded a load in, so everything loaded after the
+        first freeze stayed in the collector's walk and every automatic full collection walked it again. A busy cycle now
+        runs the LOAD fold-in once the insert counter has grown by load_trees since the last freeze: a walk of the unfrozen
+        objects only, which the automatic collections were walking anyway. Before this change every busy tick returned None."""
+        fake, errs = FakeGc(), []
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
+        t = self._seam(c, errs)
+        self.assertIsNone(t(True, True, 40), "the boot's first cycle never reconciles")
+        self.assertEqual(t(True, False, 40), "initial", "the first idle cycle makes the initial freeze")
+        kinds = {ins: t(False, False, ins) for ins in range(41, 57)}
+        self.assertEqual({i: k for i, k in kinds.items() if k is not None}, {48: "load", 56: "load"},
+                         "busy cycles fold in exactly when the insert counter has grown by load_trees: %r" % kinds)
+        self.assertEqual(fake.calls, ["collect", "freeze"] * 3, "the initial freeze and two busy fold-ins, each walking only the unfrozen: no unfreeze")
+        self.assertEqual((c.freezes, c.reclaims, c.last_kind), (3, 0, "load"), "/perf reads the busy fold-ins: %r" % c.perf())
+        self.assertEqual(c.perf()["busyRuns"], 2, "the two busy fold-ins are counted apart on /perf; the idle initial freeze is not one: %r" % c.perf())
+        self.assertEqual(errs, [])
+
+    def test_a_pusher_that_never_idles_still_freezes(self):
+        """2026-09-28: the initial freeze used to wait for an idle cycle, so a kernel with no idle cycle after its first never
+        froze at all. A busy cycle makes the initial freeze once anything is loaded, and keeps folding in after it. The first
+        busy freeze lands under the load bound (3 inserts of 8), since a freeze of an unfrozen controller at a load past the
+        bound reads `initial` through the load branch too, so a pin past the bound could not tell the initial branch was gone
+        (review 2026-09-28: a busy pusher with 1 to 7 inserts then made no freeze until the 8th)."""
+        fake, errs = FakeGc(), []
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
+        t = self._seam(c, errs)
+        self.assertIsNone(t(False, True, 3), "the boot's first cycle never reconciles, busy or not")
+        self.assertIsNone(gf.pusher_tick(c, idle=False, first=False, stats_fn=lambda: {"inserts": 0}, on_error=errs.append),
+                          "nothing loaded yet: a busy cycle makes no freeze")
+        self.assertEqual(t(False, False, 3), "initial", "the first busy cycle with anything loaded makes the initial freeze, under the load bound")
+        self.assertEqual(t(False, False, 11), "load", "and the busy cycles fold in after it")
+        self.assertEqual(fake.calls, ["collect", "freeze"] * 2)
+        self.assertEqual(c.perf()["busyRuns"], 2, "a busy initial freeze counts as a busy run: %r" % c.perf())
+        self.assertEqual(errs, [])
+
+    def test_the_backstop_is_bounded_on_a_pusher_that_never_idles(self):
+        """2026-09-28: busy fold-ins freeze live cyclic objects that may die later, and the backstop reclaim that bounds them
+        runs on an idle cycle. A busy cycle leaves it to an idle one for one full backstop window (the frozen-heap walk is the
+        pause the idle boundary exists for), then takes it itself once the fold-in count reaches twice backstop_foldins: the
+        bound keys on the fold-in count, never a timer."""
+        fake, errs = FakeGc(), []
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=2, gc=fake, clock=lambda: 0.0)
+        t = self._seam(c, errs)
+        t(False, True, 40)
+        self.assertEqual(t(False, False, 41), "initial")
+        self.assertEqual([t(False, False, 49), t(False, False, 57)], ["load", "load"], "fold-ins 1 and 2: the idle backstop would be due now")
+        self.assertIsNone(t(False, False, 57), "a busy cycle leaves the backstop to an idle cycle for a full window")
+        self.assertEqual([t(False, False, 65), t(False, False, 73)], ["load", "load"], "fold-ins 3 and 4: still loads on busy cycles")
+        fake.calls.clear()
+        self.assertEqual(t(False, False, 81), "backstop", "a full window passed with no idle cycle: the busy cycle runs the backstop, even with a load also due")
+        self.assertEqual(fake.calls, ["unfreeze", "collect", "freeze"], "the backstop walks the frozen heap")
+        self.assertEqual((c.reclaims, c._foldins), (1, 0), "a reclaim, and the fold-in count restarts")
+        self.assertIsNone(t(False, False, 81), "nothing due right after the backstop: its re-freeze folded the load in")
+        self.assertEqual(errs, [])
+
+    def test_a_busy_cycle_after_the_first_freeze_never_judges_the_ended_sessions(self):
+        """2026-09-28: the release (and the unfreeze its survivor drives) stays on the idle boundary. Once a freeze is held, a
+        busy cycle folds a load in with an owed ended session registered, leaves it registered, never unfreezes; the next idle
+        cycle releases it (before the first freeze a busy cycle judges them, as the idle one does, pinned in TriggerLogic)."""
+        fake, errs = FakeGc(), []
+        c = gf.GcFreeze(enabled=True, load_trees=8, gc=fake, clock=lambda: 0.0)
+        t = self._seam(c, errs)
+        t(True, True, 40)
+        self.assertEqual(t(True, False, 40), "initial")
+        owner = _Owner(); fin = _FakeThread(alive=False)   # locals: alive with a finished worker, so owed at the next judgement
+        c.note_ended(owner, thread=fin)
+        fake.calls.clear()
+        self.assertEqual(t(False, False, 48), "load", "a busy cycle past the threshold folds in, it does not release")
+        self.assertEqual(len(c._ended), 1, "and leaves the owed ended session registered, unjudged")
+        self.assertNotIn("unfreeze", fake.calls, "a busy cycle never walks the frozen heap for a release")
+        self.assertEqual(t(True, False, 48), "release", "the next idle cycle judges it and releases")
+        self.assertEqual(c._ended, [])
+        self.assertEqual(errs, [])
+
+    def test_a_busy_run_clears_the_last_release_sids(self):
+        """Review 2026-09-28: after the first freeze a busy cycle judges nothing, so a busy load right after a live-root
+        release left `lastReleaseSids` naming the released session beside the load's kind and the survivor count every run
+        rebinds (0). On /perf that is the shape of a cheap-collect release of that session, where a full-heap pause had
+        freed nothing. A busy run judged nothing and owed nothing, so it clears the sids: the three fields then describe one
+        run, a busy load reading no sids, 0 survivors and `load`, a busy backstop the same with `backstop`. A busy cycle with
+        nothing due runs nothing and keeps the last run's row."""
+        fake, errs = TakingGc(), []
+        c = gf.GcFreeze(enabled=True, load_trees=8, backstop_foldins=1, gc=fake, clock=lambda: 0.0)
+        t = self._seam(c, errs)
+        def fields():
+            pf = c.perf()
+            return (pf["lastReleaseSids"], pf["lastReleaseSurvivors"], pf["lastReconcileKind"])
+        t(True, True, 40)
+        self.assertEqual(t(True, False, 40), "initial")
+        root = _Owner(); root.sid = "abcdef12-3456-7890-abcd-ef1234567890"   # held in a local: a live root keeps it through the reclaim
+        fin = _FakeThread(alive=False)
+        c.note_ended(root, thread=fin)
+        self.assertEqual(t(True, False, 40), "release", "an idle cycle releases the owed ref")
+        self.assertEqual(fields(), (["abcdef12"], 1, "release"), "a live-root release: its sid, one survivor, the kind: %r" % c.perf())
+        # review 2026-09-29: a busy cycle with nothing due ran nothing, so it keeps the release's row, and /perf still names
+        # the session a live root kept through that wasted pause
+        self.assertIsNone(t(False, False, 41), "a busy cycle with nothing due runs nothing")
+        self.assertEqual(fields(), (["abcdef12"], 1, "release"), "and keeps the release's row: its sid, the survivor, the kind: %r" % c.perf())
+        self.assertEqual(t(False, False, 48), "load", "a busy cycle folds the next load in")
+        self.assertEqual(fields(), ([], 0, "load"), "the busy load owed nothing: no sids, no survivor, a load: %r" % c.perf())
+        # a cheap-collect release (judged `load`) names its owed sid and brings the fold-ins to twice the bound, so the next
+        # busy cycle runs the backstop, which judged nothing either and clears the sids too
+        held = [_Owner()]; held[0].sid = "beadfeed-1234-5678-9abc-def012345678"   # held only in the list the next collect empties
+        fin2 = _FakeThread(alive=False)
+        c.note_ended(held[0], thread=fin2)
+        fake.take = held
+        self.assertEqual(t(True, False, 48), "load", "the cheap collect took the released owner whole: a load pass")
+        self.assertEqual(fields(), (["beadfeed"], 0, "load"), "a cheap-collect release names its owed sid: %r" % c.perf())
+        self.assertEqual(t(False, False, 48), "backstop", "two fold-ins since the reclaim, twice the bound: the busy backstop")
+        self.assertEqual(fields(), ([], 0, "backstop"), "the busy backstop owed nothing: no sids, no survivor, the kind: %r" % c.perf())
+        self.assertEqual(errs, [])
 
     def test_the_kernels_tick_wrapper_ticks_and_counts_a_raising_tick(self):
         km = load_source("romp_kernel_gcf_tick", os.path.join(BIN, "romp-kernel"))
@@ -328,6 +496,8 @@ class PusherTick(unittest.TestCase):
             d.ticks.clear()
             km._gc_freeze_tick(True, True)
             self.assertEqual(d.ticks, [], "the boot's first cycle does not tick")
+            km._gc_freeze_tick(False, False)
+            self.assertEqual((d.ticks, d.busy_ticks), ([], [3]), "a busy non-first cycle reaches the busy tick through the kernel wrapper")
             km._GC_FREEZE_ERRORS[0] = 0; km._GC_FREEZE_SAID[0] = False
             km._GC_FREEZE = DoubleController(raise_tick=True)
             km._gc_freeze_tick(True, False)   # must not raise
@@ -558,6 +728,20 @@ class RealCollector(unittest.TestCase):
             a = Cyclic(); b = Cyclic(); a.other = b; b.other = a
             out.append(a)
         return out                                   # a function scope so no loop variable leaks a reference
+
+    def test_a_busy_cycle_fold_in_freezes_the_new_load_on_the_real_collector(self):
+        """2026-09-28, on the real collector: a busy cycle's load fold-in moves what was loaded since the last freeze out of
+        the collector's walk (the frozen count rises by at least the new load), with no unfreeze of the frozen heap."""
+        errs = []
+        c = gf.GcFreeze(enabled=True, load_trees=1, gc=gc)
+        t = lambda ins: gf.pusher_tick(c, idle=False, first=False, stats_fn=lambda: {"inserts": ins}, on_error=errs.append)
+        self.assertEqual(t(1), "initial", "a busy cycle makes the initial freeze")
+        loaded = self._make_cycles(5000)             # a new load after the freeze, held (10,000 tracked objects)
+        before = gc.get_freeze_count()
+        self.assertEqual(t(2), "load", "a busy cycle folds the new load in")
+        self.assertGreaterEqual(gc.get_freeze_count() - before, 10000, "the new load left the collector's walk")
+        self.assertEqual((c.reclaims, errs), (0, []), "no frozen-heap walk and no error")
+        del loaded
 
     def test_a_warm_collection_after_the_freeze_leaves_the_frozen_cold_cycles_alone(self):
         heap = self._make_cycles(20000)
@@ -872,7 +1056,7 @@ class SessionEndPopsRegister(unittest.TestCase):
 
 
 class KernelGlue(unittest.TestCase):
-    """The kernel wires the ended note at backend load and calls the tick at the pusher's idle boundary."""
+    """The kernel wires the ended note at backend load and calls the tick at the end of every pusher cycle."""
     def test_the_pusher_cycle_calls_the_tick_and_the_kernel_wires_the_ended_note(self):
         import inspect
         km = load_source("romp_kernel_gcf_glue", os.path.join(BIN, "romp-kernel"))

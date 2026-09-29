@@ -2,13 +2,20 @@
 """Issue #1735, served: a REAL hermetic kernel with the freeze ON proves the live wiring the unit tests cannot.
 
 The judges parse the living sessions at boot (no browser needed; the boot-parses lab pins that), so the record
-cache fills and, at the pusher's idle boundary, the freeze fires: /perf's gc.freeze shows `active` with `freezes`
-at least one. Then a transcript is appended and re-read repeatedly (each re-read REPLACES its acyclic cache entry,
+cache fills and, at the end of a pusher cycle (busy or idle, never the boot's first), the freeze fires: /perf's
+gc.freeze shows `active` with `freezes` at least one.
+Then a transcript is appended and re-read repeatedly (each re-read REPLACES its acyclic cache entry,
 a record-cache pop) and `reclaims` stays put: under the corrected trigger a pop is not a cyclic release and drives
 no unfreeze pause. The gen-2 arithmetic: this lab drives no release, so it asserts the INEQUALITIES that hold for any
 run (`gen."2".collections` at least the controller's `collections`, which is itself at least `freezes` + `reclaims`);
 the EXACT equality, organic full collections = gen-2 collections less the controller's `collections`, is unit-tested
 (test_the_organic_arithmetic_is_exact_via_the_collections_count). The reclaim of a measured cyclic ended session (a weakref judged at the idle tick) is covered by the unit tests.
+A second case attaches a chat client (the websocket client the other served tests use) to one session and appends
+turns to it, so the cycles that push them to the client read BUSY: /perf's `busyRuns` grows and `freezes` passes the
+freeze the client found, the busy fold-in reached through the kernel's own wrapper with a served cycle's own idle flag
+(the unit tests drive the seam in-process and pin the kernel's call site only by its text). Some cycles between the
+pushes still read idle and can fold a load in on the idle path, so `freezes` can grow without the busy path, even
+with the client attached; `busyRuns` is the assertion that says the busy path ran.
 The freeze is set ON in the kernel's own env here; the suite floors it OFF everywhere else. Synthetic only:
 invented text, placeholder uuids, TESTHOST.
 """
@@ -34,6 +41,7 @@ BIN = os.path.join(ROOT, "bin")
 EXT = os.path.join(ROOT, "vscode-extension")
 sys.path.insert(0, HERE)
 import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environment
+from test_fold_checkpoints_served import ChatClient   # noqa: E402  the websocket client
 
 WEB = "aaaaaaaa-1111-2222-3333-444444444441"
 API = "bbbbbbbb-1111-2222-3333-444444444444"
@@ -47,10 +55,10 @@ def iso(t):
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _turns(t0, n):
-    recs, parent = [], None
+def _turns(t0, n, tag="", parent=None):
+    recs = []
     for j in range(n):
-        u, a = "u%d" % j, "a%d" % j
+        u, a = "u%s%d" % (tag, j), "a%s%d" % (tag, j)
         recs.append({"type": "user", "timestamp": iso(t0 + j * 100), "uuid": u, "parentUuid": parent,
                      "promptSource": "typed", "message": {"role": "user", "content": "wire the fixtures into the suite %d" % j}})
         recs.append({"type": "assistant", "timestamp": iso(t0 + j * 100 + 20), "uuid": a, "parentUuid": u,
@@ -130,8 +138,45 @@ class ServedGcFreeze(unittest.TestCase):
             time.sleep(0.5)
         return self._perf()
 
+    def test_a_busy_pusher_with_a_client_attached_folds_loads_in(self):
+        # review 2026-09-28: with no client a served cycle can read idle throughout, so only a client makes the busy path run
+        # in a real kernel. The first freeze comes before the client attaches, as in the case below.
+        self._wait(lambda pf: (pf.get("gc", {}).get("freeze", {}).get("freezes") or 0) >= 1)
+        client = ChatClient(self.port, self.token, WEB)
+        try:
+            client.send({"type": "ready"})
+            seen = []
+            for fr in client.frames(30):
+                seen.append(fr.get("type"))
+                if fr.get("type") == "session" and (fr.get("id") == WEB or fr.get("sid") == WEB):
+                    break
+            self.assertIn("session", seen, "the chat client received web's frame; frames seen: %s" % seen[:20])
+            pf = self._perf(); fr0 = pf["gc"]["freeze"]
+            busy0, freezes0 = fr0.get("busyRuns") or 0, fr0.get("freezes") or 0
+            self.assertGreaterEqual(freezes0, 1, "the initial freeze came before the new turns: %r" % fr0)
+            parent = "a11"                                   # the transcript's last turn (setUpClass wrote twelve)
+            for k in range(20):                              # a new turn on the session the client looks at, about 1.5 s apart
+                with open(self.paths[WEB], "a") as f:
+                    f.write("".join(json.dumps(r) + "\n" for r in _turns(int(time.time()), 1, tag="busy%d-" % k, parent=parent)))
+                parent = "abusy%d-0" % k
+                for _ in client.frames(1.5):                 # read what the kernel pushes, so the client stays attached
+                    pass
+                pf = self._perf(); fr = pf["gc"]["freeze"]
+                if (fr.get("busyRuns") or 0) > busy0 and (fr.get("freezes") or 0) > freezes0:
+                    break
+        finally:
+            client.close()
+        fr = pf["gc"]["freeze"]
+        cycles = {k: (pf.get("pusher") or {}).get(k) for k in ("cycles", "idle_cycles")}
+        self.assertGreater(fr.get("busyRuns") or 0, busy0,
+                           "a busy cycle reconciled through the kernel's wrapper while the client watched: %r, pusher %r" % (fr, cycles))
+        self.assertGreater(fr["freezes"], freezes0,
+                           "the freezes passed the one the client found (busy fold-ins), not stuck at the initial freeze: %r" % fr)
+        self.assertEqual(fr["reclaims"], fr0["reclaims"], "a busy fold-in walks no frozen heap: %r" % fr)
+        self.assertEqual(fr.get("errors", 0), 0, "no reconcile raised: %r" % fr)
+
     def test_the_freeze_fires_live_and_steady_re_reads_never_reclaim(self):
-        # the judges' boot parse loads the sessions; at an idle cycle the freeze fires
+        # the judges' boot parse loads the sessions; at the end of a pusher cycle the freeze fires
         pf = self._wait(lambda pf: (pf.get("gc", {}).get("freeze", {}).get("freezes") or 0) >= 1)
         fr = pf["gc"]["freeze"]
         self.assertTrue(fr["enabled"] and fr["active"], "the freeze is on and holds a freeze: %r" % fr)
