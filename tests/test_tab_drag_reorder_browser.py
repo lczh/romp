@@ -169,7 +169,7 @@ await page.addInitScript(() => {
 // THE OPEN SESSION IS CHOSEN, NOT ADOPTED (2026-09-29): with no saved choice the page opens whichever session's frame lands
 // first, which left each fold click below to the way back whenever the header's group contained that session at the click
 // (foldGroup). The shim's saved state names it instead (its activeId is the ?active= connect hint and the tab the page
-// restores once it is listed or its frame arrives), written only while the key is absent, so the two reloads keep what it saved
+// restores once it is listed or its frame arrives), written only while the key is absent, so the two reloads keep what the page saved
 await page.addInitScript((sid) => {
   try { if (localStorage.getItem("romp-vscode-state-chat") === null) localStorage.setItem("romp-vscode-state-chat", JSON.stringify({ activeId: sid })); } catch (e) {}
 }, cfg.active);
@@ -644,8 +644,9 @@ process.exit(0);
 def gestures_on(result, sid):
     """The recorded gestures of a driver run that touch the session `sid` (its tab id, the id the saved state names), one
     line each: a case whose dragged tab or drop target is that session, and a rename whose answer names it (the kernel's
-    /rename answers with the renamed session's id). A case that records no dragged tab's id is named too, so a record that
-    lost the ids never reads as one that spared the session. A header drag moves a group and no tab, and a skipped case
+    /rename answers with the renamed session's id). A case that records no dragged tab's id, or a tab drop target with no
+    id (a header target, named '#<group>', has none), is named too, so a record that lost the ids never reads as one that
+    spared the session. A header drag moves a group and no tab, and a skipped case
     made no gesture, so neither is read."""
     hits = []
     for c in result.get("cases") or []:
@@ -658,6 +659,8 @@ def gestures_on(result, sid):
             hits.append("%s: drags it" % label)
         if over.get("id") == sid:
             hits.append("%s: drops on it" % label)
+        elif c.get("over") and not over.get("id") and not str(over.get("name") or "").startswith("#"):
+            hits.append("%s: records no drop target's id" % label)
         if "rename" in c:
             ans = c.get("rename") or {}
             if not ans.get("id"):
@@ -1230,13 +1233,15 @@ class PinnedSessionRecordCheck(unittest.TestCase):
                          ["push mid-drag: trail, 2nd tab to the 6th slot (right part of the 6th): renames it"])
 
     def test_a_record_that_cannot_say_which_tabs_it_touched_is_named(self):
-        # a dragged tab's id missing, or a refused rename (no id in its answer): the record cannot say the session was
-        # spared, so it does not pass for one that says so
+        # a dragged tab's id missing, a tab drop target's id missing, or a refused rename (no id in its answer): the record
+        # cannot say the session was spared, so it does not pass for one that says so
         r = self._record()
         del r["cases"][0]["from"]["id"]
+        del r["cases"][0]["over"]["id"]
         r["cases"][4]["rename"] = {"ok": False, "error": "no live session named \"auth\""}
         self.assertEqual(gestures_on(r, self.PIN), [
             "classic: trail, 1st tab to the 3rd slot (right part of the 3rd): records no dragged tab's id",
+            "classic: trail, 1st tab to the 3rd slot (right part of the 3rd): records no drop target's id",
             "push mid-drag: trail, 2nd tab to the 6th slot (right part of the 6th): the rename's answer names no session: %r"
             % ({"ok": False, "error": "no live session named \"auth\""},)])
 
