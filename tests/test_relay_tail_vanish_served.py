@@ -106,7 +106,7 @@ const park = async () => {
 };
 
 // What the page files when it REFUSES a frame, the event a refused scenario's read waits on (2026-09-29; a 2500 ms pause stood for it,
-// so a page that dropped or ignored the frame kept the store, the read point and its neighbours, and passed every invariant below): a
+// so a page that dropped or ignored the frame kept the store, the read point and its neighbors, and passed every invariant below): a
 // refused full frame files its desync row (render.ts guard 3, why would-drop-held), the loop's second identical refusal files the loop
 // row, and a refused delta asks for the full frame, or files the refusal row when an ask is already out. The page holds one session,
 // so a gap ask is this frame's. A scenario the page must APPLY keeps the pause: its own assertions are positive, a miss fails them.
