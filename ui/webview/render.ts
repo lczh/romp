@@ -18820,7 +18820,7 @@ function upsert(msg: any) {
   // the client minted, which no kernel event can share. A page holding nothing else (a send into an empty session:
   // the dashed bubble alone) read the kernel's first frame after the send as a new transcript, tore the view down and
   // rebuilt it behind the loader an animation frame later, a state that showed neither the bubble nor the frame's rows
-  // (a served clear lab read the page there). clearBoundarySeen (send-pending.ts) reads the held turns the same way.
+  // (a served clear lab read the page there). clearBoundarySeen (send-pending.ts) never counts the page's own groups either.
   const prevKernel = prev ? prev.events.filter((e) => !isOptimistic(e) && !isHeldGroup(e)) : [];
   const forked = !!(existed && msg.events && msg.events.length && prev && prevKernel.length
                     && !sharesAnyUuid(msg.events, prevKernel));
@@ -18861,8 +18861,9 @@ function upsert(msg: any) {
     // A first build over a view that painted only the client's groups builds FRESH, as a placeholder's does (syncView's
     // empty branch leaves rendered at 0): the tail window from the newest compaction, in the task that replaces the
     // bubble's nodes. The keyed paint would stretch the bubble's one-unit window over the whole arriving history; the
-    // fork's teardown used to give this fresh build (2026-09-29).
-    if (v && firstBuild) v.rendered = 0;
+    // fork's teardown used to give this fresh build (2026-09-29). And its row average, measured off the bubble alone, is
+    // measured again off the new rows, as every fresh rebuild's is: the spacers of a long arriving history are sized by it.
+    if (v && firstBuild) { v.rendered = 0; v.avgTurnH = undefined; }
   }
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
   adoptArrival(order, msg.id, existed);   // once: its tabOrder frame usually carried it already (tab-order.ts)
