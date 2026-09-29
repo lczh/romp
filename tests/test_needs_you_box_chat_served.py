@@ -94,7 +94,19 @@ const readBox = () => page.evaluate(() => {
 });
 const waitRows = (n, ms) => page.waitForFunction((n) => document.querySelectorAll("#notices .ntc-row").length === n, n, { timeout: ms }).then(() => true).catch(() => false);
 await page.goto(cfg.chat);
-await page.waitForSelector("#tabs .tab", { timeout: 30000 }).catch(() => {});
+// THE PREMISE, web's tab active (the CI census of 2026-09-29: two runs on main read api's box as web's, 'Needs you · 1' under api's active tab,
+// and six tests failed after their 60 s and 5 s waits): a fresh page with no saved choice adopts the FIRST session frame to arrive, and the
+// kernel can send api's first (a pusher cycle that straddles the socket's ready, which withholds web's frame and sends api's; or the connect
+// push's ranking, which puts a session named to the cycle or one without a transcript ahead of the strip's order), and no later frame
+// displaces it. So the driver PICKS web's tab, as a user would: the page adopts an arriving frame only while no tab is active, so the pick
+// stands whatever the kernel sent first. The tab the page adopted is kept for test 1's message alone. Each wait fails soft: a throw here ends
+// the driver and fails all thirty tests with no record, where a miss is the premise, which test 1 names
+const webTab = '#tabs .tab[data-id="' + cfg.sid + '"]';
+out.premise = { webTab: await page.waitForSelector(webTab, { timeout: 30000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; }) };
+out.premise.adopted = await page.waitForSelector("#tabs .tab.active[data-id]", { timeout: 15000 }).then((h) => h.getAttribute("data-id")).catch((e) => { if (e.name !== "TimeoutError") throw e; return null; });   // the first arrival's tab (null: none adopted yet, and the pick below comes first)
+if (out.premise.webTab) await page.click(webTab, { timeout: 5000 }).catch((e) => { if (e.name !== "TimeoutError") throw e; out.premise.clickMissed = String(e).slice(0, 300); });
+out.premise.webActive = await page.waitForSelector('#tabs .tab.active[data-id="' + cfg.sid + '"]', { timeout: 15000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; });
+out.premise.active = await page.evaluate(() => { const t = document.querySelector("#tabs .tab.active[data-id]"); return t ? t.getAttribute("data-id") : null; });
 // 1. the box: four rows (the three questions and the held message), the header, the token edge, no row for the hard stop, the red ring on the tab
 out.fourRows = await waitRows(4, 60000);
 out.first = await readBox();
@@ -619,9 +631,9 @@ await browser.close();
 """
 
 
-# the driver's budget. Its bounded waits sum to about 2950 s serially (every helper counted PER CALL, the round-one verifier of PR 2105: the
+# the driver's budget. Its bounded waits sum to about 2985 s serially (every helper counted PER CALL, the round-one verifier of PR 2105: the
 # kernel's four 90 s deadlines, the 60 s row, card and credential-row waits, the 30 s and 15 s waits of the brief helpers per call, the fold
-# helper's three 5 s waits per call, the shorter button, dialog, level, settings-card and frame waits, the frame loops), more than any per-test ceiling the runner gives (CI's served-page step runs pytest with --timeout=600, thread method), so
+# helper's three 5 s waits per call, the shorter button, dialog, level, settings-card, premise and frame waits, the frame loops), more than any per-test ceiling the runner gives (CI's served-page step runs pytest with --timeout=600, thread method), so
 # the cap cannot be the sum: it is the ceiling less the SETUP the same per-test timer wraps (pytest-timeout's thread method times the first
 # test's setUpClass too: the esbuild run and the healthz boot loop, bounded at about 60 to 120 s here), so a kernel that boots late and then
 # stalls still hits this cap before the runner's, with the record below and the kernel's tail in hand rather than a bare per-test timeout
@@ -672,7 +684,8 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             {"sid": SID, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": SID, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
         # api: one question and no hard stop, so its tab wears the Needs you ring (the switch leg reads it: web's red ring is painted
-        # first and alone, so a regression dropping the magenta ring would pass on web's tab); web stays first, the active tab
+        # first and alone, so a regression dropping the magenta ring would pass on web's tab); web stays first in the strip, and the driver
+        # picks its tab before the first read, since the strip's order never made it the active one (the premise in the driver, 2026-09-29)
         Path(state, "names", API).write_text("api\t%s\t#1EA1EB\t#ffffff\n" % cwd)
         Path(state, "sdk", API + ".json").write_text(json.dumps(
             {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
@@ -807,8 +820,11 @@ class NeedsYouBoxChatServed(unittest.TestCase):
 
     def test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop(self):
         r = self._result()
+        p = r["premise"]
+        adopted = {SID: "web", API: "api"}.get(p.get("adopted"), p.get("adopted"))
+        self.assertTrue(p["webActive"], "premise: web's tab is active before the box is read, the page having adopted %s's first frame (the pick of web's tab moves it there whatever the kernel sent first; every scene before the switch reads web's box): %r" % (adopted, p))
         self.assertEqual(r["errors"], [], "no page error")
-        self.assertTrue(r["fourRows"], "four rows within a minute: %r (kernel: %s)" % (r["first"], self._kernel_tail()))
+        self.assertTrue(r["fourRows"], "four rows within a minute: %r (premise: %r; kernel: %s)" % (r["first"], p, self._kernel_tail()))
         b = r["first"]
         self.assertTrue(b["shown"], "the box shows")
         self.assertEqual(b["head"], "Needs you · 4", "the header: the title with the count")
