@@ -11,11 +11,13 @@ text cannot state a header value, a file or a sandbox the tree does not have:
     popup lab witnesses), the sender checks in the listeners romp installs and their helper's path, and the diagnostic
     row a pane's listener files for its first drop from each sender origin, up to window-sender.ts's cap a page load;
   - its residual cautions say where browsers ignore the policy (a plain-http address other than localhost and
-    127.0.0.1), and that the sender checks are what remains there;
+    127.0.0.1), that the sender checks are what remains there, and that the default address (the kernel's bind
+    default) and the https route are secure contexts;
   - the plan's section 5 says a URL pane cannot open one of the dashboard's pages in a new tab, why (the inherited
     sandbox against the policy), what lifting it would take short of dropping the policy, and names its witness, a
-    test the popup lab defines; the paragraph follows "The pin:", which pins the bullets above it; the URL frame's
-    sandbox in the kernel lacks the token that would lift it.
+    test the popup lab defines; it states the outcome that witness asserts (the tab opens without the page) and no
+    engine's refusal page, which nothing asserts; the paragraph follows "The pin:", which pins the bullets above it;
+    the URL frame's sandbox in the kernel lacks the token that would lift it.
 Reads the tree only: no kernel, no browser.
 """
 import os
@@ -98,12 +100,17 @@ class SecurityDoc(unittest.TestCase):
     def test_the_residual_cautions_say_where_the_policy_is_ignored_and_what_remains(self):
         cautions = _section(self.doc, "\n## Residual cautions on shared machines\n", "\n## ")
         b = _flat(_bullet(cautions, "On a plain-http address"))
-        self.assertIn("other than `localhost` or `127.0.0.1`", b)
+        # the default address is the kernel's bind default, one of the two addresses the bullet names as secure
+        bind = re.findall(r'(?m)^BIND = os\.environ\.get\("ROMP_SERVE_HOST", "([^"]+)"\)', self.kernel)
+        self.assertEqual(bind, ["127.0.0.1"], "the kernel binds loopback unless ROMP_SERVE_HOST says otherwise")
+        self.assertIn("other than `localhost` or `%s`" % bind[0], b)
         self.assertIn("`ROMP_SERVE_HOST`", b)
         self.assertIn("browsers ignore the opener policy", b)
         self.assertIn("they enforce it only in a secure context", b)
         self.assertIn("the sender checks in each page's listeners are the remaining protection", b)
-        self.assertIn("the https route through `tailscale serve` are secure contexts", b)
+        # both halves: the default address as well as the https route (dropping the first half passed every test, the
+        # 2026-09-29 review)
+        self.assertIn("The default address and the https route through `tailscale serve` are secure contexts.", b)
 
     def test_no_em_dash_in_the_new_lines(self):
         for label, head in (("**Window isolation:**", "\n## What is already hardened\n"),
@@ -149,6 +156,24 @@ class PanesPlan(unittest.TestCase):
         self.assertIn("`tests/test_pane_popup_opener_served.py` witnesses the refusal (`%s`)" % self.WITNESS, p)
         lab = _read("tests", "test_pane_popup_opener_served.py")
         self.assertEqual(len(re.findall(r"(?m)^    def %s\(self\):" % self.WITNESS, lab)), 1)
+
+    def test_the_paragraph_states_only_what_the_witness_asserts(self):
+        # The witness asserts that the URL pane's tab opened and does not show the page (the file's line is absent), in
+        # the one engine CI runs the lab in, Chromium. What an engine shows instead is asserted nowhere, so the plan says
+        # the tab opens without the page and names no engine's refusal page: a sentence that swapped the three engines'
+        # pages passed every test (the 2026-09-29 review). This reads the witness's source; the lab runs it.
+        p = _flat(self._para())
+        self.assertIn("so a tab onto one of the dashboard's pages opens without showing that page.", p)
+        for engine in ("Chromium", "Firefox", "WebKit"):
+            with self.subTest(engine=engine):
+                self.assertNotIn(engine, p, "no engine's refusal page: the witness does not assert one")
+        lab = _read("tests", "test_pane_popup_opener_served.py")
+        at = lab.index("    def %s(self):" % self.WITNESS)
+        nxt = lab.find("\n    def ", at + 1)
+        body = lab[at:nxt if nxt >= 0 else len(lab)]
+        r = body.index('r = self._result()["residual"]')
+        self.assertIn('self.assertTrue(r["opened"], ', body[r:], "the tab opened")
+        self.assertIn('self.assertNotIn(MARK, r["text"] or "", ', body[r:], "and does not show the page")
 
 
 if __name__ == "__main__":

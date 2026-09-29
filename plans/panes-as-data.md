@@ -252,10 +252,9 @@ takes the census over the built landing, the bundles' sources and the built bund
 sandbox (`allow-popups` lets the pane open it but does not lift the sandbox), and a browser renders a sandboxed
 navigation's response only when that response's `Cross-Origin-Opener-Policy` is `unsafe-none`. Every page the kernel
 serves declares `same-origin-allow-popups` except a state-root pane's own files, so a tab onto one of the dashboard's
-pages shows no page: Chromium shows its error page, Firefox a blocked page and WebKit an empty one. A URL pane can
-open a state-root pane's own files. Short of dropping the policy, lifting the limit would take
-`allow-popups-to-escape-sandbox` on the frame, which would unsandbox every popup the pane opens.
-`tests/test_pane_popup_opener_served.py` witnesses the refusal
+pages opens without showing that page. A URL pane can open a state-root pane's own files. Short of dropping the
+policy, lifting the limit would take `allow-popups-to-escape-sandbox` on the frame, which would unsandbox every popup
+the pane opens. `tests/test_pane_popup_opener_served.py` witnesses the refusal
 (`test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page`).
 
 ## 6. Roads not taken
