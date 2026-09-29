@@ -100,13 +100,18 @@ await page.goto(cfg.chat);
 // push's ranking, which puts a session named to the cycle or one without a transcript ahead of the strip's order), and no later frame
 // displaces it. So the driver PICKS web's tab, as a user would: the page adopts an arriving frame only while no tab is active, so the pick
 // stands whatever the kernel sent first. The tab the page adopted is kept for test 1's message alone. Each wait fails soft: a throw here ends
-// the driver and fails every test in the class with no record, where a miss is the premise, which test 1 names
-const webTab = '#tabs .tab[data-id="' + cfg.sid + '"]';
-out.premise = { webTab: await page.waitForSelector(webTab, { timeout: 30000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; }) };
-out.premise.adopted = await page.waitForSelector("#tabs .tab.active[data-id]", { timeout: 15000 }).then((h) => h.getAttribute("data-id")).catch((e) => { if (e.name !== "TimeoutError") throw e; return null; });   // the first arrival's tab (null: none adopted yet, and the pick below comes first)
-if (out.premise.webTab) await page.click(webTab, { timeout: 5000 }).catch((e) => { if (e.name !== "TimeoutError") throw e; out.premise.clickMissed = String(e).slice(0, 300); });
-out.premise.webActive = await page.waitForSelector('#tabs .tab.active[data-id="' + cfg.sid + '"]', { timeout: 15000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; });
-out.premise.active = await page.evaluate(() => { const t = document.querySelector("#tabs .tab.active[data-id]"); return t ? t.getAttribute("data-id") : null; });
+// the driver and fails every test in the class with no record, where a miss is the premise, which test 1 names. One helper for the page and
+// for the shell's chat pane (scene 6), a fresh page of its own that makes the same pick
+const pickWeb = async (f) => {   // f: the standalone page or the shell's chat frame
+  const webTab = '#tabs .tab[data-id="' + cfg.sid + '"]';
+  const p = { webTab: await f.waitForSelector(webTab, { timeout: 30000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; }) };
+  p.adopted = await f.waitForSelector("#tabs .tab.active[data-id]", { timeout: 15000 }).then((h) => h.getAttribute("data-id")).catch((e) => { if (e.name !== "TimeoutError") throw e; return null; });   // the first arrival's tab (null: none adopted yet, and the pick below comes first)
+  if (p.webTab) await f.click(webTab, { timeout: 5000 }).catch((e) => { if (e.name !== "TimeoutError") throw e; p.clickMissed = String(e).slice(0, 300); });
+  p.webActive = await f.waitForSelector('#tabs .tab.active[data-id="' + cfg.sid + '"]', { timeout: 15000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; });
+  p.active = await f.evaluate(() => { const t = document.querySelector("#tabs .tab.active[data-id]"); return t ? t.getAttribute("data-id") : null; });
+  return p;
+};
+out.premise = await pickWeb(page);
 // 1. the box: four rows (the three questions and the held message), the header, the token edge, no row for the hard stop, the red ring on the tab
 out.fourRows = await waitRows(4, 60000);
 out.first = await readBox();
@@ -368,6 +373,11 @@ await shell.goto(cfg.landing);                                                  
 let fr = null; for (let i = 0; i < 150 && !fr; i++) { fr = shell.frames().find((f) => /\/chat(\?|$)/.test(f.url())) || null; if (!fr) await shell.waitForTimeout(200); }   // loop-ok: bounded
 out.hiddenPane = { frame: !!fr };
 if (fr) {
+  // THE SAME PREMISE in the shell's chat pane (a review of this fix, 2026-09-29): a fresh page with no saved choice as well, and the kernel can
+  // send api's frame before any strip reaches it, which the page adopts before the stale-active fallback (the strip's first member) can act.
+  // The hidden-pane, keyboard-order and content scenes read web's rows here, so the driver picks web's tab first. Recorded in the scene's
+  // record, which the hidden-pane test prints, and asserted by no test yet: no run has forced api first on this page
+  out.hiddenPane.premise = await pickWeb(fr);
   out.hiddenPane.loaded = await fr.waitForSelector("#notices .ntc-head", { timeout: 60000 }).then(() => true).catch(() => false);   // the box on screen once, collapsed to its header line (a fresh page)
   out.hiddenPane.collapsedFresh = await fr.evaluate(() => document.getElementById("notices").classList.contains("ntc-l0") && Array.from(document.querySelectorAll("#notices .ntc-row")).every((r) => getComputedStyle(r).display === "none"));   // collapsed by default: the rows attached and hidden
   await openNeedsBox(fr, 2);   // to the full context; a page without the levels (the base) shows everything already
@@ -631,7 +641,7 @@ await browser.close();
 """
 
 
-# the driver's budget. Its bounded waits sum to about 2985 s serially (every helper counted PER CALL, the round-one verifier of PR 2105: the
+# the driver's budget. Its bounded waits sum to about 3050 s serially (every helper counted PER CALL, the round-one verifier of PR 2105: the
 # kernel's four 90 s deadlines, the 60 s row, card and credential-row waits, the 30 s and 15 s waits of the brief helpers per call, the fold
 # helper's three 5 s waits per call, the shorter button, dialog, level, settings-card, premise and frame waits, the frame loops), more than any per-test ceiling the runner gives (CI's served-page step runs pytest with --timeout=600, thread method), so
 # the cap cannot be the sum: it is the ceiling less the SETUP the same per-test timer wraps (pytest-timeout's thread method times the first
