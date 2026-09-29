@@ -76,12 +76,13 @@ await page.waitForFunction(() => (window.__sent || []).some((x) => x.text === "/
 // The kernel's first frame after a send into an EMPTY session shares no id with the page's own pending group, so the
 // page reads it as a new transcript (render.ts upsert, `forked`): the view is torn down in that frame's task and
 // rebuilt at the next animation frame, and a read landing between the two found only the loader, neither the bubble
-// nor the row. The row cannot be on the page in that gap, and every paint that shows it paints from a list already
-// holding the pending /clear, so this predicate cannot fire there. It also checks what the old read often skipped:
-// in about half of the passing runs that read came before the clearing frame, so it never looked at the page while
-// the clear ran. 10 s from seeing the send stays well under the fake SDK's gate cap (about 15 s from when the fake
-// takes the /clear, which can only follow that send), so the fixture the clear-batch lab shares is unchanged. A
-// timeout is recorded, never thrown, so the gate is still written and the test names the premise that failed.
+// nor the row. The row is never on the page in that gap, so this predicate cannot fire there; and every paint that
+// shows the row paints from a list already holding the pending /clear, so the snapshot it returns sees the bubble.
+// It also checks what the old read often skipped: in about half of the passing runs that read came before the
+// clearing frame, so it never saw the page's in-flight state. 10 s from seeing the send stays well under the fake
+// SDK's gate cap (about 15 s from when the fake takes the /clear, which can only follow that send), so the fixture
+// the clear-batch lab shares is unchanged. A timeout is recorded, never thrown, so the gate is still written and
+// the test names the premise that failed.
 const midRead = (final) => {
   const clearingRow = !!document.querySelector("#content .turn-clearing");
   if (!clearingRow && !final) return false;   // nothing is read before the row is on the page
