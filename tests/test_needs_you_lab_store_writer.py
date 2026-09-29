@@ -21,9 +21,10 @@ written. At each hold the test acts as the kernel, then lets the writer go:
   - a node gone from the store is named (the store's revision, its node ids, any store moved aside), never a bare TypeError.
 One more test holds the writer earlier, at its read of the store through the descriptor it opened, and publishes there as the kernel:
 the edit is kept, because the identity comes from that descriptor, not from the path.
-NoInPlaceWrites pins the source: neither driver that writes a file the kernel reads writes one in place, and every scene edit of the
-needs-you driver reads its node through nodeOf. TornStoreChain walks the kernel half of the CI red step by step; it describes the
-kernel, so it passes before the fix and after it alike.
+NoInPlaceWrites pins the source, by the spellings its constants list: neither driver that writes a file the kernel reads writes one in
+place, each such write is a publishJson call, and every scene edit of the needs-you driver reads its node through nodeOf.
+TornStoreChain walks the kernel half of the CI red step by step; it describes the kernel, so it passes before the fix and after it
+alike.
 
 Needs node (the lab's own runtime) and skips without it. Synthetic only: a private placeholder sid, invented text."""
 import ast
@@ -58,11 +59,18 @@ T0 = 1781100000
 NEW_BRIEF = "the CI job runs the Postgres loader first and the SQLite loader against its fixtures"
 ASIDE = SID + ".json.corrupt-20260101T000000Z"   # a store the kernel moved aside earlier, named as its quarantine names one
 # node's writers that open a file and fill it in place (truncating it first, or filling it in steps): any of them on a file the kernel reads
-# reopens the window the CI red fell into, so NoInPlaceWrites looks for each, not only the one the driver happened to use
-IN_PLACE_WRITES = ("fs.writeFileSync(", "fs.writeFile(", "fs.promises.writeFile(", "fs.truncateSync(", "fs.createWriteStream(")
-# a scene edit that reaches a node without nodeOf (`st.nodes[cfg.g6].blockSummary = ...`); the lookahead leaves out a node's creation
-# (`st.nodes[cfg.g6c] = {`), the only other shape the driver writes
-BARE_NODE = re.compile(r"st\.nodes\[cfg\.\w+\](?!\s*=\s*\{)")
+# reopens the window the CI red fell into, so NoInPlaceWrites looks for each, not only the one the driver happened to use. It matches these
+# exact spellings on a line of a driver: writeFile (sync, callback and promise), truncateSync, createWriteStream, copyFile in the same three
+# (a copy truncates the target and keeps its inode), and TRUNCATING_OPEN below. A writer reached through an alias of fs is not matched.
+IN_PLACE_WRITES = ("fs.writeFileSync(", "fs.writeFile(", "fs.promises.writeFile(", "fs.truncateSync(", "fs.createWriteStream(",
+                   "fs.copyFileSync(", "fs.copyFile(", "fs.promises.copyFile(")
+# an open that truncates, to be followed by a write (the harness's own in-place shape): fs.openSync, fs.open or fs.promises.open with the
+# flag "w" or "w+". It keys on the flag, since a bare `fs.openSync(` would match the writer's own read-only open of the store too.
+TRUNCATING_OPEN = re.compile(r"""fs\.(?:openSync|open|promises\.open)\([^;]*?,\s*(["'`])w\+?\1""")
+# a scene edit that reaches a node without nodeOf: `st.nodes[<key>]` or `st["nodes"][<key>]`, the key any expression with at most one
+# level of brackets in it (cfg.g6, cfg["g6"], a string literal). The lookahead leaves out a node's creation (`st.nodes[cfg.g6c] = {`), the
+# only other shape the driver writes. A node reached through an alias (`const ns = st.nodes; ns[id]`) is not matched.
+BARE_NODE = re.compile(r"""\bst(?:\.nodes|\[(["'`])nodes\1\])\[(?:[^\[\]]|\[[^\[\]]*\])*\](?!\s*=\s*\{)""")
 
 
 def _read_const(path, name):
@@ -334,18 +342,25 @@ class LabStoreWriter(unittest.TestCase):
 class NoInPlaceWrites(unittest.TestCase):
     def test_the_labs_write_no_file_the_kernel_reads_in_place(self):
         """Every file these two drivers write for the kernel (the goal store, the judge-auth latch, a comments store) goes through the
-        shared publisher; an in-place write anywhere in them, by any of node's in-place writers, reopens the window the CI red fell into.
-        And every scene edit of the needs-you driver reads its node through nodeOf, so a lost node is named, never a bare TypeError again."""
+        shared publisher; an in-place write anywhere in them reopens the window the CI red fell into. The pin checks the spellings listed
+        at IN_PLACE_WRITES and TRUNCATING_OPEN, and that each known write of a kernel-read file is a publishJson call. And every scene
+        edit of the needs-you driver reads its node through nodeOf (the spellings at BARE_NODE), so a lost node is named, never a bare
+        TypeError again."""
+        spellings = ", ".join(IN_PLACE_WRITES) + ' and an fs open with the flag "w" or "w+"'
         for path in (BOX, REOPEN):
             name = os.path.basename(path)
             with open(path, encoding="utf-8") as f:
                 src = f.read()
-            in_place = [ln.strip()[:160] for ln in _read_const(path, "DRIVER").splitlines() if any(m in ln for m in IN_PLACE_WRITES)]
-            self.assertEqual(in_place, [], "%s: its driver writes no file in place" % name)   # the lines themselves, never the whole driver
+            in_place = [ln.strip()[:160] for ln in _read_const(path, "DRIVER").splitlines()
+                        if any(m in ln for m in IN_PLACE_WRITES) or TRUNCATING_OPEN.search(ln)]
+            # the lines themselves, never the whole driver
+            self.assertEqual(in_place, [], "%s: its driver writes no file in place (the spellings checked: %s)" % (name, spellings))
             self.assertTrue("_lab.PUBLISH_JSON_JS + " in src, "%s: its driver is written with the shared publisher in front" % name)
         self.assertTrue("publishJson(cfg.judgeAuth, " in _read_const(BOX, "DRIVER"), "the judge-auth seed is published too")
+        self.assertTrue("publishJson(cfg.store, " in _read_const(REOPEN, "DRIVER"), "the comment-reopen lab's comments store is published too")
         bare = [ln.strip()[:160] for ln in _read_const(BOX, "DRIVER").splitlines() if BARE_NODE.search(ln)]
-        self.assertEqual(bare, [], "every scene edit reads the node it edits through nodeOf, so a lost node is named")
+        self.assertEqual(bare, [], "every scene edit reads the node it edits through nodeOf, so a lost node is named (the spellings checked: "
+                         'st.nodes[<key>] and st["nodes"][<key>] other than a node\'s creation)')
 
 
 class TornStoreChain(unittest.TestCase):
