@@ -378,6 +378,7 @@ if (fr) {
   // The hidden-pane, keyboard-order and content scenes read web's rows here, so the driver picks web's tab first. Recorded in the scene's
   // record, which the hidden-pane test prints, and asserted by no test yet: no run has forced api first on this page
   out.hiddenPane.premise = await pickWeb(fr);
+  mark();   // the pane's premise on a PARTIAL line at once: a driver that overruns its budget in the scenes below still names it (_overrun_record)
   out.hiddenPane.loaded = await fr.waitForSelector("#notices .ntc-head", { timeout: 60000 }).then(() => true).catch(() => false);   // the box on screen once, collapsed to its header line (a fresh page)
   out.hiddenPane.collapsedFresh = await fr.evaluate(() => document.getElementById("notices").classList.contains("ntc-l0") && Array.from(document.querySelectorAll("#notices .ntc-row")).every((r) => getComputedStyle(r).display === "none"));   // collapsed by default: the rows attached and hidden
   await openNeedsBox(fr, 2);   // to the full context; a page without the levels (the base) shows everything already
@@ -648,8 +649,52 @@ await browser.close();
 # test's setUpClass too: the esbuild run and the healthz boot loop, bounded at about 60 to 120 s here), so a kernel that boots late and then
 # stalls still hits this cap before the runner's, with the record below and the kernel's tail in hand rather than a bare per-test timeout
 # that also skips every later served test in the process (the second contributor's read of PR 2038). A driver that runs past it has hit
-# several deadlines in a row; the driver prints a PARTIAL line after every scene, and _result reports the last one with the kernel's tail.
+# several deadlines in a row; the driver prints a PARTIAL line after every scene, and _result reports the last one, its two premise records
+# named first (_overrun_record), with the kernel's tail.
 DRIVER_TIMEOUT_S = 480
+
+
+def _opened_on(adopted):
+    """The tab a fresh page first opened on, named for a message (None: none was active within the pick's 15 s wait, the case a message
+    most needs to name)."""
+    if adopted is None or isinstance(adopted, str):
+        return {SID: "web's tab", API: "api's tab", None: "no tab (none was active within 15 s)"}.get(adopted, "the tab %s" % adopted)
+    return "the tab %r" % (adopted,)
+
+
+def _premise_said(p):
+    """One premise record (the driver's pickWeb: web's tab picked before the first read), said for the budget message."""
+    if not isinstance(p, dict):
+        return "not recorded"
+    return "web's tab %s, the page having first opened on %s: %r" % ("active" if p.get("webActive") is True else "NOT active", _opened_on(p.get("adopted")), p)
+
+
+def _overrun_record(stdout):
+    """What a driver that ran past its budget had reached, for the message every test then fails on: the two premise records named FIRST,
+    the standalone page's (`premise`) and the shell's chat pane's (`hiddenPane.premise`), read from the last PARTIAL line as JSON, then that
+    line's last 3000 characters. The tail alone missed both, since each record sits early in its line (the first review round of this fix,
+    2026-09-29: with the pane left on api's tab the driver overran and all 30 tests failed on a budget message that said nothing of the
+    premise). A line that does not parse, or parses to something other than a record, falls back to the tail. Never raises: this message is
+    all an overrun leaves."""
+    line = next((ln for ln in reversed((stdout or "").splitlines()) if ln.startswith("PARTIAL:")), None)
+    if line is None:
+        return "its record so far: (no scene completed)"
+    tail = "its record so far: %s" % line[-3000:]
+    try:
+        rec = json.loads(line[len("PARTIAL:"):])
+    except ValueError:
+        return tail
+    if not isinstance(rec, dict):
+        return tail
+    pane = rec.get("hiddenPane")
+    if not isinstance(pane, dict):
+        said = "not reached (the driver had not opened the shell's chat pane)"
+    elif "premise" not in pane:
+        said = "not recorded (the shell's chat frame found: %r)" % (pane.get("frame"),)
+    else:
+        said = _premise_said(pane["premise"])
+    return "the premise, web's tab picked before the first read: on the standalone page, %s; in the shell's chat pane, %s; %s" % (
+        _premise_said(rec.get("premise")), said, tail)
 
 
 def _block(t, why):
@@ -798,10 +843,9 @@ class NeedsYouBoxChatServed(unittest.TestCase):
                                    env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
             except subprocess.TimeoutExpired as e:
                 # the driver ran past its budget (several deadlines in a row): say the record it had reached and what the kernel's tail says, instead
-                # of a bare traceback in every test (the second contributor's read of PR 2031)
+                # of a bare traceback in every test (the second contributor's read of PR 2031); the two premise records first (_overrun_record)
                 out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-                partial = next((ln for ln in reversed(out.splitlines()) if ln.startswith("PARTIAL:")), "(no scene completed)")
-                type(self)._fail = "the driver ran past its %d s budget; its record so far: %s; kernel: %s" % (DRIVER_TIMEOUT_S, partial[-3000:], self._kernel_tail())
+                type(self)._fail = "the driver ran past its %d s budget; %s; kernel: %s" % (DRIVER_TIMEOUT_S, _overrun_record(out), self._kernel_tail())
                 self.fail(type(self)._fail)
             if "browser-launch-failed" in p.stderr:
                 self._skip("no playwright browser on this box")
@@ -831,7 +875,7 @@ class NeedsYouBoxChatServed(unittest.TestCase):
     def test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop(self):
         r = self._result()
         p = r["premise"]
-        opened = {SID: "web's tab", API: "api's tab", None: "no tab (none was active within 15 s)"}.get(p.get("adopted"), "the tab %s" % p.get("adopted"))   # None: the case the message most needs to name
+        opened = _opened_on(p.get("adopted"))
         self.assertTrue(p["webActive"], "premise: web's tab is active before the box is read; the page first opened on %s (the pick of web's tab moves it there whatever the kernel sent first; every scene before the switch reads web's box): %r" % (opened, p))
         self.assertEqual(r["errors"], [], "no page error")
         self.assertTrue(r["fourRows"], "four rows within a minute: %r (premise: %r; kernel: %s)" % (r["first"], p, self._kernel_tail()))
@@ -1263,6 +1307,85 @@ class NeedsYouBoxChatServed(unittest.TestCase):
         self.assertTrue(r["on"]["shown"], "back on, the box returns with its rows: %r" % r["on"]["box"])
         self.assertEqual(r["on"]["levelKept"], 2, "at the level the page held for the session, read before any click (the same review: two mutants resetting the level on rebuild passed a read after a fold)")
         self.assertIn("ring-waiting-on-you", (r["on"]["box"]["tabs"] or {}).get(API) or "")
+
+
+class OverrunRecord(unittest.TestCase):
+    """The budget message's premise records (_overrun_record), browserless: no browser, no kernel, the driver never run. Each PARTIAL line is
+    built the way the driver's mark() writes one, and the long ones carry filler enough that neither premise record falls in the line's last
+    3000 characters, the tail the message carried alone before (the first review round of this fix, 2026-09-29). Synthetic records only."""
+
+    STANDALONE = {"webTab": True, "adopted": API, "webActive": True, "active": SID}   # the page opened on api's tab and the pick moved it to web
+    PANE = {"webTab": True, "adopted": API, "webActive": False, "active": API, "clickMissed": "TimeoutError: a synthetic click that timed out"}   # the pick missed: the pane stays on api
+    TEST_1 = "test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop"
+
+    @staticmethod
+    def _line(rec):
+        return "PARTIAL:" + json.dumps(rec)
+
+    def _both(self):
+        return self._line({"errors": [], "premise": self.STANDALONE, "first": {"filler": "x" * 4000}, "hiddenPane": {"frame": True, "premise": self.PANE}, "shellKeys": {"filler": "y" * 4000}})
+
+    def test_a_line_carrying_both_records_names_both_ahead_of_the_tail(self):
+        early = self._line({"errors": [], "premise": {"webTab": False, "adopted": None, "webActive": False, "active": None}})   # an earlier line: the LAST one is read
+        line = self._both()
+        tail = "its record so far: " + line[-3000:]
+        self.assertNotIn('"premise"', tail, "premise: neither record is in the tail, so only the parse can name them")
+        msg = _overrun_record("\n".join(["a driver log line", early, line, "a stray line after it"]) + "\n")
+        self.assertIn("on the standalone page, web's tab active, the page having first opened on api's tab: %r" % self.STANDALONE, msg)
+        self.assertIn("in the shell's chat pane, web's tab NOT active, the page having first opened on api's tab: %r" % self.PANE, msg)
+        self.assertTrue(msg.endswith(tail), "and the line's tail after them: %r" % msg[-200:])
+        self.assertLess(msg.index("in the shell's chat pane"), msg.index("its record so far:"), "both records ahead of the tail")
+
+    def test_a_line_from_before_the_shell_names_the_standalone_record_and_says_the_pane_is_not_reached(self):
+        missed = {"webTab": True, "adopted": None, "webActive": False, "active": None}
+        line = self._line({"errors": [], "premise": missed, "on": {"filler": "z" * 4000}})
+        msg = _overrun_record(line + "\n")
+        self.assertIn("on the standalone page, web's tab NOT active, the page having first opened on no tab (none was active within 15 s): %r" % missed, msg)
+        self.assertIn("in the shell's chat pane, not reached (the driver had not opened the shell's chat pane)", msg)
+        self.assertLess(msg.index("in the shell's chat pane"), msg.index("its record so far:"))
+        self.assertTrue(msg.endswith("its record so far: " + line[-3000:]))
+
+    def test_a_malformed_line_falls_back_to_the_tail_and_never_raises(self):
+        cut = "PARTIAL:" + json.dumps({"errors": [], "premise": self.STANDALONE, "first": {"filler": "x" * 4000}})[:-9]   # cut mid-record, as a kill mid-write leaves it
+        self.assertEqual(_overrun_record("a driver log line\n" + cut), "its record so far: " + cut[-3000:])
+        self.assertEqual(_overrun_record("PARTIAL:[1, 2]\n"), "its record so far: PARTIAL:[1, 2]", "JSON that is not a record: the tail")
+        for empty in ("", None, "a driver log line\n"):
+            self.assertEqual(_overrun_record(empty), "its record so far: (no scene completed)")
+
+    def test_a_record_of_the_wrong_shape_names_what_it_can_and_never_raises(self):
+        msg = _overrun_record(self._line({"premise": 3, "hiddenPane": [1]}))
+        self.assertIn("on the standalone page, not recorded; in the shell's chat pane, not reached", msg)
+        msg = _overrun_record(self._line({"premise": {"adopted": [1], "webActive": "yes"}, "hiddenPane": {"frame": False}}))
+        self.assertIn("on the standalone page, web's tab NOT active, the page having first opened on the tab [1]", msg)
+        self.assertIn("in the shell's chat pane, not recorded (the shell's chat frame found: False)", msg)
+
+    def test_the_budget_branch_fails_every_test_on_the_message_with_both_records(self):
+        """The branch itself, driven with node stubbed to overrun: the lab's instance fields set by hand (no setUpClass: no kernel), under a
+        subclass minted here, so the failure latched on the class is the subclass's and never the lab's (nor one the lab latched earlier)."""
+        class Probe(NeedsYouBoxChatServed):
+            _fail = None
+        before = NeedsYouBoxChatServed.__dict__.get("_fail")
+        t = Probe(self.TEST_1)
+        t.lab = tempfile.mkdtemp(prefix="needs-you-overrun-")
+        self.addCleanup(shutil.rmtree, t.lab, True)
+        t._r, t.port, t.token, t.g, t.klog = None, 1, "testtok-overrun", [SID + ":g%d" % i for i in range(1, 5)], os.devnull
+        t.store, t.ledger, t.order = (os.path.join(t.lab, "xdg", "romp", n) for n in ("goals/store.json", "cleared.jsonl", "session-order.json"))
+        line = self._both()
+        from unittest import mock
+        with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired(["node"], DRIVER_TIMEOUT_S, output=("a driver log line\n" + line + "\n").encode())):
+            with self.assertRaises(AssertionError) as cm:
+                t._result()
+        msg = str(cm.exception)
+        self.assertTrue(msg.startswith("the driver ran past its %d s budget; the premise, web's tab picked before the first read: " % DRIVER_TIMEOUT_S), msg[:300])
+        self.assertIn("on the standalone page, web's tab active, the page having first opened on api's tab: %r" % self.STANDALONE, msg)
+        self.assertIn("in the shell's chat pane, web's tab NOT active, the page having first opened on api's tab: %r" % self.PANE, msg)
+        self.assertIn("its record so far: " + line[-3000:] + "; kernel: ", msg)
+        self.assertEqual(NeedsYouBoxChatServed.__dict__.get("_fail"), before, "the lab's own class latched nothing")
+
+    def test_the_driver_writes_a_partial_line_right_after_the_shells_pick(self):
+        """The message can name the pane's record only if a PARTIAL line carries it before the scenes that can overrun: the next mark()
+        after the pick stood at the end of the shell's scenes, past the hidden-pane, keyboard-order and content scenes."""
+        self.assertIn("  out.hiddenPane.premise = await pickWeb(fr);\n  mark();", DRIVER)
 
 
 if __name__ == "__main__":
