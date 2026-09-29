@@ -1134,6 +1134,33 @@ class PerfRoutes(unittest.TestCase):
         self.assertEqual(st, 403, "the stack sample is token-gated like the snapshot")
         self.assertNotIn("frames", str(body))
 
+    def test_get_perf_walks_the_heap_only_when_asked(self):
+        """The two reads whose cost grows with the whole heap (the allocator's block count, the frozen generation's size) run
+        on a GET that says ?walk=1 and never on a plain one (the macOS runner flake, 2026-09-29: each is one C call that
+        holds the interpreter lock, seconds long where the heap is paged out). The handler's thread makes the calls, so the
+        recorders count every thread's; the snapshot's one caller in the kernel is this route."""
+        calls = []
+
+        def recorder(name, real):
+            def rec(*a, **kw):
+                calls.append(name)
+                return real(*a, **kw)
+            return rec
+        with mock.patch.object(sys, "getallocatedblocks", recorder("getallocatedblocks", sys.getallocatedblocks)), \
+             mock.patch.object(km.gc, "get_freeze_count", recorder("get_freeze_count", km.gc.get_freeze_count)):
+            st, plain = self._req("GET", "/perf")
+            plain_calls = list(calls)
+            st2, walked = self._req("GET", "/perf?walk=1")
+            st3, _ = self._req("GET", "/perf?walk=1", token=False)
+        self.assertEqual((st, st2, st3), (200, 200, 403))
+        self.assertEqual(plain_calls, [], "a plain GET walks nothing")
+        self.assertIsNone(plain["heap"]["allocatedBlocks"])
+        self.assertIsNone(plain["gc"]["frozen"])
+        self.assertEqual(sorted(calls), ["get_freeze_count", "getallocatedblocks"], "?walk=1 walks each once, a refused one none")
+        self.assertIsInstance(walked["heap"]["allocatedBlocks"], int)
+        self.assertIsInstance(walked["gc"]["frozen"], int)
+        self.assertEqual(set(walked), TOP_KEYS, "the same document, two slots filled")
+
     def test_get_perf_stacks_carries_one_frame_list_per_thread_with_its_stage_mark(self):
         """T401 (2)'s proof instrument: `?stacks=1` adds one row per live thread (name, ident, self, stage, frames innermost
         last); a thread inside a tick job shows `jobs.<job>` and the frame it waits in; the plain snapshot carries no `stacks`;

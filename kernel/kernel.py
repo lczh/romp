@@ -249,11 +249,13 @@ def _heap_stats():
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
 
-    What it never does: walk an object graph, collect, evict, fill a cache, read a file, build anything. Each gauge is O(1)
-    or O(entries) over a copied value list: the built tabs (bounded by the open tabs) and the image entries, whose cache has
-    no cap, so that gauge is O(entries) over whatever it has grown to, a refused file counting as an entry of zero bytes
-    (166 microseconds median over 100,000 hydrated entries, 10,000 LRU slots, 50,000 usage rows, 1,000 images and 50 tabs of
-    100 KB in the lab). A gauge the process cannot read is None, said once (_heap_read)."""
+    What it never does: walk an object graph or the allocator's pools, collect, evict, fill a cache, read a file, build
+    anything. Each gauge is O(1) or O(entries) over a copied value list: the built tabs (bounded by the open tabs) and the
+    image entries, whose cache has no cap, so that gauge is O(entries) over whatever it has grown to, a refused file counting
+    as an entry of zero bytes (166 microseconds median over 100,000 hydrated entries, 10,000 LRU slots, 50,000 usage rows,
+    1,000 images and 50 tabs of 100 KB in the lab). allocatedBlocks is None here: its one source visits every allocator
+    pool, so only a request that asks pays that walk (_perf_walks, GET /perf?walk=1; the macOS runner flake, 2026-09-29). A
+    gauge the process cannot read is None, said once (_heap_read)."""
     def hydrated():
         with em._ASM_CKPT_LOCK:
             return {"entries": len(em._HYDRATED), "bytes": int(em._HYDRATED_BYTES[0]), "capBytes": int(em._HYDRATED_CAP)}
@@ -301,7 +303,7 @@ def _heap_stats():
 
     # every accessor is looked up INSIDE its lambda: a bare attribute argument is evaluated before _heap_read runs, so a
     # runtime lacking it would raise past the per-key guard and fail the whole snapshot (review find, 2026-09-15)
-    return {"allocatedBlocks": _heap_read("allocatedBlocks", lambda: sys.getallocatedblocks()),
+    return {"allocatedBlocks": None,          # the allocator's walk grows with the heap: GET /perf?walk=1 alone (_perf_walks)
             "gc": {"enabled": _heap_read("gc.enabled", lambda: gc.isenabled()),
                    "counts": _heap_read("gc.counts", lambda: list(gc.get_count())),
                    "thresholds": _heap_read("gc.thresholds", lambda: list(gc.get_threshold())),
@@ -315,6 +317,18 @@ def _heap_stats():
             "judgeUsageRows": _heap_read("judgeUsageRows", lambda: len(_JUDGE_USAGE_CACHE["rows"])),
             "builtChat": _heap_read("builtChat", built_chat),
             "imgCache": _heap_read("imgCache", img_cache)}
+
+
+def _perf_walks(snap):
+    """GET /perf?walk=1: the snapshot's two reads whose cost grows with the heap, filled into the slots the plain read
+    leaves None (the macOS runner flake, 2026-09-29). heap.allocatedBlocks is sys.getallocatedblocks, which visits every
+    pool of the small-object allocator (about half a millisecond per GB of heap in the lab); gc.frozen is
+    gc.get_freeze_count, a walk of the frozen generation's list (about 7 ms per million frozen). Each is one C call that
+    holds the interpreter lock, so where the operating system has paged out or compressed the heap one read faults it back
+    in while every kernel thread waits. On request they read what they always read, through the same per-key guards."""
+    snap["heap"]["allocatedBlocks"] = _heap_read("allocatedBlocks", lambda: sys.getallocatedblocks())
+    snap["gc"]["frozen"] = _gc_read("frozen", lambda: gc.get_freeze_count())
+    return snap
 
 
 # The chat-build signature's components, in the order _chat_build_sig appends them. One label per position:
@@ -374,15 +388,17 @@ class _PerfStats:
                                    ru_maxrss, on macOS: _process_stats), threads, cpu_s
                                    (time.process_time), pid
       heap                         where that resident size sits at the read (_heap_stats): the allocator's
-                                   live blocks, the collector's gauges, and the occupancy of every cache that
-                                   holds session content (hydrated bodies, assembly entries, parse slots, live
-                                   indexes, materialized-atom LRU slots, judge-usage rows, built chat tabs and
-                                   their serialized bytes, preview images); gauges, not counters
+                                   live blocks (null unless the GET says ?walk=1: the count walks every pool),
+                                   the collector's gauges, and the occupancy of every cache that holds session
+                                   content (hydrated bodies, assembly entries, parse slots, live indexes,
+                                   materialized-atom LRU slots, judge-usage rows, built chat tabs and their
+                                   serialized bytes, preview images); gauges, not counters
       gc                           the collector's collections and their pauses (gc_event, a gc.callbacks hook
                                    main installs once): per generation, collections, msSum / msMax / msLast
                                    (wall on the collecting thread) and collectedLast; thresholds and counts
                                    (gc.get_threshold / gc.get_count, repeated from heap.gc so the block reads
-                                   on its own), frozen (gc.get_freeze_count), errors (callback failures,
+                                   on its own), frozen (gc.get_freeze_count, null unless the GET says
+                                   ?walk=1: a walk of the frozen generation), errors (callback failures,
                                    counted, never raised) and hooked (whether this collector's hook is in
                                    gc.callbacks). Each split row on the rings carries the cycle's own delta
                                    as `gc` (n0, n1, n2 collections per generation and ms2), so a slow cycle
@@ -1203,7 +1219,7 @@ class _PerfStats:
                     # and the block still serves (the heap block's review find, 2026-09-15, applied here)
                     "thresholds": _gc_read("thresholds", lambda: list(gc.get_threshold())),
                     "counts": _gc_read("counts", lambda: list(gc.get_count())),
-                    "frozen": _gc_read("frozen", lambda: gc.get_freeze_count()),
+                    "frozen": None,                    # a walk of the frozen generation: GET /perf?walk=1 alone (_perf_walks)
                     "errors": gc_errors,
                     "hooked": _gc_read("hooked", lambda: self.gc_event in gc.callbacks),
                     # #1735: the freeze controller's state and the reconcile trade, so a reconcile collection is told
@@ -71300,6 +71316,8 @@ class Handler(BaseHTTPRequestHandler):
                 snap = _PERF_STATS.snapshot(ring_all=(q.get("ring") or [""])[0] == "all")   # ?ring=all: the whole stage ring (T397)
                 if (q.get("stacks") or [""])[0] == "1":
                     snap["stacks"] = _thread_stacks()      # ?stacks=1: one frame list per thread with its stage mark (T401)
+                if (q.get("walk") or [""])[0] == "1":
+                    _perf_walks(snap)                      # ?walk=1: the two heap-wide gauges, on request alone (2026-09-29)
                 return self._send(200, json.dumps(snap), "application/json", cache="no-cache")
             if p == "/commands":                              # slash-command list for the composer's "/" autocomplete (SDK get_server_info, per-cwd cached)
                 sid = (q.get("sid") or [""])[0]

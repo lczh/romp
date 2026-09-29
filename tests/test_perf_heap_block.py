@@ -11,16 +11,18 @@ their serialized strings, the preview images) beside the allocator's and the col
 Pinned here: the gauges move by exactly what a test adds and fall back when it removes it, and two snapshots move no
 cumulative counter (a); the block serializes and every leaf is a plain scalar (b); a container the source lacks or an
 accessor that raises yields None for its key, the snapshot still serves, and the failure is said once per key, not per
-snapshot, a built-chat entry of a shape the gauge does not know being such a failure and never a silent under-count (c); a snapshot reads no file, builds nothing, evicts nothing and collects nothing (d); and the read stays under
-5 ms over populated caches (e). Synthetic fixtures only: invented strings and placeholder uuids."""
+snapshot, a built-chat entry of a shape the gauge does not know being such a failure and never a silent under-count (c); a snapshot reads no file, builds nothing, evicts nothing and collects nothing (d); and the plain read
+calls none of the interpreter's heap-wide walks over populated caches, the two heap-wide gauges being served only to a GET
+that asks ?walk=1 (e). Synthetic fixtures only: invented strings and placeholder uuids."""
 import contextlib
 import gc
 import io
 import json
 import os
-import statistics
+import sys
 import tempfile
-import time
+import threading
+import tracemalloc
 import types
 import unittest
 from contextlib import redirect_stderr
@@ -85,6 +87,33 @@ def _em_lacking(*names):
     heap reads see the absence, as they would beside an older event model that has not got the container."""
     stub = types.SimpleNamespace(**{k: v for k, v in vars(em).items() if k not in names})
     return mock.patch.object(km, "em", stub)
+
+
+# The stdlib reads whose cost grows with the whole heap rather than with a cache the block names (2026-09-29): the
+# allocator's pool walk and its stats dump, the frozen generation's list walk, the two object-graph walks, a collection
+# and a tracemalloc snapshot. A 5 ms budget on the read's wall time could not tell one of these from a loaded runner; a
+# recorded call can, whatever the heap's size or the runner's load, so the pin is that the plain read makes none of them.
+HEAP_WALKS = ((sys, "getallocatedblocks"), (sys, "_debugmallocstats"), (gc, "get_freeze_count"), (gc, "get_objects"),
+              (gc, "get_referrers"), (gc, "collect"), (tracemalloc, "take_snapshot"))
+
+
+@contextlib.contextmanager
+def _walks_recorded():
+    """Each heap-wide read above replaced by a pass-through that records its name when the entering thread calls it (another
+    thread's walk never lands here), yielding the list; a name this runtime lacks is skipped."""
+    me, calls = threading.get_ident(), []
+    with contextlib.ExitStack() as stack:
+        for mod, name in HEAP_WALKS:
+            real = getattr(mod, name, None)
+            if real is None:
+                continue
+
+            def rec(*a, _real=real, _name=name, **kw):
+                if threading.get_ident() == me:
+                    calls.append(_name)
+                return _real(*a, **kw)
+            stack.enter_context(mock.patch.object(mod, name, rec))
+        yield calls
 
 
 class _Caches(unittest.TestCase):
@@ -169,7 +198,8 @@ class Gauges(_Caches):
         self.assertEqual(h["gc"]["enabled"], gc.isenabled())
         self.assertEqual(h["gc"]["thresholds"], list(gc.get_threshold()))
         self.assertEqual(len(h["gc"]["stats"]), len(gc.get_stats()))
-        for k in ("allocatedBlocks", "assemblyEntries", "parseSlots", "lazyIndexes", "materializedLruSlots", "judgeUsageRows"):
+        self.assertIsNone(h["allocatedBlocks"], "the allocator's walk is GET /perf?walk=1's alone")
+        for k in ("assemblyEntries", "parseSlots", "lazyIndexes", "materializedLruSlots", "judgeUsageRows"):
             self.assertIsInstance(h[k], int, k)
             self.assertGreaterEqual(h[k], 0, k)
 
@@ -286,8 +316,10 @@ class AbsentSupport(_Caches):
         try:
             km.sys, km.gc, km.tracemalloc = stub_sys, stub_gc, stub_tm
             h = self.st.snapshot()["heap"]
+            walked = km._perf_walks(self.st.snapshot())["heap"]   # the count's one read is ?walk=1's, through the same guard
         finally:
             km.sys, km.gc, km.tracemalloc = real_sys, real_gc, real_tm
+        self.assertIsNone(walked["allocatedBlocks"])
         self.assertIsNone(h["allocatedBlocks"]); self.assertIsNone(h["gc"]["enabled"]); self.assertIsNone(h["tracing"])
         self.assertIsInstance(h["gc"]["counts"], list, "the accessors the stub has still answer")
         self.assertIsInstance(h["imgCache"], dict, "the rest of the block is untouched")
@@ -331,7 +363,10 @@ class NoSideEffects(_Caches):
         try:
             keep = [[] for _ in range(20000)]              # tracked allocations: the young count climbs past any threshold and a
             count0 = gc.get_count()[0]                    #  collect would zero it (the snapshot's own allocations are far fewer)
-            self.assertGreaterEqual(count0, 20000)
+            # past the threshold, not a literal 20,000 (2026-09-29): a list handed back from the interpreter's free list is
+            # not counted as an allocation, so 20,000 new lists can add about 80 fewer, and the count fell short whenever it
+            # stood near zero before the loop, which depends on what the earlier tests allocated
+            self.assertGreater(count0, gc.get_threshold()[0])
             reads0, inserts0 = em.read_bytes_total(), em.record_cache_stats()["inserts"]
             collections0 = [s["collections"] for s in gc.get_stats()]
             lens0 = lens()
@@ -351,30 +386,44 @@ class NoSideEffects(_Caches):
 
 
 class Overhead(_Caches):
-    """(e) The read is cheap over populated caches: 1,000 images, 50 tabs with 100 KB strings, 100,000 hydrated entries,
-    10,000 LRU slots, 50,000 usage rows; the median of 20 calls under 5 ms."""
+    """(e) The read stays cheap over populated caches: 1,000 images, 50 tabs with 100 KB strings, 100,000 hydrated entries,
+    10,000 LRU slots, 50,000 usage rows (166 microseconds median in the lab). A 5 ms median budget stood here, and it timed
+    the runner's memory, not the read (2026-09-29): the allocator's block count walked every pool of a test process of
+    several GB, and on macOS runners whose memory was compressed or paged out the median reached seconds. The pin is now
+    what the read calls: none of the interpreter's heap-wide walks on the plain read, each once on the request that asks."""
 
-    def test_the_read_stays_under_five_milliseconds_over_populated_caches(self):
+    def _populate(self):
         self.add_images(1000, 100)
         self.add_tabs(50, 100 * 1024)
         self.add_hydrated(100_000, 10)
         self.add_mat_slots(10_000)
         self.set_rows(50_000)
-        km._heap_stats()                                  # one warm call, the code paths compiled
-        took = []
-        for _ in range(20):
-            t0 = time.perf_counter()
+
+    def test_the_plain_read_walks_nothing_over_populated_caches(self):
+        self._populate()
+        with _walks_recorded() as calls:
             h = km._heap_stats()
-            took.append(time.perf_counter() - t0)
-        self.assertEqual(h["imgCache"]["entries"] - 0, len(km._img_cache))
+            snap = self.st.snapshot()
+        self.assertEqual(calls, [], "the plain read made a heap-wide call")
+        self.assertIsNone(h["allocatedBlocks"], "the allocator's walk is GET /perf?walk=1's alone")
+        self.assertIsNone(snap["heap"]["allocatedBlocks"])
+        self.assertIsNone(snap["gc"]["frozen"], "and so is the frozen generation's")
+        self.assertEqual(h["imgCache"]["entries"], len(km._img_cache))
         self.assertGreaterEqual(h["hydrated"]["entries"], 100_000)
         self.assertGreaterEqual(h["materializedLruSlots"], 10_000)
         self.assertGreaterEqual(h["judgeUsageRows"], 50_000)
         self.assertGreaterEqual(h["builtChat"]["serializedBytes"], 50 * 100 * 1024)
-        med = statistics.median(took)
-        print("heap block: median %.0f us over 20 calls (min %.0f us, max %.0f us)"
-              % (med * 1e6, min(took) * 1e6, max(took) * 1e6))
-        self.assertLess(med, 0.005, "median %.3f ms" % (med * 1000))
+
+    def test_the_walks_run_once_each_on_request(self):
+        """The positive control: the recorder sees both walks when the request asks, so an empty list above is a read that
+        made none, not a recorder that saw nothing."""
+        with _walks_recorded() as calls:
+            snap = km._perf_walks(self.st.snapshot())
+        self.assertEqual(sorted(calls), ["get_freeze_count", "getallocatedblocks"], "one of each, on the request that asks")
+        self.assertIsInstance(snap["heap"]["allocatedBlocks"], int)
+        self.assertGreater(snap["heap"]["allocatedBlocks"], 0)
+        self.assertIsInstance(snap["gc"]["frozen"], int)
+        json.dumps(snap)
 
 
 class ShapeChange(_Caches):
@@ -440,6 +489,7 @@ class Documented(unittest.TestCase):
         self.assertIn("cumulative", para)
         self.assertIn("upper bound", para)
         self.assertIn("`null`", para)
+        self.assertIn("`GET /perf?walk=1`", para)
         self.assertIn("`recordCache`", para, "the record cache is pointed at from inside the heap bullet")
         self.assertIn("`budgetBytes`", para, "with the key its occupancy is read against")
 

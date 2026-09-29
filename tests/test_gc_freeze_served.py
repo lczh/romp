@@ -114,8 +114,8 @@ class ServedGcFreeze(unittest.TestCase):
             cls.kernel.kill()
         shutil.rmtree(cls.lab, ignore_errors=True)
 
-    def _perf(self):
-        req = urllib.request.Request("http://127.0.0.1:%d/perf" % self.port, headers={"X-Romp-Token": self.token})
+    def _perf(self, query=""):
+        req = urllib.request.Request("http://127.0.0.1:%d/perf%s" % (self.port, query), headers={"X-Romp-Token": self.token})
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read().decode())
 
@@ -137,7 +137,8 @@ class ServedGcFreeze(unittest.TestCase):
         self.assertTrue(fr["enabled"] and fr["active"], "the freeze is on and holds a freeze: %r" % fr)
         self.assertGreaterEqual(fr["freezes"], 1, "the freeze fired on the judges' boot parse: %r" % fr)
         self.assertIn(fr["lastReconcileKind"], ("initial", "load"), "no reclaim yet, only loads: %r" % fr)
-        self.assertGreater(pf["gc"]["frozen"], 0, "objects left the collector's walk (gc.get_freeze_count): %r" % pf["gc"]["frozen"])
+        frozen = self._perf("?walk=1")["gc"]["frozen"]   # the frozen generation's size is a walk: ?walk=1 alone (2026-09-29)
+        self.assertGreater(frozen, 0, "objects left the collector's walk (gc.get_freeze_count): %r" % frozen)
         reclaims_before = fr["reclaims"]
         inserts_before = int(pf["recordCache"]["inserts"])
         # steady re-reads: append to a transcript repeatedly (each re-read replaces its acyclic cache entry). Under the
