@@ -238,8 +238,8 @@ test("guard 3 executed with the real sharesAnyUuid in scope (PR 1860 onto 1877):
 // that frame read as a new transcript: the view was torn down and rebuilt at the next animation frame, the DOM holding only the
 // loader in between (never painted; a served clear lab read the page there). The frame is the view's first kernel content: the
 // view stays, the first-build show lands it, and its build starts fresh, the tail window a torn-down view got. A page holding
-// kernel events beside its own group reads forks and appends as before; on a frame naming no tail start, its re-injected group
-// no longer counts as a shared id.
+// kernel events beside its own group (a turn, or only the head and the send's echo) reads forks and appends as before; on a frame
+// naming no tail start, its re-injected group no longer counts as a shared id.
 const pendingGroup = { kind: "queued", bare: true, texts: [{ md: "/clear", optimistic: true, qid: "q-1" }], uuid: "optimistic:1700000000000" };
 const heldCopies = { kind: "queued", texts: [{ md: "status?", landing: true }], uuid: "held:1700000000000" };
 const clearingFrame = (extra: Record<string, unknown> = {}) => ({ type: "session", id: "A", name: "web", proto: 2, headKnown: true, tailLo: 0, status: { state: "clearing" },
@@ -277,6 +277,14 @@ test("a page holding kernel events beside its own group: a frame sharing none of
   assert.deepEqual([fork.v.removed, fork.kept, fork.shows], [1, false, ["show"]], "a real fork still drops the view and lands the new transcript");
   const more = upsertOnPaintedView(pageHolding(kernel, [pendingGroup]), clearingFrame({ status: { state: "working" }, events: [...kernel, { kind: "assistant", uuid: "a2", md: "more" }] }), 3);
   assert.deepEqual([more.v.removed, more.kept, more.shows, more.v.rendered, more.v.rediff, more.v.avgTurnH], [0, true, ["append"], 3, true, 40], "an append keeps the view, its render mark and its row average, and compares its units");
+  // the kernel's head and the send's echo are kernel events too, though neither is a transcript turn (clearBoundarySeen reads turns
+  // alone): a page holding them beside its bubble, given a frame that carries them, appends. Read by turns, it would be a first
+  // build, and every frame of an empty session's first exchange would rebuild the window and land the reader again until a real
+  // turn was resident
+  const headAndEcho = [{ kind: "system", uuid: "system:head" }, { kind: "user", uuid: "echo:q-1", md: "/clear" }];
+  const echoed = upsertOnPaintedView(pageHolding(headAndEcho, [pendingGroup]), clearingFrame(), 3);
+  assert.deepEqual([echoed.v.removed, echoed.kept, echoed.shows, echoed.v.rendered, echoed.v.avgTurnH], [0, true, ["append"], 3, 40],
+    "the head and the echo are shared kernel content: an append that keeps the view, its render mark and its row average");
 });
 
 test("a frame naming no tail start, adopted as sent: the page's re-injected group is no shared id, so a real fork still drops the view", () => {
