@@ -267,9 +267,10 @@ class NoInPlaceWrites(unittest.TestCase):
             name = os.path.basename(path)
             with open(path, encoding="utf-8") as f:
                 src = f.read()
-            self.assertNotIn("fs.writeFileSync(", _read_const(path, "DRIVER"), "%s: its driver writes no file in place" % name)
-            self.assertIn("_lab.PUBLISH_JSON_JS + ", src, "%s: its driver is written with the shared publisher in front" % name)
-        self.assertIn("publishJson(cfg.judgeAuth, ", _read_const(BOX, "DRIVER"), "the judge-auth seed is published too")
+            in_place = [ln.strip()[:160] for ln in _read_const(path, "DRIVER").splitlines() if "fs.writeFileSync(" in ln]
+            self.assertEqual(in_place, [], "%s: its driver writes no file in place" % name)   # the lines themselves, never the whole driver
+            self.assertTrue("_lab.PUBLISH_JSON_JS + " in src, "%s: its driver is written with the shared publisher in front" % name)
+        self.assertTrue("publishJson(cfg.judgeAuth, " in _read_const(BOX, "DRIVER"), "the judge-auth seed is published too")
 
 
 class TornStoreChain(unittest.TestCase):
