@@ -211,6 +211,35 @@ const openNeedsBox = async (target, level) => {
 """
 
 
+# A served lab's write of a file the KERNEL reads (a goal store, the judge-auth latch, a comments store) is a PUBLICATION, the way every
+# kernel writer publishes: the bytes go to a temp file beside the target and a rename puts them in place. An in-place rewrite truncates the
+# file first, and a kernel read in that instant finds it EMPTY: the goal store's loader moves bytes that do not parse aside as corrupt and
+# starts the session fresh (a CI red on main, 2026-09-24: the needs-you lab's seeded question was gone one write later, and all thirty of
+# its tests failed on one TypeError). The temp takes the kernel's own publish-temp shape (judge.py _publish_tmp, <file>.tmp.<pid>.<thread>.<n>,
+# the thread 0 here), which the kernel's stale-temp sweep matches: that sweep runs once, at the judge child's start, and skips a live pid, so
+# it can only remove a temp a killed driver left. `unchanged`, when given, is asked after the temp is written and before the rename: false
+# leaves the target alone, removes the temp and answers false, the hook a compare-and-swap writer keys on (the needs-you lab's writeStore).
+# fileIdent is the identity that writer compares (inode, mtime in ns, size), from a descriptor or by path, null for an absent file.
+# Prepended to a lab's driver, which imports fs itself (an import is hoisted, so the driver's binding stands before any of this runs);
+# tests/test_needs_you_lab_store_writer.py runs it under node with the kernel's own loader reading between the open and the write.
+PUBLISH_JSON_JS = r"""
+let publishSeq = 0;
+const fileIdent = (p, fd) => {
+  let s;
+  try { s = fd === undefined ? fs.statSync(p, { bigint: true }) : fs.fstatSync(fd, { bigint: true }); }
+  catch (e) { if (e.code === "ENOENT") return null; throw e; }
+  return s.ino + ":" + s.mtimeNs + ":" + s.size;
+};
+const publishJson = (p, obj, unchanged) => {
+  const tmp = p + ".tmp." + process.pid + ".0." + (++publishSeq);
+  fs.writeFileSync(tmp, JSON.stringify(obj));
+  if (unchanged && !unchanged()) { fs.unlinkSync(tmp); return false; }
+  fs.renameSync(tmp, p);
+  return true;
+};
+"""
+
+
 def relaunch_env(env):
     """The part of a lab kernel's environment `env` that a served lab writes to its cfg.json for the driver's
     relaunch of the kernel: the RELAUNCH_ENV_PREFIXES names and RELAUNCH_ENV_NAMES, less the ROMP_TESTS_* names
