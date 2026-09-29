@@ -97,8 +97,8 @@ HEAP_WALKS = ((sys, "getallocatedblocks"), (sys, "_debugmallocstats"), (gc, "get
 
 
 def _walk_hook(calls):
-    """A profile function (sys.setprofile) that appends the name of each heap-wide read above the thread calls, matched by
-    identity, not by name: a C function by the object the call reaches (the "c_call" event hands it over), a Python one
+    """A profile function (sys.setprofile) that appends the name of each heap-wide read above that the thread calls,
+    matched by identity, not by name: a C function by the object the call reaches (the "c_call" event hands it over), a Python one
     (tracemalloc.take_snapshot) by its code object (the "call" event's frame). So a call from Python code is seen however
     the kernel spells it, an attribute lookup, a module-level alias or a from-import (review round one, 2026-09-29: the
     recorder before this patched the module attributes, and an alias bound at import time called straight past it). A name
