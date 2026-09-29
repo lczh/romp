@@ -5309,11 +5309,42 @@ def _model_rank(name):
     return None
 
 
+def _model_version(name):
+    """The version a model id/display name carries right after its family word, as (major, minor), or None when it
+    carries none: 'claude-opus-4-8' and 'Opus 4.8' are (4, 8), 'Opus 5' is (5, 0), and a bare alias ('opus', the
+    label 'Opus') is None, since which version an alias resolves to is not in the name. A date stamp is not a version
+    (at most two digits a part), so 'claude-haiku-4-5-20251001' is (4, 5) and an old-style id that puts its version
+    before the family ('claude-3-opus-20240229') is None."""
+    r = _model_rank(name)
+    if r is None:
+        return None
+    m = re.search(re.escape(_MODEL_TIERS[r]) + r"[-\s]?(\d{1,2})(?:[-.](\d{1,2}))?(?!\d)", str(name).lower())
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+
+
 def _model_downgrade(frm, to):
     """True only for a KNOWN down-tier transition — the shape of an API capacity fallback. Unknown
-    names never qualify: a mint on a user's own exotic pick is worse than a missed exotic fallback."""
+    names never qualify: a mint on a user's own exotic pick is worse than a missed exotic fallback.
+    Across families the family rank decides; inside one the version does, where BOTH names carry one
+    (a safeguards fallback can stay in the family: Opus 5.5 answered by Opus 4.8, first seen 2026-09-23, which the
+    family rank alone read as lateral, so no card, no requested-model mark and no retry followed it)."""
     a, b = _model_rank(frm), _model_rank(to)
-    return a is not None and b is not None and b < a
+    if a is None or b is None:
+        return False
+    if a != b:
+        return b < a
+    va, vb = _model_version(frm), _model_version(to)
+    return va is not None and vb is not None and vb < va
+
+
+def _model_same_tier(x, y):
+    """The same family and, where both names carry one, the same version: one fallback tier, read
+    the way _model_downgrade reads a transition. Unknown families never match."""
+    a, b = _model_rank(x), _model_rank(y)
+    if a is None or a != b:
+        return False
+    va, vb = _model_version(x), _model_version(y)
+    return va is None or vb is None or va == vb
 
 
 def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False, category=""):
@@ -7067,7 +7098,7 @@ class SdkSession:
         if str(rec.get("scope") or "session") == "local":
             return False
         to = str(rec.get("fallbackModel") or rec.get("fallback_model") or "")
-        if _model_rank(to) is None or _model_rank(to) != _model_rank(live):
+        if not _model_same_tier(to, live):
             return False
         cat = str(rec.get("apiRefusalCategory") or rec.get("api_refusal_category") or "").strip()
         self._fallback_cause = "safeguards"
@@ -7098,8 +7129,7 @@ class SdkSession:
         if not pick or pick == "default" or getattr(self, "_upgrade_retry", None):
             return False
         live = getattr(self, "_served_model", "") or getattr(self, "model", "")
-        pr, lr = _model_rank(pick), _model_rank(live)
-        if pr is not None and lr is not None and lr < pr:
+        if _model_downgrade(pick, live):
             self._arm_upgrade_retry(_alias_label(pick), live)
             return True
         return False
@@ -7135,8 +7165,7 @@ class SdkSession:
         arm = self._retry_armed()
         if not arm:
             return
-        a, b = _model_rank(pm), _model_rank(arm.get("from"))
-        if a is None or b is None or a < b:
+        if _model_rank(pm) is None or _model_rank(arm.get("from")) is None or _model_downgrade(arm.get("from"), pm):
             return
         self._upgrade_retry = None
         self.backend._log("retry upgrade (%s): back on %s after %d attempt(s)" % (self.name, pm, arm.get("attempts", 0)))
@@ -7932,7 +7961,7 @@ class SdkSession:
             # ALREADY standing — the API served this tier last time too: a host attach replaying the fallen reply the old
             # kernel never acked, a reconnect's init reporting the pick and the next reply falling back the same way — keeps
             # the cause on record (review 2026-09-17: the attach's seed set "safeguards" and the replayed learn erased it).
-            same_episode = bool(prev_served) and _model_rank(prev_served) is not None and _model_rank(prev_served) == _model_rank(pm)
+            same_episode = bool(prev_served) and _model_same_tier(prev_served, pm)
             if not getattr(self, "_refusal_this_turn", False) and not same_episode:
                 self._fallback_cause = ""             # a new episode: its cause is unknown until the CLI's refusal frame names it (seconds later)
                 self._fallback_category = ""
