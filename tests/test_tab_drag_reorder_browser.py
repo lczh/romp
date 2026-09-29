@@ -61,11 +61,12 @@ drag that only reorders shows neither.
 THE OPEN SESSION IS CHOSEN, AND A HEADER IS READ BEFORE IT IS PRESSED (2026-09-29). A header's click folds its group
 except on an OPEN group whose section the pane shows and which holds the open session: that click is the way back to
 the transcript and folds nothing (render.ts makeGroupHead, pinned by tab-snapshot-pane.test.ts). The page used to open
-whichever session's frame reached it first, and when that was a grouped session one of the re-folds below waited out
-its bound for a fold that by design never comes, always at one of the two re-folds that follow an open. So the saved
-state names a trail session no phase moves (PINNED), each fold click first reads what the header says its click does
-(the way back is taken only when the header shows every state that makes it one, and tallied: the main run expects
-none), and a last phase meets the way back on purpose.
+whichever session's frame reached it first, and when the header's group contained that session at a re-fold's click (a
+grouped session, or one a drop had moved into the group), the re-fold waited out its bound for a fold that by design
+never comes, always at one of the two re-folds that follow an open. So the saved state names a trail session no phase
+moves (PINNED), each fold click first reads what the header says its click does (the way back is taken only when the
+header shows every state that makes it one, and tallied: the main run expects none), and a last phase meets the way
+back on purpose.
 
 Each case records the row layout (every tab's left/top/width), the release point and the landing rect, and
 expects the tab to sit where the pointer was released: after every other tab on the release row whose
@@ -76,7 +77,8 @@ extension deps or a Playwright browser. SYNTHETIC fixtures only (the notes-api d
 placeholder sids). TAB_DRAG_DIST=<dir> serves another tree's UI bundle (the bisect's before);
 TAB_DRAG_DUMP=<path> writes the whole measurement; TAB_DRAG_SHOTS=<prefix> writes strip screenshots of the packed layouts;
 TAB_DRAG_ACTIVE=<name> opens another session than PINNED (a qa member meets the way back at the re-fold after the
-unfolded shape, an infra member at the fold ahead of the folded-header join)."""
+unfolded shape; an infra member, or backup, a trail session at boot that the first drop between the two folded
+headers moves into infra, at the fold ahead of the folded-header join)."""
 import json
 import os
 import re
@@ -163,9 +165,9 @@ await page.addInitScript(() => {
   watch();
 });
 // THE OPEN SESSION IS CHOSEN, NOT ADOPTED (2026-09-29): with no saved choice the page opens whichever session's frame lands
-// first, which put the fold clicks below at the mercy of the way back whenever that was a grouped session (foldGroup). The
-// shim's saved state names it instead (its activeId is the ?active= connect hint and the tab the page restores once it is
-// listed or its frame arrives), written only while the key is absent, so the two reloads keep what the page saved since
+// first, which left each fold click below to the way back whenever the header's group contained that session at the click
+// (foldGroup). The shim's saved state names it instead (its activeId is the ?active= connect hint and the tab the page
+// restores once it is listed or its frame arrives), written only while the key is absent, so the two reloads keep what it saved
 await page.addInitScript((sid) => {
   try { if (localStorage.getItem("romp-vscode-state-chat") === null) localStorage.setItem("romp-vscode-state-chat", JSON.stringify({ activeId: sid })); } catch (e) {}
 }, cfg.active);
@@ -390,7 +392,7 @@ async function dragAcrossPush(label, fromRow, fromIdx, toRow, toIdx, frac, renam
   Object.assign(cases[cases.length - 1], { rename: ans, pushed, shownDuring, shownAfter, rebuiltMidDrag });
 }
 const out = { grouped: null, yatharth: null };
-// wayBack: every way-back click foldGroup took in the main run (none expected: the open session is in no group)
+// wayBack: every way-back click foldGroup took in the main run (none expected: no header's group contains the open session)
 Object.assign(out, { opened, wayBack: [] });
 // 1. the CLASSIC theme, the control: row 0 = the infra group, the last row = the untagged trail
 let L = await layout();
@@ -1131,8 +1133,9 @@ class ServedTabDragReorder(unittest.TestCase):
 
     def test_no_fold_click_of_the_main_run_meets_the_way_back(self):
         r = self._run()
-        self.assertEqual(r["wayBack"], [], "the open session is in no group, so every header click of the main run folds or opens;"
-                         " a way back here means a grouped session was open: %r, opened %r" % (r["wayBack"], r["opened"]))
+        self.assertEqual(r["wayBack"], [], "no header's group contains the open session, so every header click of the main run"
+                         " folds or opens; a way back here means the header's group contained the open session at that click"
+                         " (a grouped session, or one a drop moved into a group): %r, opened %r" % (r["wayBack"], r["opened"]))
 
     def test_the_way_back_is_one_click_and_the_click_after_it_folds(self):
         c = self._run()["wayBackCase"]
