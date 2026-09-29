@@ -12,13 +12,14 @@
 // The grid runs twice: without a performance collector, and with a real one (perf-telemetry.ts) on window.__rompPerf,
 // as federation.js publishes it on the kernel's page. Both hosts wrap the frame listener in that collector and run the
 // sender check outside the wrapper, so a foreign message is neither drawn nor counted in the page's telemetry.
-// tests/test_timeline_boot_senders.py runs the same boot from the kernel's own suite, over named rows.
+// tests/test_timeline_boot_senders.py runs the same boot from the kernel's own suite, over named rows. A dropped message
+// leaves one trace (window-sender.ts noteForeign, inlined in the boot): the last legs read the rows it files.
 // Synthetic world only: loopback and example origins, a placeholder webview id.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { windowSender } from "./window-sender";
+import { windowSender, NOTE_MAX } from "./window-sender";
 import { createPerfTelemetry, type PerfDeps, type RompPerf } from "./perf-telemetry";
 
 const ROOT = path.resolve(process.cwd(), "..");   // npm test runs in vscode-extension
@@ -124,13 +125,13 @@ type Booted = { listeners: Array<(e: unknown) => void>; registered: Array<(e: un
  *  VS Code host bridge (the browser page's shim provides one), HTMLElement for the DOM helpers, addEventListener, and,
  *  when given, the page's performance collector (window.__rompPerf) and federation's frame registry (window.__rompFed,
  *  whose onFrame keeps what the boot registers). Then a panel is connected whose update counts the frames drawn. */
-function bootOver(w: Win, boot: string, perf?: RompPerf, fed?: boolean): Booted {
+function bootOver(w: Win, boot: string, perf?: RompPerf, fed?: boolean, host?: { postMessage(m: unknown): void }): Booted {
   const out: Booted = { listeners: [], registered: [], drawn: [], error: null };
   const own: any = w;
   Object.defineProperty(own, "window", { value: w, enumerable: false, configurable: true });
   Object.defineProperty(own, "self", { value: w, enumerable: false, configurable: true });
   Object.defineProperty(own, "HTMLElement", { value: function () { /* the DOM helpers' prototype */ }, enumerable: false, configurable: true });
-  Object.defineProperty(own, "acquireVsCodeApi", { value: () => ({ postMessage() { /* the host */ } }), enumerable: false, configurable: true });
+  Object.defineProperty(own, "acquireVsCodeApi", { value: () => (host || { postMessage() { /* the host */ } }), enumerable: false, configurable: true });
   Object.defineProperty(own, "addEventListener", { value: (t: string, f: (e: unknown) => void) => { if (t === "message") out.listeners.push(f); },
     enumerable: false, configurable: true });
   if (perf) Object.defineProperty(own, "__rompPerf", { value: perf, enumerable: false, configurable: true });
@@ -286,4 +287,56 @@ test("federation's frame registry gets the wrapped frame listener itself, not th
   run.registered[0]({ data: { type: "data", data: { from: "federation" } } });
   assert.deepEqual(run.drawn, [{ from: "federation" }]);
   assert.equal(c.counted(), 1, "timed by the collector on the registry path too");
+});
+
+// ── the trace a dropped message leaves ──
+
+const traceRow = (origin: string) => ({ type: "clientDiag", surface: "window-sender", what: "foreign", data: { site: "timeline-boot", origin } });
+
+test("the boot's dropped message leaves one trace: one foreign post files one row through the shim's send, a repeat files none, and a heard sender files none", () => {
+  const w = receivers()[0];
+  const sent: unknown[] = [], hosted: unknown[] = [];
+  Object.defineProperty(w, "__rompLocalSend", { value: (m: unknown) => { sent.push(m); }, enumerable: false, configurable: true });
+  const run = bootOver(w, timelineBoot(), undefined, false, { postMessage: (m: unknown) => { hosted.push(m); } });
+  assert.equal(run.error, null);
+  const listener = run.listeners[0];
+  const hostedAtBoot = hosted.length;   // the connect handshake rides the host bridge
+  const stranger = win("a window on another origin");
+  listener({ source: stranger, origin: OTHER_ORIGIN, data: { type: "data", data: { from: "foreign", secret: "the message's data" } } });
+  assert.deepEqual(sent, [traceRow(OTHER_ORIGIN)], "one row: the site and the origin, nothing of the message");
+  listener({ source: stranger, origin: OTHER_ORIGIN, data: { type: "data", data: { from: "foreign again" } } });
+  listener({ source: null, origin: OTHER_ORIGIN, data: { type: "data", data: { from: "foreign, gone" } } });
+  assert.equal(sent.length, 1, "a repeat from the same origin files none");
+  listener({ source: stranger, origin: "null", data: { type: "data", data: { from: "a sandboxed frame" } } });
+  assert.deepEqual(sent.slice(1), [traceRow("null")], "another origin files its own");
+  for (const [who, source, origin] of [["this window", w, ORIGIN], ["its parent", w.parent, ORIGIN], ["a window on its origin", win("a peer"), ORIGIN], ["dispatch", null, ""]] as const) {
+    listener({ source, origin, data: { type: "data", data: { from: who } } });
+  }
+  assert.equal(sent.length, 2, "no heard sender files a row");
+  assert.deepEqual(run.drawn.map((d) => (d as { from: string }).from), ["this window", "its parent", "a window on its origin", "dispatch"]);
+  assert.equal(hosted.length, hostedAtBoot, "with the shim's send present, no row takes the host bridge");
+});
+
+test("without the shim's send, the boot's trace takes the page's host bridge, and it never throws", () => {
+  const w = receivers()[0];
+  const hosted: Array<Record<string, any>> = [];
+  const run = bootOver(w, timelineBoot(), undefined, false, { postMessage: (m: any) => { hosted.push(m); } });
+  assert.equal(run.error, null);
+  const listener = run.listeners[0];
+  const before = hosted.length;
+  listener({ source: win("a stray window"), origin: "null", data: { type: "data", data: { from: "foreign" } } });
+  assert.deepEqual(hosted.slice(before), [traceRow("null")]);
+  const angry = bootOver(receivers()[2], timelineBoot(), undefined, false, { postMessage: () => { throw new Error("no host"); } });
+  assert.doesNotThrow(() => angry.listeners[0]({ source: win("a stray window"), origin: "null", data: { type: "data", data: {} } }), "a throwing bridge is swallowed");
+  assert.doesNotThrow(() => angry.listeners[0](null), "a missing event is swallowed");
+});
+
+test("the boot files at most twenty trace rows a page life, however many origins post", () => {
+  const w = receivers()[0];
+  const sent: unknown[] = [];
+  Object.defineProperty(w, "__rompLocalSend", { value: (m: unknown) => { sent.push(m); }, enumerable: false, configurable: true });
+  const run = bootOver(w, timelineBoot());
+  for (let i = 0; i < 35; i++) run.listeners[0]({ source: win("a stray window"), origin: "https://h" + i + ".example.invalid", data: { type: "data", data: {} } });
+  assert.equal(sent.length, NOTE_MAX, "window-sender.ts NOTE_MAX, inlined");
+  assert.equal(NOTE_MAX, 20);
 });

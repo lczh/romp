@@ -36,7 +36,7 @@ import { watchOverlayScrollbars } from "./overlay-scrollbars";
 import { loadSettings, installSettingsSync, onExternalSettingsChange } from "./settings";
 import { sessionLabelNodes, hostOf, hostIsDown, hostDownNote } from "./host-prefix";
 import { menuCard, showMenuCard, closeContextMenu } from "./ctx-menu";
-import { windowSender } from "./window-sender";   // the pane's window listener hears no foreign sender
+import { windowSender, noteForeign } from "./window-sender";   // the pane's window listener hears no foreign sender
 
 interface Listing { items: ArtifactItem[]; capped: boolean; max: number; error: string; sid: string; sig: string }
 
@@ -279,7 +279,7 @@ function openRow(i: number): void {
 }
 
 // ── boot ──────────────────────────────────────────────────────────────────────────────────────
-applyTheme(document, loadSettings()); installSettingsSync(); onExternalSettingsChange((st) => applyTheme(document, st));
+applyTheme(document, loadSettings()); installSettingsSync(vscodeApi); onExternalSettingsChange((st) => applyTheme(document, st));
 watchOverlayScrollbars(document, window);   // styles.css's styled scrollbars stand down where the platform overlays its own
 initFileView((m) => vscodeApi?.postMessage(m));   // the shared viewer's poster: its ops (fileGitLink, saveFile) ride this socket
 setLightboxNav((sid) => { const cur = sel.sid; return listing && cur && sid === cur ? cycleEntries(listing.items, cur) : []; });
@@ -296,7 +296,7 @@ if (root) delegate(root, {
 window.addEventListener("message", (ev) => {
   const m = ev.data;
   if (!m) return;
-  if (windowSender(ev) === "foreign") return;
+  if (windowSender(ev) === "foreign") { noteForeign("artifacts", ev, vscodeApi); return; }
   if (m.romp === "panes") {
     panesOn = m.on || {}; panesAvail = m.avail || {};
     if (onScreen() && sel.sid && !loading && (stale || !listing)) requestListing();   // shown again: a stale listing (a growth while off screen) is re-asked here, never under an ask in flight

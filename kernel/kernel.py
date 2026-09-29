@@ -65095,6 +65095,13 @@ function heardSender(e){if(!e)return false;var s=e.source;
 if(s===null||s===undefined){if(e.origin===undefined||e.origin===null||e.origin==="")return true;}
 else{if(s===window)return true;if(window.parent&&window.parent!==window&&s===window.parent)return true;}
 var o=window.location&&window.location.origin;return typeof o==="string"&&o!=="null"&&e.origin===o;}
+// A message the window listener drops leaves a trace: window-sender.ts noteForeign, inlined. One client-diag row per site
+// and sender origin a page life, at most 20, naming the site and the origin the browser stamped on the post and nothing
+// of the message, through the shim's send (window.__rompLocalSend) or else this page's host bridge; it never throws.
+var noted=Object.create(null),nNoted=0;
+function noteForeign(site,e){try{var o=e?e.origin:undefined;o=typeof o==="string"?o:String(o);var k=site+" "+o;
+if(noted[k]||nNoted>=20)return;noted[k]=1;nNoted++;var m={type:"clientDiag",surface:"window-sender",what:"foreign",data:{site:site,origin:o}};
+var s=window.__rompLocalSend;if(typeof s==="function")s(m);else api.postMessage(m);}catch(x){}}
 // the frame listener, wrapped like every pane's through the page's performance collector when there is one
 // (ui/webview/perf-telemetry.ts, published on window.__rompPerf by federation.js, which loads before this boot),
 // so each frame's handling is timed by type; without a collector the plain listener
@@ -65116,8 +65123,9 @@ else if(m.type==="tagEditFailed"&&panel.tagEditFailed)panel.tagEditFailed(m);
 else if(m.type==="openViewsDialog"&&panel._openViewsDialog)panel._openViewsDialog(null);};
 var frameListener=(window.__rompPerf&&window.__rompPerf.wrapFrameHandler)?window.__rompPerf.wrapFrameHandler(onFrame):onFrame;
 // the window path hears every window that can post to this page, so it hands the listener only a heard sender's message,
-// the sender check outside the collector's wrapper, as frame-listener.ts's listenForFrames installs every pane's
-window.addEventListener("message",function(e){if(!heardSender(e))return;frameListener(e);});
+// the sender check outside the collector's wrapper, as frame-listener.ts's listenForFrames installs every pane's; a
+// message it drops leaves its trace first
+window.addEventListener("message",function(e){if(!heardSender(e)){noteForeign("timeline-boot",e);return;}frameListener(e);});
 // the merged data/bars frames come by direct call from federation.js once the listener is registered with it (federation.ts
 // onFrame/emit; the pane bundles register through frame-listener.ts) — without the registry the window dispatch carries them.
 // Only federation.js calls that path, with a MessageEvent it built itself, so the registry holds the listener as it is

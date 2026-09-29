@@ -23,7 +23,7 @@ const { initGear } = require("./gear.js");
 const api =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
 initGear((m: Record<string, unknown>) => api?.postMessage(m), { ownPage: true });
-installSettingsSync();   // a gear save relayed by a host (VS Code's fan-out shape) lands here too
+installSettingsSync(api);   // a gear save relayed by a host (VS Code's fan-out shape) lands here too
 applyTheme(document, loadSettings());
 onExternalSettingsChange((s) => applyTheme(document, s));
 // the handshake every pane sends: this socket carries keepalives and op replies only, and the kernel's

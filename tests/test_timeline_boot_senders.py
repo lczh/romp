@@ -12,7 +12,12 @@ performance collector's wrapper, so a foreign message is neither drawn nor count
 ui/webview/timeline-boot-senders.test.ts pins the boot to windowSender itself over a grid of receiving windows, senders
 and origins, with and without a real collector. The rows here hold the same rule in the kernel's own suite over named
 senders, on a page on a loopback origin, on a page whose own origin is opaque (no window is a peer of it) and on a page
-with no location. Synthetic only: loopback and example origins.
+with no location.
+
+A message the listener drops leaves one trace (2026-09-29; ui/webview/window-sender.ts noteForeign, inlined in the boot as
+noteForeign): one client-diag row per sender origin a page life, naming the site ("timeline-boot") and the origin and
+nothing of the message, through the shim's send (window.__rompLocalSend) or else the host bridge. TheTrace reads the rows
+the same deliveries file. Synthetic only: loopback and example origins.
 """
 import json
 import os
@@ -40,12 +45,14 @@ km = load_source("romp_kernel_timeline_boot_senders", os.path.join(BIN, "romp-ke
 # bridge acquireVsCodeApi, the shell as window.parent, the shell's own parent as window.top), a fake panel, and the one
 # window message listener it registers. ROMP_TEST_OWN is the page's own origin ("-" for a page with no location);
 # ROMP_TEST_PERF=1 publishes a performance collector on window.__rompPerf first, as federation.js does on the kernel's
-# page, in the shape of perf-telemetry.ts's wrapFrameHandler, counting every message it is handed.
+# page, in the shape of perf-telemetry.ts's wrapFrameHandler, counting every message it is handed. ROMP_TEST_SHIM=1
+# publishes the shim's send (window.__rompLocalSend), as every kernel page has it; both it and the host bridge record
+# what they are sent.
 _BOOT_HARNESS = r"""
 'use strict';
 const ORIGIN = 'http://127.0.0.1:7777', OTHER = 'https://elsewhere.example';
 const OWN = process.env.ROMP_TEST_OWN;
-const LISTENERS = [], UPDATES = [], COUNTED = [];
+const LISTENERS = [], UPDATES = [], COUNTED = [], SHIM = [], HOSTED = [];
 global.HTMLElement = function () {};
 global.window = global;
 const GRAND = { name: "the shell's own parent" };
@@ -61,7 +68,8 @@ global.frames = global;
 global.length = 1;
 global[0] = CHILD;
 global.location = OWN === '-' ? undefined : { origin: OWN };
-global.acquireVsCodeApi = () => ({ postMessage() {} });
+global.acquireVsCodeApi = () => ({ postMessage(m) { HOSTED.push(m); } });
+if (process.env.ROMP_TEST_SHIM === '1') global.__rompLocalSend = (m) => { SHIM.push(m); };
 global.addEventListener = (t, f) => { if (t === 'message') LISTENERS.push(f); };
 if (process.env.ROMP_TEST_PERF === '1') {
   global.__rompPerf = { wrapFrameHandler: (h) => (e) => { COUNTED.push(e && e.data && e.data.data && e.data.data.from); return h(e); } };
@@ -93,14 +101,14 @@ Object.keys(SENDERS).forEach((k) => {
   LISTENERS.forEach((f) => f(e));
 });
 process.stdout.write(JSON.stringify({ listeners: LISTENERS.length, updates: UPDATES, counted: COUNTED,
-                                      perf: typeof global.__rompPerf === 'object' }));
+                                      perf: typeof global.__rompPerf === 'object', shim: SHIM, hosted: HOSTED }));
 """
 _OWN_ORIGIN = "http://127.0.0.1:7777"   # the harness's ORIGIN
 _HEARD = ["dispatch", "fedDirect", "self", "embedder", "peer"]
 _HEARD_NO_PEER = ["dispatch", "fedDirect", "self", "embedder"]
 
 
-def _run_boot(own, perf):
+def _run_boot(own, perf, shim=False):
     node = shutil.which("node")
     if not node:
         raise unittest.SkipTest("node not installed")
@@ -110,7 +118,7 @@ def _run_boot(own, perf):
         with open(path, "w") as f:
             f.write(_BOOT_HARNESS.replace("BOOT", km._TIMELINE_BOOT))
         r = subprocess.run([node, path], capture_output=True, text=True, timeout=60,
-                           env=dict(os.environ, ROMP_TEST_OWN=own, ROMP_TEST_PERF="1" if perf else "0"))
+                           env=dict(os.environ, ROMP_TEST_OWN=own, ROMP_TEST_PERF="1" if perf else "0", ROMP_TEST_SHIM="1" if shim else "0"))
     finally:
         shutil.rmtree(fx, ignore_errors=True)
     if r.returncode != 0:
@@ -161,12 +169,54 @@ class TimelineBootSenders(unittest.TestCase):
 
     def test_source_the_check_heads_the_window_listener_outside_the_collector(self):
         boot = km._TIMELINE_BOOT
-        self.assertIn('window.addEventListener("message",function(e){if(!heardSender(e))return;frameListener(e);});', boot)
+        self.assertIn('window.addEventListener("message",function(e){if(!heardSender(e)){noteForeign("timeline-boot",e);return;}'
+                      'frameListener(e);});', boot)
         self.assertEqual(boot.count("function heardSender(e){"), 1)
         self.assertEqual(boot.count("heardSender("), 2, "defined once, called once: by the window listener")
         self.assertLess(boot.index("function heardSender(e){"), boot.index('window.addEventListener("message",'))
+        # the trace: defined once, called once, at the drop and nowhere else
+        self.assertEqual(boot.count("function noteForeign(site,e){"), 1)
+        self.assertEqual(boot.count("noteForeign("), 2, "defined once, called once: at the window listener's drop")
+        self.assertLess(boot.index("function noteForeign(site,e){"), boot.index('window.addEventListener("message",'))
         # the registry path takes the listener as it is: only federation.js calls it, with a MessageEvent it built
         self.assertIn("window.__rompFed.onFrame(frameListener);", boot)
+
+
+# The loopback page's senders in _BOOT_HARNESS order, and the rows their deliveries file: the heard senders come first and
+# file none; each foreign sender files one row the first time its origin is seen, so the opener's post files one for the
+# other origin, the popup, top window and stranger behind it none (a repeat), a sandboxed frame one for "null" and its
+# sibling and child none, and the sourceless posts, whose origins were already seen, none.
+_TRACED = ["https://elsewhere.example", "null", "http://127.0.0.1:77770", "http://127.0.0.1", "http://127.0.0.1:7778"]
+
+
+def _row(origin):
+    return {"type": "clientDiag", "surface": "window-sender", "what": "foreign", "data": {"site": "timeline-boot", "origin": origin}}
+
+
+class TheTrace(unittest.TestCase):
+    """A message the boot's listener drops files one client-diag row per sender origin, the site and the origin alone, and
+    a heard sender's files none: through the shim's send on a kernel page, else the host bridge."""
+
+    def test_each_foreign_origin_files_one_row_through_the_shims_send_a_repeat_none_and_a_heard_sender_none(self):
+        for perf in (False, True):
+            with self.subTest(perf=perf):
+                got = _run_boot(_OWN_ORIGIN, perf=perf, shim=True)
+                self.assertEqual(got["updates"], _HEARD)
+                self.assertEqual(got["shim"], [_row(o) for o in _TRACED])
+                self.assertEqual([m.get("type") for m in got["hosted"]], ["ready"], "the host bridge carried the connect handshake alone")
+                self.assertNotIn("from", json.dumps(got["shim"]), "no row carries the message's data")
+
+    def test_without_the_shims_send_the_rows_take_the_host_bridge(self):
+        got = _run_boot(_OWN_ORIGIN, perf=False, shim=False)
+        self.assertEqual(got["shim"], [])
+        self.assertEqual([m.get("type") for m in got["hosted"][:1]], ["ready"], "the connect handshake first")
+        self.assertEqual(got["hosted"][1:], [_row(o) for o in _TRACED])
+
+    def test_on_a_page_whose_own_origin_is_opaque_a_window_on_the_loopback_origin_is_foreign_and_traced(self):
+        got = _run_boot("null", perf=False, shim=True)
+        self.assertEqual(got["updates"], _HEARD_NO_PEER)
+        self.assertEqual(got["shim"], [_row(o) for o in [_OWN_ORIGIN] + _TRACED],
+                         "the peer's post, on an origin this opaque page does not share, is the first foreign origin")
 
 
 if __name__ == "__main__":

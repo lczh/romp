@@ -854,14 +854,14 @@ listenForFrames(perfFrameHandler("fleet", (m) => vscodeApi?.postMessage(m), (e: 
     .filter((a: any) => a && a.itemId && !a.provisional)
     .map((a: any) => [a.itemId as string, a] as const));
   render();
-}));
+}), vscodeApi);
 window.addEventListener("storage", (e: StorageEvent) => { if (e.key === "romp:settings") { applyTheme(document, loadSettings()); render(); } });   // theme/colormap change → reskin + recolour
 applyTheme(document, loadSettings());   // the persisted theme applies at boot (2026-08-28)
 watchOverlayScrollbars(document, window);   // styles.css's styled scrollbars stand down where the platform overlays its own
 // VS Code webviews have per-origin storage and never see another pane's `storage` events — gear
 // saves arrive as settingsSync host messages (PR #763 item 3; the raiser re-fires romp:settings,
 // which onExternalSettingsChange below already handles in the browser too)
-installSettingsSync();
+installSettingsSync(vscodeApi);
 onExternalSettingsChange((s) => { applyTheme(document, s); render(); });
 
 // THE ROW'S MENU (the user 2026-09-16, who wanted to right-click a session's name here to rename or delete it):

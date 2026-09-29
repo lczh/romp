@@ -30,7 +30,7 @@
 import { closeFileView, openFileClick } from "./file-view";
 import { fileUrl } from "./preview";
 import { openContextMenu, closeContextMenu, CtxItem } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy): the row menu's card, dismissal and keys
-import { windowSender } from "./window-sender";   // initFileBrowse's window listener hears no foreign sender
+import { windowSender, noteForeign } from "./window-sender";   // initFileBrowse's window listener hears no foreign sender
 
 type DirEntry = {
   name: string; isDir: boolean; isLink: boolean;
@@ -454,7 +454,7 @@ export function initFileBrowse(poster: (m: Record<string, unknown>) => void, hos
   window.addEventListener("message", (e: MessageEvent) => {
     const m = e.data;
     if (!m) return;
-    if (windowSender(e) === "foreign") return;
+    if (windowSender(e) === "foreign") { noteForeign("file-browse", e, post); return; }
     if (m.romp === "browseFiles" && typeof m.path === "string") {
       if (host.onRelay) { host.onRelay({ path: m.path, sid: m.sid, identity: m.identity }); return; }   // this document's own contract takes the ask whole
       openFileBrowse(m.path || ".", typeof m.sid === "string" ? m.sid : null);

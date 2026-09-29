@@ -30,10 +30,10 @@ let panel: any = null;
 // each frame's handling is timed by type, and the kernel page's inline boot twin does the same
 // …and installed through the same helper as every pane (frame-listener.ts): there is no federation.js in a VS Code
 // webview, so only the window listener is installed here; the kernel page's inline boot twin registers with it
-listenForFrames(perfFrameHandler("timeline", post, (ev: MessageEvent) => { dispatchFrame(panel, ev.data); }));
+listenForFrames(perfFrameHandler("timeline", post, (ev: MessageEvent) => { dispatchFrame(panel, ev.data); }), api);
 
 // the overall theme (2026-08-28): body classes at boot + on settings writes, like every pane
-installSettingsSync();
+installSettingsSync(api);
 applyTheme(document, loadSettings());
 onExternalSettingsChange((s) => applyTheme(document, s));
 

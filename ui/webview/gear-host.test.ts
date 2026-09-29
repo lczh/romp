@@ -59,7 +59,7 @@ test("the settings page bundle is the gear's own host", () => {
   const PAGE = read("ui", "webview", "settings-page.ts");
   assert.ok(PAGE.includes('require("./gear.js")'));
   assert.match(PAGE, /initGear\(\(m[^)]*\) => api\?\.postMessage\(m\), \{ ownPage: true \}\)/, "mounted as the page's own content: no pane lift to measure");
-  assert.ok(PAGE.includes("installSettingsSync()"), "a settings write from another document reaches it");
+  assert.ok(PAGE.includes("installSettingsSync(api)"), "a settings write from another document reaches it (a foreign sender's drop traced through the page's api)");
   assert.ok(PAGE.includes("applyTheme(document, loadSettings())"), "the modal wears the theme");
   const GEAR = read("ui", "webview", "gear.js");
   assert.ok(GEAR.includes("function initGear(post, opts)"));

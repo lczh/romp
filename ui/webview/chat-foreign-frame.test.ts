@@ -7,16 +7,18 @@
 // webview's frame replaces window.parent with the frame itself (older releases delete it), so the host is heard as a
 // window on the webview's origin, a peer, and never as the embedder; the legs below model that frame both ways.
 // The handler is lifted out of render.ts verbatim, transpiled and executed over stubs: every free identifier it reaches
-// resolves to an inert stub except the effect functions below, which count, windowSender, which is the real helper, and
-// window and location (node has neither), which are the receiving window the leg models and its location: W for a chat
-// in the romp shell, or one of the two VS Code frames. windowSender reads that same window, so a check the handler
-// spells with window or location sees the window the helper sees. Any other name read on those stand-ins is the stub.
+// resolves to an inert stub except the effect functions below, which count, windowSender, which is the real helper,
+// noteForeign, the real trace over a transport that records, and window and location (node has neither), which are the
+// receiving window the leg models and its location: W for a chat in the romp shell, or one of the two VS Code frames.
+// windowSender reads that same window, so a check the handler spells with window or location sees the window the helper
+// sees. Any other name read on those stand-ins is the stub. A foreign sender's drop files one trace under the site
+// "chat" (window-sender.ts noteForeign); a heard sender files none.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { windowSender } from "./window-sender";
+import { windowSender, noteForeign } from "./window-sender";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));   // esbuild from the extension, wherever this bundle was written
@@ -32,8 +34,8 @@ function liftHandler(): string {
   const at = RENDER.indexOf(HEAD);
   assert.ok(at > 0, "anchor not found: render.ts's chat frame listener moved; re-anchor");
   const start = at + HEAD.length;
-  const end = RENDER.indexOf("\n}));\n", start);
-  assert.ok(end > start, "the listener's closing `}));` not found");
+  const end = RENDER.indexOf("\n}), vscodeApi);\n", start);
+  assert.ok(end > start, "the listener's closing `}), vscodeApi);` not found");
   return RENDER.slice(start, end + 2);
 }
 
@@ -92,12 +94,17 @@ type Counts = Record<string, number>;
 const EFFECTS = ["adoptSessionState", "seedEditorQuote", "upsert", "retryFailedPreviews"];
 
 /** The lifted handler over stubs, with a counter per effect function, receiving as window w: the handler's window and
- *  location are w and w.location, the objects windowSender reads. The handler is sloppy-mode code here (esbuild's
- *  transform adds no strict prologue), which `with` needs. */
-function handlerOverStubs(w: Win = W): { handle: (data: unknown, from: Sent) => void; calls: Counts } {
+ *  location are w and w.location, the objects windowSender reads. `traces` holds the client-diag rows its drops file.
+ *  The handler is sloppy-mode code here (esbuild's transform adds no strict prologue), which `with` needs. */
+function handlerOverStubs(w: Win = W): { handle: (data: unknown, from: Sent) => void; calls: Counts; traces: Array<Record<string, any>> } {
   const calls: Counts = {};
+  const traces: Array<Record<string, any>> = [];
+  // the page life the trace dedupes over: one per handler, with no pane shim (the stand-in window answers every unknown
+  // name with the stub, so it cannot stand for the page here), so the trace takes the recording transport
+  const page = {};
   const named: Record<string, unknown> = {
     windowSender: (e: { source?: unknown; origin?: unknown }) => windowSender(e, w),
+    noteForeign: (site: string, e: { origin?: unknown }) => noteForeign(site, e, (m) => { traces.push(m); }, page),
     window: w,
     location: w.location,
   };
@@ -110,7 +117,7 @@ function handlerOverStubs(w: Win = W): { handle: (data: unknown, from: Sent) => 
   const code = transpile("const __handler = " + liftHandler() + ";\n");
   const make = new Function("__scope", "with (__scope) {\n" + code + "\nreturn __handler;\n}") as (s: unknown) => (e: unknown) => void;
   const handler = make(scope);
-  return { handle: (data: unknown, from: Sent) => handler({ data, source: from.source, origin: from.origin }), calls };
+  return { handle: (data: unknown, from: Sent) => handler({ data, source: from.source, origin: from.origin }), calls, traces };
 }
 
 const LEGS: { what: string; data: Record<string, unknown>; effect: string }[] = [
@@ -120,12 +127,16 @@ const LEGS: { what: string; data: Record<string, unknown>; effect: string }[] = 
 ];
 
 for (const leg of LEGS) {
-  test(leg.what + " from a foreign sender is ignored: " + leg.effect + " is not called and nothing else in the handler runs", () => {
+  test(leg.what + " from a foreign sender is ignored: " + leg.effect + " is not called and nothing else in the handler runs but its one trace", () => {
     for (const [who, from] of Object.entries(FOREIGN)) {
       const h = handlerOverStubs(from.to);
       h.handle(leg.data, from);
       assert.equal(h.calls[leg.effect], 0, leg.what + " from " + who + " reached " + leg.effect);
       assert.equal(h.calls.retryFailedPreviews, 0, "the handler returned at its head for " + who + ", before the preview heal");
+      assert.deepEqual(h.traces, [{ type: "clientDiag", surface: "window-sender", what: "foreign", data: { site: "chat", origin: from.origin } }],
+        "the drop filed one trace, the site and the sender's origin alone, for " + who);
+      h.handle(leg.data, from);
+      assert.equal(h.traces.length, 1, "a second post from the same origin files no second trace, for " + who);
     }
   });
 
@@ -134,18 +145,19 @@ for (const leg of LEGS) {
     for (const [who, from] of Object.entries(HEARD)) {
       const h = handlerOverStubs(from.to);
       h.handle(leg.data, from);
-      if (h.calls[leg.effect] !== 1) missed.push(who + " (" + h.calls[leg.effect] + " calls)");
+      if (h.calls[leg.effect] !== 1 || h.traces.length !== 0) missed.push(who + " (" + h.calls[leg.effect] + " calls, " + h.traces.length + " traces)");
     }
-    assert.deepEqual(missed, [], leg.what + " must reach " + leg.effect + " once from each heard sender; it did not from: " + missed.join("; "));
+    assert.deepEqual(missed, [], leg.what + " must reach " + leg.effect + " once from each heard sender, with no trace; it did not from: " + missed.join("; "));
   });
 }
 
 test("at source: the foreign-sender return is the handler's first check after the empty-message return", () => {
-  // Where the line sits, not what it does: the executed legs above are the proof that a foreign sender reaches nothing.
+  // Where the line sits, not what it does: the executed legs above are the proof that a foreign sender reaches nothing
+  // but its trace.
   const at = RENDER.indexOf(HEAD);
   assert.ok(at > 0);
   const head = RENDER.slice(at + HEAD.length, at + HEAD.length + 200);
-  assert.ok(head.startsWith('(e: MessageEvent) => {\n  const m = e.data;\n  if (!m) return;\n  if (windowSender(e) === "foreign") return;'),
-    "the chat handler's head is: read e.data, return on an empty message, return on a foreign sender");
-  assert.match(RENDER, /\nimport \{ windowSender \} from "\.\/window-sender";\n/);
+  assert.ok(head.startsWith('(e: MessageEvent) => {\n  const m = e.data;\n  if (!m) return;\n  if (windowSender(e) === "foreign") { noteForeign("chat", e, vscodeApi); return; }'),
+    "the chat handler's head is: read e.data, return on an empty message, return on a foreign sender through its trace");
+  assert.match(RENDER, /\nimport \{ windowSender, noteForeign \} from "\.\/window-sender";\n/);
 });
