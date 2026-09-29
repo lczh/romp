@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { adoptSharedFolds, foldsOf, foldsToPublish, hearSharedFolds, mergeFolds, parseTabGroups, phoneStandIns, planStrip, readTabGroups,
-         setFoldsPublisher, setSectionCollapsed, writeTabGroups, TABGROUPS_EVENT, TABGROUPS_KEY, TABGROUPS_PENDING_KEY, TABGROUPS_SHARED_KEY,
+         setFoldsPublisher, setPinned, setSectionCollapsed, writeTabGroups, TABGROUPS_EVENT, TABGROUPS_KEY, TABGROUPS_PENDING_KEY, TABGROUPS_SHARED_KEY,
          type TabFolds, type TabGroupsState } from "./tab-groups";
 import { viewTagUnion } from "./session-views";
 import { routeOutbound } from "./federation";
@@ -99,6 +99,234 @@ test("the migration decision: the kernel's folds win; with none there, this brow
   assert.equal(foldsToPublish(undefined, mine), null, "no folds half at all (an older kernel): never published");
 });
 
+// ── this browser's own publishes coming back (2026-09-29) ─────────────────────────────────────────────
+// The kernel answers every fold state that changes its store with a push to every viewer, the one that published it
+// included, and names on that frame the last publish it handled (`foldsBy`). Two folds inside one round trip put the
+// answer to the first on the wire while the page already shows the second.
+/** The folds as the kernel hands them back: kernel.py stores json.dumps(folds, sort_keys=True) and serves that, so every
+ *  object comes back with its keys sorted (a pin's `id` first), not in the order this page wrote them. */
+const kernelCopy = (o: unknown): any => JSON.parse(JSON.stringify(o, (_k, v) => (v && typeof v === "object" && !Array.isArray(v)
+  ? Object.fromEntries(Object.keys(v).sort().map((key) => [key, v[key]])) : v)));
+const NO_FOLDS: TabFolds = { collapsed: [], expanded: [], pinned: [] };
+const PUBLISHES = "romp:tabgroups:publishes";   // TABGROUPS_PUBLISHES_KEY
+type Sent = { f: TabFolds; by: any };
+/** A page's hearing, as the callers wire it: every publish the installed publisher makes is captured with its name. */
+function hearing(sent: Sent[]) {
+  const send = (f: TabFolds, by: unknown) => { sent.push({ f, by }); };
+  return (served: unknown, by?: unknown) => hearSharedFolds(served, send, setFoldsPublisher, by);
+}
+const record = (store: Map<string, string>) => JSON.parse(store.get(PUBLISHES) ?? '{"live":{}}');
+
+test("the kernel's answer to this page's EARLIER publish does not reopen a group folded since: two folds inside one round trip", () => {
+  withStore({}, (_store, events) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));                                          // heard: this page speaks for the folds
+    writeTabGroups(setPinned(setSectionCollapsed(readTabGroups(), "api", true), { name: "api", localId: "g1" }, "tests", true));   // 1. api folded, tests shown through it
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));   // 2. web folded before the kernel answered the first
+    assert.deepEqual(sent.map((s) => s.f.collapsed), [["api"], ["api", "web"]], "premise: two publishes, each the whole fold state");
+    const painted = events.length;
+    hear(kernelCopy(sent[0].f), sent[0].by);                             // 3. the kernel's answer to the FIRST arrives now
+    assert.deepEqual(readTabGroups().collapsed, ["api", "web"], "4. web stays folded: that answer is older than what this page published since");
+    assert.equal(events.length, painted, "and nothing repaints for it");
+    hear(kernelCopy(sent[1].f), sent[1].by);                             // the answer to the second
+    assert.deepEqual([readTabGroups().collapsed, readTabGroups().pinned, events.length], [["api", "web"], [{ sid: "tests", name: "api", id: "g1" }], painted],
+      "the answer to the latest publish is what the page already shows, its sorted keys and all");
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), { browser: "f".repeat(32), n: 1 });   // later, another device opens api
+    assert.deepEqual([readTabGroups().collapsed, events.length], [["web"], painted + 1], "another device's word is adopted as ever");
+  });
+});
+
+test("a group folded and opened again inside one round trip never folds on an answer", () => {
+  withStore({}, () => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", false));  // opened again: the same folds as the first publish
+    assert.deepEqual(sent.map((s) => s.f.collapsed), [["api"], ["api", "web"], ["api"]], "premise: three publishes, the first and the last alike");
+    const shown: string[][] = [];
+    for (const s of sent) { hear(kernelCopy(s.f), s.by); shown.push(readTabGroups().collapsed); }
+    assert.deepEqual(shown, [["api"], ["api"], ["api"]], "the second answer names a publish older than the third, so web never folds");
+  });
+});
+
+test("a dropped connection ends this page's wait: the next connection's folds are the kernel's word", () => {
+  withStore({}, () => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));   // neither answered when the connection drops
+    setFoldsPublisher(null);                                             // the drop withdraws the publisher (render.ts pipeState; federation.ts unhearViewOrder)
+    hear(kernelCopy(sent[0].f), sent[0].by);                             // the next connection's first frame: web's fold never landed
+    assert.deepEqual(readTabGroups().collapsed, ["api"], "adopted: nothing sent on the connection that dropped will be answered on this one");
+  });
+});
+
+test("only this browser's OWN earlier publishes are passed over: another device's folds are adopted while this page's publish goes unanswered", () => {
+  withStore({}, () => {
+    const hear = hearing([]);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));   // the kernel refuses it (a full disk, say): no answer ever comes
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), { browser: "f".repeat(32), n: 1 });   // another device folds web
+    assert.deepEqual(readTabGroups().collapsed, ["web"], "adopted at once: a page that held every frame until its own answer came would be stranded by the refusal");
+  });
+});
+
+test("the browser's id is minted once, kept only once a publish needs it, and its number rises across connections", () => {
+  withStore({}, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    assert.equal(store.has(PUBLISHES), false, "a page that has published nothing leaves nothing behind");
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    const id = record(store).browser;
+    assert.match(id, /^[0-9a-f]{32}$/, "16 random bytes, as hex");
+    setFoldsPublisher(null);                                             // a drop, and the next connection's first frame
+    hear(kernelCopy(sent[0].f), sent[0].by);
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    assert.deepEqual(sent.map((s) => s.by), [{ browser: id, n: 1 }, { browser: id, n: 2 }]);
+  });
+});
+
+test("a frame passed over is passed over WHOLE: no cache write, no repaint, the pending change kept, the publisher installed", () => {
+  withStore({}, (store, events) => {
+    const sent: Sent[] = [];
+    const send = (f: TabFolds, by: unknown) => { sent.push({ f, by }); };
+    const installed: unknown[] = [];
+    const install = (fn: any) => { installed.push(fn); setFoldsPublisher(fn); };
+    hearSharedFolds(kernelCopy(NO_FOLDS), send, install);
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    const base = JSON.stringify({ collapsed: ["api", "web"], expanded: [], pinned: [] });
+    store.set(TABGROUPS_PENDING_KEY, base);                              // a change another pane of this browser made before hearing
+    const copy = store.get(TABGROUPS_SHARED_KEY), painted = events.length, published = sent.length;
+    hearSharedFolds(kernelCopy(sent[0].f), send, install, sent[0].by);
+    assert.deepEqual([store.get(TABGROUPS_SHARED_KEY), events.length, sent.length], [copy, painted, published], "nothing cached, announced or published");
+    assert.equal(store.get(TABGROUPS_PENDING_KEY), base, "the pending change waits for the kernel's current folds");
+    assert.equal(installed.length, 2, "the publisher is installed as on any hearing");
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "tests", true));
+    assert.deepEqual(sent.at(-1)!.by.n, 3, "and it publishes on, numbered after the ones before");
+    assert.equal(Object.keys(record(store).live).length, 1, "on the same connection");
+  });
+});
+
+test("a frame naming this browser's publish at or above every one still out is heard, and the pending change lands over it", () => {
+  withStore({}, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    const base = JSON.stringify({ collapsed: ["api"], expanded: [], pinned: [] });
+    store.set(TABGROUPS_PENDING_KEY, base);                              // another pane folded tests before hearing
+    store.set(TABGROUPS_SHARED_KEY, JSON.stringify({ collapsed: ["api", "tests"], expanded: [], pinned: [] }));
+    hear(kernelCopy(sent[0].f), sent[0].by);                             // the answer to the latest publish
+    assert.equal(store.has(TABGROUPS_PENDING_KEY), false, "the change is spent");
+    assert.deepEqual(sent.at(-1)!.f.collapsed, ["api", "tests"], "published over the kernel's folds");
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), { browser: sent[0].by.browser, n: 99 });
+    assert.deepEqual(readTabGroups().collapsed, ["docs"], "a number above every one out: heard");
+  });
+});
+
+test("a stamp from another browser, none at all, or a malformed one is heard as before", () => {
+  withStore({}, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    for (const g of ["api", "web", "tests"]) writeTabGroups(setSectionCollapsed(readTabGroups(), g, true));   // numbers 1 to 3, the last still out
+    const id = record(store).browser;
+    const stamps: unknown[] = [undefined, null, { browser: "f".repeat(32), n: 1 }, { browser: 7, n: 1 }, { browser: "", n: 1 }, { browser: "a".repeat(65), n: 1 },
+      { browser: id, n: 0 }, { browser: id, n: -1 }, { browser: id, n: true }, { browser: id, n: 1.5 }, { browser: id, n: "2" }, { browser: id }, [id, 1], "x"];
+    stamps.forEach((by, i) => {
+      hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs" + i] }), by);
+      assert.deepEqual(readTabGroups().collapsed, ["docs" + i], "heard: " + JSON.stringify(by));
+    });
+  });
+});
+
+test("a new connection's first hearing ends the entry of the one before it", () => {
+  withStore({}, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    const [before] = Object.keys(record(store).live);
+    setFoldsPublisher(null);                                             // the drop
+    hear(kernelCopy(sent[0].f));
+    assert.deepEqual(record(store).live, {}, "its entry is gone");
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    const after = Object.keys(record(store).live);
+    assert.equal(after.length, 1);
+    assert.notEqual(after[0], before, "and the new connection has a new id");
+  });
+});
+
+test("pagehide ends the current connection's entry: a page that went away will never have its publish answered", () => {
+  withStore({}, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    (globalThis as any).window.dispatchEvent(new Event("pagehide"));
+    assert.deepEqual(record(store).live, {});
+    hear(kernelCopy(sent[0].f), sent[0].by);
+    assert.deepEqual(readTabGroups().collapsed, ["api"], "heard: nothing of this browser's is still out");
+  });
+});
+
+test("a send that throws sent nothing: the connection's entry goes back to what it was", () => {
+  withStore({}, (store) => {
+    let fail = true;
+    const sent: Sent[] = [];
+    hearSharedFolds(kernelCopy(NO_FOLDS), (f, by) => { if (fail) throw new Error("socket gone"); sent.push({ f, by }); }, setFoldsPublisher);
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));  // the first send throws (writeTabGroups keeps the fold here)
+    assert.deepEqual(record(store).live, {}, "no entry for a publish that never left");
+    fail = false;
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    const [conn] = Object.keys(record(store).live);
+    assert.deepEqual([record(store).live[conn], sent[0].by.n], [2, 2], "the number moved on all the same");
+    fail = true;
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "tests", true));
+    assert.deepEqual(record(store).live, { [conn]: 2 }, "back to the last publish that left");
+  });
+});
+
+test("a browser that cannot keep the record publishes unnamed: the message is exactly the one before the name", () => {
+  withStore({}, () => {
+    const g: any = globalThis;
+    const inner = g.localStorage;
+    g.localStorage = { ...inner, setItem: (k: string, v: string) => { if (k === PUBLISHES) throw new Error("QuotaExceededError"); inner.setItem(k, v); } };
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    assert.deepEqual(sent, [{ f: { collapsed: ["api"], expanded: [], pinned: [] }, by: null }], "sent, without a name");
+  });
+});
+
+test("the record keeps at most 32 connections, dropping the smallest number and never the publishing one's", () => {
+  const live: Record<string, number> = {};
+  for (let i = 1; i <= 40; i++) live["c" + i] = i;
+  withStore({ [PUBLISHES]: { browser: "e".repeat(32), n: 40, live } }, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    const kept = record(store).live;
+    const mine = Object.keys(kept).filter((c) => !(c in live));
+    assert.deepEqual([Object.keys(kept).length, mine.length, kept[mine[0]], sent[0].by], [32, 1, 41, { browser: "e".repeat(32), n: 41 }]);
+    assert.equal(Math.min(...Object.keys(kept).filter((c) => c !== mine[0]).map((c) => kept[c])), 10, "the nine smallest went");
+  });
+});
+
+test("a named fold goes to the LOCAL kernel whole, its name with it", () => {
+  const msg = { type: "setViewFolds", folds: { collapsed: ["api"], expanded: [], pinned: [] }, by: { browser: "e".repeat(32), n: 3 } };
+  assert.deepEqual(routeOutbound(msg, new Set(["TESTHOST"])), [{ host: "", msg }]);
+});
+
 test("an adoption caches and announces only a CHANGE, and a malformed half is ignored", () => {
   withStore({}, (store, events) => {
     assert.equal(adoptSharedFolds({ collapsed: ["api"], expanded: [], pinned: [] }), true);
@@ -133,7 +361,8 @@ test("a fold goes to the LOCAL kernel whole, and every page hears the folds thro
   assert.deepEqual(routeOutbound({ type: "setViewFolds", folds: { collapsed: ["api"], expanded: [], pinned: [{ sid: "TESTHOST:web", name: "api" }] } }, new Set(["TESTHOST"])),
     [{ host: "", msg: { type: "setViewFolds", folds: { collapsed: ["api"], expanded: [], pinned: [{ sid: "TESTHOST:web", name: "api" }] } } }]);
   // a page with a manager: the frame's folds half, only from the local kernel, and the window slot installed there
-  assert.match(FED, /if \("folds" in m\) \{\s*\n\s*hearSharedFolds\(m\.folds, \(f\) => this\.outbound\(\{ type: "setViewFolds", folds: f \}\), \(fn\) => \{ w\.__rompPublishViewFolds = fn; \}\);/);
+  // …each publish carrying its name when it has one, and the frame's name for the publish it reflects handed in (2026-09-29)
+  assert.match(FED, /if \("folds" in m\) \{\s*\n\s*hearSharedFolds\(m\.folds, \(f, by\) => this\.outbound\(\{ type: "setViewFolds", folds: f, \.\.\.\(by \? \{ by \} : \{\}\) \}\), \(fn\) => \{ w\.__rompPublishViewFolds = fn; \}, m\.foldsBy\);/);
   assert.match(FED, /if \(m && m\.type === "viewOrder"\) \{\s*\n\s*if \(host !== LOCAL\) return;\s*\n\s*const w = window as any;/, "…`w` the frame's window, shared with the arrangement half");
   assert.ok(FED.indexOf('if (m && m.type === "viewOrder") {') < FED.indexOf('if ("folds" in m) {') && /if \(m && m\.type === "viewOrder"\) \{\s*\n\s*if \(host !== LOCAL\) return;/.test(FED),
     "a remote kernel's folds are never adopted: they belong to whoever sits in front of that machine");
@@ -141,7 +370,7 @@ test("a fold goes to the LOCAL kernel whole, and every page hears the folds thro
     "start() installs no publisher of either half: a page speaks for the folds and the order only once it has heard them");
   assert.match(FED, /w\.__rompWriteTabGroups = \(blob: unknown\) => writeTabGroups\(parseTabGroups\(JSON\.stringify\(blob \?\? \{\}\)\)\);/, "the raw timeline view's one write");
   // a VS Code chat webview: its own frame branch, publishing through its host pipe
-  assert.match(RENDER, /if \("folds" in m\) hearSharedFolds\(m\.folds, \(f\) => vscodeApi\?\.postMessage\(\{ type: "setViewFolds", folds: f \}\), setFoldsPublisher\);/);
+  assert.match(RENDER, /if \("folds" in m\) hearSharedFolds\(m\.folds, \(f, by\) => vscodeApi\?\.postMessage\(\{ type: "setViewFolds", folds: f, \.\.\.\(by \? \{ by \} : \{\}\) \}\), setFoldsPublisher, m\.foldsBy\);/);
 });
 
 test("the folds' publisher is the CURRENT connection's: a drop withdraws it with the arrangement's, on every kind of page", () => {

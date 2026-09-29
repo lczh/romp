@@ -6470,12 +6470,46 @@ def _write_view_order(order):
 # The same opaque-data contract. The object is the browser's (tab-groups.ts TabFolds: collapsed, expanded,
 # pinned, and the rename memory the pins rest on); this kernel checks that it IS an object and that it is
 # bounded, and reads nothing inside it. Tag names, session ids and host prefixes are all the viewer's to
-# interpret, exactly as the arrangement's are. Last write wins, as there.
+# interpret, exactly as the arrangement's are. Last write wins, as there. Beside the object the frame names
+# the publish it reflects (`foldsBy`, kept in memory, never in the file: the note below).
 _VIEW_FOLDS_CAP = 256 * 1024             # bytes of JSON: the browser's own state is a few hundred; this only stops a
 #                                          client bug growing the file without limit, and it REFUSES rather than trims
 #                                          (a cut object is not a smaller fold state, it is a different one)
 _view_folds_lkg = [None]                 # last known good, as _view_order_lkg
 _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": the frame then carries no folds half
+
+# WHICH PUBLISH A FRAME REFLECTS (2026-09-29). A page that folded two groups inside one round trip heard this
+# kernel's answer to the first fold after it had published the second, took that older state for another
+# device's word, and reopened the second group; every pane of that browser shares one cached copy, so a
+# sibling pane hearing the answer first did the same to the browser's copy, and a change waiting in the
+# browser was merged over it and lost the second fold here for good. Recognizing the answer by its content
+# cannot work: a publish that changes nothing gets no answer, a refused one gets a warning, and a push is
+# built from the store when it is sent. So a page names each publish ({browser, n}: an id its browser keeps
+# and a counter every pane of that browser shares), this kernel keeps the name of the LAST publish it handled
+# beside the folds and serves it on the frame as `foldsBy`, and a page passes over a frame naming one of its
+# own publishes older than one it has sent since (tab-groups.ts hearSharedFolds). The last handled publish
+# counts whether it was written, unchanged or refused, since any of them is what the page last said here. A
+# browser's publish older than one already handled from that browser (two panes, two sockets, landing out of
+# order) is dropped: it would put back a state that browser has already replaced. Memory only, never in
+# view-folds.json, whose object stays the browser's byte for byte; a restarted kernel names nothing until the
+# next publish, and a page then adopts every frame, as before the stamp.
+_view_folds_by = [None]                  # the {browser, n} of the last setViewFolds handled, None when it carried none
+_view_folds_seen = {}                    # browser -> the highest n handled from it, re-inserted on each update
+_VIEW_FOLDS_SEEN_CAP = 256               # browsers remembered; past it the one heard from longest ago is forgotten
+
+
+def _view_folds_by_of(raw):
+    """The publish stamp a setViewFolds carries, {"browser": str, "n": int}, or None when there is none or it is
+    malformed (then the publish counts as unstamped): browser a string of 1 to 64 characters, n an int (never a
+    bool) from 1 to 2**53, the largest integer a page's number holds exactly."""
+    if not isinstance(raw, dict):
+        return None
+    b, n = raw.get("browser"), raw.get("n")
+    if not isinstance(b, str) or not 1 <= len(b) <= 64:
+        return None
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 2 ** 53:
+        return None
+    return {"browser": b, "n": n}
 
 
 def _view_folds_path():
@@ -6503,17 +6537,32 @@ def _view_folds_served():
     return raw
 
 
-def _write_view_folds(folds):
+def _write_view_folds(folds, by=None):
     """Publish the viewer's fold state. Raises _StateUnwritable on a failed publish (and on an object over the
     cap, which is refused whole rather than cut), so the gesture is refused loudly. Returns whether anything
     CHANGED: every browser of this kernel republishes the state it was just served when a rename moves a pin
-    the same way on each, and an unchanged state is not worth a push."""
-    if not isinstance(folds, dict):
-        raise _StateUnwritable(_view_folds_path(), "not an object")
-    text = json.dumps(folds, sort_keys=True)
-    if len(text) > _VIEW_FOLDS_CAP:
-        raise _StateUnwritable(_view_folds_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FOLDS_CAP))
-    with _view_order_lock:                           # one lock for the viewer's store, both files
+    the same way on each, and an unchanged state is not worth a push.
+
+    `by` is the publish's stamp (_view_folds_by_of), None for a page that sends none. Under the store's lock,
+    before anything else: a stamp older than one already handled from its browser is dropped whole (False:
+    nothing written, pushed or re-stamped); otherwise it becomes the stamp the next frame serves, whatever
+    the write then does (unchanged, refused or written), and an unstamped publish clears it, since its frame
+    reflects a publish nobody named. The note above _view_folds_by has the why."""
+    with _view_order_lock:                           # one lock for the viewer's store, both files, and the stamp
+        if by is not None:
+            last = _view_folds_seen.get(by["browser"])
+            if last is not None and by["n"] < last:
+                return False                         # this browser's older state, overtaken on another socket
+            _view_folds_seen.pop(by["browser"], None)
+            _view_folds_seen[by["browser"]] = by["n"]
+            while len(_view_folds_seen) > _VIEW_FOLDS_SEEN_CAP:
+                del _view_folds_seen[next(iter(_view_folds_seen))]
+        _view_folds_by[0] = dict(by) if by else None
+        if not isinstance(folds, dict):
+            raise _StateUnwritable(_view_folds_path(), "not an object")
+        text = json.dumps(folds, sort_keys=True)
+        if len(text) > _VIEW_FOLDS_CAP:
+            raise _StateUnwritable(_view_folds_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FOLDS_CAP))
         try:
             raw = _read_state_json(_view_folds_path(), expect=dict)
         except _StateUnreadable:
@@ -54057,11 +54106,18 @@ def _view_order_frame():
     same slot, so the folds converge on the same event the arrangement does (a setViewFolds that CHANGES
     the store).
 
+    `foldsBy` rides beside `folds` (2026-09-29): the {browser, n} stamp of the last setViewFolds this kernel
+    handled, present only when that publish carried one, so a page can tell its own earlier publish coming
+    back from another device's word (the note above _view_folds_by). The folds and the stamp are read under
+    the store's lock, as one step, so the stamp always names the publish the folds reflect.
+
     Each half is left OUT when its store could not be read and nothing is known-good, and the page keeps
     what it is showing for that half rather than adopting a guess (federation.ts reads a half only when it
     is present); None, no frame at all, when neither half can be said."""
     served = _view_order_served()
-    folds = _view_folds_served()
+    with _view_order_lock:                           # the folds and the stamp that names them, as one read
+        folds = _view_folds_served()
+        by = _view_folds_by[0]
     if served is None and folds is _VIEW_FOLDS_UNKNOWN:
         return None
     fr = {"type": "viewOrder"}
@@ -54069,6 +54125,8 @@ def _view_order_frame():
         fr["order"], fr["stored"] = served
     if folds is not _VIEW_FOLDS_UNKNOWN:
         fr["folds"] = folds
+        if by:
+            fr["foldsBy"] = dict(by)
     return fr
 
 
@@ -54086,7 +54144,10 @@ def _send_view_order(c, fr=None):
 
 def _broadcast_view_order():
     """The change event: every connected client learns the new arrangement now. Built ONCE and handed to
-    each client's dedup slot -- the viewer that posted it holds it already and is skipped there."""
+    each client's dedup slot. The viewer that posted the change is sent it too: its slot holds the last
+    frame this kernel sent it, not the state its page published, so the new frame differs there as it does
+    everywhere else. That echo is how a page hears its own publish land, and `foldsBy` is how it tells the
+    echo of an earlier publish from newer news (2026-09-29, the note above _view_folds_by)."""
     try:
         fr = _view_order_frame()
     except Exception:
@@ -74276,9 +74337,11 @@ class Handler(BaseHTTPRequestHandler):
             # A group folded or opened, or a member set to show through a fold, on ANY viewer of this kernel
             # (the user 2026-09-23, who wanted the phone to fold too and the folds shared like the order).
             # Kept WHOLE and OPAQUE beside the arrangement, and pushed on the same frame, so the phone and
-            # the desktop fold together. Last write wins.
+            # the desktop fold together. Last write wins. The publish's stamp (`by`, 2026-09-29) is kept for
+            # the frames that follow, whatever the write does, and a browser's publish older than one already
+            # handled from it is dropped (_write_view_folds; the note above _view_folds_by).
             try:
-                changed = _write_view_folds(msg["folds"])
+                changed = _write_view_folds(msg["folds"], _view_folds_by_of(msg.get("by")))
             except (_StateUnreadable, _StateUnwritable) as e:
                 # refused out loud: the group sits folded on this page and would silently spring back on
                 # the next reload, and no other device would ever hear of it
@@ -74286,7 +74349,7 @@ class Handler(BaseHTTPRequestHandler):
                 _reply(client, {"type": "warn", "text": "Couldn't save the folded groups: %s" % e})
             else:
                 if changed:                          # the change is the event; an unchanged republish pushes nothing
-                    _broadcast_view_order()
+                    _broadcast_view_order()          # (a dropped stale publish is no change either)
         elif msg and msg.get("type") in ("reorderTabs", "writeOrder") and isinstance(msg.get("order"), list):
             # tab-drag or lane-drag → reorder BOTH surfaces. MERGE the dragged surface's order into the
             # persisted one (don't overwrite): a chat-tab drag must not drop/reshuffle timeline-only lanes.

@@ -13,7 +13,7 @@
 // window.
 
 import { hearSharedOrder, setViewOrderPublisher, writeViewOrder, type ViewOrderPublisher } from "./view-order";
-import { hearSharedFolds, parseTabGroups, setFoldsPublisher, writeTabGroups, type TabFolds } from "./tab-groups";
+import { hearSharedFolds, parseTabGroups, setFoldsPublisher, writeTabGroups, type FoldsSender } from "./tab-groups";
 
 export type Post = (m: Record<string, unknown>) => void;
 
@@ -76,7 +76,7 @@ export function dispatchFrame(panel: any, m: any): boolean {
       const served = m.order.filter((x: any) => typeof x === "string");
       hearSharedOrder(served, m.stored === true, orderPost, setViewOrderPublisher);
     }
-    if ("folds" in m && foldsPost) hearSharedFolds(m.folds, foldsPost, setFoldsPublisher);
+    if ("folds" in m && foldsPost) hearSharedFolds(m.folds, foldsPost, setFoldsPublisher, m.foldsBy);
     return true;
   }
   // (No drop edge to withdraw the arrangement's or the folds' publisher on: the extension gives this view no pipe-state
@@ -89,8 +89,9 @@ export function dispatchFrame(panel: any, m: any): boolean {
 // publisher only once the kernel's arrangement has reached this page (dispatchFrame's viewOrder arm)
 let orderPost: ViewOrderPublisher | null = null;
 
-// the host pipe a fold is published through, set by bridgeFunctions (which holds `post`); null before the bridge exists
-let foldsPost: ((f: TabFolds) => void) | null = null;
+// the host pipe a fold is published through, set by bridgeFunctions (which holds `post`); null before the bridge exists.
+// It sends each publish's name (`by`) when it has one, which the frame's `foldsBy` answers (tab-groups.ts, 2026-09-29)
+let foldsPost: FoldsSender | null = null;
 
 /** The tab-groups store's one write, for the view's folds (romp-timeline-view.js writeTabGroupsBlob reads it off
  *  `window.__rompWriteTabGroups`, which timeline-main.ts sets to this; a browser page's federation.ts publishes the
@@ -134,7 +135,7 @@ export function bridgeFunctions(post: Post): Record<string, (...a: any[]) => voi
   orderPost = (order) => post({ type: "setViewOrder", order: order.slice() });
   // …and the folds' channel, installed as their publisher only once the kernel's folds have reached this page
   // (dispatchFrame's viewOrder arm; tab-groups.ts FoldsPublisher says why)
-  foldsPost = (f) => post({ type: "setViewFolds", folds: f });
+  foldsPost = (f, by) => post({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) });
   return {
     __rompTimelineOpenExternal: (url: string) => post(openExternalMessage(String(url))),
     // A lane drag writes the VIEWER's arrangement, the same store the chat strip writes — not the kernel's

@@ -39,6 +39,17 @@ FAR_WEB = "TESTHOST:11111111-2222-4333-8444-000000000003"
 FAR_API = "TESTHOST2:11111111-2222-4333-8444-000000000004"
 
 
+def _forget_fold_stamps():
+    """The fold publishes this kernel has handled are process memory (kernel.py _view_folds_by): each test starts with
+    none. getattr, so the module still loads against a kernel from before the stamp, where every stamp test fails on
+    its assertions rather than here."""
+    by, seen = getattr(km, "_view_folds_by", None), getattr(km, "_view_folds_seen", None)
+    if by is not None:
+        by[0] = None
+    if seen is not None:
+        seen.clear()
+
+
 class ViewOrderStore(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -49,11 +60,13 @@ class ViewOrderStore(unittest.TestCase):
         (km.jd.STATE / "session-hosts").write_text("off")
         km._view_order_lkg[0] = None
         km._view_folds_lkg[0] = None
+        _forget_fold_stamps()
 
     def tearDown(self):
         km.jd.STATE = self._state
         km._view_order_lkg[0] = None
         km._view_folds_lkg[0] = None
+        _forget_fold_stamps()
         self.td.cleanup()
 
     def stored_file(self):
@@ -265,6 +278,135 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True},
                          "no folds half at all: every page keeps the folds it shows rather than adopting a guess, "
                          "and the arrangement still goes")
+
+
+    # ── which publish a frame reflects (2026-09-29) ─────────────────────────────────────────────────────
+    # A page that folded two groups inside one round trip heard the answer to its first fold after publishing the
+    # second, and adopting it reopened the second group. Each publish now carries its name, {browser, n}, and the frame
+    # names the last publish this kernel handled (`foldsBy`), so the page can pass over its own earlier state coming back.
+    B = "0123456789abcdef0123456789abcdef"
+    C = "fedcba9876543210fedcba9876543210"
+
+    def dispatch(self, *msgs):
+        """Each message through the real dispatcher, from the desktop's socket, with the phone and the desktop connected:
+        per message, what each client was sent on the viewOrder slot, and the replies to the poster."""
+        seen = []
+        saved_send, saved_clients = km._send_client, list(km._clients)
+        km._send_client = lambda c, key, msg, *a, **kw: seen.append((c["cid"], key, msg))
+        km._clients[:] = [{"cid": "phone"}, {"cid": "desktop"}]
+        handler = object.__new__(km.Handler)
+        poster = {"cid": "desktop", "app": "chat", "alive": True, "send": lambda s: seen.append(("reply", json.loads(s)))}
+        out = []
+        try:
+            for m in msgs:
+                del seen[:]
+                km.Handler._dispatch_ws(handler, m, poster)
+                out.append(list(seen))
+        finally:
+            km._send_client, km._clients[:] = saved_send, saved_clients
+        return out
+
+    @staticmethod
+    def publish(folds, by="absent"):
+        m = {"type": "setViewFolds", "folds": folds}
+        if by != "absent":
+            m["by"] = by
+        return m
+
+    def test_a_named_publish_is_pushed_with_its_name_to_every_viewer_and_the_file_keeps_the_folds_alone(self):
+        by = {"browser": self.B, "n": 1}
+        [sent] = self.dispatch(self.publish(FOLDS, by))
+        frame = {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS, "foldsBy": by}
+        self.assertEqual(sent, [("phone", ("vieworder",), frame), ("desktop", ("vieworder",), frame)],
+                         "every viewer, the one that folded included: its echo is how its page hears the publish land")
+        self.assertEqual((km.jd.STATE / "view-folds.json").read_text(), json.dumps(FOLDS, sort_keys=True),
+                         "the browser's object byte for byte: the name is memory, never the file's")
+
+    def test_an_unchanged_publish_pushes_nothing_and_its_name_is_the_one_served_next(self):
+        [first, again] = self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 1}), self.publish(FOLDS, {"browser": self.B, "n": 2}))
+        self.assertEqual(len(first), 2)
+        self.assertEqual(again, [], "no change, no push")
+        self.assertEqual(km._view_order_frame().get("foldsBy"), {"browser": self.B, "n": 2},
+                         "the next frame (an arrangement's push, a connect) names the unchanged publish: what the page last said")
+
+    def test_a_refused_publish_is_warned_and_its_name_is_the_one_served_next(self):
+        self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 1}))
+        saved = km._write_state_json
+        km._write_state_json = lambda *a, **kw: (_ for _ in ()).throw(km._StateUnwritable(km._view_folds_path(), "[Errno 28] No space left on device"))
+        try:
+            [full] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 2}))
+        finally:
+            km._write_state_json = saved
+        self.assertEqual([m[1]["type"] for m in full], ["warn"], "a warning to the poster, no push")
+        self.assertEqual(km._view_order_frame().get("foldsBy"), {"browser": self.B, "n": 2})
+        [big] = self.dispatch(self.publish({"collapsed": ["x" * 64] * (km._VIEW_FOLDS_CAP // 64)}, {"browser": self.B, "n": 3}))
+        self.assertEqual([m[1]["type"] for m in big], ["warn"])
+        self.assertEqual(km._view_order_frame().get("foldsBy"), {"browser": self.B, "n": 3}, "an object over the cap, the same")
+        self.assertEqual(self.stored_folds(), FOLDS, "and nothing written by either")
+
+    def test_an_unnamed_publish_after_a_named_one_leaves_the_frame_unnamed(self):
+        # a page from before the name: its frame reflects a publish nobody named, and every page adopts it as before
+        [_, plain] = self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 1}), self.publish(dict(FOLDS, collapsed=[])))
+        self.assertEqual([("foldsBy" in m[2]) for m in plain], [False, False])
+        self.assertNotIn("foldsBy", km._view_order_frame())
+
+    def test_a_malformed_name_counts_as_none(self):
+        junk = [None, "b", [self.B, 1], {"browser": 7, "n": 1}, {"browser": "", "n": 1}, {"browser": "x" * 65, "n": 1},
+                {"browser": self.B, "n": 0}, {"browser": self.B, "n": -1}, {"browser": self.B, "n": True}, {"browser": self.B, "n": 1.5},
+                {"browser": self.B, "n": "2"}, {"browser": self.B, "n": 2 ** 53 + 1}, {"browser": self.B}]
+        for i, by in enumerate(junk):
+            [sent] = self.dispatch(self.publish(dict(FOLDS, collapsed=["g%d" % i]), by))
+            self.assertEqual([("foldsBy" in m[2], m[2]["folds"]["collapsed"]) for m in sent], [(False, ["g%d" % i])] * 2, repr(by))
+        [edge] = self.dispatch(self.publish(FOLDS, {"browser": "x" * 64, "n": 2 ** 53}))
+        self.assertEqual(edge[0][2].get("foldsBy"), {"browser": "x" * 64, "n": 2 ** 53}, "the bounds themselves are a name")
+
+    def test_the_folds_and_their_name_are_read_under_the_stores_lock(self):
+        # one step, so a publish landing between the two reads cannot pair its name with the folds before it
+        held = []
+        saved = km._view_folds_served
+
+        def spy():
+            held.append(km._view_order_lock.locked())
+            return saved()
+        km._view_folds_served = spy
+        self.addCleanup(lambda: setattr(km, "_view_folds_served", saved))
+        km._view_order_frame()
+        self.assertEqual(held, [True])
+
+    def test_a_browsers_publish_older_than_one_already_handled_is_dropped_and_another_browsers_is_not(self):
+        # two panes of one browser, two sockets: the later state landed first, and the earlier one must not put itself back
+        self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 2}))
+        [stale] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 1}))
+        self.assertEqual(stale, [], "dropped: nothing pushed")
+        self.assertEqual(self.stored_folds(), FOLDS, "nothing written")
+        self.assertEqual(km._view_order_frame().get("foldsBy"), {"browser": self.B, "n": 2}, "and the name served is still the later one")
+        other = dict(FOLDS, collapsed=["web"])
+        [taken] = self.dispatch(self.publish(other, {"browser": self.C, "n": 1}))
+        self.assertEqual([m[2].get("foldsBy") for m in taken], [{"browser": self.C, "n": 1}] * 2, "another browser's first publish is its own count")
+        self.assertEqual(self.stored_folds(), other)
+
+    def test_a_frame_with_no_folds_half_carries_no_name_either(self):
+        self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 1}))
+        km._write_view_order([LOCAL_A])
+        self.assertEqual(km._view_order_frame().get("foldsBy"), {"browser": self.B, "n": 1}, "premise: named")
+        saved = km._read_state_json
+
+        def flaky(path, *a, **kw):
+            if Path(path).name == "view-folds.json":
+                raise km._StateUnreadable(path, "read failed: EIO")
+            return saved(path, *a, **kw)
+        km._read_state_json = flaky
+        self.addCleanup(lambda: setattr(km, "_read_state_json", saved))
+        km._view_folds_lkg[0] = None
+        self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True})
+
+    def test_the_browsers_remembered_are_bounded_and_the_one_heard_from_longest_ago_goes_first(self):
+        cap = getattr(km, "_VIEW_FOLDS_SEEN_CAP", 256)
+        self.dispatch(*[self.publish(FOLDS, {"browser": "b%03d" % i, "n": 5}) for i in range(cap + 1)])
+        [kept] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": "b001", "n": 1}))
+        self.assertEqual(kept, [], "the second browser is still remembered: its older publish is dropped")
+        [forgotten] = self.dispatch(self.publish(dict(FOLDS, collapsed=["web"]), {"browser": "b000", "n": 1}))
+        self.assertEqual(len(forgotten), 2, "the first was forgotten when the %dth arrived: its publish is taken as new" % (cap + 1))
 
 
 if __name__ == "__main__":

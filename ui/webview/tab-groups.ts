@@ -36,6 +36,18 @@ export const TABGROUPS_SHARED_KEY = "romp:tabgroups:shared";
  *  applies the change (the cache less this base) over them (mergeFolds). Origin-wide, not per page: the pane that
  *  hears first may not be the pane that was clicked. Absent when nothing is pending. */
 export const TABGROUPS_PENDING_KEY = "romp:tabgroups:pending";
+/** This browser's record of its own fold publishes (2026-09-29): {browser, n, live}. `browser` is an id minted once
+ *  and kept here, `n` the number of the latest publish any page of this browser made, and `live` the highest number
+ *  each open connection sent, by a connection id its page mints. Every publish names itself from it ({browser, n},
+ *  hearSharedFolds' note), and a frame naming one of this browser's publishes below a live number is that publish's
+ *  late answer. Origin-wide, like the two keys above, because the state it guards is: every pane caches the kernel's
+ *  copy and merges the pending change, so a pane that knew only its own publishes let a sibling adopt the clicked
+ *  pane's late answer into the browser's copy. And an entry is never retired on an answer, only when its connection
+ *  ends (the next hearing after a drop, or pagehide): the panes hear the same frame at different times, so the first
+ *  to hear an answer cannot speak for the others, while the kernel's order (it drops a browser's publish older than
+ *  one it handled, and names the last one it handled) means a kept entry passes over only frames built before its
+ *  publish landed. */
+export const TABGROUPS_PUBLISHES_KEY = "romp:tabgroups:publishes";
 export const TABGROUPS_EVENT = "romp-tabgroups";
 /** sections that start folded until the user opens them (remembered, on every device, once toggled) */
 export const DEFAULT_COLLAPSED: ReadonlySet<string> = new Set(["archived"]);
@@ -228,6 +240,12 @@ export function readTabGroups(unions: readonly TagUnion[] = []): TabGroupsState 
  *  kernel's newer state around it stands. No publisher ever (a kernel from before the folds were shared) →
  *  the folds are this browser's alone, as they were. */
 export type FoldsPublisher = (folds: TabFolds) => void;
+/** A publish's name (2026-09-29): this browser's id and the publish's number (TABGROUPS_PUBLISHES_KEY), sent as the
+ *  setViewFolds message's `by` and served back on the viewOrder frame as `foldsBy` (kernel.py _view_folds_by). */
+export interface FoldsBy { browser: string; n: number }
+/** A page's channel to the kernel for the folds: the state, and the name to send with it (null: send it unnamed, the
+ *  message exactly as before the stamp). hearSharedFolds wraps it into the page's FoldsPublisher. */
+export type FoldsSender = (folds: TabFolds, by: FoldsBy | null) => void;
 let directFoldsPublisher: FoldsPublisher | null = null;
 
 export function setFoldsPublisher(fn: FoldsPublisher | null): void {
@@ -352,17 +370,145 @@ export function publishFolds(f: TabFolds, publish: FoldsPublisher): void {
   if (changed) announce();
 }
 
+// ── this browser's own publishes coming back (2026-09-29) ──────────────────────────────────────────────────────
+// The kernel answers a fold state that changes its store with a push to every viewer, the page that published it
+// included (kernel.py _broadcast_view_order). Two folds inside one round trip put the answer to the first on the wire
+// while every pane of the browser already shows the second; adopted, that answer reopened the second group, and a
+// sibling pane that heard it first wrote it into the browser's copy (the clicked pane repaints from that) or merged
+// the pending change over it and published the older state, losing the second fold on the kernel. So every publish
+// is named, the kernel serves the name of the last publish it handled (`foldsBy`), and a pane passes over a frame
+// naming one of this browser's publishes below a number some open connection has sent since
+// (TABGROUPS_PUBLISHES_KEY says why the record is origin-wide and when its entries end).
+
+/** The largest publish number the kernel takes as a stamp (kernel.py _view_folds_by_of): a page's number is exact to it. */
+const FOLDS_BY_MAX_N = 2 ** 53;
+/** Connections a browser's record keeps a number for; past it the smallest goes (never the publishing one's). */
+const PUBLISHES_LIVE_CAP = 32;
+
+interface PublishRecord { browser: string; n: number; live: Record<string, number> }
+
+/** 16 random bytes as 32 hex characters: a browser's id and a connection's. getRandomValues, which every page has
+ *  (randomUUID needs a secure origin, and a dashboard is often served over plain http on a LAN), else Math.random. */
+function mintFoldsId(): string {
+  const bytes = new Uint8Array(16);
+  try { (globalThis as any).crypto.getRandomValues(bytes); }
+  catch { for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256); }
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const validBrowser = (b: unknown): b is string => typeof b === "string" && b.length >= 1 && b.length <= 64;
+const validN = (n: unknown, min: number): n is number => typeof n === "number" && Number.isInteger(n) && n >= min && n <= FOLDS_BY_MAX_N;
+
+/** A stamp the kernel would take (kernel.py _view_folds_by_of's rule); anything else counts as none. */
+function validFoldsBy(by: unknown): by is FoldsBy {
+  return !!by && typeof by === "object" && !Array.isArray(by) && validBrowser((by as any).browser) && validN((by as any).n, 1);
+}
+
+/** The record as stored; absent or malformed reads as a fresh one, with a new browser id that is kept only once a
+ *  publish writes the record (a page that never publishes leaves nothing behind). */
+function readPublishRecord(): PublishRecord {
+  const live: Record<string, number> = Object.create(null);
+  try {
+    const o = JSON.parse(getKey(TABGROUPS_PUBLISHES_KEY) || "null");
+    if (o && typeof o === "object" && !Array.isArray(o) && validBrowser(o.browser) && validN(o.n, 0)) {
+      if (o.live && typeof o.live === "object" && !Array.isArray(o.live)) {
+        for (const [conn, n] of Object.entries(o.live as Record<string, unknown>)) if (validN(n, 1)) live[conn] = n;
+      }
+      return { browser: o.browser, n: o.n, live };
+    }
+  } catch { /* unparseable → a fresh record */ }
+  return { browser: mintFoldsId(), n: 0, live };
+}
+
+/** False when the record could not be kept (quota, blocked storage): the publish then goes unnamed. */
+function writePublishRecord(rec: PublishRecord): boolean {
+  try { localStorage.setItem(TABGROUPS_PUBLISHES_KEY, JSON.stringify({ browser: rec.browser, n: rec.n, live: { ...rec.live } })); return true; }
+  catch { return false; }
+}
+
+/** A connection's entry ends: its page heard a new connection's first frame, or went away. */
+function retireFoldsConn(conn: unknown): void {
+  if (typeof conn !== "string") return;
+  const rec = readPublishRecord();
+  if (!(conn in rec.live)) return;
+  delete rec.live[conn];
+  writePublishRecord(rec);
+}
+
+/** This document starts speaking for the folds on a new connection: the last connection's entry ends (whatever it
+ *  sent unanswered will never be answered on this one), and a new id names this one. Kept ON THE WINDOW, never in a
+ *  module variable: one module copy can serve several documents (the node harnesses run a page per window over one
+ *  bundle), and the id is the document's. pagehide, registered once per window, ends the current entry when the page
+ *  goes away with a publish unanswered. */
+function newFoldsConnection(w: any): void {
+  retireFoldsConn(w.__rompFoldsConn);
+  w.__rompFoldsConn = mintFoldsId();
+  if (!w.__rompFoldsUnload) {
+    w.__rompFoldsUnload = true;
+    try { w.addEventListener("pagehide", () => retireFoldsConn(w.__rompFoldsConn)); } catch { /* no events here */ }
+  }
+}
+
+/** The page's publisher over `send`: each publish takes this browser's next number, notes it as the latest of the
+ *  connection `w` holds when it is made, and goes out named. The record is written BEFORE the send, because the
+ *  kernel's answer can arrive inside it (and a first hearing's answer, heard before this document's publisher is
+ *  installed, starts the connection afresh: the id is read per publish, so no publisher keeps naming an ended one); a
+ *  send that throws sent nothing, and the connection's entry goes back to what it was. No window, or a record that
+ *  cannot be written: the publish goes unnamed, as before the stamp, and nothing is passed over for it. */
+function stampingFolds(send: FoldsSender, w: any): FoldsPublisher {
+  return (f) => {
+    const conn: string | null = w && typeof w.__rompFoldsConn === "string" ? w.__rompFoldsConn : null;
+    if (conn === null) { send(f, null); return; }
+    const rec = readPublishRecord();
+    const n = rec.n + 1, prev = rec.live[conn];
+    rec.n = n;
+    rec.live[conn] = n;
+    const others = Object.keys(rec.live).filter((c) => c !== conn);
+    others.sort((a, b) => rec.live[a] - rec.live[b]);
+    for (const c of others.slice(0, Math.max(0, others.length + 1 - PUBLISHES_LIVE_CAP))) delete rec.live[c];
+    if (!writePublishRecord(rec)) { send(f, null); return; }
+    try { send(f, { browser: rec.browser, n }); }
+    catch (e) {
+      const now = readPublishRecord();
+      if (now.live[conn] === n) {
+        if (prev === undefined) delete now.live[conn]; else now.live[conn] = prev;
+        writePublishRecord(now);
+      }
+      throw e;
+    }
+  };
+}
+
+/** Is `by` one of this browser's publishes with a later one sent since on a connection still open? */
+function ownOlderPublish(by: unknown): boolean {
+  if (!validFoldsBy(by)) return false;
+  const rec = readPublishRecord();
+  return by.browser === rec.browser && Object.values(rec.live).some((v) => v > by.n);
+}
+
 /** A page HEARS the kernel's folds: the viewOrder frame's `folds` half (kernel.py _view_order_frame), on the
  *  connect push and on every change. The migration first (foldsToPublish: this browser's folds go up when the
  *  kernel keeps none; otherwise the kernel's win and are adopted), then `install` hands the page its publisher
  *  — from this moment on it speaks for the folds (the rule at FoldsPublisher). The ONE implementation for the
  *  three kinds of page: every page with a federation manager (federation.ts, the window slot), a VS Code chat
- *  webview (render.ts) and a VS Code timeline (timeline-boot.ts), the last two through setFoldsPublisher. */
-export function hearSharedFolds(served: unknown, publish: FoldsPublisher, install: (fn: FoldsPublisher) => void): void {
+ *  webview (render.ts) and a VS Code timeline (timeline-boot.ts), the last two through setFoldsPublisher.
+ *
+ *  `by` is the frame's `foldsBy` (2026-09-29, the note above). A frame naming one of this browser's publishes older
+ *  than one an open connection has sent since is passed over WHOLE, before the pending change is read: nothing
+ *  adopted, cached or announced, and the pending change waits for the next frame, the kernel's current folds. Every
+ *  other frame is heard as before, and a frame with no stamp (an older kernel, or a publish sent unnamed) is always
+ *  heard. A hearing with no publisher installed is a new connection's first (every drop withdraws the publisher; the
+ *  VS Code timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). */
+export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn: FoldsPublisher) => void, by?: unknown): void {
+  const g = (globalThis as any).window;
+  const w = g && typeof g === "object" ? g : null;
+  if (w && (!foldsPublisher() || typeof w.__rompFoldsConn !== "string")) newFoldsConnection(w);
+  const publish = stampingFolds(send, w);
+  const isObj = !!served && typeof served === "object" && !Array.isArray(served);
+  if (isObj && w && ownOlderPublish(by)) { install(publish); return; }
   const local = readTabGroups();
   const pending = getKey(TABGROUPS_PENDING_KEY);
   if (pending !== null) { try { localStorage.removeItem(TABGROUPS_PENDING_KEY); } catch { /* read once; a stale base only re-applies no-ops */ } }
-  const isObj = !!served && typeof served === "object" && !Array.isArray(served);
   if (pending !== null && isObj) {
     // a change this browser made before any of its pages heard the kernel: over the kernel's folds, not instead of them
     publishFolds(mergeFolds(parseFolds(pending), foldsOf(local), parseFolds(JSON.stringify(served))), publish);

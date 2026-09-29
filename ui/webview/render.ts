@@ -20583,8 +20583,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     }
     // …and the FOLDS riding beside it (2026-09-23): the migration and the adoption every page runs (tab-groups.ts
     // hearSharedFolds; an adoption repaints through TABGROUPS_EVENT), after which this webview publishes its folds
-    // through its host pipe, as it publishes its arrangement
-    if ("folds" in m) hearSharedFolds(m.folds, (f) => vscodeApi?.postMessage({ type: "setViewFolds", folds: f }), setFoldsPublisher);
+    // through its host pipe, as it publishes its arrangement, each publish named (`by`) so the frame's `foldsBy` tells
+    // this browser's own earlier publish coming back from another device's word (2026-09-29)
+    if ("folds" in m) hearSharedFolds(m.folds, (f, by) => vscodeApi?.postMessage({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) }), setFoldsPublisher, m.foldsBy);
   }
   else if (m.type === "renamed" && m.id && typeof m.name === "string") {
     notePendingMeta(pendingTabMeta, m.id, { name: m.name });   // kernel truth — hold it against a push built pre-rename
