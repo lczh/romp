@@ -8,6 +8,7 @@ here), every process killed by the test, synthetic ids. The host runs on its bui
 the SDK is not importable (CI, the plain test venv); one test runs the SDK transport when the machine has
 the SDK venv, and skips otherwise.
 """
+import ast
 import asyncio
 import json
 import os
@@ -554,7 +555,9 @@ class HostProcess(unittest.TestCase):
         k2.send({"t": "in", "data": self._user("after sleep=0")})
         res = k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
         self.assertEqual(res["offset"], n0 + 1, "the journal numbering continues across the exec (assistant, then result)")
-        journal = list(sh.read_journal_dir(os.path.join(self.state, "hosts", SID)))
+        # the writer lands the result behind its frame, by design: read the journal at its n-th record, never at the frame
+        # (CI read it at the frame and saw the second turn's assistant without its result, 2026-09-24 and 09-26)
+        journal = self._journal_landed(res["offset"] + 1)
         self.assertEqual([r["type"] for _, r in journal][-4:], ["assistant", "result", "assistant", "result"], "one journal, both turns")
         log = self._hostlog()
         self.assertEqual([r["kind"] for r in log if r["kind"] in ("reexec", "reexeced")], ["reexec", "reexeced"], "the exec and the adoption, once each")
@@ -965,6 +968,9 @@ class HostProcess(unittest.TestCase):
         k, _ = self._attach(sock)
         k.send({"t": "in", "data": self._user("hi sleep=0.2")})
         res = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result")
+        # the fault frame and its host.log row come from the journal writer, which may still be behind the result's frame:
+        # wait for the frame itself (the row is written just before it), and read the journal at its landed records
+        k.recv_until(lambda f: f.get("t") == "fault")
         faults = [f for f in k.frames if f.get("t") == "fault"]
         self.assertEqual([f["kind"] for f in faults], ["journal-write-failed"])
         self.assertIsNone(host.poll(), "the host and its CLI are still running")
@@ -972,7 +978,7 @@ class HostProcess(unittest.TestCase):
         self.assertIn("journal-write-failed", kinds); self.assertNotIn("cli-exited", kinds)
         # live delivery was complete (the kernel got every record) even though offset 1 is missing from the journal
         self.assertEqual([f["offset"] for f in k.outs()], list(range(len(k.outs()))))
-        offs = [o for o, _ in sh.read_journal_dir(os.path.join(self.state, "hosts", SID))]
+        offs = [o for o, _ in self._journal_landed(len(k.outs()) - 1)]      # every record but the failed one, which readers skip
         self.assertNotIn(1, offs, "the failed record is a gap the readers skip")
         self.assertEqual(offs, [o for o in range(len(k.outs())) if o != 1], "the numbering around the gap holds")
         k.send({"t": "end", "grace": 10})
@@ -1113,6 +1119,28 @@ class HostProcess(unittest.TestCase):
         k.send({"t": "end", "grace": 10})
         k.recv_until(lambda f: f.get("t") == "exit")
         k.close()
+
+
+class LiveJournalReads(unittest.TestCase):
+    """The shape behind two of this module's CI flakes: a test read the host's journal at the instant a socket frame
+    arrived. The host forwards each record to the kernel at once and journals it on its own writer task, so a frame says
+    nothing about the disk (by design: the reader never waits for the disk, and an attach is served the unwritten records
+    from memory). The 2026-09-16 fix moved the turn test onto `_journal_landed`; the re-exec test, added two days later,
+    read the journal at the frame again and failed the same way on 2026-09-24 and 09-26. So inside HostProcess a live
+    host's journal is read only through `_journal_landed`, the wait on the writer's n-th record, except in the one test
+    that reads at the frame on purpose, to show the disk trailing the socket."""
+
+    AT_THE_FRAME_ON_PURPOSE = {"test_the_journal_lands_every_record_behind_the_socket_when_the_writer_lags"}
+
+    def test_host_process_reads_a_live_journal_only_through_the_landed_wait(self):
+        tree = ast.parse(Path(os.path.realpath(__file__)).read_text(encoding="utf-8"))
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "HostProcess")
+        readers = {fn.name for fn in cls.body if isinstance(fn, ast.FunctionDef) for node in ast.walk(fn)
+                   if isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", None)) == "read_journal_dir"}
+        self.assertIn("_journal_landed", readers, "the scan found the wait's own read (else it scanned nothing)")
+        self.assertIn(next(iter(self.AT_THE_FRAME_ON_PURPOSE)), readers, "and the deliberate read at the frame")
+        self.assertEqual(sorted(readers - {"_journal_landed"} - self.AT_THE_FRAME_ON_PURPOSE), [],
+                         "these read a live host's journal directly, which races its writer: wait with _journal_landed(n)")
 
 
 if __name__ == "__main__":
