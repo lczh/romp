@@ -72,16 +72,16 @@ const btn = await page.$("button.confirm-btn.danger, .confirm button.danger"); i
 await page.waitForFunction(() => (window.__sent || []).some((x) => x.text === "/clear"), null, { timeout: 8000 });
 // IN FLIGHT (the fake holds the clear on the gate file): ONE evaluation, keyed on the kernel's "Clearing
 // conversation..." row, returns the snapshot it read (2026-09-29, after this lab failed intermittently in CI). The
-// old form waited on "bubble OR echo", swallowed that wait's timeout and read the page again in a second round trip. The kernel's first frame after a send into an EMPTY session shares no id with the page's own pending
-// group, so the page reads it as a new transcript (render.ts upsert, `forked`): the view is torn down in that frame's
-// task and rebuilt at the next animation frame, and a read landing between the two found only the loader, neither the
-// bubble nor the row. The row cannot be on the page in that gap, and every paint that shows it paints from a list
-// already holding the pending /clear, so this predicate cannot fire there. It also checks what the old read often
-// skipped: in about half of the passing runs that read came before the clearing frame, so it never looked at the
-// page while the clear ran.
-// 10 s stays under the fake SDK's gate cap (about 15 s from when it takes the /clear, which is after the send
-// recorded above), so the fixture the clear-batch lab shares is unchanged. A timeout is recorded, never thrown, so the
-// gate is still written and the test names the premise that failed, with the frames.
+// old form waited on "bubble OR echo", swallowed that wait's timeout and read the page again in a second round trip.
+// The kernel's first frame after a send into an EMPTY session shares no id with the page's own pending group, so the
+// page reads it as a new transcript (render.ts upsert, `forked`): the view is torn down in that frame's task and
+// rebuilt at the next animation frame, and a read landing between the two found only the loader, neither the bubble
+// nor the row. The row cannot be on the page in that gap, and every paint that shows it paints from a list already
+// holding the pending /clear, so this predicate cannot fire there. It also checks what the old read often skipped:
+// in about half of the passing runs that read came before the clearing frame, so it never looked at the page while
+// the clear ran. 10 s from seeing the send stays well under the fake SDK's gate cap (about 15 s from when the fake
+// takes the /clear, which can only follow that send), so the fixture the clear-batch lab shares is unchanged. A
+// timeout is recorded, never thrown, so the gate is still written and the test names the premise that failed.
 const midRead = (final) => {
   const clearingRow = !!document.querySelector("#content .turn-clearing");
   if (!clearingRow && !final) return false;   // nothing is read before the row is on the page
