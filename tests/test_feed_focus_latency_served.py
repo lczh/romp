@@ -253,10 +253,11 @@ const runLayout = async (tag, width) => {
   // the reader's "session name in the feed": the session header's name
   const clickName = async (name) => { const fr = await feedFrame(); await fr.locator(".feed-sess-head .fname", { hasText: name }).first().click({ timeout: 8000 }); };
   const clickTitle = async (itemId) => { const fr = await feedFrame(); await fr.locator(feedCard(itemId) + " .fcard-title").first().click({ timeout: 8000 }); };
-  // after a switch: the kernel's frame for `sid` has landed (or 3 s passed), then a beat; what the head says then, and whether that frame
-  // landed at all (2026-09-29: the wait was swallowed, so a frame that came after the read, or never, read as one that flipped nothing back)
+  // after a switch: the kernel's frame for `sid` has landed (or 8 s passed, the click's own deadline), then a beat; what the head says then,
+  // and whether that frame landed at all (2026-09-29: the wait was swallowed, so a frame that came after the read, or never, read as one that
+  // flipped nothing back; the frame is now a premise the roads assert, so its bound is no longer a soft 3 s cap a loaded runner can outrun)
   const settled = async (sid) => {
-    const frameLanded = await page.waitForFunction((sid) => (document.getElementById("f-feed").contentWindow.__hops || []).some((h) => h.ev === "recv:activeChat" && h.id === sid), sid, { timeout: 3000 })
+    const frameLanded = await page.waitForFunction((sid) => (document.getElementById("f-feed").contentWindow.__hops || []).some((h) => h.ev === "recv:activeChat" && h.id === sid), sid, { timeout: 8000 })
       .then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
     await page.waitForTimeout(200);
     return { settled: await headName(), frameLanded };
