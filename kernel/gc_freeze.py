@@ -259,8 +259,8 @@ class GcFreeze:
 
     def perf(self):
         """The /perf gc block's freeze sub-block: the state and the reconcile trade, so a reconcile collection is
-        told apart from an organic one. `active` is whether a freeze is held now (named to not collide with the
-        integer `gc.frozen`); `frozenCount` (gc.get_freeze_count) is added by the caller."""
+        told apart from an organic one. `active` is whether a freeze is held now (named apart from the gc block's
+        `frozen` count, gc.get_freeze_count() on GET /perf?walk=1)."""
         return {"enabled": self.enabled, "active": self.frozen, "loadTrees": self.load_trees,
                 "backstopFoldins": self.backstop_foldins, "freezes": self.freezes, "reclaims": self.reclaims,
                 "busyRuns": self.busy_runs,

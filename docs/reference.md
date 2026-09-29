@@ -2162,7 +2162,7 @@ goal-store loads and writes per second, judge passes and their durations,
 memory and thread count. `romp perf --json` prints one raw snapshot. Two
 fields cost time in proportion to the whole heap, `heap.allocatedBlocks` and
 `gc.frozen`, so a plain read leaves them `null` and only `GET /perf?walk=1`
-fills them; the plain read's cost does not grow with the heap. If the kernel
+fills them; the plain read no longer walks the whole heap. If the kernel
 restarted between the two snapshots the counters have started over, so the
 command says so and exits non-zero instead of printing negative rates; a
 refused token is reported as such, not as a dead kernel.
@@ -2184,7 +2184,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (`sys.getallocatedblocks`; 0 on a build that cannot count them). It is
   read only when the request says `GET /perf?walk=1` and is `null` on a
   plain read: counting visits every page the allocator owns, a cost that
-  grows with the whole heap (about half a millisecond per GB resident, and
+  grows with the whole heap (1.2 to 1.7 ms at 2 GB resident in the lab, and
   far longer where the system has compressed or paged the heap out), inside
   one call every kernel thread waits for. On `?walk=1` a `null` is a read
   that failed (an accessor the runtime lacks), said once on stderr like any
@@ -2242,7 +2242,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the block reads on its own (how near the next collection is); `frozen`
   counts the objects moved out of the collector's reach by `gc.freeze`, which
   it never scans (reading the count is a linear walk of the frozen generation,
-  about 7 ms per million frozen, so, like `heap.allocatedBlocks`, it is read
+  3.6 to 12 ms per million frozen in the lab, so, like `heap.allocatedBlocks`, it is read
   only on `GET /perf?walk=1` and is `null` on a plain read); `errors` counts callback failures (counted, never raised
   into the collector; the first in the process is said once on stderr, a
   line prefixed `perf: gc hook:`, the rest counted only); `hooked` says
