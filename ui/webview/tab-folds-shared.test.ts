@@ -191,6 +191,22 @@ test("the browser's id is minted once, kept only once a publish needs it, and it
   });
 });
 
+test("a record that came back older than the kernel's word: the next publish is numbered past the last of this browser's that a frame named", () => {
+  // a browser killed before its storage was written: the kernel handled publish 45 from it and drops anything of this
+  // browser's below that as an older state, while the record here says 1. Another device's number counts for nothing
+  const E = "e".repeat(32);
+  withStore({ [PUBLISHES]: { browser: E, n: 1, live: {} } }, () => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS), { browser: E, n: 45 });                  // the connect push names this browser's publish 45
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), { browser: "f".repeat(32), n: 99 });   // then another device folds docs
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));
+    assert.deepEqual(sent.map((s) => s.by), [{ browser: E, n: 46 }, { browser: E, n: 47 }],
+      "past the kernel's 45, so neither is dropped there; the other device's frame neither raised the number nor wiped it");
+  });
+});
+
 test("a frame passed over is passed over WHOLE: no cache write, no repaint, the pending change kept, the publisher installed", () => {
   withStore({}, (store, events) => {
     const sent: Sent[] = [];

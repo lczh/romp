@@ -449,18 +449,33 @@ function newFoldsConnection(w: any): void {
   }
 }
 
-/** The page's publisher over `send`: each publish takes this browser's next number, notes it as the latest of the
- *  connection `w` holds when it is made, and goes out named. The record is written BEFORE the send, because the
- *  kernel's answer can arrive inside it (and a first hearing's answer, heard before this document's publisher is
- *  installed, starts the connection afresh: the id is read per publish, so no publisher keeps naming an ended one); a
- *  send that throws sent nothing, and the connection's entry goes back to what it was. No window, or a record that
- *  cannot be written: the publish goes unnamed, as before the stamp, and nothing is passed over for it. */
+/** A frame naming one of this browser's publishes says the kernel has handled that number from it, and the kernel drops
+ *  any later publish of this browser's numbered below it as an older state (kernel.py _write_view_folds). The record
+ *  agrees unless it came back older than the kernel's word (2026-09-29): a browser killed before its storage was
+ *  written, whose next folds would then be dropped with no push and no warning. So the page keeps, on its window, the
+ *  highest number of this browser's that a frame has named, and numbers its next publish past it (stampingFolds). This
+ *  browser's own only: another device's number says nothing about this browser's count, and its frame leaves standing
+ *  what an earlier frame said. In memory only, like the connection id, so no extra storage write can race another
+ *  renderer process. */
+function noteFoldsFloor(w: any, by: FoldsBy): void {
+  if (by.browser !== readPublishRecord().browser) return;
+  if (!(typeof w.__rompFoldsFloor === "number" && w.__rompFoldsFloor >= by.n)) w.__rompFoldsFloor = by.n;
+}
+
+/** The page's publisher over `send`: each publish takes this browser's next number (past both the record's and the
+ *  highest a frame has named, noteFoldsFloor), notes it as the latest of the connection `w` holds when it is made, and
+ *  goes out named. The record is written BEFORE the send, because the kernel's answer can arrive inside it (and a first
+ *  hearing's answer, heard before this document's publisher is installed, starts the connection afresh: the id is read
+ *  per publish, so no publisher keeps naming an ended one); a send that throws sent nothing, and the connection's entry
+ *  goes back to what it was. No window, or a record that cannot be written: the publish goes unnamed, as before the
+ *  stamp, and nothing is passed over for it. */
 function stampingFolds(send: FoldsSender, w: any): FoldsPublisher {
   return (f) => {
     const conn: string | null = w && typeof w.__rompFoldsConn === "string" ? w.__rompFoldsConn : null;
     if (conn === null) { send(f, null); return; }
     const rec = readPublishRecord();
-    const n = rec.n + 1, prev = rec.live[conn];
+    const fl = typeof w.__rompFoldsFloor === "number" ? w.__rompFoldsFloor : 0;
+    const n = Math.max(rec.n, fl) + 1, prev = rec.live[conn];
     rec.n = n;
     rec.live[conn] = n;
     const others = Object.keys(rec.live).filter((c) => c !== conn);
@@ -498,10 +513,13 @@ function ownOlderPublish(by: unknown): boolean {
  *  adopted, cached or announced, and the pending change waits for the next frame, the kernel's current folds. Every
  *  other frame is heard as before, and a frame with no stamp (an older kernel, or a publish sent unnamed) is always
  *  heard. A hearing with no publisher installed is a new connection's first (every drop withdraws the publisher; the
- *  VS Code timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). */
+ *  VS Code timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). A frame naming one
+ *  of this browser's publishes, heard or passed over, also raises the number this page's next publish goes past
+ *  (noteFoldsFloor). */
 export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn: FoldsPublisher) => void, by?: unknown): void {
   const g = (globalThis as any).window;
   const w = g && typeof g === "object" ? g : null;
+  if (w && validFoldsBy(by)) noteFoldsFloor(w, by);
   if (w && (!foldsPublisher() || typeof w.__rompFoldsConn !== "string")) newFoldsConnection(w);
   const publish = stampingFolds(send, w);
   const isObj = !!served && typeof served === "object" && !Array.isArray(served);

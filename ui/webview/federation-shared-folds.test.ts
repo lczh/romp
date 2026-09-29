@@ -483,6 +483,26 @@ test("two panes of one browser fold inside one round trip and their publishes la
   assert.deepEqual([shape(phone, true), shape(strip, false)], [BOTH, BOTH]);
 });
 
+test("a browser whose record of its publishes comes back older (killed before its storage was written) still lands its next fold", () => {
+  // the kernel drops a browser's publish numbered below one it already handled from that browser, so a record set back
+  // would have its next folds dropped with no push and no warning; the frame naming this browser's last publish says
+  // how far the kernel got, and the next publish is numbered past it
+  const k = fakeKernel();
+  const shared = new Map<string, string>();
+  const desktop = makeViewer("desktop", k, {}, shared), phone = makeViewer("phone", k);
+  for (const v of [desktop, phone]) k.connect(v);
+  fold(desktop, "api", true); fold(desktop, "web", true); fold(desktop, "web", false);
+  const rec = JSON.parse(shared.get(PUBLISHES)!);
+  assert.deepEqual([rec.n, k.seen.get(rec.browser)], [3, 3], "premise: three publishes, all handled");
+  k.drop(desktop);
+  shared.set(PUBLISHES, JSON.stringify({ browser: rec.browser, n: 1, live: {} }));   // the browser comes back with the record of its first
+  const again = makeViewer("desktop after the restart", k, {}, shared);
+  k.connect(again);                                                    // its connect push names publish 3
+  fold(again, "api", false);
+  assert.deepEqual([(k.bys.at(-1) as any).n, k.folds], [4, { collapsed: [], expanded: [], pinned: [] }], "numbered past 3, so the kernel takes it");
+  assert.deepEqual(shape(phone, false), ["#api", API, TESTS, "#web", WEB], "and the phone opens api too");
+});
+
 test("every publish is named: one browser id and one rising number across its panes, another browser's own id", () => {
   const k = fakeKernel();
   const shared = new Map<string, string>();
