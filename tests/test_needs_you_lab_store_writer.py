@@ -15,8 +15,12 @@ moment that matters: after the file it writes is opened (an in-place write has e
 written. At each hold the test acts as the kernel, then lets the writer go:
   - a kernel READ there finds the whole store, and nothing is moved aside;
   - a kernel PUBLICATION there is kept: the writer's rename stands down and its edit goes round again on the new bytes;
+  - a store REWRITTEN IN PLACE there, at the inode the writer read, is kept the same way (the identity's modification time and size,
+    which tell two files at one inode apart, as they must on ext4, where a freed inode comes back);
   - a store that moves under every round ends in a named error after twenty rounds, nothing published and no temp left;
   - a node gone from the store is named (the store's revision, its node ids, any store moved aside), never a bare TypeError.
+One more test holds the writer earlier, at its read of the store through the descriptor it opened, and publishes there as the kernel:
+the edit is kept, because the identity comes from that descriptor, not from the path.
 NoInPlaceWrites pins the source: neither driver that writes a file the kernel reads writes one in place, and every scene edit of the
 needs-you driver reads its node through nodeOf. TornStoreChain walks the kernel half of the CI red step by step; it describes the
 kernel, so it passes before the fix and after it alike.
@@ -99,22 +103,29 @@ def _seed():
 
 
 # The node side of the run. The driver's writer and what it needs from the driver (the shared publisher, nodeOf) are spliced in at
-# CODE; kernelFeed, the driver's GET /feed.json read before a write, answers null since no kernel serves here. THE HOLD: a write of a
-# file in the goals directory opens the file (an in-place write empties the store right there), says HELD on stdout and reads the
-# test's word on stdin before a byte goes in; every other write passes through. The edit is the lab's own shape: a brief and its
-# family stamp on an existing node, or (`missing`) a node read through nodeOf that the store does not hold.
+# CODE; kernelFeed, the driver's GET /feed.json read before a write, answers null since no kernel serves here. THE HOLDS, chosen by
+# cfg.holdAt: at "write" (the default), a write of a file in the goals directory opens the file (an in-place write empties the store
+# right there), says HELD on stdout and reads the test's word on stdin before a byte goes in; at "read", a read through a descriptor
+# (the writer's read of the store it opened) says HELD and waits the same way before it reads. Every other write and read passes
+# through. The edit is the lab's own shape: a brief and its family stamp on an existing node, or (`missing`) a node read through nodeOf
+# that the store does not hold.
 HARNESS = r"""
 import fs from "node:fs";
 const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 const kernelFeed = async () => null;
 const say = (kind, o) => fs.writeSync(1, kind + " " + JSON.stringify(o) + "\n");
+const hold = (at, o) => { say("HELD", Object.assign({ at }, o)); fs.readSync(0, Buffer.alloc(16), 0, 16, null); };
 const passWrite = fs.writeFileSync;
 fs.writeFileSync = (p, data, ...rest) => {
-  if (typeof p !== "string" || !p.startsWith(cfg.goalsDir + "/")) return passWrite(p, data, ...rest);
+  if (!cfg.holdAt.includes("write") || typeof p !== "string" || !p.startsWith(cfg.goalsDir + "/")) return passWrite(p, data, ...rest);
   const fd = fs.openSync(p, "w");
-  say("HELD", { path: p });
-  fs.readSync(0, Buffer.alloc(16), 0, 16, null);
+  hold("write", { path: p });
   try { fs.writeSync(fd, String(data)); } finally { fs.closeSync(fd); }
+};
+const passRead = fs.readFileSync;
+fs.readFileSync = (p, ...rest) => {
+  if (cfg.holdAt.includes("read") && typeof p === "number") hold("read", { fd: p });
+  return passRead(p, ...rest);
 };
 /*CODE*/
 try {
@@ -168,6 +179,20 @@ class LabStoreWriter(unittest.TestCase):
             jd.save_goals(SID, s)
         return {"kernelRev": jd._disk_rev(SID), "stderr": err.getvalue().strip()}
 
+    def _rewrite_in_place(self, nid, text):
+        """A store rewritten IN PLACE at a hold: one new card and the revision advanced, written into the file the path already names
+        (an open that truncates, then a write, as in TornStoreChain), so the inode stays and the size moves. It stands for two
+        publications between the writer's read and its rename that bring the inode back, as ext4 can: a change the inode alone misses."""
+        st = json.loads(self.store.read_text())
+        st["nodes"][nid] = _node(nid, text, T0 + 60)
+        st["status"][nid] = "blocked"
+        st["rev"] = st.get("rev", 0) + 1
+        before = os.stat(self.store)
+        with open(self.store, "w", encoding="utf-8") as f:
+            f.write(json.dumps(st))
+        after = os.stat(self.store)
+        return {"sameInode": before.st_ino == after.st_ino, "sizeMoved": before.st_size != after.st_size, "rewrittenRev": st["rev"]}
+
     def _drive(self, at_hold, **cfg):
         """Run the driver's writer once under node. At each hold, `at_hold(n, path)` acts as the kernel (n counts from 0) and its record
         is kept; then the writer goes on. Returns (holds, end, other): the records, ("DONE", {...}) or ("ERROR", {...}) as the writer
@@ -180,7 +205,7 @@ class LabStoreWriter(unittest.TestCase):
         script.write_text(HARNESS.replace("/*CODE*/", code))
         conf = Path(self.td.name, "writer.json")
         conf.write_text(json.dumps(dict({"goalsDir": str(jd.GOALDIR), "store": str(self.store), "order": str(self.order),
-                                         "node": G6, "brief": NEW_BRIEF, "stamp": T0 + 100, "missing": False}, **cfg)))
+                                         "node": G6, "brief": NEW_BRIEF, "stamp": T0 + 100, "missing": False, "holdAt": ["write"]}, **cfg)))
         p = subprocess.Popen(["node", str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              env=dict(os.environ, CFG=str(conf)))
         guard = threading.Timer(120, p.kill)   # a hang guard only: every step below waits on a line the writer prints
@@ -190,7 +215,8 @@ class LabStoreWriter(unittest.TestCase):
             for line in iter(p.stdout.readline, ""):
                 kind, _, rest = line.rstrip("\n").partition(" ")
                 if kind == "HELD":
-                    rec = {"path": json.loads(rest)["path"]}
+                    info = json.loads(rest)
+                    rec = {"at": info["at"], "path": info.get("path")}   # a read hold has no path: it reads through a descriptor
                     rec.update(at_hold(len(holds), rec["path"]) or {})
                     holds.append(rec)
                     p.stdin.write("go\n")
@@ -237,6 +263,44 @@ class LabStoreWriter(unittest.TestCase):
                          "moved aside (before: the in-place write left the kernel a torn store, and the edit went into the moved-aside "
                          "file): nodes %r, holds %r" % (sorted(final["nodes"]), holds))
         self.assertEqual(len(holds), 2, "the first round stood down at its rename and the second published: %r" % holds)
+        self.assertEqual(final.get("rev"), holds[0]["kernelRev"] + 1, "one revision past the kernel's publication")
+        self.assertEqual(self._temps(), [], "the stood-down round's temp was removed")
+
+    def test_a_store_rewritten_in_place_at_the_inode_the_lab_read_is_kept_and_the_edit_goes_round_again(self):
+        """The identity is the inode, the modification time in nanoseconds and the size, and the last two are what tell apart two files
+        at one inode: on ext4 a freed inode comes back, so two kernel publications between the lab's read and its rename can leave the
+        store at the inode the lab read. The store is rewritten in place at the hold, which keeps its inode on any filesystem and moves
+        its size: the lab's rename stands down and its edit goes round again on the rewritten bytes, so both land. An identity of the
+        inode alone would publish the bytes the lab read over the rewrite."""
+        holds, end, other = self._drive(lambda n, path: self._rewrite_in_place(G7, "which fixture owns the port the api listens on?") if n == 0 else {})
+        self.assertEqual(end and end[0], "DONE", "the writer finished: %r %s" % (end, other))
+        self.assertTrue(holds and (holds[0]["sameInode"], holds[0]["sizeMoved"]) == (True, True),
+                        "premise: the rewrite kept the store's inode and moved its size: %r" % holds)
+        final = jd.load_goals(SID)
+        self.assertEqual((G7 in final["nodes"], (final["nodes"].get(G6) or {}).get("blockSummary"), self._aside()), (True, NEW_BRIEF, []),
+                         "the card written in place at the store's own inode stands and the lab's edit landed on top of it (an identity of "
+                         "the inode alone takes the rewritten store for the one the lab read and publishes over it): nodes %r, holds %r"
+                         % (sorted(final["nodes"]), holds))
+        self.assertEqual(len(holds), 2, "the first round stood down at its rename and the second published: %r" % holds)
+        self.assertEqual(final.get("rev"), holds[0]["rewrittenRev"] + 1, "one revision past the rewrite")
+        self.assertEqual(self._temps(), [], "the stood-down round's temp was removed")
+
+    def test_a_kernel_publication_between_the_labs_open_and_its_read_is_kept_because_the_identity_is_the_descriptors(self):
+        """The identity is taken from the descriptor the bytes are read through. Here the writer is held at that read, after it opened the
+        store, and the kernel publishes: the writer reads the file it opened, the old one, and holds that file's identity, so its rename
+        stands down and the edit goes round again on the kernel's bytes. An identity taken by path after the read would be the kernel's
+        new file while the bytes are the old one's, and the rename would publish them over the kernel's card. (The hold comes after the
+        identity is taken, so an identity taken by path between the open and the read is outside what this test tells apart.)"""
+        holds, end, other = self._drive(lambda n, path: self._publish(G7, "which fixture owns the port the api listens on?") if n == 0 else {},
+                                        holdAt=["read"])
+        self.assertEqual(end and end[0], "DONE", "the writer finished: %r %s" % (end, other))
+        self.assertTrue(holds and all(h["at"] == "read" for h in holds), "premise: the writer was held at its reads of the store: %r" % holds)
+        final = jd.load_goals(SID)
+        self.assertEqual((G7 in final["nodes"], (final["nodes"].get(G6) or {}).get("blockSummary"), self._aside()), (True, NEW_BRIEF, []),
+                         "the kernel's card published between the lab's open and its read stands and the lab's edit landed on top of it (an "
+                         "identity taken by path after the read names the kernel's file, not the one the bytes came from, and the rename "
+                         "publishes over the card): nodes %r, holds %r" % (sorted(final["nodes"]), holds))
+        self.assertEqual(len(holds), 2, "the first round read the old file and stood down, the second read the kernel's: %r" % holds)
         self.assertEqual(final.get("rev"), holds[0]["kernelRev"] + 1, "one revision past the kernel's publication")
         self.assertEqual(self._temps(), [], "the stood-down round's temp was removed")
 
