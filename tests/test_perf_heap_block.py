@@ -15,12 +15,14 @@ snapshot, a built-chat entry of a shape the gauge does not know being such a fai
 calls none of the interpreter's heap-wide walks over populated caches, the two heap-wide gauges being served only to a GET
 that asks ?walk=1 (e). Synthetic fixtures only: invented strings and placeholder uuids."""
 import contextlib
+import functools
 import gc
 import io
 import json
 import os
 import sys
 import tempfile
+import threading
 import tracemalloc
 import types
 import unittest
@@ -96,13 +98,17 @@ HEAP_WALKS = ((sys, "getallocatedblocks"), (sys, "_debugmallocstats"), (gc, "get
               (gc, "get_referrers"), (gc, "collect"), (tracemalloc, "take_snapshot"))
 
 
-def _walk_hook(calls):
+def _walk_hook(calls, skip):
     """A profile function (sys.setprofile) that appends the name of each heap-wide read above that the thread calls,
     matched by identity, not by name: a C function by the object the call reaches (the "c_call" event hands it over), a
     Python one (tracemalloc.take_snapshot) by its code object (the "call" event's frame). So a call from Python code is
     seen however the kernel spells it, an attribute lookup, a module-level alias or a from-import (review round one,
     2026-09-29: the recorder before this patched the module attributes, and an alias bound at import time called straight
-    past it). A name this runtime lacks is skipped."""
+    past it). A C function that C code calls on the kernel's behalf, through functools.partial, map or a sort key, raises
+    no event at all, so _walks_recorded pairs this hook with the attribute pass-throughs (_recording), and `skip` is their
+    code object: the real call a pass-through makes is one the pass-through recorded, so the hook passes over it. The
+    tables hold the real functions, so the hook is built before any attribute is replaced. A name this runtime lacks is
+    skipped."""
     c_funcs, codes = {}, {}
     for mod, name in HEAP_WALKS:
         fn = getattr(mod, name, None)
@@ -117,26 +123,50 @@ def _walk_hook(calls):
     def hook(frame, event, arg):
         if event == "c_call":
             hit = c_funcs.get(id(arg))
-            if hit is not None and hit[0] is arg:
+            if hit is not None and hit[0] is arg and frame.f_code is not skip:
                 calls.append(hit[1])
         elif event == "call":
             hit = codes.get(id(frame.f_code))
-            if hit is not None and hit[0] is frame.f_code:
+            if hit is not None and hit[0] is frame.f_code and (frame.f_back is None or frame.f_back.f_code is not skip):
                 calls.append(hit[1])
     return hook
 
 
+def _recording(real, name, calls, me):
+    """The pass-through that stands in for one heap-wide read's module attribute inside _walks_recorded: it appends the
+    name when the entering thread calls it, by whatever route the attribute reached the call (C code calling it for the
+    kernel included), and returns what the real function returns. Every pass-through runs one code object (_REC_CODE),
+    which is how the hook tells a pass-through's own call to the real function from the kernel's."""
+    def rec(*a, **kw):
+        if threading.get_ident() == me:
+            calls.append(name)
+        return real(*a, **kw)
+    return rec
+
+
+_REC_CODE = _recording(None, "", None, None).__code__
+
+
 @contextlib.contextmanager
 def _walks_recorded():
-    """The heap-wide reads the entering thread makes inside the block, by name (_walk_hook), yielding the list. The hook is
-    this thread's own profile function, so another thread's walk never lands here, and the thread's previous profile
-    function is put back on exit."""
-    calls, prev = [], sys.getprofile()
-    sys.setprofile(_walk_hook(calls))
-    try:
-        yield calls
-    finally:
-        sys.setprofile(prev)
+    """The heap-wide reads the entering thread makes inside the block, by name, yielding the list. Two recorders cover each
+    other's blind spot: the thread's profile function (_walk_hook) sees a call from Python code however it is spelled, and
+    a pass-through in place of each module attribute (_recording) sees every call that looks the attribute up inside the
+    block, C code's included. A call through the attribute is recorded once. The one call neither sees is C code calling a
+    function captured before the block, such as a functools.partial built at import. Another thread's walk never lands
+    here, and the previous profile function and the real attributes are put back on exit, a raise included."""
+    me, calls, prev = threading.get_ident(), [], sys.getprofile()
+    hook = _walk_hook(calls, _REC_CODE)                   # from the real functions, before any attribute is replaced
+    with contextlib.ExitStack() as stack:
+        for mod, name in HEAP_WALKS:
+            real = getattr(mod, name, None)
+            if real is not None:
+                stack.enter_context(mock.patch.object(mod, name, _recording(real, name, calls, me)))
+        sys.setprofile(hook)
+        try:
+            yield calls
+        finally:
+            sys.setprofile(prev)
 
 
 class _Caches(unittest.TestCase):
@@ -450,18 +480,23 @@ class Overhead(_Caches):
 
     def test_the_recorder_sees_a_walk_however_the_call_is_spelled(self):
         """The recorder's own control (review round one, 2026-09-29): a walk called through a from-import or a name bound
-        before the block opened is seen like an attribute lookup, and tracemalloc's snapshot, a Python function, by its
-        code, so the empty list above does not depend on how the kernel spells a call."""
+        before the block opened is seen like an attribute lookup; one that C code calls for the caller, through
+        functools.partial or map, is seen too (the round's second pass: the profile hook alone saw neither); and
+        tracemalloc's snapshot, a Python function that passes both recorders when reached through its attribute, is
+        recorded once. So the empty list above does not depend on how the kernel spells a call."""
         from sys import getallocatedblocks as imported
         alias = gc.get_freeze_count
         tracing = tracemalloc.is_tracing()
         with _walks_recorded() as calls:
             imported()
             alias()
-            if not tracing:                               # untraced, the snapshot refuses at once, after its call event
+            functools.partial(gc.get_freeze_count)()
+            list(map(gc.get_referrers, [object()]))
+            if not tracing:                               # untraced, the snapshot refuses at once, after it is recorded
                 with contextlib.suppress(RuntimeError):
                     tracemalloc.take_snapshot()
-        self.assertEqual(calls, ["getallocatedblocks", "get_freeze_count"] + ([] if tracing else ["take_snapshot"]))
+        self.assertEqual(calls, ["getallocatedblocks", "get_freeze_count", "get_freeze_count", "get_referrers"]
+                         + ([] if tracing else ["take_snapshot"]))
 
 
 class ShapeChange(_Caches):

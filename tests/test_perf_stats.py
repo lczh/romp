@@ -1138,26 +1138,39 @@ class PerfRoutes(unittest.TestCase):
         """The two reads whose cost grows with the whole heap (the allocator's block count, the frozen generation's size) run
         on a GET that says ?walk=1 and never on a plain one (the macOS runner flake, 2026-09-29: each is one C call that
         holds the interpreter lock, and holds it far longer where the heap is paged out). Each request's handler runs on a
-        thread the server starts for it, so the recorder is a profile function every thread started meanwhile runs
+        thread the server starts for it, so one recorder is a profile function every thread started meanwhile runs
         (threading.setprofile), and it matches the builtin a call reaches by identity (the "c_call" event), so a module-level
         alias or a from-import in the kernel is seen like an attribute lookup (review round one, 2026-09-29: patching the
-        two module attributes missed a call through an alias bound at import time). The snapshot's one caller in the kernel
-        is this route."""
+        two module attributes missed a call through an alias bound at import time). That event fires only for a call from
+        Python code, so the two attributes are patched as well, with pass-throughs that record a call however it reaches
+        them (functools.partial or map calling one from C included), and the hook passes over the real call a pass-through
+        makes, so a call through the attribute is recorded once (review round one's second pass, 2026-09-29: the hook
+        alone missed a walk that C code called; tests/test_perf_heap_block.py's _walks_recorded pairs the two the same
+        way). The snapshot's one caller in the kernel is this route."""
         calls = []
         walks = {id(f): (f, name) for f, name in ((sys.getallocatedblocks, "getallocatedblocks"),
                                                    (km.gc.get_freeze_count, "get_freeze_count"))}
 
+        def recorder(name, real):
+            def rec(*a, **kw):
+                calls.append(name)
+                return real(*a, **kw)
+            return rec
+        rec_code = recorder("", None).__code__               # every pass-through runs this one code object
+
         def hook(frame, event, arg):
-            hit = walks.get(id(arg)) if event == "c_call" else None
+            hit = walks.get(id(arg)) if event == "c_call" and frame.f_code is not rec_code else None
             if hit is not None and hit[0] is arg:
                 calls.append(hit[1])
         prev = threading.getprofile()
         threading.setprofile(hook)
         try:
-            st, plain = self._req("GET", "/perf")
-            plain_calls = list(calls)
-            st2, walked = self._req("GET", "/perf?walk=1")
-            st3, _ = self._req("GET", "/perf?walk=1", token=False)
+            with mock.patch.object(sys, "getallocatedblocks", recorder("getallocatedblocks", sys.getallocatedblocks)), \
+                 mock.patch.object(km.gc, "get_freeze_count", recorder("get_freeze_count", km.gc.get_freeze_count)):
+                st, plain = self._req("GET", "/perf")
+                plain_calls = list(calls)
+                st2, walked = self._req("GET", "/perf?walk=1")
+                st3, _ = self._req("GET", "/perf?walk=1", token=False)
         finally:
             threading.setprofile(prev)
         self.assertEqual((st, st2, st3), (200, 200, 403))
