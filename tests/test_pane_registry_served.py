@@ -10,13 +10,17 @@ route pane. A Chromium driver opens the dashboard and reads:
   3. the URL pane is a sandboxed iframe with its URL as given (no ?v=, no token), marked protocol none; the forged
      toggleFleet, notify and reveal it posts on load change nothing, and it is told nothing (its beacons say so);
   3b. the URL pane posts openSettings, a settingsSync with another theme, viewFile and logUnseen into each of the shell's
-     frames but its own (parent.frames, every pane's window and the gear's): the modal stays closed, the settings store is unchanged,
-     no viewer opens and the Open log badge stays empty, and each pane that dropped one filed its trace in the kernel's
-     client-diag journal (ui/webview/window-sender.ts noteForeign: the site and the origin "null", nothing of the
-     message); the same openSettings from the notes pane, a window on the shell's origin, opens the modal;
+     frames but its own (parent.frames, every pane's window and the gear's): the modal stays closed, the settings store
+     is unchanged, no viewer opens and the Open log badge stays as it was, and each pane that dropped one filed its
+     trace in the kernel's client-diag journal (ui/webview/window-sender.ts noteForeign: the site and the origin
+     "null", nothing of the message); the same openSettings from the notes pane, a window on the shell's origin, opens
+     the modal;
   4. the gear's Panes section has a row per data pane, the experimental one off; turning it on brings the pane on screen;
   5. a define at the kernel while the page is open: the pane-set revision on the next keepalive stands the reload OFFER
      with the panes' wording, the page does not reload on its own, and the Reload click shows the new pane.
+  9. on a fresh shell page, the shell's source check (window.__rompPaneSourceOk) is read-only and non-configurable, and
+     each way a later script can try to replace it (the attempts tests/test_shell_source_lock.py runs in node's vm, each
+     run here as a script of the page) leaves the defined check in place, its text the kernel's definition.
 Runs when ROMP_SERVED_TESTS_REQUIRE=1 (CI); skips where no Chromium is installed. Synthetic fixtures only."""
 import http.server
 import json
@@ -343,6 +347,46 @@ out.phoneBoot.requests = bootRequests.slice();
 await qp.click("#mtabs button[data-pane=notes]"); await qp.waitForTimeout(800);
 out.phoneNotesTap = { notesSrc: await qp.evaluate(() => document.getElementById("f-notes").getAttribute("src")), requests: bootRequests.slice() };
 await qctx.close();
+
+// ---- 9. the shell's source check is locked, in a real browser: a fresh shell page, every attempt run as a page script ----
+const lp = await browser.newPage({ viewport: { width: 1500, height: 900 } });
+await lp.goto(cfg.url);
+await lp.waitForSelector(".rail-btn[data-pane=notes]", { timeout: 20000 }).catch(async () => { await die("no shell for the lock leg"); });
+out.lock = await lp.evaluate(() => {
+  const K = "__rompPaneSourceOk", ANY = "function(e){return true;}";
+  const desc = (d) => (d ? { writable: d.writable, configurable: d.configurable, enumerable: d.enumerable, accessor: !!(d.get || d.set), type: typeof d.value } : null);
+  const orig = window[K], text = String(orig), before = desc(Object.getOwnPropertyDescriptor(window, K));
+  // the attempts tests/test_shell_source_lock.py CheckLocked runs in node's vm, by the same names; strict mode as a strict function
+  const ATTEMPTS = {
+    "an assignment on window": "window.__rompPaneSourceOk=" + ANY + ";",
+    "an assignment by a computed name": "window['__romp'+'PaneSourceOk']=" + ANY + ";",
+    "an assignment to the bare global": "__rompPaneSourceOk=" + ANY + ";",
+    "an assignment on self": "self.__rompPaneSourceOk=" + ANY + ";",
+    "an assignment in strict mode": "(function(){'use strict';window.__rompPaneSourceOk=" + ANY + ";})();",
+    "a var declaration": "var __rompPaneSourceOk=" + ANY + ";",
+    "Reflect.set": "Reflect.set(window,'__rompPaneSourceOk'," + ANY + ");",
+    "Object.assign": "Object.assign(window,{__rompPaneSourceOk:" + ANY + "});",
+    "defineProperty with a value": "Object.defineProperty(window,'__rompPaneSourceOk',{value:" + ANY + "});",
+    "defineProperty with a getter": "Object.defineProperty(window,'__rompPaneSourceOk',{get:function(){return " + ANY + ";}});",
+    "a delete, then an assignment": "delete window.__rompPaneSourceOk;window.__rompPaneSourceOk=" + ANY + ";",
+    "an unlock, then an assignment": "Object.defineProperty(window,'__rompPaneSourceOk',{writable:true,configurable:true});window.__rompPaneSourceOk=" + ANY + ";",
+  };
+  // each attempt starts from the check as the boot left it: one that replaced it (only on a page without the lock) is undone
+  // first, as the vm harness does, so each attempt's verdict is its own
+  const ORIG = Object.getOwnPropertyDescriptor(window, K);
+  const attempts = {};
+  for (const name of Object.keys(ATTEMPTS)) {
+    const now = Object.getOwnPropertyDescriptor(window, K);
+    if ((!now || now.value !== orig || now.get || now.set) && (!now || now.configurable)) Object.defineProperty(window, K, ORIG);
+    window.__labRan = false; window.__labThrew = null;
+    const sc = document.createElement("script");
+    sc.textContent = "window.__labRan=true;try{" + ATTEMPTS[name] + "}catch(x){window.__labThrew=String(x&&x.name||x);}";
+    document.head.appendChild(sc); sc.remove();
+    attempts[name] = { ran: window.__labRan === true, same: window[K] === orig, text: String(window[K]) === text, threw: window.__labThrew };
+  }
+  return { before, text, attempts, after: desc(Object.getOwnPropertyDescriptor(window, K)), stillSame: window[K] === orig };
+}).catch((e) => ({ error: String(e) }));
+await lp.close();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -594,6 +638,40 @@ class ServedPaneRegistry(unittest.TestCase):
         self.assertIsInstance(r["controlPosted"], int, r["controlPosted"])
         self.assertTrue(r["controlOpened"], "the notes pane's openSettings opens the modal: the post reaches the gear's listener")
         self.assertTrue(r["controlClosed"], "and the lab closes it again before the gear's rows are read")
+
+    LOCK_ATTEMPTS = ("an assignment on window", "an assignment by a computed name", "an assignment to the bare global",
+                     "an assignment on self", "an assignment in strict mode", "a var declaration", "Reflect.set", "Object.assign",
+                     "defineProperty with a value", "defineProperty with a getter", "a delete, then an assignment",
+                     "an unlock, then an assignment")
+
+    def test_the_shells_source_check_is_locked_in_a_real_browser_and_no_script_replaces_it(self):
+        # 9. tests/test_shell_source_lock.py holds the lock in node's vm, through a global whose locked-property rules its
+        # harness writes by hand; this leg reads the property on Chromium's real window, after the served shell's boot
+        r = self._result()
+        lock = r["lock"]
+        self.assertNotIn("error", lock, lock)
+        with open(os.path.join(ROOT, "kernel", "kernel.py"), encoding="utf-8") as f:
+            kernel = f.read()
+        head, tail = "window.__rompPaneSourceOk=function(e){", "return false;}catch(x){return false;}};"
+        at = kernel.index(head)
+        defined = kernel[at + len("window.__rompPaneSourceOk="):kernel.index(tail, at) + len(tail) - 1]
+        self.assertEqual(lock["text"], defined, "the check on the page is the kernel's definition, its text as served")
+        self.assertEqual(sorted(lock["attempts"]), sorted(self.LOCK_ATTEMPTS), "every attempt ran")
+        for name in self.LOCK_ATTEMPTS:
+            got = lock["attempts"][name]
+            with self.subTest(attempt=name):
+                self.assertTrue(got["ran"], "the attempt ran as a script of the page")
+                self.assertTrue(got["same"] and got["text"], "the check is still the defined function, its text unchanged: %r" % got)
+        with self.subTest(what="which attempts throw"):
+            # the strict-mode write, Object.assign (which writes as strict code does) and each define the lock refuses throw
+            # a TypeError; the other seven are ignored without one (a sloppy write, a var, Reflect.set's false, a delete's)
+            threw = ("an assignment in strict mode", "Object.assign", "defineProperty with a value", "defineProperty with a getter",
+                     "an unlock, then an assignment")
+            self.assertEqual({name: got["threw"] for name, got in lock["attempts"].items()},
+                             {name: ("TypeError" if name in threw else None) for name in self.LOCK_ATTEMPTS})
+        self.assertEqual(lock["before"], {"writable": False, "configurable": False, "enumerable": True, "accessor": False, "type": "function"},
+                         "after boot the check is read-only and non-configurable")
+        self.assertEqual((lock["after"], lock["stillSame"]), (lock["before"], True), "and after every attempt the property is as the boot left it")
 
     def test_a_hand_row_flipped_in_the_gear_keeps_the_registry_keys(self):
         r = self._result()
