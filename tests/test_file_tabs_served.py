@@ -117,7 +117,7 @@ const pane = (page) => page.evaluate(() => ({
 const openLink = async (page, sid, path) => {
   await page.click('#tabs .tab[data-id="' + sid + '"]');
   await wait(page, (p) => !!document.querySelector('#content .file-uri-link[data-path="' + p + '"]'), path, "the transcript never linked " + path);
-  await page.click('#content .file-uri-link[data-path="' + path + '"]');
+  await page.click('#content .file-uri-link[data-path="' + path + '"]:visible');   // the shown transcript's (a prebuilt hidden view links it too)
   await wait(page, () => !!document.querySelector("#romp-fileview .fileview-popout"), null, "the viewer never offered its pop-out");
 };
 const popOut = async (page) => {
@@ -210,7 +210,7 @@ const chatF = frameOf("/chat");
 await wait(chatF, (n) => document.querySelectorAll("#tabs .tab[data-id]:not(.tab-file)").length >= n, cfg.count, "the shell's chat never showed every session");
 await chatF.click('#tabs .tab[data-id="' + cfg.api + '"]');
 await wait(chatF, () => !!document.querySelector('#content .file-uri-link[data-path="src/app.py"]'), null, "the shell's chat never linked src/app.py");
-await chatF.click('#content .file-uri-link[data-path="src/app.py"]');
+await chatF.click('#content .file-uri-link[data-path="src/app.py"]:visible');
 const filesF = frameOf("/files");
 await wait(filesF, () => !!document.querySelector("#romp-fileview .fileview-popout"), null, "the Files pane's viewer never offered its pop-out");
 out.filesPane = { chatModal: await chatF.evaluate(() => !!document.getElementById("romp-fileview")) };
