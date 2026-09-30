@@ -162,7 +162,7 @@ installMenuEcho();
                              ["chat.prevUnread", "Go to the previous unread reply"], ["chat.nextUnread", "Go to the next unread reply"]] as const) {
     registerCommand({ id, title, run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatJump", move: id.slice(5) }, "*"); } catch (e) { /* chat not loaded */ } } });
   }
-  // Comment on the selected chat text (the user 2026-09-30, who wanted a key for it; Mod+Alt+M): the chat pane owns the
+  // Comment on the selected chat text (the user 2026-09-30, who wanted a key for it; Mod+/): the chat pane owns the
   // selection and the comment box, so the run posts there and the pane opens what the right-click menu's Comment opens
   // (render.ts commentOnSelection); with focus in the chat its own capture handler answers the key, the chat.navBack
   // pattern. The palette's input takes the focus as it opens, so the command captures the pane's aim at that moment

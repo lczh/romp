@@ -24,8 +24,15 @@ const MOD_ORDER = ["Ctrl", "Alt", "Shift", "Meta"];
 // The chord a keydown spells, or null when it's a bare modifier (still being held, nothing to bind).
 // Option on a Mac composes a character (⌥M types µ, ⌥E is a dead key), so a ⌘⌥ keydown's `key` names the glyph and not
 // the key pressed; Command suppresses the typing, so there the physical key (`code` KeyM → M) is the chord's, or ⌘⌥M would
-// never match its own binding (2026-09-30, the comment key). Only with Meta held: without it, Ctrl+Alt is AltGr on
-// Windows, and the glyph it spells (µ on a German layout) is the reader's text, never a chord.
+// never match its own binding (2026-09-30, for the comment key's first default; it serves any ⌘⌥ binding a reader
+// records). Only with Meta held: without it, Ctrl+Alt is AltGr on Windows, and the glyph it spells (µ on a German layout)
+// is the reader's text, never a chord.
+// A "/" is the character, whichever key and Shift state the layout types it with: a German or Nordic keyboard types it as
+// Shift+7, a French one as Shift+":", so a keydown spelling "/" with Shift held is that layout's plain "/" and Ctrl+/ (⌘/)
+// is what the hint promises there too (the comment key, 2026-09-30). The physical key a US keyboard has "/" on (`code`
+// Slash) is not used: on a German layout it types "-", and Ctrl+- is the browser's zoom out. Only "/", the comment key's
+// character: every other symbol keeps its Shift, so a chord already saved with Shift in it spells what it spelled. A US
+// keyboard never spells "/" with Shift held (Shift+/ is "?"), so nothing changes there.
 export function chordOf(e: { key: string; code?: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean }): string | null {
   let k = e.key;
   if (!k || k === "Control" || k === "Alt" || k === "Shift" || k === "Meta") return null;
@@ -36,7 +43,7 @@ export function chordOf(e: { key: string; code?: string; ctrlKey: boolean; altKe
   const parts: string[] = [];
   if (e.ctrlKey) parts.push("Ctrl");
   if (e.altKey) parts.push("Alt");
-  if (e.shiftKey) parts.push("Shift");
+  if (e.shiftKey && k !== "/") parts.push("Shift");
   if (e.metaKey) parts.push("Meta");
   parts.push(k.length === 1 ? k.toUpperCase() : k);
   return parts.join("+");
