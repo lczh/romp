@@ -198,6 +198,16 @@ await fr.waitForSelector("#slash-pop", { state: "attached", timeout: 8000 }).cat
 out.slashControl = await composer(fr);
 await fr.fill("#composer-input", "");
 await fr.waitForFunction(() => !document.getElementById("slash-pop"), null, { timeout: 5000 }).catch(() => {});
+// …and it stays open when the box was left and taken back just before, the close its leave scheduled still due (CI
+// 2026-09-30: the leave to the comment box above, then the click back and the "/", and the late close shut the menu). A
+// timer the page sets right after the leave, with the close's delay, runs after the close, so its mark says the close had
+// its turn; the menu is read then
+await fr.evaluate(() => { const ta = document.getElementById("composer-input"); ta.blur(); window.__leaveDue = false; setTimeout(() => { window.__leaveDue = true; }, 120); ta.focus(); });
+await page.keyboard.type("/");
+await fr.waitForFunction(() => window.__leaveDue === true, null, { timeout: 5000 }).catch(() => {});
+out.slashAfterReturn = await composer(fr);
+await fr.fill("#composer-input", "");
+await fr.waitForFunction(() => !document.getElementById("slash-pop"), null, { timeout: 5000 }).catch(() => {});
 
 // 2b. a German layout, where "/" is Shift+7: its Ctrl+/ from the message box comments too; its Ctrl+- (the key a US keyboard
 // has "/" on) does not
@@ -410,6 +420,7 @@ class ServedCommentKey(unittest.TestCase):
         self._anchored(r["boxPop"], r["boxSel"], "from the message box")
         self.assertEqual(r["boxAfter"], {"value": "", "slash": False}, "Ctrl+/ put a \"/\" in the message box or opened its slash menu: %r" % r["boxAfter"])
         self.assertEqual(r["slashControl"], {"value": "/", "slash": True}, "the control: a typed \"/\" opens the slash menu: %r" % r["slashControl"])
+        self.assertEqual(r["slashAfterReturn"], {"value": "/", "slash": True}, "the box left and taken back, a \"/\" typed while the leave's close was due: the menu stays open: %r" % r["slashAfterReturn"])
         # 2b. a German layout: Ctrl+Shift+7 spells "/" and comments; Ctrl+- on the US slash key's position does not
         self.assertEqual(r["deKey"]["active"], "composer-input", r["deKey"])
         self.assertTrue(r["deKey"]["prevented"], "a German Ctrl+/ was taken: %r" % r["deKey"])

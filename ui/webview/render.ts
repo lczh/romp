@@ -21936,7 +21936,12 @@ function setupComposer() {
   // is the user's own act (a click, Tab, Enter over a selection, Quote, a citation seed, a slash pick, an edit
   // recall). Retiring on pointerdown alone left the note over a box they were typing in by any other route.
   ta.addEventListener("focus", () => { if (composerNoteSid) clearComposerNote(); });
-  ta.addEventListener("blur", () => window.setTimeout(closeSlash, 120));   // close when leaving (a row's mousedown keeps focus, so it fires only on a real leave)
+  // close when leaving (a row's mousedown keeps focus, so it fires only on a real leave), and the box taking the focus back
+  // cancels a close still due: that close shut the menu a "/" typed after the return had just opened (the shape of the
+  // comment-key lab's two CI reds on 2026-09-30: the box left for the comment box, clicked again, "/" typed, no menu)
+  let slashLeave: number | undefined;
+  ta.addEventListener("blur", () => { clearTimeout(slashLeave); slashLeave = window.setTimeout(closeSlash, 120); });
+  ta.addEventListener("focus", () => { clearTimeout(slashLeave); slashLeave = undefined; });
   window.addEventListener("resize", positionSlash);
 
   // ── @-MENTION autocomplete (the user 2026-09-07): an "@" opening a word, plus one or more characters,
@@ -22129,7 +22134,10 @@ function setupComposer() {
   ta.addEventListener("selectionchange", updateMention);
   ta.addEventListener("compositionstart", () => { mComposing = true; });
   ta.addEventListener("compositionend", () => { mComposing = false; updateMention(); });
-  ta.addEventListener("blur", () => window.setTimeout(closeMention, 120));   // a row's mousedown keeps focus, so this fires only on a real leave
+  // a row's mousedown keeps focus, so this fires only on a real leave; a return cancels the close, as the slash menu's does
+  let mentionLeave: number | undefined;
+  ta.addEventListener("blur", () => { clearTimeout(mentionLeave); mentionLeave = window.setTimeout(closeMention, 120); });
+  ta.addEventListener("focus", () => { clearTimeout(mentionLeave); mentionLeave = undefined; });
   window.addEventListener("resize", positionMention);
 
   // ── PROMPT HISTORY (the user 2026-08-16): ↑ with the caret on the box's FIRST line recalls the
