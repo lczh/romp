@@ -5021,6 +5021,19 @@ backing, the way the Awaiting chip names the session it waits on. Hover it for h
 session is doing; the message itself still carries the `@name` you typed, and so does a
 copy of it.
 
+### Commenting on a passage
+
+Select a passage in a message and right-click it: **Comment** opens a box on the passage for the
+first message of a side conversation about it, and **Quote** puts the passage in the message box
+instead. **Ctrl+Alt+M** (**⌘⌥M** on a Mac, the key Google Docs uses for a comment) opens the same
+box from the keyboard, just under the selection, from anywhere in the chat including the message
+box; the right-click menu shows the key under **Comment**. The command palette's **Comment on
+selection** does the same for the passage that was selected when you opened the palette. With
+nothing selected in a message, or in a session that has not finished starting or loading, it says
+so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
+there; on a keyboard where Ctrl+Alt+M types a character (AltGr+M on a German layout), the
+character wins.
+
 ### Stepping through your messages and comments
 
 The arrows in the chat's bottom-left corner form one narrow column above the go-to-bottom chip, which
