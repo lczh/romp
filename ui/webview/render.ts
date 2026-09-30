@@ -102,7 +102,6 @@ import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
-import { CommentPill, placeCommentPill } from "./comment-pill";   // the touch "Comment" pill's placement and life (2026-09-30)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
@@ -7395,57 +7394,55 @@ window.addEventListener("keydown", (e) => {
   e.preventDefault(); e.stopPropagation();
   commentOnSelection();
 }, true);
-// The touch pill (the user 2026-09-30: a comment could not be started on a phone): iOS Safari's long-press selection fires
-// no contextmenu, so the menu above never opens there. On a coarse pointer a "Comment" pill shows just below a selection
-// commentAim accepts, and its tap runs commentOnSelection with the aim it was placed for: one door for the menu, the key,
-// the palette and the pill. When it shows and hides (events only) is comment-pill.ts; here are its element and wiring.
-// The element is made on the first show (a desktop never builds one) and never rebuilt, so its click is safe from
-// re-renders; mousedown's default is cancelled so a press keeps the selection it is about.
-let cmtPillEl: HTMLButtonElement | null = null;
-function commentPillEl(): HTMLButtonElement {
-  if (cmtPillEl) return cmtPillEl;
-  const b = document.createElement("button");
-  b.type = "button";
-  b.id = "cmt-pill";
-  b.hidden = true;
-  b.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" '
-    + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + JC_BUBBLE + "</svg><span>Comment</span>";
-  b.addEventListener("mousedown", (e) => e.preventDefault());
-  b.addEventListener("click", () => { const aim = commentPill.tapped(); if (aim) commentOnSelection(aim); });
-  document.body.appendChild(b);
-  return (cmtPillEl = b);
+// Comment in the quote-chip row, beside Stage, on every device (the user 2026-09-30: on a phone the floating pill under
+// a selection kept landing under the system's own selection menu, and a page cannot ask where that menu will draw). A
+// transcript selection already seeds a quote chip at the bottom of the screen, so the button sits at a fixed spot, far from
+// the selection and whatever the system draws around it. It runs the one door the menu, the key and the palette use
+// (commentOnSelection), handed an aim made from what the chip CAPTURED, never the live selection: on a phone the tap that
+// reaches the button is the tap that dismisses the selection.
+/** The passage the chip row's Comment opens on: the NEWEST quote chip that holds a passage of a transcript turn (a ⌘-select
+ *  stacks its chips oldest first; an editor highlight holds no turn, and a card's follow-up holds no passage). commentAim's
+ *  two refusals over that anchor: "none" when no chip holds one, "session" when the session cannot take a comment yet. */
+function chipCommentTarget(id: string | null): { sid: string; uuid: string; text: string } | "none" | "session" {
+  const cites = (id && composerCitations.get(id)) || [];
+  let c: Citation | undefined;
+  for (let i = cites.length - 1; i >= 0 && !c; i--) if (cites[i].quote && cites[i].uuid) c = cites[i];
+  if (!id || !c) return "none";
+  if (isProvisionalId(id) || !liveSession(id)) return "session";
+  return { sid: id, uuid: c.uuid!, text: c.quote! };
 }
-const commentPill = new CommentPill<CommentAim>({
-  coarse: isCoarsePointer,
-  blocked: () => !!document.getElementById("cmt-pop") || !!ctxMenuEl,
-  aim: () => {
-    const a = commentAim();
-    if (typeof a !== "object") return null;
-    // a selection scrolled out of the pane has nothing on screen for the pill to sit beside
-    const sel = window.getSelection()!, r = sel.getRangeAt(sel.rangeCount - 1).getBoundingClientRect();
-    const c = document.getElementById("content")?.getBoundingClientRect();
-    return c && (r.bottom < c.top || r.top > c.bottom) ? null : a;
-  },
-  show: () => {
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount) return;
-    const b = commentPillEl();
-    b.hidden = false;   // measured shown: its width is its label's
-    const comp = document.getElementById("composer");
-    const floor = Math.min(window.innerHeight, comp && comp.offsetParent ? comp.getBoundingClientRect().top : window.innerHeight);
-    const at = placeCommentPill(sel.getRangeAt(sel.rangeCount - 1).getBoundingClientRect(), b.offsetWidth, b.offsetHeight, window.innerWidth, floor);
-    b.style.left = at.left + "px";
-    b.style.top = at.top + "px";
-  },
-  hide: () => { if (cmtPillEl) cmtPillEl.hidden = true; },
-});
-document.addEventListener("selectionchange", () => commentPill.selectionChanged());
-document.addEventListener("touchstart", (e) => commentPill.touchStart(!!cmtPillEl && cmtPillEl.contains(e.target as Node)), { capture: true, passive: true });
-const commentPillTouchOver = (e: TouchEvent): void => commentPill.touchEnd(e.touches.length);
-document.addEventListener("touchend", commentPillTouchOver, { capture: true, passive: true });
-document.addEventListener("touchcancel", commentPillTouchOver, { capture: true, passive: true });
-document.addEventListener("scroll", (e) => { if (!cmtPillEl || !cmtPillEl.contains(e.target as Node)) commentPill.scrolled(); }, { capture: true, passive: true });
-window.addEventListener("resize", () => commentPill.resized());
+/** Where a passage of a turn is on screen: the box of its text in the view's rendering of the turn, found the way its
+ *  highlight will be (findAnchorRange: the text, or its longest prefix in the turn); null when the turn is not rendered or
+ *  the text is not in its prose. */
+function passageBox(sid: string, uuid: string, exact: string): DOMRect | null {
+  const body = views.get(sid)?.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"] .md`);
+  if (!body) return null;
+  const nodes: Text[] = [];
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
+  const at = findAnchorRange(nodes.map((t) => t.data).join(""), exact);
+  const sl = at ? sliceRanges(nodes.map((t) => t.data.length), at.start, at.end) : [];
+  if (!sl.length) return null;
+  const r = document.createRange();
+  r.setStart(nodes[sl[0].idx], sl[0].s);
+  r.setEnd(nodes[sl[sl.length - 1].idx], sl[sl.length - 1].e);
+  const b = r.getBoundingClientRect();
+  return b.width || b.height ? b : null;
+}
+/** The button's press: the box opens just under the chip's passage, where the key opens it under a selection; a passage
+ *  not rendered (scrolled out of the window) opens it at the button, as the menu opens it at the pointer. */
+function commentOnChip(btn: HTMLElement): void {
+  const t = chipCommentTarget(activeId);
+  if (typeof t !== "object") { commentOnSelection(t); return; }   // it said so: the key's toast
+  const p = passageBox(t.sid, t.uuid, t.text);
+  const b = btn.getBoundingClientRect();
+  commentOnSelection({ ...t, x: p ? p.left : b.left, y: p ? p.bottom + 6 : b.top });
+}
+{
+  // delegated on the strip, which renderComposerChips empties and refills but never replaces: click-safe by construction
+  const strip = document.getElementById("composer-chips");
+  if (strip) delegate(strip, { "chip-comment": (b) => commentOnChip(b) });
+}
 
 function copyToClipboard(text: string) {
   navigator.clipboard?.writeText(text).catch(() => { try { document.execCommand("copy"); } catch { /* best effort */ } });
@@ -10405,7 +10402,6 @@ function pickThreadColor(sid: string): string {
 }
 
 function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number): void {
-  commentPill.hide();   // the touch pill never outlives the box it (or any other door) opened
   pendingCommentAnchor = { sid, uuid, exact, color: pickThreadColor(sid) };
   openCommentKey = null;
   commentPopPos = { x, y };
@@ -10413,7 +10409,6 @@ function openCommentComposer(sid: string, uuid: string, exact: string, x: number
 }
 
 function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number): void {
-  commentPill.hide();
   openCommentKey = { sid, tid };
   pendingCommentAnchor = null;
   // click coords no longer seed the position (the user 2026-08-25): a THREAD popover opens at the
@@ -18057,6 +18052,16 @@ function renderComposerChipsInner(id: string | null): void {
     chip.appendChild(x);
     strip.appendChild(chip);
   });
+  // COMMENT (the user 2026-09-30), first, as in the right-click menu: a side thread on the newest chip's passage, while a
+  // chip holds one on a session that can take it (chipCommentTarget; its press is delegated on the strip, commentOnChip)
+  if (typeof chipCommentTarget(id) === "object") {
+    const cm = el("button", "composer-comment-btn") as HTMLButtonElement;
+    cm.type = "button";
+    cm.textContent = "Comment";
+    cm.dataset.act = "chip-comment";
+    cm.title = cites.filter((c) => c.quote && c.uuid).length > 1 ? "comment on the last quoted passage" : "comment on the quoted passage";
+    strip.appendChild(cm);
+  }
   // The STAGE button (the user 2026-08-23; moved 2026-08-24): nobody discovers ⌘⏎ on their own, so
   // while quote context is held the strip carries its visible face — IMMEDIATELY AFTER the chips it
   // acts on (right-justified it floated detached, and its meaning didn't read), gone with them.

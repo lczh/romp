@@ -1417,6 +1417,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .composer-chip-mark { color: var(--accent); font-weight: 600; }
 /* the EDIT pill has no Stage beside it — it may use the full row before ellipsizing */
 .composer-chip-edit { max-width: 100%; }
+/* …and while Comment rides beside Stage (render.ts, the user 2026-09-30) every chip cedes the two buttons' footprint */
+#composer-chips:has(.composer-comment-btn) .composer-chip { max-width: calc(100% - 140px); }
 .composer-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch; }
 /* STAGED messages (the user 2026-08-15): held in the composer until the next send — deliberately NOT
    the queued idiom (queued = sent, awaiting injection; these are unsent by choice). Same chip anatomy
@@ -1457,16 +1459,16 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    right-justified it floated detached. Exists exactly while context is held (the strip renders it,
    and the strip hides with the chips). NEUTRAL at rest (the under-bubble button family's dress): an
    accent outline next to the accent-blue chips read as already-pressed — accent is for
-   hover/selected, never rest chrome */
-.composer-stage-btn { background: transparent;   /* T141: the feed word-buttons' rest — dark ground, hairline, no wash */
+   hover/selected, never rest chrome. Comment (render.ts, the user 2026-09-30) sits just before it in the same dress. */
+.composer-comment-btn, .composer-stage-btn { background: transparent;   /* T141: the feed word-buttons' rest — dark ground, hairline, no wash */
   border: 1px solid var(--card-border); color: var(--dim); border-radius: 5px; font-size: 0.82em;
   padding: 1px 8px; cursor: pointer;
   transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease; }
-.composer-stage-btn:active { transform: scale(0.96); }
+.composer-comment-btn:active, .composer-stage-btn:active { transform: scale(0.96); }
 /* hover = the FEED's word-button treatment exactly (the user 2026-08-25: text + outline light up
    blue, like Clear/Undo — never a background fill; the wash values are the feed's .ftree-act-btn
    family, referenced not re-derived) */
-.composer-stage-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+.composer-comment-btn:hover, .composer-stage-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 .staged-chip { display: flex; flex-direction: column; gap: 2px; border: 1px dashed rgba(156, 210, 255, 0.45);
   border-left: 2px solid var(--accent); border-radius: 6px; padding: 2px 6px; font-size: 12px; color: var(--fg);
   cursor: pointer; }
@@ -1490,6 +1492,29 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 }
 .composer-chip:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
 .composer-chip-x:hover { color: var(--fg); background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* TOUCH (the user 2026-09-30: on a phone the row's buttons had to be hit quite exactly). Every control in the chip row
+   and the staged strip owns a tap area at least 44px each way, Apple's minimum, and no two areas meet, so a tap beside
+   Stage never lands on Comment or the chip's x. The controls keep their compact look: the area is an invisible ::before
+   (a tap on it is a tap on its control), and the rows make room for it. In the chip row the area is 44px tall and at least
+   44px wide, centred on its button; the chip's x takes the last 44px of its chip, so it never reaches past the chip's
+   edge; the row's lines stand 44px apart and its padding holds the areas above and below its first and last lines clear
+   of the staged strip and the message box. The staged head is 44px tall with the caret's and Send now's areas inside it,
+   and each staged item is at least 44px tall with its x a full-height 44px column at its right, clear of the quote pill
+   beside it. tests/test_comment_chip_served.py measures each area and each pair; a fine pointer keeps today's sizes. */
+@media (pointer: coarse) {
+  #composer-chips { row-gap: 22px; column-gap: 8px; padding-top: 11px; padding-bottom: 11px; }
+  #composer-chips .composer-comment-btn, #composer-chips .composer-stage-btn, #composer-chips .composer-chip-x,
+  .staged-head .staged-caret, .staged-head .staged-go { position: relative; }
+  #composer-chips .composer-comment-btn::before, #composer-chips .composer-stage-btn::before,
+  .staged-head .staged-caret::before, .staged-head .staged-go::before {
+    content: ""; position: absolute; left: 50%; top: 50%; width: max(100% + 2px, 44px); height: 44px; transform: translate(-50%, -50%);
+  }
+  #composer-chips .composer-chip-x::before { content: ""; position: absolute; right: -5px; top: 50%; width: 44px; height: 44px; transform: translateY(-50%); }
+  .staged-head { min-height: 44px; }
+  .staged-chip { position: relative; min-height: 44px; justify-content: center; padding-right: 44px; }
+  .staged-chip .composer-chip-x { position: absolute; top: -1px; right: -1px; bottom: -1px; width: 44px; border-radius: 0; }
+  .staged-chip .composer-chip-x:hover { background: none; }   /* a touch leaves a sticky hover: no square wash over the item's round corner */
+}
 
 /* ── citation audit popover (the user 2026-07-01) ── click the chip to see the EXACT prompt romp will send
    the model (the kernel's /followup-preview). A scrollable monospace box floating above the chip. */
@@ -4146,21 +4171,6 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
 .cmt-pop.dragging { cursor: grabbing; }
-/* The touch "Comment" pill (render.ts commentPillEl, the user 2026-09-30): a phone's long-press selection opens no menu, so
-   this pill under the selection is the way in there. An action in the accent, the flat way: the one accent wash over the
-   raised surface (opaque: it floats over the transcript's text), the accent ink, no outline, the menus' lift; 40px tall
-   for a thumb; nothing on it selects or calls up the system's own callout. Only ever shown on a coarse pointer. */
-#cmt-pill {
-  position: fixed; z-index: 110; display: inline-flex; align-items: center; gap: 6px;
-  height: 40px; padding: 0 16px; border: none; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised)); color: var(--accent);
-  box-shadow: var(--shadow-menu); font-family: var(--sans); font-size: 14px; font-weight: 600; cursor: pointer;
-  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
-}
-#cmt-pill[hidden] { display: none; }
-#cmt-pill svg { width: 16px; height: 16px; flex: 0 0 auto; }
-#cmt-pill:active { transform: scale(0.96); }
 .cmt-pop .cmt-quote, .cmt-pop .cmt-msgs, .cmt-pop .cmt-input, .cmt-pop .cmt-name { cursor: auto; }
 .cmt-pop button, .cmt-pop .meta-btn { cursor: pointer; }
 /* the thread's own statusline (the user 2026-08-25: the popover should carry the chat's components —

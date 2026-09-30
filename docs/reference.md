@@ -5062,11 +5062,16 @@ nothing selected in a message, or in a session that has not finished starting or
 so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
 there.
 
-On a phone or tablet a long-press selection opens no menu, so a **Comment** button appears just
-below the selection instead (above it when the message box leaves no room), and tapping it opens
-the same box. It steps aside while you drag the selection's handles or scroll with your finger and
-comes back on the selection once you lift it; it goes when the selection is cleared or scrolled out
-of view, and when the box opens.
+Selecting a passage also puts it in a quote chip above the message box, and the chip's row carries
+a **Comment** button before **Stage**, on every device. It opens the same box on the chip's passage,
+just under the passage, even once the selection itself is gone, which is how a phone starts a
+comment: a long-press selection there opens no menu, and the system's own menu covers the text
+around it. With several chips stacked, Comment opens on the newest one. It shows only while a chip
+holds a passage of a message in a session that can take a comment.
+
+On a touch screen each control in the chip row and the staged strip (Comment, Stage, a chip's x,
+Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
+pixels each way, with none of them touching, while keeping its compact look.
 
 ### Stepping through your messages and comments
 
