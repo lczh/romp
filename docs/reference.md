@@ -4716,7 +4716,17 @@ process's resident memory and CPU at its exits. The live
 block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
 Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
 CPU, resident size and the pusher's idle-cycle share, and lists any
-conversation two Claude Code processes hold right now. Windows are days or
+session two Claude Code processes serve right now. A process's session is the
+`ROMP_SID` the kernel set in its environment at launch, never the conversation
+id on its command line: a comment thread is launched as a fork of its parent's
+conversation, so its command line names the parent's id while it is a session
+of its own, and grouping by that id once reported a parent and its threads as
+duplicates. The threads get their own line instead, per parent session: how
+many are running and their memory, recognised by the `threadOf` field of their
+registry rows (a deliberate fork has none and counts as a session). A process
+whose `ROMP_SID` cannot be read, or names no registry row, is listed by pid as
+not checked, and a scope matching no registry row is counted as unmatched;
+neither is guessed at. Windows are days or
 weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
 day in range), bounded by `--since` and `--until`, in the machine's local time
 unless `--tz` names a zone; weeks are counted in local dates, so a clock change
@@ -4726,7 +4736,8 @@ missing ledger is named at the top, never a silent zero. `--json` prints the who
 (each cut row joined to the boot that followed it), `quietWindows` (each
 joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
 metric above per window, with capped latency samples for the distribution
-figure), `sources`, and `live`.
+figure), `sources`, and `live` (with `duplicateClis`, `threads`,
+`unidentifiedClis`, `unmatchedScopes` and `errors`).
 
 `scripts/restart_metrics_report.py` draws the before-versus-after figures from
 two or more of those JSON documents with cleanplots, which is not a romp
