@@ -2308,7 +2308,7 @@ def _version_info(authed=False):
             "autoNudge": _mv["autoNudge"],   # server-side toggle state → the gear checkbox reflects the kernel
             "compactSuggest": _mv["compactSuggest"],   # T208+: its gear checkbox rides the same read
             "conserveMemory": _conserve_on(),   # the T148 toggle: close idle tab-less claude processes
-            "login": _login_state(),         # the in-dashboard login flow's state/url/err (T157) — never a secret
+            "login": _login_state(),         # the in-dashboard login flow's state/url/err/n (T157) — never a secret
             "acctLabel": _claude_account_label(),   # which login this box holds ("" = none) — the gear's Billing row
             "fileEditing": _mv["fileEditing"],   # dashboard raw-mode editing opt-in → gates the viewer's Edit
             # per-install: SDK sessions ask for reasoning summaries (gear checkbox). Top-level only — not
@@ -47307,17 +47307,21 @@ _KIND_CACHE = {"mtime": -1.0, "kind": ""}
 LOGIN_FLOW_TIMEOUT_S = 600
 LOGIN_LIVE_STATES = ("starting", "url", "verifying")
 _login_lock = threading.Lock()
-_login_flow = {"state": "", "url": "", "err": "", "t": 0.0, "pid": 0, "fd": -1}
+# `n` counts the starts this kernel life has seen: the dashboard's dialog reads a state carrying the number from before its
+# own start as the previous flow's, never as its outcome (a finished state is kept until the next start, so a read in
+# flight across the click returned the last flow's "done", and the dialog would have announced a sign-in that had not
+# happened yet)
+_login_flow = {"state": "", "url": "", "err": "", "t": 0.0, "pid": 0, "fd": -1, "n": 0}
 
 
 def _login_state():
-    """The payload-safe view: state/url/err only — nothing secret ever sits in the dict. Only a LIVE flow
-    ages out: a finished one ("done", "error") keeps its outcome until the next start, rather than turning
+    """The payload-safe view: state/url/err and the flow's number only — nothing secret ever sits in the dict. Only a
+    LIVE flow ages out: a finished one ("done", "error") keeps its outcome until the next start, rather than turning
     into a timeout ten minutes after the code (a success read "timed out", a refusal lost its reason)."""
     with _login_lock:
         if _login_flow["state"] in LOGIN_LIVE_STATES and time.time() - _login_flow["t"] > LOGIN_FLOW_TIMEOUT_S:
             _login_abort_locked("the login flow timed out — start it again when ready")
-        return {"state": _login_flow["state"], "url": _login_flow["url"], "err": _login_flow["err"]}
+        return {"state": _login_flow["state"], "url": _login_flow["url"], "err": _login_flow["err"], "n": _login_flow["n"]}
 
 
 def _login_abort_locked(err=""):
@@ -47366,6 +47370,7 @@ def _login_start():
     with _login_lock:
         if _login_flow["state"] in LOGIN_LIVE_STATES:
             return "a login flow is already running — finish or cancel it first"
+        _login_flow["n"] += 1                       # a new flow, whatever it comes to (a spawn failure below included)
         scratch = jd.STATE / "login-scratch"         # a neutral cwd: no project's .claude settings reach the login
         try:
             scratch.mkdir(parents=True, exist_ok=True)
@@ -47697,6 +47702,19 @@ def _login_rows():
                      "hasCmd": bool(rec.get("hasCmd")), "refused": str(rec.get("refused") or ""),
                      "why": lg.why_unavailable(rec)})
     return rows
+
+
+def _logins_view():
+    """GET /logins' body: the stored logins (_login_rows) and the machine's own login as the Billing surfaces name it,
+    with how that login stands beside the key for the gear's Account row (2026-09-30): keyHelper, whether an apiKeyHelper
+    is configured here, which a session bills unless its Billing is a login; loginUsable, whether a session can bill the
+    machine's login at all (a managed helper outranks every per-session pick), with loginWhy saying why not. Both are
+    _auth_avail's reading, the one the new-session picker's Billing row trusts, so the row's line and the picker agree."""
+    a = _auth_avail()
+    return {"ok": True, "logins": _login_rows(),
+            "machine": {"label": _claude_login_display(), "acct": _claude_account_label(), "state": _claude_account_state(),
+                        "keyHelper": bool(a.get("key")), "loginUsable": bool(a.get("login")),
+                        "loginWhy": str(a.get("loginWhy") or "")}}
 
 
 def _judge_err_status(msg):
@@ -71955,14 +71973,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(f), "application/json", cache="no-cache")
             if p == "/logins":
                 # The stored Claude logins (T346): labels, organisations, dates and states for the gear's
-                # Billing block and `romp login list`, plus the machine's own login as the surfaces name it.
-                # AUTHED like /api-health (the plain _authorize): the rows name accounts. No token ever rides
-                # here (a row's hasCmd says a token command is recorded; the command itself never rides either).
-                return self._send(200, json.dumps({"ok": True, "logins": _login_rows(),
-                                                   "machine": {"label": _claude_login_display(),
-                                                               "acct": _claude_account_label(),
-                                                               "state": _claude_account_state()}}),
-                                  "application/json", cache="no-cache")
+                # Billing block and `romp login list`, plus the machine's own login as the surfaces name it and
+                # how it stands beside the key (_logins_view). AUTHED like /api-health (the plain _authorize): the
+                # rows name accounts. No token ever rides here (a row's hasCmd says a token command is recorded; the
+                # command itself never rides either).
+                return self._send(200, json.dumps(_logins_view()), "application/json", cache="no-cache")
             if p == "/api-health":
                 # The API-health signal (docs/reference.md): per-(auth label, model family) attempt /
                 # response / give-up counts over rolling windows and a thrash/degraded/recovering state
