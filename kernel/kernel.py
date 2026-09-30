@@ -27705,6 +27705,7 @@ def _maybe_auto_push(r):
 
 
 _P2P_REF = "romp-p2p-sync"   # scratch branch the local kernel force-pushes its HEAD to on the remote
+_P2P_APPLIED_REF = "romp-applied"   # branch the remote's apply leaves on the commit it applied: the next push's base
 
 
 def _p2p_ref_on(push_url, env):
@@ -27892,6 +27893,14 @@ def _update_remote(host, head=None):
         'if [ -n "$AS" ]; then '
         'git -C "$R" update-ref -d refs/heads/%s "$WANT" 2>/dev/null || K=":REFKEPT"; echo "DIRTYNOW$K"; exit 0; fi; '
         'git -C "$R" reset --hard "$WANT" >/dev/null 2>&1 || { git -C "$R" update-ref -d refs/heads/%s "$WANT" 2>/dev/null || K=":REFKEPT"; echo "RESETFAIL$K"; exit 0; }; '
+        # The applied commit keeps a branch of its own there (_P2P_APPLIED_REF), moved on every apply, so the
+        # NEXT push sends only what is new. A push's pack is everything the pushed commit reaches minus what the
+        # peer's ADVERTISED refs reach, and receive-pack advertises branches and tags, never HEAD: this reset
+        # leaves the checkout detached on WANT and deletes the scratch ref just below, so nothing advertised
+        # named any applied build, and every push re-sent the history since the peer's newest branch (about
+        # 45 MB and 70 s a push on 2026-09-30, from a remote-tracking ref three weeks old). Best effort: a
+        # failed update costs the next push its size, never this apply its outcome.
+        'git -C "$R" update-ref refs/heads/%s "$WANT" 2>/dev/null || true; '
         'git -C "$R" update-ref -d refs/heads/%s "$WANT" 2>/dev/null || K=":REFKEPT"; '
         'NEW="$(git -C "$R" rev-parse --short HEAD)"; '
         # RESTART the kernel THROUGH THE MANAGER (the user 2026-07-04: the manager is romp's durable supervisor —
@@ -27959,7 +27968,7 @@ def _update_remote(host, head=None):
         'UP=0; for i in 1 2 3 4 5 6 7 8; do sleep 1; if bash -c "exec 3<>/dev/tcp/127.0.0.1/%d" 2>/dev/null; then UP=1; break; fi; done; '
         'if [ "$UP" = 0 ]; then nohup "$R/bin/romp-serve" >>"$LOGDIR/kernel.log" 2>&1 </dev/null &  sleep 1; fi; '
         'echo "SYNCED:$NEW:FALLBACK$K"'
-    ) % (shlex.quote(rdir), lfull, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF,
+    ) % (shlex.quote(rdir), lfull, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_APPLIED_REF, _P2P_REF,
          _local_machine_label(), lfull[:8], kport,
          _local_machine_label(), lfull[:8], kport)
     # The apply KILLS the running kernel before booting its replacement, so it must be immune to the
