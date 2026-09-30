@@ -128,7 +128,7 @@ import { setTip, pruneTip } from "./tip";
 import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as syncMetaControlsWith, ctxBar as buildCtxBar, setCtxBar as setCtxBarWith,
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
-         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
+         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { dragSlotIndex } from "./dragslot";
@@ -10492,6 +10492,21 @@ function cmtRelayedNote(t: number): HTMLElement {
   return n;
 }
 
+// What romp sent with the user's comment (the user 2026-09-30, one rule for every thread: they can always see exactly
+// what went out on their behalf). The opening message wraps their words in text written for the thread's agent: the
+// split-off line and the quote, and on a passage from before the last compaction the turns around it and where the
+// transcript is saved. The popover says so under the opening message: one line by default, the words exactly as sent
+// one click deeper (THE notice, nested; its fold keyed in openFolds so a refill keeps it). Read from what the kernel
+// ships (sent: the thread row, or its stored opening message), never from this page's memory, so a reload shows it
+// again; no note when romp added nothing.
+function cmtSentNote(th: CommentThread): HTMLElement | null {
+  if (!th.sent) return null;
+  const body = el("div", "notice-prose cmt-sent-text");
+  body.textContent = th.sent;
+  return notice({ src: "romp", glyph: "romp", sev: "romp", gist: th.sentBeforeSummary ? CMT_SENT_GIST_PRIOR : CMT_SENT_GIST,
+                  body, key: "cmtsent:" + th.tid, nested: true, cls: "cmt-sent" });
+}
+
 function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): void {
   list.dataset.session = th.tid;   // the THREAD owns its queue/errors — in-turn controls resolve to it
   const prevScroll = list.scrollTop;
@@ -10622,7 +10637,17 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       quoteHost.insertBefore(ctx, quoteHost.firstChild);
       list.closest(".cmt-pop")?.querySelector(":scope > .cmt-quote")?.remove();
     }
-  } else for (const m of th.msgs) list.appendChild(commentMsgEl(m.who, m.text));
+    const sentNote = quoteHost ? cmtSentNote(th) : null;   // under the opening message, inside its turn
+    if (sentNote) quoteHost!.appendChild(sentNote);
+  } else {
+    let sentPlaced = false;
+    for (const m of th.msgs) {
+      list.appendChild(commentMsgEl(m.who, m.text));
+      const sentNote = !sentPlaced && m.who === "you" ? cmtSentNote(th) : null;   // under the opening message
+      if (sentNote) list.appendChild(sentNote);
+      if (m.who === "you") sentPlaced = true;
+    }
+  }
   if (pend.length) list.appendChild(cmtPendingQueued(pend));
   // (the typing dots that rendered here while the thread was busy are RETIRED — the user 2026-08-24:
   // the await-green highlight carries the in-flight signal, and the reply's arrival is announced by

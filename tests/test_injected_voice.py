@@ -159,6 +159,22 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?"),
+            # …on a passage from before the last compaction (the user 2026-09-30): the opener adds what surrounded
+            # the passage and where the transcript is saved, and labels the comment as the ask, rendered by the REAL
+            # builders so the scan reads the words the code emits; the excerpts are the conversation's own words,
+            # synthetic here
+            "comment thread opener (from before a summary)": km._comment_first_message(
+                "Cap the retry delay at two minutes.", "Why two minutes and not five?",
+                km._precompact_block(("me", "and the cap on the delay?"), ("me", "ok, write that into the README"),
+                                     "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + SID + ".jsonl",
+                                     "33333333-4444-5555-6666-777777777777")),
+            "comment thread opener (from before a summary, neither side)": km._comment_first_message(
+                "Cap the retry delay at two minutes.", "Why two minutes and not five?",
+                km._precompact_block(None, None, "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + SID + ".jsonl",
+                                     "33333333-4444-5555-6666-777777777777")),
+            "the context from before a summary, with only the passage's other side before it": km._precompact_block(
+                ("you", "The sync loop polls every thirty seconds."), None,
+                "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + SID + ".jsonl", "33333333-4444-5555-6666-777777777777"),
             # what a fork is, told to the fork (the user 2026-09-24): the side-question line every thread on a
             # passage opens with, and the fork line a plain fork's first message and a dispatched thread open with
             "thread identity line": km._THREAD_FRAME,
@@ -305,10 +321,13 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # …and the spend ceiling's message is a STOP order with one question (what was fanning out), not a
             # progress ask: the session is to halt, not to report where things stand
             # …and the identity lines say what a fork or a thread IS, riding the user's own first message:
-            # telling, not asking
+            # telling, not asking; so does the context a thread on a passage from before a summary carries
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
                         "debt reminder (several)", "comment thread opener", "edit trace",
+                        "comment thread opener (from before a summary)",
+                        "comment thread opener (from before a summary, neither side)",
+                        "the context from before a summary, with only the passage's other side before it",
                         "comment-thread merge", "compaction suggestion", "spend ceiling",
                         "relayed question", "relayed question (procedural why)",
                         "relayed question (with the conversation)",

@@ -5631,6 +5631,33 @@ failed has no mark at all, and the tool call's result says what happened. An
 incoming message that waited while the session was offline wears the parked
 mark. Hovering a mark gives the state and when it was reached.
 
+## What romp sends with a comment
+
+A comment thread's opening message wraps your comment in text written for the
+thread's agent: a line saying the thread was split off from the main
+conversation to ask about one part of it, then the passage you highlighted,
+quoted. Under your comment, the thread's box shows a one-line note, "What romp
+sent with your comment"; opening it shows that text exactly as it was sent. It
+is read from the thread's record, or for a thread made before the record kept
+it, from the opening message itself, so it is there after a reload too. A thread
+whose opening message romp added nothing to shows no note.
+
+## A comment on a passage from before a compaction
+
+A comment thread normally forks the session at the highlighted message, so its
+agent holds exactly the conversation that produced the passage. Claude Code
+cannot fork at a message from before the session's last compaction, so a thread
+on such a passage takes the whole current conversation instead, where that part
+survives only as the compaction's summary. Its opening message therefore
+carries, after the quote, the nearest thing the other side said before the
+passage's turn and after it (about 1,200 characters of each, the end of the one
+before and the start of the one after), the path of the transcript file that
+holds the passage with the passage's entry id, and then your comment under the
+label "What I'm asking:". The note under your comment says so ("What romp sent
+with your comment, including the turns around it (from before the summary)").
+Editing a message from before a compaction is still refused: a rewind has no
+such fallback.
+
 ## A comment thread's mail
 
 A comment thread's mail is off, both directions, until you break it out: peers
