@@ -151,7 +151,7 @@ mark();
 // 0d. A CREDENTIAL ROW FLOORS THE BOX AT THE ITEMS (the same review: a refused judge credential hid at level 0 under a header identical to a
 // question's): the judge-auth-down latch seeded for api, whose one card becomes the "Fix credential…" row; api's box shows the items with no
 // click, the header's click goes to the full context and back to the items, never to the header line, while the row shows; web is untouched
-fs.writeFileSync(cfg.judgeAuth, JSON.stringify({ [cfg.api]: { t: Math.floor(Date.now() / 1000) - 60, mode: "key", note: "the API key is being refused" } }));
+publishJson(cfg.judgeAuth, { [cfg.api]: { t: Math.floor(Date.now() / 1000) - 60, mode: "key", note: "the API key is being refused" } });   // published, never written in place: the kernel's latch read caches a failed parse by mtime alone, so an emptied file read in the write's instant, refilled within the same clock tick, would hide the row until the file next changed
 fs.utimesSync(cfg.order, new Date(), new Date());
 await page.click('#tabs .tab[data-id="' + cfg.api + '"]');
 out.floor = { row: await page.waitForSelector('#notices .ntc-row button[data-act="ntc-fix"]', { state: "attached", timeout: 60000 }).then(() => true).catch(() => false) };
@@ -204,13 +204,32 @@ const feedBuiltPast = async (floor, id, brief, ms) => {   // the kernel's feed b
   }
   return null;
 };
+const nodeOf = (st, id) => {   // the node a scene edits, or an error that names the loss: the store's revision, its node ids and any store the kernel moved aside (the CI red of 2026-09-24, in writeStore's note, said none of it: a bare TypeError)
+  const n = (st.nodes || {})[id];
+  if (n) return n;
+  let aside; try { aside = fs.readdirSync(cfg.goalsDir).filter((f) => f.includes(".corrupt-")); } catch (e) { aside = String(e); }
+  throw new Error("store-node-lost: " + id + " is not in the goal store this write read (rev " + st.rev + ", seq " + st.seq + "; nodes " + JSON.stringify(Object.keys(st.nodes || {})) + "; stores moved aside " + JSON.stringify(aside) + ")");
+};
 const writeStore = async (mutate) => {   // the feed build id before the write (null when that read fails: its own miss, never a floor of -1), the write (seq bumped), the order touch
   // The write is a PUBLICATION the kernel's own writers must see: `rev` advances as save_goals advances it, so a judge pass whose store predates
   // this write rebases onto it (the kernel's compare-and-swap keys on rev and, since the CI red of 2026-09-23, on the file's identity; before,
-  // an in-place rewrite that left rev alone was invisible to a save holding an older base, and the pass's save erased the node just written)
-  const b0 = ((await kernelFeed()) || {}).buildId; const st = JSON.parse(fs.readFileSync(cfg.store, "utf8")); mutate(st); st.seq = (st.seq || 0) + 1; st.rev = (st.rev || 0) + 1;
-  fs.writeFileSync(cfg.store, JSON.stringify(st));
-  fs.utimesSync(cfg.order, new Date(), new Date()); return typeof b0 === "number" ? b0 : null;
+  // an in-place rewrite that left rev alone was invisible to a save holding an older base, and the pass's save erased the node just written).
+  // And it is published whole, never rewritten in place (a CI red on main, 2026-09-24): the in-place write truncated the store first, a kernel
+  // read in that instant found it empty, moved it aside as corrupt and started the session fresh, and the next scene's node was gone. So the
+  // bytes go through publishJson (a temp file and a rename), and the rename is this writer's own compare-and-swap on the file's identity, taken
+  // from the descriptor the bytes are read from: a kernel publication that lands before the identity check just ahead of the
+  // rename sends the edit round again on the new bytes, twenty rounds at most, then a named error. What stays open is each side's check-to-rename
+  // gap (nothing takes a file lock): a kernel publication landing inside this writer's gap is renamed over, and a kernel save whose check passed
+  // before this rename can publish over it inside its own; nodeOf names a node lost that way at the next edit, and a lost brief shows as the
+  // scene's build wait missing, with the file's revision and brief in its record.
+  const b0 = ((await kernelFeed()) || {}).buildId;
+  for (let round = 0; round < 20; round++) {   // loop-ok: bounded; a new round only when a kernel publication moved the store after this round's read
+    const fd = fs.openSync(cfg.store, "r"); let id0, st;
+    try { id0 = fileIdent(cfg.store, fd); st = JSON.parse(fs.readFileSync(fd, "utf8")); } finally { fs.closeSync(fd); }
+    mutate(st); st.seq = (st.seq || 0) + 1; st.rev = (st.rev || 0) + 1;
+    if (publishJson(cfg.store, st, () => fileIdent(cfg.store) === id0)) { fs.utimesSync(cfg.order, new Date(), new Date()); return typeof b0 === "number" ? b0 : null; }
+  }
+  throw new Error("store-write-contended: the goal store moved under each of 20 rounds of this write; the edit was not published");
 };
 const onMiss = async (o) => {   // the counters, the kernel's own view of the card, and the FILE: a write the kernel published over reads as a node gone and rev moved
   o.perf = await kernelPerf(); o.kernelBrief = briefOf(await kernelFeed(), o.id);
@@ -221,7 +240,7 @@ const builtRecord = async (id, floor, brief) => { const o = { id, floor, built: 
 // a brief is a FAMILY field (the store's distill families): the rebase adopts a family as a unit by its stamp, so an in-place edit of a
 // brief stamps its family (briefedMt, as every kernel writer of a brief does) or a judge pass's save keeps its own (2026-09-23)
 const briefNow = () => Math.floor(Date.now() / 1000);
-const w1 = await writeStore((st) => { st.nodes[cfg.g1].blockSummary = cfg.brief; st.nodes[cfg.g1].briefedMt = briefNow(); });
+const w1 = await writeStore((st) => { const n = nodeOf(st, cfg.g1); n.blockSummary = cfg.brief; n.briefedMt = briefNow(); });
 out.brief = await builtRecord(cfg.g1, w1, cfg.brief);
 out.brief.landed = await page.waitForFunction((a) => { const r = document.querySelector(a.sel); const b = r && (r.querySelector(".ntc-secs > .fask-distill") || r.querySelector(".ntc-body")); return !!b && (b.textContent || "").trim() === a.brief; }, { sel: rowSel(cfg.g1), brief: cfg.brief }, { timeout: 30000 }).then(() => true).catch(() => false);   // the row follows the kernel's word by one chat build
 if (!out.brief.landed) await onMiss(out.brief);
@@ -229,7 +248,7 @@ mark();
 out.brief.box = await readBox();
 // 1c. a brief past the four-line clamp gets a disclosure on its row (the second contributor's review of PR 1967): the More button shows
 // only once the body overflows, opens the row (the clamp lifted, the whole brief on screen), reads Less, and folds the row back
-const w2 = await writeStore((st) => { st.nodes[cfg.g1].blockSummary = cfg.longBrief; st.nodes[cfg.g1].briefedMt = briefNow() + 1; });
+const w2 = await writeStore((st) => { const n = nodeOf(st, cfg.g1); n.blockSummary = cfg.longBrief; n.briefedMt = briefNow() + 1; });
 const moreSel = rowSel(cfg.g1) + " .ntc-more";
 // held on the kernel's build event, then the page's own events (the round-fifteen CI red read too early; the second red saw no frame for sixty
 // seconds with no word from the kernel): the feed rebuilt past the write with the brief, the body carries it, its layout clips it, then the button
@@ -454,10 +473,10 @@ if (fr) {
   out.content.feedFrame = !!ff;
   if (ff) {
     const cardSel = '.fitem.ask[data-key="a:' + cfg.g6 + '"]';
-    const w5 = await writeStore((st) => { st.nodes[cfg.g6].background = cfg.background; st.nodes[cfg.g6].distilledMt = briefNow() + 3;
-      st.nodes[cfg.g6].origin = { peer: cfg.api, peerName: "api", goalId: cfg.api + ":g1" };
-      st.nodes[cfg.g6].warns = [{ kind: "brief-failed", t: Math.floor(Date.now() / 1000) - 60, msg: "the first brief could not be written", detail: "the model returned nothing" }];   // the warning chip (the verifier's round two: the lab drove the origin badge alone); the kernel's distill pass is off (setUpClass), so the fixture stands
-      st.nodes[cfg.g6].relayCarried = "a question to api is still parked on the far host: it went on before it could be withdrawn";   // the relayed question a far host still holds: the card's own dim line, drawn on the row too (a contributor's post-merge note on PR 2124)
+    const w5 = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.background = cfg.background; n.distilledMt = briefNow() + 3;
+      n.origin = { peer: cfg.api, peerName: "api", goalId: cfg.api + ":g1" };
+      n.warns = [{ kind: "brief-failed", t: Math.floor(Date.now() / 1000) - 60, msg: "the first brief could not be written", detail: "the model returned nothing" }];   // the warning chip (the verifier's round two: the lab drove the origin badge alone); the kernel's distill pass is off (setUpClass), so the fixture stands
+      n.relayCarried = "a question to api is still parked on the far host: it went on before it could be withdrawn";   // the relayed question a far host still holds: the card's own dim line, drawn on the row too (a contributor's post-merge note on PR 2124)
       st.nodes[cfg.g6c] = { id: cfg.g6c, text: cfg.g6cText, parentId: cfg.g6, nodeComplete: false, blocked: false, cleared: false, trail: [], t: Math.floor(Date.now() / 1000), log: [] }; st.status[cfg.g6c] = "working"; });
     Object.assign(out.content, await builtRecord(cfg.g6, w5, cfg.longBrief));   // { id, floor, built }: the kernel's build past the write
     const vis = "const vis = (x) => !!x && getComputedStyle(x).display !== 'none' && x.getBoundingClientRect().height > 0;";
@@ -534,7 +553,7 @@ if (fr) {
     out.content.pick.itemsAfterCardBg = await moreOf();
     // a REPAINT with Background picked (the same note: the items face after a repaint was unpinned): a store write that moves a field the row
     // carries (the background paragraph itself, its family stamped), waited for on the row's own background body, then the items face read again
-    const w7 = await writeStore((st) => { st.nodes[cfg.g6].background = cfg.background + " The second loader reads the first's fixtures."; st.nodes[cfg.g6].distilledMt = briefNow() + 9; });
+    const w7 = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.background = cfg.background + " The second loader reads the first's fixtures."; n.distilledMt = briefNow() + 9; });
     out.content.pick.repaint = await builtRecord(cfg.g6, w7, cfg.longBrief);
     out.content.pick.repainted = await fr.waitForFunction((s) => { const r = document.querySelector(s); const b = r && r.querySelector(".fask-bg-body"); return !!b && (b.textContent || "").includes("second loader reads"); }, rowSel(cfg.g6), { timeout: 30000 }).then(() => true).catch(() => false);   // the row repainted with the new paragraph
     out.content.pick.itemsAfterRepaint = await moreOf();
@@ -545,8 +564,8 @@ if (fr) {
     // row's line is a link like the card's and its click lands the way this chat page lands: at the turn the kernel's anchor names, or, when
     // the kernel serves none, in the landing toast that says no anchor was recorded (no goal here can carry a validated citation: the
     // synthetic transcript ends before every goal, and a goal reaching into it takes the API-error turn and becomes the hard stop)
-    const w6 = await writeStore((st) => { st.nodes[cfg.g6].blockSummary = cfg.twoParaBrief; st.nodes[cfg.g6].briefedMt = briefNow() + 5;
-      st.nodes[cfg.g6].briefParts = [{ id: cfg.g6c, since: Math.floor(Date.now() / 1000) - 120 }, { id: cfg.g6 + ":open" }]; });
+    const w6 = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.blockSummary = cfg.twoParaBrief; n.briefedMt = briefNow() + 5;
+      n.briefParts = [{ id: cfg.g6c, since: Math.floor(Date.now() / 1000) - 120 }, { id: cfg.g6 + ":open" }]; });
     out.content.stamps = await builtRecord(cfg.g6, w6, cfg.twoParaBrief);
     const fAfter = await kernelFeed(); out.content.stamps.anchor = ((((fAfter || {}).asks || []).find((a) => a.itemId === cfg.g6) || {}).summaryAnchorUuid) || null;
     out.content.stamps.cardLanded = await ff.waitForFunction((s) => { const c = document.querySelector(s); const d = c && c.querySelector(".fask-secs > .fask-distill"); return !!d && d.querySelectorAll(".fask-para").length === 2; }, cardSel, { timeout: 30000 }).then(() => true).catch(() => false);
@@ -590,7 +609,7 @@ if (fr) {
       out.content.collapsed.payloads = [];
       for (const word of ["third", "fourth"]) {   // loop-ok: two writes
         const brief = cfg.twoParaBrief + " The " + word + " loader reads the fixtures of the one before.";
-        const w = await writeStore((st) => { st.nodes[cfg.g6].blockSummary = brief; st.nodes[cfg.g6].briefedMt = briefNow() + 10 + out.content.collapsed.payloads.length; });
+        const w = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.blockSummary = brief; n.briefedMt = briefNow() + 10 + out.content.collapsed.payloads.length; });
         const rec = await builtRecord(cfg.g6, w, brief);
         rec.repainted = await fr2.waitForFunction((a) => { const r = document.querySelector(a.sel); const b = r && r.querySelector(".ntc-distill"); return !!b && (b.textContent || "").includes(a.word + " loader reads"); }, { sel: rowSel(cfg.g6), word }, { timeout: 30000 }).then(() => true).catch(() => false);
         out.content.collapsed.payloads.push(rec);
@@ -767,9 +786,9 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             base = "http://127.0.0.1:%d" % self.port
             with open(cfg, "w") as f:
                 json.dump({"chat": base + "/chat?token=" + self.token, "feed": base + "/feed?token=" + self.token, "feedJson": base + "/feed.json?token=" + self.token, "perf": base + "/perf?token=" + self.token, "sid": SID, "api": API, "g1": self.g[0], "g2": self.g[1], "g3": self.g[2], "g4": self.g[3],
-                           "reply": "Postgres, the same as production", "store": self.store, "brief": BRIEF, "longBrief": LONG_BRIEF, "g5": SID + ":g5", "g5q": "should the fixtures use the production database name or a scratch one?", "g6": SID + ":g6", "g6q": "which of the two fixture loaders should the CI job run first?", "g6c": SID + ":g6c", "g6cText": "run the second loader under the first's fixtures", "background": BACKGROUND, "twoParaBrief": TWO_PARA_BRIEF, "landing": base + "/?token=" + self.token, "ledger": self.ledger, "order": self.order, "judgeAuth": os.path.join(os.path.dirname(os.path.dirname(self.store)), "judge-auth.json")}, f)
+                           "reply": "Postgres, the same as production", "store": self.store, "brief": BRIEF, "longBrief": LONG_BRIEF, "g5": SID + ":g5", "g5q": "should the fixtures use the production database name or a scratch one?", "g6": SID + ":g6", "g6q": "which of the two fixture loaders should the CI job run first?", "g6c": SID + ":g6c", "g6cText": "run the second loader under the first's fixtures", "background": BACKGROUND, "twoParaBrief": TWO_PARA_BRIEF, "landing": base + "/?token=" + self.token, "ledger": self.ledger, "order": self.order, "judgeAuth": os.path.join(os.path.dirname(os.path.dirname(self.store)), "judge-auth.json"), "goalsDir": os.path.dirname(self.store)}, f)
             driver = os.path.join(self.lab, "needsbox.mjs")
-            Path(driver).write_text(_lab.NEEDS_BOX_OPEN_JS + DRIVER)   # the fold helper the held-mail lab shares
+            Path(driver).write_text(_lab.NEEDS_BOX_OPEN_JS + _lab.PUBLISH_JSON_JS + DRIVER)   # the fold helper the held-mail lab shares, and the publisher every write of a file the kernel reads goes through
             try:
                 p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=DRIVER_TIMEOUT_S,
                                    env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
@@ -804,6 +823,22 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             return open(self.klog).read()[-1200:]
         except OSError:
             return ""
+
+    def test_the_labs_writes_never_leave_the_kernel_a_store_to_move_aside(self):
+        """A CI red on main (2026-09-24): the driver rewrote the goal store in place, a kernel read in the instant the file stood empty
+        moved it aside as corrupt and started the session fresh, and every test failed on one TypeError that named nothing. The driver
+        publishes every file the kernel reads now (publishJson: a temp file and a rename). This reads the kernel's log and the state
+        directory itself, never the driver's record, so a store moved aside is named here even when the driver died of it."""
+        try:
+            self._result()
+        except AssertionError:
+            if not getattr(type(self), "_fail", None):
+                raise   # not the driver's own failure (a required lab that could not run): that is this test's to report too
+        state = os.path.dirname(os.path.dirname(self.store))
+        unparsed = [ln for ln in Path(self.klog).read_text(errors="replace").splitlines() if "could not be parsed" in ln]
+        aside = sorted(os.path.relpath(os.path.join(d, n), state) for d, _dirs, names in os.walk(state) for n in names if ".corrupt-" in n)
+        self.assertEqual((unparsed, aside), ([], []), "no state file the kernel read was unparseable and none was moved aside (before: the "
+                         "in-place store write, read empty, was moved aside and the session started fresh)")
 
     def test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop(self):
         r = self._result()
