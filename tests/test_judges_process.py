@@ -190,7 +190,9 @@ class ChildRoad(_Child):
         j = self._judge()
         self.assertEqual((j["passes"], j["tierStarts"], j.get("passesLost"), j.get("childRestarts")), (1, 2, 0, 0))
         self.assertEqual(j.get("cpu_ms_child_workers"), 4.0)
-        self.assertEqual(j["cpu_ms_sum"] - cpu0, 7.0, "tier plus workers, as the in-process figure counts")
+        # almost-equal: both reads carry every earlier pass's CPU, so the difference has a float's rounding in it (6.999999999999998
+        # on a shard, 2026-09-30); nine places still catch any real extra contribution, a microsecond of CPU and up
+        self.assertAlmostEqual(j["cpu_ms_sum"] - cpu0, 7.0, places=9, msg="tier plus workers, as the in-process figure counts")
         self.assertEqual((j.get("child") or {}).get("seq"), 1)
         self.assertEqual((j.get("child") or {}).get("pid"), getattr(getattr(km, "_JUDGE_CHILD", None), "pid", None))
         self.assertEqual((j.get("child") or {}).get("recordCache"), {"entries": 1})
