@@ -88,9 +88,9 @@ for (const theme of ["dark", "light"]) {
   // comparison reads two settled surfaces, not the popover's fresh paint against a chip still wearing the other theme
   if (theme === "light") await page.waitForFunction((prev) => { const m = document.querySelector('#spinner-meta .meta-btn[data-kind="model"] .meta-label'); return !!m && getComputedStyle(m).color !== prev; }, before, { timeout: 5000 });
   await page.waitForTimeout(150);
-  const tab = await page.$("#tabs .tab.active[data-id]");
-  const box = await tab.boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  // the hover resolves the active tab when it acts (a locator): the strip rebuilds its tabs on a push that changes them
+  // (renderTabs' replaceChildren), and a handle taken before such a push measured a detached tab, a null box (CI 2026-09-30)
+  await page.locator("#tabs .tab.active[data-id]").hover();
   await page.waitForFunction(() => { const t = document.querySelector(".tab-tip"); return !!t && getComputedStyle(t).display !== "none"; }, null, { timeout: 5000 });
   await page.waitForTimeout(150);
   out.themes[theme] = await measure(theme);
