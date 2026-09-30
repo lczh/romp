@@ -63,6 +63,8 @@ class FallbackCard(unittest.TestCase):
         src = open(os.path.join(HERE, "..", "kernel", "sdk_backend.py")).read()
         self.assertIn("if self.model and not self._model_pending and not cleared \\", src,
                       "first learns and user-driven picks never mint")
+        self.assertIn('and not _lands_on_pick(pm, getattr(self, "chosen_model", "")) \\', src,
+                      "a move onto a versioned pick's own model is that pick landing, never a fallback (the #33 follow-up)")
         self.assertIn('on_model_fallback', src)
         ksrc = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("jd.mint_fallback_card(sid, frm, to)", ksrc, "the kernel wires the hook at boot")
@@ -115,6 +117,23 @@ class DowngradeOnlyGate(unittest.TestCase):
     def test_the_learn_path_wires_the_gate(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
         self.assertIn("and _model_downgrade(self.model, pm):", src)
+
+    def test_a_move_onto_a_versioned_pick_is_the_pick_landing(self):
+        # (2026-09-30, the #33 follow-up) a fallback moves a session AWAY from what was picked, so a move onto the very
+        # model a versioned pick names is that pick landing, even where a report from before the pick had moved the live
+        # name above it; an alias or the default names no version, so nothing lands on it by name
+        self.assertTrue(hasattr(sb, "_lands_on_pick"), "the learn has no reading of a move onto the pick's own model")
+        lands = sb._lands_on_pick
+        for pm, pick in (("Opus 4.8", "claude-opus-4-8"), ("Opus 4.8", "claude-opus-4-8[1m]"), ("Opus 5", "claude-opus-5")):
+            self.assertTrue(lands(pm, pick), "%s is the very model %s names: the pick landing" % (pm, pick))
+        for pm, pick, why in (("Opus 5", "claude-opus-5-5", "a lower version than the pick is a fallback"),
+                              ("Opus 4.8", "claude-opus-5-5", "a lower version than the pick is a fallback"),
+                              ("Opus 5", "opus", "an alias names no version"),
+                              ("Sonnet 5", "default", "the default names no model"),
+                              ("Sonnet 5", "", "an empty pick is the default"),
+                              ("Sonnet 4.8", "claude-opus-4-8", "the same number in another family"),
+                              ("gw-mini", "gw-mini", "a name with no family word carries no version")):
+            self.assertFalse(lands(pm, pick), "%s on a %r pick: %s" % (pm, pick, why))
 
 
 class SidechainNeverLearns(unittest.TestCase):

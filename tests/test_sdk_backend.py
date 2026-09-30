@@ -2068,6 +2068,38 @@ class SetModelModePure(unittest.TestCase):
         self.assertFalse(sb.read_reg(self.d, "g").get("modelPending") or False)
         self.assertEqual(sb.read_reg(self.d, "g").get("liveModel"), "Opus", "and lands a best-effort label, not blank")
 
+    def test_every_live_pick_is_in_flight_until_a_report_of_it_lands(self):
+        # (2026-09-30, the #33 follow-up) a pick was marked in flight only when the live name did not already carry the
+        # pick's family word, so an older version of the live family (claude-opus-4-8 on Opus 5.5), a re-pick of the
+        # live model and the account default went unmarked; since the learn reads versions inside a family, the pick's
+        # first report could then read as an automatic fallback
+        _hosts_off(self.d)
+        sid = self.be.spawn("m", self.d)
+        sb.write_reg(self.d, sid, {**sb.read_reg(self.d, sid), "model": "claude-opus-5-5", "liveModel": "Opus 5.5",
+                                   "liveModelId": "claude-opus-5-5"})
+        sess = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        self.be.sessions[sid] = sess
+        sent = []
+        sess.set_model_live = lambda model, prev=None: sent.append((model, prev))   # the loop hop, stubbed
+        self.assertTrue(self.be.set_model(sid, "claude-opus-4-8"))
+        self.assertEqual(sess._model_pending, "claude-opus-4-8",
+                         "an older version of the live family is in flight from the click, like any pick")
+        self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"), "…persisted for the dormant row")
+        self.assertTrue(sess.snapshot()["modelPending"], "…and the badge shows its switching dots")
+
+        class _Client:
+            async def get_context_usage(self):
+                return {"percentage": 12, "model": "claude-opus-4-8"}
+        sess.client = _Client()
+        asyncio.run(sess._do_refresh_context())
+        self.assertEqual((sess._model_pending, sess.model), ("", "Opus 4.8"), "the refresh's report of the pick lands it")
+        self.assertFalse(sb.read_reg(self.d, sid).get("modelPending"))
+        self.assertTrue(self.be.set_model(sid, "claude-opus-4-8"))
+        self.assertEqual(sess._model_pending, "claude-opus-4-8", "a re-pick of the live model is in flight until its report too")
+        self.assertTrue(self.be.set_model(sid, ""))
+        self.assertEqual(sess._model_pending, "default", "an empty pick is the account default, and in flight as one")
+        self.assertIsNone(sent[-1][0], "…which goes out as set_model(None)")
+
     def test_set_mode_persists_to_registry(self):
         sid = self.be.spawn("m", self.d)
         self.assertTrue(self.be.set_mode(sid, "plan"))

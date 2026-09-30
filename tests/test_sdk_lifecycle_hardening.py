@@ -810,6 +810,29 @@ class BootReconcile(unittest.TestCase):
         self.assertFalse(reg.get("modelPending"))
         self.assertEqual(be._ensured, [], "the heal alone never wakes a session")
 
+    def test_a_stranded_model_pick_heals_onto_the_picks_label_at_boot(self):
+        # (2026-09-30, the #33 follow-up) a model pick in flight at a hard kernel death left the registry naming the model
+        # the session ran BEFORE the pick; the next connect launches on the pick, and its first report read as that model
+        # falling back to the pick: a Completed card saying the model changed automatically. The sweep heals the label
+        # onto the pick's name, as a thread's death does (_on_session_gone); a flagged row with no pick keeps its label.
+        d, be = self._setup()
+        Path(d, "session-hosts").write_text("off")   # this root is outside the runner's belt (CLAUDE.md, 2026-09-11)
+        sid = "11111111-aaaa-0000-0000-000000000010"
+        bare = "11111111-aaaa-0000-0000-000000000011"
+        _reg(d, sid, model="claude-opus-4-8", liveModel="Opus 5.5", modelPending=True)
+        _reg(d, bare, liveModel="Opus 5.5", modelPending=True)
+        for x in (sid, bare):
+            sb.append_state(Path(d), x, "waiting")
+        with mock.patch.object(sb.subprocess, "run", return_value=mock.Mock(stdout="")):
+            be._boot_reconcile([sb.read_reg(Path(d), sid), sb.read_reg(Path(d), bare)])
+        reg = sb.read_reg(Path(d), sid)
+        self.assertEqual(reg.get("liveModel"), "Opus 4.8",
+                         "a pick in flight at a hard death restarts from the pick's name, not the model it replaced")
+        self.assertFalse(reg.get("modelPending"))
+        self.assertEqual(be._ensured, [], "the heal alone never wakes a session")
+        self.assertEqual(sb.read_reg(Path(d), bare).get("liveModel"), "Opus 5.5",
+                         "a flagged row with no pick on record keeps its label")
+
     def test_the_sweep_reads_each_registry_fresh_not_the_listing_it_was_handed(self):
         # __init__ lists the registries, then the echo reseed may re-queue a lost send into one of
         # them ON DISK, then the sweep walks that same listing: a row listed before the write still
