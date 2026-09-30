@@ -483,6 +483,8 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([(m[0], m[2].get("foldsBy")) for m in equal], [("phone", {"browser": self.B, "n": 2}), ("desktop", {"browser": self.B, "n": 2})],
                          "an equal number is taken and pushed to every viewer")
         self.assertEqual(self.stored_folds(), again)
+        self.assertEqual(km._view_folds_seen[self.B], {"n": 2, "at": 2, "top": 2, "top_at": 2},
+                         "kept at the count it took now, and so is the largest, which it equals (2026-09-30)")
         other = dict(FOLDS, collapsed=["web"])
         [taken] = self.dispatch(self.publish(other, {"browser": self.C, "n": 1}))
         self.assertEqual([m[2].get("foldsBy") for m in taken], [{"browser": self.C, "n": 1}] * 2, "another browser's first publish is its own count")
