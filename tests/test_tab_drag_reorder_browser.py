@@ -58,6 +58,16 @@ the DOM alone. The cue is measured mid-gesture too: the group about to be joined
 that would clear tags names them all before the release — the whole safety, since there is no undo stack — and a
 drag that only reorders shows neither.
 
+THE OPEN SESSION IS CHOSEN, AND A HEADER IS READ BEFORE IT IS PRESSED (2026-09-29). A header's click folds its group
+except on an OPEN group whose section the pane shows and which holds the open session: that click is the way back to
+the transcript and folds nothing (render.ts makeGroupHead, pinned by tab-snapshot-pane.test.ts). The page used to open
+whichever session's frame reached it first, and when the header's group contained that session at a re-fold's click (a
+grouped session, or one a drop had moved into the group), the re-fold waited out its bound for a fold that by design
+never comes, always at one of the two re-folds that follow an open. So the saved state names a trail session that no
+recorded gesture drags, drops on or renames (PINNED, asserted from the driver's record), each fold click first reads
+what the header says its click does (the way back is taken only when the header shows every state that makes it one,
+and tallied: the main run expects none), and a last phase meets the way back on purpose.
+
 Each case records the row layout (every tab's left/top/width), the release point and the landing rect, and
 expects the tab to sit where the pointer was released: after every other tab on the release row whose
 midpoint is left of the cursor once the dragged tab is taken out of the row (the pre-drag layout, the strip's
@@ -65,7 +75,10 @@ own virtual model), before the rest. The log each case keeps (every drag event's
 strip's rebuilds) says, when a case fails, whether a drop reached the strip at all. Skips LOUDLY without the
 extension deps or a Playwright browser. SYNTHETIC fixtures only (the notes-api demo world, host TESTHOST,
 placeholder sids). TAB_DRAG_DIST=<dir> serves another tree's UI bundle (the bisect's before);
-TAB_DRAG_DUMP=<path> writes the whole measurement; TAB_DRAG_SHOTS=<prefix> writes strip screenshots of the packed layouts."""
+TAB_DRAG_DUMP=<path> writes the whole measurement; TAB_DRAG_SHOTS=<prefix> writes strip screenshots of the packed layouts;
+TAB_DRAG_ACTIVE=<name> opens another session than PINNED (a qa member meets the way back at the re-fold after the
+unfolded shape; an infra member, or backup, a trail session at boot that the first drop between the two folded
+headers moves into infra, at the fold ahead of the folded-header join)."""
 import json
 import os
 import re
@@ -100,6 +113,13 @@ QA = ["tests", "docs"]              # the qa group: the second row; folded besid
 TAGS = [{"id": "tag-infra", "name": "infra", "color": "#4EC9B0", "members": [SIDS[n] for n in TAGGED]},
         {"id": "tag-qa", "name": "qa", "color": "#c98cff", "members": [SIDS[n] for n in QA]}]
 TRAIL = [n for n in NAMES if n not in TAGGED and n not in QA]
+# THE OPEN SESSION (2026-09-29): a trail session that no recorded gesture drags, drops on or renames. It starts in no
+# group and is never dragged, so no drop moves it into one: no header ever holds it, and no fold click meets the way back
+# (foldGroup). The trail is newest transcript first, so cache sits 13th of its 15 tabs at boot, but a gesture addresses
+# a slot as the trail stands when it runs, and the joins and drags before it shift that trail, so a boot slot does not
+# say which sessions the gestures reach: the driver's record does (gestures_on, asserted by
+# test_the_page_opens_the_pinned_session). The open tab is now never among the dragged tabs; before, it sometimes was
+PINNED = "cache"
 
 
 def _free_port():
@@ -146,6 +166,13 @@ await page.addInitScript(() => {
       if (removed > 2) L("rebuild:-" + removed, null); }).observe(bar, { childList: true }); };
   watch();
 });
+// THE OPEN SESSION IS CHOSEN, NOT ADOPTED (2026-09-29): with no saved choice the page opens whichever session's frame lands
+// first, which left each fold click below to the way back whenever the header's group contained that session at the click
+// (foldGroup). The shim's saved state names it instead (its activeId is the ?active= connect hint and the tab the page
+// restores once it is listed or its frame arrives), written only while the key is absent, so the two reloads keep what the page saved
+await page.addInitScript((sid) => {
+  try { if (localStorage.getItem("romp-vscode-state-chat") === null) localStorage.setItem("romp-vscode-state-chat", JSON.stringify({ activeId: sid })); } catch (e) {}
+}, cfg.active);
 const settle = async (n = cfg.count) => {   // n: the tabs the strip shows (a folded group's members have none)
   await page.waitForSelector("#tabs .tab[data-id]", { timeout: 30000 });
   await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, n, { timeout: 30000 });
@@ -153,6 +180,11 @@ const settle = async (n = cfg.count) => {   // n: the tabs the strip shows (a fo
 };
 await page.goto(cfg.chat);
 await settle();
+// …and it is the one open: the wait is for the strip's own active mark on it, bounded and recorded rather than thrown (a
+// throw would fail every case; the Python side asserts it and names the session the page opened instead)
+const opened = { want: cfg.active, on: await page.waitForFunction((sid) => !!document.querySelector(`#tabs .tab.active[data-id="${sid}"]`), cfg.active, { timeout: 10000 })
+  .then(() => true).catch(() => false) };
+opened.active = await page.evaluate(() => { const a = document.querySelector("#tabs .tab.active"); return a ? a.dataset.id || null : null; });
 const r1 = (v) => Math.round(v * 10) / 10;
 // THE KERNEL'S OWN VIEWS STORE, read per gesture: which tag holds which session. The drag's tag writes (drag
 // into a group adds the tag, a drop on the ungrouped row takes the dragged copy's off) are asserted from here,
@@ -218,8 +250,8 @@ async function record(label, pre, src, tgt, tx, ty, extra) {
   const landed = post.tabs.find((t) => t.id === src.id);
   const count = (k) => log.filter((e) => e.k === k).length;
   cases.push({ label, theme: post.theme, gap: post.bar.gap,
-               from: { name: src.name, index: pre.order.indexOf(src.id), draggable: src.draggable },
-               over: tgt ? { name: tgt.name, left: tgt.left, w: tgt.w, top: tgt.top } : null,
+               from: { name: src.name, id: src.id, index: pre.order.indexOf(src.id), draggable: src.draggable },
+               over: tgt ? { name: tgt.name, id: tgt.id || null, left: tgt.left, w: tgt.w, top: tgt.top } : null,   // a header: id null
                release: { x: cx, y: cy }, expected, actual, ok: expected === actual,
                landed: landed ? { left: landed.left, right: r1(landed.left + landed.w), top: landed.top,
                                   cursorInside: landed.left <= cx && cx <= landed.left + landed.w && landed.top <= cy && cy < landed.top + landed.h } : null,
@@ -362,8 +394,11 @@ async function dragAcrossPush(label, fromRow, fromIdx, toRow, toIdx, frac, renam
   Object.assign(cases[cases.length - 1], { rename: ans, pushed, shownDuring, shownAfter, rebuiltMidDrag });
 }
 const out = { grouped: null, yatharth: null };
+// wayBack: every way-back click foldGroup took in the main run (none expected: no header's group contains the open session)
+Object.assign(out, { opened, wayBack: [] });
 // 1. the CLASSIC theme, the control: row 0 = the infra group, the last row = the untagged trail
 let L = await layout();
+opened.slot = L.rows.length ? L.rows[L.rows.length - 1].findIndex((t) => t.id === opened.active) : null;   // its place on the trail's row
 out.grouped = { theme: L.theme, gap: L.bar.gap, rows: L.rows.map((r) => r.map((t) => t.name)), bar: L.bar,
                 items: L.items.map((i) => (i.id ? i.name : "[" + i.cls + "]") + "@" + i.left + "," + i.top + "+" + i.w + "x" + i.h) };
 let trail = L.rows.length - 1;
@@ -397,10 +432,38 @@ await page.waitForFunction((n) => { const names = Array.from(document.querySelec
 //    virtual layout has the packed row as one row, as the strip does), a drop between the two headers lands at the
 //    trail's head, a header dragged across the shared row still reorders the groups, and with one group opened again
 //    the folded one keeps a row of its own. Then the same under the classic theme.
-const foldGroup = async (name, folded) => {   // a real click on the header; the wait is for the fold's own render (its members' tabs gone, or back)
-  await page.click(`#tabs .tab-group-head[data-group="${name}"]`);
-  await page.waitForFunction(([n, f]) => { const h = document.querySelector(`#tabs .tab-group-head[data-group="${n}"]`);
-    return !!h && h.classList.contains("collapsed") === f && (document.querySelector(`#tabs .tab[data-copy="${n}"]`) === null) === f; }, [name, folded], { timeout: 10000 });
+// A HEADER'S CLICK, READ BEFORE IT IS PRESSED (2026-09-29). The header says what its click does in data-act, from the state it
+// rendered (render.ts makeGroupHead): "toggle-group" folds or opens, and "show-transcript" is THE WAY BACK, the click on an
+// open group the pane shows that holds the open session, which puts the transcript back and folds nothing (pinned by
+// tab-snapshot-pane.test.ts). A blind click there waited out the bound for a fold that never comes, and a second blind click
+// on a header that DID fold would open it again, so the header is read first. The way back is taken only when the header
+// shows every state that makes it one (shown, open, holding the open session), and tallied; show-transcript on any other
+// header is a regression and throws with what the header showed. Then the fold's own click, on a header offering the fold
+// from the opposite state, and the wait for the fold's render (its members' tabs gone, or back), each bound named on expiry.
+const headState = (name) => page.evaluate((n) => {
+  const h = document.querySelector(`#tabs .tab-group-head[data-group="${n}"]`), a = document.querySelector("#tabs .tab.active");
+  return h ? { act: h.dataset.act || "", folded: h.dataset.folded || "", cls: h.className, current: h.getAttribute("aria-current"),
+               active: a ? a.dataset.id || null : null } : null;
+}, name);
+const foldGroup = async (name, folded, tally = out.wayBack) => {
+  const sel = `#tabs .tab-group-head[data-group="${name}"]`;
+  await page.waitForSelector(sel, { timeout: 10000 });
+  const h = await headState(name);
+  if (h && h.act === "show-transcript") {
+    const has = (c) => h.cls.split(/\s+/).includes(c);
+    if (!(has("snap-shown") && h.folded === "0" && !has("collapsed") && (has("holds-active") || h.current === "true")))
+      throw new Error(`foldGroup(${name}, ${folded}): the header offers the way back without the state that makes it one: ` + JSON.stringify(h));
+    await page.click(sel);
+    tally.push({ group: name, folded, active: h.active });
+  }
+  const offered = await page.waitForFunction(([s, f]) => { const x = document.querySelector(s);
+    return !!x && x.dataset.act === "toggle-group" && x.dataset.folded === (f ? "0" : "1"); }, [sel, folded], { timeout: 10000 }).then(() => true).catch(() => false);
+  if (!offered) throw new Error(`foldGroup(${name}, ${folded}): the header never offered that fold: ` + JSON.stringify(await headState(name)));
+  await page.click(sel);
+  const done = await page.waitForFunction(([n, f]) => { const x = document.querySelector(`#tabs .tab-group-head[data-group="${n}"]`);
+    return !!x && x.classList.contains("collapsed") === f && (document.querySelector(`#tabs .tab[data-copy="${n}"]`) === null) === f; }, [name, folded], { timeout: 10000 })
+    .then(() => true).catch(() => false);
+  if (!done) throw new Error(`foldGroup(${name}, ${folded}): the fold was clicked and never rendered: ` + JSON.stringify(await headState(name)));
   await page.waitForTimeout(400);
 };
 const stripShot = async (tag) => { if (cfg.shots) { const b = await page.evaluate(() => { const r = document.getElementById("tabbar").getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; });
@@ -550,12 +613,61 @@ const folder = L.rows[trailRow()][4].name;
 out.foldedJoin = { group: open0[1], joiner: folder };
 await dragCopy("join: a tab dragged onto a FOLDED group's header joins it", folder, "", { head: open0[1] }, 0.75, { tagWrite: true });
 out.joinEnd = { tags: tagsOf(), rows: (await layout()).rows.map((r) => r.map((t) => t.name)) };
+// 7. THE WAY BACK, MET ON PURPOSE (2026-09-29): the one header click that folds nothing, so foldGroup's reading of it is
+//    exercised whatever session the main run opened. A pick of one of qa's members (a pick also ends the pane's section
+//    view, setActive) makes qa's header the holder of the open session; a fold and an open put qa's section in the pane,
+//    open; the re-fold's header then offers the way back, which is taken exactly once, and the click after it folds.
+const wbCase = { group: "qa", setup: [], wayBacks: [] };
+out.wayBackCase = wbCase;
+try {   // recorded, not thrown: every case above already has its result, and a throw here would fail them all with this phase
+  wbCase.start = await headState("qa");
+  if (wbCase.start && wbCase.start.folded === "1") await foldGroup("qa", false, wbCase.setup);   // opened first if a phase left it folded
+  wbCase.member = await page.evaluate(() => { const t = document.querySelector('#tabs .tab[data-copy="qa"][data-id]'); return t ? t.dataset.id : null; });
+  if (!wbCase.member) throw new Error("the way-back case: qa shows no member to pick: " + JSON.stringify(await layout()));
+  await page.click(`#tabs .tab[data-copy="qa"][data-id="${wbCase.member}"] .tab-label`);
+  wbCase.picked = await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active");
+    return !!a && a.dataset.id === sid && !document.querySelector("#tabs .tab-group-head.snap-shown"); }, wbCase.member, { timeout: 10000 }).then(() => true).catch(() => false);
+  await foldGroup("qa", true, wbCase.setup);
+  await foldGroup("qa", false, wbCase.setup);
+  wbCase.offered = await headState("qa");   // what the re-fold's header offers before the press
+  await foldGroup("qa", true, wbCase.wayBacks);
+  wbCase.after = await headState("qa");
+} catch (e) { wbCase.error = String((e && e.stack) || e); }
 out.cases = cases;
 fs.writeFileSync(cfg.out, JSON.stringify(out));   // a file, not stdout: the per-case logs outgrow one pipe write
 fs.writeSync(1, "RESULT:" + cfg.out + "\n");
 await browser.close();
 process.exit(0);
 """
+
+
+def gestures_on(result, sid):
+    """The recorded gestures of a driver run that touch the session `sid` (its tab id, the id the saved state names), one
+    line each: a case whose dragged tab or drop target is that session, and a rename whose answer names it (the kernel's
+    /rename answers with the renamed session's id). A case that records no dragged tab's id, or a tab drop target with no
+    id (a header target, named '#<group>', has none), is named too, so a record that lost the ids never reads as one that
+    spared the session. A header drag moves a group and no tab, and a skipped case
+    made no gesture, so neither is read."""
+    hits = []
+    for c in result.get("cases") or []:
+        if c.get("skipped") or c.get("headDrag"):
+            continue
+        label, src, over = c.get("label"), c.get("from") or {}, c.get("over") or {}
+        if not src.get("id"):
+            hits.append("%s: records no dragged tab's id" % label)
+        elif src["id"] == sid:
+            hits.append("%s: drags it" % label)
+        if over.get("id") == sid:
+            hits.append("%s: drops on it" % label)
+        elif c.get("over") and not over.get("id") and not str(over.get("name") or "").startswith("#"):
+            hits.append("%s: records no drop target's id" % label)
+        if "rename" in c:
+            ans = c.get("rename") or {}
+            if not ans.get("id"):
+                hits.append("%s: the rename's answer names no session: %r" % (label, ans))
+            elif ans["id"] == sid:
+                hits.append("%s: renames it" % label)
+    return hits
 
 
 class ServedTabDragReorder(unittest.TestCase):
@@ -613,6 +725,11 @@ class ServedTabDragReorder(unittest.TestCase):
                      "message": {"role": "assistant", "model": "claude-opus-5", "stop_reason": "end_turn",
                                  "content": [{"type": "text", "text": "It keeps the %s side of the notes-api tidy." % name}]}}]
             Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+            # one second apart, the newest last, whatever the filesystem clock's grain (2026-09-29): new tabs take the
+            # kernel's newest-transcript-first order and a tie falls back to the sid, so files written inside one tick
+            # of a coarse clock would reorder the trail and move the open session's slot (PINNED)
+            stamp = t0 + 900 - len(NAMES) + i
+            os.utime(os.path.join(proj, sid + ".jsonl"), (stamp, stamp))
         # two tags, three and two sessions: the strip groups by tag, a row per group, the other fifteen in the trail
         Path(state, "timeline-views.json").write_text(json.dumps({"active": "all", "tags": TAGS}))
         cls.state = state   # the kernel's own views store: what the drag's tag writes are asserted from (never the DOM alone)
@@ -652,13 +769,21 @@ class ServedTabDragReorder(unittest.TestCase):
             raise
         return cls.result
 
+    @staticmethod
+    def _pinned():
+        """The session the page opens: PINNED, or TAB_DRAG_ACTIVE's (a bisect of the way back)."""
+        name = os.environ.get("TAB_DRAG_ACTIVE") or PINNED
+        if name not in SIDS:
+            raise AssertionError("TAB_DRAG_ACTIVE=%r names no fixture session: %r" % (name, NAMES))
+        return name
+
     @classmethod
     def _drive(cls):
         cfg = os.path.join(cls.lab, "cfg.json")
         out = os.path.join(cls.lab, "result.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "count": len(NAMES), "trail": len(TRAIL), "out": out,
-                       "rename": "http://127.0.0.1:%d/rename?token=%s" % (cls.port, cls.token),
+                       "rename": "http://127.0.0.1:%d/rename?token=%s" % (cls.port, cls.token), "active": SIDS[cls._pinned()],
                        "views": os.path.join(cls.state, "timeline-views.json"), "sids": SIDS,
                        "shots": os.environ.get("TAB_DRAG_SHOTS", "")}, f)   # TAB_DRAG_SHOTS=<prefix>: strip screenshots of the packed layouts
         driver = os.path.join(cls.lab, "driver.mjs")
@@ -1020,6 +1145,105 @@ class ServedTabDragReorder(unittest.TestCase):
             want = list(start[name]) + ([sid] if name == fj["group"] else [])
             self.assertEqual(norm(end[name]), norm(want),
                              "%s holds what it held, plus only the session the last case deliberately joined" % name + detail)
+
+    # ── THE OPEN SESSION AND THE WAY BACK (2026-09-29) ──
+    # A header's click folds its group, except the way back: on an open group the pane shows, holding the open session,
+    # the click puts the transcript back and folds nothing. The page opens a chosen session (never the first frame's),
+    # the main run's fold clicks meet no way back, and the last phase meets one on purpose.
+    def test_the_page_opens_the_pinned_session(self):
+        r = self._run()
+        o = r["opened"]
+        want = SIDS[self._pinned()]
+        names = {sid: n for n, sid in SIDS.items()}
+        detail = "\n  opened %r (the page shows %s)" % (o, names.get(o.get("active"), o.get("active")))
+        self.assertEqual(o["want"], want, "the saved state named the pinned session" + detail)
+        self.assertTrue(o["on"], "the page restored the saved state's session, whatever frame arrived first" + detail)
+        self.assertEqual(o["active"], want, "…and it is the one open" + detail)
+        if want == SIDS[PINNED]:   # the premise PINNED rests on (a bisect's session may sit anywhere, and be dragged)
+            self.assertTrue(o.get("slot") is not None and o["slot"] >= 0,
+                            "the open session is a tab of the trail's row when the page boots, so it starts in no group" + detail)
+            touched = gestures_on(r, want)
+            self.assertEqual(touched, [], "no recorded gesture drags the open session, drops on it or renames it, so no drop"
+                             " moves it into a group: %r" % (touched,) + detail)
+
+    def test_no_fold_click_of_the_main_run_meets_the_way_back(self):
+        r = self._run()
+        self.assertEqual(r["wayBack"], [], "no header's group contains the open session, so every header click of the main run"
+                         " folds or opens; a way back here means the header's group contained the open session at that click"
+                         " (a grouped session, or one a drop moved into a group): %r, opened %r" % (r["wayBack"], r["opened"]))
+
+    def test_the_way_back_is_one_click_and_the_click_after_it_folds(self):
+        c = self._run()["wayBackCase"]
+        detail = "\n  %r" % (c,)
+        self.assertIsNone(c.get("error"), "the way-back phase ran to its end" + detail)
+        self.assertTrue(c["picked"], "the pick opened a qa member and ended the pane's section view" + detail)
+        self.assertEqual(c["setup"], [], "the fold and the open ahead of the re-fold are plain fold clicks" + detail)
+        self.assertEqual(c["offered"]["act"], "show-transcript",
+                         "open, shown in the pane and holding the open session, the header offers the way back" + detail)
+        self.assertEqual(c["wayBacks"], [{"group": "qa", "folded": True, "active": c["member"]}],
+                         "the re-fold took the way back exactly once, on qa's header, with the picked member open" + detail)
+        self.assertEqual(c["after"]["folded"], "1", "…and the click after it folded the group" + detail)
+        self.assertIn("collapsed", c["after"]["cls"].split(), "…as the header renders it" + detail)
+
+
+class PinnedSessionRecordCheck(unittest.TestCase):
+    """gestures_on, the check test_the_page_opens_the_pinned_session makes of the driver's record, over records built
+    here in the driver's shape (record()'s from and over, dragHead's headDrag, a skipped case, the push case's rename
+    answer): no browser, so it runs wherever this module is collected."""
+    PIN = SIDS[PINNED]
+
+    @staticmethod
+    def _tab(name, **kw):
+        return dict({"name": name, "id": SIDS[name]}, **kw)
+
+    def _record(self):
+        """A main run's record that leaves the pinned session alone: a drag on the trail, a drop on a folded header, a
+        header drag, a skipped case and the push case, whose rename renamed the trail's last tab."""
+        t = self._tab
+        return {"cases": [
+            {"label": "classic: trail, 1st tab to the 3rd slot (right part of the 3rd)", "from": t("indexer", index=0),
+             "over": t("notifier", left=400.0, w=90.0, top=60.0)},
+            {"label": "join: a tab dragged onto a FOLDED group's header joins it", "from": t("mailer", index=4),
+             "over": {"name": "#infra", "id": None, "left": 0.0, "w": 80.0, "top": 0.0}},
+            {"label": "packed: the second header dragged onto the first (the groups swap)", "headDrag": True,
+             "from": {"name": "qa", "draggable": True}},
+            {"label": "classic: group row, 1st tab to the 3rd slot (right part of the 3rd)", "skipped": "no such tab: rows=[]"},
+            {"label": "push mid-drag: trail, 2nd tab to the 6th slot (right part of the 6th)", "from": t("importer", index=1),
+             "over": t("metrics", left=500.0, w=90.0, top=60.0),
+             "rename": {"ok": True, "id": SIDS["auth"], "name": "auth-renamed"}}]}
+
+    def test_a_record_that_leaves_the_pinned_session_alone_names_nothing(self):
+        self.assertEqual(gestures_on(self._record(), self.PIN), [])
+
+    def test_a_drop_on_the_pinned_session_is_named(self):
+        r = self._record()
+        r["cases"][0]["over"] = self._tab(PINNED, left=400.0, w=90.0, top=60.0)
+        self.assertEqual(gestures_on(r, self.PIN),
+                         ["classic: trail, 1st tab to the 3rd slot (right part of the 3rd): drops on it"])
+
+    def test_a_drag_of_the_pinned_session_is_named(self):
+        r = self._record()
+        r["cases"][1]["from"] = self._tab(PINNED, index=11)
+        self.assertEqual(gestures_on(r, self.PIN), ["join: a tab dragged onto a FOLDED group's header joins it: drags it"])
+
+    def test_a_rename_of_the_pinned_session_is_named(self):
+        r = self._record()
+        r["cases"][4]["rename"] = {"ok": True, "id": self.PIN, "name": PINNED + "-renamed"}
+        self.assertEqual(gestures_on(r, self.PIN),
+                         ["push mid-drag: trail, 2nd tab to the 6th slot (right part of the 6th): renames it"])
+
+    def test_a_record_that_cannot_say_which_tabs_it_touched_is_named(self):
+        # a dragged tab's id missing, a tab drop target's id missing, or a refused rename (no id in its answer): the record
+        # cannot say the session was spared, so it does not pass for one that says so
+        r = self._record()
+        del r["cases"][0]["from"]["id"]
+        del r["cases"][0]["over"]["id"]
+        r["cases"][4]["rename"] = {"ok": False, "error": "no live session named \"auth\""}
+        self.assertEqual(gestures_on(r, self.PIN), [
+            "classic: trail, 1st tab to the 3rd slot (right part of the 3rd): records no dragged tab's id",
+            "classic: trail, 1st tab to the 3rd slot (right part of the 3rd): records no drop target's id",
+            "push mid-drag: trail, 2nd tab to the 6th slot (right part of the 6th): the rename's answer names no session: %r"
+            % ({"ok": False, "error": "no live session named \"auth\""},)])
 
 
 if __name__ == "__main__":

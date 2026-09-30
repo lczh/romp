@@ -102,6 +102,7 @@ import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
+import { CommentPill, placeCommentPill } from "./comment-pill";   // the touch "Comment" pill's placement and life (2026-09-30)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
@@ -7321,15 +7322,15 @@ function showSelectionMenu(e: MouseEvent) {
   if (!content || !sel || !sel.anchorNode || !content.contains(sel.anchorNode) || !text.trim()) return;
   e.preventDefault();
   dismissTabMenu();
-  const items: { label: string; pick: () => void }[] = [];
-  const mk = (labelText: string, fn: () => void) => { items.push({ label: labelText, pick: fn }); };
+  const items: { label: string; sub?: string; pick: () => void }[] = [];
+  const mk = (labelText: string, fn: () => void, sub?: string) => { items.push({ label: labelText, sub, pick: fn }); };
   // Comment first, Quote second (the user 2026-08-23): Comment is the primary act — a side thread
   // about the passage — and Quote is the lighter one. Comment only when the selection sits in a real
-  // transcript turn (transcriptSelection's uuid) on a real session.
-  const q = transcriptSelection();
-  if (q?.uuid && activeId && !isProvisionalId(activeId) && liveSession(activeId)) {
-    const sid = activeId, uuid = q.uuid, qtext = q.text;
-    mk("Comment", () => openCommentComposer(sid, uuid, qtext, e.clientX, e.clientY));
+  // transcript turn on a real session: commentAim's gate, the one the key asks too. Its sub-line names
+  // the key while one is bound (keyHint reads the live overrides), the tab menu bell row's way.
+  const aim = commentAim();
+  if (typeof aim === "object") {
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), keyHint("chat.commentSelection") || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7338,6 +7339,111 @@ function showSelectionMenu(e: MouseEvent) {
   mk("Copy", () => copyToClipboard(text));
   ctxMenuEl = openContextMenu(e.clientX, e.clientY, items, { onClose: onTabMenuClosed });   // the shared card: placed, dismissed and keyed the one way
 }
+
+// Comment on the selection from the keyboard or the palette (chat.commentSelection, the user 2026-09-30, who wanted a key
+// for it): exactly what the menu's Comment opens, through the same gate (commentAim) and the same openCommentComposer.
+type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number };
+/** The passage a new comment anchors to, and where its box opens: the transcript selection in a real turn
+ *  (transcriptSelection's uuid) on the active session, the box's corner just under the selection's box, since the
+ *  keyboard has no pointer to open it at (the menu's pick uses its own). "none" when nothing in a turn is selected;
+ *  "session" when the session cannot take a comment yet (a tab still being created, or a skeleton this page has not
+ *  loaded). Also read by the shell's palette as it opens (__rompCommentAim below). */
+function commentAim(): CommentAim | "none" | "session" {
+  const q = transcriptSelection();
+  if (!q?.uuid) return "none";
+  if (!activeId || isProvisionalId(activeId) || !liveSession(activeId)) return "session";
+  const sel = window.getSelection();
+  const r = sel && sel.rangeCount ? sel.getRangeAt(sel.rangeCount - 1) : null;
+  // the passage must be in the view on screen: a selection left in another tab's hidden view still reads as transcript
+  // text, and its turn's uuid is that session's, never the active one's
+  if (!r || !views.get(activeId)?.el.contains(r.startContainer)) return "none";
+  const b = r.getBoundingClientRect();
+  return { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
+}
+/** The command's run. `held` is the aim the palette captured as it opened (its input took the focus since, which may
+ *  have moved the selection); absent, the live selection is read. A held aim whose tab is no longer the one shown, or
+ *  whose session stopped being ready, is refused like a live one. Nothing to anchor to: a toast says what to do. */
+function commentOnSelection(held?: CommentAim | "none" | "session"): void {
+  let aim = held === undefined ? commentAim() : held;
+  if (typeof aim === "object" && aim.sid !== activeId) aim = "none";
+  else if (typeof aim === "object" && (isProvisionalId(aim.sid) || !liveSession(aim.sid))) aim = "session";
+  if (aim === "none") { ephemeralWarnToast("Select some text in the chat to comment on it."); return; }
+  if (aim === "session") { ephemeralWarnToast("This session isn't ready for comments yet."); return; }
+  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y);
+}
+/** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. */
+function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
+  if (v === "none" || v === "session") return v;
+  const a = v as Partial<CommentAim> | null;
+  return a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
+    && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
+}
+(window as any).__rompCommentAim = commentAim;
+// The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+Alt+M). With focus in
+// the chat this capture handler answers, reading the overrides store per press, so a rebind in the shortcuts dialog moves
+// it too (the chat.navBack pattern); with focus in the shell the command's run posts commentSelection here. It fires from
+// the message box too, as the jump cluster's keys do: the chord types nothing there, and the selection it reads is the
+// transcript's.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a command
+  const ch = chordOf(e);
+  if (!ch || !ch.includes("+")) return;
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], loadOverrides(), mac)) return;
+  e.preventDefault(); e.stopPropagation();
+  commentOnSelection();
+}, true);
+// The touch pill (the user 2026-09-30: a comment could not be started on a phone): iOS Safari's long-press selection fires
+// no contextmenu, so the menu above never opens there. On a coarse pointer a "Comment" pill shows just below a selection
+// commentAim accepts, and its tap runs commentOnSelection with the aim it was placed for: one door for the menu, the key,
+// the palette and the pill. When it shows and hides (events only) is comment-pill.ts; here are its element and wiring.
+// The element is made on the first show (a desktop never builds one) and never rebuilt, so its click is safe from
+// re-renders; mousedown's default is cancelled so a press keeps the selection it is about.
+let cmtPillEl: HTMLButtonElement | null = null;
+function commentPillEl(): HTMLButtonElement {
+  if (cmtPillEl) return cmtPillEl;
+  const b = document.createElement("button");
+  b.type = "button";
+  b.id = "cmt-pill";
+  b.hidden = true;
+  b.innerHTML = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" '
+    + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + JC_BUBBLE + "</svg><span>Comment</span>";
+  b.addEventListener("mousedown", (e) => e.preventDefault());
+  b.addEventListener("click", () => { const aim = commentPill.tapped(); if (aim) commentOnSelection(aim); });
+  document.body.appendChild(b);
+  return (cmtPillEl = b);
+}
+const commentPill = new CommentPill<CommentAim>({
+  coarse: isCoarsePointer,
+  blocked: () => !!document.getElementById("cmt-pop") || !!ctxMenuEl,
+  aim: () => {
+    const a = commentAim();
+    if (typeof a !== "object") return null;
+    // a selection scrolled out of the pane has nothing on screen for the pill to sit beside
+    const sel = window.getSelection()!, r = sel.getRangeAt(sel.rangeCount - 1).getBoundingClientRect();
+    const c = document.getElementById("content")?.getBoundingClientRect();
+    return c && (r.bottom < c.top || r.top > c.bottom) ? null : a;
+  },
+  show: () => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    const b = commentPillEl();
+    b.hidden = false;   // measured shown: its width is its label's
+    const comp = document.getElementById("composer");
+    const floor = Math.min(window.innerHeight, comp && comp.offsetParent ? comp.getBoundingClientRect().top : window.innerHeight);
+    const at = placeCommentPill(sel.getRangeAt(sel.rangeCount - 1).getBoundingClientRect(), b.offsetWidth, b.offsetHeight, window.innerWidth, floor);
+    b.style.left = at.left + "px";
+    b.style.top = at.top + "px";
+  },
+  hide: () => { if (cmtPillEl) cmtPillEl.hidden = true; },
+});
+document.addEventListener("selectionchange", () => commentPill.selectionChanged());
+document.addEventListener("touchstart", (e) => commentPill.touchStart(!!cmtPillEl && cmtPillEl.contains(e.target as Node)), { capture: true, passive: true });
+const commentPillTouchOver = (e: TouchEvent): void => commentPill.touchEnd(e.touches.length);
+document.addEventListener("touchend", commentPillTouchOver, { capture: true, passive: true });
+document.addEventListener("touchcancel", commentPillTouchOver, { capture: true, passive: true });
+document.addEventListener("scroll", (e) => { if (!cmtPillEl || !cmtPillEl.contains(e.target as Node)) commentPill.scrolled(); }, { capture: true, passive: true });
+window.addEventListener("resize", () => commentPill.resized());
 
 function copyToClipboard(text: string) {
   navigator.clipboard?.writeText(text).catch(() => { try { document.execCommand("copy"); } catch { /* best effort */ } });
@@ -10297,6 +10403,7 @@ function pickThreadColor(sid: string): string {
 }
 
 function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number): void {
+  commentPill.hide();   // the touch pill never outlives the box it (or any other door) opened
   pendingCommentAnchor = { sid, uuid, exact, color: pickThreadColor(sid) };
   openCommentKey = null;
   commentPopPos = { x, y };
@@ -10304,6 +10411,7 @@ function openCommentComposer(sid: string, uuid: string, exact: string, x: number
 }
 
 function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number): void {
+  commentPill.hide();
   openCommentKey = { sid, tid };
   pendingCommentAnchor = null;
   // click coords no longer seed the position (the user 2026-08-25): a THREAD popover opens at the
@@ -12326,7 +12434,9 @@ function ensureToastBox(): HTMLElement {
 // says the same host is unreachable and that romp is re-dialing it; the send into a tab whose create failed (deliver
 // too) says the session never started; the staging refusals (stageComposer) say an edit of a past message is in
 // progress or attachments are on the composer; the branch jump's
-// refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host
+// refusal (branchjump) says the session is not on this dashboard; the comment key's (commentOnSelection) say nothing in
+// the chat is selected or the session is not ready for comments (a selection never survives a reload, and a tab still
+// being created does not either). The fresh page shows each state for itself (the host
 // mark and the transcript foot, from the kernel's tunnel health, which the page reads afresh into a disconnected set
 // that starts empty; the staged strip; the attachments and the roster come back from the kernel and the
 // persisted drafts, the refused message among them) or no longer has it (a provisional tab, pending or failed, does not
@@ -18839,8 +18949,17 @@ function upsert(msg: any) {
   // WIRE_TAIL events, a full-session push re-windows to the last N, so the first uuid changes though it's the
   // same transcript — which dropped the DOM and snapped the view to the bottom (the user 2026-07-06). Detect a
   // fork by the ABSENCE of any shared event uuid instead.
-  const forked = !!(existed && msg.events && msg.events.length && prev && prev.events.length
-                    && !sharesAnyUuid(msg.events, prev.events));
+  // …among the KERNEL's events the page held (2026-09-29): its own pending group and its held-copies group wear ids
+  // the client minted, which no kernel event can share. A page holding nothing else (a send into an empty session:
+  // the dashed bubble alone) read the kernel's first frame after the send as a new transcript: it tore the view down
+  // and rebuilt it at the next animation frame, the DOM holding only the loader in between (never painted; a served
+  // clear lab read the page there). clearBoundarySeen (send-pending.ts) never counts the page's own groups either, but
+  // its fork test compares transcript turns alone, where this reading takes EVERY kernel event (the head, the send's
+  // echo, the kernel's overlay cards): read by turns, a page with the head and an echo beside its bubble would read
+  // each full frame (a reconnect's, a repair's; never a delta) of an empty session's first exchange as a first build.
+  const prevKernel = prev ? prev.events.filter((e) => !isOptimistic(e) && !isHeldGroup(e)) : [];
+  const forked = !!(existed && msg.events && msg.events.length && prev && prevKernel.length
+                    && !sharesAnyUuid(msg.events, prevKernel));
   // A view that never held an event is a PLACEHOLDER (a fork's provisional tab, a revive's stub):
   // the payload that fills it is the tab's FIRST content-bearing build, not an append onto a
   // transcript someone is reading. The append path measured "was the reader at the bottom?"
@@ -18848,7 +18967,8 @@ function upsert(msg: any) {
   // scrollTop 0, and the never-yank rule then held the top forever (the user 2026-09-02: an
   // opened or forked session sat at the top after its context loaded). A first build takes the
   // showActive branch below, where landActive pins the bottom exactly like a brand-new tab.
-  const firstBuild = !!(existed && prev && !prev.events.length && msg.events && msg.events.length);
+  // A view that held only the client's own groups is one too: the frame is its first kernel content (2026-09-29).
+  const firstBuild = !!(existed && prev && !prevKernel.length && msg.events && msg.events.length);
   // Preserve the reader's position across ANY active-tab rebuild (fork OR slid tail-window): capture whether
   // they were at the bottom + their anchor turn BEFORE we drop/rebuild the DOM, so a push never SNAPS a
   // scrolled-up reader down (the user 2026-07-06). Only a genuinely-at-bottom reader follows new content.
@@ -18874,6 +18994,12 @@ function upsert(msg: any) {
     // view as it is.
     const v = views.get(msg.id);
     if (v) { v.rediff = true; v.rendered = Math.min(v.rendered, s.events.length); }   // a shorter list is the keyed paint's too, never the rewind path's tail rebuild
+    // A first build over a view that painted only the client's groups builds FRESH, as a placeholder's does (syncView's
+    // empty branch leaves rendered at 0): the tail window from the newest compaction, in the task that replaces the
+    // bubble's nodes. The keyed paint would stretch the bubble's one-unit window over the whole arriving history; the
+    // fork's teardown used to give this fresh build (2026-09-29). And its row average, measured off the bubble alone, is
+    // measured again off the new rows, as every fresh rebuild's is: the spacers of a long arriving history are sized by it.
+    if (v && firstBuild) { v.rendered = 0; v.avgTurnH = undefined; }
   }
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
   adoptArrival(order, msg.id, existed);   // once: its tabOrder frame usually carried it already (tab-order.ts)
@@ -20122,6 +20248,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
   // the shell's palette / shell-focus chords for the jump cluster's moves (palette-main.ts chat.prevMine and the rest)
   if (m.romp === "chatJump") { if ((MOVES as readonly string[]).includes(m.move)) runJump(m.move as Move); return; }
+  // the shell's palette / shell-focus key for "Comment on selection" (palette-main.ts chat.commentSelection); a palette run
+  // carries the aim captured as the palette opened
+  if (m.romp === "commentSelection") { commentOnSelection("held" in m ? heldCommentAim(m.held) : undefined); return; }
   // a moved tab's drafts (the chat split): the shell took them from the source page (__rompTakeSessionState) and
   // hands them to this page, the session's column now — into the maps, persisted, and into the box when it is active
   if (m.romp === "adopt") { adoptSessionState(m.sid, m.state); return; }

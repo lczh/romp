@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { mergeWindow, keyOf, prependHead } from "./chat-window";
 import { OVERLAY_KINDS, insertRun, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Region } from "./chat-regions";
 import { frameOlder, droppedLandedHuman, dropsLandedRow } from "./frame-guard";   // the frame watermark guard (2026-09-22): upsert reads it
+import { isOptimisticUuid, isKernelEchoUuid } from "./send-pending";   // the uuid tests render.ts imports (the lifted predicates and upsert read them)
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -57,13 +58,24 @@ test("renderEvent stamps an orphan note's record uuid on its turn beside the not
 });
 
 // ── upsert: the tail run's regions (T386 stage 2) ────────────────────────────────────────────────
-// the client's own injections, as render.ts tells them (the optimistic group's and the held group's uuid prefixes)
-const isOptimistic = (e: any) => typeof e.uuid === "string" && e.uuid.startsWith("optimistic:");
-const isHeldGroup = (e: any) => e.kind === "queued" && typeof e.uuid === "string" && e.uuid.startsWith("held:");
+// the client's own injections, as render.ts tells them (the optimistic group's and the held group's uuid prefixes): its own two
+// predicates, lifted whole with the uuid test render.ts imports for the first and its HELD_PREFIX for the second, so an edit to
+// either in render.ts reaches every test below (the harness ran copies of its own, which kept the module green while render.ts's
+// isHeldGroup answered false, 2026-09-29)
+// one physical line of render.ts, which must be one whole statement: a predicate wrapped onto the next line would lift as its
+// first half, which esbuild accepts once it appends its own semicolon, so the raw line must end with one (review 2026-09-30)
+const liftLine = (anchor: string) => {
+  const a = RENDER.indexOf(anchor), b = RENDER.indexOf("\n", a);
+  assert.ok(a > 0 && b > a && RENDER.slice(a, b).trimEnd().endsWith(";"), `the lifted line is not one whole statement (wrapped?): ${anchor.slice(0, 40)}`);
+  return liftBetween(anchor, "\n");
+};
+const { isOptimistic, isHeldGroup } = liftWith(liftLine("const isOptimistic = (e: ChatEvent): boolean =>") + liftLine("const HELD_PREFIX = ")
+  + liftLine("const isHeldGroup = (e: ChatEvent): boolean =>"), { isOptimisticUuid }, ["isOptimistic", "isHeldGroup"]);
 // render.ts's own same-transcript reading (a fork shares no uuid), lifted whole: the harness used to answer it with the Proxy's no-op, so
 // PR 1860's guard 3 (which reads it) never ran here and its refusal was untestable in this file (the note on PR 1877, 2026-09-19)
 const sharesAnyUuid = liftWith(liftBetween("function sharesAnyUuid(a: ChatEvent[], b: ChatEvent[]): boolean {", "\n\n/** One client-diag row"), {}, ["sharesAnyUuid"]).sharesAnyUuid;
-function liftUpsert(sessions: Map<string, any>, pendingFullWhy: Map<string, string>, activeId: string | null, rows: any[] = [], asks: any[] = []) {
+// `over` replaces scope entries for one test (a painted view, the show paths recorded)
+function liftUpsert(sessions: Map<string, any>, pendingFullWhy: Map<string, string>, activeId: string | null, rows: any[] = [], asks: any[] = [], over: Record<string, unknown> = {}) {
   const scope: Record<string, unknown> = {
     sessions, pendingFullWhy, activeId, awaitingFull: new Set<string>(), skeletonTabs: { ids: new Set() }, tabMeta: new Map(), pendingTabMeta: new Map(),
     emptyFrameDiagSent: new Set(), ledgers: new Map(), views: new Map(), pendingRewind: new Map(),
@@ -72,10 +84,12 @@ function liftUpsert(sessions: Map<string, any>, pendingFullWhy: Map<string, stri
     keepResidentEvents: () => false, onFull: () => false, hostOf: () => "", mergeWindow, keyOf, regionsFromRuns, runsOf, insertRun, turnsBeforeTail, stripOptimistic: () => {},
     // the merge guard's rules (2026-09-19): the real split, the real overlay set, the client's injection tells, and the diag rows recorded
     splitHeldAgainstFrame, OVERLAY_KINDS, isOptimistic, isHeldGroup, chatDiagRow: (what: string, data: any) => rows.push({ what, data }),
+    isOptimisticUuid, isKernelEchoUuid,   // render.ts's imports from send-pending.ts, the real ones, so an edit to upsert that reads a uuid's kind by them runs here
     // PR 1860's guard 3 onto 1877: the real same-transcript reading, its latch, the rows it posts directly and the full-frame asks it makes
     sharesAnyUuid, refusedFrameLatch: new Map(), clearRefusedLatch: () => {}, requestFullSession: (id: string, why: string) => asks.push([id, why]),
     vscodeApi: { postMessage: (m: any) => rows.push({ what: m.what, data: m.data }) },
     frameOlder, droppedLandedHuman, dropsLandedRow,   // the frame watermark guard (2026-09-22): the real rules, their rows recorded like the merge guard's
+    ...over,
   };
   const js = liftBetween("function upsert(msg: any) {", "\nfunction ");
   return liftWith(js, scope, ["upsert"]);
@@ -222,6 +236,86 @@ test("guard 3 executed with the real sharesAnyUuid in scope (PR 1860 onto 1877):
   const rows2: any[] = [], asks2: any[] = [];
   liftUpsert(sessions, new Map(), "A", rows2, asks2).upsert(frame2([evU("t1"), evU("t2"), evU("t3"), evU("t4")], { tailLo: 195 }));
   assert.deepEqual([order(sessions.get("A")), shape(sessions.get("A").regions), rows2, asks2], [["t1", "t2", "t3", "t4"], ["gap[0,195)", "run[195,tail):t1,t2,t3,t4"], [], []]);
+});
+
+// ── upsert: the fork reading takes the page's KERNEL events (2026-09-29) ─────────────────────────────────────────────────
+// A send into an empty session leaves the page holding its own dashed group alone, and the kernel's first frame after the send (the
+// head, the send's echo, the clearing row) shares no id with it. The reading compared the frame with everything the page held, so
+// that frame read as a new transcript: the view was torn down and rebuilt at the next animation frame, the DOM holding only the
+// loader in between (never painted; a served clear lab read the page there). The frame is the view's first kernel content: the
+// view stays, the first-build show lands it, and its build starts fresh, the tail window a torn-down view got. A page holding
+// kernel events beside its own group (a turn, or only the head and the send's echo) reads forks and appends as before; on a frame
+// naming no tail start, its re-injected group no longer counts as a shared id.
+const pendingGroup = { kind: "queued", bare: true, texts: [{ md: "/clear", optimistic: true, qid: "q-1" }], uuid: "optimistic:1700000000000" };
+const heldCopies = { kind: "queued", texts: [{ md: "status?", landing: true }], uuid: "held:1700000000000" };
+const clearingFrame = (extra: Record<string, unknown> = {}) => ({ type: "session", id: "A", name: "web", proto: 2, headKnown: true, tailLo: 0, status: { state: "clearing" },
+  events: [{ kind: "system", uuid: "system:head" }, { kind: "user", uuid: "echo:q-1", md: "/clear" }, { kind: "clearing", uuid: "clearing:1" }], ...extra });
+const pageHolding = (kernel: any[], own: any[]) => ({ id: "A", name: "web", events: [...kernel, ...own], status: { state: "ready" }, proto: 2, headKnown: true,
+  headTotal: kernel.length, firstUuid: kernel.length ? kernel[0].uuid : null, lastUuid: kernel.length ? kernel[kernel.length - 1].uuid : null, tailLo: 0,
+  regions: [{ kind: "run", lo: 0, hi: null, events: kernel.slice() }] });
+/** One full frame onto the active session "A", whose view is painted up to `rendered` events: the view afterwards, whether it is
+ *  still the session's, and which show path ran. */
+function upsertOnPaintedView(page: any, frame: any, rendered: number) {
+  const v: any = { rendered, rediff: false, removed: 0, avgTurnH: 40 };
+  v.el = { remove: () => { v.removed++; } };
+  const views = new Map<string, any>([["A", v]]), shows: string[] = [], sessions = new Map<string, any>([["A", page]]);
+  liftUpsert(sessions, new Map(), "A", [], [], { views, showActive: () => shows.push("show"), appendActive: () => shows.push("append") }).upsert(frame);
+  return { v, kept: views.get("A") === v, shows, s: sessions.get("A") };
+}
+
+test("a send into an empty session: the kernel's first frame after it is the view's first build, never a fork (the view stays, the first-build show lands it, and it builds fresh)", () => {
+  const r = upsertOnPaintedView(pageHolding([], [pendingGroup]), clearingFrame(), 1);
+  assert.deepEqual([r.v.removed, r.kept], [0, true], "the view the bubble is painted in stays (read as a fork, it was removed and rebuilt at the next animation frame)");
+  assert.deepEqual(r.shows, ["show"], "the first-build show lands it, never the append path");
+  assert.equal(r.v.rendered, 0, "the build starts fresh, as a placeholder's does: the tail window, never the bubble's one-unit window stretched over the arriving rows");
+  assert.equal(r.v.avgTurnH, undefined, "the row average is measured again off the new rows");
+  assert.deepEqual(order(r.s), ["system:head", "echo:q-1", "clearing:1"], "the frame's rows are the session's (the reconcile, a stub here, re-injects the bubble)");
+});
+
+test("a page holding only its held-copies group reads the kernel's next frame as a first build too", () => {
+  const r = upsertOnPaintedView(pageHolding([], [heldCopies]), clearingFrame(), 1);
+  assert.deepEqual([r.v.removed, r.kept, r.shows, r.v.rendered], [0, true, ["show"], 0], "the held group is the client's, like the dashed one");
+});
+
+test("a page holding kernel events beside its own group: a frame sharing none of them is still a fork, one sharing them still appends", () => {
+  const kernel = [{ kind: "user", uuid: "t1", md: "hi" }, { kind: "assistant", uuid: "a1", md: "hello" }];
+  const fork = upsertOnPaintedView(pageHolding(kernel, [pendingGroup]), clearingFrame({ events: [{ kind: "user", uuid: "n1", md: "fresh" }] }), 3);
+  assert.deepEqual([fork.v.removed, fork.kept, fork.shows], [1, false, ["show"]], "a real fork still drops the view and lands the new transcript");
+  const more = upsertOnPaintedView(pageHolding(kernel, [pendingGroup]), clearingFrame({ status: { state: "working" }, events: [...kernel, { kind: "assistant", uuid: "a2", md: "more" }] }), 3);
+  assert.deepEqual([more.v.removed, more.kept, more.shows, more.v.rendered, more.v.rediff, more.v.avgTurnH], [0, true, ["append"], 3, true, 40], "an append keeps the view, its render mark and its row average, and compares its units");
+  // the kernel's head and the send's echo are kernel events too, though neither is a transcript turn (clearBoundarySeen's fork test
+  // compares turns alone): a page holding them beside its bubble, given a frame that carries them, appends. Read by turns, it would
+  // be a first build, and every full frame reaching it during an empty session's first exchange (a reconnect's or a repair's; the
+  // deltas between never read it) would rebuild the window and land the reader again until a real turn was resident
+  const headAndEcho = [{ kind: "system", uuid: "system:head" }, { kind: "user", uuid: "echo:q-1", md: "/clear" }];
+  const echoed = upsertOnPaintedView(pageHolding(headAndEcho, [pendingGroup]), clearingFrame(), 3);
+  assert.deepEqual([echoed.v.removed, echoed.kept, echoed.shows, echoed.v.rendered, echoed.v.avgTurnH], [0, true, ["append"], 3, 40],
+    "the head and the echo are shared kernel content: an append that keeps the view, its render mark and its row average");
+});
+
+test("a first build before the session's view exists (views are built lazily): the fresh-build reset is skipped, and the frame lands", () => {
+  // a background session whose first kernel content arrives before any show built its view: a page holding only its dashed group,
+  // and one holding nothing, each given the clearing frame; the reset reads the view, so without one the call must still return
+  for (const own of [[pendingGroup], []]) {
+    const held = own.length ? "a page holding its dashed group alone" : "a page holding nothing";
+    const views = new Map<string, any>(), sessions = new Map<string, any>([["A", pageHolding([], own)]]);
+    const api = liftUpsert(sessions, new Map(), "B", [], [], { views });
+    assert.doesNotThrow(() => api.upsert(clearingFrame()), held + ": the frame is applied with no view to reset");
+    assert.deepEqual(order(sessions.get("A")), ["system:head", "echo:q-1", "clearing:1"], held + ": the session holds the frame's events");
+    assert.equal(views.size, 0, held + ": no view is made here, the next show builds it");
+  }
+});
+
+test("a frame naming no tail start, adopted as sent: the page's re-injected group is no shared id, so a real fork still drops the view", () => {
+  const kernel = [{ kind: "user", uuid: "t1", md: "hi" }, { kind: "assistant", uuid: "a1", md: "hello" }];
+  const v: any = { rendered: 3, rediff: false, removed: 0 }; v.el = { remove: () => { v.removed++; } };
+  const views = new Map<string, any>([["A", v]]), shows: string[] = [];
+  const sessions = new Map<string, any>([["A", pageHolding(kernel, [pendingGroup])]]);
+  // the reconcile re-injects the pending group into the session's list, which on this road is the frame's own array
+  liftUpsert(sessions, new Map(), "A", [], [], { views, showActive: () => shows.push("show"), appendActive: () => shows.push("append"),
+    reconcileOptimistic: (s: any) => { s.events.push({ ...pendingGroup }); } })
+    .upsert(clearingFrame({ headKnown: false, tailLo: undefined, events: [{ kind: "user", uuid: "n1", md: "fresh" }] }));
+  assert.deepEqual([v.removed, views.get("A") === v, shows], [1, false, ["show"]], "the page's own bubble matched itself and a real fork read as shared");
 });
 
 // ── the older wire's wait (the follow-up of 2026-09-19, after the client merge guard): a regions-less proto-2 session's landing rides loadOlder ──

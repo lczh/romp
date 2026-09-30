@@ -240,7 +240,11 @@ export function initPalette(opts?: { onClose?: () => void; kbdFor?: (c: PaletteC
       placeholder: "Type a command…",
       // hidden commands are bindable but not listed (palette.toggle from the palette just blinks it)
       items: commandList().filter((c) => !c.hidden && (!c.when || c.when()))
-        .map((c) => ({ title: c.title, kbd: opts && opts.kbdFor ? opts.kbdFor(c) : undefined, run: c.run })),
+        .map((c) => {
+          // what a capturing command reads, read NOW: openPick moves the focus into the input next (commands.ts capture)
+          const held = c.capture ? c.capture() : undefined;
+          return { title: c.title, kbd: opts && opts.kbdFor ? opts.kbdFor(c) : undefined, run: c.capture ? () => c.run(held) : c.run };
+        }),
     });
   }
   function close(): void {

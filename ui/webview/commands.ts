@@ -12,7 +12,11 @@ export type PaletteCommand = {
   hidden?: boolean; // bindable but not listed in the palette (palette.toggle: running "toggle the
   when?: () => boolean;   // listed only while true, re-read at every open (a pane whose control the gear hid; T317)
                     // palette" FROM the palette would just blink it)
-  run: () => void;
+  // Read as the palette opens, before its input takes the focus, and handed to a run FROM that palette: for a command
+  // acting on state the focus move can disturb (chat.commentSelection's text selection, 2026-09-30). A run by key gets
+  // nothing and reads the live state itself.
+  capture?: () => unknown;
+  run: (held?: unknown) => void;
 };
 
 // Every DEFAULT key binding, by command id — ONE table, so the palette registration below, the shell
@@ -53,6 +57,11 @@ export const DEFAULT_CHORDS: Record<string, string> = {
   "chat.nextComment": "Ctrl+Alt+Shift+ArrowDown",
   "chat.prevUnread": "Ctrl+Alt+PageUp",
   "chat.nextUnread": "Ctrl+Alt+PageDown",
+  // Comment on the selected chat text (the user 2026-09-30, who wanted a key for it): Google Docs' insert-comment key, ⌘⌥M
+  // on a Mac and Ctrl+Alt+M elsewhere, so Mod here. Not chat.navBack's literal Ctrl+M: the Alt makes it another chord on
+  // both platforms. It edits no text, so it works from the message box too; where Ctrl+Alt+M types a character (AltGr+M,
+  // µ on a German layout) the keydown spells that character, not M, and the typing wins. The dialog rebinds.
+  "chat.commentSelection": "Mod+Alt+M",
 };
 
 const commands = new Map<string, PaletteCommand>();

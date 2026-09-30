@@ -75,8 +75,9 @@ const rowSel = (id) => '#notices .ntc-row[data-item="' + id + '"]';
 const readBox = () => page.evaluate(() => {
   const box = document.getElementById("notices"); const cs = box ? getComputedStyle(box) : null;
   const rows = box ? Array.from(box.querySelectorAll(".ntc-row")) : [];
-  const tab = document.querySelector('#tabs .tab[data-id]');
-  const tabs = Object.fromEntries(Array.from(document.querySelectorAll('#tabs .tab[data-id]')).map((t) => [t.getAttribute("data-id"), t.className]));   // every tab's classes by sid: the rings
+  // every tab's classes by sid, the rings, read BY ID (the first review round of this fix: the strip's first tab, which this record carried as
+  // web's, is api's under a saved order that puts api first, while the pick has moved the page to web)
+  const tabs = Object.fromEntries(Array.from(document.querySelectorAll('#tabs .tab[data-id]')).map((t) => [t.getAttribute("data-id"), t.className]));
   const vis = (el) => !!el && getComputedStyle(el).display !== "none";
   const level = box ? ["ntc-l0", "ntc-l1", "ntc-l2"].findIndex((c) => box.classList.contains(c)) : null;   // the box's level class (-1: none)
   return { shown: !!box && box.style.display !== "none" && !!cs && cs.display !== "none", border: cs ? cs.borderTopColor : null, borderLeft: cs ? cs.borderLeftWidth : null,
@@ -90,11 +91,28 @@ const readBox = () => page.evaluate(() => {
            theme: document.body.classList.contains("theme-light") ? "light" : "dark",
            rows: rows.map((r) => ({ id: r.getAttribute("data-item"), title: (r.querySelector(".ntc-title") || {}).textContent, body: ((r.querySelector(".ntc-secs > .fask-distill") || r.querySelector(".ntc-body")) || {}).textContent,
                                    buttons: Array.from(r.querySelectorAll(".ntc-actions button")).map((b) => b.textContent), disabled: Array.from(r.querySelectorAll(".ntc-actions button")).map((b) => b.disabled) })),
-           tabClasses: tab ? tab.className : null, tabs };
+           tabs };
 });
 const waitRows = (n, ms) => page.waitForFunction((n) => document.querySelectorAll("#notices .ntc-row").length === n, n, { timeout: ms }).then(() => true).catch(() => false);
 await page.goto(cfg.chat);
-await page.waitForSelector("#tabs .tab", { timeout: 30000 }).catch(() => {});
+// THE PREMISE, web's tab active (the CI census of 2026-09-29: two runs on main read api's box as web's, 'Needs you · 1' under api's active tab,
+// and six tests failed after their 60 s and 5 s waits): a fresh page with no saved choice adopts the FIRST session frame to arrive, and the
+// kernel can send api's first (a pusher cycle that straddles the socket's ready, which withholds web's frame and sends api's; or the connect
+// push's ranking, which puts a session named to the cycle or one without a transcript ahead of the strip's order), and no later frame
+// displaces it. So the driver PICKS web's tab, as a user would: the page adopts an arriving frame only while no tab is active, so the pick
+// stands whatever the kernel sent first. The tab the page adopted is kept for test 1's message alone. Each wait fails soft: a throw here ends
+// the driver and fails every test in the class with no record, where a miss is the premise, which test 1 names. One helper for the page and
+// for the shell's chat pane (scene 6), a fresh page of its own that makes the same pick
+const pickWeb = async (f) => {   // f: the standalone page or the shell's chat frame
+  const webTab = '#tabs .tab[data-id="' + cfg.sid + '"]';
+  const p = { webTab: await f.waitForSelector(webTab, { timeout: 30000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; }) };
+  p.adopted = await f.waitForSelector("#tabs .tab.active[data-id]", { timeout: 15000 }).then((h) => h.getAttribute("data-id")).catch((e) => { if (e.name !== "TimeoutError") throw e; return null; });   // the first arrival's tab (null: none adopted yet, and the pick below comes first)
+  if (p.webTab) await f.click(webTab, { timeout: 5000 }).catch((e) => { if (e.name !== "TimeoutError") throw e; p.clickMissed = String(e).slice(0, 300); });
+  p.webActive = await f.waitForSelector('#tabs .tab.active[data-id="' + cfg.sid + '"]', { timeout: 15000 }).then(() => true).catch((e) => { if (e.name !== "TimeoutError") throw e; return false; });
+  p.active = await f.evaluate(() => { const t = document.querySelector("#tabs .tab.active[data-id]"); return t ? t.getAttribute("data-id") : null; });
+  return p;
+};
+out.premise = await pickWeb(page);
 // 1. the box: four rows (the three questions and the held message), the header, the token edge, no row for the hard stop, the red ring on the tab
 out.fourRows = await waitRows(4, 60000);
 out.first = await readBox();
@@ -151,7 +169,7 @@ mark();
 // 0d. A CREDENTIAL ROW FLOORS THE BOX AT THE ITEMS (the same review: a refused judge credential hid at level 0 under a header identical to a
 // question's): the judge-auth-down latch seeded for api, whose one card becomes the "Fix credential…" row; api's box shows the items with no
 // click, the header's click goes to the full context and back to the items, never to the header line, while the row shows; web is untouched
-fs.writeFileSync(cfg.judgeAuth, JSON.stringify({ [cfg.api]: { t: Math.floor(Date.now() / 1000) - 60, mode: "key", note: "the API key is being refused" } }));
+publishJson(cfg.judgeAuth, { [cfg.api]: { t: Math.floor(Date.now() / 1000) - 60, mode: "key", note: "the API key is being refused" } });   // published, never written in place: the kernel's latch read caches a failed parse by mtime alone, so an emptied file read in the write's instant, refilled within the same clock tick, would hide the row until the file next changed
 fs.utimesSync(cfg.order, new Date(), new Date());
 await page.click('#tabs .tab[data-id="' + cfg.api + '"]');
 out.floor = { row: await page.waitForSelector('#notices .ntc-row button[data-act="ntc-fix"]', { state: "attached", timeout: 60000 }).then(() => true).catch(() => false) };
@@ -204,13 +222,32 @@ const feedBuiltPast = async (floor, id, brief, ms) => {   // the kernel's feed b
   }
   return null;
 };
+const nodeOf = (st, id) => {   // the node a scene edits, or an error that names the loss: the store's revision, its node ids and any store the kernel moved aside (the CI red of 2026-09-24, in writeStore's note, said none of it: a bare TypeError)
+  const n = (st.nodes || {})[id];
+  if (n) return n;
+  let aside; try { aside = fs.readdirSync(cfg.goalsDir).filter((f) => f.includes(".corrupt-")); } catch (e) { aside = String(e); }
+  throw new Error("store-node-lost: " + id + " is not in the goal store this write read (rev " + st.rev + ", seq " + st.seq + "; nodes " + JSON.stringify(Object.keys(st.nodes || {})) + "; stores moved aside " + JSON.stringify(aside) + ")");
+};
 const writeStore = async (mutate) => {   // the feed build id before the write (null when that read fails: its own miss, never a floor of -1), the write (seq bumped), the order touch
   // The write is a PUBLICATION the kernel's own writers must see: `rev` advances as save_goals advances it, so a judge pass whose store predates
   // this write rebases onto it (the kernel's compare-and-swap keys on rev and, since the CI red of 2026-09-23, on the file's identity; before,
-  // an in-place rewrite that left rev alone was invisible to a save holding an older base, and the pass's save erased the node just written)
-  const b0 = ((await kernelFeed()) || {}).buildId; const st = JSON.parse(fs.readFileSync(cfg.store, "utf8")); mutate(st); st.seq = (st.seq || 0) + 1; st.rev = (st.rev || 0) + 1;
-  fs.writeFileSync(cfg.store, JSON.stringify(st));
-  fs.utimesSync(cfg.order, new Date(), new Date()); return typeof b0 === "number" ? b0 : null;
+  // an in-place rewrite that left rev alone was invisible to a save holding an older base, and the pass's save erased the node just written).
+  // And it is published whole, never rewritten in place (a CI red on main, 2026-09-24): the in-place write truncated the store first, a kernel
+  // read in that instant found it empty, moved it aside as corrupt and started the session fresh, and the next scene's node was gone. So the
+  // bytes go through publishJson (a temp file and a rename), and the rename is this writer's own compare-and-swap on the file's identity, taken
+  // from the descriptor the bytes are read from: a kernel publication that lands before the identity check just ahead of the
+  // rename sends the edit round again on the new bytes, twenty rounds at most, then a named error. What stays open is each side's check-to-rename
+  // gap (nothing takes a file lock): a kernel publication landing inside this writer's gap is renamed over, and a kernel save whose check passed
+  // before this rename can publish over it inside its own; nodeOf names a node lost that way at the next edit, and a lost brief shows as the
+  // scene's build wait missing, with the file's revision and brief in its record.
+  const b0 = ((await kernelFeed()) || {}).buildId;
+  for (let round = 0; round < 20; round++) {   // loop-ok: bounded; a new round only when a kernel publication moved the store after this round's read
+    const fd = fs.openSync(cfg.store, "r"); let id0, st;
+    try { id0 = fileIdent(cfg.store, fd); st = JSON.parse(fs.readFileSync(fd, "utf8")); } finally { fs.closeSync(fd); }
+    mutate(st); st.seq = (st.seq || 0) + 1; st.rev = (st.rev || 0) + 1;
+    if (publishJson(cfg.store, st, () => fileIdent(cfg.store) === id0)) { fs.utimesSync(cfg.order, new Date(), new Date()); return typeof b0 === "number" ? b0 : null; }
+  }
+  throw new Error("store-write-contended: the goal store moved under each of 20 rounds of this write; the edit was not published");
 };
 const onMiss = async (o) => {   // the counters, the kernel's own view of the card, and the FILE: a write the kernel published over reads as a node gone and rev moved
   o.perf = await kernelPerf(); o.kernelBrief = briefOf(await kernelFeed(), o.id);
@@ -221,7 +258,7 @@ const builtRecord = async (id, floor, brief) => { const o = { id, floor, built: 
 // a brief is a FAMILY field (the store's distill families): the rebase adopts a family as a unit by its stamp, so an in-place edit of a
 // brief stamps its family (briefedMt, as every kernel writer of a brief does) or a judge pass's save keeps its own (2026-09-23)
 const briefNow = () => Math.floor(Date.now() / 1000);
-const w1 = await writeStore((st) => { st.nodes[cfg.g1].blockSummary = cfg.brief; st.nodes[cfg.g1].briefedMt = briefNow(); });
+const w1 = await writeStore((st) => { const n = nodeOf(st, cfg.g1); n.blockSummary = cfg.brief; n.briefedMt = briefNow(); });
 out.brief = await builtRecord(cfg.g1, w1, cfg.brief);
 out.brief.landed = await page.waitForFunction((a) => { const r = document.querySelector(a.sel); const b = r && (r.querySelector(".ntc-secs > .fask-distill") || r.querySelector(".ntc-body")); return !!b && (b.textContent || "").trim() === a.brief; }, { sel: rowSel(cfg.g1), brief: cfg.brief }, { timeout: 30000 }).then(() => true).catch(() => false);   // the row follows the kernel's word by one chat build
 if (!out.brief.landed) await onMiss(out.brief);
@@ -229,7 +266,7 @@ mark();
 out.brief.box = await readBox();
 // 1c. a brief past the four-line clamp gets a disclosure on its row (the second contributor's review of PR 1967): the More button shows
 // only once the body overflows, opens the row (the clamp lifted, the whole brief on screen), reads Less, and folds the row back
-const w2 = await writeStore((st) => { st.nodes[cfg.g1].blockSummary = cfg.longBrief; st.nodes[cfg.g1].briefedMt = briefNow() + 1; });
+const w2 = await writeStore((st) => { const n = nodeOf(st, cfg.g1); n.blockSummary = cfg.longBrief; n.briefedMt = briefNow() + 1; });
 const moreSel = rowSel(cfg.g1) + " .ntc-more";
 // held on the kernel's build event, then the page's own events (the round-fifteen CI red read too early; the second red saw no frame for sixty
 // seconds with no word from the kernel): the feed rebuilt past the write with the brief, the body carries it, its layout clips it, then the button
@@ -356,6 +393,15 @@ await shell.goto(cfg.landing);                                                  
 let fr = null; for (let i = 0; i < 150 && !fr; i++) { fr = shell.frames().find((f) => /\/chat(\?|$)/.test(f.url())) || null; if (!fr) await shell.waitForTimeout(200); }   // loop-ok: bounded
 out.hiddenPane = { frame: !!fr };
 if (fr) {
+  // THE SAME PREMISE in the shell's chat pane (a review of this fix, 2026-09-29): a fresh page with no saved choice as well, and the kernel can
+  // send api's frame before any strip reaches it, which the page adopts before the stale-active fallback (the strip's first member) can act.
+  // The hidden-pane, keyboard-order and content scenes read web's rows here, so the driver picks web's tab first. The first review round of
+  // this fix forced api first here: with the saved session order (setUpClass) written api first, this pane and the standalone page both
+  // opened on api's tab (this one perhaps through that fallback, the strip's first member then being api), the pick moved each to web, and
+  // these scenes passed. Recorded in the scene's record, which the hidden-pane test prints, and on the PARTIAL line below for a run that
+  // overruns its budget; asserted by no test
+  out.hiddenPane.premise = await pickWeb(fr);
+  mark();   // the pane's premise on a PARTIAL line at once: a driver that overruns its budget in the scenes below still names it (_overrun_record)
   out.hiddenPane.loaded = await fr.waitForSelector("#notices .ntc-head", { timeout: 60000 }).then(() => true).catch(() => false);   // the box on screen once, collapsed to its header line (a fresh page)
   out.hiddenPane.collapsedFresh = await fr.evaluate(() => document.getElementById("notices").classList.contains("ntc-l0") && Array.from(document.querySelectorAll("#notices .ntc-row")).every((r) => getComputedStyle(r).display === "none"));   // collapsed by default: the rows attached and hidden
   await openNeedsBox(fr, 2);   // to the full context; a page without the levels (the base) shows everything already
@@ -454,10 +500,10 @@ if (fr) {
   out.content.feedFrame = !!ff;
   if (ff) {
     const cardSel = '.fitem.ask[data-key="a:' + cfg.g6 + '"]';
-    const w5 = await writeStore((st) => { st.nodes[cfg.g6].background = cfg.background; st.nodes[cfg.g6].distilledMt = briefNow() + 3;
-      st.nodes[cfg.g6].origin = { peer: cfg.api, peerName: "api", goalId: cfg.api + ":g1" };
-      st.nodes[cfg.g6].warns = [{ kind: "brief-failed", t: Math.floor(Date.now() / 1000) - 60, msg: "the first brief could not be written", detail: "the model returned nothing" }];   // the warning chip (the verifier's round two: the lab drove the origin badge alone); the kernel's distill pass is off (setUpClass), so the fixture stands
-      st.nodes[cfg.g6].relayCarried = "a question to api is still parked on the far host: it went on before it could be withdrawn";   // the relayed question a far host still holds: the card's own dim line, drawn on the row too (a contributor's post-merge note on PR 2124)
+    const w5 = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.background = cfg.background; n.distilledMt = briefNow() + 3;
+      n.origin = { peer: cfg.api, peerName: "api", goalId: cfg.api + ":g1" };
+      n.warns = [{ kind: "brief-failed", t: Math.floor(Date.now() / 1000) - 60, msg: "the first brief could not be written", detail: "the model returned nothing" }];   // the warning chip (the verifier's round two: the lab drove the origin badge alone); the kernel's distill pass is off (setUpClass), so the fixture stands
+      n.relayCarried = "a question to api is still parked on the far host: it went on before it could be withdrawn";   // the relayed question a far host still holds: the card's own dim line, drawn on the row too (a contributor's post-merge note on PR 2124)
       st.nodes[cfg.g6c] = { id: cfg.g6c, text: cfg.g6cText, parentId: cfg.g6, nodeComplete: false, blocked: false, cleared: false, trail: [], t: Math.floor(Date.now() / 1000), log: [] }; st.status[cfg.g6c] = "working"; });
     Object.assign(out.content, await builtRecord(cfg.g6, w5, cfg.longBrief));   // { id, floor, built }: the kernel's build past the write
     const vis = "const vis = (x) => !!x && getComputedStyle(x).display !== 'none' && x.getBoundingClientRect().height > 0;";
@@ -534,7 +580,7 @@ if (fr) {
     out.content.pick.itemsAfterCardBg = await moreOf();
     // a REPAINT with Background picked (the same note: the items face after a repaint was unpinned): a store write that moves a field the row
     // carries (the background paragraph itself, its family stamped), waited for on the row's own background body, then the items face read again
-    const w7 = await writeStore((st) => { st.nodes[cfg.g6].background = cfg.background + " The second loader reads the first's fixtures."; st.nodes[cfg.g6].distilledMt = briefNow() + 9; });
+    const w7 = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.background = cfg.background + " The second loader reads the first's fixtures."; n.distilledMt = briefNow() + 9; });
     out.content.pick.repaint = await builtRecord(cfg.g6, w7, cfg.longBrief);
     out.content.pick.repainted = await fr.waitForFunction((s) => { const r = document.querySelector(s); const b = r && r.querySelector(".fask-bg-body"); return !!b && (b.textContent || "").includes("second loader reads"); }, rowSel(cfg.g6), { timeout: 30000 }).then(() => true).catch(() => false);   // the row repainted with the new paragraph
     out.content.pick.itemsAfterRepaint = await moreOf();
@@ -545,8 +591,8 @@ if (fr) {
     // row's line is a link like the card's and its click lands the way this chat page lands: at the turn the kernel's anchor names, or, when
     // the kernel serves none, in the landing toast that says no anchor was recorded (no goal here can carry a validated citation: the
     // synthetic transcript ends before every goal, and a goal reaching into it takes the API-error turn and becomes the hard stop)
-    const w6 = await writeStore((st) => { st.nodes[cfg.g6].blockSummary = cfg.twoParaBrief; st.nodes[cfg.g6].briefedMt = briefNow() + 5;
-      st.nodes[cfg.g6].briefParts = [{ id: cfg.g6c, since: Math.floor(Date.now() / 1000) - 120 }, { id: cfg.g6 + ":open" }]; });
+    const w6 = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.blockSummary = cfg.twoParaBrief; n.briefedMt = briefNow() + 5;
+      n.briefParts = [{ id: cfg.g6c, since: Math.floor(Date.now() / 1000) - 120 }, { id: cfg.g6 + ":open" }]; });
     out.content.stamps = await builtRecord(cfg.g6, w6, cfg.twoParaBrief);
     const fAfter = await kernelFeed(); out.content.stamps.anchor = ((((fAfter || {}).asks || []).find((a) => a.itemId === cfg.g6) || {}).summaryAnchorUuid) || null;
     out.content.stamps.cardLanded = await ff.waitForFunction((s) => { const c = document.querySelector(s); const d = c && c.querySelector(".fask-secs > .fask-distill"); return !!d && d.querySelectorAll(".fask-para").length === 2; }, cardSel, { timeout: 30000 }).then(() => true).catch(() => false);
@@ -590,7 +636,7 @@ if (fr) {
       out.content.collapsed.payloads = [];
       for (const word of ["third", "fourth"]) {   // loop-ok: two writes
         const brief = cfg.twoParaBrief + " The " + word + " loader reads the fixtures of the one before.";
-        const w = await writeStore((st) => { st.nodes[cfg.g6].blockSummary = brief; st.nodes[cfg.g6].briefedMt = briefNow() + 10 + out.content.collapsed.payloads.length; });
+        const w = await writeStore((st) => { const n = nodeOf(st, cfg.g6); n.blockSummary = brief; n.briefedMt = briefNow() + 10 + out.content.collapsed.payloads.length; });
         const rec = await builtRecord(cfg.g6, w, brief);
         rec.repainted = await fr2.waitForFunction((a) => { const r = document.querySelector(a.sel); const b = r && r.querySelector(".ntc-distill"); return !!b && (b.textContent || "").includes(a.word + " loader reads"); }, { sel: rowSel(cfg.g6), word }, { timeout: 30000 }).then(() => true).catch(() => false);
         out.content.collapsed.payloads.push(rec);
@@ -619,15 +665,60 @@ await browser.close();
 """
 
 
-# the driver's budget. Its bounded waits sum to about 2950 s serially (every helper counted PER CALL, the round-one verifier of PR 2105: the
+# the driver's budget. Its bounded waits sum to about 3050 s serially (every helper counted PER CALL, the round-one verifier of PR 2105: the
 # kernel's four 90 s deadlines, the 60 s row, card and credential-row waits, the 30 s and 15 s waits of the brief helpers per call, the fold
-# helper's three 5 s waits per call, the shorter button, dialog, level, settings-card and frame waits, the frame loops), more than any per-test ceiling the runner gives (CI's served-page step runs pytest with --timeout=600, thread method), so
+# helper's three 5 s waits per call, the shorter button, dialog, level, settings-card, premise and frame waits, the frame loops), more than any per-test ceiling the runner gives (CI's served-page step runs pytest with --timeout=600, thread method), so
 # the cap cannot be the sum: it is the ceiling less the SETUP the same per-test timer wraps (pytest-timeout's thread method times the first
 # test's setUpClass too: the esbuild run and the healthz boot loop, bounded at about 60 to 120 s here), so a kernel that boots late and then
 # stalls still hits this cap before the runner's, with the record below and the kernel's tail in hand rather than a bare per-test timeout
 # that also skips every later served test in the process (the second contributor's read of PR 2038). A driver that runs past it has hit
-# several deadlines in a row; the driver prints a PARTIAL line after every scene, and _result reports the last one with the kernel's tail.
+# several deadlines in a row; the driver prints a PARTIAL line after every scene, and _result reports the last one, its two premise records
+# named first (_overrun_record), with the kernel's tail.
 DRIVER_TIMEOUT_S = 480
+
+
+def _opened_on(adopted):
+    """The tab a fresh page first opened on, named for a message (None: none was active within the pick's 15 s wait, the case a message
+    most needs to name)."""
+    if adopted is None or isinstance(adopted, str):
+        return {SID: "web's tab", API: "api's tab", None: "no tab (none was active within 15 s)"}.get(adopted, "the tab %s" % adopted)
+    return "the tab %r" % (adopted,)
+
+
+def _premise_said(p):
+    """One premise record (the driver's pickWeb: web's tab picked before the first read), said for the budget message."""
+    if not isinstance(p, dict):
+        return "not recorded"
+    return "web's tab %s, the page having first opened on %s: %r" % ("active" if p.get("webActive") is True else "NOT active", _opened_on(p.get("adopted")), p)
+
+
+def _overrun_record(stdout):
+    """What a driver that ran past its budget had reached, for the message every test then fails on: the two premise records named FIRST,
+    the standalone page's (`premise`) and the shell's chat pane's (`hiddenPane.premise`), read from the last PARTIAL line as JSON, then that
+    line's last 3000 characters. The tail alone missed the standalone record, which sits early in every line, and the pane's, which sits
+    last only in the line written right after its pick and early in the later ones (the first review round of this fix, 2026-09-29: with the
+    pane left on api's tab the driver overran and all 30 tests failed on a budget message that said nothing of the premise). A line that
+    does not parse, or parses to something other than a record, falls back to the tail. Never raises: this message is all an overrun
+    leaves."""
+    line = next((ln for ln in reversed((stdout or "").splitlines()) if ln.startswith("PARTIAL:")), None)
+    if line is None:
+        return "its record so far: (no scene completed)"
+    tail = "its record so far: %s" % line[-3000:]
+    try:
+        rec = json.loads(line[len("PARTIAL:"):])
+    except ValueError:
+        return tail
+    if not isinstance(rec, dict):
+        return tail
+    pane = rec.get("hiddenPane")
+    if not isinstance(pane, dict):
+        said = "not reached (the last PARTIAL line was written before the driver opened the shell's chat pane)"
+    elif "premise" not in pane:
+        said = "not recorded (the shell's chat frame found: %r)" % (pane.get("frame"),)
+    else:
+        said = _premise_said(pane["premise"])
+    return "the premise, web's tab picked before the first read: on the standalone page, %s; in the shell's chat pane, %s; %s" % (
+        _premise_said(rec.get("premise")), said, tail)
 
 
 def _block(t, why):
@@ -672,7 +763,8 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             {"sid": SID, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": SID, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
         # api: one question and no hard stop, so its tab wears the Needs you ring (the switch leg reads it: web's red ring is painted
-        # first and alone, so a regression dropping the magenta ring would pass on web's tab); web stays first, the active tab
+        # first and alone, so a regression dropping the magenta ring would pass on web's tab); web stays first in the strip, and the driver
+        # picks its tab before the first read, since the strip's order never made it the active one (the premise in the driver, 2026-09-29)
         Path(state, "names", API).write_text("api\t%s\t#1EA1EB\t#ffffff\n" % cwd)
         Path(state, "sdk", API + ".json").write_text(json.dumps(
             {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
@@ -767,18 +859,17 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             base = "http://127.0.0.1:%d" % self.port
             with open(cfg, "w") as f:
                 json.dump({"chat": base + "/chat?token=" + self.token, "feed": base + "/feed?token=" + self.token, "feedJson": base + "/feed.json?token=" + self.token, "perf": base + "/perf?token=" + self.token, "sid": SID, "api": API, "g1": self.g[0], "g2": self.g[1], "g3": self.g[2], "g4": self.g[3],
-                           "reply": "Postgres, the same as production", "store": self.store, "brief": BRIEF, "longBrief": LONG_BRIEF, "g5": SID + ":g5", "g5q": "should the fixtures use the production database name or a scratch one?", "g6": SID + ":g6", "g6q": "which of the two fixture loaders should the CI job run first?", "g6c": SID + ":g6c", "g6cText": "run the second loader under the first's fixtures", "background": BACKGROUND, "twoParaBrief": TWO_PARA_BRIEF, "landing": base + "/?token=" + self.token, "ledger": self.ledger, "order": self.order, "judgeAuth": os.path.join(os.path.dirname(os.path.dirname(self.store)), "judge-auth.json")}, f)
+                           "reply": "Postgres, the same as production", "store": self.store, "brief": BRIEF, "longBrief": LONG_BRIEF, "g5": SID + ":g5", "g5q": "should the fixtures use the production database name or a scratch one?", "g6": SID + ":g6", "g6q": "which of the two fixture loaders should the CI job run first?", "g6c": SID + ":g6c", "g6cText": "run the second loader under the first's fixtures", "background": BACKGROUND, "twoParaBrief": TWO_PARA_BRIEF, "landing": base + "/?token=" + self.token, "ledger": self.ledger, "order": self.order, "judgeAuth": os.path.join(os.path.dirname(os.path.dirname(self.store)), "judge-auth.json"), "goalsDir": os.path.dirname(self.store)}, f)
             driver = os.path.join(self.lab, "needsbox.mjs")
-            Path(driver).write_text(_lab.NEEDS_BOX_OPEN_JS + DRIVER)   # the fold helper the held-mail lab shares
+            Path(driver).write_text(_lab.NEEDS_BOX_OPEN_JS + _lab.PUBLISH_JSON_JS + DRIVER)   # the fold helper the held-mail lab shares, and the publisher every write of a file the kernel reads goes through
             try:
                 p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=DRIVER_TIMEOUT_S,
                                    env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
             except subprocess.TimeoutExpired as e:
                 # the driver ran past its budget (several deadlines in a row): say the record it had reached and what the kernel's tail says, instead
-                # of a bare traceback in every test (the second contributor's read of PR 2031)
+                # of a bare traceback in every test (the second contributor's read of PR 2031); the two premise records first (_overrun_record)
                 out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-                partial = next((ln for ln in reversed(out.splitlines()) if ln.startswith("PARTIAL:")), "(no scene completed)")
-                type(self)._fail = "the driver ran past its %d s budget; its record so far: %s; kernel: %s" % (DRIVER_TIMEOUT_S, partial[-3000:], self._kernel_tail())
+                type(self)._fail = "the driver ran past its %d s budget; %s; kernel: %s" % (DRIVER_TIMEOUT_S, _overrun_record(out), self._kernel_tail())
                 self.fail(type(self)._fail)
             if "browser-launch-failed" in p.stderr:
                 self._skip("no playwright browser on this box")
@@ -805,10 +896,29 @@ class NeedsYouBoxChatServed(unittest.TestCase):
         except OSError:
             return ""
 
+    def test_the_labs_writes_never_leave_the_kernel_a_store_to_move_aside(self):
+        """A CI red on main (2026-09-24): the driver rewrote the goal store in place, a kernel read in the instant the file stood empty
+        moved it aside as corrupt and started the session fresh, and every test failed on one TypeError that named nothing. The driver
+        publishes every file the kernel reads now (publishJson: a temp file and a rename). This reads the kernel's log and the state
+        directory itself, never the driver's record, so a store moved aside is named here even when the driver died of it."""
+        try:
+            self._result()
+        except AssertionError:
+            if not getattr(type(self), "_fail", None):
+                raise   # not the driver's own failure (a required lab that could not run): that is this test's to report too
+        state = os.path.dirname(os.path.dirname(self.store))
+        unparsed = [ln for ln in Path(self.klog).read_text(errors="replace").splitlines() if "could not be parsed" in ln]
+        aside = sorted(os.path.relpath(os.path.join(d, n), state) for d, _dirs, names in os.walk(state) for n in names if ".corrupt-" in n)
+        self.assertEqual((unparsed, aside), ([], []), "no state file the kernel read was unparseable and none was moved aside (before: the "
+                         "in-place store write, read empty, was moved aside and the session started fresh)")
+
     def test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop(self):
         r = self._result()
+        p = r["premise"]
+        opened = _opened_on(p.get("adopted"))
+        self.assertTrue(p["webActive"], "premise: web's tab is active before the box is read; the page first opened on %s (the pick of web's tab moves it there whatever the kernel sent first; every scene before the switch reads web's box): %r" % (opened, p))
         self.assertEqual(r["errors"], [], "no page error")
-        self.assertTrue(r["fourRows"], "four rows within a minute: %r (kernel: %s)" % (r["first"], self._kernel_tail()))
+        self.assertTrue(r["fourRows"], "four rows within a minute: %r (premise: %r; kernel: %s)" % (r["first"], p, self._kernel_tail()))
         b = r["first"]
         self.assertTrue(b["shown"], "the box shows")
         self.assertEqual(b["head"], "Needs you · 4", "the header: the title with the count")
@@ -826,7 +936,7 @@ class NeedsYouBoxChatServed(unittest.TestCase):
             self.assertEqual(row["buttons"], ["Reply", "Clear"], "a live session's question: Reply and Clear (the user 2026-09-23: no Continue button for now)")
             self.assertEqual(row["disabled"], [False, False], "two buttons, both live")
         self.assertEqual(b["rows"][3]["buttons"], ["Approve", "Deny"], "the held message keeps its stored actions")
-        self.assertIn("ring-needs-you", b["tabClasses"] or "", "the tab wears the red Blocked ring for the hard stop (it outranks the Needs you ring): %r" % b["tabClasses"])
+        self.assertIn("ring-needs-you", (b["tabs"] or {}).get(SID) or "", "web's tab wears the red Blocked ring for the hard stop (it outranks the Needs you ring): %r" % b["tabs"])
         self.assertIn("ring-waiting-on-you", (b["tabs"] or {}).get(API) or "", "api's tab, a question and no hard stop, wears the Needs you ring: %r" % b["tabs"])
 
     def test_a_brief_landing_on_a_card_reaches_its_row_with_no_gesture(self):
@@ -1232,11 +1342,90 @@ class NeedsYouBoxChatServed(unittest.TestCase):
         self.assertEqual((sw["pane"], sw["label"], sw["head"], sw["headSection"], sw["checked"]), ("chat", "Needs you box", "Boxes below the transcript", "boxes", True), "a plainly labelled row under its own head, on by default: %r" % sw)
         self.assertTrue(sw.get("rendered"), "the card OPENED and the row is on screen, so the clicks that follow are real ones (the second contributor's post-merge review of PR 2093: the card never opened before): %r" % sw)
         self.assertTrue(r["off"]["hidden"], "the box hides on the row's save: %r" % r["off"]["box"])
-        self.assertIn("ring-needs-you", r["off"]["box"]["tabClasses"] or "", "the red ring stays: the switch is the box's alone")
+        self.assertIn("ring-needs-you", (r["off"]["box"]["tabs"] or {}).get(SID) or "", "the red ring on web's tab stays: the switch is the box's alone: %r" % r["off"]["box"]["tabs"])
         self.assertIn("ring-waiting-on-you", (r["off"]["box"]["tabs"] or {}).get(API) or "", "and the Needs you ring on api's tab stays too: %r" % r["off"]["box"]["tabs"])
         self.assertTrue(r["on"]["shown"], "back on, the box returns with its rows: %r" % r["on"]["box"])
         self.assertEqual(r["on"]["levelKept"], 2, "at the level the page held for the session, read before any click (the same review: two mutants resetting the level on rebuild passed a read after a fold)")
         self.assertIn("ring-waiting-on-you", (r["on"]["box"]["tabs"] or {}).get(API) or "")
+
+
+class OverrunRecord(unittest.TestCase):
+    """The budget message's premise records (_overrun_record), browserless: no browser, no kernel, the driver never run. Each PARTIAL line is
+    built the way the driver's mark() writes one, and the long ones carry filler enough that neither premise record falls in the line's last
+    3000 characters, the tail the message carried alone before (the first review round of this fix, 2026-09-29). Synthetic records only."""
+
+    STANDALONE = {"webTab": True, "adopted": API, "webActive": True, "active": SID}   # the page opened on api's tab and the pick moved it to web
+    PANE = {"webTab": True, "adopted": API, "webActive": False, "active": API, "clickMissed": "TimeoutError: a synthetic click that timed out"}   # the pick missed: the pane stays on api
+    TEST_1 = "test_the_box_lists_the_questions_and_the_held_message_under_the_header_in_the_token_and_no_row_for_the_hard_stop"
+
+    @staticmethod
+    def _line(rec):
+        return "PARTIAL:" + json.dumps(rec)
+
+    def _both(self):
+        return self._line({"errors": [], "premise": self.STANDALONE, "first": {"filler": "x" * 4000}, "hiddenPane": {"frame": True, "premise": self.PANE}, "shellKeys": {"filler": "y" * 4000}})
+
+    def test_a_line_carrying_both_records_names_both_ahead_of_the_tail(self):
+        early = self._line({"errors": [], "premise": {"webTab": False, "adopted": None, "webActive": False, "active": None}})   # an earlier line: the LAST one is read
+        line = self._both()
+        tail = "its record so far: " + line[-3000:]
+        self.assertNotIn('"premise"', tail, "premise: neither record is in the tail, so only the parse can name them")
+        msg = _overrun_record("\n".join(["a driver log line", early, line, "a stray line after it"]) + "\n")
+        self.assertIn("on the standalone page, web's tab active, the page having first opened on api's tab: %r" % self.STANDALONE, msg)
+        self.assertIn("in the shell's chat pane, web's tab NOT active, the page having first opened on api's tab: %r" % self.PANE, msg)
+        self.assertTrue(msg.endswith(tail), "and the line's tail after them: %r" % msg[-200:])
+        self.assertLess(msg.index("in the shell's chat pane"), msg.index("its record so far:"), "both records ahead of the tail")
+
+    def test_a_line_from_before_the_shell_names_the_standalone_record_and_says_the_pane_is_not_reached(self):
+        missed = {"webTab": True, "adopted": None, "webActive": False, "active": None}
+        line = self._line({"errors": [], "premise": missed, "on": {"filler": "z" * 4000}})
+        msg = _overrun_record(line + "\n")
+        self.assertIn("on the standalone page, web's tab NOT active, the page having first opened on no tab (none was active within 15 s): %r" % missed, msg)
+        self.assertIn("in the shell's chat pane, not reached (the last PARTIAL line was written before the driver opened the shell's chat pane)", msg)
+        self.assertLess(msg.index("in the shell's chat pane"), msg.index("its record so far:"))
+        self.assertTrue(msg.endswith("its record so far: " + line[-3000:]))
+
+    def test_a_malformed_line_falls_back_to_the_tail_and_never_raises(self):
+        cut = "PARTIAL:" + json.dumps({"errors": [], "premise": self.STANDALONE, "first": {"filler": "x" * 4000}})[:-9]   # cut mid-record, as a kill mid-write leaves it
+        self.assertEqual(_overrun_record("a driver log line\n" + cut), "its record so far: " + cut[-3000:])
+        self.assertEqual(_overrun_record("PARTIAL:[1, 2]\n"), "its record so far: PARTIAL:[1, 2]", "JSON that is not a record: the tail")
+        for empty in ("", None, "a driver log line\n"):
+            self.assertEqual(_overrun_record(empty), "its record so far: (no scene completed)")
+
+    def test_a_record_of_the_wrong_shape_names_what_it_can_and_never_raises(self):
+        msg = _overrun_record(self._line({"premise": 3, "hiddenPane": [1]}))
+        self.assertIn("on the standalone page, not recorded; in the shell's chat pane, not reached", msg)
+        msg = _overrun_record(self._line({"premise": {"adopted": [1], "webActive": "yes"}, "hiddenPane": {"frame": False}}))
+        self.assertIn("on the standalone page, web's tab NOT active, the page having first opened on the tab [1]", msg)
+        self.assertIn("in the shell's chat pane, not recorded (the shell's chat frame found: False)", msg)
+
+    def test_the_budget_branch_fails_every_test_on_the_message_with_both_records(self):
+        """The branch itself, driven with node stubbed to overrun: the lab's instance fields set by hand (no setUpClass: no kernel), under a
+        subclass minted here, so the failure latched on the class is the subclass's and never the lab's (nor one the lab latched earlier)."""
+        class Probe(NeedsYouBoxChatServed):
+            _fail = None
+        before = NeedsYouBoxChatServed.__dict__.get("_fail")
+        t = Probe(self.TEST_1)
+        t.lab = tempfile.mkdtemp(prefix="needs-you-overrun-")
+        self.addCleanup(shutil.rmtree, t.lab, True)
+        t._r, t.port, t.token, t.g, t.klog = None, 1, "testtok-overrun", [SID + ":g%d" % i for i in range(1, 5)], os.devnull
+        t.store, t.ledger, t.order = (os.path.join(t.lab, "xdg", "romp", n) for n in ("goals/store.json", "cleared.jsonl", "session-order.json"))
+        line = self._both()
+        from unittest import mock
+        with mock.patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired(["node"], DRIVER_TIMEOUT_S, output=("a driver log line\n" + line + "\n").encode())):
+            with self.assertRaises(AssertionError) as cm:
+                t._result()
+        msg = str(cm.exception)
+        self.assertTrue(msg.startswith("the driver ran past its %d s budget; the premise, web's tab picked before the first read: " % DRIVER_TIMEOUT_S), msg[:300])
+        self.assertIn("on the standalone page, web's tab active, the page having first opened on api's tab: %r" % self.STANDALONE, msg)
+        self.assertIn("in the shell's chat pane, web's tab NOT active, the page having first opened on api's tab: %r" % self.PANE, msg)
+        self.assertIn("its record so far: " + line[-3000:] + "; kernel: ", msg)
+        self.assertEqual(NeedsYouBoxChatServed.__dict__.get("_fail"), before, "the lab's own class latched nothing")
+
+    def test_the_driver_writes_a_partial_line_right_after_the_shells_pick(self):
+        """The message can name the pane's record only if a PARTIAL line carries it before the scenes that can overrun: the next mark()
+        after the pick stood at the end of the shell's scenes, past the hidden-pane, keyboard-order and content scenes."""
+        self.assertIn("  out.hiddenPane.premise = await pickWeb(fr);\n  mark();", DRIVER)
 
 
 if __name__ == "__main__":

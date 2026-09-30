@@ -170,7 +170,7 @@ await closePop();
 // ── deleted: the thread is gone from the store before the page comes back ────────────────────────
 await openByMark(cfg.gone);
 out.recordGone = await record();
-fs.writeFileSync(cfg.store, JSON.stringify({ threads: cfg.threadsAfterDelete }));
+publishJson(cfg.store, { threads: cfg.threadsAfterDelete });   // a temp file and a rename, never an in-place rewrite a kernel read could find empty (the needs-you lab's CI red of 2026-09-24)
 await page.reload();
 await landed(cfg.keep);
 await page.waitForFunction((tid) => !document.querySelector(`mark.cmt-hl[data-tid="${tid}"]`), cfg.gone, { timeout: 60000 });
@@ -298,7 +298,7 @@ class ServedCommentReopenAfterReload(unittest.TestCase):
                        "store": self.store, "threadsAfterDelete": [r for r in self.rows if r["tid"] != GONE]}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
-            f.write(DRIVER)
+            f.write(_lab.PUBLISH_JSON_JS + DRIVER)   # the shared publisher the delete's store write goes through
         p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=420,
                            env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
         if p.returncode == 3:

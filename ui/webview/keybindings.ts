@@ -22,9 +22,17 @@ export const KEYS_EVENT = "romp:keys";           // window event raised on every
 const MOD_ORDER = ["Ctrl", "Alt", "Shift", "Meta"];
 
 // The chord a keydown spells, or null when it's a bare modifier (still being held, nothing to bind).
-export function chordOf(e: { key: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean }): string | null {
-  const k = e.key;
+// Option on a Mac composes a character (⌥M types µ, ⌥E is a dead key), so a ⌘⌥ keydown's `key` names the glyph and not
+// the key pressed; Command suppresses the typing, so there the physical key (`code` KeyM → M) is the chord's, or ⌘⌥M would
+// never match its own binding (2026-09-30, the comment key). Only with Meta held: without it, Ctrl+Alt is AltGr on
+// Windows, and the glyph it spells (µ on a German layout) is the reader's text, never a chord.
+export function chordOf(e: { key: string; code?: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean }): string | null {
+  let k = e.key;
   if (!k || k === "Control" || k === "Alt" || k === "Shift" || k === "Meta") return null;
+  if (e.metaKey && e.altKey && (k === "Dead" || (k.length === 1 && k.charCodeAt(0) > 0x7f))) {
+    const phys = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code || "");
+    if (phys) k = phys[1] || phys[2];
+  }
   const parts: string[] = [];
   if (e.ctrlKey) parts.push("Ctrl");
   if (e.altKey) parts.push("Alt");

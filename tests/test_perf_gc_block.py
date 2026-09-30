@@ -91,7 +91,8 @@ class Shape(unittest.TestCase):
             self.assertEqual(row, {"collections": 0, "msSum": 0.0, "msMax": 0.0, "msLast": 0.0, "collectedLast": 0})
         self.assertEqual(g["thresholds"], list(gc.get_threshold()))
         self.assertEqual(len(g["counts"]), 3)
-        self.assertEqual(g["frozen"], gc.get_freeze_count())
+        self.assertIsNone(g["frozen"])
+        self.assertEqual(km._perf_walks(snap)["gc"]["frozen"], gc.get_freeze_count())
         self.assertEqual(g["errors"], 0)
         self.assertEqual(set(g["freeze"]), FREEZE_KEYS, "the #1735 freeze sub-block carries its state and reconcile counters")
         self.assertFalse(g["hooked"], "a collector's hook is installed only when asked")
@@ -282,7 +283,7 @@ class Robustness(_Hooked):
         try:
             km.gc = stub_gc
             with redirect_stderr(err):
-                snaps = [self.st.snapshot() for _ in range(3)]
+                snaps = [km._perf_walks(self.st.snapshot()) for _ in range(3)]
         finally:
             km.gc = real_gc
         for snap in snaps:
@@ -347,6 +348,7 @@ class Documented(unittest.TestCase):
         self.assertIn("shows in both rings", para)                  # the delta is process-wide: the rings never sum to gen.collections
         self.assertIn("stageRing", para)
         self.assertIn("`heap.gc`", para, "the overlap with the heap block's collector gauges is named")
+        self.assertIn("`GET /perf?walk=1`", para)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@ These are for scripting and for agents rather than daily use:
 |---|---|
 | `romp url` | Print only the tokened dashboard URL, for piping |
 | `romp sessions [--json]` | The fleet with each session's state, identity colours, directory and backend |
-| `romp perf [--interval <s>] [--json]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
+| `romp perf [--interval <s>] [--json [--walk]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, and `--walk` fills its two heap-wide gauges; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
 | `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
@@ -2162,9 +2162,13 @@ judge threads and the rest of the process, builds served from cache against
 rebuilds, the kernel's parse-store misses by road with the bytes of its whole
 parses, bytes sent per slot as full frames, deltas and deduplicated frames,
 goal-store loads and writes per second, judge passes and their durations,
-memory and thread count. `romp perf --json` prints one raw snapshot. If the
-kernel restarted between the two snapshots the counters have started over, so
-the command says so and exits non-zero instead of printing negative rates; a
+memory and thread count. `romp perf --json` prints one raw snapshot. Two
+fields cost time in proportion to the whole heap, `heap.allocatedBlocks` and
+`gc.frozen`, so a plain read leaves them `null` and only `GET /perf?walk=1`
+fills them; the plain read no longer walks the whole heap.
+`romp perf --json --walk` prints the snapshot with both filled. If the kernel
+restarted between the two snapshots the counters have started over, so the
+command says so and exits non-zero instead of printing negative rates; a
 refused token is reported as such, not as a dead kernel.
 
 The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
@@ -2181,12 +2185,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   a GAUGE, the occupancy at the read and not a count since boot, with one
   exception named below. `allocatedBlocks` is the number of memory blocks
   the interpreter's object allocator holds at the read, of any size
-  (`sys.getallocatedblocks`; 0 on a build that cannot count them); `gc` is
-  the collector's `enabled`, its `counts` (the young generation's
-  allocations since its last collection, then how many times each younger
-  generation was collected since the older's last) and `thresholds` as
-  lists, and `stats` (per generation: `collections`, `collected`,
-  `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
+  (`sys.getallocatedblocks`; 0 on a build that cannot count them). It is
+  read only when the request says `GET /perf?walk=1` and is `null` on a
+  plain read: counting visits every page the allocator owns, a cost that
+  grows with the whole heap (1.2 to 1.7 ms at 2 GB resident in the lab, and
+  far longer where the system has compressed or paged the heap out), inside
+  one call every kernel thread waits for. On `?walk=1` a `null` is a read
+  that failed (an accessor the runtime lacks), said once on stderr like any
+  gauge. `gc` is the collector's `enabled`, its `counts` (the young
+  generation's allocations since its last collection, then how many times
+  each younger generation was collected since the older's last) and
+  `thresholds` as lists, and `stats` (per generation: `collections`,
+  `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
   lazy bodies read on demand: `entries`, and `bytes`, the records' length on
   disk, which `capBytes` bounds, a proxy that locates the holder without
@@ -2214,11 +2224,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   against `budgetBytes`), so a resident size these gauges leave unaccounted
   for is read there first. The block reads a length or a counter per
   cache, under the cache's own lock where its readers take one and over a
-  copied value list otherwise; it walks no object graph, collects nothing,
-  evicts nothing, fills nothing and reads no file. A gauge this process
-  cannot read (an accessor the runtime lacks, a container the source has not
-  got, a cached entry of a shape the gauge does not know) is `null`, said
-  once on stderr.
+  copied value list otherwise; on a plain read it walks neither the
+  allocator nor any object graph, collects nothing, evicts nothing, fills
+  nothing and reads no file. A gauge this process cannot read (an accessor
+  the runtime lacks, a container the source has not got, a cached entry of
+  a shape the gauge does not know) is `null`, said once on stderr.
 - `gc`: the interpreter's garbage collections, counted and timed (2026-09-16:
   pusher cycles stalled for 9-33 s and a profile of the process caught a 9.2 s
   generation-2 collection charged to whichever stage happened to be running,
@@ -2236,7 +2246,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the block reads on its own (how near the next collection is); `frozen`
   counts the objects moved out of the collector's reach by `gc.freeze`, which
   it never scans (reading the count is a linear walk of the frozen generation,
-  about 7 ms per million frozen, paid by the `/perf` read); `errors` counts callback failures (counted, never raised
+  about 2 to 14 ms per million frozen in the lab, set by what is frozen, so, like `heap.allocatedBlocks`, it is read
+  only on `GET /perf?walk=1` and is `null` on a plain read); `errors` counts callback failures (counted, never raised
   into the collector; the first in the process is said once on stderr, a
   line prefixed `perf: gc hook:`, the rest counted only); `hooked` says
   whether the kernel's `gc.callbacks` hook is installed, so zeros with
@@ -2282,7 +2293,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
   a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
-  apart from the integer `frozen` above, which is `gc.get_freeze_count()`),
+  apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
   `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
   backstop), `freezes` and
@@ -5020,6 +5031,25 @@ session is shown as a chip: the name without its `@`, in that session's color on
 backing, the way the Awaiting chip names the session it waits on. Hover it for how that
 session is doing; the message itself still carries the `@name` you typed, and so does a
 copy of it.
+
+### Commenting on a passage
+
+Select a passage in a message and right-click it: **Comment** opens a box on the passage for the
+first message of a side conversation about it, and **Quote** puts the passage in the message box
+instead. **Ctrl+Alt+M** (**⌘⌥M** on a Mac, the key Google Docs uses for a comment) opens the same
+box from the keyboard, just under the selection, from anywhere in the chat including the message
+box; the right-click menu shows the key under **Comment**. The command palette's **Comment on
+selection** does the same for the passage that was selected when you opened the palette. With
+nothing selected in a message, or in a session that has not finished starting or loading, it says
+so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
+there; on a keyboard where Ctrl+Alt+M types a character (AltGr+M on a German layout), the
+character wins.
+
+On a phone or tablet a long-press selection opens no menu, so a **Comment** button appears just
+below the selection instead (above it when the message box leaves no room), and tapping it opens
+the same box. It steps aside while you drag the selection's handles or scroll with your finger and
+comes back on the selection once you lift it; it goes when the selection is cleared or scrolled out
+of view, and when the box opens.
 
 ### Stepping through your messages and comments
 

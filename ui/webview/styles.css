@@ -4140,6 +4140,21 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
 .cmt-pop.dragging { cursor: grabbing; }
+/* The touch "Comment" pill (render.ts commentPillEl, the user 2026-09-30): a phone's long-press selection opens no menu, so
+   this pill under the selection is the way in there. An action in the accent, the flat way: the one accent wash over the
+   raised surface (opaque: it floats over the transcript's text), the accent ink, no outline, the menus' lift; 40px tall
+   for a thumb; nothing on it selects or calls up the system's own callout. Only ever shown on a coarse pointer. */
+#cmt-pill {
+  position: fixed; z-index: 110; display: inline-flex; align-items: center; gap: 6px;
+  height: 40px; padding: 0 16px; border: none; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised)); color: var(--accent);
+  box-shadow: var(--shadow-menu); font-family: var(--sans); font-size: 14px; font-weight: 600; cursor: pointer;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+#cmt-pill[hidden] { display: none; }
+#cmt-pill svg { width: 16px; height: 16px; flex: 0 0 auto; }
+#cmt-pill:active { transform: scale(0.96); }
 .cmt-pop .cmt-quote, .cmt-pop .cmt-msgs, .cmt-pop .cmt-input, .cmt-pop .cmt-name { cursor: auto; }
 .cmt-pop button, .cmt-pop .meta-btn { cursor: pointer; }
 /* the thread's own statusline (the user 2026-08-25: the popover should carry the chat's components —
