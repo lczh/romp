@@ -67,6 +67,14 @@ test("view chatter is not intent — the reconnect reload resyncs it", () => {
   }
 });
 
+test("a client-diag row is view chatter: one queued while the pipe is down is dropped at the reconnect", () => {
+  // ui/webview/window-sender.ts discloses this for its trace rows (noteForeign; the timeline boot's inlined copy runs
+  // on the kernel's /timeline page only, never in a webview): in a VS Code webview a row filed while the kernel pipe
+  // is down does not survive the reconnect, whose keep set is intent only (pipe-durability.test.ts pins that half). If
+  // clientDiag ever becomes intent, that disclosure is stale.
+  assert.ok(!intentOp("clientDiag"), "clientDiag is not user intent: the reconnect drops it with the view chatter");
+});
+
 test("non-strings never classify as intent", () => {
   assert.ok(!intentOp(undefined));
   assert.ok(!intentOp(null));

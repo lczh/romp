@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """The opener policy on the REAL dashboard, both directions (2026-09-27). Handler._send declares
-Cross-Origin-Opener-Policy: same-origin-allow-popups on every response but a state-root pane's own files; its comment
-says why that value and not same-origin, and why those files carry none. A hermetic kernel serves the dashboard on
-127.0.0.1, a secure context where browsers enforce the policy, with two data panes (plans/panes-as-data.md): a
-state-root pane (pane:notes, a page and a callback page under STATE/panes/notes/, framed on this origin) and a URL pane
-(a page a second origin serves, framed sandboxed with allow-popups). That second origin also serves a page that posts
-back to window.opener, a page that opens windows, and a sign-in provider that sends its popup back. A Chromium driver
-reads:
+Cross-Origin-Opener-Policy: same-origin-allow-popups on every response but a state-root pane's own files; the comment in
+_security_headers, which writes it, says why that value and not same-origin, and why those files carry none. A hermetic
+kernel serves the dashboard on 127.0.0.1, a secure context where browsers enforce the policy, with two data panes
+(plans/panes-as-data.md): a state-root pane (pane:notes, a page and a callback page under STATE/panes/notes/, framed on
+this origin) and a URL pane (a page a second origin serves, framed sandboxed with allow-popups). That second origin also
+serves a page that posts back to window.opener, a page that opens windows, and a sign-in provider that sends its popup
+back. A Chromium driver reads:
   1. a popup the URL pane opens: window.open returns a handle, the popup has an opener, and the pane hears its post;
   2. a popup the state-root pane opens onto the second origin: the handle stays open, the popup has an opener, and the
      pane hears its post. Under same-origin, 1 got a null handle and 2 a closed one, and neither pane heard its popup;
   3. a page on the second origin that opens the dashboard's shell gets a closed handle and the shell gets no opener: the
      isolation the policy exists for (with no policy the handle stays open and the shell's opener is that page);
-  4. the RESIDUAL the _send comment discloses: a tab the URL pane opens onto one of the dashboard's pages (a /file
-     text) shows no page, not the file, because the popup inherits the pane's sandbox and a browser shows a sandboxed
-     navigation's response only under the unsafe-none policy. The same /file opened by the state-root pane shows the
-     file with its handle open, so the refusal is the sandbox's, not the route's; and the URL pane's tab onto a
-     state-root pane's own page, which carries no policy (6), shows it. This leg is the disclosure's witness: it turns
-     red if the refusal ever lifts (the frame's sandbox gains allow-popups-to-escape-sandbox, or the header goes), and
-     the disclosure is then to be revisited. Engines differ in what they show instead, and the leg asserts only the
-     absence of the file: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit
-     an empty one, each leaving the handle open (LAB_ENGINE=firefox or webkit runs the driver in that engine);
+  4. the RESIDUAL the comment in _security_headers discloses: a tab the URL pane opens onto one of the dashboard's pages
+     (a /file text) shows no page, not the file, because the popup inherits the pane's sandbox and a browser shows the
+     response of a sandboxed tab or popup (a top-level navigation) only under the unsafe-none policy. The same /file
+     opened by the state-root pane shows the file with its handle open, so the refusal is the sandbox's, not the
+     route's; and the URL pane's tab onto a state-root pane's own page, which carries no policy (6), shows it. This leg
+     is the disclosure's witness: it turns red if the refusal ever lifts (the frame's sandbox gains
+     allow-popups-to-escape-sandbox, or the header goes), and the disclosure is then to be revisited. Engines differ in
+     what they show instead, and the leg asserts only the absence of the file: Chromium shows its error page and closes
+     the handle; Firefox shows a blocked page and WebKit an empty one, each leaving the handle open (LAB_ENGINE=firefox
+     or webkit runs the driver in that engine);
   5. the timeline page's external-link fallback opens a tab on the second origin with no opener: the direction the
      policy leaves to each call (a popup this origin opens keeps its opener unless the call passes noopener);
   6. a sign-in round trip: the state-root pane's popup goes to the second origin, which sends it back to a callback page
@@ -410,7 +411,8 @@ class ServedPanePopupOpener(unittest.TestCase):
         self.assertEqual(r["title"], "back:false", "the tab has no opener to post to or navigate: %r" % r)
 
     def test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page(self):
-        # the witness of the residual the _send comment discloses; the state-root pane's tab is the control
+        # the witness of the residual the comment in _security_headers discloses; the state-root pane's tab is the
+        # control
         own = self._result()["ownTab"]
         self.assertTrue(own["opened"] and own["got"], "the state-root pane opened the /file tab: %r" % own)
         self.assertIs(own["closed"], False, "a tab on this origin keeps its handle: %r" % own)

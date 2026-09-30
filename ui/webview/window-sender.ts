@@ -44,9 +44,16 @@ export function windowSender(e: { source?: unknown; origin?: unknown } | null | 
 // (window.__rompLocalSend, on a kernel page) or else the transport the caller passes (the VS Code api, or a poster that
 // reaches it), and it never throws. At most NOTE_MAX rows a page life: a page framing many origins cannot flood the
 // journal, and the first rows already name what is refused. While a kernel page's socket is down, the pane shim queues
-// these rows under a cap of their own (kernel.py _shim, FOREIGN_QUEUE_MAX, equal to NOTE_MAX), so a foreign page posting
-// during an outage never takes a queued slot from the page's own rows (pane-shim-stale.test.ts runs it). The timeline
-// boot (kernel.py _TIMELINE_BOOT) inlines the same beside heardSender. Kept import-free, like windowSender.
+// these rows under a cap of their own (kernel.py _shim, FOREIGN_QUEUE_MAX, equal to NOTE_MAX), so a foreign page
+// posting during an outage never takes a queued slot from the page's own rows (pane-shim-stale.test.ts runs it). The
+// timeline boot (kernel.py _TIMELINE_BOOT) inlines the same beside heardSender, on the kernel's /timeline page only. In
+// a VS Code webview this helper's rows go through the api to the extension's pipe instead (extension.ts
+// KernelPipe.send; VS Code's timeline view loads timeline-main.js, whose listener files through this helper), which
+// holds what is sent while the kernel is down but, at the reconnect, keeps only intent ops and reloads the webview;
+// clientDiag is not one (vscode-extension/src/pipe-intent.ts), so a row filed during an outage is dropped there. That
+// is not new: the same filter drops every queued client-diag row. The reload starts a new page life, so a host that
+// keeps posting has its next refused post traced with the pipe up (pipe-intent.test.ts holds that clientDiag is not
+// intent, pipe-durability.test.ts that the reconnect keeps only intent). Kept import-free, like windowSender.
 export const NOTE_MAX = 20;
 export type NoteTransport = ((m: Record<string, unknown>) => unknown) | { postMessage(m: unknown): unknown } | null | undefined;
 const noted = new WeakMap<object, Set<string>>();   // per receiving window: the site and origin pairs it has filed

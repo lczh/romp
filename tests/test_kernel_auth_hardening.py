@@ -19,6 +19,7 @@ import io
 import hashlib
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -226,27 +227,35 @@ class CookieDoesNotBypassOrigin(unittest.TestCase):
 
 
 class ResponseHardeningHeaders(unittest.TestCase):
-    """Every response declares its type as final (nosniff) and refuses cross-origin framing
-    (clickjacking). Source-pinned: the header set lives in _send, exercised on every route."""
-
-    def test_send_sets_nosniff_and_frame_guards(self):
-        import inspect
-        src = inspect.getsource(km.Handler._send)
-        self.assertIn('"X-Content-Type-Options", "nosniff"', src)
-        self.assertIn('"X-Frame-Options", "SAMEORIGIN"', src)
-        self.assertIn("frame-ancestors 'self'", src)
-        self.assertIn('"Referrer-Policy", "same-origin"', src)   # executed by TokenLeavesTheUrl below
-        self.assertIn('"Cross-Origin-Opener-Policy", "same-origin-allow-popups"', src)   # executed by OpenerIsolation below
+    """Every page a route answers through _send, and every error page http.server writes with a header block
+    (Handler.send_error), declares its type as final (nosniff) and refuses cross-origin framing (clickjacking). A few
+    responses skip _send: the /file route's and the /remote relay's HEAD, range and download replies, which write
+    nosniff but not the rest of the set (an SVG's HEAD or range reply adds its sandbox policy, and a download, sent as
+    an attachment, does not); the CORS preflight and the WebSocket upgrade, which write none of it; and the remote's
+    answer to a WebSocket handshake, which the /remote relay forwards as it came. None is a page a browser renders. The
+    header set lives in _security_headers, which _send and the error pages both write, and each header and value in it
+    is executed rather than read from the source, where a spelling change that leaves the wire as it was would turn a
+    pin red: ServerErrorPages requires PAGE_HEADERS on each error page and on its control, a page _send writes (/chat)
+    whose headers it reads whole, and holds PAGE_HEADERS to what _security_headers writes when run; OpenerIsolation
+    reads the opener policy off the routes, the exempt one included, and TokenLeavesTheUrl reads Referrer-Policy."""
 
     def test_the_opener_policy_is_turned_off_by_one_call_the_pane_routes_author_file(self):
-        # A where-pin: it guards that the one exemption from the opener policy (_send's opener_policy=False) is passed by
-        # one call, the /pane/ route's return of a pane author's file, and by no other route, where it would take the
-        # header off a response no executed test may name. What that call serves is executed by OpenerIsolation's
+        # A where-pin: it guards that the one exemption from the opener policy is passed by one call, the /pane/ route's
+        # return of a pane author's file (_send's opener_policy=False), and by no other route, where it would take the
+        # header off a response no executed test may name. Two functions take the flag: _send, and _security_headers,
+        # which writes the header set for _send and for the error pages. So every _send call in Handler is walked, and
+        # every reference to the name _security_headers in the kernel's code must be one of its two calls: _send's,
+        # which passes _send's own flag on, and end_headers', which passes none. Without that second half, a route
+        # writing its own headers through _security_headers(self.send_header, False) left this module green, and
+        # tests/test_sender_hardening_docs.py too, which counts only the keyword spelling. What the one call serves is
+        # executed by OpenerIsolation's
         # test_a_state_root_panes_own_files_carry_no_opener_policy_and_its_shim_and_theme_keep_it.
         import ast
         import inspect
-        import textwrap
-        tree = ast.parse(textwrap.dedent(inspect.getsource(km.Handler)))
+        module = ast.parse(inspect.getsource(km))
+        handlers = [n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "Handler"]
+        self.assertEqual(len(handlers), 1, "one Handler class in the kernel")
+        tree = handlers[0]
         found = []
 
         def visit(node, branches):
@@ -272,6 +281,25 @@ class ResponseHardeningHeaders(unittest.TestCase):
         self.assertEqual(call, "self._send(200, fp.read_bytes(), ct, cache='no-cache', opener_policy=False)",
                          "the pane author's file, read from the pane's directory")
         self.assertIn("p.startswith('/pane/')", branches, "inside the /pane/ route")
+
+        calls = {id(n.func): n for n in ast.walk(module) if isinstance(n, ast.Call)}
+        refs = []
+
+        def census(node, where):
+            # where: the classes and functions whose body holds this node
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                where = where + [node.name]
+            if (isinstance(node, ast.Name) and node.id == "_security_headers") or (
+                    isinstance(node, ast.Attribute) and node.attr == "_security_headers"):
+                call = calls.get(id(node))
+                refs.append((".".join(where), ast.unparse(call) if call else "not a call: " + ast.unparse(node)))
+            for c in ast.iter_child_nodes(node):
+                census(c, where)
+
+        census(module, [])
+        self.assertEqual(sorted(refs), [("Handler._send", "_security_headers(self.send_header, opener_policy)"),
+                                        ("Handler.end_headers", "_security_headers(self.send_header)")],
+                         "_security_headers is called by _send, with _send's own flag, and by end_headers, with none")
 
     def test_remote_relay_derives_its_own_mime_and_discards_the_remotes(self):
         # the /remote/<host>/file relay must decide the Content-Type from the requested extension
@@ -395,20 +423,21 @@ class OpenerIsolation(unittest.TestCase):
     """Every document the kernel serves, but a state-root pane's own files (the last test below says why), declares
     Cross-Origin-Opener-Policy: same-origin-allow-popups (2026-09-27), so a page on another origin that opens a
     dashboard page gets no live handle to it, and a handle is what a window message needs, while a popup a data pane
-    opens keeps its opener (same-origin would sever it; the _send comment says why, and
-    tests/test_pane_popup_opener_served.py drives both in a browser). It rides _send, so every page
-    carries it, and so do the dashboard's own tabs: a /file image or PDF it opens with window.open is a same-origin
-    document with the same policy, so window.open still returns a handle (ui/webview/preview.ts openFileTab reads
-    only that). Executed on the shell, every pane page, the sign-in page, a static asset, and each document shape
-    the /file route builds: an image, every shape that hands _send extra headers of its own (an SVG, with its
-    sandbox policy; a PDF, with its name; a text file, with its mtimes), a 404, the 413 page a PDF's own tab shows,
-    and both 415 refusals (a file no view shows, a text-named file that is not text). Each shape is served once per
-    entry of NAVIGATIONS (tests/document_navigations.py): bare, and with the headers a browser sends on a navigation
-    typed, opened by the dashboard, and opened by another origin, which is where a browser reads the policy, signed
-    in by the romp_token cookie as a browser's navigation is. Read off a live socket (_wire_get), so a header
-    written anywhere, a send_response or end_headers override included, is seen, and each carries it exactly once: a
-    second copy, even of the same value, leaves a browser with a header it cannot parse and so with no policy. The
-    /remote/<host>/file relay's shapes are tests/test_kernel_remote_file_relay.py's, read the same way."""
+    opens keeps its opener (same-origin would sever it; the comment in _security_headers says why, and
+    tests/test_pane_popup_opener_served.py drives both in a browser). It rides _send, so every page a route answers
+    carries it (so does every error page http.server writes with a header block: ServerErrorPages below), and so do the
+    dashboard's own tabs: a /file image or PDF it opens with window.open is a same-origin document with the same policy,
+    so window.open still returns a handle (ui/webview/preview.ts openFileTab reads only that). Executed on the shell,
+    every pane page, the sign-in page, a static asset, and each document shape the /file route builds: an image, every
+    shape that hands _send extra headers of its own (an SVG, with its sandbox policy; a PDF, with its name; a text file,
+    with its mtimes), a 404, the 413 page a PDF's own tab shows, and both 415 refusals (a file no view shows, a
+    text-named file that is not text). Each shape is served once per entry of NAVIGATIONS
+    (tests/document_navigations.py): bare, and with the headers a browser sends on a navigation typed, opened by the
+    dashboard, and opened by another origin, which is where a browser reads the policy, signed in by the romp_token
+    cookie as a browser's navigation is. Read off a live socket (_wire_get), so a header written anywhere, a
+    send_response or end_headers override included, is seen, and each carries it exactly once: a second copy, even of
+    the same value, leaves a browser with a header it cannot parse and so with no policy. The /remote/<host>/file
+    relay's shapes are tests/test_kernel_remote_file_relay.py's, read the same way."""
 
     @classmethod
     def setUpClass(cls):
@@ -506,11 +535,11 @@ class OpenerIsolation(unittest.TestCase):
             self.assertIn(b"not a text file", body, how)
 
     def test_a_state_root_panes_own_files_carry_no_opener_policy_and_its_shim_and_theme_keep_it(self):
-        # The one exemption (the _send comment; Handler.do_GET's /pane/ route): a state-root pane's own files, its page
-        # and a callback page beside it, are served with no opener policy, so a popup the pane opens that a sign-in
-        # provider sends back to that callback keeps its opener (tests/test_pane_popup_opener_served.py drives the round
-        # trip in a browser). Every other response of the route is the kernel's own and keeps the header once: the
-        # shim and theme it serves the pane, and a file the pane does not have.
+        # The one exemption (the comment in _security_headers; Handler.do_GET's /pane/ route): a state-root pane's own
+        # files, its page and a callback page beside it, are served with no opener policy, so a popup the pane opens
+        # that a sign-in provider sends back to that callback keeps its opener (tests/test_pane_popup_opener_served.py
+        # drives the round trip in a browser). Every other response of the route is the kernel's own and keeps the
+        # header once: the shim and theme it serves the pane, and a file the pane does not have.
         import shutil
         pid = "coopnotes"   # a pane id of this test's own, so no other test's pane under the same state root is touched
         pdir = km._pane_dir()
@@ -576,6 +605,165 @@ class OpenerIsolationWireWitness(unittest.TestCase):
                 status, msg, _ = _wire_get(self.port, "/chat", {"X-Romp-Token": TOK, "X-Test-Double": where})
                 self.assertEqual(status, 200)
                 self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), want)
+
+
+# Every header _security_headers writes on a page that is not exempt, with its value, written out here rather than read
+# from the kernel, so a change to a value is a change to this test. ServerErrorPages runs _security_headers and holds
+# this list to what it writes, so a header added there is a change here too, and is then required on every error page
+# and on the control.
+PAGE_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "Content-Security-Policy": "frame-ancestors 'self'",
+    "Cross-Origin-Opener-Policy": OPENER_POLICY,
+    "Referrer-Policy": "same-origin",
+}
+# Every other header on ServerErrorPages' control, a page _send writes for the /chat route: send_response's Server and
+# Date, and _send's own Content-Type, Content-Length and the route's Cache-Control. _send writes the cookie and the CORS
+# echo only for a request that earns them (a token in the URL, an authorized Origin), and the control sends neither.
+_CONTROL_OWN = ("Server", "Date", "Content-Type", "Content-Length", "Cache-Control")
+# The line limit http.server applies to the request line and to each header line (handle_one_request reads 65,537 bytes
+# and refuses more than 65,536; http.client._MAXLINE), and its header count limit (http.client._MAXHEADERS).
+_MAXLINE = 65536
+_MAXHEADERS = 100
+# A page on another origin opening a dashboard page, signed in by the cookie: the case the opener policy exists for.
+_CROSS_SITE = [kv for how, nav in NAVIGATIONS if how == "a page on another origin opening it"
+               for kv in dict(nav, **credential(nav, TOK)).items()]
+
+
+def _raw_exchange(port, request):
+    """Send `request` (bytes) to a live kernel on `port` over a fresh socket and read until the server closes it.
+    Returns (status, [(name, value), ...] in wire order, body bytes), parsed here from the raw bytes, so the status line
+    and every copy of every header are read as the server wrote them."""
+    with socket.create_connection(("127.0.0.1", port), timeout=15) as s:
+        s.sendall(request)
+        chunks = []
+        while True:
+            b = s.recv(65536)
+            if not b:
+                break
+            chunks.append(b)
+    raw = b"".join(chunks)
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        raise AssertionError("no header block in the response: %r" % raw[:200])
+    lines = head.decode("iso-8859-1").split("\r\n")
+    m = re.match(r"HTTP/1\.[01] (\d{3})(?: |$)", lines[0])
+    if not m:
+        raise AssertionError("not an HTTP/1.x status line: %r" % lines[0][:200])
+    return int(m.group(1)), [tuple(part.strip() for part in ln.split(":", 1)) for ln in lines[1:]], body
+
+
+def _values(headers, name):
+    """Every value of header `name` in `headers` (_raw_exchange's list), in wire order, the name matched without regard
+    to case."""
+    return [v for k, v in headers if k.lower() == name.lower()]
+
+
+def _header_lines(pairs):
+    return b"".join(b"%s: %s\r\n" % (k.encode(), v.encode()) for k, v in pairs)
+
+
+class ServerErrorPages(unittest.TestCase):
+    """http.server answers some requests itself, before any kernel route runs, with a small text/html page of its own
+    (BaseHTTPRequestHandler.send_error). Three of those pages are read here: a request line over 65,536 bytes gets a
+    414, a header line over 65,536 bytes or more than 100 header lines a 431 (3.10 to 3.14 count the closing blank line
+    too, so they refuse 100 headers), and a method the handler has no do_ method for, such as PUT, a 501. Its other
+    pages, the 400 or 505 to a request line it refuses, are not driven (below).
+    Those pages skip Handler._send, and SECURITY.md says every page the kernel serves carries the opener policy (the
+    post-merge review of #32 found these carrying none of _send's security headers). Each carries every header
+    _security_headers writes on a page that is not exempt, exactly once: PAGE_HEADERS, which
+    test_the_headers_required_are_the_ones_security_headers_writes holds to what _security_headers writes when run. Read
+    off a live socket, raw, so a header written anywhere is seen, and so is a second copy (a second
+    Cross-Origin-Opener-Policy, even of the same value, leaves a browser with no policy).
+
+    Each request ends where the server stops reading: the 414's request line is exactly one byte over the limit and
+    nothing follows it, and each 431 ends on the line that trips its limit. The server closes the connection after an
+    error page, and a close with bytes it has not read resets the connection (RFC 2525, section 2.17), which can cost
+    the client the response it was about to read. Every status here comes from a well-formed request line ending in
+    HTTP/1.1. None comes from a request line http.server accepts as HTTP/0.9, whose replies have no header block on any
+    interpreter, or from one it answers with a 400 or 505: those have a header block only where the interpreter has
+    CPython's gh-54930 change, apart from the 400 to four or more words ending in a valid version below 2.0 other than
+    HTTP/0.9 (HTTP/1.1, say), which has one on every interpreter and is not driven either. The comment above
+    Handler.send_error states the rule. The control, a request line exactly at the limit (65,536 bytes, the longest
+    http.server accepts), is served by the route through _send with the same headers, and with no header beyond them
+    but the route's own (_CONTROL_OWN)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def _error_page(self, request, want_status):
+        status, headers, body = _raw_exchange(self.port, request)
+        self.assertEqual(status, want_status, "%r" % body[:200])
+        # the standard library's own page, not a kernel route's
+        self.assertEqual(_values(headers, "Content-Type"), ["text/html;charset=utf-8"])
+        self.assertIn(b"Error code: %d" % want_status, body)
+        self.assertEqual(_values(headers, "Connection"), ["close"])
+        for name, value in PAGE_HEADERS.items():
+            self.assertEqual(_values(headers, name), [value], "the %d page: %s, once" % (want_status, name))
+
+    @staticmethod
+    def _request_line(length):
+        """A GET request line onto /chat of exactly `length` bytes, its CRLF included, padded in the query."""
+        head, tail = b"GET /chat?pad=", b" HTTP/1.1\r\n"
+        line = head + b"a" * (length - len(head) - len(tail)) + tail
+        assert len(line) == length
+        return line
+
+    def test_a_request_line_over_the_limit_gets_a_414_with_every_page_header(self):
+        self._error_page(self._request_line(_MAXLINE + 1), 414)
+
+    def test_the_headers_required_are_the_ones_security_headers_writes(self):
+        # Run, not read: a header added to _security_headers turns this red until PAGE_HEADERS names it, and every error
+        # page and the control then require it. A header _send writes on every page outside _security_headers is the
+        # control's to see.
+        written = []
+        km._security_headers(lambda name, value: written.append((name, value)))
+        self.assertEqual(sorted(written), sorted(PAGE_HEADERS.items()),
+                         "the headers _security_headers writes, each once")
+
+    def test_the_control_at_the_limit_is_served_by_the_route_with_the_same_headers(self):
+        request = self._request_line(_MAXLINE) + _header_lines(_CROSS_SITE + [("Connection", "close")]) + b"\r\n"
+        status, headers, body = _raw_exchange(self.port, request)
+        self.assertEqual(status, 200, "%r" % body[:200])
+        self.assertTrue(_values(headers, "Content-Type")[0].startswith("text/html"), "the chat page")
+        for name, value in PAGE_HEADERS.items():
+            self.assertEqual(_values(headers, name), [value], "the route's page: %s, once" % name)
+        # Read whole: a header _send writes on every page outside _security_headers would be on this page and on no
+        # error page. It turns this red, so the error pages cannot fall behind what _send writes on every page unseen.
+        self.assertEqual(sorted(k.lower() for k, _ in headers),
+                         sorted(k.lower() for k in _CONTROL_OWN + tuple(PAGE_HEADERS)),
+                         "the route's page carries PAGE_HEADERS and the route's own headers, each once, and no other")
+
+    def test_a_header_line_over_the_limit_gets_a_431_with_every_page_header(self):
+        name = b"X-Pad: "
+        long_line = name + b"a" * (_MAXLINE + 1 - len(name) - 2) + b"\r\n"
+        self.assertEqual(len(long_line), _MAXLINE + 1)
+        self._error_page(b"GET /chat HTTP/1.1\r\n" + _header_lines(_CROSS_SITE) + long_line, 431)
+
+    def test_more_than_a_hundred_headers_gets_a_431_with_every_page_header(self):
+        # 101 header lines and no blank line: every interpreter refuses them at the last line sent, and they leave
+        # nothing unread. Whether the closing blank line counts as a line differs (3.10 to 3.14 count it, so they refuse
+        # 100 headers and the blank line too; 3.15 counts header lines only), and none is sent.
+        pad = [("X-Pad-%d" % i, "1") for i in range(_MAXHEADERS + 1 - len(_CROSS_SITE))]
+        self.assertEqual(len(_CROSS_SITE + pad), _MAXHEADERS + 1)
+        self._error_page(b"GET /chat HTTP/1.1\r\n" + _header_lines(_CROSS_SITE + pad), 431)
+
+    def test_a_method_the_kernel_does_not_serve_gets_a_501_with_every_page_header(self):
+        for method in ("PUT", "DELETE"):
+            with self.subTest(method=method):
+                self.assertFalse(hasattr(km.Handler, "do_" + method), "the kernel serves no " + method)
+                request = b"%s /chat HTTP/1.1\r\n" % method.encode() + _header_lines(
+                    [("X-Romp-Token", TOK), ("Content-Length", "0")]) + b"\r\n"
+                self._error_page(request, 501)
 
 
 class _DrainSpy:
