@@ -8513,7 +8513,45 @@ def _move_tag_member(tid_from, tid_to, sids):
         return out, None
 
 
-_TAG_EDIT_OPS = ("create", "rename", "recolor", "addMember", "removeMember", "delete", "move")
+def _set_member_tags(tids, sids):
+    """A session's local tags SET to exactly `tids`, as ONE write under _views_lock (the user
+    2026-09-30, who dragged a tab into another group expecting it to take that tag and lose the rest,
+    and found it had only gained one): every local tag `tids` names holds the sessions afterwards and
+    every other local tag does not. All of it lands or none of it does, so no other device ever reads
+    a half-moved session (removals then an add, as separate ops, showed one in no group, or in both,
+    between two pushes). The tab strip's drag posts it: [the group's tag] for a drop into a group, []
+    for a drop on the ungrouped row. An unknown tid refuses the whole write, since a list naming a
+    deleted tag would leave the session in fewer groups than the gesture showed. Members arrive as the
+    viewer-relative id strings every client posts (_member_pair canonicalizes). Returns (tag-or-None,
+    error-or-None) like _edit_tag; the tag is the first listed tag's post-write row, None for []."""
+    with _views_lock:
+        v0 = _timeline_views_proved()                     # PROVED, like _edit_tag: a fault raises to the door
+        v = json.loads(json.dumps(v0))                    # the working copy; v0 stays the pristine base
+        by_id = {t["id"]: t for t in v["tags"]}
+        if any(x not in by_id for x in tids):
+            return None, "the tag to move into no longer exists — it may have been deleted from another dashboard"
+        keep = set(tids)
+        pairs, keys = [], set()
+        for m in (_member_pair(x) for x in sids):
+            if m and (m["host"], m["sid"]) not in keys:
+                keys.add((m["host"], m["sid"]))
+                pairs.append(m)
+        for t in v["tags"]:
+            if t["id"] in keep:
+                have = {(m["host"], m["sid"]) for m in t["members"]}
+                t["members"] = list(t["members"]) + [m for m in pairs if (m["host"], m["sid"]) not in have]
+            else:
+                t["members"] = [m for m in t["members"] if (m["host"], m["sid"]) not in keys]
+        v = _norm_timeline_views(v)
+        _set_timeline_views(v, base=v0)
+        if not tids:
+            return None, None
+        out = json.loads(json.dumps(next(t for t in v["tags"] if t["id"] == tids[0])))
+        out["members"] = [_member_str(m) for m in out["members"]]
+        return out, None
+
+
+_TAG_EDIT_OPS = ("create", "rename", "recolor", "addMember", "removeMember", "delete", "move", "setTags")
 
 
 def _apply_tag_edit(e):
@@ -8527,7 +8565,9 @@ def _apply_tag_edit(e):
     learns both from it). Every dashboard tag gesture posts this instead of the whole blob (the user
     2026-09-05: a create followed by typing the tag's name lost the name, because the second
     whole-blob post was judged stale against the first). Members arrive as the viewer-relative id
-    strings every client already posts; _member_pair canonicalizes them."""
+    strings every client already posts; _member_pair canonicalizes them. Two ops touch more than one
+    tag, each as ONE write: `move` ({tid_from, tid_to}) and `setTags` ({tids}, the sessions' local tags
+    set to exactly that list — the tab strip's drag into a group, or onto the ungrouped row)."""
     if not isinstance(e, dict):
         return False, "the edit is missing", None
     op = str(e.get("op") or "")
@@ -8551,6 +8591,17 @@ def _apply_tag_edit(e):
             return False, "the edit named no session", None
         t, err = _move_tag_member(tf, tt, sids)
         return err is None, err, ({"tid": t["id"], "name": t["name"]} if t else {"tid": tt})
+    elif op == "setTags":
+        # {tids: [...], sid|sids}: the sessions' local tags SET to exactly these, as ONE write (an empty
+        # list clears them all). The list is required, and every entry must be a tag id
+        tl = e.get("tids")
+        if not isinstance(tl, list) or not all(isinstance(x, str) and x for x in tl):
+            return False, "the edit named no tag list", None
+        if not sids:
+            return False, "the edit named no session", None
+        tl = list(dict.fromkeys(tl))
+        t, err = _set_member_tags(tl, sids)
+        return err is None, err, ({"tid": t["id"], "name": t["name"]} if t else ({"tid": tl[0]} if tl else None))
     elif tid is None:
         return False, "the edit named no tag", None
     elif op == "rename":
@@ -54431,7 +54482,10 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagEdit — the targeted `tagEdit` op (create / rename / recolor / addMember / removeMember /
 #             delete / move, by tag id), the `tagEditAck` / `viewsAck` answers on the poster's socket,
 #             and the write sequence (`seq`) on every views blob.
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+#   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
+#             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
+#             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)

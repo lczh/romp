@@ -370,6 +370,52 @@ class TargetedTagEdits(_Wire):
         self.assertEqual([x["sid"] for x in store_tag("api")["members"]], [SID1], "no duplicate member")
         self.assertEqual(self.notices, [], "a move is built from the store — never judged stale")
 
+    def test_set_tags_puts_a_session_in_exactly_the_listed_tags_as_one_write(self):
+        """The `setTags` op (the user 2026-09-30, who dragged a tab into another group and expected it to take
+        that tag and lose its others): the session's LOCAL tags set to exactly the list, in ONE write under the
+        lock, so no other device reads a half-moved session. A refused list (a tag deleted elsewhere) writes
+        nothing at all; an empty list clears every tag (the drop on the ungrouped row); other members are
+        never touched."""
+        self.seed()                                                        # web = gA holding SID1
+        api = self.edit("w1", {"op": "create", "name": "api", "color": "#54B204", "sids": [SID1, SID2]})["tid"]
+        tests = self.edit("w2", {"op": "create", "name": "tests", "color": "#DD42FF", "sids": [SID2]})["tid"]
+        members = lambda n: sorted(m["sid"] for m in store_tag(n)["members"])   # noqa: E731
+        writes, real = [], km._set_timeline_views
+        km._set_timeline_views = lambda blob, **kw: (writes.append(1), real(blob, **kw))[1]
+        try:
+            # SID1 is in web and api: set to [tests] — off both, onto tests, as one write
+            a = self.edit("w3", {"op": "setTags", "tids": [tests], "sid": SID1})
+        finally:
+            km._set_timeline_views = real
+        self.assertEqual((a["type"], a["ok"], a["tid"], a["name"]), ("tagEditAck", True, tests, "tests"))
+        self.assertEqual(len(writes), 1, "ONE store write for the whole set, not one per tag")
+        self.assertEqual((members("web"), members("api"), members("tests")), ([], [SID2], sorted([SID1, SID2])),
+                         "off every other tag, onto the listed one, and SID2's memberships untouched")
+        # a list naming a tag that no longer exists: refused, and NOTHING moves (not even the halves that could)
+        before = json.dumps(km._timeline_views(), sort_keys=True)
+        r = self.edit("w4", {"op": "setTags", "tids": ["gA", "gghost"], "sid": SID1})
+        self.assertEqual((r["ok"], "no longer exists" in r["error"]), (False, True))
+        self.assertEqual(json.dumps(km._timeline_views(), sort_keys=True), before, "nothing was written")
+        # the malformed shapes are refused with a plain reason
+        self.assertEqual(self.edit("w5", {"op": "setTags", "tids": ["gA"]})["error"], "the edit named no session")
+        self.assertEqual(self.edit("w6", {"op": "setTags", "sid": SID1})["error"], "the edit named no tag list")
+        self.assertEqual(self.edit("w7", {"op": "setTags", "tids": "gA", "sid": SID1})["error"], "the edit named no tag list")
+        self.assertEqual(json.dumps(km._timeline_views(), sort_keys=True), before)
+        # a set to TWO tags puts it in both (back into web, kept in tests), and a sid posted twice is one member
+        self.assertTrue(self.edit("w8", {"op": "setTags", "tids": ["gA", tests], "sids": [SID1, SID1]})["ok"])
+        self.assertEqual((members("web"), members("tests")), ([SID1], sorted([SID1, SID2])), "no duplicate member")
+        # an EMPTY list clears every tag the session had: the drop on the ungrouped row
+        c = self.edit("w9", {"op": "setTags", "tids": [], "sid": SID1})
+        self.assertEqual((c["ok"], c.get("tid")), (True, None))
+        self.assertEqual((members("web"), members("api"), members("tests")), ([], [SID2], [SID2]))
+        self.assertEqual(self.notices, [], "a set is built from the store — never judged stale")
+
+    def test_the_kernel_advertises_set_tags(self):
+        """The `tagSet` cap says the op is here: a page reads it and, without it, reaches the same tags through
+        the older ops (an older kernel refuses an op it does not know)."""
+        self.assertIn("tagSet", km.KERNEL_WS_CAPS)
+        self.assertIn("setTags", km._TAG_EDIT_OPS)
+
     def test_the_tag_route_still_addresses_by_name_and_creates_on_first_use(self):
         """_edit_tag's name path is unchanged for `romp tag`: a missing name is created on any
         edit, an existing one is edited, a duplicate name refuses rather than guesses."""

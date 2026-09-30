@@ -5294,16 +5294,24 @@ folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
 adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
-**+** adds the tag without moving the tab. Dragging does it too, and the place you drop says where the
-tab should appear now: drop it inside a group's row, or on the group's header, and the session takes
-that group's tag and lands at the slot you dropped it in, keeping every other tag it carries — so a
-session under several tags goes on showing under each of them. The group about to take it wears the
-accent while you hold the tab over it, and a drop inside the group it already belongs to just reorders
-it. Drop a tab on the ungrouped row and it loses **every** tag instead: that row is not a group but the
-sessions carrying no tags, so nothing short of clearing them would put it there. The tags going are
-named under the tab before you let go, since dragging it back into one group restores that one tag and
-not the others; there is no undo beyond dragging. Dragging a **header** still reorders the groups, as
-above — which of the two gestures you get depends on what you picked up, never on where you dropped it. **Group tabs by tag**, at the foot of the tag
+**+** adds the tag without moving the tab. Dragging a tab moves it as well, and the place you drop says
+where the tab should appear now, and only there: drop it inside another group's row, or on that group's
+header, and the session **moves** there, taking that group's tag, losing every other tag it carries, and
+landing at the slot you dropped it in. That holds for a session under several tags too: drag its copy from
+one group to another and it ends under the new group alone, so its copies leave the other groups. Hold
+**Option** (**Alt** on Windows and Linux) as you let go to **add** the group's tag instead and keep the
+rest, the key a file manager copies on: a small **+** sits on the dragged tab's corner while the key is
+down, and the session goes on showing under each of its tags. The group about to take it wears the accent
+while you hold the tab over it, the tags a move would take off are named under the tab, and a drop inside
+the group the tab was already in just reorders it. Drop a tab on the ungrouped row and it loses **every**
+tag instead, with or without the key: that row is not a group but the sessions carrying no tags, so nothing
+short of clearing them would put it there. The tags going are named under the tab before you let go, since
+dragging it back into one group restores that one tag and not the others; there is no undo beyond
+dragging. A move or a clear is one write on your kernel, so another device never sees the session
+half-moved; a kernel from before that write gets the same tags through its older edits, one after another,
+and a tag kept by another kernel is changed there, in a write of its own. Dragging a **header** still
+reorders the groups, as above — which of the two gestures you get depends on what you picked up, never on
+where you dropped it. **Group tabs by tag**, at the foot of the tag
 button's menu, turns the sections off for this browser. On a phone the session picker, which stands in
 for the strip, lists the sessions the same way: each under its tag's heading, in the same order (its tag
 menu has the same switch). The folds follow you: your kernel keeps which groups are folded, which of the

@@ -100,11 +100,12 @@ test("drop commits through the SAME reorderTo — neighbor + side, hidden-view i
     "the neighbours inside the dragged copy's own group first (T264b)");
   assert.match(body, /const prev = prevIn \?\? \(nextIn \? null : walk\(dragged\.previousElementSibling, back, false\)\);/,
     "…falling back across groups only when the group holds no other tab");
-  // …and since 2026-09-23 the drop also WRITES THE TAG its zone names (the user: dragging a tab onto a
-  // group should put the session IN it, and the ungrouped row should take the tag back off). The decision
-  // is drag-join.ts's, read off the same zone the cue painted; the write is the tab menu's Tags flyout's
-  // own (postTagEdit, or the editTag wire), so ONE writer owns tags — the handler inlines none of it.
-  assert.match(body, /const d = tabDropFor\(dragged, draggedId, viewTagUnion\(effViews\(\)\)\)\.drop;/);
+  // …and since 2026-09-23 the drop also WRITES THE TAGS its zone names (the user: dragging a tab onto a
+  // group should put the session IN it, and the ungrouped row should take the tags back off; since
+  // 2026-09-30 a drop into a group MOVES it there, and Option / Alt at the release adds instead). The
+  // decision is drag-join.ts's, read off the same zone the cue painted with the drop's own altKey; the
+  // write is postTabDropTag's (postTagEdit, or the editTag wire) — the handler inlines none of it.
+  assert.match(body, /const d = tabDropFor\(dragged, draggedId, viewTagUnion\(effViews\(\)\), e\.altKey\)\.drop;/);
   assert.match(body, /if \(postTabDropTag\(d, draggedId\)\) tabDragCommitted = true;/);
   assert.doesNotMatch(body, /editUnion|moveUnion|editTag|postTagEdit/, "no tag writer inlined in the handler");
   // …and reorderTo still persists exactly as before

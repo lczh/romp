@@ -56,14 +56,15 @@ Tabs carry the state of their sessions. A tab shows a count dot while its
 session needs you and a red ring while it is stopped, tags group the strip into
 sections, and a tab can take a hot key of your own.
 
-Drag a tab onto a tag group to put that session in it: the tab takes the group's
-tag and lands where you dropped it, keeping its other tags, so a session with
-several tags shows under each one.
+Drag a tab onto a tag group to move that session there: it takes the group's
+tag, loses its others and lands where you dropped it. Hold Option (Alt on
+Windows and Linux) as you let go to add the tag and keep the rest instead, so
+the session shows under each of its tags; a small **+** on the tab says so.
 
-Drag a tab onto the ungrouped row instead and it loses every tag it had — that
-row is the sessions with no tags — so the label under the tab names them all
-before you let go. Dragging one back into a group restores that tag, not the
-rest. Dragging a group's header still reorders the groups.
+Drag a tab onto the ungrouped row and it loses every tag it had, since that row
+is the sessions with no tags. Before you let go, the label under the tab names
+the tags coming off. Dragging it back restores only the tag of the group it
+lands in. Dragging a group's header still reorders the groups.
 
 What a session needs from you sits in a box above its composer, folded to a
 header with the count. Click the header to see the items, again for the full
