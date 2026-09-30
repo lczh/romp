@@ -51,7 +51,7 @@ export const TABGROUPS_PUBLISHES_KEY = "romp:tabgroups:publishes";
 /** How far this browser has got in the kernel's count of taken fold publishes (2026-09-30; the viewOrder frame's
  *  `foldsSeq`, one kernel life's): {received, heard}, the highest count any pane of this browser has received on a frame,
  *  and the highest it has heard on a frame it did not pass over that names no publish of this browser's. A key of its
- *  own, which only a hearing writes and a hearing writes nothing else of: nearly every push raises a count, so every open
+ *  own: only a hearing writes it, and noting a count writes nothing else. Nearly every push raises a count, so every open
  *  pane writes here on nearly every push, and a tab in another renderer process, which sees this browser's writes only
  *  after a delay, would otherwise write back the record above as it last saw it, dropping a sibling's newest entry or
  *  setting its number back. Two tabs writing here inside that delay can set a count back: a lower received count only
@@ -565,11 +565,13 @@ function stampingFolds(send: FoldsSender, w: any): FoldsPublisher {
  *  One with a count does while this browser's received count is of the same kernel life as it, and no frame newer than
  *  it has been HEARD (TABGROUPS_FOLDS_SEEN_KEY: a frame naming no publish of this browser's). Such a frame reflects a
  *  later publish that is not this browser's, taken and heard, and from then on every frame at or below the entry's count
- *  is older than one received (the first rule at passesOver). It is never a frame the entry itself passes over, whatever
- *  the pane that heard it had seen of the record: the second rule passes over only frames at or below the entry's
- *  count, and the third only frames naming this browser's publishes. So the first frame received from a new kernel life
- *  ends every entry of the old one, and an entry left by a page gone without pagehide ends once a later publish that is
- *  not this browser's (another device's, or an unnamed one from a page before the name) is taken and heard. */
+ *  is older than one received (the first rule at passesOver). Once this browser's record has reached the pane that heard
+ *  it (before then that pane reads a fresh browser id, and takes this browser's frames for another device's), such a
+ *  frame is never one the entry itself passes over, whatever entries that pane had seen: the second rule passes over
+ *  only frames at or below the entry's count, and the third only frames naming this browser's publishes. So the first
+ *  frame received from a new kernel life ends every entry of the old one, and an entry left by a page gone without
+ *  pagehide ends once a later publish that is not this browser's (another device's, or an unnamed one from a page before
+ *  the name) is taken and heard. */
 function stands(seen: FoldsSeen, e: LiveEntry): boolean {
   const r = e.received;
   if (!r) return true;
@@ -612,12 +614,13 @@ function passesOver(rec: PublishRecord, seen: FoldsSeen, by: unknown, s: FoldsSe
  *  one: as received, and as heard unless it was passed over or names one of this browser's publishes (a frame whose
  *  folds are null counts too), BEFORE anything below publishes, so a publish made over this frame carries it. Whether a
  *  frame naming one of this browser's publishes is its older state turns on entries that a tab in another renderer
- *  process may not have seen yet, so such a frame never raises the heard count: a tab that has not seen an entry cannot
- *  end it with the very frame it holds back (stands). A frame with no count (an older kernel) is judged by the third
- *  rule alone, with every entry standing, as before the count. A hearing with no publisher installed is a new
- *  connection's first (every drop withdraws the publisher; the VS Code timeline reloads instead), and starts this
- *  document's entry afresh (newFoldsConnection). A frame naming one of this browser's publishes, heard or passed over,
- *  also raises the number this page's next publish goes past (noteFoldsFloor). */
+ *  process may not have seen yet, so such a frame never raises the heard count: once this browser's record has reached
+ *  a tab, that tab cannot end an entry it has not seen with the very frame the entry holds back (stands). A frame with
+ *  no count (an older kernel) is judged by the third rule alone, with every entry standing, as before the count. A
+ *  hearing with no publisher installed is a new connection's first (every drop withdraws the publisher; the VS Code
+ *  timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). A frame naming one of this
+ *  browser's publishes, heard or passed over, also raises the number this page's next publish goes past
+ *  (noteFoldsFloor). */
 export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn: FoldsPublisher) => void, by?: unknown, seq?: unknown): void {
   const g = (globalThis as any).window;
   const w = g && typeof g === "object" ? g : null;

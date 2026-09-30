@@ -437,6 +437,29 @@ test("a tab in another renderer process hears this tab's earlier answer before t
   });
 });
 
+test("a frame passed over as older than one received raises no heard count, so a slower pane still passes over this browser's earlier answer", () => {
+  // the kernel takes another device's publish (count 7), then this browser's publish 1 (8); publish 2 is still out. A pane
+  // that connects now hears its connect push, 1's answer at 8, first and passes it over. A sibling on a slower socket then
+  // hears the other device's 7, older than the 8 received (passed over), and then 1's answer at 8
+  withStore({}, (store, events) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS), { browser: OTHER, n: 1 }, at(6));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));   // publish 1, having received 6
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));   // publish 2, before 1 is answered
+    const answer = kernelCopy(sent[0].f), by1 = { browser: sent[0].by.browser, n: 1 };
+    const g: any = globalThis, win = g.window;
+    g.window = new EventTarget();                                        // the pane that connects now
+    try { hearSharedFolds(answer, () => {}, () => {}, by1, at(8)); } finally { g.window = win; }
+    assert.deepEqual(counts(store), { received: at(8), heard: at(6) }, "premise: passed over, the received count raised alone");
+    const painted = events.length;
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), { browser: OTHER, n: 2 }, at(7));   // the slower socket: the other device's 7
+    hear(answer, by1, at(8));                                            // then 1's answer
+    assert.deepEqual([readTabGroups().collapsed, events.length], [["api", "web"], painted], "both passed over: web stays folded");
+    assert.deepEqual(counts(store), { received: at(8), heard: at(6) }, "and no heard count was raised");
+  });
+});
+
 test("an entry stops counting once a newer frame is heard, or once a frame of a new kernel life is received", () => {
   const E = "e".repeat(32);
   // a sibling pane's publish 5, made having received count 4, that never landed; its page went away without pagehide
