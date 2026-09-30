@@ -20707,7 +20707,15 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // the kernel's typed move refusal → the reason where the path was typed, or a toast if the dialog is gone
     moveFailedLocal(String(m.id), String(m.name || m.id), String(m.text || "unknown error"));
   }
-  else if (m.type === "focusComposer") { const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; ta?.focus(); }
+  else if (m.type === "focusComposer") {
+    // The shell focuses this column's window and posts this in the same breath (palette-main.ts: the column cycle, a session's
+    // hot key, the shortcuts dialog handing the keyboard back), and the post is handled a task later. A chord pressed in that
+    // gap moves the focus to another column first; taking it back here then dragged the shell's focus ring back to this
+    // column, and the press after it cycled from the wrong one (the served split test's CI reds, 2026-09-25 to 2026-09-30).
+    // So the post is acted on only while this document still holds the focus the shell gave it.
+    if (!document.hasFocus()) return;
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; ta?.focus();
+  }
   else if (m.type === "glowTurns") applyGlow(Array.isArray(m.groups) ? m.groups : [], Array.isArray(m.mids) ? m.mids : []);
   else if (m.type === "askLive") setLiveAsk(m.id, m.ask ?? null);
   else if (m.type === "askLiveClear") clearLiveAsk(m.id);
