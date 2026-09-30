@@ -62,7 +62,13 @@ test("renderEvent stamps an orphan note's record uuid on its turn beside the not
 // predicates, lifted whole with the uuid test render.ts imports for the first and its HELD_PREFIX for the second, so an edit to
 // either in render.ts reaches every test below (the harness ran copies of its own, which kept the module green while render.ts's
 // isHeldGroup answered false, 2026-09-29)
-const liftLine = (anchor: string) => liftBetween(anchor, "\n");
+// one physical line of render.ts, which must be one whole statement: a predicate wrapped onto the next line would lift as its
+// first half, which esbuild accepts once it appends its own semicolon, so the raw line must end with one (review 2026-09-30)
+const liftLine = (anchor: string) => {
+  const a = RENDER.indexOf(anchor), b = RENDER.indexOf("\n", a);
+  assert.ok(a > 0 && b > a && RENDER.slice(a, b).trimEnd().endsWith(";"), `the lifted line is not one whole statement (wrapped?): ${anchor.slice(0, 40)}`);
+  return liftBetween(anchor, "\n");
+};
 const { isOptimistic, isHeldGroup } = liftWith(liftLine("const isOptimistic = (e: ChatEvent): boolean =>") + liftLine("const HELD_PREFIX = ")
   + liftLine("const isHeldGroup = (e: ChatEvent): boolean =>"), { isOptimisticUuid }, ["isOptimistic", "isHeldGroup"]);
 // render.ts's own same-transcript reading (a fork shares no uuid), lifted whole: the harness used to answer it with the Proxy's no-op, so
@@ -279,8 +285,8 @@ test("a page holding kernel events beside its own group: a frame sharing none of
   assert.deepEqual([more.v.removed, more.kept, more.shows, more.v.rendered, more.v.rediff, more.v.avgTurnH], [0, true, ["append"], 3, true, 40], "an append keeps the view, its render mark and its row average, and compares its units");
   // the kernel's head and the send's echo are kernel events too, though neither is a transcript turn (clearBoundarySeen's fork test
   // compares turns alone): a page holding them beside its bubble, given a frame that carries them, appends. Read by turns, it would
-  // be a first build, and every frame of an empty session's first exchange would rebuild the window and land the reader again until
-  // a real turn was resident
+  // be a first build, and every full frame reaching it during an empty session's first exchange (a reconnect's or a repair's; the
+  // deltas between never read it) would rebuild the window and land the reader again until a real turn was resident
   const headAndEcho = [{ kind: "system", uuid: "system:head" }, { kind: "user", uuid: "echo:q-1", md: "/clear" }];
   const echoed = upsertOnPaintedView(pageHolding(headAndEcho, [pendingGroup]), clearingFrame(), 3);
   assert.deepEqual([echoed.v.removed, echoed.kept, echoed.shows, echoed.v.rendered, echoed.v.avgTurnH], [0, true, ["append"], 3, 40],
