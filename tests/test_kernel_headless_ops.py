@@ -393,6 +393,11 @@ class SdkSingleFlight(unittest.TestCase):
         fake_mod = mock.Mock()
         fake_mod.SdkBackend = lambda *a, **k: FakeBackend()
         prev = km._sdk_backend
+        # _sdk() wires the judge's hooks to the backend it builds, here a FakeBackend from a Mock module; left behind,
+        # jd._LOGIN_AUTH_ENV_FN (the Mock's startup_auth_env) broke every later login-billed judge call in the process
+        # until another test built a real backend (2026-09-30, found when CI split the suite into shards).
+        hooks = {h: getattr(km.jd, h) for h in ("_LOGIN_AUTH_ENV_FN", "_USAGE_REFRESH_FN", "_DEFAULT_AUTH_FN",
+                                                  "_DEFAULT_LOGIN_FN", "_API_HEALTH_NOTE_FN")}
         try:
             km._sdk_backend = None
             results = [None] * 6
@@ -410,6 +415,8 @@ class SdkSingleFlight(unittest.TestCase):
                             "every caller gets the same singleton")
         finally:
             km._sdk_backend = prev
+            for h, v in hooks.items():
+                setattr(km.jd, h, v)
 
 
 class WiringPins(unittest.TestCase):
