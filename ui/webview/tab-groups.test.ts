@@ -1928,9 +1928,10 @@ test("the tab drag moves THIS copy and reorders within its group's neighbours (T
   assert.match(drop, /const prev = prevIn \?\? \(nextIn \? null : walk\(dragged\.previousElementSibling, back, false\)\);/);
   assert.match(drop, /const next = nextIn \?\? \(prevIn \? null : walk\(dragged\.nextElementSibling, fwd, false\)\);/);
   assert.doesNotMatch(drop, /\n\s*tabDragCommitted = true;\s*\/\//, "no unconditional commit: a drop that moved nothing takes dragend's cancel path");
-  // a drop still changes no membership: a copy dragged into another group's row re-sections home on the next render
+  // the hit-test places the copy and nothing more: what the release does to the session's tags (a move into the
+  // group, since 2026-09-30) is read from the slot it lands in, by drag-join.ts's rule (drag-join.test.ts)
   const over = RENDER.slice(RENDER.indexOf('tabs.addEventListener("dragover"'), RENDER.indexOf('tabs.addEventListener("drop"'));
-  assert.match(over, /A drop changes\s*\n?\s*\/\/ no membership/);
+  assert.match(over, /The hit-test places the tab and nothing more; what the release does to the\s*\n\s*\/\/ session's tags is read from the slot it lands in \(tabDropFor, below\)\./);
 });
 
 test("executed: the keyboard order keeps a session while any copy is on screen (T264b)", () => {

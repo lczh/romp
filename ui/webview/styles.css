@@ -981,16 +981,24 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
   box-shadow: var(--shadow-toast); font-size: 0.86em; line-height: 1.45;
   max-width: min(440px, 92vw);
 }
-/* THE TAB DRAG's leave cue (the user 2026-09-23; render.ts paintDragCue): while a group's tab hovers the
-   ungrouped row, the line under it names the tag the release would take off and the groups the session
-   STAYS in — a session that keeps another tag never appears in the trail, so the drop would otherwise
-   look like it did nothing. It wears the shared tooltip dress above (a floating annotation IS a tip, so
+/* THE TAB DRAG's leave cue (the user 2026-09-23; render.ts paintDragCue): while a tab hovers the ungrouped
+   row, or another group it would MOVE to (2026-09-30), the line under it names the tags the release would
+   take off — the tab's move alone does not say which of its other copies leave the strip. It wears the shared tooltip dress above (a floating annotation IS a tip, so
    it cannot drift from the others) plus the bits a drag cue needs: the tags as their chips on one line,
    never a pointer target (it must not eat the drag's own events), and position:fixed from .romp-tip, so
    it takes no space and the strip cannot shift. Shown and hidden by the gesture alone — no timer, no
    toast. The join half wears the accent ring on the target header instead (.tab-group-head.join-target). */
 .tab-drag-cue { display: none; align-items: center; gap: 5px; white-space: nowrap; pointer-events: none;
   padding: 4px 8px; color: var(--dim); }
+/* THE TAB DRAG's copy badge (the user 2026-09-30; render.ts paintDragCue): with Option (Alt) held over a
+   group, the release ADDS that group's tag instead of moving the session there, and a small "+" sits over
+   the dragged tab's top-right corner, where the desktop puts its copy badge on the pointer (the native drag
+   image is blanked, so the dragged tab stands in for it). The accent disc with its ink, tokens only, so it
+   reads in every theme; fixed and pointer-events none, so it takes no space and eats none of the drag's
+   events. Shown and hidden by the gesture alone, like the leave line above. */
+.tab-drag-add { position: fixed; z-index: 210; display: none; align-items: center; justify-content: center;
+  width: 13px; height: 13px; border-radius: 50%; background: var(--accent); color: var(--accent-fg);
+  font-family: var(--sans); font-size: 11px; font-weight: 600; line-height: 1; pointer-events: none; }
 .tab-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.12); }
 .tab-add { color: var(--dim); font-size: 1.1em; padding: 6px 10px; border-radius: 6px; line-height: 18px; }
 /* the tag controls reserve the + tab's EXACT vertical box — 18px line + 12px padding + 1px border

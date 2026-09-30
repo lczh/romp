@@ -482,12 +482,14 @@ planned here did not ship; the per-surface lens took the hash's place.
 Every dashboard write of the views blob is acknowledged on the socket that posted
 it. A tag edit from the timeline's tag table, its lane gear menu, or a tab's Tags
 flyout is one `tagEdit` WS op, `{writeId, edit: {op, tid, …}}`, where `op` is
-create, rename, recolor, addMember, removeMember, delete or move. It is applied
+create, rename, recolor, addMember, removeMember, delete, move or setTags. It is applied
 through the same read-modify-write merge as `romp tag`, so the stale-writer guard
 never refuses it. Every op but create names the tag by its stored id, never by
 name; a create takes an optional name, and the kernel mints the id and, given no
 name, the lowest free "tag N". A move (off one tag, onto another) is one write:
-both halves land or neither does. The kernel answers `tagEditAck` with `ok`, the
+both halves land or neither does. So is setTags, `{tids, sids}`, which sets the
+sessions' local tags to exactly that list (the tab strip's drag into a group, or
+onto the ungrouped row with an empty list). The kernel answers `tagEditAck` with `ok`, the
 post-write client blob, the tag's `tid` and `name`, or a plain refusal. A lens or
 order change still posts the whole blob (`setTimelineViews`) together with
 `edited`, the tag ids the write changed (none for a lens or order write).
@@ -679,8 +681,10 @@ write succeeds.
 The kernel announces what it can do in a `{type: "caps", caps, viewsSeq}` frame
 in reply to every `ready` (a pane's bundle posts one per page life; the shell
 page's own socket posts one at every open) and lists the caps on `/version`;
-`tagEdit` covers the targeted op, the acks and the `seq`. A client uses the
-targeted op only when the cap is present and posts the whole blob otherwise. A
+`tagEdit` covers the targeted op, the acks and the `seq`, and `tagSet` its
+setTags op. A client uses the targeted op only when the cap is present and posts
+the whole blob otherwise; without `tagSet`, the strip's drag reaches the same
+tags through the older ops (a one-to-one move, else adds and removals in turn). A
 message no handler takes is answered `{type: "unknownOp", op, writeId}`, which
 the client treats as a refusal of that write and as withdrawing the cap. The
 `ready` handler sends the caps frame after its own connect push, and the pane
