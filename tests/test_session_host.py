@@ -487,6 +487,10 @@ class HostProcess(unittest.TestCase):
         self.assertEqual(kinds, ["control_response", "system", "assistant", "result"])
         journal = self._journal_landed(len(kinds))                        # the writer lands them behind the socket, by design
         self.assertEqual([r["type"] for _, r in journal], kinds, "the journal holds every record the CLI emitted, in order")
+        # review 2026-09-30: the wait fails at its deadline, never handing back a short journal; one record past a finished
+        # turn's last can never land, so that wait must raise
+        with self.assertRaises(AssertionError):
+            self._journal_landed(len(kinds) + 1, timeout=0.2)
         self.assertEqual(self._lease()["fsid"], FSID, "the lease's conversation id follows the init (it started as the romp sid)")
         k.send({"t": "ack", "offset": res["offset"]})
         # secrets: the canary environment value appears nowhere the host writes or sends
