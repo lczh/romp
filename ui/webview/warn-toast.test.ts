@@ -46,10 +46,14 @@ test("the family dismissal: a visible ✕, Escape clears the stack, click-safe b
   assert.match(RENDER, /setTimeout\(\(\) => t\.classList\.add\("fade"\), 11000\);/);
 });
 
-test("the specimen's copy is untouched — only the trap was the bug", () => {
+test("the specimen's copy was untouched — only the trap was the bug; the refusal itself is retired since", () => {
+  // the specimen was the comment-thread refusal on a passage from before the last compaction. The user decided on
+  // 2026-09-30 that such a passage opens a thread (a tip fork carrying what surrounded it), so that toast is gone;
+  // its rewind sibling, still a refusal, keeps the wording the user liked
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
-  assert.ok(KERNEL.includes("that message predates the last context compaction; only newer passages can open a thread"),
-    "the comment-thread refusal keeps its exact wording — the user likes the information");
+  assert.ok(!KERNEL.includes("only newer passages can open a thread"), "a pre-compaction passage opens a thread now");
+  assert.ok(KERNEL.includes("that message predates the last context compaction — only newer messages can be rewound to"),
+    "the rewind refusal keeps its exact wording");
 });
 
 test("federation surfaces a dropped route instead of vanishing it", () => {

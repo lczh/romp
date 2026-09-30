@@ -127,7 +127,7 @@ import { setTip, pruneTip } from "./tip";
 import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as syncMetaControlsWith, ctxBar as buildCtxBar, setCtxBar as setCtxBarWith,
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
-         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
+         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_PRIOR_GIST } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { dragSlotIndex } from "./dragslot";
@@ -10384,6 +10384,19 @@ function cmtRelayedNote(t: number): HTMLElement {
   return n;
 }
 
+// A thread on a passage from BEFORE the session's last compaction (the user 2026-09-30): its opening message carried,
+// beyond the quote and the comment, the turns around the passage and where the full transcript is saved. That text went
+// out on the user's behalf, so the popover says so under the opening message: one line by default, the words exactly
+// as sent one click deeper (THE notice, nested; its fold keyed in openFolds so a refill keeps it). Read from the thread
+// row the kernel ships (priorContext), never from this page's memory, so a reload shows it again.
+function cmtPriorNote(th: CommentThread): HTMLElement | null {
+  if (!th.priorContext) return null;
+  const body = el("div", "notice-prose cmt-prior-text");
+  body.textContent = th.priorContext;
+  return notice({ src: "romp", glyph: "romp", sev: "romp", gist: CMT_PRIOR_GIST, body, key: "cmtprior:" + th.tid,
+                  nested: true, cls: "cmt-prior" });
+}
+
 function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): void {
   list.dataset.session = th.tid;   // the THREAD owns its queue/errors — in-turn controls resolve to it
   const prevScroll = list.scrollTop;
@@ -10514,7 +10527,17 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       quoteHost.insertBefore(ctx, quoteHost.firstChild);
       list.closest(".cmt-pop")?.querySelector(":scope > .cmt-quote")?.remove();
     }
-  } else for (const m of th.msgs) list.appendChild(commentMsgEl(m.who, m.text));
+    const prior = quoteHost ? cmtPriorNote(th) : null;   // under the opening message, inside its turn
+    if (prior) quoteHost!.appendChild(prior);
+  } else {
+    let priorPlaced = false;
+    for (const m of th.msgs) {
+      list.appendChild(commentMsgEl(m.who, m.text));
+      const prior = !priorPlaced && m.who === "you" ? cmtPriorNote(th) : null;   // under the opening message
+      if (prior) list.appendChild(prior);
+      if (m.who === "you") priorPlaced = true;
+    }
+  }
   if (pend.length) list.appendChild(cmtPendingQueued(pend));
   // (the typing dots that rendered here while the thread was busy are RETIRED — the user 2026-08-24:
   // the await-green highlight carries the in-flight signal, and the reply's arrival is announced by

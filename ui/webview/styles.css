@@ -4174,6 +4174,9 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 /* the quoted passage as CONTEXT on the thread's opening message (the user 2026-08-24) — the
    .cmt-quote dress, sitting inside the turn above its bubble, the chat's citation-as-context shape */
 .cmt-quote-ctx { margin: 0 0 4px; }
+/* a pre-compaction thread's note under its opening message (render.ts cmtPriorNote, the user 2026-09-30): THE notice,
+   nested and folded, its one line dim and allowed to wrap on a narrow box rather than cut off mid-sentence */
+.cmt-prior .notice-gist { color: var(--dim); white-space: normal; }
 .cmt-msg { padding: 5px 8px; border-radius: 6px; line-height: 1.35; overflow-wrap: anywhere; }
 .cmt-msg.you { background: color-mix(in srgb, var(--accent) 14%, transparent); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
 .cmt-msg.agent { background: rgba(255, 255, 255, 0.05); align-self: flex-start; max-width: 96%; }

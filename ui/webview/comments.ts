@@ -41,7 +41,14 @@ export type CommentThread = {
   effort?: string;            // the thread's effort level (ditto)
   msgs: CommentMsg[];
   events?: unknown[];         // the CHAT's own ChatEvents from the branch point on (render parity)
+  /** a thread on a passage from before the session's last compaction: what its opening message carried beyond the
+   *  quote and the comment (the turns around the passage, where the transcript is saved), verbatim from the thread
+   *  row — the popover's note under the opening message (render.ts cmtPriorNote); absent on every other thread */
+  priorContext?: string;
 };
+
+/** The note's one line (the user 2026-09-30): text romp sent on the user's behalf is visible, one click from its words. */
+export const CMT_PRIOR_GIST = "From before the summary: also sent the turns around it and where the full conversation is saved";
 
 export type CommentsFrame = { type: "comments"; id: string; threads: CommentThread[] };
 

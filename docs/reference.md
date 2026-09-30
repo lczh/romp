@@ -5601,6 +5601,22 @@ failed has no mark at all, and the tool call's result says what happened. An
 incoming message that waited while the session was offline wears the parked
 mark. Hovering a mark gives the state and when it was reached.
 
+## A comment on a passage from before a compaction
+
+A comment thread normally forks the session at the highlighted message, so its
+agent holds exactly the conversation that produced the passage. Claude Code
+cannot fork at a message from before the session's last compaction, so a thread
+on such a passage takes the whole current conversation instead, where that part
+survives only as the compaction's summary. Its opening message therefore
+carries, after the quote, the nearest thing the other side said before the
+passage's turn and after it (about 1,200 characters of each, the end of the one
+before and the start of the one after) and the path of the transcript file that
+holds the passage, with the passage's entry id. Under your comment, the thread's
+box shows a one-line note saying so; opening the note shows that text exactly as
+it was sent, read from the thread's record, so it is there after a reload too.
+Editing a message from before a compaction is still refused: a rewind has no
+such fallback.
+
 ## A comment thread's mail
 
 A comment thread's mail is off, both directions, until you break it out: peers

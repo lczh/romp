@@ -26,6 +26,7 @@ KERNEL_ALLOWED = {
     "build_session",
     # readers of raw transcript records (jsonl rows), never atoms
     "_last_assistant_report", "_comment_prose_record", "_comment_cut_target", "_comment_msg_text", "_thread_messages",
+    "_comment_said",                                    # a pre-compaction passage's surroundings, read off raw jsonl rows (2026-09-30)
     "_undelivered_wake_tail", "_gist_step", "_launch_ids_step", "_launch_step", "_api_error_pass", "_session_meta_step",
     "_transcript_tok_rows", "_rewind_target", "_subagent_meta_map", "_read_task_output",
     "_spend_file_rows",                                 # the spend guard prices the record cache's raw jsonl rows (T350)
