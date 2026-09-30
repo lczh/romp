@@ -48,7 +48,7 @@ def anonymize_default(out) -> bool:
         return True
 SMALL_N = 5   # below this many turns a window's latency is drawn as its points, not a box (the small-n ruling)
 EVENT_COLUMNS = (("orphansReaped", "Orphans reaped at boot"), ("scopesStopped", "Leftover scopes stopped"),
-                 ("duplicateClis", "Two CLIs on one conversation"), ("crashHeals", "Crash heals"),
+                 ("duplicateClis", "Two CLIs on one session"), ("crashHeals", "Crash heals"),
                  ("crashLoops", "Crash loops"), ("drainLeftClosing", "Drain left closing"),
                  ("leaseProblems", "Lease problems"))
 

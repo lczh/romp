@@ -4558,8 +4558,13 @@ sweep summary of every boot that had a session to reconcile: `sessions`, `resume
 `restored`, `notified`, `reaped`, `scopesStopped`, `toStart`, `durationS`),
 `reconcile.orphan-reaped` (`cliPid`, `fsid`, `scope`, `signaled`, `forced`,
 `tree`), `reconcile.scope-stopped` (`unit`, `sid8`, `cliPid`),
-`reconcile.duplicate-cli` (two Claude Code processes holding one conversation
-as the boot's process listing stood: `fsid`, `pids`, `n`), `crash.heal` and
+`reconcile.duplicate-cli` (two Claude Code processes serving one session as
+the boot's process listing stood: `sid`, `fsid`, `pids`, `n`; a process's
+session is the `ROMP_SID` in its environment, not the conversation id on its
+command line, which a comment thread shares with its parent, and rows written
+before that change are keyed by `fsid`), `reconcile.duplicate-unchecked`
+(processes on this kernel's conversations whose session could not be read, so
+the check skipped them: `pids`, `n`), `crash.heal` and
 `crash.loop` (`attempt`), `drain.unjoined` (a session the drain's bound left
 closing: `inflight`, `reaped`), and the lease work's `lease.*` kinds. Every kind
 but the boot summary carries `text` and is also a kernel-log line of the form

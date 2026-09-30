@@ -316,7 +316,9 @@ class LeaseRules(unittest.TestCase):
         # the boot sweep files that event itself (reconcile.duplicate-cli, duplicate_clis); the census judges each
         c = self._census([self._cli(709, 1), self._cli(710, 1)], [self._lease(709)], {709: "1000", self.HOLDER: "50"})
         self.assertEqual((c["owned"], c["orphans"], c["problems"]), ({709: "lease"}, [710], []))
-        self.assertEqual(sb.duplicate_clis([self._cli(709, 1), self._cli(710, 1)], [self.SID]), {self.SID: [709, 710]})
+        both = {709: self.RSID, 710: self.RSID}.get     # both launched for the one session (their ROMP_SID)
+        self.assertEqual(sb.duplicate_clis([self._cli(709, 1), self._cli(710, 1)], [self.SID], [self.RSID], both),
+                         {self.RSID: [709, 710]})
 
     def test_lease_state_names_the_first_failing_check(self):
         st = lambda starts: (lambda p: starts.get(p))
