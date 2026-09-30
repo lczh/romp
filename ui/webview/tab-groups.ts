@@ -614,13 +614,13 @@ function passesOver(rec: PublishRecord, seen: FoldsSeen, by: unknown, s: FoldsSe
  *  one: as received, and as heard unless it was passed over or names one of this browser's publishes (a frame whose
  *  folds are null counts too), BEFORE anything below publishes, so a publish made over this frame carries it. Whether a
  *  frame naming one of this browser's publishes is its older state turns on entries that a tab in another renderer
- *  process may not have seen yet, so such a frame never raises the heard count: once this browser's record has reached
- *  a tab, that tab cannot end an entry it has not seen with the very frame the entry holds back (stands). A frame with
- *  no count (an older kernel) is judged by the third rule alone, with every entry standing, as before the count. A
- *  hearing with no publisher installed is a new connection's first (every drop withdraws the publisher; the VS Code
- *  timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). A frame naming one of this
- *  browser's publishes, heard or passed over, also raises the number this page's next publish goes past
- *  (noteFoldsFloor). */
+ *  process may not have seen yet, so, once this browser's record has reached a tab, such a frame never raises the
+ *  heard count there, and that tab cannot end an entry it has not seen with the very frame the entry holds back
+ *  (stands). A frame with no count (an older kernel) is judged by the third rule alone, with every entry standing, as
+ *  before the count. A hearing with no publisher installed is a new connection's first (every drop withdraws the
+ *  publisher; the VS Code timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). A
+ *  frame naming one of this browser's publishes, heard or passed over, also raises the number this page's next
+ *  publish goes past (noteFoldsFloor). */
 export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn: FoldsPublisher) => void, by?: unknown, seq?: unknown): void {
   const g = (globalThis as any).window;
   const w = g && typeof g === "object" ? g : null;
