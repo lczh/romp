@@ -168,7 +168,10 @@ class ChildRoad(_Child):
         self.jd.run_index = lambda now=None: called.append("index")
         self.jd.run_triage = lambda now=None: called.append("triage")
         gen0 = km._judge_gen[0]
-        cpu0 = km._PERF_STATS.judge["cpu_ms_sum"]
+        # The baseline comes through the same read as the figure below: /perf's cpu_ms_sum adds the judge module's pool-worker
+        # CPU, which is cumulative for the process, so a raw baseline counted every earlier judge test's workers as this
+        # pass's (7.03 != 7.0 once CI split the suite into shards, 2026-09-30, and the tests that had masked it ran elsewhere).
+        cpu0 = self._judge()["cpu_ms_sum"]
         try:
             self._pass()
         finally:
