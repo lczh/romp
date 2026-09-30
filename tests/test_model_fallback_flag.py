@@ -59,6 +59,13 @@ class TheRow(unittest.TestCase):
             self.assertIsNone(sb.model_fallback_row(pick, live, "", None, True), why)
 
 
+    def test_an_older_version_of_the_picked_family_is_a_fallback_row_too(self):
+        # a safeguards fallback inside the family (first seen 2026-09-23): the family rank alone drew no mark for it
+        row = sb.model_fallback_row("claude-opus-5-5", "Opus 4.8", "safeguards", None, True, category="cyber")
+        self.assertEqual((row["pick"], row["pickValue"], row["live"], row["category"]), ("Opus 5.5", "claude-opus-5-5", "Opus 4.8", "cyber"))
+        self.assertIsNone(sb.model_fallback_row("claude-opus-4-8", "Opus 5.5", "", None, True), "a newer version: the user's own upgrade")
+        self.assertIsNone(sb.model_fallback_row("opus", "Opus 4.8", "", None, True), "a bare alias pick names no version to sit below")
+
 class WhereTheBackendPutsIt(unittest.TestCase):
     def test_the_live_snapshot_carries_it_and_reads_the_switch_and_the_arm(self):
         be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
@@ -197,6 +204,19 @@ class ObservingTheStandingFallbackAgainKeepsTheCause(unittest.TestCase):
         self.assertEqual(s._fallback_cause, "", "a new episode: unknown until the frame names it")
 
 
+    def test_a_different_version_of_the_same_family_is_a_new_episode(self):
+        # the cause on record belongs to the swap that named it: 5.5 answered by 5 (one refusal) and later by 4.8 (another)
+        # are two episodes, and the second's cause is unknown until its own frame arrives
+        be = _backend()
+        s = _sess(be, name="api", model="claude-opus-5-5", liveModel="Opus 5", liveModelId="claude-opus-5", servedModel="Opus 5",
+                  fallbackCause="safeguards", fallbackCategory="bio")
+        s._learn_model("Opus 5.5", raw="claude-opus-5-5")                   # a reconnect's init: the configured pick
+        s._learn_model("Opus 5", raw="claude-opus-5", served=True)          # the same fallen tier again: the same episode
+        self.assertEqual((s._fallback_cause, s._fallback_category), ("safeguards", "bio"))
+        s._learn_model("Opus 5.5", raw="claude-opus-5-5")
+        s._learn_model("Opus 4.8", raw="claude-opus-4-8", served=True)      # another version: another episode
+        self.assertEqual((s._fallback_cause, s._fallback_category), ("", ""))
+
 class TheRetryReArmsAtAnAttach(unittest.TestCase):
     def test_a_session_below_its_pick_arms_when_the_switch_is_on(self):
         be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
@@ -279,6 +299,19 @@ class AStandingFallbackReadsItsCauseOffTheTranscript(unittest.TestCase):
         self.assertFalse(s._seed_fallback_cause_from_transcript(self._transcript([marker]), "Opus 5"), "no record at all")
         self.assertFalse(s._seed_fallback_cause_from_transcript("/nonexistent/transcript.jsonl", "Opus 5"), "no file: nothing, no raise")
         self.assertEqual(s._fallback_cause, "")
+
+    def test_a_refusal_inside_the_family_seeds_only_for_the_version_now_serving(self):
+        be = _backend()
+        s = _sess(be, cwd="/tmp/notes-api", model="claude-opus-5-5", liveModel="Opus 4.8", liveModelId="claude-opus-4-8",
+                  servedModel="Opus 4.8")
+        rec = {"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "scope": "session",
+               "originalModel": "claude-opus-5-5", "fallbackModel": "claude-opus-5", "apiRefusalCategory": "bio"}
+        self.assertFalse(s._seed_fallback_cause_from_transcript(self._transcript([rec]), "Opus 4.8"),
+                         "the last refusal on record swapped to another version of the family")
+        self.assertEqual(s._fallback_cause, "")
+        self.assertTrue(s._seed_fallback_cause_from_transcript(
+            self._transcript([rec, dict(rec, fallbackModel="claude-opus-4-8", apiRefusalCategory="cyber")]), "Opus 4.8"))
+        self.assertEqual((s._fallback_cause, s._fallback_category), ("safeguards", "cyber"))
 
     def test_the_attach_asks_only_for_a_standing_fallback_with_no_cause(self):
         be, s = self._sess()

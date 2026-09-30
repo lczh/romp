@@ -99,6 +99,41 @@ class CommentMerge(unittest.TestCase):
         self.assertIn("could not be delivered", err or "")
         self.assertEqual(self._row().get("status"), "open")
 
+    # A thread left in 'merging' is lost to the user: off the scroll rail, its popover stuck on "Relaying…" with no Relay
+    # or Delete, and every reply and relay refused as "being relayed; give it a moment". The latch must be released on
+    # every way out (the user 2026-09-30, whose relayed comment stopped showing).
+    def test_a_read_that_raises_releases_the_latch(self):
+        def unreadable(tsid, cut, floor_t=0):
+            raise OSError("the thread's transcript is unreadable")
+        km._thread_messages = unreadable
+        err = km._comment_merge(PARENT, TSID)
+        self.assertIn("unreadable", err or "", "loud: the reason reaches the user")
+        self.assertEqual(self._row().get("status"), "open", "the latch never outlives the relay that took it")
+        self.assertEqual(self.be.sent, [])
+
+    def test_the_latch_records_the_status_it_replaced(self):
+        seen = {}
+
+        class Peek(FakeBE):
+            def send(s2, sid, text):
+                seen.update(km._comment_thread(PARENT, TSID))
+                return True
+        self.be = Peek()
+        self.assertIsNone(km._comment_merge(PARENT, TSID))
+        self.assertEqual((seen.get("status"), seen.get("mergePrior")), ("merging", "open"),
+                         "mid-relay, the row names what a boot would give it back")
+
+    def test_a_boot_releases_a_latch_no_relay_holds(self):
+        # the kernel exited mid-relay: no relay survives a kernel's exit, so the boot is the event that frees the latch
+        km._comment_update(PARENT, TSID, status="merging", mergePrior="resolved")
+        self.assertEqual(km._comment_latch_boot_pass(), 1)
+        self.assertEqual(self._row().get("status"), "resolved", "a closed thread stays closed")
+        km._comment_update(PARENT, TSID, status="merging", mergePrior=None)   # a latch taken before the prior was recorded
+        self.assertEqual(km._comment_latch_boot_pass(), 1)
+        self.assertEqual(self._row().get("status"), "open")
+        self.assertEqual(km._comment_latch_boot_pass(), 0, "nothing else is touched")
+        self.assertEqual(self._row().get("status"), "open")
+
     def test_a_relayed_thread_stays_talkable_and_a_second_relay_sends_only_the_new_tail(self):
         # T145 (the user 2026-08-28): a relay does NOT close the thread — talking continues, and the
         # next relay carries only what the session hasn't seen (the evidence-time relayedT floor).

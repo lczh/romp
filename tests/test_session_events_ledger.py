@@ -40,6 +40,13 @@ def _pid_max() -> int:
 
 P = _pid_max()
 CLI, CLI2, TOOL, LIVE, KERNEL = P + 304, P + 305, P + 306, P + 307, P + 90304
+THREAD1 = "33333333-4444-4555-8666-000000000304"    # comment threads of SID (the notes-api demo's web session)
+THREAD2 = "34343434-4444-4555-8666-000000000304"
+
+
+def _fork(parent_fsid, sid):
+    """A fork launch's argv (_options: resume + fork_session + session_id): the parent's conversation, the fork's sid."""
+    return "--resume %s --session-id=%s --fork-session" % (parent_fsid, sid)
 
 
 def _backend(d, log=None):
@@ -152,8 +159,29 @@ class PureHelpers(unittest.TestCase):
               "  %d 1 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % (CLI2, SID2),
               "  %d 1 claude --resume %s" % (TOOL, SID),          # a terminal CLI (no stream-json mark): never counted
               "  garbage line"]
-        self.assertEqual(sb.duplicate_clis(ps, [SID, SID2]), {SID: [CLI, LIVE]})
-        self.assertEqual(sb.duplicate_clis(ps, [SID2]), {})
+        env = {CLI: SID, LIVE: SID, CLI2: SID2, TOOL: SID}.get   # the ROMP_SID each was launched with
+        self.assertEqual(sb.duplicate_clis(ps, [SID, SID2], [SID, SID2], env), {SID: [CLI, LIVE]})
+        self.assertEqual(sb.duplicate_clis(ps, [SID2], [SID, SID2], env), {})
+
+    def test_a_parent_and_its_forked_threads_are_different_sessions(self):
+        # every thread's argv names the PARENT's conversation (a fork launch); its environment names the thread
+        ps = ["  %d 1 /x/claude --output-format stream-json --resume %s --input-format stream-json" % (CLI, SID),
+              "  %d 1 /x/claude --output-format stream-json %s --input-format stream-json" % (CLI2, _fork(SID, THREAD1)),
+              "  %d 1 /x/claude --output-format stream-json %s --input-format stream-json" % (LIVE, _fork(SID, THREAD2))]
+        sids = [SID, THREAD1, THREAD2]
+        env = {CLI: SID, CLI2: THREAD1, LIVE: THREAD2}
+        self.assertEqual(sb.cli_sessions(ps, sids, sids, env.get), ({SID: [CLI], THREAD1: [CLI2], THREAD2: [LIVE]}, []))
+        self.assertEqual(sb.duplicate_clis(ps, sids, sids, env.get), {})
+        # an unreadable environment is unchecked, never filed under the argv's id
+        self.assertEqual(sb.cli_sessions(ps, sids, sids, {CLI: SID}.get), ({SID: [CLI]}, [CLI2, LIVE]))
+        self.assertEqual(sb.duplicate_clis(ps, sids, sids, {CLI: SID}.get), {})
+
+    def test_a_process_session_id_is_read_from_its_environment(self):
+        out = "/x/claude --resume %s --input-format stream-json HOME=/h ROMP_SID=%s TERM=x\n" % (SID2, SID)
+        self.assertEqual(sb.proc_session_id(4242, run=lambda a, **k: mock.Mock(stdout=out), procfs=False), SID)
+        self.assertIsNone(sb.proc_session_id(4242, run=lambda a, **k: mock.Mock(stdout="/x/claude --resume %s\n" % SID),
+                                             procfs=False), "no ROMP_SID: unknown, never the argv's id")
+        self.assertIsNone(sb.proc_session_id(CLI, procfs=True), "a pid no process wears has no session")
 
 
 class BootReconcileRows(unittest.TestCase):
@@ -173,6 +201,7 @@ class BootReconcileRows(unittest.TestCase):
         with mock.patch.object(sb.subprocess, "run", side_effect=run), \
              mock.patch.object(sb.os, "kill", side_effect=lambda p, s: None), \
              mock.patch.object(sb, "proc_state_tag", lambda p, **k: T if p in (CLI, LIVE) else None), \
+             mock.patch.object(sb, "proc_session_id", lambda p, **k: SID if p in (CLI, LIVE) else None, create=True), \
              mock.patch.object(sb.SdkBackend, "_pid_alive", lambda self, p: False), \
              mock.patch.object(sb.SdkBackend, "_ensure", lambda self, sid, **k: None):
             be._boot_reconcile([sb.read_reg(Path(d), SID)])
@@ -198,7 +227,58 @@ class BootReconcileRows(unittest.TestCase):
         texts = [r["text"] for r in _ring(be)]
         self.assertEqual(len(texts), 4, texts)
         self.assertTrue(all(sb.PROBLEM_ROW_MARK not in t for t in texts))
-        self.assertTrue(texts[0].startswith("boot: 2 claude processes were holding session web's conversation"))
+        self.assertTrue(texts[0].startswith("boot: 2 claude processes were serving session web at once"), texts[0])
+
+    # A parent session whose comment threads outlived the restart (under their hosts): the threads' CLIs still carry
+    # the fork launch's argv, the PARENT's conversation id, and each its own ROMP_SID. Keyed on the argv, every such
+    # boot filed the parent as a duplicate; keyed on the session, only two CLIs for one session is one.
+    def _boot_with(self, lines, env):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "session-hosts"), "w") as f:
+            f.write("off")                     # a bare state root would start real hosts (T348)
+        be = _backend(d)
+        regs = [_reg(d, SID, "web"), _reg(d, THREAD1, "web thread one"), _reg(d, THREAD2, "web thread two")]
+        for sid in (THREAD1, THREAD2):
+            sb.write_reg(Path(d), sid, dict(sb.read_reg(Path(d), sid), threadOf=SID))
+        ps = "".join(ln + "\n" for ln in ["  %d 1 /usr/bin/python3 /x/romp/bin/romp-kernel" % KERNEL] + lines)
+        def run(argv, **kw):
+            return mock.Mock(stdout=ps if argv == sb.PS_ARGV else "", returncode=0)
+        with mock.patch.object(sb.subprocess, "run", side_effect=run), \
+             mock.patch.object(sb.os, "kill", side_effect=lambda p, s: None), \
+             mock.patch.object(sb, "proc_state_tag", lambda p, **k: None), \
+             mock.patch.object(sb, "proc_session_id", lambda p, **k: env.get(p), create=True), \
+             mock.patch.object(sb.SdkBackend, "_pid_alive", lambda self, p: False), \
+             mock.patch.object(sb.SdkBackend, "_ensure", lambda self, sid, **k: None):
+            be._boot_reconcile([sb.read_reg(Path(d), r["sid"]) for r in regs])
+        return _events(d), _ring(be)
+
+    def _cli(self, pid, argv):
+        # a live kernel's child: kept by the census (with its no-lease row), so the rows under test are the sweep's own
+        return "  %d %d /x/claude --output-format stream-json %s --input-format stream-json" % (pid, KERNEL, argv)
+
+    def test_a_parent_and_its_surviving_threads_file_no_duplicate_row(self):
+        rows, ring = self._boot_with([self._cli(CLI, "--resume %s" % SID), self._cli(CLI2, _fork(SID, THREAD1)),
+                                      self._cli(LIVE, _fork(SID, THREAD2))], {CLI: SID, CLI2: THREAD1, LIVE: THREAD2})
+        kinds = [r["kind"] for r in rows]
+        self.assertNotIn("reconcile.duplicate-cli", kinds)
+        self.assertNotIn("reconcile.duplicate-unchecked", kinds)
+        self.assertFalse([t for t in (r["text"] for r in ring) if "at once" in t], ring)
+
+    def test_two_clis_for_one_session_still_file_the_row(self):
+        rows, _ = self._boot_with([self._cli(CLI, "--resume %s" % SID), self._cli(CLI2, _fork(SID, THREAD1)),
+                                   self._cli(LIVE, "--resume=%s" % SID)], {CLI: SID, CLI2: THREAD1, LIVE: SID})
+        dups = [r for r in rows if r["kind"] == "reconcile.duplicate-cli"]
+        self.assertEqual([(r["sid"], r["name"], r["fsid"], r["pids"], r["n"]) for r in dups],
+                         [(SID, "web", SID, "%d,%d" % (CLI, LIVE), 2)], "the thread is not in it")
+
+    def test_an_unreadable_session_id_is_named_unchecked_not_a_duplicate(self):
+        rows, ring = self._boot_with([self._cli(CLI, "--resume %s" % SID), self._cli(CLI2, _fork(SID, THREAD1))],
+                                     {CLI: SID})
+        kinds = [r["kind"] for r in rows]
+        self.assertNotIn("reconcile.duplicate-cli", kinds, "never a duplicate claimed from the argv alone")
+        (row,) = [r for r in rows if r["kind"] == "reconcile.duplicate-unchecked"]
+        self.assertEqual((row["pids"], row["n"]), (str(CLI2), 1))
+        self.assertTrue(any("not checked" in r["text"] for r in ring), ring)
 
     def test_quiet_boot_writes_the_summary_alone(self):
         d = tempfile.mkdtemp(); be = _backend(d)

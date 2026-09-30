@@ -15,8 +15,12 @@ test("upsert tells append from fork by transcript OVERLAP, not the first uuid (s
   // first uuid changes though it's the same transcript → a false fork dropped the DOM + snapped to the bottom
   // (the user 2026-07-06). A fork = the events share NO uuid (a wholesale /clear-style replacement).
   assert.match(RENDER, /function sharesAnyUuid\(/, "a helper tells a continuation from a wholesale replacement");
-  assert.match(RENDER, /const forked = [\s\S]*?!sharesAnyUuid\(msg\.events, prev\.events\)/,
+  assert.match(RENDER, /const forked = [\s\S]*?!sharesAnyUuid\(msg\.events, prevKernel\)/,
     "fork = NO shared uuid, so a mere tail-window slide is NOT a fork");
+  // …read against the KERNEL's events the page held (2026-09-29): the client's own groups share no id with any frame, so a page
+  // holding only its dashed bubble read every first frame as a fork (chat-proto2-exec.test.ts executes the reading)
+  assert.match(RENDER, /const prevKernel = prev \? prev\.events\.filter\(\(e\) => !isOptimistic\(e\) && !isHeldGroup\(e\)\) : \[\];/,
+    "the fork reading and the first build take the page's kernel events, never its own pending or held groups");
 });
 
 test("a content refresh appends (preserves scroll); only a fork drops the DOM", () => {
@@ -33,8 +37,8 @@ test("a placeholder's first content-bearing build LANDS (bottom), it does not ap
   // holding the top forever (the user 2026-09-02: an opened/forked session sat at the top after its
   // context loaded). First build = prev had NO events and the payload brings some → showActive →
   // landActive pins the bottom exactly like a brand-new tab.
-  assert.match(RENDER, /const firstBuild = !!\(existed && prev && !prev\.events\.length && msg\.events && msg\.events\.length\);/,
-    "first build = the view's zero-event placeholder filling with its first real events");
+  assert.match(RENDER, /const firstBuild = !!\(existed && prev && !prevKernel\.length && msg\.events && msg\.events\.length\);/,
+    "first build = the view's zero-event placeholder (or one holding only the client's own groups) filling with its first kernel events");
   assert.match(RENDER, /if \(msg\.id === activeId && !\(existed && !forked && !firstBuild\)\) \{/,
     "the land branch's scroll capture covers the first build too");
 });

@@ -98,7 +98,9 @@ test("a lost save reply cannot wedge 'Saving…' forever", () => {
 });
 
 test("a cancelled save's late ack cannot touch a NEW editing session", () => {
-  assert.match(VIEW, /editHooks = null;\s*\/\/ a cancelled save's late ack must not touch a NEW session/);
+  // exitEdit drops THIS viewer's registration (reg: the modal's module-level editHooks, or a file tab's own, 2026-09-30)
+  assert.match(VIEW, /reg\.edit = null;\s*\/\/ a cancelled save's late ack must not touch a NEW session/);
+  assert.match(VIEW, /get edit\(\) \{ return editHooks; \}, set edit\(h\) \{ editHooks = h; \},/, "the modal's reg IS the module-level editHooks");
 });
 
 test("CRLF files round-trip byte-identical", () => {

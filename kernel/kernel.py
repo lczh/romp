@@ -249,11 +249,13 @@ def _heap_stats():
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
 
-    What it never does: walk an object graph, collect, evict, fill a cache, read a file, build anything. Each gauge is O(1)
-    or O(entries) over a copied value list: the built tabs (bounded by the open tabs) and the image entries, whose cache has
-    no cap, so that gauge is O(entries) over whatever it has grown to, a refused file counting as an entry of zero bytes
-    (166 microseconds median over 100,000 hydrated entries, 10,000 LRU slots, 50,000 usage rows, 1,000 images and 50 tabs of
-    100 KB in the lab). A gauge the process cannot read is None, said once (_heap_read)."""
+    What it never does: walk an object graph or the allocator's pools, collect, evict, fill a cache, read a file, build
+    anything. Each gauge is O(1) or O(entries) over a copied value list: the built tabs (bounded by the open tabs) and the
+    image entries, whose cache has no cap, so that gauge is O(entries) over whatever it has grown to, a refused file counting
+    as an entry of zero bytes (166 microseconds median over 100,000 hydrated entries, 10,000 LRU slots, 50,000 usage rows,
+    1,000 images and 50 tabs of 100 KB in the lab). allocatedBlocks is None here: its one source visits every allocator
+    pool, so only a request that asks pays that walk (_perf_walks, GET /perf?walk=1; the macOS runner flake, 2026-09-29). A
+    gauge the process cannot read is None, said once (_heap_read)."""
     def hydrated():
         with em._ASM_CKPT_LOCK:
             return {"entries": len(em._HYDRATED), "bytes": int(em._HYDRATED_BYTES[0]), "capBytes": int(em._HYDRATED_CAP)}
@@ -301,7 +303,7 @@ def _heap_stats():
 
     # every accessor is looked up INSIDE its lambda: a bare attribute argument is evaluated before _heap_read runs, so a
     # runtime lacking it would raise past the per-key guard and fail the whole snapshot (review find, 2026-09-15)
-    return {"allocatedBlocks": _heap_read("allocatedBlocks", lambda: sys.getallocatedblocks()),
+    return {"allocatedBlocks": None,          # the allocator's walk grows with the heap: GET /perf?walk=1 alone (_perf_walks)
             "gc": {"enabled": _heap_read("gc.enabled", lambda: gc.isenabled()),
                    "counts": _heap_read("gc.counts", lambda: list(gc.get_count())),
                    "thresholds": _heap_read("gc.thresholds", lambda: list(gc.get_threshold())),
@@ -315,6 +317,21 @@ def _heap_stats():
             "judgeUsageRows": _heap_read("judgeUsageRows", lambda: len(_JUDGE_USAGE_CACHE["rows"])),
             "builtChat": _heap_read("builtChat", built_chat),
             "imgCache": _heap_read("imgCache", img_cache)}
+
+
+def _perf_walks(snap):
+    """GET /perf?walk=1: the snapshot's two reads whose cost grows with the heap, filled into the slots the plain read
+    leaves None (the macOS runner flake, 2026-09-29). heap.allocatedBlocks is sys.getallocatedblocks, which visits every
+    pool of the small-object allocator (a median of 1.2 to 1.7 ms at 2 GB of small objects in the lab, Python 3.10, 3.12
+    and 3.13 alike, the spread being the machine's); gc.frozen is gc.get_freeze_count, a walk of the frozen generation's
+    list (about 2 to 14 ms per million frozen in the lab, a median of 15 calls, set mostly by what is frozen: 2.3 to 14
+    across object shapes at one version on one machine; on 2-CPU nodes one shape read 3.6 at one million and 6.3 to 7.7
+    at four under 3.10, 3.12 and 3.13 alike). Each is one C call that holds the interpreter lock, so where the operating
+    system has paged out or compressed the heap one read faults it back in while every kernel thread waits. On request
+    they read what they always read, through the same per-key guards."""
+    snap["heap"]["allocatedBlocks"] = _heap_read("allocatedBlocks", lambda: sys.getallocatedblocks())
+    snap["gc"]["frozen"] = _gc_read("frozen", lambda: gc.get_freeze_count())
+    return snap
 
 
 # The chat-build signature's components, in the order _chat_build_sig appends them. One label per position:
@@ -374,15 +391,17 @@ class _PerfStats:
                                    ru_maxrss, on macOS: _process_stats), threads, cpu_s
                                    (time.process_time), pid
       heap                         where that resident size sits at the read (_heap_stats): the allocator's
-                                   live blocks, the collector's gauges, and the occupancy of every cache that
-                                   holds session content (hydrated bodies, assembly entries, parse slots, live
-                                   indexes, materialized-atom LRU slots, judge-usage rows, built chat tabs and
-                                   their serialized bytes, preview images); gauges, not counters
+                                   live blocks (null unless the GET says ?walk=1: the count walks every pool),
+                                   the collector's gauges, and the occupancy of every cache that holds session
+                                   content (hydrated bodies, assembly entries, parse slots, live indexes,
+                                   materialized-atom LRU slots, judge-usage rows, built chat tabs and their
+                                   serialized bytes, preview images); gauges, not counters
       gc                           the collector's collections and their pauses (gc_event, a gc.callbacks hook
                                    main installs once): per generation, collections, msSum / msMax / msLast
                                    (wall on the collecting thread) and collectedLast; thresholds and counts
                                    (gc.get_threshold / gc.get_count, repeated from heap.gc so the block reads
-                                   on its own), frozen (gc.get_freeze_count), errors (callback failures,
+                                   on its own), frozen (gc.get_freeze_count, null unless the GET says
+                                   ?walk=1: a walk of the frozen generation), errors (callback failures,
                                    counted, never raised) and hooked (whether this collector's hook is in
                                    gc.callbacks). Each split row on the rings carries the cycle's own delta
                                    as `gc` (n0, n1, n2 collections per generation and ms2), so a slow cycle
@@ -1194,8 +1213,8 @@ class _PerfStats:
         memos["cleared"] = dict(_CLEARED_STATS)       # the clear set: parsed once per file state, served while it stands (2026-09-09)
         # the collector's collections and pauses (2026-09-16): the hook's tallies per generation, and beside them the collector's
         # own thresholds and counts (repeated from heap.gc so the block reads on its own: how near the next collection is), the
-        # frozen count, the callback failures, and whether this collector's hook is installed at all (zeros with hooked false
-        # say "no hook", not "no collections")
+        # frozen count's slot (None unless GET /perf?walk=1: _perf_walks), the callback failures, and whether this collector's
+        # hook is installed at all (zeros with hooked false say "no hook", not "no collections")
         gc_block = {"gen": {str(g): {"collections": n, "msSum": round(s, 1), "msMax": round(mx, 1), "msLast": round(last, 1),
                                      "collectedLast": col}                # rounded like every ms on the snapshot; the tallies stay exact
                             for g, (n, s, mx, last, col) in sorted(gc_rows.items())},
@@ -1203,12 +1222,12 @@ class _PerfStats:
                     # and the block still serves (the heap block's review find, 2026-09-15, applied here)
                     "thresholds": _gc_read("thresholds", lambda: list(gc.get_threshold())),
                     "counts": _gc_read("counts", lambda: list(gc.get_count())),
-                    "frozen": _gc_read("frozen", lambda: gc.get_freeze_count()),
+                    "frozen": None,                    # a walk of the frozen generation: GET /perf?walk=1 alone (_perf_walks)
                     "errors": gc_errors,
                     "hooked": _gc_read("hooked", lambda: self.gc_event in gc.callbacks),
                     # #1735: the freeze controller's state and the reconcile trade, so a reconcile collection is told
                     # apart from an organic one (freezes + reclaims ran a collection each; organic = gen 2 collections
-                    # less those), beside the frozen count above
+                    # less those), beside the frozen slot above
                     "freeze": dict(_GC_FREEZE.perf(), errors=_GC_FREEZE_ERRORS[0])}
         now = time.time()
         stacks = _thread_stacks() if os.environ.get("ROMP_PERF_STACKS") else None   # every thread's frames, named and staged: under
@@ -1242,12 +1261,15 @@ class _PerfStats:
 
 _PERF_STATS = _PerfStats()
 
-# Road B for #1735: the freeze controller and the pusher's idle-boundary tick. The controller keeps the loaded
+# Road B for #1735: the freeze controller and the pusher's end-of-cycle tick. The controller keeps the loaded
 # decoded heap out of the cycle collector's walk (a warm full collection over 5.6M loaded objects fell from
-# 2.83 s to 0.1 ms once frozen; plans/gc-full-collection-pause.md); it reconciles at the idle boundary. A LOAD
-# fold-in keys on the record cache's insert counter; a RELEASE reclaim is owed when an ended session, registered
+# 2.83 s to 0.1 ms once frozen; plans/gc-full-collection-pause.md); it reconciles at the end of each pusher cycle. A LOAD
+# fold-in keys on the record cache's insert counter, on a busy cycle too (2026-09-28: idle-only, a pusher that almost never
+# idled never folded in); a RELEASE reclaim, at an idle cycle, is owed when an ended session, registered
 # by weakref at its pop, is observed still alive with its worker thread finished (a surviving cycle, or a ref a live root keeps,
-# which reads the same, costs one reclaim and is counted a survivor), or by a bounded fold-in backstop. The reconcile's pause is paid with no browser waiting. Default on; ROMP_GC_FREEZE=off.
+# which reads the same, costs one reclaim and is counted a survivor); a bounded fold-in backstop reclaims on an idle cycle,
+# or on a busy one past twice its bound. The frozen-heap walks wait for an idle cycle, except that busy backstop past twice
+# its bound. Default on; ROMP_GC_FREEZE=off.
 _GC_FREEZE_ERRORS = [0]
 _GC_FREEZE_SAID = [False]
 _GC_FREEZE_LOAD_TREES, _gc_freeze_bad_knob = gcf.load_trees_from_env()   # parsed with a fallback, never a bare int() at import (#1735 high)
@@ -1262,9 +1284,10 @@ if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell b
 
 
 def _gc_freeze_tick(idle, first):
-    """The pusher's idle-boundary call (the reconcile logic is gcf.pusher_tick, pinned in-process): fold in a
-    material load (the record cache's insert counter), reclaim when an ended session is observed cyclic or the
-    backstop fires. Cheap when nothing is due. A failure never ends the pusher: counted for /perf, said once."""
+    """The pusher's end-of-cycle call (the reconcile logic is gcf.pusher_tick, pinned in-process): fold in a
+    material load (the record cache's insert counter) on any cycle but the first, and on an idle one reclaim when an
+    ended session is observed cyclic or the backstop is due (a busy one runs the backstop only past twice its bound).
+    Cheap when nothing is due. A failure never ends the pusher: counted for /perf, said once."""
     def on_error(e):
         _GC_FREEZE_ERRORS[0] += 1
         if not _GC_FREEZE_SAID[0]:
@@ -6657,6 +6680,61 @@ def _write_view_folds(folds, by=None, received=None):
             return False
         _write_state_json(_view_folds_path(), text)
         _view_folds_lkg[0] = json.loads(text)
+    return True
+
+
+# ── …and the viewer's FILE TABS, kept beside them the same way (the user 2026-09-30) ─────────────────────────────────
+# A file opened from the viewer as a tab of the chat strip (ui/webview/file-tabs.ts) sits beside a session tab, and the
+# user wants one arrangement on every device, so the list rides this store's frame and push too: the viewOrder frame
+# carries `files` beside `order` and `folds`, and view-files.json sits beside their files. Its own FILE, not entries in
+# the arrangement, so a page from before file tabs (which prunes the arrangement to the sessions it knows) can never drop
+# them, and its own frame half, so such a page ignores it. The same opaque-data contract as the folds: this kernel checks
+# that it is an object and that it is bounded, and reads nothing inside it (paths, session ids and host prefixes are the
+# viewer's). Last write wins.
+_VIEW_FILES_CAP = 256 * 1024             # bytes of JSON; refused whole over it, never cut (the folds' rule)
+_view_files_lkg = [None]                 # last known good, as _view_folds_lkg
+
+
+def _view_files_path():
+    return jd.STATE / "view-files.json"
+
+
+def _view_files_served():
+    """The file tabs to serve: the stored object, None when this kernel keeps NONE (absent file: a browser holding
+    tabs of its own publishes them against exactly that, file-tabs.ts hearSharedFileTabs), or _VIEW_FOLDS_UNKNOWN when
+    the file could not be read and nothing is known-good (the frame then carries no files half). _view_folds_served's
+    reasoning, for the same kind of store."""
+    p = _view_files_path()
+    try:
+        raw = _read_state_json(p, expect=dict)
+    except _StateUnreadable as e:
+        _note_state_fault(e)
+        lkg = _view_files_lkg[0]
+        return dict(lkg) if lkg is not None else _VIEW_FOLDS_UNKNOWN
+    _clear_state_fault(p)
+    if raw is None:
+        return None
+    _view_files_lkg[0] = dict(raw)
+    return raw
+
+
+def _write_view_files(files):
+    """Publish the viewer's file tabs. Raises _StateUnwritable on a failed publish and on an object over the cap
+    (refused whole), so the gesture is refused loudly. Returns whether anything CHANGED."""
+    if not isinstance(files, dict):
+        raise _StateUnwritable(_view_files_path(), "not an object")
+    text = json.dumps(files, sort_keys=True)
+    if len(text) > _VIEW_FILES_CAP:
+        raise _StateUnwritable(_view_files_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FILES_CAP))
+    with _view_order_lock:                           # one lock for the viewer's store, every file
+        try:
+            raw = _read_state_json(_view_files_path(), expect=dict)
+        except _StateUnreadable:
+            raw = _VIEW_ORDER_NO_PROOF               # cannot prove it unchanged -> publish (a whole replace)
+        if raw is not _VIEW_ORDER_NO_PROOF and raw == files:
+            return False
+        _write_state_json(_view_files_path(), text)
+        _view_files_lkg[0] = json.loads(text)
     return True
 
 
@@ -18178,7 +18256,7 @@ def _seed_fork_stores(parent_sid, sid, path, cut_uuid):
 # re-served to a just-connected page by the ready reset (_client_reset_chat_base); the client joins it with the anchored turn to draw the mark (render.ts applyCommentMarks).
 
 _comments_lock = threading.Lock()          # store read-modify-writes from WS handler threads
-_thread_msgs_cache = {}                    # thread sid -> (path, mtime, cut_uuid, msgs)
+_thread_msgs_cache = {}                    # thread sid -> (path, mtime, cut_uuid, msgs, what romp sent with the opener)
 
 
 def _comments_path(sid):
@@ -18329,29 +18407,149 @@ def _comment_cut_target(path, sid, anchor_uuid):
     itself, INCLUSIVE (_rewind_target's 'just before' would drop the very passage the user
     highlighted). cut_t is the cut record's own timestamp — stamped into the thread row (anchorT)
     so the timeline can place the comment's square at the commented message without a parse. Same
-    guards as the rewind family: the record must exist, sit on the ACTIVE chain, postdate the last
-    compaction; when the anchor record isn't itself a clean prose cut (a tool row, a tool result),
-    the nearest prose ANCESTOR carries it — the opening message quotes the highlighted passage
-    verbatim, so nothing the user pointed at is lost to the thread's agent.
+    guards as the rewind family: the record must exist and sit on the ACTIVE chain; when the anchor
+    record isn't itself a clean prose cut (a tool row, a tool result), the nearest prose ANCESTOR
+    carries it — the opening message quotes the highlighted passage verbatim, so nothing the user
+    pointed at is lost to the thread's agent.
 
     A cut BEHIND A RESTART SEAM (the record lives in a resumed-from file, not the current one)
     returns cut_uuid "" — a TIP fork: the CLI's --resume-session-at only addresses records in the
     current transcript, so the thread takes the whole conversation instead, a superset of the
-    context the anchor asked for; the quote still names the passage exactly."""
+    context the anchor asked for; the quote still names the passage exactly. A passage from BEFORE
+    the last compaction is a tip fork too (the CLI loads only post-boundary records, so it cannot
+    cut there either; see _comment_cut_resolve, which also builds what that thread's opening message
+    carries in place of the history the compaction summarized)."""
+    return _comment_cut_resolve(path, sid, anchor_uuid)[:3]
+
+
+# A passage from BEFORE the session's last context compaction (the user 2026-09-30, who wanted a thread on it rather
+# than the refusal this used to be): the CLI loads only the records after the newest compact_boundary, and
+# --resume-session-at a pre-boundary uuid exits "No message found" (_rewind_target's docstring), so the thread is a
+# TIP fork of the whole current conversation (the restart-seam precedent). That conversation holds only the
+# compaction's SUMMARY of what surrounded the passage, so the opening message carries it back: the nearest thing the
+# other side said before the passage's turn and after it, each capped, and where the full transcript is saved, with
+# the passage's own record id; and the comment itself is labelled as the ask (_COMMENT_ASK_HEAD), so after a block of
+# quoted context the model reads which part is the request (the user 2026-09-30, reviewing the first draft, where the
+# comment followed the file pointer unlabelled). Injected-voice rules apply (the person the agent works for speaking; no
+# romp nouns; tests/test_injected_voice.py renders it). An ordinary thread's opening message is unchanged. What romp
+# added around the user's words is kept on the thread row (sent) for the popover's note; _comment_strip_frame keeps it
+# out of the bubble.
+_PRECOMPACT_LEAD = ("It's from before our conversation was summarized, so you may only have the summary of "
+                    "what was around it.")
+_PRECOMPACT_FILE_LEAD = "The full conversation is saved in "
+_COMMENT_ASK_HEAD = "What I'm asking:"
+_PRECOMPACT_EXCERPT_CAP = 1200     # characters per side: enough to place the passage, never a second transcript
+
+
+def _comment_said(r, is_nudge):
+    """("me" | "you", text) when raw transcript record `r` is something one side of the conversation SAID — a prose
+    user/assistant record's visible text, "me" for the person (a user record), "you" for the agent — else None: tool
+    traffic, thinking, a compaction summary, the CLI's own settle, harness wrappers and romp's own injections are
+    nobody talking (the filter _thread_messages applies to the side conversation)."""
+    if not _comment_prose_record(r) or r.get("isApiErrorMessage"):
+        return None
+    if (r.get("message") or {}).get("model") == "<synthetic>":
+        return None
+    txt = _comment_msg_text(r)
+    if r.get("type") != "user":
+        return ("you", txt) if txt else None
+    txt = _split_reminders(txt)[0].strip()
+    if (not txt or em.SYSTEM_WRAPPER_RE.match(txt) or em.CMD_WRAP_RE.match(txt) or is_nudge(txt)
+            or "<!-- romp-" in txt or (em._record_origin(r) or {}).get("kind") not in (None, "human")):
+        return None
+    return "me", txt
+
+
+def _precompact_excerpt(text, tail):
+    """`text` capped at _PRECOMPACT_EXCERPT_CAP characters on a word boundary with an ellipsis: its TAIL (what led
+    straight into the passage) or its HEAD (what came straight after)."""
+    t, cap = str(text or "").strip(), _PRECOMPACT_EXCERPT_CAP
+    if len(t) <= cap:
+        return t
+    if tail:
+        cut = t[-cap:]
+        m = re.search(r"\s", cut)
+        if m and m.start() < cap // 2:
+            cut = cut[m.end():]
+        return "…" + cut.lstrip()
+    cut = t[:cap]
+    ws = max(cut.rfind(" "), cut.rfind("\n"), cut.rfind("\t"))
+    if ws > cap // 2:
+        cut = cut[:ws]
+    return cut.rstrip() + "…"
+
+
+def _precompact_block(before, after, transcript, anchor_uuid):
+    """The context a pre-compaction thread's opening message carries after the quote: `before` / `after` are the
+    ("me" | "you", text) said nearest the passage's turn on each side (None when there is none: the first or the last
+    message), `transcript` the absolute path of the file that holds the passage's record. Starts with
+    _PRECOMPACT_LEAD and ends with the one-line _PRECOMPACT_FILE_LEAD sentence, the two ends _comment_opener_split
+    finds it by; _comment_first_message puts the _COMMENT_ASK_HEAD label between it and the comment."""
+    quote = lambda t: "\n".join("> " + ln for ln in t.splitlines())
+    who = lambda side: "I" if side == "me" else "you"
+    parts, lead = [], _PRECOMPACT_LEAD
+    if before:
+        parts += ["%s Right before it, %s said:" % (lead, who(before[0])), quote(_precompact_excerpt(before[1], True))]
+        lead = ""
+    if after:
+        label = "Right after it, %s said:" % who(after[0])
+        parts += [("%s %s" % (lead, label)) if lead else label, quote(_precompact_excerpt(after[1], False))]
+        lead = ""
+    if lead:
+        parts.append(lead)
+    parts.append("%s%s (this passage is the entry with uuid %s) if you need more."
+                 % (_PRECOMPACT_FILE_LEAD, transcript, anchor_uuid))
+    return "\n\n".join(parts)
+
+
+def _precompact_context(ad, path, anchor_uuid, newer):
+    """_precompact_block for a pre-compaction anchor on the stitched chain `ad`. `newer` is the active chain from the
+    leaf down to the record just after the anchor (leaf first), as the cut walk collected it. The passage's TURN is
+    the anchor's side (the person's message, or the agent's reply with its tool traffic); the excerpts are the
+    nearest thing the OTHER side said before it and after it."""
+    is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
+    said = _comment_said(ad.by_uuid.get(anchor_uuid) or {}, is_nudge)
+    side = "me" if said and said[0] == "me" else "you"
+    before, u, hops = None, ad.parent_of.get(anchor_uuid), 0
+    while u is not None and hops < 500000:
+        s = _comment_said(ad.by_uuid.get(u) or {}, is_nudge)
+        if s and s[0] != side:
+            before = s
+            break
+        u = ad.parent_of.get(u); hops += 1
+    after = None
+    for u in reversed(newer):
+        s = _comment_said(ad.by_uuid.get(u) or {}, is_nudge)
+        if s and s[0] != side:
+            after = s
+            break
+    # the file that holds the passage's record: after a restart seam, an older file of the lineage (_anchor_adapter
+    # reads them all from the one projects directory)
+    fsid = ad.fsid_of.get(anchor_uuid) or os.path.splitext(os.path.basename(path))[0]
+    transcript = os.path.abspath(os.path.join(os.path.dirname(path), fsid + ".jsonl"))
+    return _precompact_block(before, after, transcript, anchor_uuid)
+
+
+def _comment_cut_resolve(path, sid, anchor_uuid):
+    """(cut_uuid, cut_t, error, prior): _comment_cut_target's answer plus `prior`, the context block the opening
+    message of a thread on a passage from before the last compaction carries (_precompact_block), "" for every
+    other anchor. A pre-compaction anchor is a tip fork (cut "") stamped with its own record's time, like the
+    restart-seam case."""
     ad = _anchor_adapter(path, sid)
     if anchor_uuid not in ad.by_uuid:
-        return None, 0, ANCHOR_LAG_ERR
+        return None, 0, ANCHOR_LAG_ERR, ""
     is_boundary = lambda r: r is not None and r.get("type") == "system" and r.get("subtype") == "compact_boundary"
-    u, hops, on_active = ad.leaf_uuid, 0, False
+    u, hops, on_active, compacted, newer = ad.leaf_uuid, 0, False, False, []
     while u is not None and hops < 500000:
         if u == anchor_uuid:
             on_active = True
             break
         if is_boundary(ad.by_uuid.get(u)):
-            return None, 0, "that message predates the last context compaction; only newer passages can open a thread"
+            compacted = True                 # the anchor predates a compaction: the CLI can't cut there (docstring)
+        newer.append(u)
         u = ad.parent_of.get(u); hops += 1
     if not on_active:
-        return None, 0, "that message is on a branch that was rewound away"
+        return None, 0, "that message is on a branch that was rewound away", ""
     cur_fsid = os.path.splitext(os.path.basename(path))[0]
     u, hops = anchor_uuid, 0
     while u is not None and hops < 500000:
@@ -18360,11 +18558,13 @@ def _comment_cut_target(path, sid, anchor_uuid):
             break
         if _comment_prose_record(r):
             cut_t = int(em.parse_z(r.get("timestamp")) or 0)
+            if compacted:
+                return "", cut_t, None, _precompact_context(ad, path, anchor_uuid, newer)
             if ad.fsid_of.get(u) != cur_fsid:
-                return "", cut_t, None       # behind a restart/clear seam → tip fork (see docstring)
-            return u, cut_t, None
+                return "", cut_t, None, ""   # behind a restart/clear seam → tip fork (see _comment_cut_target)
+            return u, cut_t, None, ""
         u = ad.parent_of.get(u); hops += 1
-    return None, 0, "that message can't anchor a thread; try a passage from the conversation itself"
+    return None, 0, "that message can't anchor a thread; try a passage from the conversation itself", ""
 
 
 _COMMENT_FRAME_HEAD = "About this part of the conversation:"
@@ -18393,14 +18593,27 @@ _FORK_FRAME = ("I've split this conversation off from the original at this point
                "tasks or background work.")
 
 
-def _comment_first_message(exact, comment):
+def _comment_opener_parts(exact, comment, prior="", frame=None):
+    """(sent, comment) for a thread's opening message, which is exactly sent + "\n\n" + comment: `sent` is everything
+    romp adds around the user's words (the identity line, the quote head and the quote, and for a passage from before
+    the last compaction the context block and the _COMMENT_ASK_HEAD label), `comment` the user's own words. The
+    thread row keeps `sent` so the popover can show the user, word for word, what went with their comment."""
+    q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
+    parts = [frame or _THREAD_FRAME, _COMMENT_FRAME_HEAD, q] + ([prior, _COMMENT_ASK_HEAD] if prior else [])
+    return "\n\n".join(parts), str(comment or "").strip()
+
+
+def _comment_first_message(exact, comment, prior="", frame=None):
     """The thread's opening message — romp-authored FRAMING around the user's own words, read by an
     agent that has the conversation up to the highlight and no idea it is being tracked, so it
     speaks as the person it works for quoting the conversation back (test_injected_voice scans it;
     it must never name romp machinery). It opens with _THREAD_FRAME, what this conversation is,
-    then the quote and the comment."""
-    q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
-    return "%s\n\n%s\n\n%s\n\n%s" % (_THREAD_FRAME, _COMMENT_FRAME_HEAD, q, str(comment or "").strip())
+    then the quote and the comment. `prior` (a thread on a passage from before the last compaction,
+    _precompact_block) rides between the quote and the comment, which then wears the _COMMENT_ASK_HEAD
+    label: what surrounded the passage, which the thread's own history holds only as a summary.
+    `frame` replaces the identity line: _FORK_FRAME for a dispatched thread (raw_opener) that has a
+    passage to quote."""
+    return "%s\n\n%s" % _comment_opener_parts(exact, comment, prior, frame)
 
 
 def _strip_fork_opener(text):
@@ -18413,22 +18626,51 @@ def _strip_fork_opener(text):
     return rest or text
 
 
+def _comment_opener_split(text):
+    """(sent, comment): a thread's opening message split into what romp added around the user's words, verbatim, and
+    the user's own words — read back from the stored message, so a thread made before its row kept `sent` shows the
+    same note. The identity line (_THREAD_FRAME, or _FORK_FRAME on a dispatched thread), the quote head with the
+    quote under it, a pre-compaction thread's context block (its lead sentence through its one-line transcript
+    pointer) and the _COMMENT_ASK_HEAD label are romp's; what follows is the comment. A thread opened before the
+    identity line existed starts at the quote head and splits the same way. A message romp added nothing to (an
+    unframed send, or a dispatched thread from before the fork line) is ("", text), and so is one that would leave
+    no comment at all."""
+    if not text:
+        return "", text
+    pos = 0
+    for line in (_THREAD_FRAME, _FORK_FRAME):
+        if text.startswith(line):
+            pos = len(line)
+            break
+    rest = text[pos:]
+    pos += len(rest) - len(rest.lstrip())
+    if text.startswith(_COMMENT_FRAME_HEAD, pos):
+        lines = text[pos:].splitlines(keepends=True)
+        off, i = len(lines[0]), 1
+        while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
+            off += len(lines[i]); i += 1
+        if i < len(lines) and lines[i].startswith(_PRECOMPACT_LEAD):
+            end = next((k for k in range(i, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
+            if end is not None:
+                k = end + 1
+                while k < len(lines) and not lines[k].strip():
+                    k += 1
+                if k < len(lines) and lines[k].strip() == _COMMENT_ASK_HEAD:
+                    k += 1
+                off += sum(len(ln) for ln in lines[i:k])
+        pos += off
+    comment = text[pos:].strip()
+    if not pos or not comment:
+        return "", text
+    return text[:pos].rstrip(), comment
+
+
 def _comment_strip_frame(text):
     """The opening message, shown as the user's COMMENT alone — the framing + quote it was wrapped
-    in for the thread's agent already sit in the popover header, so rendering them again would say
-    everything twice. The identity line (_THREAD_FRAME, or _FORK_FRAME on a dispatched thread) goes with
-    it; a thread opened before that line existed starts at the quote head and strips the same way."""
-    if text.startswith(_THREAD_FRAME):
-        body = text[len(_THREAD_FRAME):].lstrip()
-    else:
-        body = _strip_fork_opener(text)
-    if not body.startswith(_COMMENT_FRAME_HEAD):
-        return body
-    lines = body.splitlines()
-    i = 1
-    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
-        i += 1
-    return "\n".join(lines[i:]).strip() or text
+    in for the thread's agent already sit in the popover (the quote above the bubble, everything romp
+    added in the note under it), so rendering them again would say everything twice. The split is
+    _comment_opener_split's."""
+    return _comment_opener_split(text)[1]
 
 
 def _comment_msg_text(rec):
@@ -18579,12 +18821,17 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
                                                     # something the user SAID — it must not owe a reply (T237 review)
             if txt and not is_nudge(txt) and not (r.get("type") == "user" and "<!-- romp-" in txt):
                 rows.append({"who": "you" if r.get("type") == "user" else "agent",
-                             "text": txt[:4000],
+                             "text": txt,           # capped below, AFTER the opener's strip: a frame with a long
+                             #                        quote or a pre-compaction context block runs past the cap, and
+                             #                        a strip of the capped text never reached the comment
                              "t": int(em.parse_z(r.get("timestamp")) or 0)})
         u = parent_of.get(u); hops += 1
     rows.reverse()
-    if rows and rows[0]["who"] == "you":            # the opening message: show the comment, not its frame
-        rows[0]["text"] = _comment_strip_frame(rows[0]["text"])
+    sent = ""
+    if rows and rows[0]["who"] == "you":            # the opening message: show the comment, not its frame (which
+        sent, rows[0]["text"] = _comment_opener_split(rows[0]["text"])   # the note shows: _thread_sent_fields)
+    for r in rows:
+        r["text"] = r["text"][:4000]
     merged = []                                     # one assistant turn can span records — read as one reply
     for r in rows:
         if merged and merged[-1]["who"] == r["who"] == "agent":
@@ -18595,8 +18842,30 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     merged = merged[-40:]
     if len(_thread_msgs_cache) > 512:
         _thread_msgs_cache.clear()
-    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), merged)
+    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), merged, sent)
     return merged
+
+
+def _thread_opener_sent(tsid):
+    """What romp added to the thread's opening message, read back from the message itself by the last _thread_messages
+    pass (the opener is the first thing after the branch point, however long the thread grows past the projection's
+    cap); "" before that message is in the transcript, and when romp added nothing."""
+    hit = _thread_msgs_cache.get(tsid)
+    return hit[4] if hit and len(hit) > 4 else ""
+
+
+def _thread_sent_fields(th, tsid, status):
+    """The comments frame's `sent` / `sentBeforeSummary` for thread row `th`: what romp sent with the user's comment,
+    verbatim, for the popover's note (the user 2026-09-30: they can always see exactly what was sent on their behalf).
+    The row's own copy (every create since writes one), else the thread's stored opening message read back
+    (_thread_opener_sent, after this frame's _thread_messages pass), so a thread made before rows kept it shows the
+    same note. Nothing for a promoted thread (its popover points at the session) or when romp added nothing."""
+    if status == "promoted":
+        return {}
+    sent = str(th.get("sent") or "") or _thread_opener_sent(tsid)
+    if not sent:
+        return {}
+    return {"sent": sent, "sentBeforeSummary": bool(th.get("beforeSummary"))}
 
 
 _built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_at): the popover's chat build,
@@ -18676,7 +18945,14 @@ def _thread_events(tsid, cut_uuid, now, live_map):
             evs = evs[at + 1:]                       # sliced to AFTER the branch point (the extension's source pin)
     else:
         floor = int((_comment_thread_row_created(tsid) or 0))
-        evs = [e for e in evs if not e.get("ts") or int(em.parse_z(e.get("ts")) or 0) >= floor]
+        # a TIP fork: the copied history keeps its original (older) stamps, under the floor. The build's head cards
+        # (the system card, a clear's card: its headCards) sit above that history, and a cut fork slices them off
+        # with it; the system card carries no stamp, so the floor kept it and a tip-forked thread (every one on a
+        # passage from before the last compaction) opened on "System context" above its own first message
+        heads = {c.get("uuid") for c in ((m or {}).get("headCards") or []) if isinstance(c, dict) and c.get("uuid")}
+        evs = [e for e in evs if e.get("uuid") not in heads
+               and (not e.get("ts") or int(em.parse_z(e.get("ts")) or 0) >= floor)]
+    evs = _thread_opener_shown(evs)
     evs = evs[-80:]
     # an EMPTY result for these inputs is as settled as a full one and is served the same way; only a
     # build that RAISED (above) stays uncached, so a transient read fault retries on the next cycle
@@ -18685,6 +18961,24 @@ def _thread_events(tsid, cut_uuid, now, live_map):
             _built_thread.pop(next(iter(_built_thread)))
         _built_thread[tsid] = (key, cut_uuid, evs, started)
     return list(evs)
+
+
+def _thread_opener_shown(evs):
+    """`evs` with the thread's OPENING message (its first user event after the branch point) shown as the user's
+    comment alone, the msgs projection's rule (_comment_strip_frame): the identity line, the quote and a
+    pre-compaction thread's context block are written for the thread's agent, and the popover already shows the
+    quote above the bubble and everything romp added in its own note under it (_thread_sent_fields). The chat builder strips only a plain fork's line
+    (_strip_fork_opener), so the popover's events arm showed the whole frame, quote twice included. A copy of the
+    event, never the built one (the build cache holds it)."""
+    i = next((k for k, e in enumerate(evs) if e.get("kind") == "user"), None)
+    if i is None or not isinstance(evs[i].get("md"), str):
+        return evs
+    md = _comment_strip_frame(evs[i]["md"])
+    if md == evs[i]["md"]:
+        return evs
+    out = list(evs)
+    out[i] = dict(evs[i], md=md)
+    return out
 
 
 _comment_created_memo = {}                          # tsid -> createdT, for the tip-fork event floor
@@ -19043,6 +19337,9 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
+                        # what romp sent with the user's comment, verbatim (the popover's note, the user 2026-09-30): the
+                        # row's copy, or for a thread made before rows kept one, read back from its opening message
+                        **_thread_sent_fields(th, tsid, status),
                         # the thread's mail state (T356): off by default until broken out. An open thread's popover does
                         # not announce it (the user 2026-09-11; the tab hover and the Sessions pane carry the state) and
                         # shows only how many messages wait in the box (they land within the bus's retry interval of a
@@ -19291,7 +19588,11 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     prompt (the plugin's thread instructions); the quote frame would bury it under a passage that
     doesn't exist, and without the line the fork reads the parent's history as its own (2026-09-24). `meta`
     ({thread, note} strings) rides the registry row for provenance — the popover shows the row's
-    exact/name as usual; nothing kernel-side consumes meta beyond storing it."""
+    exact/name as usual; nothing kernel-side consumes meta beyond storing it.
+
+    An anchor from BEFORE the last compaction is a tip fork as well (the user 2026-09-30; _comment_cut_resolve):
+    the opening message adds what surrounded the passage and where the transcript is saved. Every row keeps what
+    romp added around the user's words verbatim (sent) for the popover's note."""
     be = Sessions.backend_for(parent_sid)
     if not (hasattr(be, "fork") and _sdk_ready()):
         return "threads need a Claude Code session; this one runs on another backend, so there is nothing to fork.", None
@@ -19301,8 +19602,9 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     sess = _session_row(parent_sid, now)     # idle > 48h still takes a comment (_session_row's fallbacks)
     if not sess:
         return "no transcript for this session yet, so nothing to comment on.", None
+    prior = ""                      # a pre-compaction passage's context block (_comment_cut_resolve), else ""
     if str(anchor_uuid or ""):
-        cut, cut_t, err = _comment_cut_target(sess["path"], parent_sid, str(anchor_uuid))
+        cut, cut_t, err, prior = _comment_cut_resolve(sess["path"], parent_sid, str(anchor_uuid))
         if err:
             return err, None
     else:
@@ -19341,6 +19643,17 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
            "createdT": int(now), "lastSeenT": int(now)}
     if isinstance(meta, dict) and (meta.get("thread") or meta.get("note")):
         row["meta"] = {k: str(meta.get(k) or "")[:500] for k in ("thread", "note") if meta.get(k)}
+    # the opening message, as romp's part and the user's (the first message says what this conversation is:
+    # _THREAD_FRAME / _FORK_FRAME, why there). A dispatched thread's caller-authored prompt rides verbatim BEHIND the fork
+    # line; a passage from before the last compaction adds what surrounded it (prior), quoted like any passage
+    if raw_opener and not prior:
+        sent, said = _FORK_FRAME, str(text)
+    else:
+        sent, said = _comment_opener_parts(exact, text, prior, frame=_FORK_FRAME if raw_opener else None)
+    row["sent"] = sent                # VERBATIM what romp added around the user's words: the popover's note shows it (the
+    #                                   user 2026-09-30: they can always see exactly what was sent on their behalf)
+    if prior:
+        row["beforeSummary"] = True   # the note's line names the turns around the passage
     if nm:
         refusal = _claim_session_name(nm, "thread", tsid)
         if refusal:
@@ -19377,10 +19690,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            # the first message says what this conversation is (_THREAD_FRAME / _FORK_FRAME, why there): a
-            # dispatched thread's caller-authored prompt rides verbatim BEHIND the fork line
-            _user_send(be, tsid, ("%s\n\n%s" % (_FORK_FRAME, text)) if raw_opener
-                       else _comment_first_message(exact, text))
+            _user_send(be, tsid, "%s\n\n%s" % (sent, said))   # the opening message (row["sent"] above)
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -19480,22 +19790,28 @@ def _comment_merge(parent_sid, tid):
     prior, th = _comment_update_if(parent_sid, tid, ("open", "resolved"), status="merging")
     if th is None:
         return _comment_status_refusal(prior)
+    _comment_update(parent_sid, tid, mergePrior=prior)   # what a boot gives a latch back that no relay holds (_comment_latch_boot_pass)
 
     def _revert(msg):
         _comment_update(parent_sid, tid, status=prior)
         return msg
-    msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
-    # A LATER relay sends only the NEW tail (T145: the thread stays talkable after a relay, and
-    # relaying again must not repeat what the session already has). relayedT is EVIDENCE time — the
-    # last relayed message's own stamp, never wall clock (the design rule; wall clocks also skew
-    # cross-host). First relay: everything.
-    floor = th.get("relayedT") or 0
-    if floor:
-        msgs = [m for m in msgs if (m.get("t") or 0) > floor]
-    if not any((m.get("text") or "").strip() for m in msgs):
-        return _revert("nothing new to send back yet." if floor else "this thread has no discussion to send back yet.")
-    body = _merge_body(th.get("exact"), msgs)
-    be = Sessions.backend_for(parent_sid)
+    # The latch is released on EVERY way out: a read that raised here left the row 'merging' for good (the user
+    # 2026-09-30) — off the chat's scroll rail, its popover stuck on "Relaying…", every reply and relay refused.
+    try:
+        msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
+        # A LATER relay sends only the NEW tail (T145: the thread stays talkable after a relay, and
+        # relaying again must not repeat what the session already has). relayedT is EVIDENCE time — the
+        # last relayed message's own stamp, never wall clock (the design rule; wall clocks also skew
+        # cross-host). First relay: everything.
+        floor = th.get("relayedT") or 0
+        if floor:
+            msgs = [m for m in msgs if (m.get("t") or 0) > floor]
+        if not any((m.get("text") or "").strip() for m in msgs):
+            return _revert("nothing new to send back yet." if floor else "this thread has no discussion to send back yet.")
+        body = _merge_body(th.get("exact"), msgs)
+        be = Sessions.backend_for(parent_sid)
+    except Exception as e:
+        return _revert("the discussion could not be read for the relay: %s" % e)
     try:
         delivered = _user_send(be, parent_sid, body)     # the merge is the user's gesture (T315: it retries a stood-down attach)
     except Exception as e:
@@ -19515,6 +19831,31 @@ def _comment_merge(parent_sid, tid):
             pass
     _push_soon()
     return None
+
+
+def _comment_latch_boot_pass():
+    """Give every thread still in 'merging' back the status its relay latched over (the row's mergePrior; 'open' for a
+    latch taken before that was recorded). The relay runs inside the kernel process and holds its latch only while it
+    runs, so a row still 'merging' when a kernel starts belongs to a relay that died with the last kernel: the boot is
+    the event that frees it. Unfreed, the thread was lost to the user for good (the user 2026-09-30): off the chat's
+    scroll rail, its popover stuck on "Relaying…" with no Relay or Delete, every reply and relay refused. Returns how
+    many rows it freed."""
+    freed = 0
+    try:
+        files = sorted((jd.STATE / "comments").glob("*.json"))
+    except OSError:
+        return 0
+    for f in files:
+        with _comments_lock:
+            data = _load_comments(f.stem)
+            hit = False
+            for th in data.get("threads") or []:
+                if th.get("status") == "merging":
+                    th["status"] = th.get("mergePrior") if th.get("mergePrior") in ("open", "resolved") else "open"
+                    hit, freed = True, freed + 1
+            if hit:
+                _save_comments(f.stem, data)
+    return freed
 
 
 def _comment_resolve(parent_sid, tid):
@@ -47079,35 +47420,48 @@ _KIND_CACHE = {"mtime": -1.0, "kind": ""}
 # ── in-dashboard LOGIN (T157, the user 2026-08-28: today an expired login means dropping to a
 # terminal for /login — unreachable from the phone over Tailscale, so everything stalls until they
 # are physically back. The dashboard IS on the phone, so it becomes the login surface.) ──────────
-# The CLI's login is PTY-driven: a spawned REPL + /login + the subscription option prints an OAuth
-# URL with code=true and platform.claude.com's OWN code-display callback (probed on 2.1.221 — no
-# localhost anywhere, so ANY device's browser completes it and shows a code), then waits at "Paste
-# code here". The kernel drives exactly that: spawn → gates (trust dialog, method picker) → parse
-# the URL out of its OSC-8 wrapping → stream it to the dashboard as a link → pass the user's code
-# STRAIGHT THROUGH to the PTY. The code and the resulting tokens exist nowhere but the PTY write
-# and the CLI's own credential store: never logged, never echoed into a transcript, never in a
-# payload. One flow at a time per kernel (each box logs in its own store); a stuck flow self-reaps.
+# The kernel runs Claude Code's own login subcommand, `claude auth login --claudeai`, over plain pipes
+# (verified on 2.1.263 and 2.1.282, 2026-09-30). It prints the code=true sign-in URL on stdout, whose
+# redirect is platform.claude.com's OWN code-display page (no localhost, so ANY device's browser
+# completes it and shows a code), then `Paste code here if prompted > `. It reads the pasted code as
+# one line on stdin, and it EXITS with the verdict: 0 after `Login successful.`, 1 after `Login
+# failed: <why>` on stderr. The exit status is the verdict the kernel reports; the CLI's own stderr
+# sentence is what the dashboard shows when it fails. The one complaint that does not end the process
+# is a code without its `#state` half (`Invalid code. Please make sure the full code was copied.`):
+# the CLI keeps reading lines, so the flow returns to the paste step with that sentence.
+# The code and the resulting tokens exist nowhere but the stdin write and the CLI's own credential
+# store: never logged, never echoed into a transcript, never in a payload. One flow at a time per
+# kernel (each box logs in its own store); a stuck flow self-reaps.
+# Until 2026-09-30 the kernel drove the interactive REPL's /login in a PTY instead (trust dialog, REPL
+# hints, a method picker, a paste box, a verdict matched by words on the screen), and CLI 2.1.282 broke
+# it three ways: the trust dialog now focuses "No, exit", so the Enter that answered it quit the CLI on
+# a fresh scratch dir; a rejected code reads "OAuth error: …", a phrase the matcher never knew; and the
+# renderer repaints only the cells that changed, so even "Invalid code" arrived as "Invalid ode". A
+# rejected code sat at "checking the code…" until the ten-minute timeout. The subcommand has no
+# screen to read, no gates, and prints its link in about half a second, where the REPL took three.
 LOGIN_FLOW_TIMEOUT_S = 600
+LOGIN_LIVE_STATES = ("starting", "url", "verifying")
 _login_lock = threading.Lock()
 _login_flow = {"state": "", "url": "", "err": "", "t": 0.0, "pid": 0, "fd": -1}
 
 
 def _login_state():
-    """The payload-safe view: state/url/err only — nothing secret ever sits in the dict."""
+    """The payload-safe view: state/url/err only — nothing secret ever sits in the dict. Only a LIVE flow
+    ages out: a finished one ("done", "error") keeps its outcome until the next start, rather than turning
+    into a timeout ten minutes after the code (a success read "timed out", a refusal lost its reason)."""
     with _login_lock:
-        if _login_flow["state"] and time.time() - _login_flow["t"] > LOGIN_FLOW_TIMEOUT_S:
+        if _login_flow["state"] in LOGIN_LIVE_STATES and time.time() - _login_flow["t"] > LOGIN_FLOW_TIMEOUT_S:
             _login_abort_locked("the login flow timed out — start it again when ready")
         return {"state": _login_flow["state"], "url": _login_flow["url"], "err": _login_flow["err"]}
 
 
 def _login_abort_locked(err=""):
-    """End the flow: clear the record and SIGTERM the CLI. The PTY master fd is NOT closed here — the
-    reader thread owns it and closes it when it exits (within one 0.5 s select timeout once the pid
-    check fails). Closing it from here while the reader was parked in select on that fd number let the
-    next _login_start reuse the same number for ITS master, and the old thread's os.read then swallowed
-    the new flow's first output — the trust prompt never seen, the new flow hung until its timeout
-    (review find on #931, 2026-09-07; the PR's own flow tests tripped it: tearDown cancels, the next
-    test starts)."""
+    """End the flow: clear the record and SIGTERM the CLI. The CLI's pipes are NOT closed here: the reader
+    thread owns them and closes them when it exits (within one 0.5 s select timeout once the pid check
+    fails). Closing a PTY master from here while the reader was parked in select on that fd number let the
+    next _login_start reuse the number, and the old thread's os.read swallowed the new flow's first output
+    (review find on #931, 2026-09-07); the same ownership keeps a pipe's number from being reused under a
+    live reader or under _login_code's write."""
     pid = _login_flow["pid"]
     _login_flow.update(state=("error" if err else ""), url="", err=err, pid=0, fd=-1)
     if pid:
@@ -47124,8 +47478,8 @@ def _login_cancel():
 
 
 def _login_code(code):
-    """Pass the user's code STRAIGHT to the PTY — a pure pass-through (T157 house rule: the code is
-    never logged, stored, or echoed anywhere; this function's only trace is the write itself)."""
+    """Pass the user's code STRAIGHT to the CLI's stdin as one line — a pure pass-through (T157 house rule:
+    the code is never logged, stored, or echoed anywhere; this function's only trace is the write itself)."""
     code = str(code or "").strip()
     if not code:
         return "empty code"
@@ -47133,9 +47487,8 @@ def _login_code(code):
         if _login_flow["state"] != "url" or _login_flow["fd"] < 0:
             return "no login flow is waiting for a code"
         try:
-            os.write(_login_flow["fd"], code.encode() + b"\r")
-            _login_flow["state"] = "verifying"
-            _login_flow["t"] = time.time()
+            os.write(_login_flow["fd"], code.encode() + b"\n")
+            _login_flow.update(state="verifying", err="", t=time.time())
         except Exception as e:
             _login_abort_locked("the code never reached the login flow (%s) — start again" % type(e).__name__)
             return "the login flow died taking the code — start again"
@@ -47144,13 +47497,11 @@ def _login_code(code):
 
 
 def _login_start():
-    """Spawn the PTY login flow; the reader thread drives the gates and parses the URL."""
-    import fcntl, struct, termios
-    import pty as _pty
+    """Spawn `claude auth login --claudeai`; the reader thread parses the URL and waits for the exit."""
     with _login_lock:
-        if _login_flow["state"] in ("starting", "url", "verifying"):
+        if _login_flow["state"] in LOGIN_LIVE_STATES:
             return "a login flow is already running — finish or cancel it first"
-        scratch = jd.STATE / "login-scratch"
+        scratch = jd.STATE / "login-scratch"         # a neutral cwd: no project's .claude settings reach the login
         try:
             scratch.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -47158,20 +47509,17 @@ def _login_start():
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)          # the login flow, never key auth
         env.pop("CLAUDE_CODE_CHILD_SESSION", None)  # a plain top-level CLI
+        env.pop("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", None)   # set, it turns `auth login` into a silent refresh-token login
         try:
-            m, s = _pty.openpty()
-            # There is no visible terminal. Give the CLI room to print its OAuth URL intact
-            # instead of hard-wrapping it at the default 80 columns (including inside OSC-8).
-            fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 4096, 0, 0))
-            proc = subprocess.Popen([_claude_bin()], stdin=s, stdout=s, stderr=s,
+            proc = subprocess.Popen([_claude_bin(), "auth", "login", "--claudeai"], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     env=env, cwd=str(scratch), close_fds=True)
-            os.close(s)
         except Exception as e:
             _login_flow.update(state="error", url="",
                                err="could not start the login flow: %s" % e, pid=0, fd=-1)
             return _login_flow["err"]
-        _login_flow.update(state="starting", url="", err="", t=time.time(), pid=proc.pid, fd=m)
-    threading.Thread(target=_login_reader, args=(m, proc), daemon=True).start()
+        _login_flow.update(state="starting", url="", err="", t=time.time(), pid=proc.pid, fd=proc.stdin.fileno())
+    threading.Thread(target=_login_reader, args=(proc,), daemon=True).start()
     _push_soon()
     return ""
 
@@ -47182,7 +47530,7 @@ _LOGIN_OSC_RE = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)
 
 
 def _login_url(buf):
-    """Return a complete CLI-issued URL, never the first line or an unfinished PTY read.
+    """Return a complete CLI-issued URL, never the first line or an unfinished read.
 
     OSC-8's terminator bounds the actual link even when its visible label is wrapped. Some
     CLI versions also wrap the target: remove only its layout whitespace, preserving all OAuth
@@ -47212,79 +47560,72 @@ def _login_url(buf):
     return ""
 
 
-def trust_gate_passed(low0):
-    """The REPL is up and past its gates (the composer hints render) — space-free matching, since
-    PTY cursor codes concatenate words (probed: 'Tipsforgetting')."""
-    return "tipsforgetting" in low0 or "try\"" in low0 or "welcomeback" in low0
+def _login_said(line):
+    """A line of the CLI's stderr made fit for the dashboard: escapes and control characters out, spacing
+    collapsed, capped, and any long unbroken run of token alphabet replaced by an ellipsis. The CLI's
+    complaints name the problem, never the code, and this keeps it that way on the payload even if a
+    future message quoted one (the login state rides /version)."""
+    s = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=]*[A-Za-z~]", "", str(line or ""))
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s)
+    s = re.sub(r"[A-Za-z0-9_\-]{24,}", "…", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:300]
 
 
-def _login_reader(fd, proc):
-    """Drive the spawned CLI to the URL and through the result. Output is parsed for STATES only —
-    nothing from this stream is ever logged verbatim (the paste prompt window can contain the code
-    echo), and the buffer dies with the thread."""
+def _login_reader(proc):
+    """Drive the spawned CLI to the URL and through its verdict. Output is parsed for STATES only —
+    nothing from these streams is ever logged verbatim, and the buffers die with the thread."""
     import select as _select
     try:
-        _login_reader_loop(fd, proc, _select)
+        _login_reader_loop(proc, _select)
     finally:
-        try:
-            os.close(fd)                         # the reader is the fd's sole owner (see _login_abort_locked)
-        except OSError:
-            pass
+        with _login_lock:                           # a reader that dies mid-flow says so, never leaves it hanging
+            if _login_flow["pid"] == proc.pid and _login_flow["state"] in LOGIN_LIVE_STATES:
+                _login_abort_locked("the login flow stopped unexpectedly — start it again")
+        for f in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                f.close()                            # the reader is the pipes' sole owner (see _login_abort_locked)
+            except Exception:
+                pass
+        _push_soon()
 
 
-def _login_reader_loop(fd, proc, _select):
-    buf = ""
-    sent_login = sent_pick = trust_answered = False
+def _login_reader_loop(proc, _select):
+    out, err_part, said = "", "", ""                 # stdout so far; stderr's unfinished line; its last whole line
+    streams = {proc.stdout.fileno(): "out", proc.stderr.fileno(): "err"}
     t0 = time.time()
-    while time.time() - t0 < LOGIN_FLOW_TIMEOUT_S:
+    while streams and time.time() - t0 < LOGIN_FLOW_TIMEOUT_S:
         with _login_lock:
             if _login_flow["pid"] != proc.pid:      # cancelled/superseded
-                break
+                return
         try:
-            r, _, _ = _select.select([fd], [], [], 0.5)
-        except (OSError, ValueError):               # Cancel can close the PTY during select.
-            break
-        if r:
+            ready, _, _ = _select.select(list(streams), [], [], 0.5)
+        except (OSError, ValueError):
+            return                                   # the finally reports a live flow as stopped
+        for fd in ready:
             try:
                 chunk = os.read(fd, 8192).decode("utf-8", "replace")
             except OSError:
-                break
-            buf = (buf + chunk)[-20000:]
-        plain = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", buf)
-        plain = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", plain)
-        low0 = plain.lower().replace(" ", "")
-        if not trust_answered and "trustthisfolder" in low0:
-            os.write(fd, b"\r")                     # the kernel's own scratch dir — trusted
-            trust_answered = True
-            buf = ""
-            continue
-        if not sent_login and trust_gate_passed(low0):
-            time.sleep(0.8)                          # the REPL settles, then the command
-            os.write(fd, b"/login\r")
-            sent_login = True
-            buf = ""
-            continue
-        if sent_login and not sent_pick and "selectloginmethod" in plain.lower().replace(" ", ""):
-            # PTY cursor-move codes mangle spacing (probed: 'Selectloginmethod:') — match space-free
-            os.write(fd, b"\r")                     # option 1: Claude account with subscription
-            sent_pick = True
-            buf = ""
-            continue
-        url = _login_url(buf)
+                chunk = ""
+            if not chunk:
+                streams.pop(fd, None)                # EOF: the CLI closed it, so it is exiting
+            elif streams[fd] == "out":
+                out = (out + chunk)[-20000:]
+            else:
+                lines = (err_part + chunk).split("\n")
+                err_part = lines.pop()[-4000:]
+                for line in lines:
+                    line = _login_said(line)
+                    if line:
+                        said = line
+                        _login_complaint(proc, said)
+        url = _login_url(out)
         if url:
             with _login_lock:
-                if _login_flow["pid"] == proc.pid and _login_flow["state"] in ("starting",):
+                if _login_flow["pid"] == proc.pid and _login_flow["state"] == "starting":
                     _login_flow.update(state="url", url=url, t=time.time())
-            _push_soon()
-        low = plain.lower()
-        # the VERDICT WINDOW is anchored on the paste prompt itself, not a buffer clear (a clear
-        # raced an instant verdict and wiped it): verdict phrases count only AFTER the last
-        # "Paste code here", which by construction precedes any verdict and follows every REPL
-        # hint ('how do I log an error?' false-fired the old loose match)
-        low0all = low.replace(" ", "")
-        pidx = low0all.rfind("pastecodehere")
-        low0v = low0all[pidx:] if pidx >= 0 else ""
-        if pidx >= 0 and not url:
+                    _push_soon()
+        elif "pastecodehere" in out.lower().replace(" ", ""):
             # The CLI is already asking for the code, so it HAS printed its sign-in link — and _login_url
             # found none it will stand behind (the allowlist rejected it, or the shape moved). Waiting on
             # would only report a timeout ten minutes later; the event is here, so say what happened now
@@ -47292,35 +47633,46 @@ def _login_reader_loop(fd, proc, _select):
             with _login_lock:
                 if _login_flow["pid"] == proc.pid and _login_flow["state"] == "starting":
                     _login_abort_locked("the sign-in link the CLI printed could not be read — log in from a "
-                                        "terminal with `claude /login`, or update the CLI")
-                    _push_soon()
-                    return
-        if "loggedinas" in low0v or "loginsuccessful" in low0v:
-            with _login_lock:
-                if _login_flow["pid"] == proc.pid:
-                    _login_abort_locked()            # done: reap the CLI; state clears to ""
-                    _login_flow["state"] = "done"
-            _ACCT_CACHE["mtime"] = -2.0   # bust the account cache: the Billing rows flip on the next read
-            _push_soon()
+                                        "terminal with `claude auth login`, or update the CLI")
             return
-        if "invalidcode" in low0v or "loginerror" in low0v or "loginfailed" in low0v:
-            # tight FAILURE phrases, and only in the post-code window — a loose error/login word
-            # match false-fired on the REPL's own hints (found by the mocked-PTY test)
-            # loud honest failure — the copy names the retry, never the code
-            with _login_lock:
-                if _login_flow["pid"] == proc.pid and _login_flow["state"] == "verifying":
-                    _login_abort_locked("the login code was not accepted — start the flow again")
-            _push_soon()
-            return
-        if proc.poll() is not None:
-            with _login_lock:
-                if _login_flow["pid"] == proc.pid and _login_flow["state"] not in ("done", "error"):
-                    _login_abort_locked("the login flow ended before completing — start it again")
-            _push_soon()
-            return
+    if streams:                                      # the clock ran out with the CLI still talking
+        with _login_lock:
+            if _login_flow["pid"] == proc.pid and _login_flow["state"] in LOGIN_LIVE_STATES:
+                _login_abort_locked("the login flow timed out — start it again when ready")
+        return
+    # Both streams closed: the CLI is exiting, and its exit status is the verdict. Cancel SIGTERMs it, so
+    # the wait cannot outlive a Cancel; the bound is the flow's own clock.
+    try:
+        rc = proc.wait(timeout=max(1.0, LOGIN_FLOW_TIMEOUT_S - (time.time() - t0)))
+    except subprocess.TimeoutExpired:
+        return                                       # the finally reports it as stopped
+    said = _login_said(err_part) or said
     with _login_lock:
-        if _login_flow["pid"] == proc.pid and _login_flow["state"] not in ("done", ""):
-            _login_abort_locked("the login flow timed out — start it again when ready")
+        if _login_flow["pid"] != proc.pid:
+            return
+        _login_flow["pid"] = 0                       # reaped by the wait: its number may be reused, so no SIGTERM
+        if rc == 0:
+            _login_abort_locked()                    # done: the CLI has exited; state clears to ""
+            _login_flow["state"] = "done"
+        elif said:
+            _login_abort_locked("%s — start the login again" % said)   # the CLI's own words: "Login failed: <why>"
+        else:
+            _login_abort_locked("the login flow ended before completing (exit %s) — start it again" % rc)
+    if rc == 0:
+        _ACCT_CACHE["mtime"] = -2.0   # bust the account cache: the Billing rows flip on the next read
+
+
+def _login_complaint(proc, said):
+    """One whole stderr line from a live CLI. The incomplete-code sentence means the CLI is reading lines
+    again, so the flow returns to the paste step carrying it; any other line while the code is being
+    checked is shown as it stands (the exit, when it comes, still decides)."""
+    with _login_lock:
+        if _login_flow["pid"] != proc.pid or _login_flow["state"] != "verifying":
+            return
+        if "invalidcode" in said.lower().replace(" ", ""):
+            _login_flow.update(state="url", err=said, t=time.time())
+        else:
+            _login_flow["err"] = said
     _push_soon()
 
 
@@ -54138,9 +54490,10 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagEdit — the targeted `tagEdit` op (create / rename / recolor / addMember / removeMember /
 #             delete / move, by tag id), the `tagEditAck` / `viewsAck` answers on the poster's socket,
 #             and the write sequence (`seq`) on every views blob.
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
-#                                              viewFolds: …and its folded groups, on the same frame (2026-09-23)
+#                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
+#                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05
@@ -54207,15 +54560,20 @@ def _view_order_frame():
     _view_folds_by). The folds, the stamp and the count are read under the store's lock in one acquisition, so
     the three describe the same moment.
 
+    `files` rides beside them too (2026-09-30): the viewer's file tabs (_view_files_served), an object, or null when
+    this kernel keeps none (file-tabs.ts hearSharedFileTabs publishes a browser's own against that), on the same
+    event (a setViewFiles that CHANGES the store).
+
     Each half is left OUT when its store could not be read and nothing is known-good, and the page keeps
     what it is showing for that half rather than adopting a guess (federation.ts reads a half only when it
-    is present); None, no frame at all, when neither half can be said."""
+    is present); None, no frame at all, when no half can be said."""
     served = _view_order_served()
     with _view_order_lock:                           # the folds, the stamp that names them and the count, as one read
         folds = _view_folds_served()
         by = _view_folds_by[0]
         taken = _view_folds_taken[0]
-    if served is None and folds is _VIEW_FOLDS_UNKNOWN:
+    files = _view_files_served()
+    if served is None and folds is _VIEW_FOLDS_UNKNOWN and files is _VIEW_FOLDS_UNKNOWN:
         return None
     fr = {"type": "viewOrder"}
     if served is not None:
@@ -54225,6 +54583,8 @@ def _view_order_frame():
         if by:
             fr["foldsBy"] = dict(by)
         fr["foldsSeq"] = {"boot": _BOOT_ID, "n": taken}
+    if files is not _VIEW_FOLDS_UNKNOWN:
+        fr["files"] = files
     return fr
 
 
@@ -63356,7 +63716,7 @@ def _pusher_cycle():
             _boot_health_first_cycle(time.monotonic() - _t_cycle)   # the boot's first cycle, on the record (a no-op after)
         elif not _BOOT_HEALTH_DONE[0]:
             _boot_health_row_backstop(time.monotonic())         # the jobs pass still open long after: the row without it
-        _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze at the idle boundary (the guard is inside pusher_tick)
+        _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze (the fold-in on any cycle, the release when idle; the guard is inside pusher_tick)
 
 
 @contextlib.contextmanager
@@ -63933,6 +64293,7 @@ def _shim(app, v=0, no_stale=False, pv=None, data=None):
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
 var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=null;   // readyProto/readyMsg: the bundle's ready as sent, for the redial's dial term (&proto=) and for a fresh dial after a ready no caps frame answered (the socket died between the kernel's pushes and its frame): onopen posts it again, so the kernel serves the page whole, answers, and the redials after carry the flag (round 3, C); one the flush just sent is not doubled   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
+var queuedForeign=0,FOREIGN_QUEUE_MAX=20;   // of those, the window-sender rows (window-sender.ts noteForeign and the timeline boot's copy), which another page's posts cause: capped on their own count, so they never take one of the DIAG_QUEUE_MAX slots this page's own rows keep (under one cap, a foreign page posting into every frame during an outage cut the page's own record of it, the 2026-09-29 review); counted in queuedDiag as well, so the reload hold and the loss line leave them out like every breadcrumb; the cap is noteForeign's NOTE_MAX
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
 // URLs); otherwise the shell's per-tab id from sessionStorage, which is scoped to the browsing context and
@@ -64160,7 +64521,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;queuedForeign=0;
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -64232,7 +64593,7 @@ function diagStamp(m){var c={};for(var k in m)c[k]=m[k];c.build=LOADEDV;c.boot=B
 function send(m){if(m&&m.type==="clientDiag")m=diagStamp(m);var s=JSON.stringify(m);if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);readyMsg=s;}   // the bundle's listener is installed: from here a redial may declare itself (the dial term in connect)
 if(ws&&ws.readyState===1){ws.send(s);return;}
 if(m&&m.type==="ready")readyQueued=true;   // ...and this one waits for the open: the redial that carries it dials as a fresh page (onopen clears the bit after the flush)
-if(m&&m.type==="clientDiag"){if(queuedDiag>=DIAG_QUEUE_MAX)return;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped; everything else queues as before
+if(m&&m.type==="clientDiag"){var fr=m.surface==="window-sender";if(fr?queuedForeign>=FOREIGN_QUEUE_MAX:queuedDiag-queuedForeign>=DIAG_QUEUE_MAX)return;if(fr)queuedForeign++;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped, this page's own and the window-sender rows each on their own count; everything else queues as before
 queue.push(s);}
 // ONE ordered dispatch FIFO per socket (the user 2026-09-07, whose dashboard froze on return to its tab): a tab
 // that sat hidden or frozen thaws into EVERY frame the browser queued for it, and each used to be parsed AND
@@ -64463,6 +64824,9 @@ _CHAT_MOBILE_CSS = (
     ".mrow .workdot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--st-working-bg,#e0b020)}"
     ".mrow .workdot.await{background:var(--st-awaitbg-bg,#54B204)}"   # green: idle-waiting-on-bg-work
     ".mrow .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dddddd}"
+    # a FILE TAB's row (2026-09-30): the file beside its session, set in under it at the text's own weight, so it reads as
+    # the session's file and never as a session; the glyph the strip's tab wears rides the cloned label
+    ".mrow.file{padding-left:28px}.mrow.file .nm{font-weight:400}.mrow.file .tab-file-glyph{margin-right:6px}"
     # per-row end-session x (the mobile picker's only way to end a session — desktop has the tab x)
     ".mrow .mclose{flex:0 0 auto;order:1;margin-left:8px;padding:0 6px;color:#8a8a8a;font-size:20px;line-height:1}"   # order:1 keeps the x right of the Needs-you pill
     ".mrow .mclose:active{color:#e5484d}"
@@ -64551,7 +64915,7 @@ var lab=t.querySelector('.tab-label'),id=t.getAttribute('data-id'),copy=t.getAtt
 out.push({key:'t:'+id+'/'+(copy===null?'':copy),id:id,copy:copy,name:(lab?lab.textContent:id),lab:lab,
 bg:t.style.getPropertyValue('--chip-bg').trim(),fg:t.style.getPropertyValue('--chip-fg').trim(),
 working:t.classList.contains('tab-working'),awaitbg:!!t.querySelector('.tab-dot.await'),retrying:!!t.querySelector('.tab-dot.retrying'),ask:t.classList.contains('ring-waiting-on-you'),badgeNeeds:!!t.querySelector('.tab-badge'),needsCount:(function(){var b=t.querySelector('.tab-badge');return b?b.textContent:'';})(),needsLabel:(function(){var b=t.querySelector('.tab-badge');return b?(b.getAttribute('aria-label')||''):'';})(),active:t.classList.contains('active'),
-ph:t.classList.contains('tab-placeholder'),away:t.classList.contains('tab-away')});});return out;}
+ph:t.classList.contains('tab-placeholder'),away:t.classList.contains('tab-away'),file:t.classList.contains('tab-file')});});return out;}
 // A name is filled from the desktop label's own CHILD NODES, cloned — not from its flattened text. A
 // federated session's name carries a <span class="host-prefix"> that renders the "host:" as quiet
 // metadata (host-prefix.ts: dim, italic, never bold, a step smaller), and textContent threw that span
@@ -64570,6 +64934,7 @@ function rowUpdate(row,s){row.classList.toggle('active',!!s.active);
 // who tapped a remote session on the phone and nothing happened)
 row.classList.toggle('ph',!!s.ph&&pendingId!==s.id);
 row.classList.toggle('pending',pendingId===s.id);
+row.classList.toggle('file',!!s.file);   // a file tab's row (2026-09-30)
 row.classList.toggle('ask',!!s.ask);   // RING mode: the desktop tab's magenta ring (ring-waiting-on-you, a widget with a switch; switched off it puts no class on the tab, so the phone follows): a card of this session's needs you
 var mb=row.querySelector('.m-badge');   // BADGE mode: the desktop tab wears a .tab-badge dot with a count instead of the ring; the phone shows the same dot in the row's flow, before the close (plans/tab-state-badge.md)
 if(s.badgeNeeds){if(!mb){mb=document.createElement('span');mb.className='m-badge';mb.setAttribute('role','img');row.appendChild(mb);}mb.textContent=s.needsCount||'';mb.setAttribute('aria-label',s.needsLabel||'needs you');}
@@ -64585,7 +64950,7 @@ var lbl=row.querySelector('.nm');fillName(lbl,s);lbl.style.color=s.bg||'';
 if(s.copy!==null)row.setAttribute('data-copy',s.copy);else row.removeAttribute('data-copy');}
 function rowMake(s){var row=document.createElement('div');row.className='mrow';row.setAttribute('data-id',s.id);row.setAttribute('data-key',s.key);
 var lbl=document.createElement('span');lbl.className='nm';row.appendChild(lbl);
-var x=document.createElement('span');x.className='mclose';x.textContent='\u00d7';x.title='End session';
+var x=document.createElement('span');x.className='mclose';x.textContent='\u00d7';x.title=s.file?'Close tab':'End session';   // a file tab's row (2026-09-30) closes the tab
 row.appendChild(x);rowUpdate(row,s);return row;}
 // a GROUP HEADING: the header's own chip (tag-menu.ts tagChip, cloned — the one tag treatment, T251), the caret,
 // the count (folded: the members the fold hides, as the header counts them) and, folded, the header's member-state
@@ -65256,6 +65621,13 @@ function heardSender(e){if(!e)return false;var s=e.source;
 if(s===null||s===undefined){if(e.origin===undefined||e.origin===null||e.origin==="")return true;}
 else{if(s===window)return true;if(window.parent&&window.parent!==window&&s===window.parent)return true;}
 var o=window.location&&window.location.origin;return typeof o==="string"&&o!=="null"&&e.origin===o;}
+// A message the window listener drops leaves a trace: window-sender.ts noteForeign, inlined. One client-diag row per site
+// and sender origin a page life, at most 20, naming the site and the origin the browser stamped on the post and nothing
+// of the message, through the shim's send (window.__rompLocalSend) or else this page's host bridge; it never throws.
+var noted=Object.create(null),nNoted=0;
+function noteForeign(site,e){try{var o=e?e.origin:undefined;o=typeof o==="string"?o:String(o);var k=site+" "+o;
+if(noted[k]||nNoted>=20)return;noted[k]=1;nNoted++;var m={type:"clientDiag",surface:"window-sender",what:"foreign",data:{site:site,origin:o}};
+var s=window.__rompLocalSend;if(typeof s==="function")s(m);else api.postMessage(m);}catch(x){}}
 // the frame listener, wrapped like every pane's through the page's performance collector when there is one
 // (ui/webview/perf-telemetry.ts, published on window.__rompPerf by federation.js, which loads before this boot),
 // so each frame's handling is timed by type; without a collector the plain listener
@@ -65277,8 +65649,9 @@ else if(m.type==="tagEditFailed"&&panel.tagEditFailed)panel.tagEditFailed(m);
 else if(m.type==="openViewsDialog"&&panel._openViewsDialog)panel._openViewsDialog(null);};
 var frameListener=(window.__rompPerf&&window.__rompPerf.wrapFrameHandler)?window.__rompPerf.wrapFrameHandler(onFrame):onFrame;
 // the window path hears every window that can post to this page, so it hands the listener only a heard sender's message,
-// the sender check outside the collector's wrapper, as frame-listener.ts's listenForFrames installs every pane's
-window.addEventListener("message",function(e){if(!heardSender(e))return;frameListener(e);});
+// the sender check outside the collector's wrapper, as frame-listener.ts's listenForFrames installs every pane's; a
+// message it drops leaves its trace first
+window.addEventListener("message",function(e){if(!heardSender(e)){noteForeign("timeline-boot",e);return;}frameListener(e);});
 // the merged data/bars frames come by direct call from federation.js once the listener is registered with it (federation.ts
 // onFrame/emit; the pane bundles register through frame-listener.ts) — without the registry the window dispatch carries them.
 // Only federation.js calls that path, with a MessageEvent it built itself, so the registry holds the listener as it is
@@ -67290,6 +67663,14 @@ else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
     try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}}
   try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time
   try{bf&&bf.contentWindow&&bf.contentWindow.postMessage({romp:'browseFiles',path:m.path,sid:m.sid},'*');}catch(e){}}
+// A file POPPED OUT of a viewer hosted by a pane with no tab strip (the feed's file browser, the Files pane: file-view.ts
+// popOutTarget, 2026-09-30) posts up as openFileTab; the shell forwards it to the chat column that shows that session (the
+// one last used when none does), bringing a toggled-off chat pane forward and, on a phone, the chat tab, so the tab that
+// opens is on screen. The chat opens it beside the session it came from (render.ts openFileAsTab).
+if(m.romp==='openFileTab'&&typeof m.path==='string'&&m.path){var ft=(window.__rompChatTarget&&window.__rompChatTarget(m.sid))||(window.__rompFocusedChatId&&document.getElementById(window.__rompFocusedChatId()))||document.getElementById('f-chat');
+  if(!document.body.classList.contains('po-chat')){try{window.__rompPaneToggle&&window.__rompPaneToggle('chat',true);}catch(e){}}
+  try{if(window.__rompMobileOn&&window.__rompMobileOn())window.__rompMobileTab&&window.__rompMobileTab('chat');}catch(e){}
+  try{ft&&ft.contentWindow&&ft.contentWindow.postMessage({romp:'openFileTab',path:m.path,sid:m.sid||null},'*');}catch(e){}}
 // A passage selected in a viewer hosted by a pane with NO composer (the feed) posts up in the
 // editorSelection shape the chat already handles (file-view.ts composerWindow); the shell forwards it
 // whole into the chat pane, whose composer seeds the labeled quote chip for the session the file was
@@ -70877,6 +71258,76 @@ def _state_write_route(path, b):
     return 404, {"ok": False, "error": "no such route"}
 
 
+def _security_headers(send_header, opener_policy=True):
+    """Write the security headers through `send_header`, on each page Handler._send writes and on each error page
+    http.server writes itself with a header block (Handler.send_error; its comment says when a reply has none).
+    opener_policy=False leaves the opener policy out, for the one exempt route (below)."""
+    # Take the declared type at its word. Without this a browser may sniff a response whose
+    # bytes look like markup and run it as HTML on the dashboard's own origin, which is the
+    # same escalation the /remote/…/file relay's own type check closes from the other side.
+    send_header("X-Content-Type-Options", "nosniff")
+    # Framing gate (clickjacking): the authenticated dashboard must not be loadable in a
+    # cross-origin frame, or a hostile same-site loopback page (the same attacker the cookie
+    # Origin gate below defends against) could frame it and drive it invisibly. SAMEORIGIN keeps
+    # the dashboard's own same-origin sub-frames (/chat, /feed) working, and 'self' is tight
+    # enough to need no allowlist: the VS Code panes are extension-authored webviews that load
+    # their bundle via asWebviewUri and reach the kernel only over connect-src (fetch + WS);
+    # they never frame this origin as a document, and neither header applies to fetch/XHR/WS.
+    # Phone and tailnet frame the kernel's own origin, which 'self' permits.
+    send_header("X-Frame-Options", "SAMEORIGIN")
+    send_header("Content-Security-Policy", "frame-ancestors 'self'")
+    # Opener isolation (2026-09-27): a page on another origin that opens a dashboard page with window.open keeps
+    # a handle to it, and a handle is what lets that page post window messages to it. Under this policy a
+    # top-level document this origin serves, opened by a page on another origin, starts a browsing context group
+    # of its own: the opener gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file
+    # image or PDF it opens with window.open) are documents on this origin carrying the same policy, so window.open
+    # still returns a handle and the in-app view does not take over (preview.ts openFileTab reads only whether it
+    # got one).
+    # same-origin-allow-popups, not same-origin: a data pane (plans/panes-as-data.md) may open a popup and hear back
+    # from it through window.opener, as a sign-in or a picker does; a URL pane's frame is sandboxed with
+    # allow-popups for that. Under same-origin, a URL pane's window.open returns null and a state-root pane's
+    # popup on another origin leaves it a closed handle, and neither pane hears from its popup. What allow-popups
+    # gives up is the other direction: a popup the dashboard opens onto another origin keeps its opener. So every
+    # window.open in romp's own pages passes noopener (render.ts, pr-links.ts, file-view.ts, the timeline boot's
+    # fallback) or severs the opener on the handle it gets back (preview.ts openFileTab, which needs the handle to
+    # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
+    # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
+    # a browser.
+    # One exemption, opener_policy=False: a state-root pane's own files (/pane/<id>/ and the files under its
+    # directory, the pane author's documents). A sign-in popup a pane opens comes back to a callback page, and a
+    # state-root pane's callback naturally lives beside its page, on this origin. A callback that declared this
+    # policy would start a browsing context group of its own on arrival, because its policy does not match the
+    # provider's page it replaces: the popup would lose its opener and the pane would hold a closed handle
+    # (Chromium and WebKit, whether the provider sends it back by a script or a 302; Firefox, by a script). The
+    # cost: a page on another origin that opens a pane author's document keeps a handle to it. The pane shim has
+    # no window listener, and the page's own listeners are its author's. The handle reaches no romp page: sending
+    # that window on to one lands on a document with this policy, which severs it. The pane's shim, its theme and
+    # every other response the route makes are the kernel's own and keep the header. The served lab's legs 6 and 7
+    # witness the round trip, the cost and its bound (the shell).
+    # Residual: a URL pane cannot open one of the dashboard's pages in a tab (a state-root pane's own files, which carry
+    # no policy, it can). Its popup inherits the frame's sandbox, and a browser shows the response of a sandboxed tab or
+    # popup (a top-level navigation) only when its opener policy is unsafe-none, so the tab shows no page, as it did
+    # under same-origin: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit an
+    # empty one, each leaving the handle open (witness: test_pane_popup_opener_served.py
+    # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page, which asserts only that the file is not shown).
+    # Allowing it would take allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes every popup the
+    # pane opens.
+    # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
+    # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
+    # document navigations only, so it is inert on JSON, assets and sockets.
+    if opener_policy:
+        send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+    # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
+    # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
+    # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
+    # origin and nothing cross-origin (a transcript's <img> from another host, a link out), whatever
+    # the browser's default, on every page the kernel serves: the SECURITY.md claim that a cross-site
+    # page cannot obtain the token then holds by construction. same-origin and not no-referrer: a
+    # same-origin GET carries no Origin header, so the Referer is the one header that names the page
+    # origin behind it to the kernel, and this keeps it.
+    send_header("Referrer-Policy", "same-origin")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -70888,70 +71339,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # Take the declared type at its word. Without this a browser may sniff a response whose
-        # bytes look like markup and run it as HTML on the dashboard's own origin, which is the
-        # same escalation the /remote/…/file relay's own type check closes from the other side.
-        self.send_header("X-Content-Type-Options", "nosniff")
-        # Framing gate (clickjacking): the authenticated dashboard must not be loadable in a
-        # cross-origin frame, or a hostile same-site loopback page (the same attacker the cookie
-        # Origin gate below defends against) could frame it and drive it invisibly. SAMEORIGIN keeps
-        # the dashboard's own same-origin sub-frames (/chat, /feed) working, and 'self' is tight
-        # enough to need no allowlist: the VS Code panes are extension-authored webviews that load
-        # their bundle via asWebviewUri and reach the kernel only over connect-src (fetch + WS) —
-        # they never frame this origin as a document, and neither header applies to fetch/XHR/WS.
-        # Phone and tailnet frame the kernel's own origin, which 'self' permits.
-        self.send_header("X-Frame-Options", "SAMEORIGIN")
-        self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
-        # Opener isolation (2026-09-27): a page on another origin that opens a dashboard page with window.open keeps
-        # a handle to it, and a handle is what lets that page post window messages to it. Under this policy a
-        # top-level document this origin serves, opened by a page on another origin, starts a browsing context group
-        # of its own: the opener gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file
-        # image or PDF it opens with window.open) are documents on this origin carrying the same policy, so window.open
-        # still returns a handle and the in-app view does not take over (preview.ts openFileTab reads only whether it
-        # got one).
-        # same-origin-allow-popups, not same-origin: a data pane (plans/panes-as-data.md) may open a popup and hear back
-        # from it through window.opener, as a sign-in or a picker does; a URL pane's frame is sandboxed with
-        # allow-popups for that. Under same-origin, a URL pane's window.open returns null and a state-root pane's
-        # popup on another origin leaves it a closed handle, and neither pane hears from its popup. What allow-popups
-        # gives up is the other direction: a popup the dashboard opens onto another origin keeps its opener. So every
-        # window.open in romp's own pages passes noopener (render.ts, pr-links.ts, file-view.ts, the timeline boot's
-        # fallback) or severs the opener on the handle it gets back (preview.ts openFileTab, which needs the handle to
-        # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
-        # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
-        # a browser.
-        # One exemption, opener_policy=False: a state-root pane's own files (/pane/<id>/ and the files under its
-        # directory, the pane author's documents). A sign-in popup a pane opens comes back to a callback page, and a
-        # state-root pane's callback naturally lives beside its page, on this origin. A callback that declared this
-        # policy would start a browsing context group of its own on arrival, because its policy does not match the
-        # provider's page it replaces: the popup would lose its opener and the pane would hold a closed handle
-        # (Chromium and WebKit, whether the provider sends it back by a script or a 302; Firefox, by a script). The
-        # cost: a page on another origin that opens a pane author's document keeps a handle to it. The pane shim has
-        # no window listener, and the page's own listeners are its author's. The handle reaches no romp page: sending
-        # that window on to one lands on a document with this policy, which severs it. The pane's shim, its theme and
-        # every other response the route makes are the kernel's own and keep the header. The served lab's legs 6 and 7
-        # witness the round trip, the cost and its bound (the shell).
-        # Residual: a URL pane cannot open one of the dashboard's pages in a tab (a state-root pane's own files, which
-        # carry no policy, it can). Its popup inherits the frame's sandbox, and a browser shows a sandboxed
-        # navigation's response only when its opener policy is unsafe-none, so the tab shows no page, as it did under
-        # same-origin: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit an
-        # empty one, each leaving the handle open (witness: test_pane_popup_opener_served.py
-        # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page, which asserts only that the file is not
-        # shown). Allowing it would take allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes
-        # every popup the pane opens.
-        # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
-        # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
-        # document navigations only, so it is inert on JSON, assets and sockets.
-        if opener_policy:
-            self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
-        # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
-        # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
-        # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
-        # origin and nothing cross-origin (a transcript's <img> from another host, a link out), whatever
-        # the browser's default, on every page the kernel serves: the SECURITY.md claim that a cross-site
-        # page cannot obtain the token then holds by construction. same-origin and not no-referrer: a
-        # same-origin GET carries no Origin header, so the Referer is the one header that names the page
-        # origin behind it to the kernel, and this keeps it.
-        self.send_header("Referrer-Policy", "same-origin")
+        _security_headers(self.send_header, opener_policy)
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         if cache:                                     # e.g. "no-cache" — keeps a tab from running a stale bundle
@@ -70979,6 +71367,43 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
+
+    # http.server answers some requests itself, before any route here runs, with a small text/html page of its own
+    # (BaseHTTPRequestHandler.send_error): a request line over 65,536 bytes gets a 414; a header line over 65,536 bytes,
+    # or more than 100 header lines, a 431 (3.10 to 3.14 count the closing blank line too, so they refuse 100 headers);
+    # a method this class has no do_ method for (PUT, DELETE) a 501; and any other request line it refuses a 400, or a
+    # 505 for a version of 2.0 and up, though an empty or whitespace-only line gets no reply at all. A long enough URL
+    # takes a browser to the 414.
+    # Those pages never pass through _send, so they carry _security_headers here, which keeps SECURITY.md's claim that
+    # every page the kernel serves carries the opener policy true of them too (the post-merge review of #32 found them
+    # carrying none of these headers). send_error marks the response as its own and end_headers adds the headers to it
+    # last, before the block is flushed; the rest of the page (the status line, the escaped body, Connection: close)
+    # stays the standard library's, so it follows the running interpreter's rules, which differ between versions.
+    # The headers ride every error page http.server writes with a header block, and cannot ride a reply that has none.
+    # The standard library writes no status line and no header while the request's version, as it holds it, is exactly
+    # HTTP/0.9, the value it starts from; for any other version the reply has a header block. On every interpreter,
+    # then, no reply to a request line it accepts as HTTP/0.9, a two-word GET or three words ending in HTTP/0.9, has a
+    # header block, whether the route writes it or http.server does (a 431, a 501). Before CPython's gh-54930 change
+    # neither does the 400 or 505 to a request line refused for its version (malformed, or 2.0 and up) or for having
+    # none (one word, or two not starting with GET), nor the 400 to four or more words ending in HTTP/0.9; with that
+    # change each of those refusals has a header block. Browsers send none of these requests, so no page a browser loads
+    # is one of these replies.
+    # The mark, rather than adding the headers in end_headers for every response: _send has already written them on its
+    # own responses, and a second Cross-Origin-Opener-Policy, even of the same value, leaves a browser with no policy.
+    # No route here calls send_error: a route's own error statuses go through _send. tests/test_kernel_auth_hardening.py
+    # ServerErrorPages reads the 414, both 431s and the 501 (for PUT and for DELETE) off a socket; it drives no request
+    # line http.server answers with a 400 or 505, and none it accepts as HTTP/0.9.
+    def send_error(self, code, message=None, explain=None):
+        self._server_error_page = True
+        try:
+            super().send_error(code, message, explain)
+        finally:
+            self._server_error_page = False
+
+    def end_headers(self):
+        if getattr(self, "_server_error_page", False):
+            _security_headers(self.send_header)
+        super().end_headers()
 
     # ── serve-layer security (docs/read-side.md): Origin/Host gate always; token required for ALL
     # access, loopback included (Jupyter's model — loopback is shared by every local user on the
@@ -71461,6 +71886,8 @@ class Handler(BaseHTTPRequestHandler):
                 snap = _PERF_STATS.snapshot(ring_all=(q.get("ring") or [""])[0] == "all")   # ?ring=all: the whole stage ring (T397)
                 if (q.get("stacks") or [""])[0] == "1":
                     snap["stacks"] = _thread_stacks()      # ?stacks=1: one frame list per thread with its stage mark (T401)
+                if (q.get("walk") or [""])[0] == "1":
+                    _perf_walks(snap)                      # ?walk=1: the two heap-wide gauges, on request alone (2026-09-29)
                 return self._send(200, json.dumps(snap), "application/json", cache="no-cache")
             if p == "/commands":                              # slash-command list for the composer's "/" autocomplete (SDK get_server_info, per-cwd cached)
                 sid = (q.get("sid") or [""])[0]
@@ -71923,7 +72350,7 @@ class Handler(BaseHTTPRequestHandler):
                       "json": "application/json", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
                       "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf", "map": "application/json"}.get(fp.suffix.lstrip("."), "text/plain")
                 # the pane author's own file: no opener policy, so a sign-in popup the pane opens keeps its opener when it
-                # comes back to a callback page here (Handler._send's comment says why, and what that costs)
+                # comes back to a callback page here (the comment in _security_headers says why, and what that costs)
                 return self._send(200, fp.read_bytes(), ct, cache="no-cache", opener_policy=False)
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA
@@ -74063,12 +74490,12 @@ class Handler(BaseHTTPRequestHandler):
             if _set_session_color(str(msg["id"]), str(msg["bg"])):
                 _mark_views_dirty()
         elif msg and msg.get("type") == "loginStart":
-            # the in-dashboard login (T157): spawn the PTY flow; the gear polls /version for state
+            # the in-dashboard login (T157): spawn `claude auth login`; the gear polls /version for state
             err = _login_start()
             if err:
                 client["send"](json.dumps({"type": "warn", "text": err}))
         elif msg and msg.get("type") == "loginCode":
-            # PASS-THROUGH ONLY (T157 house rule): the code goes straight to the PTY — this handler
+            # PASS-THROUGH ONLY (T157 house rule): the code goes straight to the CLI's stdin — this handler
             # must never log, store, or echo it anywhere
             err = _login_code(msg.get("code"))
             if err:
@@ -74466,6 +74893,19 @@ class Handler(BaseHTTPRequestHandler):
                 # a state the kernel has already replaced with a later one of the same browser's.)
                 sys.stderr.write("romp-kernel: setViewFolds refused: %s\n" % e)
                 _reply(client, {"type": "warn", "text": "Couldn't save the folded groups: %s" % e})
+            else:
+                if changed:                          # the change is the event; an unchanged republish pushes nothing
+                    _broadcast_view_order()
+        elif msg and msg.get("type") == "setViewFiles" and isinstance(msg.get("files"), dict):
+            # A file opened as a tab, closed, or dragged, on ANY viewer of this kernel (the user 2026-09-30, who wanted
+            # the files open beside their sessions to follow them like the tab order does). Kept WHOLE and OPAQUE beside
+            # the arrangement, pushed on the same frame. Last write wins.
+            try:
+                changed = _write_view_files(msg["files"])
+            except (_StateUnreadable, _StateUnwritable) as e:
+                # refused out loud: the tab sits on this page and would silently vanish on the next reload
+                sys.stderr.write("romp-kernel: setViewFiles refused: %s\n" % e)
+                _reply(client, {"type": "warn", "text": "Couldn't save your file tabs: %s" % e})
             else:
                 if changed:                          # the change is the event; an unchanged republish pushes nothing
                     _broadcast_view_order()
@@ -75990,6 +76430,12 @@ def main():
             sys.stderr.write("romp-kernel: re-armed %d given-up summary line(s) at startup\n" % _n)   # promised this since 07-03; now wired)
     except Exception:
         sys.stderr.write("startup rearm: %s\n" % traceback.format_exc())
+    try:                                                      # a comment relay's latch no relay holds any more
+        _n = _comment_latch_boot_pass()                       # (it died with the last kernel): the thread gets
+        if _n:                                                # its status back instead of 'merging' for good
+            sys.stderr.write("romp-kernel: freed %d comment thread(s) a relay left mid-flight\n" % _n)
+    except Exception:
+        sys.stderr.write("comment latch boot pass: %s\n" % traceback.format_exc())
     try:                                                      # a stored model pinned to a family's PRE-FIX seed
         _model_alias_boot_pass()                              # head (claude-fable-5) → the family alias, so the
     except Exception:                                         # next reconnect follows the CLI's newest.

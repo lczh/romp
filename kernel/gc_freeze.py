@@ -9,13 +9,21 @@ later full collection walks only what was allocated since. Measured (plans/gc-fu
 a warm full collection over 5.6 million loaded objects fell from 2.83 s to 0.1 ms once they were
 frozen, and the freeze itself is a pointer move.
 
-Two operations, both at the pusher's IDLE boundary (never a timer), where a pause is paid with no
-browser waiting:
+Two operations, both at the end of a pusher cycle and keyed on events (never a timer):
 
   - a LOAD fold-in (cheap): `gc.collect(); gc.freeze()`. The collect walks only the unfrozen objects
     loaded since the last freeze, so it costs milliseconds; the freeze folds their survivors in.
-    Keyed on the record cache's insert counter growing by a material number of trees.
-  - a RELEASE reclaim (up to the full pause), STAGED: `gc.collect()` with the freeze IN PLACE first (cheap,
+    Keyed on the record cache's insert counter growing by a material number of trees, on ANY cycle but
+    the boot's first, busy or idle (2026-09-28). It used to wait for an idle cycle, and a pusher that
+    almost never idles then almost never folded in: everything loaded after the last freeze stayed in
+    the walk of every automatic full collection. Those come often after a freeze, since CPython's
+    trigger (promoted objects reaching a quarter of the oldest generation's size at the last full
+    collection) counts only unfrozen objects once one full collection has run, so each walked every
+    post-freeze load again, a pause that grew with the load. A busy fold-in walks those same unfrozen
+    objects once and takes them out. The initial freeze likewise waits for no idle cycle: the first
+    cycle after the boot's first with anything loaded makes it, so a pusher that never idles still freezes.
+  - a RELEASE reclaim (up to the full pause), at the pusher's IDLE boundary only, where the frozen-heap
+    walk is paid with no browser waiting. STAGED: `gc.collect()` with the freeze IN PLACE first (cheap,
     it takes a released cycle allocated since the last freeze), then the owed refs are re-read and only a
     survivor drives `gc.unfreeze(); gc.collect()` (the frozen-heap walk); a `gc.freeze()` re-holds either
     way. A release the cheap walk took whole counts as a LOAD pass, so the backstop's bound does not stretch.
@@ -28,7 +36,13 @@ and the idle tick judges each by observation: a dead ref died by reference count
 reclaim); a live ref whose worker thread still runs is not garbage yet (kept for the next tick, a kill
 mid-turn); a live ref whose thread has finished is a cycle the collector must take (reclaim once for all
 such, then drop them). Exact on every path, no per-path reasoning. A BOUNDED BACKSTOP (after
-`backstop_foldins` load fold-ins) covers any ended owner nobody registered. The record cache's
+`backstop_foldins` load fold-ins) covers any ended owner nobody registered. It is a frozen-heap walk
+too, so an idle cycle runs it; a busy cycle runs it only once the fold-ins reach TWICE
+`backstop_foldins`, a full window with no idle cycle to take it (2026-09-28: a busy fold-in can freeze a
+live cycle that dies later, and on a pusher that never idles nothing else would ever reclaim it). A busy
+cycle judges the ended sessions only before the first freeze, as the idle tick does: the initial freeze's
+collect takes their pre-freeze garbage, so the owed refs are dropped at no cost. Once a freeze is held, a
+busy cycle never judges them: their release waits for the idle tick. The record cache's
 `released` counter is a /perf statistic, never a trigger: its entries are acyclic.
 
 The thread test rests on CPython's own threading: a running session and its worker Thread reference each
@@ -43,8 +57,9 @@ judges it, its frame and its target, not a cycle) reads the same, alive with a f
 as a surviving cycle: the reclaim frees nothing, so it costs ONE reclaim, is counted a `survivor` on /perf,
 and is dropped (never re-registered), never a pass per tick.
 
-A request that arrives during a reconcile waits that one collection; the idle boundary is the best
-moment for it, not a guarantee none arrives. Default on; `ROMP_GC_FREEZE=off` (or `0`/`false`) off.
+A request that arrives during a reconcile waits that one collection. The idle boundary is the best
+moment for the frozen-heap walks, not a guarantee none arrives; a busy fold-in walks only what an
+automatic full collection would have walked anyway. Default on; `ROMP_GC_FREEZE=off` (or `0`/`false`) off.
 """
 import gc as _gc_mod
 import os
@@ -53,9 +68,11 @@ import time
 import weakref
 
 DEFAULT_LOAD_TREES = 8            # record-cache inserts since the last freeze that count as a material load
-MIN_LOAD_TREES = 1               # floored here: a threshold of 0 or below would fold in every idle cycle
+MIN_LOAD_TREES = 1               # floored here: a threshold of 0 or below would fold in every cycle
 DEFAULT_BACKSTOP_FOLDINS = 1000  # a reclaim after this many load fold-ins since the last reclaim, bounding a cyclic release
-#                                  no ended ref caught; at the measured ~97 fold-ins an hour it fires about once in ten hours
+#                                  no ended ref caught; at the ~97 fold-ins an hour measured when fold-ins ran only on idle
+#                                  cycles it fired about once in ten hours; busy-cycle fold-ins (2026-09-28) come more often,
+#                                  and the bound stays on fold-ins because a fold-in is what can freeze a live cycle
 _OFF = ("off", "0", "false")
 
 
@@ -82,7 +99,7 @@ def load_trees_from_env(env=None):
 
 class GcFreeze:
     """The freeze controller. `gc` and `clock` are injected so a test drives a fake collector or a real one; the
-    kernel passes the real `gc`. The `tick`/`_run` path runs on the pusher thread; `note_ended` runs on every
+    kernel passes the real `gc`. The `tick`/`tick_busy`/`_run` path runs on the pusher thread; `note_ended` runs on every
     thread that ends a session (the HTTP handler, housekeeping, a worker), so a small lock guards the ended list."""
 
     def __init__(self, enabled=True, load_trees=DEFAULT_LOAD_TREES, backstop_foldins=DEFAULT_BACKSTOP_FOLDINS,
@@ -99,8 +116,9 @@ class GcFreeze:
         self._ended_lock = threading.Lock()   # note_ended runs on other threads than the tick; guard the list
         self.freezes = 0             # initial freeze plus load fold-ins
         self.reclaims = 0            # unfreeze/collect/re-freeze passes (a cyclic ended ref, or the backstop)
+        self.busy_runs = 0           # of all the runs, those a BUSY cycle ran (an initial freeze, a load fold-in, the busy backstop)
         self.survivors = 0           # owed refs still alive after a reclaim's collect: kept by a LIVE ROOT, not a cycle (a wasted pause), counted once and dropped
-        self.last_release_sids = []  # first 8 chars of each sid a reclaim was owed for, set under the ended lock, cleared per judgement
+        self.last_release_sids = []  # first 8 chars of each sid a reclaim was owed for, set under the ended lock, cleared per judgement and per busy run after the first freeze
         self.last_release_survivors = 0   # of the LAST RUN's owed refs, how many a live root kept through it (0 when the reclaim freed
         #                                   them, and 0 on any run that owed none, e.g. a load after a live-root release: read right after a release)
         self.last_kept_sids = []     # the sids of those survivors, likewise rebound each run (cleared to [] by a run that owed none); named kept-by-a-live-root in the release line
@@ -163,6 +181,35 @@ class GcFreeze:
             return self._run("load", inserts, [])
         return None
 
+    def tick_busy(self, inserts):
+        """One BUSY-cycle pass (2026-09-28): the initial freeze once anything is loaded, the load fold-in on a material load,
+        and the backstop only once the fold-ins reach twice `backstop_foldins` (a full window passed with no idle cycle to
+        take it). Judges the ended sessions only while no freeze is held, as the idle `tick` does there: the initial
+        freeze's collect takes their pre-freeze garbage, so the owed refs are dropped at no cost (left unjudged, a ref a
+        live root keeps would be frozen with the heap and cost a full release at the first idle cycle; the 2026-09-28
+        review). Once a freeze is held it never judges them: a release, and the frozen-heap walk a survivor drives, waits
+        for the idle `tick`. A busy load or backstop judged nothing and owed nothing, so it clears `last_release_sids` (under
+        the ended lock, where `resolve_ended` sets it): /perf's sids, survivors and kind then describe the same run, never a
+        load beside the sids of an earlier release (the same review). Returns the kind run, or None."""
+        if not self.enabled:
+            return None
+        if not self.frozen:
+            self.resolve_ended()                     # no frozen heap yet: judge the pre-freeze refs and drop the owed, as the idle tick does
+            kind = self._run("initial", inserts, []) if inserts > 0 else None
+        else:
+            if self._foldins >= 2 * self.backstop_foldins:
+                kind = self._run("backstop", inserts, [])
+            elif (inserts - self._ins_mark) >= self.load_trees:
+                kind = self._run("load", inserts, [])
+            else:
+                kind = None
+            if kind is not None:
+                with self._ended_lock:
+                    self.last_release_sids = []      # this run owed no reclaim: no sids, as its survivor count is 0
+        if kind is not None:
+            self.busy_runs += 1
+        return kind
+
     def _run(self, kind, inserts, owed):
         """Run the owed collector operation and return the kind actually run. A RELEASE is STAGED (the 2026-09-22 PR 1999
         review): a plain collect with the freeze IN PLACE first (cheap, it takes a cycle allocated since the last freeze),
@@ -212,10 +259,11 @@ class GcFreeze:
 
     def perf(self):
         """The /perf gc block's freeze sub-block: the state and the reconcile trade, so a reconcile collection is
-        told apart from an organic one. `active` is whether a freeze is held now (named to not collide with the
-        integer `gc.frozen`); `frozenCount` (gc.get_freeze_count) is added by the caller."""
+        told apart from an organic one. `active` is whether a freeze is held now (named apart from the gc block's
+        `frozen` count, gc.get_freeze_count() on GET /perf?walk=1)."""
         return {"enabled": self.enabled, "active": self.frozen, "loadTrees": self.load_trees,
                 "backstopFoldins": self.backstop_foldins, "freezes": self.freezes, "reclaims": self.reclaims,
+                "busyRuns": self.busy_runs,
                 "collections": self.collections, "survivors": self.survivors, "lastReleaseSurvivors": self.last_release_survivors,
                 "lastReleaseSids": list(self.last_release_sids),
                 "endedPending": len(self._ended), "lastReconcileMs": round(self.last_ms, 1),
@@ -223,15 +271,17 @@ class GcFreeze:
 
 
 def pusher_tick(controller, idle, first, stats_fn, on_error):
-    """The pusher's idle-boundary call, extracted so it is pinned in-process. Reconcile only on an IDLE, non-FIRST
-    cycle. `stats_fn` returns the record cache stats (its `inserts` keys the LOAD fold-in). A raising `stats_fn` or
-    tick is handed to `on_error` and never propagates: the pusher must not die on the freeze. Returns the reconcile
-    kind run, or None."""
-    if not (idle and not first) or not controller.enabled:
+    """The pusher's end-of-cycle call, extracted so it is pinned in-process. Never on the boot's FIRST cycle. An IDLE cycle
+    runs the full `tick` (the release, the backstop, the fold-in); a BUSY one runs `tick_busy` (the initial freeze, the
+    fold-in, and the backstop only past its busy bound). 2026-09-28: this used to return on every busy cycle, which starved
+    the fold-in on a pusher that almost never idles. `stats_fn` returns the record cache stats (its `inserts` keys the LOAD
+    fold-in). A raising `stats_fn` or tick is handed to `on_error` and never propagates: the pusher must not die on the
+    freeze. Returns the reconcile kind run, or None."""
+    if first or not controller.enabled:
         return None
     try:
         inserts = int((stats_fn() or {}).get("inserts") or 0)
-        return controller.tick(inserts)
+        return controller.tick(inserts) if idle else controller.tick_busy(inserts)
     except Exception as e:
         on_error(e)
     return None

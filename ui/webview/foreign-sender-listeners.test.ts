@@ -26,13 +26,23 @@
 // which are the real helpers, and window, which is the stand-in the helpers read (the shell's check on it is the
 // kernel's own text, run over the stand-in's frames). A representative arm per listener reaches its effect once from
 // every heard sender and never from a foreign one; the head check sits before every arm, which the census below pins at
-// source for every listener in ui/.
+// source for every listener in ui/. Each windowSender listener's drop leaves one trace (window-sender.ts noteForeign):
+// every executed leg reads the client-diag rows a delivery files, one naming the listener's own site for a foreign
+// sender and none for a heard one. The receiving window has no pane shim, as in a VS Code webview, so a row arrives only
+// through the transport the listener hands noteForeign: an installed leg hands its helper a recorder, and a lifted leg
+// binds the one name its listener's transport has (the gear's and the strip's poster, the Artifacts pane's api) to a
+// recorder, every other name staying a stub, a real global or the effect, none of which records, so a drop that hands
+// over an arm, another name or none fails.
+// Each pane install of listenForFrames and installSettingsSync must hand the helper the page's VS Code api, the road
+// those two traces take in a VS Code webview; a census reads every call (the install census below).
 //
 // The census reads the population instead of a list: every addEventListener("message", …) call in a ui/ source file
 // (tests excluded), the method named or a computed member, every call of a listed registration helper with "message",
 // and every onmessage handler assigned to the window (by window, self, globalThis or the bare global), must take the
 // event as its one parameter, with no default, open with its file's check, preceded by nothing but reads of the message,
-// and be one of the gated sites below, each with an executed leg here. A new window listener anywhere in ui/ fails it
+// and be one of the gated sites below, each with an executed leg here. A windowSender listener's check returns through
+// its trace and nothing else: `{ noteForeign("<site>", <the event>[, <a name>]); return; }`, its site a literal no
+// other listener uses. A new window listener anywhere in ui/ fails it
 // until it is gated and given a leg. A second census reads what the name of each check is bound to: in every ui/ file
 // that calls it, the helper's own import (gear.js: its require), bound once and never written, so a local helper of the
 // same name that lets one more sender through cannot stand in for it. The first census reads the listeners the source
@@ -46,7 +56,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { windowSender } from "./window-sender";
+import { windowSender, noteForeign } from "./window-sender";
 import { paneSourceOk } from "./pane-source";
 import { listenForFrames } from "./frame-listener";
 import { installSettingsSync } from "./settings";
@@ -201,46 +211,58 @@ function withGlobals<T>(vals: Record<string, unknown>, fn: () => T): T {
     for (const [k, had, v] of saved) { if (had) g[k] = v; else delete g[k]; }
   }
 }
-type Installed = { site: string; data: unknown; what: string; setup: (effect: () => void) => { globals?: Record<string, unknown>; install: () => void } };
+/** The client-diag rows one delivery filed through the transport a listener was handed, and the one a trace of `site`
+ *  from `origin` must be: the site and the sender's origin alone, never the message's data. */
+type Rows = Array<Record<string, any>>;
+const traceRow = (site: string, origin: string) => ({ type: "clientDiag", surface: "window-sender", what: "foreign", data: { site, origin } });
+type Installed = { site: string; trace: string; data: unknown; what: string;
+                   setup: (effect: () => void, transport: (m: Record<string, unknown>) => void) => { globals?: Record<string, unknown>; install: () => void } };
 const INSTALLED: Installed[] = [
-  { site: "webview/frame-listener.ts", what: "a kernel-shaped feed frame reaching a pane's frame handler through listenForFrames",
+  { site: "webview/frame-listener.ts", trace: "frame-listener", what: "a kernel-shaped feed frame reaching a pane's frame handler through listenForFrames",
     data: { type: "feed", ledgers: [{ id: SID, name: "api" }] },
-    setup: (effect) => ({ install: () => { listenForFrames(() => effect()); } }) },
-  { site: "webview/settings.ts", what: "a settingsSync that replaces the settings store (installSettingsSync)",
+    setup: (effect, transport) => ({ install: () => { listenForFrames(() => effect(), { postMessage: transport }); } }) },
+  { site: "webview/settings.ts", trace: "settings-sync", what: "a settingsSync that replaces the settings store (installSettingsSync)",
     data: { type: "settingsSync", settings: { theme: "classic", figureHosts: ["example.invalid"] } },
-    setup: (effect) => ({ globals: { localStorage: { setItem: (k: string) => { if (k === "romp:settings") effect(); } } },
-                          install: () => installSettingsSync() }) },
-  { site: "webview/file-view.ts", what: "a viewFile relay that opens a file in the viewer (initFileView)",
+    setup: (effect, transport) => ({ globals: { localStorage: { setItem: (k: string) => { if (k === "romp:settings") effect(); } } },
+                                     install: () => installSettingsSync({ postMessage: transport }) }) },
+  { site: "webview/file-view.ts", trace: "file-view", what: "a viewFile relay that opens a file in the viewer (initFileView)",
     data: { romp: "viewFile", path: "docs/design.md", sid: SID },
-    setup: (effect) => ({ globals: { document: { addEventListener: () => { /* the viewer's press watch */ } } },
-                          install: () => initFileView(() => { /* the kernel poster */ }, () => effect()) }) },
-  { site: "webview/file-browse.ts", what: "a browseFiles relay that lists a directory (initFileBrowse)",
+    setup: (effect, transport) => ({ globals: { document: { addEventListener: () => { /* the viewer's press watch */ } } },
+                                     install: () => initFileView(transport, () => effect()) }) },
+  { site: "webview/file-browse.ts", trace: "file-browse", what: "a browseFiles relay that lists a directory (initFileBrowse)",
     data: { romp: "browseFiles", path: "docs", sid: SID },
-    setup: (effect) => ({ install: () => initFileBrowse(() => { /* the kernel poster */ }, { onRelay: () => effect() }) }) },
+    setup: (effect, transport) => ({ install: () => initFileBrowse(transport, { onRelay: () => effect() }) }) },
 ];
 /** Installs the listener for real over a fresh receiving window of the row's kind (the global window while it installs
- *  and while the message is delivered), delivers the message from the row's sender, and returns the effect's count. */
-function runInstalled(leg: Installed, row: Row): number {
+ *  and while the message is delivered), handing it a transport that records what it is sent (the kernel poster, or the
+ *  VS Code api), delivers the message from the row's sender, and returns the effect's count and the rows the transport
+ *  was sent. The receiving window has no pane shim, so a trace goes through that transport. */
+function runInstalled(leg: Installed, row: Row): { n: number; rows: Rows } {
   const w = receiver(row.ctx);
   let n = 0;
-  const { globals, install } = leg.setup(() => { n++; });
+  const rows: Rows = [];
+  const { globals, install } = leg.setup(() => { n++; }, (m) => { rows.push(m); });
   withGlobals({ ...(globals || {}), window: w }, () => {
     install();
     const ls = w.messageListeners();
     assert.equal(ls.length, 1, leg.site + ": the install added one window message listener");
     ls[0]({ data: leg.data, source: row.source(w), origin: row.origin });
   });
-  return n;
+  return { n, rows };
 }
 
 for (const leg of INSTALLED) {
-  test(leg.site + ": " + leg.what + " from a foreign sender reaches nothing", () => {
-    const reached = FOREIGN.filter((row) => runInstalled(leg, row) !== 0).map((row) => row.who);
+  test(leg.site + ": " + leg.what + " from a foreign sender reaches nothing, and files one trace naming the listener and the sender's origin", () => {
+    const reached = FOREIGN.filter((row) => runInstalled(leg, row).n !== 0).map((row) => row.who);
     assert.deepEqual(reached, [], leg.site + ": a foreign sender reached the effect: " + reached.join("; "));
+    const traced = FOREIGN.map((row) => [row, runInstalled(leg, row).rows] as const)
+      .filter(([row, rows]) => JSON.stringify(rows) !== JSON.stringify([traceRow(leg.trace, row.origin)])).map(([row, rows]) => row.who + ": " + JSON.stringify(rows));
+    assert.deepEqual(traced, [], leg.site + ": a foreign sender's drop did not file exactly its one trace: " + traced.join("; "));
   });
-  test(leg.site + ": " + leg.what + " from every sender that is not foreign reaches the effect once", () => {
-    const missed = HEARD.map((row) => [row.who, runInstalled(leg, row)] as const).filter(([, n]) => n !== 1).map(([who, n]) => who + " (" + n + ")");
-    assert.deepEqual(missed, [], leg.site + ": a heard sender did not reach the effect once: " + missed.join("; "));
+  test(leg.site + ": " + leg.what + " from every sender that is not foreign reaches the effect once, and files no trace", () => {
+    const missed = HEARD.map((row) => [row.who, runInstalled(leg, row)] as const).filter(([, r]) => r.n !== 1 || r.rows.length !== 0)
+      .map(([who, r]) => who + " (" + r.n + ", traces " + JSON.stringify(r.rows) + ")");
+    assert.deepEqual(missed, [], leg.site + ": a heard sender did not reach the effect once with no trace: " + missed.join("; "));
   });
 }
 
@@ -346,24 +368,28 @@ type Lifted = { file: string; marker: string; what: string; data: unknown;
                 named: (hit: () => void, w: Receiver) => Record<string, unknown>;   // the effect's binding, counting through hit
                 writes?: string;   // or: the effect is a write to this free name
                 self?: (hit: () => void) => Record<string, unknown>;   // or: a method of the listener's `this` (a class's arrow)
+                trace?: string;   // a windowSender listener's site: the name its drop's trace carries
+                // and its transport: the name its drop hands noteForeign and that name's shape (a poster function, or the VS
+                // Code api's object), which runLifted binds, and no other name, to a recorder of that shape
+                transport?: [string, "poster" | "api"];
                 heard?: Row[] };   // the senders its check hears: every class windowSender does not name foreign, unless given
 const LIFTED: Lifted[] = [
-  { file: "webview/artifacts.ts", marker: '"chatTabs"', what: "the shell's activeChat relay, which picks the Artifacts pane's session",
-    data: { romp: "activeChat", id: SID, nonce: 1 }, named: (hit) => ({ apply: hit }) },
-  { file: "webview/gear.js", marker: "'taskTracking'", what: "the gear's taskTracking echo, which tells the shell",
-    data: { type: "taskTracking", on: false }, named: (hit) => ({ tellShellTracking: hit }) },
-  { file: "webview/gear.js", marker: "'browseResult'", what: "the gear's browseResult, which fills the default directory and persists it",
-    data: { type: "browseResult", target: "gear", path: "/srv/notes-api" }, named: (hit) => ({ dd: { value: "", dispatchEvent: hit } }) },
-  { file: "webview/gear.js", marker: "'settingStale'", what: "the gear's settingStale toast, which advances the gesture clock",
-    data: { type: "settingStale", setting: "judge-model", storedGt: 2000, gt: 1000, kept: "fable" }, named: (hit) => ({ gclock: { learn: hit, stamp: () => 0 } }) },
-  { file: "webview/gear.js", marker: "'models'", what: "the gear's models frame, which re-reads /models",
-    data: { type: "models", rev: 2 }, named: (hit) => ({ fetch: () => { hit(); return chain; } }) },
-  { file: "webview/gear.js", marker: "'openSettings'", what: "the gear's openSettings ask, which opens the modal",
-    data: { romp: "openSettings", tab: "tasks" }, named: (hit) => ({ openSettings: hit }) },
-  { file: "webview/gear.js", marker: "'logUnseen'", what: "the gear's logUnseen count, which sets the Open log badge",
-    data: { romp: "logUnseen", n: 3 }, named: (hit, w) => { defineHidden(w, "__rompSetLogCount", hit); return {}; } },
-  { file: "webview/strip.ts", marker: '"stripShow"', what: "the VS Code strip's usage push, which repaints the bars",
-    data: { type: "usage", usage: { fiveHour: { pct: 10 } } }, named: (hit) => ({ render: hit }) },
+  { file: "webview/artifacts.ts", marker: '"chatTabs"', what: "the shell's activeChat relay, which picks the Artifacts pane's session", trace: "artifacts",
+    transport: ["vscodeApi", "api"], data: { romp: "activeChat", id: SID, nonce: 1 }, named: (hit) => ({ apply: hit }) },
+  { file: "webview/gear.js", marker: "'taskTracking'", what: "the gear's taskTracking echo, which tells the shell", trace: "gear:taskTracking",
+    transport: ["post", "poster"], data: { type: "taskTracking", on: false }, named: (hit) => ({ tellShellTracking: hit }) },
+  { file: "webview/gear.js", marker: "'browseResult'", what: "the gear's browseResult, which fills the default directory and persists it", trace: "gear:browseResult",
+    transport: ["post", "poster"], data: { type: "browseResult", target: "gear", path: "/srv/notes-api" }, named: (hit) => ({ dd: { value: "", dispatchEvent: hit } }) },
+  { file: "webview/gear.js", marker: "'settingStale'", what: "the gear's settingStale toast, which advances the gesture clock", trace: "gear:settingStale",
+    transport: ["post", "poster"], data: { type: "settingStale", setting: "judge-model", storedGt: 2000, gt: 1000, kept: "fable" }, named: (hit) => ({ gclock: { learn: hit, stamp: () => 0 } }) },
+  { file: "webview/gear.js", marker: "'models'", what: "the gear's models frame, which re-reads /models", trace: "gear:models",
+    transport: ["post", "poster"], data: { type: "models", rev: 2 }, named: (hit) => ({ fetch: () => { hit(); return chain; } }) },
+  { file: "webview/gear.js", marker: "'openSettings'", what: "the gear's openSettings ask, which opens the modal", trace: "gear:openSettings",
+    transport: ["post", "poster"], data: { romp: "openSettings", tab: "tasks" }, named: (hit) => ({ openSettings: hit }) },
+  { file: "webview/gear.js", marker: "'logUnseen'", what: "the gear's logUnseen count, which sets the Open log badge", trace: "gear:logUnseen",
+    transport: ["post", "poster"], data: { romp: "logUnseen", n: 3 }, named: (hit, w) => { defineHidden(w, "__rompSetLogCount", hit); return {}; } },
+  { file: "webview/strip.ts", marker: '"stripShow"', what: "the VS Code strip's usage push, which repaints the bars", trace: "strip",
+    transport: ["post", "poster"], data: { type: "usage", usage: { fiveHour: { pct: 10 } } }, named: (hit) => ({ render: hit }) },
   { file: "webview/palette-main.ts", marker: '"openKeys"', what: "the shell's openKeys ask, which opens the shortcuts dialog",
     data: { romp: "openKeys" }, named: (hit) => ({ keys: { open: hit } }), heard: SHELL_HEARD },
   { file: "webview/palette-main.ts", marker: '"hotkeyConfigure"', what: "the shell's hotkeyConfigure ask, which binds a tab's hot key",
@@ -376,7 +402,7 @@ const compiled = new Map<string, (this: unknown, scope: unknown) => Listener>();
 /** The lifted listener as a function of its scope (compiled once per site): sloppy-mode code, which `with` needs
  *  (esbuild's transform adds no strict prologue, and a .js listener is used as written). */
 function compile(site: Site): (this: unknown, scope: unknown) => Listener {
-  const key = site.file + ":" + site.line;
+  const key = site.file + ":" + site.line + "\n" + site.text;   // the text too: a planted drop (below) runs from the same line
   const hit = compiled.get(key);
   if (hit) return hit;
   const src = "const __listener = " + site.text + ";\n";
@@ -385,19 +411,27 @@ function compile(site: Site): (this: unknown, scope: unknown) => Listener {
   compiled.set(key, make);
   return make;
 }
-/** Runs the lifted listener once, over a fresh receiving window of the row's kind, on the message from the row's sender,
- *  and returns the effect's count. */
-function runLifted(leg: Lifted, row: Row): number {
-  const site = siteOf(leg.file, leg.marker);
+/** Runs the lifted listener once (its text as its file spells it, unless a test plants another), over a fresh receiving
+ *  window of the row's kind, on the message from the row's sender, and returns the effect's count and what its transport
+ *  was sent. noteForeign is the real helper, reading that window, handed whatever the listener passes it. That window has
+ *  no pane shim, so a row goes only through the listener's transport: the leg's transport name is bound to a recorder of
+ *  its shape, and every other name the drop could hand over is the inert stub, a real global (JSON, fetch) or the leg's
+ *  effect (which counts), none of which records, so a trace row arrives only when the drop hands noteForeign its own
+ *  transport. */
+function runLifted(leg: Lifted, row: Row, site: Site = siteOf(leg.file, leg.marker)): { n: number; rows: Rows } {
   const w = receiver(row.ctx);
   let n = 0;
+  const rows: Rows = [];
   const hit = () => { n++; };
+  const record = (m: Record<string, unknown>) => { rows.push(m); };
   const named: Record<string, unknown> = {
     windowSender: (e: { source?: unknown; origin?: unknown }) => windowSender(e, w),
+    noteForeign: (at: string, e: { origin?: unknown }, via?: Parameters<typeof noteForeign>[2]) => noteForeign(at, e, via, w),
     paneSourceOk: (e: MessageEvent) => paneSourceOk(e, w as unknown as Window),
     window: w,
     location: w.location,
     ...leg.named(hit, w),
+    ...(leg.transport ? { [leg.transport[0]]: leg.transport[1] === "api" ? { postMessage: record } : record } : {}),
   };
   const scope = new Proxy(named, {
     has: (t, k) => typeof k === "string" && (k in t || !(k in globalThis)),   // named first; other real globals (JSON, Object, Event) stay real
@@ -406,18 +440,33 @@ function runLifted(leg: Lifted, row: Row): number {
   });
   const self = leg.self ? leg.self(hit) : undefined;
   compile(site).call(self, scope)({ data: leg.data, source: row.source(w), origin: row.origin });
-  return n;
+  return { n, rows };
+}
+/** What each foreign sender's message did at a lifted listener (runLifted's `site`): the senders that reached the effect,
+ *  and those whose delivery did not send the transport exactly the one trace row it should. The shell's bundles read the
+ *  shell's check, which drops without a trace (plans/panes-as-data.md section 5); every windowSender listener's drop
+ *  files its one trace through its transport. */
+function liftedForeign(leg: Lifted, site?: Site): { reached: string[]; traced: string[] } {
+  const reached: string[] = [], traced: string[] = [];
+  for (const row of FOREIGN) {
+    const r = runLifted(leg, row, site);
+    if (r.n !== 0) reached.push(row.who);
+    if (JSON.stringify(r.rows) !== JSON.stringify(leg.trace ? [traceRow(leg.trace, row.origin)] : [])) traced.push(row.who + ": " + JSON.stringify(r.rows));
+  }
+  return { reached, traced };
 }
 
 for (const leg of LIFTED) {
   const label = leg.file + " (" + leg.marker + ")";
-  test(label + ": " + leg.what + " from a foreign sender reaches nothing", () => {
-    const reached = FOREIGN.filter((row) => runLifted(leg, row) !== 0).map((row) => row.who);
+  test(label + ": " + leg.what + " from a foreign sender reaches nothing" + (leg.trace ? ", and files one trace naming the listener and the sender's origin, through its transport" : ""), () => {
+    const { reached, traced } = liftedForeign(leg);
     assert.deepEqual(reached, [], label + ": a foreign sender reached the effect: " + reached.join("; "));
+    assert.deepEqual(traced, [], label + ": a foreign sender's drop did not send its transport exactly the traces it should: " + traced.join("; "));
   });
-  test(label + ": " + leg.what + " from every sender " + (leg.heard ? "its check hears (a pane of the shell)" : "that is not foreign") + " reaches the effect once", () => {
-    const missed = (leg.heard || HEARD).map((row) => [row.who, runLifted(leg, row)] as const).filter(([, n]) => n !== 1).map(([who, n]) => who + " (" + n + ")");
-    assert.deepEqual(missed, [], label + ": a heard sender did not reach the effect once: " + missed.join("; "));
+  test(label + ": " + leg.what + " from every sender " + (leg.heard ? "its check hears (a pane of the shell)" : "that is not foreign") + " reaches the effect once, and files no trace", () => {
+    const missed = (leg.heard || HEARD).map((row) => [row.who, runLifted(leg, row)] as const).filter(([, r]) => r.n !== 1 || r.rows.length !== 0)
+      .map(([who, r]) => who + " (" + r.n + ", traces " + JSON.stringify(r.rows) + ")");
+    assert.deepEqual(missed, [], label + ": a heard sender did not reach the effect once with no trace: " + missed.join("; "));
   });
   // A shell bundle's listener hears a pane of the shell alone: every other sender windowSender hears (the shell's own
   // page, a second column, a dispatch, the VS Code host) reaches nothing, so a listener that read windowSender in place
@@ -429,11 +478,43 @@ for (const leg of LIFTED) {
       assert.ok(others.some((row) => row.ctx === "shell"), "a sender on the shell's own page is among them");
       assert.ok(others.every((row) => { const w = receiver(row.ctx); return windowSender({ source: row.source(w), origin: row.origin }, w) !== "foreign"; }),
         "windowSender hears every one of them");
-      const reached = others.filter((row) => runLifted(leg, row) !== 0).map((row) => row.who);
+      const reached = others.filter((row) => runLifted(leg, row).n !== 0).map((row) => row.who);
       assert.deepEqual(reached, [], label + ": a sender that is not a pane of the shell reached the effect: " + reached.join("; "));
     });
   }
 }
+
+// The census reads only that a trace's transport is a name its file binds, and an arm is one too. The lifted legs are
+// what hold the transport, by running it: each drop below is its listener's own text with the trace's transport
+// swapped for the listener's arm (where the arm is a free function the drop could hand over), for another name (any name
+// the file binds that is not the transport is the inert stub in a lifted leg's scope, as this one is), or for nothing,
+// and each is run through the same leg, which must fail it. In a VS Code webview (no pane shim) such a drop would run
+// the arm once per sender origin, or file no row.
+test("the lifted legs catch a drop whose trace hands noteForeign an arm, another name or no transport in place of its own", () => {
+  const ARMS: Record<string, string> = { "artifacts": "apply", "gear:taskTracking": "tellShellTracking", "gear:models": "fetch",
+                                         "gear:openSettings": "openSettings", "strip": "render" };
+  const traced = LIFTED.filter((leg) => leg.trace);
+  assert.equal(traced.length, 8, "the gear's six, the strip's and the Artifacts pane's");
+  for (const leg of traced) {
+    const label = leg.file + " (" + leg.marker + ")";
+    const site = siteOf(leg.file, leg.marker);
+    const call = new RegExp("noteForeign\\((['\"])" + leg.trace!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\1, (\\w+), " + leg.transport![0] + "\\)");
+    const m = site.text.match(call);
+    assert.ok(m, label + ": the drop hands noteForeign its transport, " + leg.transport![0]);
+    assert.equal(site.text.split(m![0]).length, 2, label + ": one such call");
+    const plant = (tail: string): Site => ({ ...site, text: site.text.replace(call, "noteForeign(" + m![1] + leg.trace + m![1] + ", " + m![2] + tail + ")") });
+    const asWritten = liftedForeign(leg);
+    assert.deepEqual([asWritten.reached, asWritten.traced], [[], []], label + ": the listener as written passes its leg");
+    const cases: Array<[string, string]> = [["no transport", ""], ["another name", ", notItsTransport"]];
+    if (ARMS[leg.trace!]) cases.push(["its arm, " + ARMS[leg.trace!], ", " + ARMS[leg.trace!]]);
+    for (const [what, tail] of cases) {
+      const got = liftedForeign(leg, plant(tail));
+      assert.equal(got.traced.length, FOREIGN.length, label + ": a drop handing noteForeign " + what + " still sent the leg's transport a trace row for a foreign sender");
+      if (what.startsWith("its arm")) assert.deepEqual(got.reached, FOREIGN.map((row) => row.who), label + ": a drop handing noteForeign " + what + " is counted as reaching it");
+    }
+  }
+  assert.deepEqual(Object.keys(ARMS).filter((t) => !traced.some((leg) => leg.trace === t)), [], "every arm names a traced leg");
+});
 
 // ── the census: every window message listener in ui/ ──
 
@@ -450,11 +531,15 @@ function uiSources(): string[] {
   walk("");
   return out.sort();
 }
-/** Where the listener's `if (windowSender(<its event>) === "foreign") return;` is among its body's statements, or why it
- *  does not count: the listener takes one parameter, the event, a plain name with no default (a parameter's default runs
- *  before the body, so a default on it or on a second parameter would run ahead of the check), and every statement before
- *  the check must be a read of the message (a declaration initialised to <event>.data) or an early return on a condition
- *  that calls, constructs and assigns nothing, so no arm runs before the check. */
+/** Where the listener's `if (windowSender(<its event>) === "foreign") { noteForeign("<site>", <its event>[, <a name>]);
+ *  return; }` is among its body's statements, or why it does not count: the listener takes one parameter, the event, a
+ *  plain name with no default (a parameter's default runs before the body, so a default on it or on a second parameter
+ *  would run ahead of the check), and every statement before the check must be a read of the message (a declaration
+ *  initialised to <event>.data) or an early return on a condition that calls, constructs and assigns nothing, so no arm
+ *  runs before the check. The check's branch is its trace and a bare return, nothing else: the trace's site a string
+ *  literal, its second argument the event itself, and its transport, when given, a name the file binds, so evaluating
+ *  the call's arguments runs nothing (window-sender.ts noteForeign reads the event's origin and never throws). Which
+ *  name that is, the census cannot tell from an arm's: the executed legs hold it by running the transport. */
 /** The shell's bundles: their listeners read the shell's source check (pane-source.ts paneSourceOk) at their heads, as
  *  `if (!paneSourceOk(e)) return;`, instead of windowSender. Every other file's listeners read windowSender. */
 const SHELL_BUNDLES = new Set(["webview/palette-main.ts", "webview/panedock-main.ts"]);
@@ -468,7 +553,8 @@ function headCheck(site: Site): string | null {
   }
   const ev = fn.parameters[0].name.text;
   const isReturn = (s: any) => ts.isReturnStatement(s) && !s.expression;
-  const isGate = (s: any) => ts.isIfStatement(s) && !s.elseStatement && isReturn(s.thenStatement)
+  const traced = (b: any) => ts.isBlock(b) && b.statements.length === 2 && isReturn(b.statements[1]) && traceSite(b.statements[0], ev) !== null;
+  const isGate = (s: any) => ts.isIfStatement(s) && !s.elseStatement && traced(s.thenStatement)
     && ts.isBinaryExpression(s.expression) && s.expression.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
     && ts.isCallExpression(s.expression.left) && ts.isIdentifier(s.expression.left.expression) && s.expression.left.expression.text === "windowSender"
     && s.expression.left.arguments.length === 1 && ts.isIdentifier(s.expression.left.arguments[0]) && s.expression.left.arguments[0].text === ev
@@ -498,7 +584,31 @@ function headCheck(site: Site): string | null {
     if (!readsMessage(body[i]) && !earlyReturn(body[i])) return "statement " + (i + 1) + " runs before the foreign-sender check: " + body[i].getText().slice(0, 80);
   }
   return shell ? "no `if (!paneSourceOk(" + ev + ")) return;` in the shell bundle's listener"
-    : "no `if (windowSender(" + ev + ") === \"foreign\") return;` in the listener's body";
+    : "no `if (windowSender(" + ev + ") === \"foreign\") { noteForeign(\"<site>\", " + ev + "); return; }` in the listener's body";
+}
+/** The site a trace statement names: the statement is `noteForeign("<site>", <ev>);` or `noteForeign("<site>", <ev>,
+ *  <name>);`, the name bound in its file (a free name would throw a ReferenceError ahead of the return); else null. */
+function traceSite(st: any, ev: string): string | null {
+  if (!ts.isExpressionStatement(st) || !ts.isCallExpression(st.expression)) return null;
+  const c = st.expression;
+  if (!ts.isIdentifier(c.expression) || c.expression.text !== "noteForeign" || c.questionDotToken) return null;
+  const a = c.arguments;
+  if (a.length < 2 || a.length > 3 || !ts.isStringLiteral(a[0]) || !a[0].text) return null;
+  if (!ts.isIdentifier(a[1]) || a[1].text !== ev) return null;
+  if (a.length === 3 && !(ts.isIdentifier(a[2]) && declOf(a[2]) !== null)) return null;
+  return a[0].text;
+}
+/** The site a windowSender listener's trace names, read from its check (headCheck accepted it); null for any other. */
+function siteTrace(site: Site): string | null {
+  if (SHELL_BUNDLES.has(site.file) || headCheck(site) !== null) return null;
+  const ev = site.fn.parameters[0].name.text;
+  for (const st of site.fn.body.statements) {
+    if (ts.isIfStatement(st) && ts.isBlock(st.thenStatement) && st.thenStatement.statements.length === 2) {
+      const at = traceSite(st.thenStatement.statements[0], ev);
+      if (at !== null) return at;
+    }
+  }
+  return null;
 }
 // The gated sites, by file and count. A listener that is not a window listener (a WebSocket's, a MessagePort's or a
 // BroadcastChannel's) is listed in EXEMPT by its file and receiver, with its reason (federation.ts's sockets use
@@ -525,6 +635,35 @@ test("census: every window message listener in ui/ opens with its check, before 
   const odd = sites.filter((s) => !isExempt(s) && !(s.receiver === "window" && (s.kind === "addEventListener" || s.kind === "registrar")))
     .map((s) => s.file + ":" + s.line + " " + s.kind + " on " + s.receiver);
   assert.deepEqual(odd, [], "every census site is a message listener on window, added directly or through a listed registrar");
+  // each windowSender listener's trace names a site of its own, so a row in the journal says which listener dropped
+  const traces = sites.filter((s) => !isExempt(s) && !SHELL_BUNDLES.has(s.file)).map((s) => [s.file + ":" + s.line, siteTrace(s)] as const);
+  assert.deepEqual(traces.filter(([, t]) => t === null).map(([at]) => at), [], "every windowSender listener's check names its trace's site");
+  const names = traces.map(([, t]) => t as string);
+  assert.equal(new Set(names).size, names.length, "no two listeners' traces share a site: " + names.slice().sort().join(", "));
+  assert.equal(names.length, GATED.filter(([f]) => !SHELL_BUNDLES.has(f)).reduce((a, [, n]) => a + n, 0), "a trace per windowSender site");
+});
+
+test("census: every executed leg's trace is the site its listener's check names", () => {
+  // the legs above read the rows a delivery files against the leg's own `trace`; this ties each to the site the source
+  // spells, so a leg cannot pass by expecting a name its listener does not file
+  for (const leg of INSTALLED) {
+    const ss = messageSites(leg.site);
+    assert.equal(ss.length, 1);
+    assert.equal(siteTrace(ss[0]), leg.trace, leg.site + ": the trace's site");
+  }
+  for (const leg of LIFTED) {
+    const s = siteOf(leg.file, leg.marker);
+    assert.equal(siteTrace(s), leg.trace ?? null, leg.file + " (" + leg.marker + "): the trace's site");
+    // a traced leg names its transport, and that name is not one the leg binds to its effect (runLifted binds it to the
+    // recorder); a shell bundle's leg names none, since the shell's check files no trace
+    assert.equal(!!leg.transport, !!leg.trace, leg.file + " (" + leg.marker + "): a transport exactly when a trace");
+    if (leg.transport) assert.ok(!(leg.transport[0] in leg.named(() => { /* no effect */ }, receiver("pane"))), leg.file + " (" + leg.marker + "): the transport is not the effect's name");
+  }
+  // the chat's frame handler, the first check (chat-foreign-frame.test.ts executes it): listenForFrames' window install
+  // wraps it, so its site sits in the census as frame-listener's, and its own check is read here
+  const at = fs.readFileSync(path.join(UI, "webview", "render.ts"), "utf8");
+  assert.equal((at.match(/if \(windowSender\(e\) === "foreign"\) \{ noteForeign\("chat", e, vscodeApi\); return; \}/g) || []).length, 1,
+    "the chat handler's check files its trace under its own site");
 });
 
 test("census: each exempt listener is on the receiver it names, a BroadcastChannel its file makes, and nothing else", () => {
@@ -599,8 +738,9 @@ test("the census reads every spelling of a window message listener: addEventList
 // the file (a local, a parameter, a function, a destructured name, an import aliased so that another binding takes the
 // name), an assignment to the name, or a `with` statement, which can rebind any name, fails it.
 
-const TS_BINDING = 'import { windowSender } from "./window-sender";';
+const TS_BINDING = 'import { windowSender, noteForeign } from "./window-sender";';
 const GEAR_BINDING = "var windowSender = require('./window-sender.ts').windowSender;";
+const GEAR_NOTE_BINDING = "var noteForeign = require('./window-sender.ts').noteForeign;";
 /** Why `name` (windowSender by default) in this source does not certainly name the helper, or null when it does: its
  *  declarations, the writes to it and any `with` statement, read by the TypeScript parser (so a spelling in a comment or a
  *  string is none). A TypeScript file must bind it by `tsBinding`, a script by `jsBinding` at its top level (null: no
@@ -665,6 +805,24 @@ test("census: in every ui/ file that calls the check, the name windowSender is b
   assert.deepEqual(bad, [], "a file's windowSender is not certainly the helper:\n" + bad.join("\n"));
 });
 
+// The trace between a check and its return is the only call a foreign sender's message reaches, so the name noteForeign
+// is held the same way: in every file that checks, it is bound once, by the same import (gear.js: its own require), and
+// never written, so a local of that name that acts on the message cannot stand in for the helper.
+test("census: in every ui/ file that calls the check, the name noteForeign is bound once, to the helper, and never written", () => {
+  const files = senderFiles("noteForeign");
+  assert.deepEqual(files.slice().sort(), senderFiles().slice().sort(), "every file that names windowSender names noteForeign, and no other");
+  const bad = files.map((f) => [f, senderBinding(f, fs.readFileSync(path.join(UI, f), "utf8"), "noteForeign", TS_BINDING, GEAR_NOTE_BINDING)] as const)
+    .filter(([, why]) => why !== null).map(([f, why]) => f + ": " + why);
+  assert.deepEqual(bad, [], "a file's noteForeign is not certainly the helper:\n" + bad.join("\n"));
+  const refused: Array<[string, string, RegExp]> = [
+    ["webview/probe.ts", TS_BINDING + "\nfunction f() { const noteForeign = (s: string, e: MessageEvent) => go(e.data); return noteForeign; }", /2 bindings/],
+    ["webview/probe.ts", 'import { windowSender, noteForeign as trace } from "./window-sender";\nconst noteForeign = (s: string, e: MessageEvent) => trace(s, e);', /not `import/],
+    ["webview/probe.js", GEAR_NOTE_BINDING + "\nnoteForeign = function (s, e) { go(e.data); };", /a write/],
+    ["webview/probe.js", "var noteForeign = function (s, e) { go(e.data); };", /not `var noteForeign = require/],
+  ];
+  for (const [file, src, why] of refused) assert.match(String(senderBinding(file, src, "noteForeign", TS_BINDING, GEAR_NOTE_BINDING)), why, file + ": " + src);
+});
+
 // The shell's bundles read the shell's check through pane-source.ts: the same census, over the name paneSourceOk. It is
 // named only in the shell bundles (and in no script), bound once there by its import, never written.
 const PANE_SOURCE_BINDING = 'import { paneSourceOk } from "./pane-source";';
@@ -702,6 +860,103 @@ test("the binding census reads what it claims: a local, a parameter, an aliased 
     ["webview/probe.js", "var a = 1;", /0 bindings/],
   ];
   for (const [file, src, why] of refused) assert.match(String(senderBinding(file, src)), why, file + ": " + src);
+});
+
+// ── the install census: every pane install of a shared listener hands it the page's VS Code api ──
+//
+// listenForFrames and installSettingsSync each install a windowSender listener whose drop files its trace through the api
+// the caller hands the helper, the one road a VS Code webview has (it runs no pane shim). The installed legs above run
+// each helper with an api; this census reads every install in ui/ (tests excluded). Every mention of either name must be
+// its declaration in its own module, an unaliased import from that module, or a call whose api argument (listenForFrames'
+// second, installSettingsSync's first) is a const of the file bound to the page's VS Code api: one whose initializer calls
+// acquireVsCodeApi, bare or as a member, or calls postMessage on another such const (a wrapper that forwards to the api,
+// as feed.ts's does to note the pane's own jumps). A call without it, with another name, or a mention that is none of
+// these (a value handed on, an aliased import) fails, with where it is.
+const API_TAKERS: Record<string, { own: string; module: string; slot: number }> = {
+  listenForFrames: { own: "webview/frame-listener.ts", module: "./frame-listener", slot: 1 },
+  installSettingsSync: { own: "webview/settings.ts", module: "./settings", slot: 0 },
+};
+/** Whether the identifier `id` names a const of its file bound to the page's VS Code api (see above). */
+function vscodeApiConst(id: any, seen: Set<any> = new Set()): boolean {
+  const d = declOf(id);
+  if (!d || seen.has(d) || !isConstDecl(d) || !d.initializer) return false;
+  seen.add(d);
+  let hit = false;
+  const visit = (n: any): void => {
+    if (hit) return;
+    if (ts.isCallExpression(n)) {
+      const c = unwrap(n.expression);
+      const callee = ts.isIdentifier(c) ? c.text : ts.isPropertyAccessExpression(c) ? c.name.text : "";
+      if (callee === "acquireVsCodeApi") { hit = true; return; }
+      if (callee === "postMessage" && ts.isIdentifier(unwrap(c.expression)) && vscodeApiConst(unwrap(c.expression), seen)) { hit = true; return; }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(d.initializer);
+  return hit;
+}
+/** The installs in `src` that hand their helper the page's VS Code api, as "<helper> <file>:<line>", and every other
+ *  mention of a helper's name, with where it is and why it fails. */
+function apiInstalls(file: string, src: string): { ok: string[]; bad: string[] } {
+  const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, file.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+  const ok: string[] = [], bad: string[] = [];
+  const visit = (n: any): void => {
+    if (ts.isIdentifier(n) && Object.prototype.hasOwnProperty.call(API_TAKERS, n.text)) {
+      const t = API_TAKERS[n.text], p = n.parent, o = outer(n), c = o.parent;
+      const where = n.text + " " + file + ":" + (sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1);
+      if (ts.isFunctionDeclaration(p) && p.name === n && file === t.own) { /* the helper's own declaration */ }
+      else if (ts.isImportSpecifier(p) && p.name === n && !p.propertyName && ts.isStringLiteral(p.parent.parent.parent.moduleSpecifier)
+               && p.parent.parent.parent.moduleSpecifier.text === t.module) { /* its unaliased import */ }
+      else if (ts.isCallExpression(c) && c.expression === o) {
+        const a = c.arguments[t.slot];
+        if (a && ts.isIdentifier(unwrap(a)) && vscodeApiConst(unwrap(a))) ok.push(where);
+        else bad.push(where + ": the call hands the helper " + (a ? "`" + a.getText(sf).slice(0, 60) + "`, not a const bound to the page's VS Code api" : "no api") + " (argument " + (t.slot + 1) + ")");
+      } else bad.push(where + ": a mention that is not the helper's declaration, its unaliased import or an install: `" + c.getText(sf).slice(0, 80) + "`");
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return { ok, bad };
+}
+
+test("install census: every listenForFrames and installSettingsSync install in ui/ hands the helper the page's VS Code api", () => {
+  const ok: string[] = [], bad: string[] = [];
+  for (const f of uiSources()) {
+    const r = apiInstalls(f, fs.readFileSync(path.join(UI, f), "utf8"));
+    ok.push(...r.ok); bad.push(...r.bad);
+  }
+  assert.deepEqual(bad, [], "an install of a shared listener that does not hand it the page's VS Code api:\n" + bad.join("\n"));
+  // the installs as the tree has them: a new one joins this list once it passes the rule above
+  const byFile = (helper: string) => ok.filter((w) => w.startsWith(helper + " ")).map((w) => w.split(" ")[1].replace(/:\d+$/, "")).sort();
+  assert.deepEqual(byFile("listenForFrames"), ["webview/feed.ts", "webview/fleet.ts", "webview/render.ts", "webview/timeline-main.ts"]);
+  assert.deepEqual(byFile("installSettingsSync"), ["webview/artifacts.ts", "webview/feed.ts", "webview/files.ts", "webview/fleet.ts",
+                                                   "webview/render.ts", "webview/settings-page.ts", "webview/timeline-main.ts"]);
+});
+
+test("the install census reads what it claims: an install without the api, with another name or through an alias is refused; the api and a wrapper of it are accepted", () => {
+  const API = "const api = typeof (window as any).acquireVsCodeApi === \"function\" ? (window as any).acquireVsCodeApi() : undefined;\n";
+  const IMP = "import { listenForFrames } from \"./frame-listener\";\nimport { installSettingsSync } from \"./settings\";\n";
+  const run = (src: string) => apiInstalls("webview/probe.ts", IMP + src);
+  assert.deepEqual(run(API + "listenForFrames((e) => go(e), api); installSettingsSync(api);").bad, []);
+  assert.equal(run(API + "listenForFrames((e) => go(e), api); installSettingsSync(api);").ok.length, 2);
+  assert.deepEqual(run("const api = (window as any).acquireVsCodeApi();\ninstallSettingsSync(api);").bad, [], "timeline-main.ts's shape");
+  assert.deepEqual(run("const hostApi = acquireVsCodeApi();\nconst vscodeApi = hostApi ? { postMessage: (m: any) => { note(m); hostApi.postMessage(m); } } : undefined;\ninstallSettingsSync(vscodeApi);").bad, [],
+    "a wrapper that forwards to the api (feed.ts's shape)");
+  const refused: string[] = [
+    API + "installSettingsSync();",
+    API + "listenForFrames((e) => go(e));",
+    API + "installSettingsSync(undefined);",
+    API + "const post = (m: unknown) => m;\ninstallSettingsSync(post);",
+    API + "installSettingsSync({ postMessage: (m: unknown) => api.postMessage(m) });",
+    API + "const w = api ? { postMessage: (m: unknown) => go(m) } : undefined;\ninstallSettingsSync(w);",
+    "let api = acquireVsCodeApi();\ninstallSettingsSync(api);",
+    API + "listenForFrames(api, (e) => go(e));",
+    API + "const install = installSettingsSync;\ninstall(api);",
+    API + "function f(api: unknown) { installSettingsSync(api); }",
+  ];
+  for (const src of refused) assert.notDeepEqual(run(src).bad, [], "refused: " + src);
+  assert.notDeepEqual(apiInstalls("webview/probe.ts", "import { installSettingsSync as sync } from \"./settings\";\n" + API + "sync(api);").bad, [], "an aliased import");
+  assert.notDeepEqual(apiInstalls("webview/probe.ts", "import { installSettingsSync } from \"./other\";\n" + API + "installSettingsSync(api);").bad, [], "an import from another module");
 });
 
 // ── the census: every addEventListener in ui/ is one the census above can read ──
@@ -1500,20 +1755,44 @@ test("the census rule reads what it claims: a listener that acts before the chec
     const call = (sf.statements[0] as any).expression;
     return headCheck({ file: "probe.ts", line: 1, receiver: "window", fn: call.arguments[1], text, kind: "addEventListener" });
   };
-  assert.equal(probe('(e) => { if (windowSender(e) === "foreign") return; go(e.data); }'), null);
-  assert.equal(probe('(e) => { const m = e.data; if (!m || m.type !== "x") return; if (windowSender(e) === "foreign") return; go(m); }'), null);
-  assert.equal(probe("function (e) { if (windowSender(e) === 'foreign') return; var m = e.data; go(m); }"), null);
-  assert.match(String(probe('(e) => { const m = e.data; go(m); if (windowSender(e) === "foreign") return; }')), /runs before the foreign-sender check/);
-  assert.match(String(probe('(e) => { if (!e.data || note(e.data)) return; if (windowSender(e) === "foreign") return; }')), /runs before/, "a call in an early return's condition is an arm");
-  assert.match(String(probe('(e) => { const m = e.data; if (m) seen = m; if (windowSender(e) === "foreign") return; }')), /runs before/);
+  const G = '{ noteForeign("probe", e); return; }';   // the check's branch: its trace, then the return
+  assert.equal(probe('(e) => { if (windowSender(e) === "foreign") ' + G + ' go(e.data); }'), null);
+  assert.equal(probe('(e) => { const m = e.data; if (!m || m.type !== "x") return; if (windowSender(e) === "foreign") ' + G + ' go(m); }'), null);
+  assert.equal(probe("function (e) { if (windowSender(e) === 'foreign') { noteForeign('probe', e); return; } var m = e.data; go(m); }"), null);
+  assert.match(String(probe('(e) => { const m = e.data; go(m); if (windowSender(e) === "foreign") ' + G + ' }')), /runs before the foreign-sender check/);
+  assert.match(String(probe('(e) => { if (!e.data || note(e.data)) return; if (windowSender(e) === "foreign") ' + G + ' }')), /runs before/, "a call in an early return's condition is an arm");
+  assert.match(String(probe('(e) => { const m = e.data; if (m) seen = m; if (windowSender(e) === "foreign") ' + G + ' }')), /runs before/);
   assert.match(String(probe('(e) => { if (windowSender(e) !== "foreign") go(e.data); }')), /runs before|no `if/);
-  assert.match(String(probe('(e) => { if (windowSender(other) === "foreign") return; go(e.data); }')), /runs before|no `if/, "the check reads this listener's event");
+  assert.match(String(probe('(e) => { if (windowSender(other) === "foreign") ' + G + ' go(e.data); }')), /runs before|no `if/, "the check reads this listener's event");
   assert.match(String(probe("(e) => go(e.data)")), /not a function with a body/);
   // a parameter's default runs before the body, the check included
-  assert.match(String(probe('(e, early = go(e.data)) => { if (windowSender(e) === "foreign") return; }')), /more than its one event parameter/);
-  assert.match(String(probe('(e: MessageEvent, _x = (e.data && e.data.on ? (seen = e.data.on) : 0)) => { if (windowSender(e) === "foreign") return; }')), /more than its one event parameter/);
-  assert.match(String(probe('(e = go()) => { if (windowSender(e) === "foreign") return; }')), /gives it a default/);
-  assert.match(String(probe('function (e, f) { if (windowSender(e) === "foreign") return; go(f); }')), /more than its one event parameter/);
-  assert.match(String(probe('(...e) => { if (windowSender(e[0]) === "foreign") return; }')), /names no event parameter|more than/);
-  assert.equal(probe('(e: MessageEvent) => { if (windowSender(e) === "foreign") return; go(e.data); }'), null, "a type on the one parameter is no default");
+  assert.match(String(probe('(e, early = go(e.data)) => { if (windowSender(e) === "foreign") ' + G + ' }')), /more than its one event parameter/);
+  assert.match(String(probe('(e: MessageEvent, _x = (e.data && e.data.on ? (seen = e.data.on) : 0)) => { if (windowSender(e) === "foreign") ' + G + ' }')), /more than its one event parameter/);
+  assert.match(String(probe('(e = go()) => { if (windowSender(e) === "foreign") ' + G + ' }')), /gives it a default/);
+  assert.match(String(probe('function (e, f) { if (windowSender(e) === "foreign") ' + G + ' go(f); }')), /more than its one event parameter/);
+  assert.match(String(probe('(...e) => { if (windowSender(e[0]) === "foreign") { noteForeign("probe", e); return; } }')), /names no event parameter|more than/);
+  assert.equal(probe('(e: MessageEvent) => { if (windowSender(e) === "foreign") ' + G + ' go(e.data); }'), null, "a type on the one parameter is no default");
+  // the branch: the trace and a bare return, nothing else. A drop with no trace, an arm beside the trace, a trace that
+  // reads the message or runs a call in its arguments, or a transport the file does not bind, is refused
+  const T = (branch: string) => probe('(e) => { if (windowSender(e) === "foreign") ' + branch + ' go(e.data); }');
+  assert.match(String(T('{ noteForeign("probe", e, post); return; }')), /runs before|no `if/, "a transport the probe's file does not bind is refused");
+  for (const branch of ['return;', '{ return; }', '{ noteForeign("probe", e); }', '{ return; noteForeign("probe", e); }',
+                        '{ noteForeign("probe", e); go(e.data); return; }', '{ go(e.data); noteForeign("probe", e); return; }',
+                        '{ noteForeign("probe", e.data); return; }', '{ noteForeign(site, e); return; }', '{ noteForeign("", e); return; }',
+                        '{ noteForeign(`probe`, e); return; }', '{ noteForeign("probe", e, go(e.data)); return; }', '{ noteForeign("probe", e, (m) => go(m)); return; }',
+                        '{ noteForeign("probe", e, post, extra); return; }', '{ noteForeign("probe"); return; }', '{ noteForeign?.("probe", e); return; }',
+                        '{ trace("probe", e); return; }', '{ noteForeign("probe", e); return go(e.data); }', '{ noteForeign("probe", e) || go(e.data); return; }']) {
+    assert.match(String(T(branch)), /runs before|no `if/, "refused: " + branch);
+  }
+  // a transport the listener's scope binds (the gear's initGear parameter, a module's poster) is accepted
+  const bound = (text: string) => {
+    const sf = ts.createSourceFile("probe.ts", "const post = (m: unknown) => m;\nwindow.addEventListener(\"message\", " + text + ");", ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const call = (sf.statements[1] as any).expression;
+    return headCheck({ file: "probe.ts", line: 2, receiver: "window", fn: call.arguments[1], text, kind: "addEventListener" });
+  };
+  assert.equal(bound('(e) => { if (windowSender(e) === "foreign") { noteForeign("probe", e, post); return; } go(e.data); }'), null);
+  assert.match(String(bound('(e) => { if (windowSender(e) === "foreign") { noteForeign("probe", e, poster); return; } go(e.data); }')), /runs before|no `if/, "a free name is refused");
+  // An arm the file binds is a bound name too, so handing one over as the transport passes this rule. The executed legs
+  // catch it instead, by running the transport: an installed leg's helper is handed a recorder, and a lifted leg binds
+  // only its transport's name to one ("the lifted legs catch a drop whose trace hands noteForeign an arm, ..." above).
 });

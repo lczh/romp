@@ -61,7 +61,7 @@ class BuildGating(unittest.TestCase):
         self.assertIn("var onFrame=function(ev){var m=ev.data;if(!m||!panel)return;", boot)
         self.assertIn('var frameListener=(window.__rompPerf&&window.__rompPerf.wrapFrameHandler)'
                       "?window.__rompPerf.wrapFrameHandler(onFrame):onFrame;", boot)
-        self.assertIn('window.addEventListener("message",function(e){if(!heardSender(e))return;frameListener(e);});', boot)
+        self.assertIn('window.addEventListener("message",function(e){if(!heardSender(e)){noteForeign("timeline-boot",e);return;}frameListener(e);});', boot)
         self.assertEqual(boot.count('addEventListener("message"'), 1, "one listener, the sender check in front of the wrapped one")
 
     def test_the_host_shim_registers_the_wrapped_listener_with_federation_for_direct_delivery(self):
@@ -73,7 +73,7 @@ class BuildGating(unittest.TestCase):
         # federation.js) is unchanged.
         boot = km._TIMELINE_BOOT
         self.assertIn("if(window.__rompFed&&window.__rompFed.onFrame)window.__rompFed.onFrame(frameListener);", boot)
-        self.assertLess(boot.index('window.addEventListener("message",function(e){if(!heardSender(e))return;frameListener(e);});'),
+        self.assertLess(boot.index('window.addEventListener("message",function(e){if(!heardSender(e)){noteForeign("timeline-boot",e);return;}frameListener(e);});'),
                         boot.index("window.__rompFed.onFrame(frameListener)"), "window first, the registry after it")
 
     def test_the_host_shim_run_the_window_check_and_the_registry_reach_the_panel_and_the_collector(self):

@@ -19,7 +19,7 @@ test("real katex output matches the marking code's structural assumptions", () =
 
 test("the busy/settled pairing keys on the HOST carrying a busy mark, and the rule is alive (not brace-eaten)", () => {
   assert.match(RENDER, /const kat = segs\[i\]\.parentElement\?\.closest\("\.katex"\) as HTMLElement \| null;/);
-  assert.match(RENDER, /if \(kat\) kat\.classList\.toggle\("cmt-hl-host", th\.status !== "resolved" && th\.status !== "merged"\);/);
+  assert.match(RENDER, /if \(kat\) kat\.classList\.toggle\("cmt-hl-host", !threadSettled\(th\.status\)\);/);
   assert.match(CSS, /\.md \.katex\.cmt-hl-host:has\(mark\.cmt-hl\.busy\) \{/);
   // the rule directly above the combined selector must be a CLOSED comment, never a stray } (the
   // brace-eater — css-balance.test.ts guards the whole class; this pins the one that shipped)

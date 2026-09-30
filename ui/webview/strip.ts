@@ -16,7 +16,7 @@
 // webview's cross-origin fetch carries no cookie.
 import { kernelUrl } from "./media";
 import { durLabel } from "./duration";
-import { windowSender } from "./window-sender";   // initStrip's window listener hears no foreign sender
+import { windowSender, noteForeign } from "./window-sender";   // initStrip's window listener hears no foreign sender
 
 export type UsageWindow = {
   key: string;
@@ -344,7 +344,7 @@ export function initStrip(openSettings: () => void, post?: (m: Record<string, un
   window.addEventListener("message", (ev: MessageEvent) => {
     const m = ev.data;
     if (!m) return;
-    if (windowSender(ev) === "foreign") return;
+    if (windowSender(ev) === "foreign") { noteForeign("strip", ev, post); return; }
     if (m.type === "usage") render(m.usage || null);                      // live: host-relayed timeline forwards
     else if (m.type === "stripShow") strip.style.display = m.show ? "" : "none";  // feed-over-chat rule
     else if (m.type === "stripPanes") renderPanes(m.hidden || {});        // which quick-opens to offer

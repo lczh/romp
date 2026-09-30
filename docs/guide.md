@@ -37,6 +37,10 @@ A path or a markdown link in the chat opens the file in the viewer, rendered. A
 passage selected there lands in the composer as a quote, labelled with the file
 and the line it came from.
 
+The viewer's pop-out button keeps the file open as a tab, right after the
+session it came from. File tabs sit in the strip with your sessions, the arrows
+step through them, and your other devices show the same ones.
+
 Select a passage in the chat itself and comment on it, and a side conversation
 opens on the highlight; a reload brings you back to where you were reading with
 that thread still open, back where you had moved its box, though anything you

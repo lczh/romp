@@ -41,7 +41,19 @@ export type CommentThread = {
   effort?: string;            // the thread's effort level (ditto)
   msgs: CommentMsg[];
   events?: unknown[];         // the CHAT's own ChatEvents from the branch point on (render parity)
+  /** what romp sent with the user's comment, verbatim: everything its opening message carried around their words (the
+   *  split-off line and the quote; on a passage from before the last compaction also the turns around it, where the
+   *  transcript is saved and the ask's label). From the thread row, or read back from the stored opening message for a
+   *  thread made before rows kept it; absent when romp added nothing. The popover's note (render.ts cmtSentNote) */
+  sent?: string;
+  /** the passage predates the session's last compaction, so `sent` carries the turns around it (the note's longer line) */
+  sentBeforeSummary?: boolean;
 };
+
+/** The note's line (the user 2026-09-30): they can always see exactly what romp sent on their behalf, one click from its
+ *  words. User-facing UI, so it names romp. */
+export const CMT_SENT_GIST = "What romp sent with your comment";
+export const CMT_SENT_GIST_PRIOR = "What romp sent with your comment, including the turns around it (from before the summary)";
 
 export type CommentsFrame = { type: "comments"; id: string; threads: CommentThread[] };
 
@@ -68,6 +80,22 @@ export function pickMarkToOpen(chain: { tid: string; unread: boolean }[]): strin
   if (!chain.length) return null;
   const ring = chain.find((m) => m.unread);
   return (ring || chain[0]).tid;
+}
+
+/** Does the thread wear the DIMMED look (the mark's .resolved wash, no code/math host tint, the rail tick's .resolved
+ *  fade)? Only a thread the user CLOSED. A relayed thread (merged, and merging on its way there) is still an open
+ *  conversation (T145: Relay sends the discussion back and the thread stays open for more talk), so it renders like an
+ *  open one; dimming it too made its highlight vanish on the light theme's page (the user 2026-09-30, who pressed Relay
+ *  and watched the comment stop showing). */
+export function threadSettled(status: CommentThread["status"]): boolean {
+  return status === "resolved";
+}
+
+/** Does the thread get a tick on the scroll rail and a stop in the comment jumps? Open, resolved and relayed threads,
+ *  merging included: the relay holds `merging` while it delivers, and the thread must not drop off the rail meanwhile
+ *  (nor for good, should a relay ever fail to settle). A promoted thread's talk lives in its own session. */
+export function threadOnRail(status: CommentThread["status"]): boolean {
+  return status === "open" || status === "resolved" || status === "merging" || status === "merged";
 }
 
 /** The thread session is mid-turn — the popover shows its thinking dots. */

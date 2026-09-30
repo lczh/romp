@@ -14,8 +14,9 @@ Sources, and what each stamp is (every stamp is an EVENT's time, never the clock
                          parked deploy's wait from parked to restart (waitedS) and whether the fifteen-minute
                          backstop fired (backstop)
   session-events.jsonl   what went wrong with a session's process (kernel/sdk_backend.py problem_row): an
-                         orphaned CLI ended at boot, a leftover scope stopped, two CLIs holding one
-                         conversation, a crash heal or loop, a session the drain left closing, the lease
+                         orphaned CLI ended at boot, a leftover scope stopped, two CLIs serving one
+                         session (keyed by fsid in rows before the sid key, by sid since; either counts)
+                         or a boot that could not read every CLI's session, a crash heal or loop, a session the drain left closing, the lease
                          work's `lease.*` kinds; plus reconcile.boot, the boot sweep's summary (resumed =
                          continuation notices queued)
   turns.jsonl            one row per settled turn: fedT (the feed pop), firstOutT (the first streamed work
@@ -28,7 +29,10 @@ Sources, and what each stamp is (every stamp is an EVENT's time, never the clock
                          and this says so); the day's total dollars, for the redo ratio
   live (skipped with --no-live): each romp-session-* scope's memory.current and cpu.stat on Linux (ps on
                          macOS), the kernel's GET /version and GET /perf (its own CPU and the pusher's
-                         idle-cycle counter), and a `ps` scan for two CLIs holding one conversation now
+                         idle-cycle counter), a `ps` scan for two CLIs holding one SESSION now (the session
+                         is the ROMP_SID the kernel set on the process, never the conversation id on its
+                         argv, which a comment thread shares with its parent), and the comment threads
+                         running per parent session (the registry's threadOf)
 
 Output: --json, the whole document (schema 1), or the one-screen text summary per window. Windows are
 days or weeks (--window), the week anchored on --anchor (default: the day of the first restart in range),
@@ -50,7 +54,8 @@ from pathlib import Path
 SCHEMA = 1
 SCOPE_RE = re.compile(r"romp-session-([0-9a-fA-F]{1,8})-(\d+)-\d+\.scope\Z")
 SDK_CLI_MARK = "--input-format stream-json"
-PROBLEM_KINDS = ("reconcile.orphan-reaped", "reconcile.scope-stopped", "reconcile.duplicate-cli",
+SID_ENV = "ROMP_SID"      # the session id the kernel sets on every session CLI it launches (sdk_backend _options)
+PROBLEM_KINDS = ("reconcile.orphan-reaped", "reconcile.scope-stopped", "reconcile.duplicate-cli", "reconcile.duplicate-unchecked",
                  "crash.heal", "crash.loop", "drain.unjoined")
 QUIET_JOIN_S = 180        # a cut row within this many seconds after a quiet-window row is that window's restart
 
@@ -346,7 +351,7 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
                     "restartsWithoutCutRow": 0, "cutSessions": {}, "reasons": {}, "_outage": [], "_settle": [],
                     "drainUnjoinedCount": 0, "drainReapedCount": 0,
                     "quietWindows": 0, "backstopFires": 0, "_quietWait": [],
-                    "events": {}, "orphansReaped": 0, "scopesStopped": 0, "duplicateClis": 0, "crashHeals": 0,
+                    "events": {}, "orphansReaped": 0, "scopesStopped": 0, "duplicateClis": 0, "duplicateUnchecked": 0, "crashHeals": 0,
                     "crashLoops": 0, "drainLeftClosing": 0, "leaseProblems": 0, "boots": 0, "resumedTurns": 0,
                     "attachedAtBoot": 0, "attachedLater": 0,
                     "redo": {"turns": 0, "usd": 0.0, "tokens": 0}, "_l_res": [], "_l_first": [], "_l_api": [],
@@ -401,6 +406,8 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
             b["scopesStopped"] += 1
         elif k == "reconcile.duplicate-cli" or k == "lease.duplicate-cli":
             b["duplicateClis"] += 1
+        elif k == "reconcile.duplicate-unchecked":        # a boot that could not read every CLI's session (ROMP_SID),
+            b["duplicateUnchecked"] += 1                  #  so its duplicate count is a floor
         elif k == "crash.heal":
             b["crashHeals"] += 1
         elif k == "crash.loop":
@@ -472,18 +479,31 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
 
 
 # ── live reads (never a kernel module; files and HTTP only) ─────────────────────────────────────────────
-def _regs(state: Path) -> dict:
-    """sid -> {name, lastSid, alive} from sdk/*.json (read, never written)."""
-    out = {}
+def _regs(state: Path, errors: list | None = None) -> dict:
+    """sid -> {name, lastSid, alive, threadOf} from sdk/*.json (read, never written). threadOf is the parent
+    session's sid on a comment thread's row (the kernel's own mark: backend.fork(thread_of=...), cleared when
+    the thread is promoted to a full session); a deliberate fork has none, since it is a session of its own.
+    A row that does not parse, or no rows at all, is said in `errors`: the sessions it would name cannot be
+    identified, and nothing below guesses them."""
+    out, bad = {}, 0
     for p in glob.glob(str(state / "sdk" / "*.json")):
         try:
             d = json.loads(Path(p).read_text(encoding="utf-8"))
         except Exception:
+            bad += 1
             continue
         if isinstance(d, dict):
             sid = str(d.get("sid") or Path(p).stem)
             out[sid] = {"name": str(d.get("name") or sid[:8]), "lastSid": str(d.get("lastSid") or ""),
-                        "alive": bool(d.get("alive"))}
+                        "alive": bool(d.get("alive")), "threadOf": str(d.get("threadOf") or "")}
+        else:
+            bad += 1
+    if errors is not None:
+        if bad:
+            errors.append("%d registry file(s) under sdk/ did not parse: their sessions are not identified" % bad)
+        if not out:
+            errors.append("no registry rows under sdk/: no process can be tied to a session, so neither "
+                          "duplicates nor comment threads are counted")
     return out
 
 
@@ -548,54 +568,118 @@ def parse_ps(lines: list[str]) -> dict[int, dict]:
     return procs
 
 
-def cli_sid_of(cmd: str, sids) -> str | None:
-    for s in sids:
-        if not s:
-            continue
-        for flag in ("--resume", "--session-id"):
-            if (flag + " " + s) in cmd or (flag + "=" + s) in cmd:
-                return s
-    return None
+ARGV_ID_RE = re.compile(r"--(?:resume|session-id)[= ](\S+)")
 
 
-def duplicate_clis(procs: dict[int, dict], lastsids) -> dict[str, list[int]]:
-    """Conversation ids more than one SDK-driven CLI holds right now, id -> pids (the same match the kernel's
-    boot reap uses: the stream-json mark plus a --resume / --session-id spelling)."""
-    seen = {}
+def argv_ids(cmd: str) -> set[str]:
+    """The conversation ids a CLI's argv names after --resume / --session-id, either spelling (the kernel's
+    cli_sid_of match, read as a set so a registry of thousands of rows costs one lookup per id)."""
+    return set(ARGV_ID_RE.findall(cmd))
+
+
+def proc_session_id(pid: int, run=None, procfs=None) -> str | None:
+    """The session id the kernel set on a process at launch: ROMP_SID in its environment as exec'd. _options
+    sets it on every session CLI to that session's own sid, so a comment thread's CLI carries the thread's
+    sid while its argv still names the PARENT's conversation (--resume <parent> --fork-session: the fork
+    loads the parent's transcript and writes its own). /proc/<pid>/environ where there is a procfs (readable
+    for this user's own processes), else `ps -E` (macOS prints the environment after the command), the read
+    the kernel's proc_state_tag makes. None when the process is gone or its environment is unreadable or
+    carries no ROMP_SID. `run` and `procfs` are the test seams."""
+    procfs = os.path.isdir("/proc") if procfs is None else procfs
+    key = SID_ENV + "="
+    if procfs:
+        try:
+            with open("/proc/%d/environ" % int(pid), "rb") as f:
+                data = f.read()
+        except (OSError, ValueError):
+            return None
+        for kv in data.split(b"\0"):
+            if kv.startswith(key.encode()):
+                return kv[len(key):].decode("ascii", "replace") or None
+        return None
+    run = run or subprocess.run
+    try:
+        out = run(["ps", "-E", "-ww", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True,
+                  timeout=5).stdout
+    except Exception:
+        return None
+    vals = [tok[len(key):] for tok in (out or "").split() if tok.startswith(key)]
+    return (vals[-1] or None) if vals else None    # the environment follows the argv
+
+
+def cli_sessions(procs: dict[int, dict], regs: dict, sid_of=None) -> tuple[dict[str, list[int]], list[int]]:
+    """({sid: [pids]}, [unidentified pids]) over the SDK-driven CLIs on this state directory's conversations
+    (the stream-json mark plus a --resume / --session-id naming one of the registry's conversation ids or
+    sids, the kernel's boot-reap match). Each is filed under the session its ROMP_SID names (proc_session_id,
+    `sid_of` the seam), never under the conversation id on its argv: a parent and every comment thread forked
+    from it all carry the parent's id there, and they are different sessions. A CLI of ours whose ROMP_SID
+    cannot be read, or names no registry row, is UNIDENTIFIED and listed as such, never guessed from its
+    argv. Pids ascending."""
+    sid_of = sid_of or proc_session_id
+    ours = {r["lastSid"] for r in regs.values() if r.get("lastSid")} | set(regs)
+    by_sid: dict[str, list[int]] = {}
+    unknown: list[int] = []
     for pid in sorted(procs):
         cmd = procs[pid]["cmd"]
-        if SDK_CLI_MARK not in cmd:
+        if SDK_CLI_MARK not in cmd or not (argv_ids(cmd) & ours):
             continue
-        s = cli_sid_of(cmd, lastsids)
-        if s:
-            seen.setdefault(s, []).append(pid)
-    return {s: p for s, p in seen.items() if len(p) > 1}
+        sid = sid_of(pid)
+        if sid and sid in regs:
+            by_sid.setdefault(sid, []).append(pid)
+        else:
+            unknown.append(pid)
+    return by_sid, unknown
 
 
-def ps_session_trees(procs: dict[int, dict], regs: dict) -> list[dict]:
+def duplicate_clis(procs: dict[int, dict], regs: dict, sid_of=None) -> dict[str, list[int]]:
+    """Sessions more than one SDK-driven CLI serves right now, sid -> pids (cli_sessions' grouping: by the
+    session, so a parent and its comment threads are never each other's duplicates)."""
+    by_sid, _ = cli_sessions(procs, regs, sid_of)
+    return {s: p for s, p in by_sid.items() if len(p) > 1}
+
+
+def ps_session_trees(procs: dict[int, dict], regs: dict, sid_of=None) -> list[dict]:
     """Per-session memory and CPU from a ps listing (macOS, or Linux without cgroup access): each SDK CLI
-    that carries a session's conversation id, with its descendants' rss summed."""
+    cli_sessions ties to a session, with its descendants' rss summed. An unidentified CLI has no row here;
+    live_snapshot lists it by pid."""
     kids = {}
     for pid, p in procs.items():
         kids.setdefault(p["ppid"], []).append(pid)
-    by_fsid = {r["lastSid"]: (sid, r) for sid, r in regs.items() if r.get("lastSid")}
+    by_sid, _ = cli_sessions(procs, regs, sid_of)
     out = []
-    for pid, p in procs.items():
-        if SDK_CLI_MARK not in p["cmd"]:
-            continue
-        fsid = cli_sid_of(p["cmd"], list(by_fsid))
-        if not fsid:
-            continue
-        stack, tree = [pid], []
-        while stack:
-            x = stack.pop()
-            tree.append(x)
-            stack.extend(kids.get(x, []))
-        sid, r = by_fsid[fsid]
-        out.append({"sid": sid, "name": r["name"], "cliPid": pid, "procs": len(tree),
-                    "memBytes": sum(procs[x]["rssKb"] for x in tree) * 1024,
-                    "cpuPct": round(sum(procs[x]["pcpu"] for x in tree), 2)})
+    for sid, pids in by_sid.items():
+        for pid in pids:
+            stack, tree = [pid], []
+            while stack:
+                x = stack.pop()
+                tree.append(x)
+                stack.extend(kids.get(x, []))
+            out.append({"sid": sid, "name": regs[sid]["name"], "cliPid": pid, "procs": len(tree),
+                        "memBytes": sum(procs[x]["rssKb"] for x in tree) * 1024,
+                        "cpuPct": round(sum(procs[x]["pcpu"] for x in tree), 2)})
     return out
+
+
+def thread_groups(sessions: list[dict], regs: dict) -> list[dict]:
+    """The comment threads among the live session rows, per parent session: a row whose registry row carries
+    threadOf (the kernel's mark for a comment thread) is that parent's thread. Each thread is its own session
+    with its own process, counted and sized here so its memory is visible without reading as a leak. Largest
+    first. A row with no registry row is not a thread by this reading: nothing says it is."""
+    groups: dict[str, dict] = {}
+    for s in sessions:
+        r = regs.get(s.get("sid") or "")
+        parent = (r or {}).get("threadOf")
+        if not parent:
+            continue
+        g = groups.setdefault(parent, {"parentSid": parent,
+                                       "parentName": (regs.get(parent) or {}).get("name") or parent[:8],
+                                       "threads": 0, "sids": [], "memBytes": None})
+        if s["sid"] not in g["sids"]:
+            g["sids"].append(s["sid"])
+            g["threads"] += 1
+        if isinstance(s.get("memBytes"), int):
+            g["memBytes"] = (g["memBytes"] or 0) + s["memBytes"]
+    return sorted(groups.values(), key=lambda g: (-(g["memBytes"] or 0), g["parentName"]))
 
 
 def _kernel_port(state: Path) -> int:
@@ -642,34 +726,43 @@ def kernel_live(state: Path) -> dict:
     return out
 
 
-def live_snapshot(state: Path) -> dict:
-    regs = _regs(state)
+def live_snapshot(state: Path, sid_of=None) -> dict:
+    """The live block. Every process is tied to its SESSION: a scope by the sid prefix in its unit name
+    (bin/romp-cli-scope names it from ROMP_SID, the session's own sid, not its conversation id), a CLI by the
+    ROMP_SID in its environment (cli_sessions). `sid_of` is the environment reader's seam; each pid is read
+    once however many views ask (on macOS every read is a `ps` run)."""
     out = {"platform": platform.system(), "t": int(time.time()), "sessions": [], "errors": []}
-    by8 = {}
+    reader, seen = sid_of or proc_session_id, {}
+    def cached(pid):
+        if pid not in seen:
+            seen[pid] = reader(pid)
+        return seen[pid]
+    regs = _regs(state, out["errors"])
+    by8: dict[str, list] = {}
     for sid, r in regs.items():
-        if r.get("lastSid"):
-            by8.setdefault(r["lastSid"][:8].lower(), (sid, r))
-    dirs = cgroup_scope_dirs() if os.path.isdir("/sys/fs/cgroup") else []
+        by8.setdefault(sid[:8].lower(), []).append((sid, r))
+    dirs = cgroup_scope_dirs()
+    procs = parse_ps(ps_lines())
     if dirs:
         out["source"] = "cgroup"
         for d in dirs:
             s = scope_stats(d)
-            sid, r = by8.get(s["sid8"], (None, None))
+            hits = by8.get(s["sid8"]) or []
+            sid, r = hits[0] if len(hits) == 1 else (None, None)   # two sids sharing a prefix: named by neither
             s["sid"], s["name"] = sid, (r["name"] if r else s["sid8"])
             out["sessions"].append(s)
     else:
         out["source"] = "ps"
-        procs = parse_ps(ps_lines())
-        out["sessions"] = ps_session_trees(procs, regs)
-    procs = parse_ps(ps_lines())
-    lastsids = [r["lastSid"] for r in regs.values() if r.get("lastSid")]
-    dups = duplicate_clis(procs, lastsids)
-    by_fsid = {r["lastSid"]: r["name"] for r in regs.values() if r.get("lastSid")}
-    out["duplicateClis"] = [{"fsid": f, "name": by_fsid.get(f, f[:8]), "pids": p} for f, p in dups.items()]
+        out["sessions"] = ps_session_trees(procs, regs, cached)
+    by_sid, unknown = cli_sessions(procs, regs, cached)
+    out["duplicateClis"] = [{"sid": s, "name": regs[s]["name"], "pids": p} for s, p in by_sid.items() if len(p) > 1]
+    out["unidentifiedClis"] = unknown
+    out["threads"] = thread_groups(out["sessions"], regs)
     out["kernel"] = kernel_live(state)
     mem = [s["memBytes"] for s in out["sessions"] if isinstance(s.get("memBytes"), int)]
     out["memTotalBytes"] = sum(mem) if mem else None
     out["sessionsCounted"] = len(out["sessions"])
+    out["unmatchedScopes"] = sum(1 for s in out["sessions"] if not s.get("sid"))
     return out
 
 
@@ -770,6 +863,13 @@ def _mb(b):
     return "-" if not isinstance(b, (int, float)) else ("%.0f MB" % (b / 1048576.0))
 
 
+def _size(b):
+    """MB below a gigabyte, GB with one decimal from there (many threads' memory reads as 9.8 GB, not 10035 MB)."""
+    if not isinstance(b, (int, float)):
+        return "memory unknown"
+    return _mb(b) if b < 1 << 30 else "%.1f GB" % (b / float(1 << 30))
+
+
 def summary(doc: dict) -> str:
     """The one-screen text per window."""
     w = doc["window"]
@@ -792,9 +892,10 @@ def summary(doc: dict) -> str:
             lines.append("  reasons: " + ", ".join("%s %d" % (k, v) for k, v in sorted(b["reasons"].items(), key=lambda kv: -kv[1])))
         lines.append("  outage to first serve %s · reconcile settle %s" % (_st(b["outageS"]), _st(b["settleS"])))
         lines.append("  quiet windows %d · wait %s · backstop fired %d" % (b["quietWindows"], _st(b["quietWaitS"]), b["backstopFires"]))
-        lines.append("  boot sweeps %d · orphans reaped %d · scopes stopped %d · duplicate CLIs %d · crash heals %d · "
+        unchecked = (" (%d boot(s) could not check every CLI)" % b["duplicateUnchecked"]) if b.get("duplicateUnchecked") else ""
+        lines.append("  boot sweeps %d · orphans reaped %d · scopes stopped %d · duplicate CLIs %d%s · crash heals %d · "
                      "crash loops %d · drain left closing %d (cut rows: unjoined %d, reaped %d) · lease problems %d"
-                     % (b["boots"], b["orphansReaped"], b["scopesStopped"], b["duplicateClis"], b["crashHeals"],
+                     % (b["boots"], b["orphansReaped"], b["scopesStopped"], b["duplicateClis"], unchecked, b["crashHeals"],
                         b["crashLoops"], b["drainLeftClosing"], b["drainUnjoinedCount"], b["drainReapedCount"], b["leaseProblems"]))
         lines.append("  hosts attached: at boot %d · later %d" % (b["attachedAtBoot"], b["attachedLater"]))
         red = b["redo"]
@@ -816,10 +917,22 @@ def summary(doc: dict) -> str:
         lines.append("live: skipped")
     else:
         sess = live.get("sessions") or []
+        threads = live.get("threads") or []
+        n_thr = sum(g["threads"] for g in threads)
         top = sorted([s for s in sess if isinstance(s.get("memBytes"), int)], key=lambda s: -s["memBytes"])[:3]
-        lines.append("live (%s): %d session scopes · memory total %s · top: %s"
-                     % (live.get("source", "?"), len(sess), _mb(live.get("memTotalBytes")),
+        lines.append("live (%s): %d session scopes%s · memory total %s · top: %s"
+                     % (live.get("source", "?"), len(sess),
+                        (" (%d of them comment threads)" % n_thr) if n_thr else "", _mb(live.get("memTotalBytes")),
                         ", ".join("%s %s" % (s.get("name"), _mb(s["memBytes"])) for s in top) or "-"))
+        if threads:
+            lines.append("comment threads running, each its own session forked from the one named (not duplicates): "
+                         + " · ".join("%s: %d thread%s, %s" % (g["parentName"], g["threads"], "" if g["threads"] == 1 else "s",
+                                                               _size(g["memBytes"])) for g in threads))
+        if live.get("unmatchedScopes"):
+            lines.append("%d scope(s) match no registry row: not identified, so not counted as a thread or a duplicate"
+                         % live["unmatchedScopes"])
+        for e in live.get("errors") or []:
+            lines.append("live: " + e)
         k = live.get("kernel") or {}
         if k.get("error"):
             lines.append("kernel: " + k["error"])
@@ -831,7 +944,12 @@ def summary(doc: dict) -> str:
                             _mb((pf.get("rssKb") or 0) * 1024) if pf.get("rssKb") else "-", idle,
                             (" · " + k["perfError"]) if k.get("perfError") else ""))
         if live.get("duplicateClis"):
-            lines.append("DUPLICATE CLIs NOW: " + "; ".join("%s pids %s" % (d["name"], d["pids"]) for d in live["duplicateClis"]))
+            lines.append("DUPLICATE CLIs NOW (more than one process for one session): "
+                         + "; ".join("%s pids %s" % (d["name"], d["pids"]) for d in live["duplicateClis"]))
+        if live.get("unidentifiedClis"):
+            lines.append("NOT CHECKED for duplicates: %d CLI(s) on this machine's conversations whose session id "
+                         "(ROMP_SID) could not be read or names no registry row, pids %s"
+                         % (len(live["unidentifiedClis"]), live["unidentifiedClis"]))
     lines.append("")
     for n in doc.get("notes") or []:
         lines.append("note: " + n)

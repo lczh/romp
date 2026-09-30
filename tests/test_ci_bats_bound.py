@@ -72,25 +72,22 @@ class PythonJobCeiling(unittest.TestCase):
 
 
 class ExtensionJobCeiling(unittest.TestCase):
-    """The vscode-extension job runs the served labs, which grow with every lab added: PR 1790's run was cancelled at the
-    job's 25-minute ceiling after 25 min 04 s mid lab (2026-09-16), and under the 40-minute cap that followed, PR 2061's red
-    run 35821212036 (attempt 1) was cut at 40 min 15 s. Sixty minutes (2026-09-23): the rule is a served step of up to 38 min
-    plus the 600 s per-test timeout plus about 2 min of earlier steps, about 50. After the raise the served step took 31.62
-    to 39.15 min over the sixty green main runs from 2026-09-23 06:37 UTC to 2026-09-24 10:44 UTC (35.97 to 37.77 over the
-    sixteen consecutive runs from f824eb06 to f2108d89, and 37.92 on 23c2a9960 shortly before them), the closest call the
-    run on b598eae9 ending its served step 41 min 19 s after the job started; with a step of up to 39 min the rule's figure
-    is about 51, the floor, and the ceiling stays 60, so the pin keeps the file's range style and a revert to 40 or 50
-    goes red on it."""
-    def test_the_extension_job_gets_sixty_minutes_and_never_reverts_below_the_rules_figure(self):
+    """The served labs grow with every lab added, and the job running them kept outgrowing its cap: 15, 25, 40, then 60
+    minutes (PR 1790's run cut at 25 min 04 s mid lab on 2026-09-16, PR 2061's red run 35821212036 cut at 40 min 15 s),
+    until the unsharded served step took 45 min 20 s on 2026-09-30 (run 36702816332). Since then the labs run as parallel
+    shards (scripts/ci/shard_tests.py) and the cap is per shard, by the same rule: a shard's served step plus the 600 s
+    per-test timeout plus setup. A quarter of the step is about 12 minutes; 30 leaves up to 18 for a slow runner and new
+    labs. Below 25 a slow shard's stall is cut by the cap before the per-test timeout names it; past 35 the next step is
+    another shard, not a higher cap."""
+    def test_each_served_shard_gets_thirty_minutes_and_never_reverts_below_the_rules_figure(self):
         src = open(WF).read()
-        m = re.search(r"^  vscode-extension:\n((?:    .*\n|\n)+?)    defaults:\n", src, re.M)
-        self.assertTrue(m, "the extension job's head moved: re-anchor this pin")
+        m = re.search(r"^  vscode-extension-served:\n((?:    .*\n|\n)+?)    strategy:\n", src, re.M)
+        self.assertTrue(m, "the served shards' job head moved: re-anchor this pin")
         t = re.search(r"^    timeout-minutes: (\d+)$", m.group(1), re.M)
-        self.assertTrue(t, "the extension job has no plain timeout-minutes line")
-        self.assertGreaterEqual(int(t.group(1)), 51, "the served step ran 31.62 to 39.15 min over the sixty green main runs after the raise (2026-09-23 to "
-                                                     "2026-09-24; 41 min 19 s to its end at the closest call, b598eae9): up to 39 min plus the 600 s per-test "
-                                                     "timeout plus about 2 min of earlier steps is about 51, so a cap below it cuts a green run")
-        self.assertLessEqual(int(t.group(1)), 60, "past an hour a hung lab eats the run")
+        self.assertTrue(t, "the served shards' job has no plain timeout-minutes line")
+        self.assertGreaterEqual(int(t.group(1)), 25, "a shard's served step of up to 13 minutes on a slow runner plus the 600 s "
+                                                     "per-test timeout plus setup is about 25, so a cap below it cuts a stall nameless")
+        self.assertLessEqual(int(t.group(1)), 35, "a shard that needs more than 35 minutes wants another shard, not a higher cap")
 
 
 if __name__ == "__main__":

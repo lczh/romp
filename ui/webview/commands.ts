@@ -12,7 +12,11 @@ export type PaletteCommand = {
   hidden?: boolean; // bindable but not listed in the palette (palette.toggle: running "toggle the
   when?: () => boolean;   // listed only while true, re-read at every open (a pane whose control the gear hid; T317)
                     // palette" FROM the palette would just blink it)
-  run: () => void;
+  // Read as the palette opens, before its input takes the focus, and handed to a run FROM that palette: for a command
+  // acting on state the focus move can disturb (chat.commentSelection's text selection, 2026-09-30). A run by key gets
+  // nothing and reads the live state itself.
+  capture?: () => unknown;
+  run: (held?: unknown) => void;
 };
 
 // Every DEFAULT key binding, by command id — ONE table, so the palette registration below, the shell
@@ -53,6 +57,15 @@ export const DEFAULT_CHORDS: Record<string, string> = {
   "chat.nextComment": "Ctrl+Alt+Shift+ArrowDown",
   "chat.prevUnread": "Ctrl+Alt+PageUp",
   "chat.nextUnread": "Ctrl+Alt+PageDown",
+  // Comment on the selected chat text (the user 2026-09-30, who wanted a key for it, and then two keys rather than Google
+  // Docs' three-key ⌘⌥M): ⌘/ on a Mac and Ctrl+/ elsewhere, so Mod here, the code editors' "toggle comment" key. ⌘M alone
+  // was out: it is macOS's minimize, which the OS takes before a page sees it. Chrome binds Mod+/ on no platform, and
+  // Google Docs answers to it in the browser, so a page can take it; Safari's menu has ⌘/ (View > Show Status Bar), which
+  // the page is expected to claim first (still to be confirmed on a real Mac). keybindings' chordOf reads a "/" the layout
+  // types with Shift (Shift+7 on a German keyboard) as plain "/", so the key the hint prints is the one to press on any
+  // layout. It edits no text, so it works from the message box too, where its preventDefault keeps the "/" out of the box
+  // and the slash menu shut. The dialog rebinds.
+  "chat.commentSelection": "Mod+/",
 };
 
 const commands = new Map<string, PaletteCommand>();

@@ -196,6 +196,29 @@ EOF
     [ -z "$output" ]
 }
 
+@test "the watchdog path: a TERM between the fork of the sleep and the assignment of its pid still ends the sleep" {
+    # CI 2026-09-29 and 2026-09-30 (trees that did not touch the launcher): the two session checks here saw a leftover
+    # sleep, one launch in a few hundred. A trap runs between commands, and `sleep &` and `_s=$!` are two, so the
+    # watchdog's TERM could run its trap while the sleep was running and its pid not yet known; that trap ended nothing
+    # and exited. The window is a fork wide, so this case holds it open: bash runs the launcher with a DEBUG trap that
+    # pauses half a second before `_s=$!` (set -T carries it into the watchdog's subshell), the fast probe ends inside
+    # the pause and the launcher TERMs the watchdog there. At the base the sleep outlives the launcher every time.
+    command -v setsid >/dev/null 2>&1 || skip "needs setsid to scope the process-group check (Linux)"
+    local bash_; bash_="$(command -v bash)"
+    local bare="$TEST_DIR/bare-window"; mkdir -p "$bare"
+    local t
+    for t in sh cmp cp chmod mv mkdir rm sleep ps setsid; do ln -s "$(command -v "$t")" "$bare/$t"; done
+    ln -s "$BIN/node" "$bare/node"
+    printf '%s\n' 'set -T' 'trap '\''[ "$BASH_COMMAND" = "_s=\$!" ] && sleep 0.5'\'' DEBUG' > "$TEST_DIR/pause-before-pid.sh"
+    PATH="$bare" BASH_ENV="$TEST_DIR/pause-before-pid.sh" run setsid -w "$bash_" -c 'printf "%s\n" "$$" > "$1"; exec "$2" "$3" "$4" up' _ "$TEST_DIR/pgid" "$bash_" "$LAUNCH" "$MANAGER"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"NODE_V1 ran: $MANAGER up"* ]]
+    local pgid; pgid="$(cat "$TEST_DIR/pgid")"
+    [ -n "$pgid" ]
+    run bash -c 'ps -eo pgid=,args= | awk -v g="$1" "\$1==g"' _ "$pgid"
+    [ -z "$output" ]
+}
+
 @test "the watchdog path: a copy that HANGS is killed at the bound, the manager comes up on the system node, and no node is leaked" {
     # round three of issue 1600: the watchdog could only signal the probe's wrapper subshell, and a wrapper that ran the node
     # in its foreground survived the kill while the hung node did not die; one hung node leaked per launch (the launcher's

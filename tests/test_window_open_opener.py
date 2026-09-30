@@ -3,11 +3,12 @@
 
 Handler._send declares Cross-Origin-Opener-Policy: same-origin-allow-popups. A page on another origin that opens a
 dashboard page gets a closed handle, while a popup that a page on this origin opens keeps its opener, which a data
-pane's popup needs (the _send comment says why; tests/test_pane_popup_opener_served.py drives both in a browser). So a
-tab that romp's own code opens onto another origin, or onto a page whose links may lead there, would hold the dashboard
-as its opener, and could post to it and navigate it. Each call therefore passes noopener (or noreferrer, which implies
-it) in its features, or severs the opener on the handle it gets back, as ui/webview/preview.ts openFileTab does: its
-caller needs the handle to tell a blocked popup from an open one, and the noopener feature returns null either way.
+pane's popup needs (the comment in _security_headers says why; tests/test_pane_popup_opener_served.py drives both in a
+browser). So a tab that romp's own code opens onto another origin, or onto a page whose links may lead there, would hold
+the dashboard as its opener, and could post to it and navigate it. Each call therefore passes noopener (or noreferrer,
+which implies it) in its features, or severs the opener on the handle it gets back, as ui/webview/preview.ts openFileTab
+does: its caller needs the handle to tell a blocked popup from an open one, and the noopener feature returns null either
+way.
 
 CallsLeaveNoOpener reads every window.open( call in the page sources: ui/ and vscode-extension/src, less tests and
 built bundles, and kernel/kernel.py, whose inline scripts the kernel serves. It holds each call to one of those two

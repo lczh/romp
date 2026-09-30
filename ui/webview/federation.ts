@@ -16,6 +16,7 @@ import { adoptArrivals, applyViewOrder, applyViewOrderTo, churnSwaps, healOrder,
          VIEW_ORDER_KEY, VIEW_ORDER_SHARED_KEY, VIEW_ORDER_EVENT } from "./view-order";
 import { adoptViews, capsAdopts, announcedSeq, announcedAfter } from "./views-writes";
 import { hearSharedFolds, parseTabGroups, writeTabGroups } from "./tab-groups";
+import { hearSharedFileTabs } from "./file-tabs";   // the file tabs beside them (2026-09-30), the folds' protocol
 import { hostOf, bareId, hostDialLive } from "./host-prefix";
 import { installPerfTelemetry, classifyFrame, type RompPerf } from "./perf-telemetry";
 
@@ -415,6 +416,8 @@ export function routeOutbound(msg: any, knownHosts?: ReadonlySet<string>): Route
   // …and so do its FOLDS (2026-09-23): tag names and pinned ids as this viewer sees them, kept by the kernel it
   // talks to beside the arrangement. No field of it is a per-host order to split.
   if (msg.type === "setViewFolds") return [{ host: LOCAL, msg }];
+  // …and its FILE TABS (2026-09-30): paths and session ids as this viewer sees them, one list over every host.
+  if (msg.type === "setViewFiles") return [{ host: LOCAL, msg }];
 
   // order[] (reorderTabs / the timeline's writeOrder): split across the hosts it touches.
   if (Array.isArray(msg.order) && msg.order.some((x: any) => typeof x === "string")) {
@@ -1321,6 +1324,11 @@ export class FederationManager {
       if ("folds" in m) {
         hearSharedFolds(m.folds, (f, by) => this.outbound({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) }), (fn) => { w.__rompPublishViewFolds = fn; }, m.foldsBy, m.foldsSeq);
       }
+      // …and the FILE TABS (2026-09-30): the same hearing, on the same frame (file-tabs.ts hearSharedFileTabs); a kernel
+      // from before them sends no half, and this page's tabs then stay this browser's
+      if ("files" in m) {
+        hearSharedFileTabs(m.files, (f) => this.outbound({ type: "setViewFiles", files: f }), (fn) => { w.__rompPublishViewFiles = fn; });
+      }
       return;
     }
     // A NEW connection (the shim's reconnect, as a frame: it lands after the dead socket's last frames and before the
@@ -1468,6 +1476,7 @@ export class FederationManager {
     this.viewOrderHeard = false;
     try { delete (window as any).__rompPublishViewOrder; } catch { /* no window */ }
     try { delete (window as any).__rompPublishViewFolds; } catch { /* no window */ }
+    try { delete (window as any).__rompPublishViewFiles; } catch { /* no window */ }
   }
 
   private lastFeedCounts = "";   // last per-host ask-count signature — breadcrumb only on change

@@ -350,8 +350,9 @@ test("dispatchFrame routes tagEditFailed to the panel — the LOUD half of remot
   // (the listener body ends there; the boot wraps it through the page's performance collector when one is published on
   // window.__rompPerf, the way every pane bundle wraps its own — perf-telemetry.ts — and the window listener hands the
   // wrapped listener only a message from a sender windowSender hears, the check outside the wrapper as listenForFrames
-  // has it; timeline-boot-senders.test.ts runs the boot with a real collector over every sender)
-  assert.match(KERNEL, /else if\(m\.type==="tagEditFailed"&&panel\.tagEditFailed\)panel\.tagEditFailed\(m\);\nelse if\(m\.type==="openViewsDialog"&&panel\._openViewsDialog\)panel\._openViewsDialog\(null\);\};\nvar frameListener=\(window\.__rompPerf&&window\.__rompPerf\.wrapFrameHandler\)\?window\.__rompPerf\.wrapFrameHandler\(onFrame\):onFrame;\n(?:\/\/[^\n]*\n)*window\.addEventListener\("message",function\(e\)\{if\(!heardSender\(e\)\)return;frameListener\(e\);\}\);/);
+  // has it, a dropped message leaving its trace first; timeline-boot-senders.test.ts runs the boot with a real collector
+  // over every sender)
+  assert.match(KERNEL, /else if\(m\.type==="tagEditFailed"&&panel\.tagEditFailed\)panel\.tagEditFailed\(m\);\nelse if\(m\.type==="openViewsDialog"&&panel\._openViewsDialog\)panel\._openViewsDialog\(null\);\};\nvar frameListener=\(window\.__rompPerf&&window\.__rompPerf\.wrapFrameHandler\)\?window\.__rompPerf\.wrapFrameHandler\(onFrame\):onFrame;\n(?:\/\/[^\n]*\n)*window\.addEventListener\("message",function\(e\)\{if\(!heardSender\(e\)\)\{noteForeign\("timeline-boot",e\);return;\}frameListener\(e\);\}\);/);
   assert.match(KERNEL, /window\.__rompTimelineEditTag=function\(edit\)\{post\(\{type:"editTag",edit:edit\}\);\};/);
   const BOOT = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "timeline-boot.ts"), "utf8");
   assert.match(BOOT, /__rompTimelineEditTag: \(edit: unknown\) => post\(\{ type: "editTag", edit \}\),/);

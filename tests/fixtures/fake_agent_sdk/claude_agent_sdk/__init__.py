@@ -142,6 +142,25 @@ def _transcript(cwd, fsid):
     return os.path.join(_proj_dir(cwd), fsid + ".jsonl")
 
 
+def _leaf(cwd, fsid):
+    """The uuid of the episode transcript's LAST record, None for an absent or empty one: a connection that resumes an
+    episode continues its parentUuid chain from there, as the real CLI's --resume does. A chain rooted afresh (parentUuid
+    None) on a transcript that already holds a conversation is a second conversation, and the kernel shows the active
+    chain alone: every earlier turn left the chat (the comment-relay lab's first run, 2026-09-30)."""
+    try:
+        with open(_transcript(cwd, fsid)) as f:
+            last = None
+            for ln in f:
+                try:
+                    u = json.loads(ln).get("uuid")
+                except (ValueError, AttributeError):
+                    continue
+                last = u or last
+            return last
+    except (OSError, RuntimeError):   # no transcript yet; an unset CLAUDE_CONFIG_DIR still refuses at the first write
+        return None
+
+
 def _append(path, record):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a") as f:
@@ -181,7 +200,7 @@ class ClaudeSDKClient:
         self._fsid = (getattr(options, "session_id", None) or getattr(options, "resume", None) or "fsid")
         self._cwd = getattr(options, "cwd", None)
         self._init_sent = False
-        self._parent = None   # parentUuid chain within the current episode
+        self._parent = _leaf(self._cwd, self._fsid)   # parentUuid chain within the current episode, resumed from its last record
 
     async def __aenter__(self):
         return self

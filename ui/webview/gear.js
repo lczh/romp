@@ -31,8 +31,11 @@ var LS = require('./landing-settle.ts');   // gestureEvidence: the chat's rule f
 // Who posted a window message (window-sender.ts). Every window listener below returns first on a foreign sender: its
 // messages come from the kernel (dispatched in this document, or forwarded by the VS Code webview host from a window on
 // its origin), the shell (this document's embedder) or this document itself, never from a sandboxed frame or a page on
-// another origin.
+// another origin. A listener's first return for each sender origin in a page's life leaves a client-diag row naming
+// the listener (noteForeign; a repeat from that origin files none), sent through initGear's poster where the page has
+// no pane shim.
 var windowSender = require('./window-sender.ts').windowSender;
+var noteForeign = require('./window-sender.ts').noteForeign;   // a drop's trace, one per listener and sender origin a page life (window-sender.ts), through the gear's poster
 function kb() { return (typeof window !== 'undefined' && window.__rompKernelBase) || ''; }
 function ku(path) {
   var tok = (typeof window !== 'undefined' && window.__rompKernelToken) || '';
@@ -384,8 +387,12 @@ var GEAR_HTML =
   '<div id=rs-login-modal hidden>' +
   '<div class=rs-login-card>' +
   "<div class=rs-h style='margin-bottom:4px'>Log in to Claude Code</div>" +
+  // the dialog's own status line: a wait says what it waits on beside the loader's dots, and the CLI's complaint or
+  // refusal shows under it; before 2026-09-30 the dialog showed only its title and Cancel through both waits
+  "<div id=rs-login-status class=rs-login-status hidden><span class=rs-login-dots><i></i><i></i><i></i></span><span id=rs-login-wait></span></div>" +
+  "<div id=rs-login-err class=rs-login-err hidden></div>" +
   "<div id=rs-login-url hidden style='margin-top:6px'></div>" +
-  "<div id=rs-login-code hidden style='margin-top:8px;display:flex;gap:6px;align-items:center'>" +
+  "<div id=rs-login-code class=rs-login-code hidden>" +
   "<input id=rs-login-input type=text autocomplete=off spellcheck=false placeholder='paste the code from the browser…' style='flex:1;background:var(--input-bg, #1e1e1e);color:var(--fg, #ccc);border:1px solid #3a3a3a;border-radius:5px;padding:4px 8px'>" +
   "<button id=rs-login-send type=button style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Submit</button>" +
   '</div>' +
@@ -1164,7 +1171,7 @@ function initGear(post, opts) {
   function tellShellTracking(on) { try { (window.parent !== window ? window.parent : window).postMessage({ romp: 'taskTracking', on: !!on }, '*'); } catch (e) {} }
   if (tk) tk.addEventListener('change', function () { post(scoped({ type: 'setTaskTracking', enabled: tk.checked, gt: gclock.stamp('task-tracking') })); });
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:taskTracking', e, post); return; }
     var m = e.data;
     if (!m || m.type !== 'taskTracking' || typeof m.on !== 'boolean') return;   // the kernel's echo of an applied flip
     if (tk) tk.checked = m.on;
@@ -1256,6 +1263,21 @@ function initGear(post, opts) {
   // and the button reopens the modal mid-flow instead of restarting the login.
   var lgM = document.getElementById('rs-login-modal');
   function lgModal(on) { if (lgM) lgM.hidden = !on; }
+  var lgW = document.getElementById('rs-login-status'), lgWT = document.getElementById('rs-login-wait'),
+      lgE = document.getElementById('rs-login-err');
+  // What the dialog says: "Starting Claude Code…" until the sign-in link arrives, "Checking the code…" while the CLI
+  // weighs a pasted code, and the kernel's err under it (a refusal in the CLI's own words, or its complaint about a
+  // half-copied code, which brings the paste box back).
+  function lgStatus(f) {
+    var wait = f.state === 'starting' ? 'Starting Claude Code…' : f.state === 'verifying' ? 'Checking the code…' : '';
+    if (lgW) lgW.hidden = !wait;
+    if (lgWT && lgWT.textContent !== wait) lgWT.textContent = wait;
+    if (lgE) {
+      lgE.hidden = !f.err;
+      lgE.textContent = f.err || '';
+      lgE.classList.toggle('bad', f.state === 'error' || f.state === 'url');
+    }
+  }
   if (lgM) lgM.addEventListener('click', function (e) {
     // This dialog is a sibling of settings. Keep its clicks inside the dialog so the
     // settings outside-click handler cannot close the panel and shrink its host iframe.
@@ -1272,11 +1294,13 @@ function initGear(post, opts) {
     var mid = f.state === 'url' || f.state === 'starting' || f.state === 'verifying';
     lgB.hidden = false;
     lgB.textContent = mid ? 'Show login code…' : 'Log in to Claude Code';
-    if (!f.state) lgModal(false);   // the flow ended (logged in / cancelled) — the modal's job is done
-    lgS.textContent = f.state === 'starting' ? 'starting the login flow…'
+    if (!f.state || f.state === 'done') lgModal(false);   // the flow ended (logged in / cancelled) — the modal's job is done
+    lgStatus(f);
+    lgS.textContent = f.state === 'starting' ? 'starting Claude Code…'
       : f.state === 'verifying' ? 'checking the code…'
-      : f.state === 'error' ? (f.err || 'the login flow failed — try again') : '';
-    lgS.style.color = f.state === 'error' ? '#F85B5A' : '';
+      : f.state === 'error' ? (f.err || 'the login flow failed — try again')
+      : f.state === 'url' ? (f.err || '') : '';
+    lgS.style.color = f.state === 'error' || (f.state === 'url' && f.err) ? '#F85B5A' : '';
     lgU.hidden = f.state !== 'url';
     lgC.hidden = f.state !== 'url';
     if (f.state === 'url' && f.url && lgU.getAttribute('data-url') !== f.url) {
@@ -1297,7 +1321,9 @@ function initGear(post, opts) {
     fetch(ku('/version'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (v) {
       lgRender(v);
       var st = (v.login || {}).state;
-      if (st === 'starting' || st === 'url' || st === 'verifying') lgTimer = setTimeout(lgPoll, 1500);
+      // quick while the CLI is starting or checking a code (about a second each), the old pace while the person reads
+      if (st === 'starting' || st === 'verifying') lgTimer = setTimeout(lgPoll, 400);
+      else if (st === 'url') lgTimer = setTimeout(lgPoll, 1500);
       else lgTimer = null;
     }).catch(function () { lgTimer = setTimeout(lgPoll, 3000); });
   }
@@ -1305,16 +1331,20 @@ function initGear(post, opts) {
     lgModal(true);
     if (lgLive === 'url' || lgLive === 'starting' || lgLive === 'verifying') return;   // reopen only — never restart a live flow
     post({ type: 'loginStart' });
-    lgS.textContent = 'starting the login flow…';
-    if (!lgTimer) lgTimer = setTimeout(lgPoll, 800);
+    lgS.textContent = 'starting Claude Code…';
+    lgStatus({ state: 'starting', err: '' });   // the dialog acknowledges at once, before the first poll
+    if (!lgTimer) lgTimer = setTimeout(lgPoll, 400);
   });
   if (lgSend) lgSend.addEventListener('click', function () {
     var code = lgI && lgI.value ? lgI.value.trim() : '';
     if (!code) return;
-    post({ type: 'loginCode', code: code });   // pass-through; the kernel writes it to the PTY and nothing else
+    post({ type: 'loginCode', code: code });   // pass-through; the kernel writes it to the CLI's stdin and nothing else
     if (lgI) lgI.value = '';
     lgS.textContent = 'checking the code…';
-    if (!lgTimer) lgTimer = setTimeout(lgPoll, 800);
+    lgU.hidden = true; lgC.hidden = true;
+    lgStatus({ state: 'verifying', err: '' });   // the dialog acknowledges the Submit at once
+    if (lgTimer) clearTimeout(lgTimer);           // the paste step's slower poll gives way to the verdict's
+    lgTimer = setTimeout(lgPoll, 400);
   });
   if (lgI) lgI.addEventListener('keydown', function (e) { if (e.key === 'Enter' && lgSend) lgSend.click(); });
   if (lgX) lgX.addEventListener('click', function () { lgModal(false); post({ type: 'loginCancel' }); if (lgTimer) { clearTimeout(lgTimer); lgTimer = null; } lgRender({ login: { state: '' } }); });
@@ -1586,7 +1616,7 @@ function initGear(post, opts) {
   // The kernel's browseResult (target 'gear') fills the field + persists via the change handler.
   // (This listener lives HERE, with the field — it used to sit in render.ts, a different document.)
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:browseResult', e, post); return; }
     var m = e.data;
     if (m && m.type === 'browseResult' && m.target === 'gear' && typeof m.path === 'string' && dd) {
       dd.value = m.path; dd.dispatchEvent(new Event('change'));
@@ -1737,7 +1767,7 @@ function initGear(post, opts) {
              run: function () { post(Object.assign({}, m.gesture, { gt: gclock.stamp(m.setting) })); } };
   }
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:settingStale', e, post); return; }
     var m = e.data;
     if (!m || m.type !== 'settingStale') return;
     gclock.learn(m.setting, m.storedGt);   // the frame IS new information about that store's clock
@@ -1860,7 +1890,7 @@ function initGear(post, opts) {
   // kernel sends no models frame for a list that changed while it was down. Its rev is seeded from the clock at
   // boot, so the restarted kernel's list is newer than the one this page holds and adoptChoices takes it.
   window.addEventListener('message', function (e) {
-    if (windowSender(e) === 'foreign') return;
+    if (windowSender(e) === 'foreign') { noteForeign('gear:models', e, post); return; }
     var m = e.data;
     if (!m || (m.type !== 'models' && m.type !== 'wsup')) return;
     fetch(ku('/models'), { cache: 'no-store' }).then(function (r) { return r.json(); })
@@ -2262,7 +2292,7 @@ function initGear(post, opts) {
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
     p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; tl.checked = !!s.tabsLocked; if (tsb) tsb.checked = (s.tabStateBadge !== false); jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (nb) nb.checked = s.needsBox !== false; if (fsc) fsc.checked = (s.showFilesControl === true); if (pdk) pdk.checked = (s.paneDocking === true); renderRegistryRows(s); (function (p) { Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].checked = p[k]; }); })(panesOf(s)); tcPaint(); paintWidgets(); csPaint(); ttPaint(); if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); if (bk) { bk.value = BN.effectiveDefaultBackend(s.backend); repaintSelectPicks(); } if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); if (section) showSection(section); else clearSectionScroll(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
-  window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') return; if (e.data && e.data.romp === 'openSettings') openSettings(typeof e.data.tab === 'string' ? e.data.tab : undefined, typeof e.data.section === 'string' ? e.data.section : undefined); });   // the tab and its section ride the ask (T379: the strip's gear opens Chat at Tab strip (T415; Tab widgets until then))
+  window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') { noteForeign('gear:openSettings', e, post); return; } if (e.data && e.data.romp === 'openSettings') openSettings(typeof e.data.tab === 'string' ? e.data.tab : undefined, typeof e.data.section === 'string' ? e.data.section : undefined); });   // the tab and its section ride the ask (T379: the strip's gear opens Chat at Tab strip (T415; Tab widgets until then))
   // Escape, relayed by the web shell's Escape chain (_LANDING_ESC_JS captures keydown in this same-origin
   // document and calls this synchronously): close the modal and say so, unless one of its own dialogs is up
   // (the login card, an open house dropdown), which the document's own Escape handlers close one level at a
@@ -2293,7 +2323,7 @@ function initGear(post, opts) {
       lgn.hidden = n <= 0;
       lgn.textContent = n <= 0 ? '' : ' \u00b7 ' + (n > 9 ? '9+' : String(n));
     };
-    window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') return; var m = e.data; if (m && m.romp === 'logUnseen') window.__rompSetLogCount(m.n); });
+    window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') { noteForeign('gear:logUnseen', e, post); return; } var m = e.data; if (m && m.romp === 'logUnseen') window.__rompSetLogCount(m.n); });
   })();
   p.addEventListener('click', function (e) { if (e.target === p) closeSettings(); });   // click the dimmed backdrop (not the card) → close
   document.addEventListener('click', function (e) { if (!p.hidden && e.target !== g && !p.contains(e.target)) closeSettings(); });

@@ -158,9 +158,9 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_backend.py"), "utf8");
 
-test("the selection menu offers Comment, gated on a real transcript turn", () => {
-  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(/);
-  assert.match(UI, /q\?\.uuid && activeId && !isProvisionalId\(activeId\)/);
+test("the selection menu offers Comment, gated on a real transcript turn (commentAim: the gate the comment key shares)", () => {
+  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY\)/);
+  assert.match(UI, /if \(!q\?\.uuid\) return "none";\n\s*if \(!activeId \|\| isProvisionalId\(activeId\) \|\| !liveSession\(activeId\)\) return "session";/);
 });
 
 test("marks, badges AND every popover button ride the stable document.body delegate", () => {
@@ -360,7 +360,7 @@ test("the highlight is highlighter-YELLOW — never the selection blue — and o
   assert.match(CSS, /mark\.cmt-hl\.hl-first \{ border-top-left-radius: 2px/);
   // a fully-covered inline-code span tints at the ELEMENT: a mark inside it can't paint the code's
   // padded background, which left an untinted sliver around every code word (the word-island look)
-  assert.match(UI, /host\.classList\.toggle\("cmt-hl-host", th\.status !== "resolved" && th\.status !== "merged"\)/);
+  assert.match(UI, /host\.classList\.toggle\("cmt-hl-host", !threadSettled\(th\.status\)\)/);   // a relayed thread keeps the tint (2026-09-30)
   assert.match(UI, /p\.classList\.remove\("cmt-hl-host"\)/);
   assert.match(CSS, /code\.cmt-hl-host \{ background: color-mix\(in srgb, var\(--cmt-hl\) 30%, var\(--code-bg\)\)/);
   assert.match(CSS, /code\.cmt-hl-host > mark\.cmt-hl \{ background: transparent/);
@@ -478,7 +478,7 @@ test("an in-flight thread's highlight PULSES await-green — text and hosts in l
   assert.match(CSS, /mark\.cmt-hl \{\s*\n\s*background: color-mix\(in srgb, var\(--cmt-hl\) 30%, transparent\);/);
   assert.match(CSS, /mark\.cmt-hl\.unread \{ background: color-mix\(in srgb, var\(--cmt-hl\) 45%, transparent\); \}/);
   assert.match(CSS, /mark\.cmt-hl:hover \{ background: color-mix\(in srgb, var\(--cmt-hl\) 58%, transparent\); \}/);
-  assert.match(CSS, /mark\.cmt-hl\.resolved \{ background: rgba\(255, 255, 255, 0\.08\); \}/);
+  assert.match(CSS, /mark\.cmt-hl\.resolved \{ background: var\(--cmt-hl-resolved\); \}/);   // the dimmed comment ink, a token per theme (2026-09-30)
 });
 
 test("the thread's identity rail runs continuous — no holes at the list's flex gaps", () => {

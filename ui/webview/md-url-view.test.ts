@@ -68,8 +68,8 @@ test("a ctrl-, meta- or shift-click on a same-origin .md keeps the tab: the modi
   // listener. The ONE auxclick listener in render.ts is onMiddleClick, on the path PILLS (spans, not
   // anchors), where a middle-click opens a PDF in a tab of its own — pdf-new-tab.test.ts pins it
   assert.doesNotMatch(HANDLER, /addEventListener\("auxclick"/);
-  assert.equal((RENDER.match(/addEventListener\("auxclick"/g) || []).length, 2,
-    "only onMiddleClick (path pills) and the composer ✕'s stopper — both on spans/buttons, never on an anchor");
+  assert.equal((RENDER.match(/addEventListener\("auxclick"/g) || []).length, 3,
+    "only onMiddleClick (path pills), the composer ✕'s stopper and a file tab's middle-click close (2026-09-30) — on spans, buttons and a tab, never on an anchor");
   assert.match(REF, /ctrl- or ⌘-click still opens the file in\s+a tab/, "the reference says so");
 });
 

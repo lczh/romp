@@ -1692,9 +1692,10 @@ def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, 
 #                         {"t": epoch s (int), "pid": the writing kernel, "kind": "<writer>.<what>",
 #                          "sid": romp sid when about a session, "name": its name then, ...flat fields}.
 #                         Kinds this file writes: reconcile.boot (the sweep's summary, every boot, ledger only),
-#                         reconcile.orphan-reaped, reconcile.scope-stopped, reconcile.duplicate-cli, crash.heal,
-#                         crash.loop, drain.unjoined. Every kind but the boot summary is written through
-#                         problem_row: its row carries the prose as `text`, and the kernel log gets
+#                         reconcile.orphan-reaped, reconcile.scope-stopped, reconcile.duplicate-cli,
+#                         reconcile.duplicate-unchecked, crash.heal, crash.loop, drain.unjoined. Every kind but
+#                         the boot summary is written through problem_row: its row carries the prose as `text`,
+#                         and the kernel log gets
 #                         `<prose> ;; problem-row {json}` so a log reader parses the same object with
 #                         `line.rsplit(PROBLEM_ROW_MARK, 1)[1]`. Every one of those but drain.unjoined also
 #                         lands on the backend's problem ring (the dashboard's bell and error center) as its
@@ -4023,24 +4024,42 @@ def cli_sid_of(cmd: str, sids) -> "str | None":
     return None
 
 
-def duplicate_clis(ps_lines: list[str], lastsids: list[str]) -> dict[str, list[int]]:
-    """Conversation ids that MORE THAN ONE SDK-driven CLI in a PS_ARGV listing is holding, id -> pids in
-    listing order (T304: two writers for one transcript is the failure the boot reap exists to prevent, and
-    until now nothing recorded when it was found). Same match as find_orphan_clis (the stream-json mark plus
-    a --resume/--session-id spelling), whatever the parents are: an orphan beside this kernel's live child
-    counts, and so do two orphans. Pure."""
-    seen: dict[str, list[int]] = {}
+def cli_sessions(ps_lines: list[str], lastsids: list[str], sids, sid_of=None) -> tuple[dict[str, list[int]], list[int]]:
+    """({sid: [pids]}, [unchecked pids]) over the SDK-driven CLIs in a PS_ARGV listing that carry one of OUR
+    conversation ids (find_orphan_clis' match: the stream-json mark plus a --resume/--session-id spelling), each
+    filed under the SESSION it was launched for, the ROMP_SID in its environment (proc_session_id; `sid_of` is the
+    seam), when that names one of `sids`. Never under the conversation id on its argv: a comment thread is launched
+    as a fork of its parent's conversation, so the parent's CLI and every thread's carry the parent's id there and
+    are different sessions writing different transcripts. A CLI whose ROMP_SID cannot be read, or names no session
+    in `sids`, is UNCHECKED and returned as such, never filed by its argv. Pids in listing order."""
+    sid_of = sid_of or proc_session_id
+    known = set(sids)
+    by_sid: dict[str, list[int]] = {}
+    unchecked: list[int] = []
     for ln in ps_lines:
         parts = ln.strip().split(None, 2)
         if len(parts) < 3 or not parts[0].isdigit():
             continue
         cmd = parts[2]
-        if _SDK_CLI_MARK not in cmd:
+        if _SDK_CLI_MARK not in cmd or not _cli_carries_sid(cmd, lastsids):
             continue
-        s = cli_sid_of(cmd, lastsids)
-        if s:
-            seen.setdefault(s, []).append(int(parts[0]))
-    return {s: pids for s, pids in seen.items() if len(pids) > 1}
+        pid = int(parts[0])
+        sid = sid_of(pid)
+        if sid and sid in known:
+            by_sid.setdefault(sid, []).append(pid)
+        else:
+            unchecked.append(pid)
+    return by_sid, unchecked
+
+
+def duplicate_clis(ps_lines: list[str], lastsids: list[str], sids, sid_of=None) -> dict[str, list[int]]:
+    """Sessions that MORE THAN ONE SDK-driven CLI in a PS_ARGV listing is serving, sid -> pids in listing order
+    (T304: two writers for one transcript is the failure the boot reap exists to prevent, and until then nothing
+    recorded when it was found). Grouped by the session (cli_sessions), so a parent and the comment threads forked
+    from it are never each other's duplicates, whatever the parents are: an orphan beside this kernel's live child
+    counts, and so do two orphans."""
+    by_sid, _ = cli_sessions(ps_lines, lastsids, sids, sid_of)
+    return {s: pids for s, pids in by_sid.items() if len(pids) > 1}
 
 
 # ── SESSION OWNERSHIP LEASES (T305, stage 1 of sessions that survive a kernel restart) ─────────────
@@ -4477,12 +4496,13 @@ def unit_state_tags(list_lines) -> dict:
     return out
 
 
-def proc_state_tag(pid: int, run=None, procfs=None) -> str | None:
-    """The state tag in a process's environment as it was exec'd: /proc/<pid>/environ where there is a procfs (readable for
-    this user's own processes), else `ps -E` (macOS prints the environment after the command). None when the process is
-    gone, its environment cannot be read, or it carries no tag of the tag's shape. `run` and `procfs` are the test seams."""
+def proc_env_value(pid: int, name: str, run=None, procfs=None) -> str | None:
+    """The value of `name` in a process's environment as it was exec'd: /proc/<pid>/environ where there is a procfs
+    (readable for this user's own processes), else `ps -E` (macOS prints the environment after the command). None when
+    the process is gone, its environment cannot be read, or it does not carry the variable. `run` and `procfs` are the
+    test seams."""
     procfs = os.path.isdir("/proc") if procfs is None else procfs
-    key = STATE_TAG_ENV + "="
+    key = name + "="
     if procfs:
         try:
             with open("/proc/%d/environ" % int(pid), "rb") as f:
@@ -4491,8 +4511,7 @@ def proc_state_tag(pid: int, run=None, procfs=None) -> str | None:
             return None
         for kv in data.split(b"\0"):
             if kv.startswith(key.encode()):
-                v = kv[len(key):].decode("ascii", "replace")
-                return v if _STATE_TAG_SHAPE.match(v) else None
+                return kv[len(key):].decode("ascii", "replace")
         return None
     run = run or subprocess.run
     try:
@@ -4500,7 +4519,25 @@ def proc_state_tag(pid: int, run=None, procfs=None) -> str | None:
     except Exception:
         return None
     vals = [tok[len(key):] for tok in (out or "").split() if tok.startswith(key)]
-    return vals[-1] if vals and _STATE_TAG_SHAPE.match(vals[-1]) else None   # the environment follows the argv
+    return vals[-1] if vals else None   # the environment follows the argv
+
+
+def proc_state_tag(pid: int, run=None, procfs=None) -> str | None:
+    """The state tag in a process's environment as it was exec'd (proc_env_value). None when the process is gone, its
+    environment cannot be read, or it carries no tag of the tag's shape. `run` and `procfs` are the test seams."""
+    v = proc_env_value(pid, STATE_TAG_ENV, run=run, procfs=procfs)
+    return v if v is not None and _STATE_TAG_SHAPE.match(v) else None
+
+
+SESSION_ID_ENV = "ROMP_SID"   # the session's own sid, set by _options on every session CLI (a hosted one's spawn spec too)
+
+
+def proc_session_id(pid: int, run=None, procfs=None) -> str | None:
+    """The session a process was launched for: ROMP_SID in its environment as exec'd (proc_env_value). _options sets it to
+    the session's OWN sid on every launch, so a comment thread's CLI carries the thread's sid while its argv still names
+    the parent's conversation (a fork launch is --resume <parent> --fork-session --session-id=<thread>). None when the
+    process is gone, its environment cannot be read, or it carries none."""
+    return proc_env_value(pid, SESSION_ID_ENV, run=run, procfs=procfs) or None
 
 
 def find_session_cli(ps_lines: list[str], sids: list[str], parent_pid: int, lease: dict | None = None,
@@ -5309,11 +5346,42 @@ def _model_rank(name):
     return None
 
 
+def _model_version(name):
+    """The version a model id/display name carries right after its family word, as (major, minor), or None when it
+    carries none: 'claude-opus-4-8' and 'Opus 4.8' are (4, 8), 'Opus 5' is (5, 0), and a bare alias ('opus', the
+    label 'Opus') is None, since which version an alias resolves to is not in the name. A date stamp is not a version
+    (at most two digits a part), so 'claude-haiku-4-5-20251001' is (4, 5) and an old-style id that puts its version
+    before the family ('claude-3-opus-20240229') is None."""
+    r = _model_rank(name)
+    if r is None:
+        return None
+    m = re.search(re.escape(_MODEL_TIERS[r]) + r"[-\s]?(\d{1,2})(?:[-.](\d{1,2}))?(?!\d)", str(name).lower())
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+
+
 def _model_downgrade(frm, to):
     """True only for a KNOWN down-tier transition — the shape of an API capacity fallback. Unknown
-    names never qualify: a mint on a user's own exotic pick is worse than a missed exotic fallback."""
+    names never qualify: a mint on a user's own exotic pick is worse than a missed exotic fallback.
+    Across families the family rank decides; inside one the version does, where BOTH names carry one
+    (a safeguards fallback can stay in the family: Opus 5.5 answered by Opus 4.8, first seen 2026-09-23, which the
+    family rank alone read as lateral, so no card, no requested-model mark and no retry followed it)."""
     a, b = _model_rank(frm), _model_rank(to)
-    return a is not None and b is not None and b < a
+    if a is None or b is None:
+        return False
+    if a != b:
+        return b < a
+    va, vb = _model_version(frm), _model_version(to)
+    return va is not None and vb is not None and vb < va
+
+
+def _model_same_tier(x, y):
+    """The same family and, where both names carry one, the same version: one fallback tier, read
+    the way _model_downgrade reads a transition. Unknown families never match."""
+    a, b = _model_rank(x), _model_rank(y)
+    if a is None or a != b:
+        return False
+    va, vb = _model_version(x), _model_version(y)
+    return va is None or vb is None or va == vb
 
 
 def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False, category=""):
@@ -7067,7 +7135,7 @@ class SdkSession:
         if str(rec.get("scope") or "session") == "local":
             return False
         to = str(rec.get("fallbackModel") or rec.get("fallback_model") or "")
-        if _model_rank(to) is None or _model_rank(to) != _model_rank(live):
+        if not _model_same_tier(to, live):
             return False
         cat = str(rec.get("apiRefusalCategory") or rec.get("api_refusal_category") or "").strip()
         self._fallback_cause = "safeguards"
@@ -7098,8 +7166,7 @@ class SdkSession:
         if not pick or pick == "default" or getattr(self, "_upgrade_retry", None):
             return False
         live = getattr(self, "_served_model", "") or getattr(self, "model", "")
-        pr, lr = _model_rank(pick), _model_rank(live)
-        if pr is not None and lr is not None and lr < pr:
+        if _model_downgrade(pick, live):
             self._arm_upgrade_retry(_alias_label(pick), live)
             return True
         return False
@@ -7135,8 +7202,7 @@ class SdkSession:
         arm = self._retry_armed()
         if not arm:
             return
-        a, b = _model_rank(pm), _model_rank(arm.get("from"))
-        if a is None or b is None or a < b:
+        if _model_rank(pm) is None or _model_rank(arm.get("from")) is None or _model_downgrade(arm.get("from"), pm):
             return
         self._upgrade_retry = None
         self.backend._log("retry upgrade (%s): back on %s after %d attempt(s)" % (self.name, pm, arm.get("attempts", 0)))
@@ -7932,7 +7998,7 @@ class SdkSession:
             # ALREADY standing — the API served this tier last time too: a host attach replaying the fallen reply the old
             # kernel never acked, a reconnect's init reporting the pick and the next reply falling back the same way — keeps
             # the cause on record (review 2026-09-17: the attach's seed set "safeguards" and the replayed learn erased it).
-            same_episode = bool(prev_served) and _model_rank(prev_served) is not None and _model_rank(prev_served) == _model_rank(pm)
+            same_episode = bool(prev_served) and _model_same_tier(prev_served, pm)
             if not getattr(self, "_refusal_this_turn", False) and not same_episode:
                 self._fallback_cause = ""             # a new episode: its cause is unknown until the CLI's refusal frame names it (seconds later)
                 self._fallback_category = ""
@@ -12243,17 +12309,33 @@ class SdkBackend:
                         parts = ln.strip().split(None, 2)
                         if len(parts) == 3 and parts[0].isdigit():
                             cmd_of[int(parts[0])] = parts[2]
-                    # T304: two CLIs holding ONE conversation, as the listing stands before the reap — the
-                    # two-writers hazard itself, recorded even though the reap below usually resolves it
-                    for fsid, pids in duplicate_clis(ps_lines, lastsids).items():
-                        r0 = by_fsid.get(fsid) or {}
+                    # T304: two CLIs serving ONE session, as the listing stands before the reap — the two-writers
+                    # hazard itself, recorded even though the reap below usually resolves it. Keyed on the session each
+                    # CLI was launched for (cli_sessions: its ROMP_SID), never the conversation id on its argv, which a
+                    # comment thread shares with its parent: keyed that way, every boot filed a parent whose threads
+                    # outlived the restart under their hosts as a duplicate. The row keeps its kind and fields; `fsid`
+                    # is now the session's conversation id from its reg
+                    by_sid_reg = {str(r.get("sid")): r for r in regs if r.get("sid")}
+                    by_sid, unchecked = cli_sessions(ps_lines, lastsids, by_sid_reg)
+                    for dsid, pids in by_sid.items():
+                        if len(pids) < 2:
+                            continue
+                        r0 = by_sid_reg.get(dsid) or {}
                         problem_row(self.state_dir,
-                                    "boot: %d claude processes were holding session %s's conversation at once "
-                                    "(pids %s); the orphans this kernel started are being ended, any other kernel's "
-                                    "stays and is named below" % (len(pids), r0.get("name") or fsid[:8],
-                                                                       ", ".join(str(p) for p in pids)),
-                                    "reconcile.duplicate-cli", log=self._log, sid=r0.get("sid"), name=r0.get("name"),
-                                    fsid=fsid, pids=",".join(str(p) for p in pids), n=len(pids))
+                                    "boot: %d claude processes were serving session %s at once (pids %s); each is "
+                                    "judged by its own lease below, and only an orphan this kernel started is ended"
+                                    % (len(pids), r0.get("name") or dsid[:8], ", ".join(str(p) for p in pids)),
+                                    "reconcile.duplicate-cli", log=self._log, sid=dsid, name=r0.get("name"),
+                                    fsid=str(r0.get("lastSid") or ""), pids=",".join(str(p) for p in pids), n=len(pids))
+                    if unchecked:
+                        # the fail-loud half: a CLI on one of our conversations whose session cannot be read is not
+                        # filed as anyone's duplicate by its argv; it is named here as not checked
+                        problem_row(self.state_dir,
+                                    "boot: %d claude process(es) on this kernel's conversations (pids %s) carry no "
+                                    "session id this kernel can read or knows, so they were not checked for a second "
+                                    "process serving one session" % (len(unchecked), ", ".join(str(p) for p in unchecked)),
+                                    "reconcile.duplicate-unchecked", log=self._log,
+                                    pids=",".join(str(p) for p in unchecked), n=len(unchecked))
                     # Ownership by lease (T305): a CLI with a valid lease is owned whatever its parent; every
                     # anomaly is a problem row (lease_census documents the rules and the kinds)
                     leases = list_leases(self.state_dir)

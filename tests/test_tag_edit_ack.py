@@ -895,9 +895,9 @@ class Capability(_Wire):
                         and isinstance(seq["n"], int) and not isinstance(seq["n"], bool),
                         "the folds half carries this kernel life's count of taken fold publishes, null folds "
                         "included (2026-09-30): %r" % (seq,))
-        self.assertEqual(vo, {"type": "viewOrder", "order": [], "stored": False, "folds": None},
-                         "no arrangement stored here yet, nor any folds (2026-09-23), which is what a browser "
-                         "carrying either publishes against")
+        self.assertEqual(vo, {"type": "viewOrder", "order": [], "stored": False, "folds": None, "files": None},
+                         "no arrangement stored here yet, nor any folds (2026-09-23) or file tabs (2026-09-30), which is "
+                         "what a browser carrying any of them publishes against")
         caps = next(m for m in self.sent if m["type"] == "caps")
         # the frame lists the tuple itself, so a PR adding a capability edits one line, not this test too
         self.assertEqual(caps, {"type": "caps", "caps": list(km.KERNEL_WS_CAPS), "viewsSeq": None},

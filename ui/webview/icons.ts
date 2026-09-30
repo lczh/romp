@@ -20,6 +20,13 @@ export const ICON_ZOOM = svg('<circle cx="11" cy="11" r="8"/><line x1="21" y1="2
 /** a fork: one line in from the left that branches into two, up-right and down-right, running on to the right
  *  edge; no arrowheads (the user 2026-09-12, describing the chat's fork control) */
 export const ICON_FORK = svg('<polyline points="2 12 9 12 15 7 22 7"/><polyline points="9 12 15 17 22 17"/>');
+/** a window with an arrow leaving it up and to the right: the file viewer's "Open as a tab" (2026-09-30) */
+export const ICON_POPOUT = svg('<path d="M14 4h6v6"/><line x1="20" y1="4" x2="11" y2="13"/>'
+  + '<path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>');
+/** a circular arrow: a file tab's Reload (2026-09-30) */
+export const ICON_RELOAD = svg('<path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/>');
+/** a page with its corner folded: a file tab's glyph in the strip (2026-09-30), drawn at the label's size */
+export const ICON_FILE = svg('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><polyline points="14 3 14 8 19 8"/>');
 /** the acknowledgements a glyph button swaps to: done, and failed */
 export const ICON_CHECK = svg('<polyline points="20 6 9 17 4 12"/>');
 export const ICON_CROSS = svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>');

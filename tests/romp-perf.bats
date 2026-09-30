@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# `romp perf [--interval <s>] [--json]` and `romp perf log on|off` — the kernel's performance counters
+# `romp perf [--interval <s>] [--json [--walk]]` and `romp perf log on|off` — the kernel's performance counters
 # for a terminal: two GET /perf snapshots printed as rates, one raw snapshot, or the POST that flips the
 # romp-perf stderr log without a restart.
 #
@@ -213,6 +213,29 @@ json.dump(d, open(sys.argv[2], "w"))' "${!src}" "$TEST_DIR/old-$s.json"
     [ "$status" -eq 0 ]
     echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["pusher"]["cycles"] == 100; assert d["process"]["pid"] == 4242'
     [ "$(cat "$CURL_CALLS")" -eq 1 ]
+    [ "$(grep -c -F "walk=1" "$CURL_LOG")" -eq 0 ]       # a plain read: the two heap-wide gauges stay null (2026-09-29)
+}
+
+@test "romp perf --json --walk: reads GET /perf?walk=1 once, in either order, and prints that snapshot" {
+    # the two gauges whose read walks the whole heap (heap.allocatedBlocks, gc.frozen) are filled only on ?walk=1
+    run "$ROMP_SCRIPT" perf --json --walk
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -F "127.0.0.1:29855/perf?walk=1" "$CURL_LOG")" -eq 1 ]
+    grep -q "X-Romp-Token: TESTTOKEN123" "$CURL_STDIN"
+    echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["process"]["pid"] == 4242'
+    [ "$(cat "$CURL_CALLS")" -eq 1 ]
+    run "$ROMP_SCRIPT" perf --walk --json
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -F "127.0.0.1:29855/perf?walk=1" "$CURL_LOG")" -eq 2 ]
+}
+
+@test "romp perf --walk: refused without --json, before any read (the rates never use the walked gauges)" {
+    run "$ROMP_SCRIPT" perf --walk
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp perf [--interval <s>] [--json [--walk]]"* ]]
+    run "$ROMP_SCRIPT" perf --walk --interval 0
+    [ "$status" -eq 2 ]
+    [ ! -f "$CURL_LOG" ]                                 # nothing reached the kernel
 }
 
 @test "romp perf stacks: reads GET /perf?stacks=1 once and prints one block per thread, its stage and its frames innermost last" {

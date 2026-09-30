@@ -29,8 +29,10 @@ test("relayed is a first-class status, and the thread STAYS TALKABLE", () => {
   assert.match(TYPES, /"merging" \| "merged"/);
   assert.match(RENDER, /: th!\.status === "merging" \? "Relaying back to the session…"/);
   assert.match(RENDER, /: th!\.status === "merged" \? nm \+ " \(relayed to the session\)"/);
-  assert.match(RENDER, /t\.status === "open" \|\| t\.status === "resolved" \|\| t\.status === "merged"/);
-  assert.match(RENDER, /th\.status === "resolved" \|\| th\.status === "merged" \? " resolved" : ""/);
+  // …and it LOOKS open (the user 2026-09-30, whose relayed comment stopped showing): the rail keeps it, merging included,
+  // and only a resolved thread dims (comment-relay-look.test.ts pins the mapping)
+  assert.match(RENDER, /\.filter\(\(t\) => threadOnRail\(t\.status\)\)/);
+  assert.match(RENDER, /"cmt-tick" \+ \(threadSettled\(th\.status\) \? " resolved" : ""\)/);
   // the composer invites the next message instead of declaring the thread done
   assert.match(RENDER, /Reply to continue — the discussion so far was relayed to the session…/);
   // …and the kernel reopens a relayed thread on reply. A RESOLVED thread no longer does (the user

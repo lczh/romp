@@ -173,7 +173,10 @@ process.stdout.write(JSON.stringify({
         # one by one; queued breadcrumbs are capped besides. pane-shim-stale.test.ts runs both.
         self.assertIn('else{if(!failedConnects)firstFailT=Date.now();failedConnects++;}', js)
         self.assertIn('if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}', js)
-        self.assertIn('if(m&&m.type==="clientDiag"){if(queuedDiag>=DIAG_QUEUE_MAX)return;queuedDiag++;}', js)
+        # A window-sender row (a foreign page's post caused it) queues under a cap of its own, so it never takes a slot
+        # the page's own breadcrumbs keep; pane-shim-stale.test.ts runs it against the real noteForeign.
+        self.assertIn('if(m&&m.type==="clientDiag"){var fr=m.surface==="window-sender";if(fr?queuedForeign>=FOREIGN_QUEUE_MAX:'
+                      'queuedDiag-queuedForeign>=DIAG_QUEUE_MAX)return;if(fr)queuedForeign++;queuedDiag++;}', js)
 
     def test_shim_reconnect_loop_cannot_die(self):
         # The retry chain used to hang entirely off onclose, and the watchdog only ever closed OPEN

@@ -9,9 +9,19 @@ route pane. A Chromium driver opens the dashboard and reads:
      hears the pane-set broadcast naming it;
   3. the URL pane is a sandboxed iframe with its URL as given (no ?v=, no token), marked protocol none; the forged
      toggleFleet, notify and reveal it posts on load change nothing, and it is told nothing (its beacons say so);
+  3b. the URL pane posts openSettings, a settingsSync with another theme, viewFile and logUnseen into each of the
+     shell's frames but its own (parent.frames, every pane's window and the gear's), and every read of the frames reads
+     each of them that has loaded a kernel page (the feed and the Files pane among them; an off pane's frame loads
+     none), with none failing: the modal stays closed, the settings store is unchanged, no viewer opens and the Open log
+     badge stays as it was, and each pane that dropped one filed its trace in the kernel's client-diag journal
+     (ui/webview/window-sender.ts noteForeign: the site and the origin "null", nothing of the message); the same
+     openSettings from the notes pane, a window on the shell's origin, opens the modal;
   4. the gear's Panes section has a row per data pane, the experimental one off; turning it on brings the pane on screen;
   5. a define at the kernel while the page is open: the pane-set revision on the next keepalive stands the reload OFFER
      with the panes' wording, the page does not reload on its own, and the Reload click shows the new pane.
+  9. on a fresh shell page, the shell's source check (window.__rompPaneSourceOk) is read-only and non-configurable, and
+     each way a later script can try to replace it (the attempts tests/test_shell_source_lock.py runs in node's vm, each
+     run here as a script of the page) leaves the defined check in place, its text the kernel's definition.
 Runs when ROMP_SERVED_TESTS_REQUIRE=1 (CI); skips where no Chromium is installed. Synthetic fixtures only."""
 import http.server
 import json
@@ -69,6 +79,7 @@ def _transcript(cwd, pairs):
 NOTES_PAGE = """<!doctype html><html><head><meta charset=utf-8><link rel=stylesheet href=theme.css><script src=shim.js></script></head>
 <body><h1 id=t>Notes</h1><div id=empty data-pane-empty style="height:260px"></div><iframe id=inner src=inner.html></iframe><script>
 window.__labMsgs=[];window.addEventListener('message',function(e){window.__labMsgs.push(e.data);});
+window.__labOpenSettingsAll=function(){var n=0;for(var i=0;i<parent.frames.length;i++){try{parent.frames[i].postMessage({romp:'openSettings'},'*');n++;}catch(e){}}return n;};
 </script></body></html>"""
 
 # a frame NESTED inside the notes pane (same origin as the shell, served from the pane's own directory): it forges the
@@ -84,6 +95,8 @@ DOCS_PAGE = """<!doctype html><html><head><meta charset=utf-8></head><body><h1>D
 try{parent.postMessage({romp:'toggleFleet',to:'fleet'},'*');parent.postMessage({romp:'notify',kind:'error',text:'forged from the docs pane'},'*');parent.postMessage({romp:'reveal',pane:'fleet'},'*');
 parent.postMessage({romp:'openKeys'},'*');parent.postMessage({romp:'hotkeyConfigure',sid:'11111111-2222-4333-8444-000000000301',name:'forged'},'*');}catch(e){}
 window.addEventListener('message',function(e){var i=new Image();i.src='/beacon?m='+encodeURIComponent(JSON.stringify(e.data)).slice(0,300);});
+window.__labPostAll=function(ms){var n=0;for(var i=0;i<parent.frames.length;i++){try{var f=parent.frames[i];if(f===window)continue;
+for(var k=0;k<ms.length;k++)f.postMessage(ms[k],'*');n++;}catch(e){}}return n;};
 </script></body></html>"""
 
 
@@ -150,6 +163,48 @@ out.afterForged = await page.evaluate(() => ({ fleet: document.body.classList.co
   notices: (() => { try { return JSON.parse(localStorage.getItem("romp:notices") || "[]").map((n) => n.text); } catch (e) { return []; } })() }));
 
 if (cfg.shot) await page.screenshot({ path: cfg.shot });   // a picture for a reviewer (ROMP_LAB_SHOT names the file; unset in CI)
+
+// ---- 3b. the URL pane posts into every frame of the shell; the notes pane's same post is the control ----
+// the gear's frame loads on its first open (data-src); give it its src without opening it, so its listeners are up
+await page.evaluate(() => { const f = document.getElementById("f-settings"); if (f && !f.getAttribute("src")) f.setAttribute("src", f.getAttribute("data-src")); });
+const sf = await frameEnding("/settings");
+if (!sf) await die("no /settings frame");
+out.gearUp = await sf.waitForFunction(() => !!document.getElementById("rsettings") && typeof window.__rompSetLogCount === "function" && typeof window.__rompSettingsClose === "function",
+  null, { timeout: 15000 }).then(() => true).catch(() => false);
+await page.waitForTimeout(500);
+// every frame holding a page on the kernel's origin: its modal, viewer and Open log badge (null where the frame has
+// none), and the store they share (a frame with no kernel page, an off pane's empty one or the URL pane's own, is not
+// read). A frame whose read fails is a row of its own, {path, error}, never dropped: a frame missing from a read would
+// pass every check below that filters the read for an open modal or viewer
+const ownFrames = async () => { const rows = []; for (const f of page.frames()) { if (f === page.mainFrame() || !f.url().startsWith(cfg.api)) continue;
+  const r = await f.evaluate(() => ({ path: location.pathname, modal: (() => { const p = document.getElementById("rsettings"); return p ? !p.hidden : null; })(),
+    viewer: !!document.getElementById("romp-fileview"), badge: (() => { const b = document.querySelector("#rs-log-open .rs-log-n"); return b ? b.textContent : null; })() }))
+    .catch((e) => ({ path: new URL(f.url()).pathname, error: String(e).slice(0, 300) }));
+  rows.push(r); } return rows.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)); };
+const store = () => page.evaluate(() => localStorage.getItem("romp:settings"));
+out.foreignBefore = { store: await store(), frames: await ownFrames() };
+const theme = (() => { try { return JSON.parse(out.foreignBefore.store || "{}").theme || "classic"; } catch (e) { return "classic"; } })();
+out.forgedTheme = theme === "yatharth-light" ? "classic" : "yatharth-light";
+const df = await frameEnding("/docs/");
+if (!df) await die("no /docs/ frame");
+out.shellFrames = await page.evaluate(() => window.frames.length);
+// three passes, each read before the next: logUnseen first and alone, since a shell that hears of new log lines (a viewer
+// that opened on a missing file logs one) posts its own count over the badge, and an open modal asks for it; openSettings
+// last, since the modal toggles
+const postAll = (ms) => df.evaluate((list) => window.__labPostAll(list), ms).catch((e) => "threw: " + e);
+out.foreignPosted = [await postAll([{ romp: "logUnseen", n: 7 }])];
+await page.waitForTimeout(1200);
+out.foreignBadge = { store: await store(), frames: await ownFrames() };
+out.foreignPosted.push(await postAll([{ type: "settingsSync", settings: { theme: out.forgedTheme } }, { romp: "viewFile", path: "notes/forged-from-docs.md" }]));
+await page.waitForTimeout(1500);
+out.foreignMid = { store: await store(), frames: await ownFrames() };
+out.foreignPosted.push(await postAll([{ romp: "openSettings" }]));
+await page.waitForTimeout(1500);
+out.foreignAfter = { store: await store(), frames: await ownFrames() };
+out.controlPosted = await nf.evaluate(() => window.__labOpenSettingsAll()).catch((e) => "threw: " + e);
+out.controlOpened = await sf.waitForFunction(() => { const p = document.getElementById("rsettings"); return !!p && !p.hidden; }, null, { timeout: 8000 }).then(() => true).catch(() => false);
+out.controlClosed = await sf.evaluate(() => window.__rompSettingsClose()).catch(() => false);   // as it was, for the gear's rows below
+await page.waitForTimeout(300);
 
 // ---- 4. the gear's rows ----
 await page.evaluate(() => window.__rompOpenSettings && window.__rompOpenSettings());
@@ -297,6 +352,46 @@ out.phoneBoot.requests = bootRequests.slice();
 await qp.click("#mtabs button[data-pane=notes]"); await qp.waitForTimeout(800);
 out.phoneNotesTap = { notesSrc: await qp.evaluate(() => document.getElementById("f-notes").getAttribute("src")), requests: bootRequests.slice() };
 await qctx.close();
+
+// ---- 9. the shell's source check is locked, in a real browser: a fresh shell page, every attempt run as a page script ----
+const lp = await browser.newPage({ viewport: { width: 1500, height: 900 } });
+await lp.goto(cfg.url);
+await lp.waitForSelector(".rail-btn[data-pane=notes]", { timeout: 20000 }).catch(async () => { await die("no shell for the lock leg"); });
+out.lock = await lp.evaluate(() => {
+  const K = "__rompPaneSourceOk", ANY = "function(e){return true;}";
+  const desc = (d) => (d ? { writable: d.writable, configurable: d.configurable, enumerable: d.enumerable, accessor: !!(d.get || d.set), type: typeof d.value } : null);
+  const orig = window[K], text = String(orig), before = desc(Object.getOwnPropertyDescriptor(window, K));
+  // the attempts tests/test_shell_source_lock.py CheckLocked runs in node's vm, by the same names; strict mode as a strict function
+  const ATTEMPTS = {
+    "an assignment on window": "window.__rompPaneSourceOk=" + ANY + ";",
+    "an assignment by a computed name": "window['__romp'+'PaneSourceOk']=" + ANY + ";",
+    "an assignment to the bare global": "__rompPaneSourceOk=" + ANY + ";",
+    "an assignment on self": "self.__rompPaneSourceOk=" + ANY + ";",
+    "an assignment in strict mode": "(function(){'use strict';window.__rompPaneSourceOk=" + ANY + ";})();",
+    "a var declaration": "var __rompPaneSourceOk=" + ANY + ";",
+    "Reflect.set": "Reflect.set(window,'__rompPaneSourceOk'," + ANY + ");",
+    "Object.assign": "Object.assign(window,{__rompPaneSourceOk:" + ANY + "});",
+    "defineProperty with a value": "Object.defineProperty(window,'__rompPaneSourceOk',{value:" + ANY + "});",
+    "defineProperty with a getter": "Object.defineProperty(window,'__rompPaneSourceOk',{get:function(){return " + ANY + ";}});",
+    "a delete, then an assignment": "delete window.__rompPaneSourceOk;window.__rompPaneSourceOk=" + ANY + ";",
+    "an unlock, then an assignment": "Object.defineProperty(window,'__rompPaneSourceOk',{writable:true,configurable:true});window.__rompPaneSourceOk=" + ANY + ";",
+  };
+  // each attempt starts from the check as the boot left it: one that replaced it (only on a page without the lock) is undone
+  // first, as the vm harness does, so each attempt's verdict is its own
+  const ORIG = Object.getOwnPropertyDescriptor(window, K);
+  const attempts = {};
+  for (const name of Object.keys(ATTEMPTS)) {
+    const now = Object.getOwnPropertyDescriptor(window, K);
+    if ((!now || now.value !== orig || now.get || now.set) && (!now || now.configurable)) Object.defineProperty(window, K, ORIG);
+    window.__labRan = false; window.__labThrew = null;
+    const sc = document.createElement("script");
+    sc.textContent = "window.__labRan=true;try{" + ATTEMPTS[name] + "}catch(x){window.__labThrew=String(x&&x.name||x);}";
+    document.head.appendChild(sc); sc.remove();
+    attempts[name] = { ran: window.__labRan === true, same: window[K] === orig, text: String(window[K]) === text, threw: window.__labThrew };
+  }
+  return { before, text, attempts, after: desc(Object.getOwnPropertyDescriptor(window, K)), stillSame: window[K] === orig };
+}).catch((e) => ({ error: String(e) }));
+await lp.close();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -500,6 +595,101 @@ class ServedPaneRegistry(unittest.TestCase):
         self.assertEqual((r["phonePage"] or {}).get("title"), "Notes", "the page is up, its shim with it: %r" % r["phonePage"])
         self.assertEqual(r["phoneRequests"], 1, "the page is requested once, however many times its tab is tapped: %r" % r["phoneRequests"])
         self.assertGreater((r["kitArtifacts"]["rect"] or {"w": 0})["w"], 60, "the Artifacts leaf has a rectangle: %r; after the drop: %r" % (r["kitArtifacts"], r["kitAfterDrop"]["rects"]))
+
+    def test_a_foreign_frame_posting_into_every_pane_changes_nothing_and_leaves_its_trace_and_a_pane_is_heard(self):
+        r = self._result()
+        # 3b. the URL pane (a sandboxed frame, origin "null") posted openSettings, a settingsSync with another theme, viewFile and
+        # logUnseen into each of the shell's frames; the same openSettings from the notes pane (a window on the shell's origin) is
+        # the control that shows the post reaches the gear's listener at all
+        self.assertTrue(r["gearUp"], "the gear's frame loaded and installed its listeners before the posts")
+        before, badged, mid, after = r["foreignBefore"], r["foreignBadge"], r["foreignMid"], r["foreignAfter"]
+        paths = [f["path"] for f in before["frames"]]
+        print("the frames each read reads: %s" % ", ".join(paths))   # read off a passing run's log (-rP)
+        # the first read holds the frames the checks below name: the chat, the feed and the Files pane (each opens a
+        # viewer on viewFile), the gear's frame (openSettings and the badge), the timeline (whose boot files one of the
+        # traces required below) and the notes pane (the control's sender). A frame the first read holds beyond these,
+        # the Outline's among them, is held to every later read by the equality below
+        for need in ("/chat", "/feed", "/files", "/pane/notes/", "/settings", "/timeline"):
+            self.assertIn(need, paths, "the frame the posts must reach is up: %r" % paths)
+        # every read read every frame holding a kernel page: a failed read is a row with an error (ownFrames), and each
+        # later read holds the first read's frames, so a frame that went missing cannot pass the modal and viewer checks
+        # below as clean
+        for label, read in (("before the posts", before), ("after logUnseen", badged), ("after settingsSync and viewFile", mid),
+                            ("after openSettings", after)):
+            with self.subTest(read=label):
+                self.assertEqual([f for f in read["frames"] if "error" in f], [], "a frame read failed")
+                self.assertEqual([f["path"] for f in read["frames"]], paths, "the same frames as the first read")
+        self.assertEqual(r["foreignPosted"], [r["shellFrames"] - 1] * 3, "each pass, the docs page posted into every one of the shell's frames but its own")
+        self.assertGreaterEqual(r["shellFrames"], 6, "the panes and the gear's frame: %r" % paths)
+        gear = [f for f in before["frames"] if f["path"] == "/settings"]
+        print("the gear's frame before and after each pass: %r" % [[f for f in x["frames"] if f["path"] == "/settings"] for x in (before, badged, mid, after)])
+        self.assertEqual([(f.get("modal"), isinstance(f.get("badge"), str)) for f in gear], [(False, True)], "before the posts: the modal closed, the badge there: %r" % gear)
+        with self.subTest(post="settingsSync"):
+            self.assertEqual((badged["store"], mid["store"], after["store"]), (before["store"],) * 3, "a foreign settingsSync must not rewrite the settings store (theme %r forged)" % r["forgedTheme"])
+        with self.subTest(post="openSettings"):
+            self.assertEqual([f["path"] for f in after["frames"] if f.get("modal")], [], "a foreign openSettings must not open the modal: %r" % after["frames"])
+        with self.subTest(post="viewFile"):
+            self.assertEqual([f["path"] for f in mid["frames"] + after["frames"] if f.get("viewer")], [], "a foreign viewFile must not open a viewer: %r" % mid["frames"])
+        with self.subTest(post="logUnseen"):
+            # the badge as it stood before the posts: the shell's own count of the lines the lab's earlier legs logged
+            self.assertEqual([f.get("badge") for f in badged["frames"] if f["path"] == "/settings"], [gear[0].get("badge")],
+                             "a foreign logUnseen (n 7) must leave the Open log badge as it was")
+        with self.subTest(what="the trace"):
+            rows = []
+            with open(os.path.join(self.lab, "xdg", "romp", "client-diag.jsonl"), encoding="utf-8") as f:
+                for line in f:
+                    rec = json.loads(line)
+                    if rec.get("surface") == "window-sender":
+                        rows.append(rec)
+            sites = {rec["data"]["site"] for rec in rows}
+            print("traced sites (%d rows): %s" % (len(rows), ", ".join(sorted(sites))))   # read off a passing run's log (-rP)
+            for need in ("frame-listener", "file-view", "settings-sync", "gear:openSettings", "gear:logUnseen", "timeline-boot"):
+                self.assertIn(need, sites, "a pane that dropped a foreign post filed its trace: %r" % sorted(sites))
+            self.assertEqual({(rec["what"], json.dumps(sorted(rec["data"]))) for rec in rows}, {("foreign", '["origin", "site"]')},
+                             "each row names the site and the origin and nothing else")
+            self.assertEqual({rec["data"]["origin"] for rec in rows}, {"null"}, "the sender's origin, as the browser stamped it on a sandboxed frame's post")
+            # the gear's listeners and the timeline boot each run on one page, and each heard four foreign posts from one origin:
+            # one row apiece, so a repeat filed none (the other sites run on several pages, which a row does not tell apart)
+            for one in ("gear:openSettings", "gear:logUnseen", "timeline-boot"):
+                self.assertEqual(sum(1 for rec in rows if rec["data"]["site"] == one), 1, "%s: four posts, one row" % one)
+        # the control: a window on the shell's origin is heard, so the post reaches the gear's listener
+        self.assertIsInstance(r["controlPosted"], int, r["controlPosted"])
+        self.assertTrue(r["controlOpened"], "the notes pane's openSettings opens the modal: the post reaches the gear's listener")
+        self.assertTrue(r["controlClosed"], "and the lab closes it again before the gear's rows are read")
+
+    LOCK_ATTEMPTS = ("an assignment on window", "an assignment by a computed name", "an assignment to the bare global",
+                     "an assignment on self", "an assignment in strict mode", "a var declaration", "Reflect.set", "Object.assign",
+                     "defineProperty with a value", "defineProperty with a getter", "a delete, then an assignment",
+                     "an unlock, then an assignment")
+
+    def test_the_shells_source_check_is_locked_in_a_real_browser_and_no_script_replaces_it(self):
+        # 9. tests/test_shell_source_lock.py holds the lock in node's vm, through a global whose locked-property rules its
+        # harness writes by hand; this leg reads the property on Chromium's real window, after the served shell's boot
+        r = self._result()
+        lock = r["lock"]
+        self.assertNotIn("error", lock, lock)
+        with open(os.path.join(ROOT, "kernel", "kernel.py"), encoding="utf-8") as f:
+            kernel = f.read()
+        head, tail = "window.__rompPaneSourceOk=function(e){", "return false;}catch(x){return false;}};"
+        at = kernel.index(head)
+        defined = kernel[at + len("window.__rompPaneSourceOk="):kernel.index(tail, at) + len(tail) - 1]
+        self.assertEqual(lock["text"], defined, "the check on the page is the kernel's definition, its text as served")
+        self.assertEqual(sorted(lock["attempts"]), sorted(self.LOCK_ATTEMPTS), "every attempt ran")
+        for name in self.LOCK_ATTEMPTS:
+            got = lock["attempts"][name]
+            with self.subTest(attempt=name):
+                self.assertTrue(got["ran"], "the attempt ran as a script of the page")
+                self.assertTrue(got["same"] and got["text"], "the check is still the defined function, its text unchanged: %r" % got)
+        with self.subTest(what="which attempts throw"):
+            # the strict-mode write, Object.assign (which writes as strict code does) and each define the lock refuses throw
+            # a TypeError; the other seven are ignored without one (a sloppy write, a var, Reflect.set's false, a delete's)
+            threw = ("an assignment in strict mode", "Object.assign", "defineProperty with a value", "defineProperty with a getter",
+                     "an unlock, then an assignment")
+            self.assertEqual({name: got["threw"] for name, got in lock["attempts"].items()},
+                             {name: ("TypeError" if name in threw else None) for name in self.LOCK_ATTEMPTS})
+        self.assertEqual(lock["before"], {"writable": False, "configurable": False, "enumerable": True, "accessor": False, "type": "function"},
+                         "after boot the check is read-only and non-configurable")
+        self.assertEqual((lock["after"], lock["stillSame"]), (lock["before"], True), "and after every attempt the property is as the boot left it")
 
     def test_a_hand_row_flipped_in_the_gear_keeps_the_registry_keys(self):
         r = self._result()

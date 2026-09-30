@@ -66,12 +66,14 @@ class ViewOrderStore(unittest.TestCase):
         km._view_order_lkg[0] = None
         km._view_folds_lkg[0] = None
         _forget_fold_stamps()
+        km._view_files_lkg[0] = None
 
     def tearDown(self):
         km.jd.STATE = self._state
         km._view_order_lkg[0] = None
         km._view_folds_lkg[0] = None
         _forget_fold_stamps()
+        km._view_files_lkg[0] = None
         self.td.cleanup()
 
     def stored_file(self):
@@ -129,14 +131,14 @@ class ViewOrderStore(unittest.TestCase):
     def test_a_kernel_with_no_arrangement_says_so_and_one_with_an_empty_one_says_otherwise(self):
         # the browser's migration turns on exactly this: with no arrangement here, a browser carrying one
         # publishes it; with an EMPTY arrangement here, it does not (the emptiness is somebody's answer)
-        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [], "stored": False, "folds": None})
+        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [], "stored": False, "folds": None, "files": None})
         km._write_view_order([])
-        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [], "stored": True, "folds": None})
+        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [], "stored": True, "folds": None, "files": None})
 
     def test_the_frame_serves_what_was_written(self):
         km._write_view_order([FAR_WEB, LOCAL_A])
         self.assertFrame(km._view_order_frame(),
-                         {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": None})
+                         {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": None, "files": None})
 
     # ── the change event ──────────────────────────────────────────────────────────────────────────
     def test_a_write_reports_whether_it_changed_anything(self):
@@ -157,7 +159,7 @@ class ViewOrderStore(unittest.TestCase):
             km._broadcast_view_order()
         finally:
             km._send_client, km._clients[:] = saved_send, saved_clients
-        frame = {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": None}
+        frame = {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": None, "files": None}
         self.assertPushed(seen, ["phone", "desktop"], frame, "every viewer of this kernel hears the change, on the one slot")
 
     # ── the store survives a kernel that cannot read it ───────────────────────────────────────────
@@ -173,7 +175,7 @@ class ViewOrderStore(unittest.TestCase):
         km._write_view_order([LOCAL_A, FAR_WEB])
         self._raise_on_read()
         self.assertEqual(km._view_order_served(), ([LOCAL_A, FAR_WEB], True))
-        # (the folds half reads through the same patched reader and has no known-good copy: it is left out)
+        # (the folds and files halves read through the same patched reader and have no known-good copy: they are left out)
         self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A, FAR_WEB], "stored": True})
 
     def test_an_unreadable_store_with_nothing_known_good_says_NOTHING_rather_than_a_guess(self):
@@ -227,7 +229,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual(km._view_folds_served(), FOLDS)
         km._write_view_order([FAR_WEB, LOCAL_A])
         self.assertFrame(km._view_order_frame(),
-                         {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": FOLDS},
+                         {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": FOLDS, "files": None},
                          "one frame: the arrangement and the folds side by side")
 
     def test_no_folds_is_null_and_an_empty_fold_state_is_not(self):
@@ -262,14 +264,14 @@ class ViewFoldsStore(ViewOrderStore):
         handler = object.__new__(km.Handler)
         poster = {"cid": "desktop", "app": "chat", "alive": True, "send": lambda s: seen.append(("reply", json.loads(s)))}
         try:
-            km.Handler._dispatch_ws(handler, {"type": "setViewFolds", "folds": FOLDS}, poster)
+            km.Handler._dispatch_ws(handler, {"type": "setViewFolds", "folds": FOLDS, "files": None}, poster)
             first = list(seen)
             del seen[:]
-            km.Handler._dispatch_ws(handler, {"type": "setViewFolds", "folds": FOLDS}, poster)
+            km.Handler._dispatch_ws(handler, {"type": "setViewFolds", "folds": FOLDS, "files": None}, poster)
             again = list(seen)
         finally:
             km._send_client, km._clients[:] = saved_send, saved_clients
-        frame = {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS}
+        frame = {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS, "files": None}
         self.assertPushed(first, ["phone", "desktop"], frame)
         self.assertEqual(again, [], "the same folds again: no change, no push")
         self.assertEqual(self.stored_folds(), FOLDS)
@@ -281,7 +283,7 @@ class ViewFoldsStore(ViewOrderStore):
         saved = km._write_state_json
         km._write_state_json = lambda *a, **kw: (_ for _ in ()).throw(km._StateUnwritable(km._view_folds_path(), "[Errno 28] No space left on device"))
         try:
-            km.Handler._dispatch_ws(handler, {"type": "setViewFolds", "folds": FOLDS}, poster)
+            km.Handler._dispatch_ws(handler, {"type": "setViewFolds", "folds": FOLDS, "files": None}, poster)
         finally:
             km._write_state_json = saved
         self.assertEqual([m["type"] for m in seen], ["warn"])
@@ -300,7 +302,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.addCleanup(lambda: setattr(km, "_read_state_json", saved))
         self.assertEqual(km._view_order_frame()["folds"], FOLDS, "a file we could not read is not a missing one")
         km._view_folds_lkg[0] = None                 # a kernel that has never read it
-        self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True},
+        self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True, "files": None},
                          "no folds half at all: every page keeps the folds it shows rather than adopting a guess, "
                          "and the arrangement still goes")
 
@@ -345,7 +347,7 @@ class ViewFoldsStore(ViewOrderStore):
     def test_a_named_publish_is_pushed_with_its_name_to_every_viewer_and_the_file_keeps_the_folds_alone(self):
         by = {"browser": self.B, "n": 1}
         [sent] = self.dispatch(self.publish(FOLDS, by))
-        frame = {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS, "foldsBy": by}
+        frame = {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS, "foldsBy": by, "files": None}
         self.assertPushed(sent, ["phone", "desktop"], frame,
                           "every viewer, the one that folded included: its echo is how its page hears the publish land")
         self.assertEqual((km.jd.STATE / "view-folds.json").read_text(), json.dumps(FOLDS, sort_keys=True),
@@ -466,7 +468,7 @@ class ViewFoldsStore(ViewOrderStore):
         finally:
             km._send_client = saved
         self.assertEqual(seen, [(("vieworder",), {"type": "viewOrder", "order": [], "stored": False, "folds": None,
-                                                  "foldsSeq": {"boot": km._BOOT_ID, "n": 0}})])
+                                                  "foldsSeq": {"boot": km._BOOT_ID, "n": 0}, "files": None})])
 
     def test_a_browsers_publish_older_than_one_already_handled_is_dropped_and_another_browsers_is_not(self):
         # two panes of one browser, two sockets: the later state landed first, and the earlier one must not put itself back
@@ -503,7 +505,7 @@ class ViewFoldsStore(ViewOrderStore):
         km._read_state_json = flaky
         self.addCleanup(lambda: setattr(km, "_read_state_json", saved))
         km._view_folds_lkg[0] = None
-        self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True})
+        self.assertEqual(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True, "files": None})
 
     def test_the_browsers_remembered_are_bounded_and_the_one_heard_from_longest_ago_goes_first(self):
         cap = getattr(km, "_VIEW_FOLDS_SEEN_CAP", 256)
@@ -637,7 +639,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.addCleanup(setattr, km, "_BOOT_ID", saved_boot)
         km._BOOT_ID = "99999.1"                        # a restart: a new life, and the memory of the last one gone
         _forget_fold_stamps()
-        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS},
+        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [], "stored": False, "folds": FOLDS, "files": None},
                          "the folds on disk, named by nobody")
         self.assertEqual(km._view_order_frame()["foldsSeq"], {"boot": "99999.1", "n": 0}, "the new life's count, from nothing")
         [first] = self.dispatch(self.publish(dict(FOLDS, collapsed=["web"]), {"browser": self.B, "n": 5, "received": old}))
@@ -646,6 +648,105 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([m[0] for m in stale], ["desktop"], "under the kept 5, with a count of another life: dropped")
         [taken] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 2, "received": {"boot": "99999.1", "n": 1}}))
         self.assertEqual([m[0] for m in taken], ["phone", "desktop"], "with this life's count at the kept one's: taken")
+
+
+# The file tabs the browser keeps beside them (ui/webview/file-tabs.ts FileTabsState): two files open beside sessions on
+# two machines, one dragged to the head of a group. Synthetic paths in the notes-api world.
+FILES = {"v": 1, "tabs": [
+    {"id": "ftab-1a2b3c", "path": "~/notes-api/README.md", "sid": LOCAL_A, "anchor": LOCAL_A},
+    {"id": "ftab-4d5e6f", "path": "~/notes-api/src/app.py", "sid": FAR_WEB, "anchor": LOCAL_B, "lead": True}]}
+
+
+class ViewFilesStore(ViewOrderStore):
+    """The viewer's FILE TABS, kept beside the arrangement and the folds (the user 2026-09-30, who wanted files opened as
+    tabs beside their sessions to follow them across devices like the tab order). Its own file and its own frame half,
+    so a page from before file tabs, which knows nothing of them, never drops them; opaque here as the others are: a
+    round trip returns the object as written, nothing inside it read. Inherits the store's setUp and reruns its tests,
+    which is the point: the arrangement and the folds are unchanged by the half riding beside them."""
+
+    def stored_files(self):
+        return json.loads((km.jd.STATE / "view-files.json").read_text())
+
+    def test_file_tabs_round_trip_verbatim_and_ride_the_arrangements_frame(self):
+        self.assertTrue(km._write_view_files(FILES))
+        self.assertEqual(self.stored_files(), FILES, "written whole")
+        self.assertEqual(km._view_files_served(), FILES)
+        km._write_view_order([FAR_WEB, LOCAL_A])
+        self.assertFrame(km._view_order_frame(),
+                         {"type": "viewOrder", "order": [FAR_WEB, LOCAL_A], "stored": True, "folds": None, "files": FILES},
+                         "one frame: the arrangement, the folds and the file tabs side by side")
+
+    def test_no_file_tabs_is_null_and_an_emptied_list_is_not(self):
+        # the browser's migration turns on this: with nothing here a browser holding tabs publishes them; with an
+        # emptied list here (every tab closed) it must not reopen them from its own copy
+        self.assertIsNone(km._view_order_frame()["files"])
+        empty = {"v": 1, "tabs": []}
+        km._write_view_files(empty)
+        self.assertEqual(km._view_order_frame()["files"], empty)
+
+    def test_a_file_tabs_write_reports_whether_it_changed(self):
+        self.assertTrue(km._write_view_files(FILES), "a first list is a change")
+        self.assertFalse(km._write_view_files(json.loads(json.dumps(FILES))), "a republish of the list served pushes nothing")
+        self.assertTrue(km._write_view_files(dict(FILES, tabs=FILES["tabs"][:1])), "closing a tab is a change")
+
+    def test_a_non_object_or_an_oversized_one_is_refused_whole(self):
+        with self.assertRaises(km._StateUnwritable):
+            km._write_view_files([FILES])
+        with self.assertRaises(km._StateUnwritable):
+            km._write_view_files({"tabs": [{"path": "x" * 64}] * (km._VIEW_FILES_CAP // 64)})
+        self.assertFalse((km.jd.STATE / "view-files.json").exists(), "nothing written: a cut list is a different list")
+
+    def test_the_socket_message_writes_and_pushes_one_frame_to_every_viewer(self):
+        seen = []
+        saved_send, saved_clients = km._send_client, list(km._clients)
+        km._send_client = lambda c, key, msg, *a, **kw: seen.append((c["cid"], key, msg))
+        km._clients[:] = [{"cid": "phone"}, {"cid": "desktop"}]
+        handler = object.__new__(km.Handler)
+        poster = {"cid": "desktop", "app": "chat", "alive": True, "send": lambda s: seen.append(("reply", json.loads(s)))}
+        try:
+            km.Handler._dispatch_ws(handler, {"type": "setViewFiles", "files": FILES}, poster)
+            first = list(seen)
+            del seen[:]
+            km.Handler._dispatch_ws(handler, {"type": "setViewFiles", "files": FILES}, poster)
+            again = list(seen)
+        finally:
+            km._send_client, km._clients[:] = saved_send, saved_clients
+        frame = {"type": "viewOrder", "order": [], "stored": False, "folds": None, "files": FILES}
+        self.assertPushed(first, ["phone", "desktop"], frame)
+        self.assertEqual(again, [], "the same list again: no change, no push")
+        self.assertEqual(self.stored_files(), FILES)
+
+    def test_a_refused_file_tabs_write_is_said_to_the_viewer(self):
+        seen = []
+        handler = object.__new__(km.Handler)
+        poster = {"cid": "desktop", "app": "chat", "alive": True, "send": lambda s: seen.append(json.loads(s))}
+        saved = km._write_state_json
+        km._write_state_json = lambda *a, **kw: (_ for _ in ()).throw(km._StateUnwritable(km._view_files_path(), "[Errno 28] No space left on device"))
+        try:
+            km.Handler._dispatch_ws(handler, {"type": "setViewFiles", "files": FILES}, poster)
+        finally:
+            km._write_state_json = saved
+        self.assertEqual([m["type"] for m in seen], ["warn"])
+        self.assertIn("file tabs", seen[0]["text"])
+
+    def test_an_unreadable_file_tabs_store_serves_its_last_known_good_else_leaves_the_half_out(self):
+        km._write_view_files(FILES)
+        km._write_view_order([LOCAL_A])
+        saved = km._read_state_json
+
+        def flaky(path, *a, **kw):
+            if Path(path).name == "view-files.json":
+                raise km._StateUnreadable(path, "read failed: EIO")
+            return saved(path, *a, **kw)
+        km._read_state_json = flaky
+        self.addCleanup(lambda: setattr(km, "_read_state_json", saved))
+        self.assertEqual(km._view_order_frame()["files"], FILES, "a file we could not read is not a missing one")
+        km._view_files_lkg[0] = None                 # a kernel that has never read it
+        self.assertFrame(km._view_order_frame(), {"type": "viewOrder", "order": [LOCAL_A], "stored": True, "folds": None},
+                         "no files half at all: every page keeps the tabs it shows rather than adopting a guess")
+
+    def test_the_kernel_advertises_it(self):
+        self.assertIn("viewFiles", km.KERNEL_WS_CAPS, "a page reads the cap; an older kernel lacks it and sends no half")
 
 
 if __name__ == "__main__":

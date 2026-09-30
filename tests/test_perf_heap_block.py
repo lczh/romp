@@ -11,16 +11,19 @@ their serialized strings, the preview images) beside the allocator's and the col
 Pinned here: the gauges move by exactly what a test adds and fall back when it removes it, and two snapshots move no
 cumulative counter (a); the block serializes and every leaf is a plain scalar (b); a container the source lacks or an
 accessor that raises yields None for its key, the snapshot still serves, and the failure is said once per key, not per
-snapshot, a built-chat entry of a shape the gauge does not know being such a failure and never a silent under-count (c); a snapshot reads no file, builds nothing, evicts nothing and collects nothing (d); and the read stays under
-5 ms over populated caches (e). Synthetic fixtures only: invented strings and placeholder uuids."""
+snapshot, a built-chat entry of a shape the gauge does not know being such a failure and never a silent under-count (c); a snapshot reads no file, builds nothing, evicts nothing and collects nothing (d); and the plain read
+calls none of the interpreter's heap-wide walks over populated caches, the two heap-wide gauges being served only to a GET
+that asks ?walk=1 (e). Synthetic fixtures only: invented strings and placeholder uuids."""
 import contextlib
+import functools
 import gc
 import io
 import json
 import os
-import statistics
+import sys
 import tempfile
-import time
+import threading
+import tracemalloc
 import types
 import unittest
 from contextlib import redirect_stderr
@@ -85,6 +88,85 @@ def _em_lacking(*names):
     heap reads see the absence, as they would beside an older event model that has not got the container."""
     stub = types.SimpleNamespace(**{k: v for k, v in vars(em).items() if k not in names})
     return mock.patch.object(km, "em", stub)
+
+
+# The stdlib reads whose cost grows with the whole heap rather than with a cache the block names (2026-09-29): the
+# allocator's pool walk and its stats dump, the frozen generation's list walk, the two object-graph walks, a collection
+# and a tracemalloc snapshot. A 5 ms budget on the read's wall time could not tell one of these from a loaded runner; a
+# recorded call can, whatever the heap's size or the runner's load, so the pin is that the plain read makes none of them.
+HEAP_WALKS = ((sys, "getallocatedblocks"), (sys, "_debugmallocstats"), (gc, "get_freeze_count"), (gc, "get_objects"),
+              (gc, "get_referrers"), (gc, "collect"), (tracemalloc, "take_snapshot"))
+
+
+def _walk_hook(calls, skip):
+    """A profile function (sys.setprofile) that appends the name of each heap-wide read above that the thread calls,
+    matched by identity, not by name: a C function by the object the call reaches (the "c_call" event hands it over), a
+    Python one (tracemalloc.take_snapshot) by its code object (the "call" event's frame). So a call from Python code is
+    seen however the kernel spells it, an attribute lookup, a module-level alias or a from-import (review round one,
+    2026-09-29: the recorder before this patched the module attributes, and an alias bound at import time called straight
+    past it). A C function that C code calls on the kernel's behalf, through functools.partial, map or a sort key, raises
+    no event at all, so _walks_recorded pairs this hook with the attribute pass-throughs (_recording), and `skip` is their
+    code object: the real call a pass-through makes is one the pass-through recorded, so the hook passes over it. The
+    tables hold the real functions, so the hook is built before any attribute is replaced. A name this runtime lacks is
+    skipped."""
+    c_funcs, codes = {}, {}
+    for mod, name in HEAP_WALKS:
+        fn = getattr(mod, name, None)
+        if fn is None:
+            continue
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            codes[id(code)] = (code, name)
+        else:
+            c_funcs[id(fn)] = (fn, name)
+
+    def hook(frame, event, arg):
+        if event == "c_call":
+            hit = c_funcs.get(id(arg))
+            if hit is not None and hit[0] is arg and frame.f_code is not skip:
+                calls.append(hit[1])
+        elif event == "call":
+            hit = codes.get(id(frame.f_code))
+            if hit is not None and hit[0] is frame.f_code and (frame.f_back is None or frame.f_back.f_code is not skip):
+                calls.append(hit[1])
+    return hook
+
+
+def _recording(real, name, calls, me):
+    """The pass-through that stands in for one heap-wide read's module attribute inside _walks_recorded: it appends the
+    name when the entering thread calls it, by whatever route the attribute reached the call (C code calling it for the
+    kernel included), and returns what the real function returns. Every pass-through runs one code object (_REC_CODE),
+    which is how the hook tells a pass-through's own call to the real function from the kernel's."""
+    def rec(*a, **kw):
+        if threading.get_ident() == me:
+            calls.append(name)
+        return real(*a, **kw)
+    return rec
+
+
+_REC_CODE = _recording(None, "", None, None).__code__
+
+
+@contextlib.contextmanager
+def _walks_recorded():
+    """The heap-wide reads the entering thread makes inside the block, by name, yielding the list. Two recorders cover each
+    other's blind spot: the thread's profile function (_walk_hook) sees a call from Python code however it is spelled, and
+    a pass-through in place of each module attribute (_recording) sees every call that looks the attribute up inside the
+    block, C code's included. A call through the attribute is recorded once. The one call neither sees is C code calling a
+    function captured before the block, such as a functools.partial built at import. Another thread's walk never lands
+    here, and the previous profile function and the real attributes are put back on exit, a raise included."""
+    me, calls, prev = threading.get_ident(), [], sys.getprofile()
+    hook = _walk_hook(calls, _REC_CODE)                   # from the real functions, before any attribute is replaced
+    with contextlib.ExitStack() as stack:
+        for mod, name in HEAP_WALKS:
+            real = getattr(mod, name, None)
+            if real is not None:
+                stack.enter_context(mock.patch.object(mod, name, _recording(real, name, calls, me)))
+        sys.setprofile(hook)
+        try:
+            yield calls
+        finally:
+            sys.setprofile(prev)
 
 
 class _Caches(unittest.TestCase):
@@ -169,7 +251,8 @@ class Gauges(_Caches):
         self.assertEqual(h["gc"]["enabled"], gc.isenabled())
         self.assertEqual(h["gc"]["thresholds"], list(gc.get_threshold()))
         self.assertEqual(len(h["gc"]["stats"]), len(gc.get_stats()))
-        for k in ("allocatedBlocks", "assemblyEntries", "parseSlots", "lazyIndexes", "materializedLruSlots", "judgeUsageRows"):
+        self.assertIsNone(h["allocatedBlocks"], "the allocator's walk is GET /perf?walk=1's alone")
+        for k in ("assemblyEntries", "parseSlots", "lazyIndexes", "materializedLruSlots", "judgeUsageRows"):
             self.assertIsInstance(h[k], int, k)
             self.assertGreaterEqual(h[k], 0, k)
 
@@ -286,8 +369,10 @@ class AbsentSupport(_Caches):
         try:
             km.sys, km.gc, km.tracemalloc = stub_sys, stub_gc, stub_tm
             h = self.st.snapshot()["heap"]
+            walked = km._perf_walks(self.st.snapshot())["heap"]   # the count's one read is ?walk=1's, through the same guard
         finally:
             km.sys, km.gc, km.tracemalloc = real_sys, real_gc, real_tm
+        self.assertIsNone(walked["allocatedBlocks"])
         self.assertIsNone(h["allocatedBlocks"]); self.assertIsNone(h["gc"]["enabled"]); self.assertIsNone(h["tracing"])
         self.assertIsInstance(h["gc"]["counts"], list, "the accessors the stub has still answer")
         self.assertIsInstance(h["imgCache"], dict, "the rest of the block is untouched")
@@ -331,7 +416,10 @@ class NoSideEffects(_Caches):
         try:
             keep = [[] for _ in range(20000)]              # tracked allocations: the young count climbs past any threshold and a
             count0 = gc.get_count()[0]                    #  collect would zero it (the snapshot's own allocations are far fewer)
-            self.assertGreaterEqual(count0, 20000)
+            # past the threshold, not a literal 20,000 (2026-09-29): a list handed back from the interpreter's free list is
+            # not counted as an allocation, so 20,000 new lists can add about 80 fewer, and the count fell short whenever it
+            # stood near zero before the loop, which depends on what the earlier tests allocated
+            self.assertGreater(count0, gc.get_threshold()[0])
             reads0, inserts0 = em.read_bytes_total(), em.record_cache_stats()["inserts"]
             collections0 = [s["collections"] for s in gc.get_stats()]
             lens0 = lens()
@@ -351,30 +439,64 @@ class NoSideEffects(_Caches):
 
 
 class Overhead(_Caches):
-    """(e) The read is cheap over populated caches: 1,000 images, 50 tabs with 100 KB strings, 100,000 hydrated entries,
-    10,000 LRU slots, 50,000 usage rows; the median of 20 calls under 5 ms."""
+    """(e) The read stays cheap over populated caches: 1,000 images, 50 tabs with 100 KB strings, 100,000 hydrated entries,
+    10,000 LRU slots, 50,000 usage rows (166 microseconds median in the lab). A 5 ms median budget stood here, and it timed
+    the runner's memory, not the read (2026-09-29): the allocator's block count walked every pool of a test process of
+    several GB, and on macOS runners, most likely under memory pressure, the median reached seconds. The pin is now what
+    the read calls: none of the interpreter's heap-wide walks on the plain read, each once on the request that asks."""
 
-    def test_the_read_stays_under_five_milliseconds_over_populated_caches(self):
+    def _populate(self):
         self.add_images(1000, 100)
         self.add_tabs(50, 100 * 1024)
         self.add_hydrated(100_000, 10)
         self.add_mat_slots(10_000)
         self.set_rows(50_000)
-        km._heap_stats()                                  # one warm call, the code paths compiled
-        took = []
-        for _ in range(20):
-            t0 = time.perf_counter()
+
+    def test_the_plain_read_walks_nothing_over_populated_caches(self):
+        self._populate()
+        with _walks_recorded() as calls:
             h = km._heap_stats()
-            took.append(time.perf_counter() - t0)
-        self.assertEqual(h["imgCache"]["entries"] - 0, len(km._img_cache))
+            snap = self.st.snapshot()
+        self.assertEqual(calls, [], "the plain read made a heap-wide call")
+        self.assertIsNone(h["allocatedBlocks"], "the allocator's walk is GET /perf?walk=1's alone")
+        self.assertIsNone(snap["heap"]["allocatedBlocks"])
+        self.assertIsNone(snap["gc"]["frozen"], "and so is the frozen generation's")
+        self.assertEqual(h["imgCache"]["entries"], len(km._img_cache))
         self.assertGreaterEqual(h["hydrated"]["entries"], 100_000)
         self.assertGreaterEqual(h["materializedLruSlots"], 10_000)
         self.assertGreaterEqual(h["judgeUsageRows"], 50_000)
         self.assertGreaterEqual(h["builtChat"]["serializedBytes"], 50 * 100 * 1024)
-        med = statistics.median(took)
-        print("heap block: median %.0f us over 20 calls (min %.0f us, max %.0f us)"
-              % (med * 1e6, min(took) * 1e6, max(took) * 1e6))
-        self.assertLess(med, 0.005, "median %.3f ms" % (med * 1000))
+
+    def test_the_walks_run_once_each_on_request(self):
+        """The positive control: the recorder sees both walks when the request asks, so an empty list above is a read that
+        made none, not a recorder that saw nothing."""
+        with _walks_recorded() as calls:
+            snap = km._perf_walks(self.st.snapshot())
+        self.assertEqual(sorted(calls), ["get_freeze_count", "getallocatedblocks"], "one of each, on the request that asks")
+        self.assertIsInstance(snap["heap"]["allocatedBlocks"], int)
+        self.assertGreater(snap["heap"]["allocatedBlocks"], 0)
+        self.assertIsInstance(snap["gc"]["frozen"], int)
+        json.dumps(snap)
+
+    def test_the_recorder_sees_a_walk_however_the_call_is_spelled(self):
+        """The recorder's own control (review round one, 2026-09-29): a walk called through a from-import or a name bound
+        before the block opened is seen like an attribute lookup; one that C code calls for the caller, through
+        functools.partial or map, is seen too (the round's second pass: the profile hook alone saw neither); and
+        tracemalloc's snapshot, a Python function that passes both recorders when reached through its attribute, is
+        recorded once. So the empty list above does not depend on how the kernel spells a call."""
+        from sys import getallocatedblocks as imported
+        alias = gc.get_freeze_count
+        tracing = tracemalloc.is_tracing()
+        with _walks_recorded() as calls:
+            imported()
+            alias()
+            functools.partial(gc.get_freeze_count)()
+            list(map(gc.get_referrers, [object()]))
+            if not tracing:                               # untraced, the snapshot refuses at once, after it is recorded
+                with contextlib.suppress(RuntimeError):
+                    tracemalloc.take_snapshot()
+        self.assertEqual(calls, ["getallocatedblocks", "get_freeze_count", "get_freeze_count", "get_referrers"]
+                         + ([] if tracing else ["take_snapshot"]))
 
 
 class ShapeChange(_Caches):
@@ -440,6 +562,7 @@ class Documented(unittest.TestCase):
         self.assertIn("cumulative", para)
         self.assertIn("upper bound", para)
         self.assertIn("`null`", para)
+        self.assertIn("`GET /perf?walk=1`", para)
         self.assertIn("`recordCache`", para, "the record cache is pointed at from inside the heap bullet")
         self.assertIn("`budgetBytes`", para, "with the key its occupancy is read against")
 

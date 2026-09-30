@@ -4,6 +4,7 @@ revived): the API fell back without a request, and the swap was invisible before
 pops into Completed with a done why naming the swap; a user-driven /model pick (pending marker) or
 the first learn never mints. SYNTHETIC fixtures."""
 import os
+import re
 import tempfile
 import unittest
 from romp_load import load_source
@@ -79,15 +80,37 @@ class DowngradeOnlyGate(unittest.TestCase):
         i = src.index("_MODEL_TIERS")
         j = src.index("\nclass SdkSession", i)
         sb = type("NS", (), {})
-        ns = {}
+        ns = {"re": re}
         exec(src[i:j], ns)
         sb._model_downgrade = staticmethod(ns["_model_downgrade"])
         self.assertTrue(sb._model_downgrade("claude-fable-5", "claude-sonnet-5"))
         self.assertTrue(sb._model_downgrade("Opus 5", "claude-haiku-4-5"))
         self.assertFalse(sb._model_downgrade("claude-opus-5", "claude-fable-5"), "an upgrade is the user's doing")
-        self.assertFalse(sb._model_downgrade("claude-sonnet-5", "claude-sonnet-4-5"), "lateral within a family: no card")
         self.assertFalse(sb._model_downgrade("claude-opus-5", "some-experimental-model"), "unknown target: no card")
         self.assertFalse(sb._model_downgrade("", "claude-haiku-4-5"), "unknown source: no card")
+
+    def test_an_older_version_of_the_same_family_is_a_downgrade(self):
+        # A safeguards fallback can stay inside the family (a newer Opus answered by an older one, first seen 2026-09-23): the
+        # family rank alone read it as lateral, so no card, no requested-model mark and no retry ever followed it.
+        # The version decides inside a family, and only where BOTH names carry one: a bare alias ("Opus") says nothing
+        # about which version it resolves to, and a date stamp is not a version.
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
+        i = src.index("_MODEL_TIERS")
+        j = src.index("\nclass SdkSession", i)
+        ns = {"re": re}
+        exec(src[i:j], ns)
+        down = ns["_model_downgrade"]
+        self.assertTrue(down("claude-opus-5-5", "claude-opus-4-8"), "the raw ids the CLI reports")
+        self.assertTrue(down("Opus 5.5", "Opus 4.8"), "the badge names the learn compares")
+        self.assertTrue(down("Opus 5.5", "claude-opus-5"), "a point release down: 5.5 to 5")
+        self.assertTrue(down("claude-sonnet-5", "claude-sonnet-4-5"))
+        self.assertTrue(down("us.anthropic.claude-opus-5-5-v1:0", "Opus 4.8"), "a provider-prefixed id reads the same")
+        self.assertFalse(down("claude-opus-4-8", "claude-opus-5-5"), "a newer version is an upgrade: the user's doing")
+        self.assertFalse(down("Opus 5.5", "claude-opus-5-5"), "the same model under its two names")
+        self.assertFalse(down("Opus", "Opus 4.8"), "an unversioned alias label: which version it means is unknown")
+        self.assertFalse(down("claude-opus-5-5", "gw-opus-mini"), "a gateway id with the family word and no version")
+        self.assertFalse(down("claude-haiku-4-5-20251001", "claude-haiku-4-5"), "a date stamp is not a version")
+        self.assertFalse(down("claude-3-opus-20240229", "claude-opus-4-8"), "an old-style id carries its version before the family")
 
     def test_the_learn_path_wires_the_gate(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()

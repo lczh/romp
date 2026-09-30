@@ -33,7 +33,7 @@ These are for scripting and for agents rather than daily use:
 |---|---|
 | `romp url` | Print only the tokened dashboard URL, for piping |
 | `romp sessions [--json]` | The fleet with each session's state, identity colours, directory and backend |
-| `romp perf [--interval <s>] [--json]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
+| `romp perf [--interval <s>] [--json [--walk]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, and `--walk` fills its two heap-wide gauges; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
 | `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
@@ -396,7 +396,10 @@ following to every connected machine's kernel):
   change model.
 - **Retry upgrades after downgrades** acts when a session's model changes to a
   lower tier without a pick, the automatic fallback the Completed card reports
-  (`Model changed automatically: … → …`). Every ten minutes the kernel asks for
+  (`Model changed automatically: … → …`). A lower tier is a smaller model family
+  or an older version of the same one (Opus 4.8 answering for Opus 5.5); a bare
+  alias pick such as `opus` names no version, so the requested-model mark below
+  compares its family alone. Every ten minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
@@ -2159,9 +2162,13 @@ judge threads and the rest of the process, builds served from cache against
 rebuilds, the kernel's parse-store misses by road with the bytes of its whole
 parses, bytes sent per slot as full frames, deltas and deduplicated frames,
 goal-store loads and writes per second, judge passes and their durations,
-memory and thread count. `romp perf --json` prints one raw snapshot. If the
-kernel restarted between the two snapshots the counters have started over, so
-the command says so and exits non-zero instead of printing negative rates; a
+memory and thread count. `romp perf --json` prints one raw snapshot. Two
+fields cost time in proportion to the whole heap, `heap.allocatedBlocks` and
+`gc.frozen`, so a plain read leaves them `null` and only `GET /perf?walk=1`
+fills them; the plain read no longer walks the whole heap.
+`romp perf --json --walk` prints the snapshot with both filled. If the kernel
+restarted between the two snapshots the counters have started over, so the
+command says so and exits non-zero instead of printing negative rates; a
 refused token is reported as such, not as a dead kernel.
 
 The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
@@ -2178,12 +2185,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   a GAUGE, the occupancy at the read and not a count since boot, with one
   exception named below. `allocatedBlocks` is the number of memory blocks
   the interpreter's object allocator holds at the read, of any size
-  (`sys.getallocatedblocks`; 0 on a build that cannot count them); `gc` is
-  the collector's `enabled`, its `counts` (the young generation's
-  allocations since its last collection, then how many times each younger
-  generation was collected since the older's last) and `thresholds` as
-  lists, and `stats` (per generation: `collections`, `collected`,
-  `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
+  (`sys.getallocatedblocks`; 0 on a build that cannot count them). It is
+  read only when the request says `GET /perf?walk=1` and is `null` on a
+  plain read: counting visits every page the allocator owns, a cost that
+  grows with the whole heap (1.2 to 1.7 ms at 2 GB resident in the lab, and
+  far longer where the system has compressed or paged the heap out), inside
+  one call every kernel thread waits for. On `?walk=1` a `null` is a read
+  that failed (an accessor the runtime lacks), said once on stderr like any
+  gauge. `gc` is the collector's `enabled`, its `counts` (the young
+  generation's allocations since its last collection, then how many times
+  each younger generation was collected since the older's last) and
+  `thresholds` as lists, and `stats` (per generation: `collections`,
+  `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
   lazy bodies read on demand: `entries`, and `bytes`, the records' length on
   disk, which `capBytes` bounds, a proxy that locates the holder without
@@ -2211,11 +2224,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   against `budgetBytes`), so a resident size these gauges leave unaccounted
   for is read there first. The block reads a length or a counter per
   cache, under the cache's own lock where its readers take one and over a
-  copied value list otherwise; it walks no object graph, collects nothing,
-  evicts nothing, fills nothing and reads no file. A gauge this process
-  cannot read (an accessor the runtime lacks, a container the source has not
-  got, a cached entry of a shape the gauge does not know) is `null`, said
-  once on stderr.
+  copied value list otherwise; on a plain read it walks neither the
+  allocator nor any object graph, collects nothing, evicts nothing, fills
+  nothing and reads no file. A gauge this process cannot read (an accessor
+  the runtime lacks, a container the source has not got, a cached entry of
+  a shape the gauge does not know) is `null`, said once on stderr.
 - `gc`: the interpreter's garbage collections, counted and timed (2026-09-16:
   pusher cycles stalled for 9-33 s and a profile of the process caught a 9.2 s
   generation-2 collection charged to whichever stage happened to be running,
@@ -2233,7 +2246,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the block reads on its own (how near the next collection is); `frozen`
   counts the objects moved out of the collector's reach by `gc.freeze`, which
   it never scans (reading the count is a linear walk of the frozen generation,
-  about 7 ms per million frozen, paid by the `/perf` read); `errors` counts callback failures (counted, never raised
+  about 2 to 14 ms per million frozen in the lab, set by what is frozen, so, like `heap.allocatedBlocks`, it is read
+  only on `GET /perf?walk=1` and is `null` on a plain read); `errors` counts callback failures (counted, never raised
   into the collector; the first in the process is said once on stderr, a
   line prefixed `perf: gc hook:`, the rest counted only); `hooked` says
   whether the kernel's `gc.callbacks` hook is installed, so zeros with
@@ -2241,11 +2255,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   freeze controller (issue #1735): the kernel keeps the loaded decoded heap
   out of the collector's walk with `gc.freeze`, so a warm full collection
   walks only what was allocated since and no longer pauses the pusher for
-  seconds. It reconciles at the pusher's idle boundary, never on a timer: a
-  LOAD fold-in (`collect` then `freeze`, walking only the unfrozen) when the
-  record cache's insert counter grows by a material number of trees, and a
-  RELEASE reclaim when an ended session is observed to be a surviving cycle, or
-  the backstop fires. The release is STAGED: a cheap `collect` with the freeze in
+  seconds. It reconciles at the end of a pusher cycle, never on a timer. A
+  LOAD fold-in (`collect` then `freeze`, walking only the unfrozen) runs when the
+  record cache's insert counter grows by a material number of trees, on any
+  cycle but the boot's first, busy or idle: an automatic full collection walks
+  those same unfrozen objects anyway, and would walk them again and again until
+  they are folded in. The first freeze likewise waits for no idle cycle: the
+  first cycle after the boot's first with anything loaded makes it. A RELEASE
+  reclaim runs on an idle cycle only, when
+  an ended session is observed to be a surviving cycle (the
+  backstop reclaim has its own rule, below). The release is STAGED: a cheap
+  `collect` with the freeze in
   place first (it takes a released cycle allocated since the last freeze), and only
   a survivor of that then drives `unfreeze`, a full collection and `freeze` (the
   frozen-heap walk); a release the cheap walk took whole counts as a load pass, so
@@ -2263,11 +2283,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   trigger: its decoded json is acyclic and dies by reference counting, so
   `recordCache.released` is a statistic. A BACKSTOP reclaim runs after `backstopFoldins`
   load fold-ins since the last reclaim (default 1000, about ten hours at the
-  measured ~97 fold-ins an hour), so a cycle released by an owner nobody
-  registered is bounded by the next thousand loads, not the process lifetime. The
+  ~97 fold-ins an hour measured when fold-ins ran only on idle cycles; fold-ins
+  on busy cycles come more often), so a cycle released by an owner nobody
+  registered is bounded by the next thousand loads, not the process lifetime.
+  The backstop walks the frozen heap, so an idle cycle runs it; a busy cycle
+  runs it only once the fold-ins reach twice `backstopFoldins`, so a pusher that
+  never idles still bounds it. A busy cycle judges the ended sessions only
+  before the first freeze, as an idle one does: the initial freeze's collect
+  takes their pre-freeze garbage, so the owed ones are dropped at no cost. Once
+  a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
-  apart from the integer `frozen` above, which is `gc.get_freeze_count()`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `freezes` and
+  apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
+  `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the
+  runs, those a busy cycle made: a first freeze, load fold-ins and a busy
+  backstop), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
   release that unfroze runs TWO generation-2 collections for its one reclaim, so
   `reclaims` alone cannot derive the organic count), `collections` (every
@@ -2283,20 +2312,28 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   "reclaimed", else the count the line names as kept by a live root; rebound each
   run, so a load after a live-root release reads it back at 0, like `lastReleaseSids`),
   `lastReleaseSids` (the first eight characters of the sids the LAST JUDGEMENT
-  owed a reclaim for, cleared each judgement, so a tick that owed nothing clears
-  it and a cheap-collect release judged `load` shows them too; a full release also
+  owed a reclaim for, cleared each judgement, so an idle tick that owed nothing clears
+  it and a cheap-collect release judged `load` shows them too; a busy load or
+  backstop judges nothing and clears them as well, so a busy run after a
+  live-root release reads no sids, 0 survivors and its own kind, as an idle run
+  that owed nothing does; a full release also
   writes one stderr line, "reclaimed" when nothing survived and otherwise naming the kept sids),
   `totalReconcileMs` and `errors` (a reconcile that raised is counted here and
-  said once on stderr, never ending the pusher). The reconcile's own collection
-  pause lands after the cycle closed its ring row, so the pusher and jobs rings
-  never show it; `lastReconcileMs` is where a reconcile's pause is read. The
+  said once on stderr, never ending the pusher). The reconcile runs on the
+  pusher thread after the pusher cycle closed its ring row, so the pusher ring
+  never shows its pause. A jobs row can: when a jobs pass was open across the
+  reconcile (common on a busy kernel, where the jobs thread is working when the
+  pusher reconciles), the row's `n2` and `ms2` count the controller's
+  collection along with any automatic one. `lastReconcileMs` is where a
+  reconcile's pause is read. The
   freeze is on by default; `ROMP_GC_FREEZE=off` (or `0`/`false`) turns it off
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every idle cycle). A request that arrives during a reconcile waits that
-  one collection; the idle boundary is the best moment for it, not a guarantee
-  none arrives. To read a slow cycle: find
+  fire every cycle). A request that arrives during a reconcile waits that
+  one collection. The idle boundary is the best moment for the frozen-heap
+  walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an
+  automatic full collection would have walked anyway. To read a slow cycle: find
   its row in `pusher.stageRing` (or `jobs.stageRing`) and read the row's `gc`
   (`null` when the cycle closed without an opening mark): `n0`, `n1` and
   `n2`, the collections per generation that ran anywhere in the process
@@ -4521,8 +4558,13 @@ sweep summary of every boot that had a session to reconcile: `sessions`, `resume
 `restored`, `notified`, `reaped`, `scopesStopped`, `toStart`, `durationS`),
 `reconcile.orphan-reaped` (`cliPid`, `fsid`, `scope`, `signaled`, `forced`,
 `tree`), `reconcile.scope-stopped` (`unit`, `sid8`, `cliPid`),
-`reconcile.duplicate-cli` (two Claude Code processes holding one conversation
-as the boot's process listing stood: `fsid`, `pids`, `n`), `crash.heal` and
+`reconcile.duplicate-cli` (two Claude Code processes serving one session as
+the boot's process listing stood: `sid`, `fsid`, `pids`, `n`; a process's
+session is the `ROMP_SID` in its environment, not the conversation id on its
+command line, which a comment thread shares with its parent, and rows written
+before that change are keyed by `fsid`), `reconcile.duplicate-unchecked`
+(processes on this kernel's conversations whose session could not be read, so
+the check skipped them: `pids`, `n`), `crash.heal` and
 `crash.loop` (`attempt`), `drain.unjoined` (a session the drain's bound left
 closing: `inflight`, `reaped`), and the lease work's `lease.*` kinds. Every kind
 but the boot summary carries `text` and is also a kernel-log line of the form
@@ -4679,7 +4721,17 @@ process's resident memory and CPU at its exits. The live
 block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
 Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
 CPU, resident size and the pusher's idle-cycle share, and lists any
-conversation two Claude Code processes hold right now. Windows are days or
+session two Claude Code processes serve right now. A process's session is the
+`ROMP_SID` the kernel set in its environment at launch, never the conversation
+id on its command line: a comment thread is launched as a fork of its parent's
+conversation, so its command line names the parent's id while it is a session
+of its own, and grouping by that id once reported a parent and its threads as
+duplicates. The threads get their own line instead, per parent session: how
+many are running and their memory, recognised by the `threadOf` field of their
+registry rows (a deliberate fork has none and counts as a session). A process
+whose `ROMP_SID` cannot be read, or names no registry row, is listed by pid as
+not checked, and a scope matching no registry row is counted as unmatched;
+neither is guessed at. Windows are days or
 weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
 day in range), bounded by `--since` and `--until`, in the machine's local time
 unless `--tz` names a zone; weeks are counted in local dates, so a clock change
@@ -4689,7 +4741,8 @@ missing ledger is named at the top, never a silent zero. `--json` prints the who
 (each cut row joined to the boot that followed it), `quietWindows` (each
 joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
 metric above per window, with capped latency samples for the distribution
-figure), `sources`, and `live`.
+figure), `sources`, and `live` (with `duplicateClis`, `threads`,
+`unidentifiedClis`, `unmatchedScopes` and `errors`).
 
 `scripts/restart_metrics_report.py` draws the before-versus-after figures from
 two or more of those JSON documents with cleanplots, which is not a romp
@@ -4994,6 +5047,31 @@ session is shown as a chip: the name without its `@`, in that session's color on
 backing, the way the Awaiting chip names the session it waits on. Hover it for how that
 session is doing; the message itself still carries the `@name` you typed, and so does a
 copy of it.
+
+### Commenting on a passage
+
+Select a passage in a message and right-click it: **Comment** opens a box on the passage for the
+first message of a side conversation about it, and **Quote** puts the passage in the message box
+instead. **Ctrl+/** (**⌘/** on a Mac, the key code editors use to toggle a comment) opens the same
+box from the keyboard, just under the selection, from anywhere in the chat including the message
+box, where it types no "/" and opens no slash-command menu; the right-click menu shows the key
+under **Comment**. The key is the "/" character, however your layout types it: on a German
+keyboard, where "/" is Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on
+selection** does the same for the passage that was selected when you opened the palette. With
+nothing selected in a message, or in a session that has not finished starting or loading, it says
+so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
+there.
+
+Selecting a passage also puts it in a quote chip above the message box, and the chip's row carries
+a **Comment** button before **Stage**, on every device. It opens the same box on the chip's passage,
+just under the passage, even once the selection itself is gone, which is how a phone starts a
+comment: a long-press selection there opens no menu, and the system's own menu covers the text
+around it. With several chips stacked, Comment opens on the newest one. It shows only while a chip
+holds a passage of a message in a session that can take a comment.
+
+On a touch screen each control in the chip row and the staged strip (Comment, Stage, a chip's x,
+Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
+pixels each way, with none of them touching, while keeping its compact look.
 
 ### Stepping through your messages and comments
 
@@ -5375,6 +5453,50 @@ it; click one to open it again. The gear's **Files** row (Settings, General,
 Panes) adds a Files toggle to the bottom bar (on a phone, a Files tab like the
 others), and that toggle turns the pane on.
 
+## File tabs
+
+The file viewer's pop-out button (the window with an arrow, beside Copy path;
+also the palette's **Open this file as a tab** while a viewer is up) closes the
+viewer and opens the file as a tab of the chat strip. The tab goes right after
+the session the file was opened from, inside that session's tag group, and
+shows a file glyph in the session's colour and the file's name. When two open
+files share a name, the part of their folders that tells them apart shows
+beside it; a file on another machine wears that machine's `host:` prefix. The
+tooltip gives the full path and the session. The same file on the same machine
+has one tab: opening it again selects that tab. A relative path is the session's
+own (the kernel resolves it against that session's folder), so the same relative
+path from two sessions is two tabs.
+
+Picking a file tab puts the file in the pane in the transcript's place, with the
+viewer's own bar, a Reload button added and the close cross closing the tab. The
+message box, the jump column and the transcript's rail and marks leave while it
+shows; picking any session brings them back, with the transcript where you left
+it. The file is read again each time its tab is picked. With unsaved edits in the
+file, switching away or closing the tab asks first. A file opened from the file
+browser in the feed or from the Files pane pops out the same way: the pane hands
+it to the chat column that shows its session.
+
+A file tab behaves like a tab: the strip's arrows, the window's arrows and the
+session pair (Ctrl+Alt+Left and Right) step onto and off it, the phone's session
+picker lists it under its session, and the session switcher (Cmd/Ctrl+O) lists
+the open files after the sessions. Its right-click menu has **Close tab**, **Copy
+path** and **Show in Files** (the file browser at its folder); a middle click or
+its cross closes it. Dragging moves it beside another session, into that
+session's group; a file tab carries no tags of its own, so a drag never writes
+one. It moves with its session when the session is dragged, and follows the
+session into every group the session is tagged with. If that session leaves the
+strip, the tab goes back beside the session it was opened from, and if that one
+is gone too it trails the strip in the first column.
+
+The open tabs are kept by the kernel beside the tab order and the folded groups
+(`view-files.json`, the `files` half of the `viewOrder` frame, the `viewFiles`
+capability), so every device shows the same ones, and a reload brings the pane
+back to the file tab it was showing. A page or a kernel from before file tabs
+ignores them; a kernel without the capability leaves them in the browser that
+opened them. The editor extension's chat does not show file tabs, since its
+webview cannot read files through the kernel. In a split, a file tab sits in the
+column that holds its session; there is no dragging it to another column.
+
 ## The Artifacts pane (experimental)
 
 A column listing the files a session's thread put in: a grid of large
@@ -5574,6 +5696,33 @@ parked while the recipient is unreachable, bounced, or recalled. A send that
 failed has no mark at all, and the tool call's result says what happened. An
 incoming message that waited while the session was offline wears the parked
 mark. Hovering a mark gives the state and when it was reached.
+
+## What romp sends with a comment
+
+A comment thread's opening message wraps your comment in text written for the
+thread's agent: a line saying the thread was split off from the main
+conversation to ask about one part of it, then the passage you highlighted,
+quoted. Under your comment, the thread's box shows a one-line note, "What romp
+sent with your comment"; opening it shows that text exactly as it was sent. It
+is read from the thread's record, or for a thread made before the record kept
+it, from the opening message itself, so it is there after a reload too. A thread
+whose opening message romp added nothing to shows no note.
+
+## A comment on a passage from before a compaction
+
+A comment thread normally forks the session at the highlighted message, so its
+agent holds exactly the conversation that produced the passage. Claude Code
+cannot fork at a message from before the session's last compaction, so a thread
+on such a passage takes the whole current conversation instead, where that part
+survives only as the compaction's summary. Its opening message therefore
+carries, after the quote, the nearest thing the other side said before the
+passage's turn and after it (about 1,200 characters of each, the end of the one
+before and the start of the one after), the path of the transcript file that
+holds the passage with the passage's entry id, and then your comment under the
+label "What I'm asking:". The note under your comment says so ("What romp sent
+with your comment, including the turns around it (from before the summary)").
+Editing a message from before a compaction is still refused: a rewind has no
+such fallback.
 
 ## A comment thread's mail
 

@@ -20,7 +20,7 @@ import { marked, type Tokens } from "marked";
 import { sanitizeMd } from "./md-sanitize";
 import { hostOf, bareId, hostNameNodes } from "./host-prefix";
 import { fileUrl } from "./preview";
-import { ICON_DOWNLOAD, ICON_COPY, ICON_EDIT, ICON_ZOOM, ICON_CHECK, ICON_CROSS } from "./icons";   // the bar's glyphs (T367)
+import { ICON_DOWNLOAD, ICON_COPY, ICON_EDIT, ICON_ZOOM, ICON_CHECK, ICON_CROSS, ICON_POPOUT, ICON_RELOAD } from "./icons";   // the bar's glyphs (T367; the tab pair 2026-09-30)
 import { openPdfTab, wantsOwnTab } from "./preview";   // a PDF's own tab, and the gesture that asks for it
 import { openFileTab, canPreview } from "./preview";   // any file's own tab, for the links inside a shown file, and the web-vs-webview test
 import { kernelUrl } from "./media";
@@ -36,7 +36,7 @@ import { readTextCapped, overCapWords, settleUrlResponse } from "./capped-read";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, the chat's own
 import { fenceCopyQueue, type Fence } from "./fence-source";   // what Copy copies: the fence's text as the file holds it, tabs and all
 import "./viewer-grammars";   // six more grammars for a viewed file, registered on the bundle's hljs core (rust, go, c, java, sql, toml)
-import { windowSender } from "./window-sender";   // initFileView's window listener hears no foreign sender
+import { windowSender, noteForeign } from "./window-sender";   // initFileView's window listener hears no foreign sender
 
 // hljs is registered per-bundle. Same language set (and grammar registrations) the chat's fence
 // highlighting uses, dup-guarded, so importing this module alongside render.ts costs nothing.
@@ -334,7 +334,7 @@ export function hostStub(sid: string): FileViewIdentity | null {
   return { name: (host ? host + ":" : "") + bare.slice(0, 8), color: null };
 }
 let saveSeq = 0;
-let editHooks: { reqId: number; saved: (mtimeNs: string) => void; failed: (err: string) => void } | null = null;
+let editHooks: EditHooks | null = null;
 // Set by the open viewer: returns false to VETO a close (an editor holding unsaved changes asks
 // first). The guard must live in closeFileView itself, because the browser overlay and the Escape
 // handler both close through it without knowing an edit is in progress.
@@ -363,6 +363,30 @@ function dropUrlRead(): void {
   }
 }
 
+// ── whose registrations: the modal's, or a file tab's (the user 2026-09-30) ─────────────────────────────────────────
+// A file opened as a TAB of the chat strip (file-tabs.ts; mountFileTabView below) is this same viewer, built by the same
+// code, mounted in the chat pane instead of over it. A link inside that file opens the modal OVER the tab, so the two can
+// be up at once, and each keeps its own registrations: the modal's are the module-level ones above (every teardown path
+// names them), reached through modalReg; the tab's live in tabReg, one tab viewer at a time. The builder writes through
+// whichever it was handed, so a save's reply, the GitHub ask and the object URL of one never land on the other.
+type EditHooks = { reqId: number; saved: (mtimeNs: string) => void; failed: (err: string) => void };
+type GitHooks = { reqId: number; apply: (url: string, reason: string) => void; ask: () => void };
+export interface ViewerReg { guard: (() => boolean) | null; edit: EditHooks | null; git: GitHooks | null; media: string | null; dropWidth: () => void }
+const modalReg: ViewerReg = {
+  get guard() { return closeGuard; }, set guard(g) { closeGuard = g; },
+  get edit() { return editHooks; }, set edit(h) { editHooks = h; },
+  get git() { return gitHooks; }, set git(h) { gitHooks = h; },
+  get media() { return mediaUrlLive; }, set media(u) { mediaUrlLive = u; },
+  get dropWidth() { return dropWidthWatch; }, set dropWidth(f) { dropWidthWatch = f; },
+};
+const tabReg: ViewerReg = { guard: null, edit: null, git: null, media: null, dropWidth: () => { /* no watch up */ } };
+/** Drop everything a tab viewer registered (its close, and the replace when the next tab mounts). */
+function releaseTabReg(): void {
+  tabReg.guard = null; tabReg.edit = null; tabReg.git = null;
+  if (tabReg.media) { try { URL.revokeObjectURL(tabReg.media); } catch { /* already gone */ } tabReg.media = null; }
+  tabReg.dropWidth();
+}
+
 // ── the body's content width, for the sheets ──────────────────────────────────────────────────────
 // A table of the rendered document's own (a direct child of the .fileview-md root) may grow past the prose column, up to
 // the body's content width less the root's inset (`.fileview-md > table` in both sheets reads --fv-body-w; the rule there
@@ -375,8 +399,8 @@ function dropUrlRead(): void {
 // the column). Absent ResizeObserver (a stand-in, an old engine) nothing is written and the fallback holds. One watch at a
 // time: the next open, or the close, drops the last.
 let dropWidthWatch: () => void = () => { /* no watch up */ };
-function watchBodyWidth(body: HTMLElement): () => void {
-  dropWidthWatch();
+function watchBodyWidth(body: HTMLElement, reg: ViewerReg = modalReg): () => void {
+  reg.dropWidth();
   let width = -1;                                      // the body's content width as last reported, -1 before the first report
   const stamp = (): void => {
     if (width < 0) return;
@@ -392,7 +416,7 @@ function watchBodyWidth(body: HTMLElement): () => void {
       stamp();
     });
     ro.observe(body);
-    dropWidthWatch = () => { ro.disconnect(); dropWidthWatch = () => { /* dropped */ }; };
+    reg.dropWidth = () => { ro.disconnect(); reg.dropWidth = () => { /* dropped */ }; };
   }
   return stamp;
 }
@@ -403,7 +427,7 @@ function watchBodyWidth(body: HTMLElement): () => void {
 // open and returns the action's element for the row (or null to sit this file out); an action that
 // answers asynchronously (the GitHub link's kernel ask) mounts a placeholder and fills it in when its
 // reply lands. Ordering is registration order, after the built-ins.
-export interface FileViewActionCtx { path: string; sid: string | null; }
+export interface FileViewActionCtx { path: string; sid: string | null; reg?: ViewerReg }
 export interface FileViewAction { id: string; mount: (ctx: FileViewActionCtx) => HTMLElement | null; }
 const fileViewActions: FileViewAction[] = [];
 export function registerFileViewAction(a: FileViewAction): void {
@@ -425,16 +449,16 @@ export function registerFileViewAction(a: FileViewAction): void {
 // shim's reconnect event re-asks (initFileView), so the wait never outlives the socket. Exported for the
 // DOM-shape test.
 let gitSeq = 0;
-let gitHooks: { reqId: number; apply: (url: string, reason: string) => void; ask: () => void } | null = null;
+let gitHooks: GitHooks | null = null;
 export const githubLinkAction: FileViewAction = {
   id: "github-link",
-  mount({ path, sid }) {
+  mount({ path, sid, reg = modalReg }) {
     const unit = el("span", "fileview-gh");
     unit.hidden = true;
     unit.setAttribute("aria-busy", "true");
     const reqId = ++gitSeq;
     const ask = () => post({ type: "fileGitLink", path, sid: sid || undefined, reqId });
-    gitHooks = {
+    reg.git = {
       reqId,
       ask,
       apply: (url, reason) => {
@@ -536,18 +560,74 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   dropMediaUrl();                                      // …and the old viewer's image bytes (the Reload path)
   dropUrlRead();                                       // …and a URL viewer's in-flight read, if that is what was up
   document.getElementById("romp-fileview")?.remove();
+  buildFileView(path, sid, opts, null);
+  return true;
+}
+
+// ── the POP-OUT (the user 2026-09-30): the file up in this modal becomes a TAB of the chat strip ─────────────────────
+// The chat document registers its own opener (render.ts: the tab goes beside the session the file came from); a document
+// with no strip of its own that the romp shell frames (the feed's file browser, the Files pane) hands the file to the shell,
+// which forwards it to the chat column that shows that session (kernel.py's openFileTab relay). Neither (a VS Code webview,
+// a standalone page with no strip): no button. The opener answers whether the tab opened, and the modal closes on a yes.
+let popOutOpener: ((path: string, sid: string | null) => boolean) | null = null;
+export function setFileViewPopOut(fn: ((path: string, sid: string | null) => boolean) | null): void { popOutOpener = fn; }
+function popOutTarget(): ((path: string, sid: string | null) => boolean) | null {
+  if (popOutOpener) return popOutOpener;
+  try {
+    if (window.parent !== window && window.parent.document.getElementById("chat-pane")) {
+      return (p, s) => { window.parent.postMessage({ romp: "openFileTab", path: p, sid: s }, "*"); return true; };
+    }
+  } catch { /* a cross-origin parent (VS Code) is not the romp shell */ }
+  return null;
+}
+
+/** A file TAB's view (the user 2026-09-30): the same viewer, built by the same code as the modal, mounted in `host` (the
+ *  chat pane's file-tab area) with no backdrop, its bar intact. One at a time: mounting replaces the last (the caller
+ *  asked it first, through confirmLeave). `onClose` is the bar's ✕ (it closes the tab); `onReload` re-mounts it, which is
+ *  the bar's Reload and a save conflict's Reload file alike. `scrollTop`: the reader's place to land on after the first
+ *  paint (the caller keeps it across visits). The handle: confirmLeave asks before discarding unsaved edits (a tab switch,
+ *  a close), destroy tears the view down, scrollTop reads the reader's place, unsaved says (without asking) whether an
+ *  edit is up with changes in it. */
+export interface FileTabView { confirmLeave(): boolean; destroy(): void; scrollTop(): number; unsaved(): boolean }
+export function mountFileTabView(host: HTMLElement, path: string, sid: string | null,
+                                 hooks: { onClose: () => void; onReload: () => void; scrollTop?: number }): FileTabView {
+  releaseTabReg();
+  host.replaceChildren();
+  const view = buildFileView(path, sid, {}, { host, onClose: hooks.onClose, onReload: hooks.onReload, scrollTop: hooks.scrollTop ?? 0 });
+  return {
+    confirmLeave: () => !tabReg.guard || tabReg.guard(),
+    destroy: () => { view.off(); releaseTabReg(); host.replaceChildren(); },
+    scrollTop: () => view.scrollTop(),
+    unsaved: () => view.unsaved(),
+  };
+}
+
+/** What a file tab's frame hands the builder: the pane area to mount in, and the tab's own ✕ and Reload. */
+interface TabFrame { host: HTMLElement; onClose: () => void; onReload: () => void; scrollTop: number }
+
+// THE viewer, for the modal (`tab` null: over this pane, the backdrop and the id every open/closed check targets) and for
+// a file tab (mounted in the tab's area: no backdrop, no id, its registrations in tabReg). Everything the bar and the
+// body do is this one function's, whichever frame holds it.
+function buildFileView(path: string, sid: string | null | undefined, opts: { line?: number | null; frag?: string | null } | undefined,
+                       tab: TabFrame | null): { off: () => void; scrollTop: () => number; unsaved: () => boolean } {
+  const reg = tab ? tabReg : modalReg;
   // backdrop (the whole overlay carries the id every open/closed check targets) + the ~95% card.
   // The backdrop treatment matches the lightbox: dimmed, click outside the card closes, content
   // clicks don't (the user 2026-08-15: it must be obvious the chat is still right behind it).
   const wrap = el("div");
-  wrap.id = "romp-fileview";
-  wrap.onclick = (ev) => { if (ev.target === wrap) closeFileView(); };
+  if (tab) wrap.className = "fileview-inline";   // a file tab's view: pane-resident, no backdrop (styles.css)
+  else {
+    wrap.id = "romp-fileview";
+    wrap.onclick = (ev) => { if (ev.target === wrap) closeFileView(); };
+  }
   const box = el("div", "fileview");
   // A sibling link's `#fragment` (`[see](report.md#results)`: data-frag on the path link, file-view-links.ts
   // linkMarkdownAnchors) lands on its heading after the FIRST rendered paint — once; a Raw view has no ids to
   // land on, so the landing waits for the Rendered toggle rather than being spent (review find on #958, 2026-09-07).
   let pendingFrag: string | null = opts?.frag || null;
-  document.body.classList.add("fileview-open");
+  if (!tab) document.body.classList.add("fileview-open");
+  // is THIS viewer still up: the modal while the overlay stands, a tab's while its wrap is in the page
+  const up = (): boolean => (tab ? wrap.isConnected : !!document.getElementById("romp-fileview"));
 
   const bar = el("div", "fileview-bar");
   // BACK to the listing (the user 2026-08-24): a file opened FROM the browser overlays it with the
@@ -555,7 +635,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   // The button renders only when a listing is actually underneath; a viewer opened from a path link
   // has nowhere to go back to and shows none. Import-free by design: presence is the DOM id (the
   // browser may not even be loaded in this document).
-  if (document.getElementById("romp-filebrowse")) {
+  if (!tab && document.getElementById("romp-filebrowse")) {
     const back = el("button", "fileview-btn fileview-back") as HTMLButtonElement;
     back.type = "button"; back.textContent = "‹ Files"; back.title = "Back to the file listing";
     back.addEventListener("click", () => closeFileView());
@@ -733,7 +813,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   // Registered actions render after the built-ins — the registry walk is the ONE place row
   // conventions live (see registerFileViewAction above). The GitHub link mounts here.
   for (const a of fileViewActions) {
-    const n = a.mount({ path, sid: sid || null });
+    const n = a.mount({ path, sid: sid || null, reg });
     if (n) fileGroup.appendChild(n);
   }
 
@@ -771,13 +851,41 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   const close = el("button", "fileview-btn fileview-close") as HTMLButtonElement;
   close.type = "button"; close.textContent = "✕"; close.title = "Close (Esc)";
   close.setAttribute("aria-label", "Close the file viewer");
-  close.addEventListener("click", closeFileView);
+  if (tab) { close.title = "Close tab"; close.setAttribute("aria-label", "Close this file tab"); close.addEventListener("click", () => tab.onClose()); }
+  else close.addEventListener("click", closeFileView);
   fileGroup.appendChild(copy);
+  // ── Reload, on a file TAB (2026-09-30): a tab stays up while the agents edit the file, so the bar offers the fresh read
+  // the modal gets by being opened again. It re-mounts the view (tab.onReload), behind the same discard ask as a close.
+  let reloadBtn: HTMLButtonElement | null = null;
+  if (tab) {
+    reloadBtn = el("button", "fileview-btn fileview-icon fileview-reload") as HTMLButtonElement;
+    reloadBtn.type = "button"; reloadBtn.innerHTML = ICON_RELOAD; reloadBtn.dataset.icon = "1";
+    reloadBtn.title = "Reload the file"; reloadBtn.setAttribute("aria-label", "Reload the file");
+    reloadBtn.addEventListener("click", () => { if (!confirmDiscard()) return; dirty = false; reloadBtn!.classList.add("fileview-busy"); tab.onReload(); });
+    fileGroup.appendChild(reloadBtn);
+  }
+  // ── the POP-OUT, on the modal (2026-09-30): this file as a tab of the chat strip, and the modal closes (popOutTarget
+  // above: the chat's own opener, or the shell's relay from a pane with no strip; neither, no button). Hidden while the
+  // file is being edited: the edit lives in this modal, and the tab would open on the file as it is on disk.
+  const popTo = tab ? null : popOutTarget();
+  let popBtn: HTMLButtonElement | null = null;
+  if (popTo) {
+    popBtn = el("button", "fileview-btn fileview-icon fileview-popout") as HTMLButtonElement;
+    popBtn.type = "button"; popBtn.innerHTML = ICON_POPOUT; popBtn.dataset.icon = "1";
+    popBtn.title = "Open as a tab"; popBtn.setAttribute("aria-label", "Open as a tab");
+    popBtn.addEventListener("click", () => {
+      if (editing) return;
+      popBtn!.classList.add("fileview-busy");                  // the same-tick acknowledgement
+      if (popTo(path, sid || null)) closeFileView();
+      else popBtn!.classList.remove("fileview-busy");
+    });
+    fileGroup.appendChild(popBtn);
+  }
   acts.appendChild(viewGroup); acts.appendChild(fileGroup); acts.appendChild(close);
   bar.appendChild(name); if (sess) bar.appendChild(sess); bar.appendChild(acts);
 
   const body = el("div", "fileview-body");
-  const stampBodyWidth = watchBodyWidth(body);        // the body's content width, for a top-level table's cap (the sheets read --fv-body-w)
+  const stampBodyWidth = watchBodyWidth(body, reg);   // the body's content width, for a top-level table's cap (the sheets read --fv-body-w)
   textSize.bindWheel(body);                    // Ctrl/Cmd + wheel over the text steps the size (textSizeControl)
   // Links inside the file (file-view-links.ts): a rendered document's RELATIVE links (`[notes](./notes.md)`,
   // `[fig](plots/a.png)`) open the sibling file in this same viewer, its `[top](#evidence)` links land on their
@@ -868,7 +976,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
 
   box.appendChild(bar); box.appendChild(body);
   wrap.appendChild(box);
-  document.body.appendChild(wrap);
+  (tab ? tab.host : document.body).appendChild(wrap);
 
   // The edit-mode notice (a degraded editor, a refused save): one at a time, replacing the last, mounted as
   // a child of the card between the title bar and the body. It used to be prepended inside the body, above
@@ -934,6 +1042,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
       b.hidden = editing;                       // format choices leave with edit mode; Save/Cancel own the bar
     }
     editBtn.hidden = editing || text === null || !isText || !mtimeNs;
+    if (popBtn) popBtn.hidden = editing;      // the edit lives in this modal: no pop-out while it is up
     textSize.sync();                          // the text-size control follows every paint: shown over a text view only
     syncViewGroup();
     saveBtn.hidden = !editing;
@@ -1023,7 +1132,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   // mtime floor does the real safety work (agents edit these same trees — see _save_file).
   const confirmDiscard = (): boolean =>
     !editing || !dirty || window.confirm("Discard unsaved changes to " + path.slice(cut + 1) + "?");
-  closeGuard = confirmDiscard;
+  reg.guard = confirmDiscard;
   const norm = (s: string): string => s.replace(/\r\n/g, "\n");   // the textarea's own view of any text
   // The editing substrate is CodeMirror 6 (the user 2026-08-22), living in its OWN lazily-loaded
   // bundle so people who never edit download nothing (the main bundles import none of it — the
@@ -1087,7 +1196,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   const exitEdit = () => {
     editing = false; dirty = false; ta = null;
     cm?.destroy(); cm = null;
-    editHooks = null;                           // a cancelled save's late ack must not touch a NEW session
+    reg.edit = null;                            // a cancelled save's late ack must not touch a NEW session
     saveBtn.disabled = false; saveBtn.textContent = "Save";
     // the notice is a row of the card (noteBar), so the body swap below no longer takes it: a save that
     // landed, Cancel and Escape all leave through here, and none may leave a stale notice standing
@@ -1101,7 +1210,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     saveBtn.disabled = true; saveBtn.textContent = "Saving…";   // acknowledge before the round-trip
     // restore the file's own line endings — an untouched CRLF file must round-trip byte-identical
     const content = eolCRLF ? buf.replace(/\n/g, "\r\n") : buf;
-    editHooks = {
+    reg.edit = {
       reqId: ++saveSeq,
       saved: (mtNs) => {
         mtimeNs = mtNs;
@@ -1130,7 +1239,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
           re.addEventListener("click", () => {
             if (!confirmDiscard()) return;
             dirty = false;                      // confirmed once — the replace guard must not ask twice
-            openFileView(path, sid);
+            if (tab) tab.onReload(); else openFileView(path, sid);   // a tab re-mounts in place
           });
           bar2.appendChild(re);
         }
@@ -1141,6 +1250,14 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   renderBody();   // buttons take their initial state now; the loader stays up until the fetch lands
 
   const onKey = (e: KeyboardEvent) => {
+    if (tab) {
+      // a file TAB: Escape peels edit mode when the keys are this view's, and never closes the tab (the ✕ and the
+      // strip do); a modal opened over the tab takes its own Escape first
+      if (e.key !== "Escape" || !editing || document.getElementById("romp-fileview") || !wrap.isConnected) return;
+      e.preventDefault();
+      if (confirmDiscard()) exitEdit();
+      return;
+    }
     if (e.key !== "Escape" || !document.getElementById("romp-fileview")) return;
     e.preventDefault();
     if (editing) {                              // Escape peels edit mode first, never the whole viewer
@@ -1188,14 +1305,14 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     isSvgImage = ct === "image/svg+xml";
     return isImage || isPdf ? r.blob() : r.text();
   }).then((t) => {
-    if (!document.getElementById("romp-fileview")) return;    // closed while it was in flight
+    if (!up()) return;                                        // closed while it was in flight
     if (t instanceof Blob) {
       // Minted only now — a viewer closed (above) or REPLACED mid-flight creates nothing to leak,
       // and never clobbers the new open's mediaUrlLive registration.
       if (!wrap.isConnected) return;
       mediaBlob = t;
       objUrl = URL.createObjectURL(t);
-      mediaUrlLive = objUrl;                   // registered so close/replace can revoke (dropMediaUrl)
+      reg.media = objUrl;                      // registered so close/replace can revoke (dropMediaUrl; a tab's, releaseTabReg)
       renderBody();
       return;
     }
@@ -1204,8 +1321,9 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     if (pendingLine !== null && isMd && fmt.md === "rendered") fmt.md = "raw";
     renderBody();
     if (pendingLine !== null) { scrollToLine(pendingLine); pendingLine = null; }
+    else if (tab && tab.scrollTop > 0) body.scrollTop = tab.scrollTop;   // a tab back where its reader left it
   }).catch((err) => {
-    if (!document.getElementById("romp-fileview")) return;
+    if (!up()) return;
     const why = el("div", "fileview-err");
     const msg = String(err && err.message || err);
     why.textContent = msg;
@@ -1228,7 +1346,8 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
     }
     body.replaceChildren(why);
   });
-  return true;
+  return { off: () => { document.removeEventListener("keydown", onKey); wrap.remove(); }, scrollTop: () => body.scrollTop,
+           unsaved: () => editing && dirty };
 }
 
 // Which fetch failures still deserve a Download offer? Exactly the ones that mean the file EXISTS:
@@ -1738,7 +1857,7 @@ export function initFileView(poster: (m: Record<string, unknown>) => void,
   window.addEventListener("message", (e: MessageEvent) => {
     const m = e.data;
     if (!m) return;
-    if (windowSender(e) === "foreign") return;
+    if (windowSender(e) === "foreign") { noteForeign("file-view", e, post); return; }
     if (m.romp === "viewFile" && typeof m.path === "string" && m.path) {
       if (onRelay) { onRelay(m); return; }   // this document's own contract (the Files pane) takes the message whole
       openFileView(m.path, typeof m.sid === "string" ? m.sid : null);
@@ -1751,6 +1870,11 @@ export function initFileView(poster: (m: Record<string, unknown>) => void,
     } else if (m.type === "fileSaveFailed" && editHooks && m.reqId === editHooks.reqId) {
       const h = editHooks; editHooks = null;
       h.failed(String(m.error || "the save failed"));
+    } else if (tabReply(m)) {
+      /* a file tab's viewer's reply (tabReg): the same three replies, keyed on the tab's own reqIds */
+    } else if (m.type === "warn" && typeof m.sid !== "string" && tabReg.edit && !editHooks) {
+      const h = tabReg.edit; tabReg.edit = null;   // the tab's save, when the modal has none in flight (the modal's arm below takes it first)
+      h.failed(String(m.text || "the session's host is not answering — the save was not sent"));
     } else if (m.type === "warn" && typeof m.sid !== "string" && editHooks) {
       // A federation drop (the session's host unreachable) answers a saveFile with a warn instead
       // of a reply — the feed page renders no toasts, so without this the button spins forever
@@ -1777,4 +1901,33 @@ export function initFileView(poster: (m: Record<string, unknown>) => void,
   // same reqId, so a first reply that was merely late and the second are one answer (the browse
   // overlay's re-ask on romp:wsup is the precedent). A read-only query: asking twice costs nothing.
   window.addEventListener("romp:wsup", () => { if (gitHooks) gitHooks.ask(); });
+  // …and the same two for a file tab's viewer (tabReg), whose registrations are its own
+  window.addEventListener("romp:wsdown", () => {
+    if (!tabReg.edit) return;
+    const h = tabReg.edit; tabReg.edit = null;
+    h.failed("the connection dropped mid-save — it may or may not have landed; "
+      + "Save again once the connection returns (a save that DID land will refuse as changed-on-disk)");
+  });
+  window.addEventListener("romp:wsup", () => { if (tabReg.git) tabReg.git.ask(); });
+}
+
+/** A kernel reply for the file TAB's viewer (tabReg): the GitHub link, a save landing, a save refused, each matched on
+ *  the reqId the tab's own ask carried (reqIds come from one counter per kind, so the modal's never match). */
+function tabReply(m: { type?: unknown; reqId?: unknown; url?: unknown; reason?: unknown; mtimeNs?: unknown; error?: unknown }): boolean {
+  if (m.type === "fileGitLink" && tabReg.git && m.reqId === tabReg.git.reqId) {
+    const h = tabReg.git; tabReg.git = null;
+    h.apply(String(m.url || ""), String(m.reason || ""));
+    return true;
+  }
+  if (m.type === "fileSaved" && tabReg.edit && m.reqId === tabReg.edit.reqId) {
+    const h = tabReg.edit; tabReg.edit = null;
+    h.saved(String(m.mtimeNs || ""));
+    return true;
+  }
+  if (m.type === "fileSaveFailed" && tabReg.edit && m.reqId === tabReg.edit.reqId) {
+    const h = tabReg.edit; tabReg.edit = null;
+    h.failed(String(m.error || "the save failed"));
+    return true;
+  }
+  return false;
 }

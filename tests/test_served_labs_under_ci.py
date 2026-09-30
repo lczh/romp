@@ -1,10 +1,10 @@
 """Every served lab runs in CI's served job (2026-09-15).
 
-CI's browser-backed step (.github/workflows/ci.yml, "Browser-backed served-page tests") runs ONLY the files its two
-globs name, tests/test_*_browser.py and tests/test_*_served.py, under ROMP_SERVED_TESTS_REQUIRE=1; tests/conftest.py
-turns a skip in exactly those files into a failure (_is_served_test_file, the same two suffixes). A lab whose name misses
-both suffixes therefore skips on the Python matrix runners (no node deps, no browser), never runs in the served job,
-and its skip stays a skip: eleven labs stood outside the globs on 2026-09-15, and one of them
+CI's browser-backed step (.github/workflows/ci.yml, "Browser-backed served-page tests", sharded since 2026-09-30) runs
+ONLY the files its two globs name, tests/test_*_browser.py and tests/test_*_served.py, under ROMP_SERVED_TESTS_REQUIRE=1;
+tests/conftest.py turns a skip in exactly those files into a failure (_is_served_test_file, the same two suffixes). A lab
+whose name misses both suffixes therefore skips on the Python matrix runners (no node deps, no browser), never runs in the
+served job, and its skip stays a skip: eleven labs stood outside the globs on 2026-09-15, and one of them
 (the ship-reship lab, since renamed with the suffix; its NackNoticeSurvivesReload class) hid a real regression on main
 for a day.
 
@@ -62,12 +62,15 @@ def served_labs():
 
 
 def ci_served_globs():
-    """The file globs on the served step's pytest line: the step that sets ROMP_SERVED_TESTS_REQUIRE to 1."""
+    """The file globs the served step deals into its shards (the step that sets ROMP_SERVED_TESTS_REQUIRE to 1; since
+    2026-09-30 its pytest line runs the files scripts/ci/shard_tests.py picks from these globs for the shard)."""
     with open(CI_YML, encoding="utf-8") as f:
         text = f.read()
-    step = re.search(r'ROMP_SERVED_TESTS_REQUIRE: "1".*?python -m pytest ([^\n]*)', text, re.S)
+    step = re.search(r'ROMP_SERVED_TESTS_REQUIRE: "1"[\s\S]*?files=\$\(python scripts/ci/shard_tests\.py ([^\n]*)\)\n'
+                     r'(?:[^\n]*\n)*?\s*python -m pytest \$files ', text)
     if not step:
-        raise AssertionError("ci.yml has no pytest line after ROMP_SERVED_TESTS_REQUIRE: \"1\"")
+        raise AssertionError("ci.yml's served step no longer deals its globs through scripts/ci/shard_tests.py into "
+                             "the pytest line after ROMP_SERVED_TESTS_REQUIRE: \"1\"")
     return [tok for tok in step.group(1).split() if tok.startswith("tests/")]
 
 

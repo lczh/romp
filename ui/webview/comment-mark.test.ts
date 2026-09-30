@@ -30,7 +30,7 @@ test("the ring is the painter's call: only mark.cmt-hl.unread.cmt-ring carries a
 test("read marks wear no box, and the fill tiers are byte-untouched — the colour still says pending vs landed", () => {
   assert.match(CSS, /mark\.cmt-hl\.unread \{ background: color-mix\(in srgb, var\(--cmt-hl\) 45%, transparent\); \}/, "landed = the 45% yellow tier (T237's pin)");
   assert.match(CSS, /mark\.cmt-hl\.busy \{\s*\n\s*background-color: color-mix\(in srgb, var\(--st-awaitbg-bg\) 24%, transparent\);/, "pending = the green wash");
-  assert.match(CSS, /mark\.cmt-hl\.resolved \{ background: rgba\(255, 255, 255, 0\.08\); \}/);
+  assert.match(CSS, /mark\.cmt-hl\.resolved \{ background: var\(--cmt-hl-resolved\); \}/);
   assert.match(CSS, /mark\.cmt-hl:hover \{ background: color-mix\(in srgb, var\(--cmt-hl\) 58%, transparent\); \}/);
   // the painter draws a box for UNREAD marks only: a read mark has no box to wear
   assert.match(RENDER, /v\.el\.querySelectorAll\("mark\.cmt-hl\.unread"\)/);

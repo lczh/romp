@@ -241,36 +241,23 @@ jobs:
         if: ${{ !cancelled() }}
         run: gitleaks dir . --no-banner --redact -v --config .gitleaks.toml
 
-  vscode-extension:
-    name: vscode-extension (typecheck + test + build)
+  # The extension's required check is three jobs (2026-09-30). The browser-backed served-page tests were 45 of the one
+  # job's 50 minutes, in a single pytest process, so a flaky lab cost the whole 50 again on a rerun. Now:
+  #  - vscode-extension-unit runs the typecheck, the node tests, the build and the pane bench, once.
+  #  - vscode-extension-served runs the served-page tests as parallel shards, each on its own runner, dealt by
+  #    recorded per-file duration: scripts/ci/shard_tests.py reads scripts/ci/served-durations.json, and its
+  #    docstring says how to refresh that file from a run's reports. A lab the file does not list still runs, and
+  #    its shard's log warns. A fifth shard is one more matrix value.
+  #  - vscode-extension carries the name the ruleset requires, "vscode-extension (typecheck + test + build)"; a matrix
+  #    job's name carries its matrix values, so the name moved to a verdict job that needs both and fails unless every
+  #    part succeeded. It runs under always(): without it a failed part would SKIP the verdict, and GitHub reports a job
+  #    skipped by a conditional as a success to a required check, so a red shard would merge.
+  # "Re-run failed jobs" re-runs the red shard and the verdict, about a quarter of the old wait.
+  vscode-extension-unit:
+    name: vscode-extension unit (typecheck + test + build + bench)
     runs-on: ubuntu-latest
-    # Time-boxed like the Python jobs above, and for the same reason the cap must EXCEED the phase it
-    # guards plus the 600 s per-test timeout plus setup. This job's long phase is the served-page
-    # pytest step below, which grows with every served lab added (the focused section's, the widgets',
-    # the held-answer federation lab). Measured from the Actions API (2026-09-14): main's run
-    # 34812968222 took the job 14 min 42 s with the served step alone at 12 min 44 s, seconds under the
-    # old 15 min; PR 1598's run 34809524051 was CANCELLED at 15 min 16 s with the served step killed
-    # at 13 min 14 s and every earlier step green, so a PR adding a lab, or a slow runner, read as a
-    # red. 25 min = 13 min of labs + 600 s for one stalled test + setup, with margin; the served step
-    # names its slowest labs (--durations=20) so the next growth is visible in the log. The labs kept
-    # growing: PR 1790's run 35138058863 was cancelled at 25 min 04 s mid served-lab on a slow runner,
-    # every step green up to the cut (2026-09-16). 40 min: the served step's 20-odd minutes on a slow
-    # runner plus the 600 s per-test timeout plus setup. The labs kept growing again: measured from the
-    # Actions API on 2026-09-23, the job took 36.2 to 36.7 min on five recent merge commits of main
-    # (d56e9380, 0534ac86, ad70c3f6, 9b8e03d0, c1dae566), and PR 2061's run 35821212036 attempt 1, a RED run
-    # (ten failures in one served class at 87 percent added about 4 min to the step), was CANCELLED at
-    # 40 min 15 s inside the served step; attempt 2 on the same head passed in 37 min 03 s. 60 min, by the
-    # rule: a served step of up to 38 min plus the 600 s per-test timeout plus about 2 min of earlier steps
-    # is about 50, with margin. After the raise the served step took 31.62 to 39.15 min over the sixty
-    # green main runs from 2026-09-23 06:37 UTC to 2026-09-24 10:44 UTC (35.97 to 37.77 min over the
-    # sixteen consecutive runs from f824eb06 to f2108d89, and 37.92 on 23c2a9960 shortly before them);
-    # the closest call was the run on b598eae9, its served step ending 41 min 19 s after the job
-    # started, and with a step of up to 39 min the rule's figure is about 51, the pin's floor. A
-    # separate served-lab job would save only the earlier steps, about 2 min
-    # (they are about 6 percent of the job), and keeps the same cap rule; what shortens the served phase
-    # is shards across parallel jobs (a matrix, which changes the required-checks list), pytest -n inside
-    # the one job (the labs that print frame and timing figures stay serial), or cheaper labs.
-    timeout-minutes: 60
+    # About 6 minutes on 2026-09-30 (the node tests are 4 of them); the cap leaves a slow runner room.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: vscode-extension
@@ -329,17 +316,53 @@ jobs:
         env:
           ROMP_UI_BENCH_REQUIRE: "1"
         run: node --test tests/ui-bench.test.mjs
+
+  vscode-extension-served:
+    name: vscode-extension served tests (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    # A shard's cap must EXCEED its served step plus the 600 s per-test timeout plus setup, or a stall late in the step
+    # is killed by the cap first, nameless, which is the silence the per-test timeout exists to end. Unsharded, the step
+    # took 45 min 20 s on 2026-09-30 (run 36702816332), up from 31.6 to 39.2 min a week earlier, and the one job's cap
+    # had grown from 15 to 60 minutes with it. A quarter is about 12 minutes; 30 leaves up to 18 for a slow runner and
+    # new labs, plus the 10 and setup. When a shard nears that, add a shard rather than raise the cap.
+    timeout-minutes: 30
+    strategy:
+      # Every shard runs to its own verdict: a red one must not cancel its siblings.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+      - name: Install deps and build
+        # The served pages load the dist the build writes; the same setup as the unit job, without its checks.
+        working-directory: vscode-extension
+        run: npm ci && npm run build
+      - name: Cache Playwright's browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('vscode-extension/package-lock.json') }}
+      - name: Install the pinned Playwright Chromium
+        # The unit job's pinned browser, for the same reasons (its comment there).
+        timeout-minutes: 5
+        working-directory: vscode-extension
+        run: npx playwright install chromium
       - uses: actions/setup-python@v5
-        # For the served-page tests below: the image's python3 would do, but its pip refuses to install
-        # into the system interpreter, and pytest is not on the image.
+        # The image's python3 would do, but its pip refuses to install into the system interpreter, and pytest is not
+        # on the image.
         with:
           python-version: '3.12'
       - name: Browser-backed served-page tests (pytest)
         # tests/test_*_browser.py and tests/test_*_served.py boot a hermetic kernel and drive the real
         # dashboard pages in the headless Chromium installed above; on the Python matrix runners (no
         # node deps, no browser) they skip, and say why, so a served-page regression never turned CI
-        # red (the deep-link landing pin, 2026-09-10: red on main, CI green). This is the one job that
-        # has the browser and the built dist, so they run HERE, one pytest process, with
+        # red (the deep-link landing pin, 2026-09-10: red on main, CI green). These shards have the
+        # browser and the built dist, so they run HERE, one pytest process per shard, with
         # ROMP_SERVED_TESTS_REQUIRE=1 turning any skip in those files into a failure that carries the
         # skip's reason (tests/conftest.py; the same stance as ROMP_UI_BENCH_REQUIRE above): a runner
         # without the browser, the deps or a serving kernel turns the job red rather than green with
@@ -349,15 +372,44 @@ jobs:
         # as "optional", which the switch leaves alone (WebKit's system libraries would need apt, which
         # this step does not run; see the install step above). The matrix jobs are unchanged: still no
         # browser, still skipping these. --durations=20 names the slowest labs in the log: this step is
-        # the job's long phase (its measured minutes and the cap's rule live in the job's comment above,
+        # the shard's long phase (its measured minutes and the cap's rule live in the job's comment above,
         # the one home for the figure), and every served lab added grows it, so the next growth should be
         # visible by name.
-        working-directory: ${{ github.workspace }}
         env:
           ROMP_SERVED_TESTS_REQUIRE: "1"
           ROMP_SERVED_TESTS_ENGINES: chromium
         run: |
           python -m pip install --upgrade pip pytest pytest-timeout cryptography
+          # this shard's files, dealt by recorded duration from everything the two globs name (the header comment above)
+          files=$(python scripts/ci/shard_tests.py --shard ${{ matrix.shard }} --of ${{ strategy.job-total }} tests/test_*_browser.py tests/test_*_served.py)
           # -rP: a PASSING lab's captured output reaches the job log too (its cost line: frames per second, the longest gap, the
-          # layout counts), so a lab's figures can be read off a green run without re-running it locally (PR 1927, round two)
-          python -m pytest tests/test_*_browser.py tests/test_*_served.py -q -rsP -p no:cacheprovider --durations=20 --timeout=600 --timeout-method=thread
+          # layout counts), so a lab's figures can be read off a green run without re-running it locally (PR 1927, round two).
+          # --junitxml: each file's time, which a durations refresh reads (xunit1 names each case's file).
+          python -m pytest $files -q -rsP -p no:cacheprovider --durations=20 --timeout=600 --timeout-method=thread --junitxml=served-junit.xml -o junit_family=xunit1
+      - name: Upload the durations report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: served-junit-${{ matrix.shard }}
+          path: served-junit.xml
+          retention-days: 14
+
+  vscode-extension:
+    name: vscode-extension (typecheck + test + build)
+    needs: [vscode-extension-unit, vscode-extension-served]
+    # always(), not !cancelled(): a cancelled part must turn this check red too, never skip it into a success.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every part passed
+        # needs.<job>.result is success, failure, cancelled or skipped, and a matrix job's is one result for all its
+        # shards; anything but success fails the check.
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' > /dev/null; then
+            echo "::error::a part of the extension check did not succeed (listed above), so this check fails with it"
+            exit 1
+          fi

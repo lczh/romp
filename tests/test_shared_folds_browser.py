@@ -17,7 +17,8 @@ kernel's own media rule). In one driver run:
      reload, shows qa open;
   3. the ACTIVE session's group folds like any other, the desktop's rule: the phone picks web, the desktop folds infra,
      and the phone's picker lists infra's heading alone, marked current, while the current-session chip still names web;
-     the phone opening infra brings web's row back, marked active.
+     the phone opening infra brings web's row back, marked active, and the desktop follows on the kernel's push, which the
+     desktop's wire holds until the phone has repainted.
 The kernel's store is read after each step. Skips LOUDLY without the extension deps or a Playwright browser. The lab
 kernel never reaches the machine's user manager: a `systemctl` and a `systemd-run` of the lab's own shadow the real
 ones on its PATH (the boot reconcile lists session scopes for any session it finds alive). SYNTHETIC fixtures only
@@ -109,6 +110,18 @@ async function run() {
 // the DESKTOP: a mouse, a wide window
 const desk = await browser.newContext({ viewport: { width: 1400, height: 800 } });
 const dpage = await desk.newPage();
+// the desktop's kernel sockets, at the wire: while the hold is armed the kernel's frames to the desktop wait here, and the
+// release sends them on in order. Step 3 holds them across the phone's own repaint, so the desktop can follow only through
+// the push, after the phone has repainted: the order a slow push gives (CI 2026-09-29 and 2026-09-30, where the desktop was
+// read while the push was still on its way)
+let deskHold = false; const deskHeld = [];
+await dpage.routeWebSocket(() => true, (ws) => {
+  const server = ws.connectToServer();
+  ws.onMessage((m) => server.send(m));
+  server.onMessage((m) => { if (deskHold) deskHeld.push([ws, m]); else ws.send(m); });
+  server.onClose(() => ws.close()); ws.onClose(() => server.close());
+});
+const releaseDesk = () => { deskHold = false; const n = deskHeld.length; for (const [ws, m] of deskHeld.splice(0)) { try { ws.send(m); } catch (e) { /* the socket closed under the hold */ } } return n; };
 await dpage.goto(cfg.chat);
 await wait(dpage, (n) => document.querySelectorAll("#tabs .tab[data-id]").length === n, cfg.count, "the desktop strip never showed every session");
 await wait(dpage, () => document.querySelectorAll("#tabs .tab-group-head[data-group]").length === 2, null, "the desktop strip never sectioned");
@@ -149,9 +162,14 @@ if (!(await page.$("#mlist.open"))) await page.tap("#mcur");
 await wait(page, () => !!document.querySelector("#mlist.open"), null, "the picker never reopened");
 await wait(page, () => { const h = document.querySelector('#mlist .mhead[data-group="infra"]'); return !!h && h.classList.contains("folded"); }, null, "the picker never folded infra");
 out.activeFolded = { phone: await readPhone(page), store: store() };
+deskHold = true;
 await page.tap('#mlist .mhead[data-group="infra"]');
 await wait(page, (id) => !!document.querySelector('#mlist .mrow.active[data-id="' + id + '"]'), cfg.web, "web's row never came back");
-out.activeOpened = { phone: await readPhone(page), desk: await readDesk(dpage), store: store() };
+const phoneOpened = await readPhone(page);
+out.heldAtDesk = releaseDesk();
+// the desktop follows on the kernel's push, not when the phone repaints: its header opening is the event
+await wait(dpage, () => { const h = document.querySelector('#tabs .tab-group-head[data-group="infra"]'); return !!h && h.dataset.folded === "0"; }, null, "the desktop never followed the phone's open of infra");
+out.activeOpened = { phone: phoneOpened, desk: await readDesk(dpage), deskFresh: await deskFresh(dpage), store: store() };
 }
 await run().then(() => finish(null), (e) => finish("an action failed: " + String(e && e.message || e).split("\n")[0]));
 """
@@ -347,6 +365,8 @@ class SharedFoldsBrowser(unittest.TestCase):
         self.assertEqual(o["phone"]["away"], [], "the tab itself is on the strip again: no stand-in node")
         self.assertEqual(o["phone"]["current"], "web")
         self.assertIn("g:infra", self.named(o["desk"]), "and the desktop followed")
+        self.assertTrue({"t:web", "t:api"} <= set(self.named(o["desk"])), "the desktop strip shows infra's tabs again: %s" % o["desk"])
+        self.assertTrue(o["deskFresh"], "the desktop followed without a reload")
 
 
 if __name__ == "__main__":
