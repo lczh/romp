@@ -176,7 +176,15 @@ test("the login flow lives in a modal behind one button (the user 2026-08-30)", 
   // mid-flow the button REOPENS the modal, never restarts the flow; terminal state closes it;
   // Cancel + Escape + backdrop close; the code input stays a pure pass-through (T157)
   assert.ok(GEAR.includes("if (lgLive === 'url' || lgLive === 'starting' || lgLive === 'verifying') return;"));
-  assert.ok(GEAR.includes("if (!f.state) lgModal(false);"));
+  assert.ok(GEAR.includes("if (!f.state || f.state === 'done') lgModal(false);"));
+  // every wait inside the dialog says what it waits on beside the loader's dots, and the kernel's err (a refusal in
+  // the CLI's words, or its complaint about a half-copied code) shows in the dialog itself (2026-09-30)
+  assert.ok(GEAR.includes("id=rs-login-status"), "the dialog's own status line");
+  assert.ok(GEAR.includes("'Starting Claude Code…'") && GEAR.includes("'Checking the code…'"));
+  assert.match(CSS, /#rs-login-modal \.rs-login-dots i \{[^}]*background: var\(--accent, #9cd2ff\);/, "the loader's accent dots");
+  assert.ok(CSS.includes("#rs-login-modal .rs-login-code[hidden] { display: none; }") && GEAR.includes("<div id=rs-login-code class=rs-login-code hidden>"),
+            "the paste row's flex must not defeat [hidden]: it shows only while a code is awaited");
+  assert.ok(GEAR.includes("lgE.classList.toggle('bad', f.state === 'error' || f.state === 'url');"));
   assert.ok(GEAR.includes("if (e.key === 'Escape' && lgM && !lgM.hidden) lgModal(false);"));
   assert.ok(GEAR.includes("if (e.target === lgM) lgModal(false);"));
   assert.ok(GEAR.includes("post({ type: 'loginCode', code: code });"), "pass-through untouched");
