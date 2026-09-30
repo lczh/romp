@@ -176,7 +176,8 @@ test("the login flow lives in a modal behind one button (the user 2026-08-30)", 
   // mid-flow the button REOPENS the modal, never restarts the flow; terminal state closes it;
   // Cancel + Escape + backdrop close; the code input stays a pure pass-through (T157)
   assert.ok(GEAR.includes("if (lgLive === 'url' || lgLive === 'starting' || lgLive === 'verifying') return;"));
-  assert.ok(GEAR.includes("if (!f.state || f.state === 'done') lgModal(false);"));
+  // a terminal state closes it unless it is the outcome this dialog followed, which it shows (the test below)
+  assert.ok(GEAR.includes("if (!(lgOk && !lgOk.hidden)) lgModal(false);"));
   // every wait inside the dialog says what it waits on beside the loader's dots, and the kernel's err (a refusal in
   // the CLI's words, or its complaint about a half-copied code) shows in the dialog itself (2026-09-30)
   assert.ok(GEAR.includes("id=rs-login-status"), "the dialog's own status line");
@@ -188,6 +189,36 @@ test("the login flow lives in a modal behind one button (the user 2026-08-30)", 
   assert.ok(GEAR.includes("if (e.key === 'Escape' && lgM && !lgM.hidden) lgModal(false);"));
   assert.ok(GEAR.includes("if (e.target === lgM) lgModal(false);"));
   assert.ok(GEAR.includes("post({ type: 'loginCode', code: code });"), "pass-through untouched");
+});
+
+test("a successful login says so: the dialog's outcome with Close, the row at rest names the login and its machine (2026-09-30)", () => {
+  // The user signed in and the dashboard read exactly as before: the dialog closed itself on done, and the only place naming
+  // the login was the row's hover popover. The behaviour is walked in gear-login-signed-in-browser.test.ts and, on the real
+  // kernel with a fake CLI, in tests/test_login_signed_in_served.py; these pins hold the shape where no browser runs.
+  assert.ok(GEAR.includes("<div id=rs-login-ok class=rs-login-ok hidden></div>"), "the dialog has an outcome line, hidden until done");
+  assert.ok(GEAR.includes("<button id=rs-login-close type=button hidden"), "…and a Close beside it");
+  assert.ok(GEAR.includes("lgSuccess(who ? 'Signed in as ' + who : 'Signed in.');"), "done in the flow this dialog followed says who");
+  assert.ok(GEAR.includes("if (on) { lgU.hidden = true; lgC.hidden = true; lgStatus({ state: 'done', err: '' }); }"),
+    "the link, the paste box and every wait go with the outcome");
+  assert.ok(GEAR.includes("if (lgX) lgX.hidden = on;"), "Close stands in Cancel's place");
+  assert.ok(GEAR.includes("if (lgClose) lgClose.addEventListener('click', function () { lgModal(false); });"), "Close cancels nothing");
+  assert.ok(!GEAR.includes("if (!f.state || f.state === 'done') lgModal(false);"), "done no longer closes the dialog out from under the person");
+  // a read in flight across the start carries the previous flow's number, and its "done" is never announced as this flow's
+  assert.ok(GEAR.includes("if (lgFrom !== null && n !== null && n <= lgFrom) {"));
+  assert.ok(GEAR.includes("lgFrom = lgN; lgStale = 0; lgSaw = false;"));
+  // the row at rest: a permanent line (rs-line, not the rs-sub popover), the machine named beside other kernels, the same flow
+  assert.ok(GEAR.includes(`"<span id=rs-login-who class='rs-line rs-login-who'></span>" +`), "the signed-in line is permanent");
+  assert.ok(GEAR.includes("var line = who ? (many ? 'Signed in on ' + where + ' as ' + who : 'Signed in as ' + who)"));
+  assert.ok(GEAR.includes("lgB.textContent = mid ? 'Show login code…' : (who ? 'Sign in again…' : 'Log in to Claude Code');"),
+    "a login re-runs the same flow; none keeps today's button");
+  // the billing line only from the kernel's reading (/logins' machine block), never guessed
+  assert.ok(GEAR.includes("if (m && m.keyHelper === true && m.loginUsable === true) bill = 'An API key is also set up here; a session uses this account only when its Billing is Login.';"));
+  // one popover under the pointer: the stored logins' note rides the row's one description (as an rs-sub of its own it
+  // floated a second popover over the first), and the list's heading, when there is a list, sits in the flow
+  assert.ok(!GEAR.includes("head.className = 'rs-sub';"), "the stored logins' head is no second rs-sub");
+  assert.ok(GEAR.includes("+ (lgStored ? ' ' + lgStored : '');"));
+  assert.ok(GEAR_CSS.includes("#rsettings .rs-line.rs-login-who { color: var(--fg, #ccc);"), "the signed-in line wears the body ink");
+  assert.ok(GEAR_CSS.includes("#rs-login-modal .rs-login-ok { margin-top: 8px; color: var(--fg, #ccc);"));
 });
 
 test("the distilling tier is its own gear pair, defaulting to follow-triage", () => {

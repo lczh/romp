@@ -106,6 +106,9 @@ load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 km = load_source("romp_kernel_login", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
+# this module mints its own state root (XDG_STATE_HOME above), outside the conftest floor's, so it pins per-session hosts off there
+jd.STATE.mkdir(parents=True, exist_ok=True)
+(jd.STATE / "session-hosts").write_text("off\n")
 
 
 def _wait_state(want, seconds=15):
@@ -358,6 +361,50 @@ class LoginFlow(unittest.TestCase):
         st = km._login_state()
         self.assertEqual(st["state"], "error")
         self.assertIn("timed out", st["err"])
+
+    def test_each_start_is_a_new_flow_number_and_its_outcome_carries_it(self):
+        # the dashboard's dialog tells the previous flow's kept outcome from its own start's by this number: a finished state
+        # stays until the next start, so a read in flight across a Sign in again click came back "done", and without the
+        # number the dialog would have announced a sign-in that had not happened yet (2026-09-30)
+        n0 = km._login_state()["n"]
+        self.assertEqual(km._login_start(), "")
+        st = _wait_state("url")
+        self.assertEqual(st["n"], n0 + 1, "the start is a new flow: %r" % st)
+        self.assertEqual(km._login_code(_GOOD), "")
+        st = _wait_state("done")
+        self.assertEqual((st["state"], st["n"]), ("done", n0 + 1), "its outcome carries its number: %r" % st)
+        self.assertEqual(km._login_start(), "")
+        st = _wait_state("url")
+        self.assertEqual(st["n"], n0 + 2, "the next start moves past the kept outcome: %r" % st)
+        km._login_cancel()
+        self.assertEqual(km._login_state()["n"], n0 + 2, "a cancel starts nothing")
+        with mock.patch.object(km, "_claude_bin", return_value=os.path.join(_MOCK_DIR, "no-such-claude")):
+            self.assertIn("could not start", km._login_start())
+        st = km._login_state()
+        self.assertEqual((st["state"], st["n"]), ("error", n0 + 3), "a start that fails to spawn is a flow of its own, its error numbered: %r" % st)
+
+    def test_the_logins_route_says_how_the_machines_login_bills_beside_the_key(self):
+        # the Account row's billing line reads these (2026-09-30): an apiKeyHelper here outranks the login, so a session bills
+        # the login only when its Billing is Login, and a managed helper outranks even that pick. _auth_avail's reading, the one
+        # the new-session picker's Billing row trusts, so the two surfaces agree
+        both = {"key": True, "login": True, "acct": "dev@example.com", "default": "key", "logins": []}
+        with mock.patch.object(km, "_auth_avail", return_value=both):
+            m = km._logins_view()["machine"]
+        self.assertEqual((m["keyHelper"], m["loginUsable"], m["loginWhy"]), (True, True, ""))
+        managed = {"key": True, "login": False, "loginWhy": jd._cred.WHY_MANAGED_HELPER, "default": "key", "logins": []}
+        with mock.patch.object(km, "_auth_avail", return_value=managed):
+            m = km._logins_view()["machine"]
+        self.assertEqual((m["keyHelper"], m["loginUsable"], m["loginWhy"]), (True, False, jd._cred.WHY_MANAGED_HELPER))
+        with mock.patch.object(km, "_sdk", return_value=None):   # no backend in this module: the key side reads absent, as on a box with none
+            d = km._logins_view()
+        self.assertIs(d["machine"]["keyHelper"], False)
+        for k in ("label", "acct", "state"):
+            self.assertIn(k, d["machine"], "the block keeps what `romp login list` and the gear read")
+        self.assertTrue(d["ok"])
+        self.assertIsInstance(d["logins"], list)
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertIn('return self._send(200, json.dumps(_logins_view()), "application/json", cache="no-cache")', src,
+                      "GET /logins serves this view")
 
     def test_ops_payload_and_gear_wiring(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
