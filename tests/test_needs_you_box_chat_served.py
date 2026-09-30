@@ -676,10 +676,11 @@ def _premise_said(p):
 def _overrun_record(stdout):
     """What a driver that ran past its budget had reached, for the message every test then fails on: the two premise records named FIRST,
     the standalone page's (`premise`) and the shell's chat pane's (`hiddenPane.premise`), read from the last PARTIAL line as JSON, then that
-    line's last 3000 characters. The tail alone missed both, since each record sits early in its line (the first review round of this fix,
-    2026-09-29: with the pane left on api's tab the driver overran and all 30 tests failed on a budget message that said nothing of the
-    premise). A line that does not parse, or parses to something other than a record, falls back to the tail. Never raises: this message is
-    all an overrun leaves."""
+    line's last 3000 characters. The tail alone missed the standalone record, which sits early in every line, and the pane's, which sits
+    last only in the line written right after its pick and early in the later ones (the first review round of this fix, 2026-09-29: with the
+    pane left on api's tab the driver overran and all 30 tests failed on a budget message that said nothing of the premise). A line that
+    does not parse, or parses to something other than a record, falls back to the tail. Never raises: this message is all an overrun
+    leaves."""
     line = next((ln for ln in reversed((stdout or "").splitlines()) if ln.startswith("PARTIAL:")), None)
     if line is None:
         return "its record so far: (no scene completed)"
