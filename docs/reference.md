@@ -408,8 +408,19 @@ following to every connected machine's kernel):
   turn the session started on its own (a background task's notice, a scheduled
   prompt) arriving after a Latest or default pick, or after any pick above the
   model the session was on; a Latest or default pick made while the session is
-  reconnecting, which can miss its CLI; and a reply from before the pick that
-  the session replays after a kernel restart. Every ten
+  reconnecting, or any pick above the model the session was on made after a
+  kernel restart before the session reconnects, either of which can miss its CLI;
+  and a reply from before the pick that the session replays after a kernel
+  restart. When one of the first two follows a Latest or default pick that
+  resolves below the model the session was on, and the switch is on, the session
+  is then reconnected every ten minutes on the pick, and turns served on it never
+  end that. One more case shows a pick as not answering: a pick above the model the
+  session was on, still taking effect when the session's CLI ends while idle or
+  the kernel restarts gracefully, keeps the old model's name, so the
+  requested-model mark below shows the pick as not answering until the first
+  reply served on it, even where the CLI runs it. With the switch on, the
+  session reattaching to its CLI then arms the retry, and when that CLI already
+  runs the pick, a `Model back on …` card follows its first reply. Every ten
   minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
@@ -417,7 +428,8 @@ following to every connected machine's kernel):
   below its pick when you turn the switch on is taken up at once, unless a pick
   of its own is still taking effect. A fallback that
   happens again is logged once per attempt; its card follows the board's usual
-  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
+  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the model
+  the session fell from or above it, or on the version you picked or above it, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
   A pick of your own ends it too, as does turning the switch off. While a
   fallback stands, the session's model picker, in the chat statusline and in the
