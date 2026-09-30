@@ -141,6 +141,9 @@ for (const [label, th, who, alt] of cfg.cases) {
   await settleAt(page, sx, sy);
   await settleAt(page, tx, ty);
   for (let i = 0; i < 3; i++) await page.mouse.move(tx, ty);
+  // the hand holds still past the strip's slide (flipTabs eases a moved tab over 0.12 s) with no tick after it: the
+  // cue must already be where the tab came to rest, not where the last tick caught it mid-slide
+  await page.waitForTimeout(300);
   // the drop indicator as the hand sees it: the ringed header, the leave line's words, the + badge on the dragged tab
   c.cue = await page.evaluate(() => {
     const vis = (el) => !!el && el.style.display !== "none" && getComputedStyle(el).display !== "none";
@@ -151,7 +154,10 @@ for (const [label, th, who, alt] of cfg.cases) {
              leave: vis(line) ? line.textContent.replace(/\s+/g, " ").trim() : "",
              plus: pr ? { text: plus.textContent, w: Math.round(pr.width), h: Math.round(pr.height),
                           onCorner: !!dr && Math.abs(pr.left + pr.width / 2 - dr.right) <= pr.width && Math.abs(pr.top + pr.height / 2 - dr.top) <= pr.height,
-                          bg: getComputedStyle(plus).backgroundColor } : null };
+                          badge: { left: Math.round(pr.left), top: Math.round(pr.top) },
+                          tab: dr ? { right: Math.round(dr.right), top: Math.round(dr.top), transform: getComputedStyle(dragged).transform } : null,
+                          bg: getComputedStyle(plus).backgroundColor } : null,
+             lineUnder: vis(line) && dr ? Math.abs(line.getBoundingClientRect().top - (dr.bottom + 4)) <= 2 : null };
   });
   if (cfg.shots) {
     const S = await strip(page);
@@ -322,6 +328,7 @@ class ServedTabDragMove(unittest.TestCase):
         self.assertEqual(c["cue"]["ring"], ["qa"], "the group about to take it wore the accent ring before the release" + detail)
         self.assertEqual(c["cue"]["leave"], "out of infra, release", "the line under the tab named both tags coming off" + detail)
         self.assertIsNone(c["cue"]["plus"], "no + badge without the modifier" + detail)
+        self.assertTrue(c["cue"]["lineUnder"], "the line sits under the dragged tab where it came to rest" + detail)
         self._agree(c, detail)
 
     def _added(self, label, theme):

@@ -6091,6 +6091,16 @@ function tabDropFor(dragged: HTMLElement, id: string, unions: readonly TagUnion[
 // whatever ended the drag.
 let dragCueEl: HTMLElement | null = null;   // the leave cue's ONE node, the hover tip's idiom: built on first use, hidden between gestures
 let dragAddEl: HTMLElement | null = null;   // …and the copy badge's
+/** The dragged tab's box where the strip has PLACED it: its rect less the FLIP translate still easing it there.
+ *  flipTabs animates every tab the live reorder moved, the dragged one too, from its old place, so the rect read
+ *  on the tick of a hop is the OLD place, and a cue pinned to it stayed there whenever no later tick came before
+ *  the hand let go (the + badge, off the tab's corner in the served lab under CI's slower clock). */
+function placedRect(t: HTMLElement): { left: number; top: number; right: number; bottom: number } {
+  const r = t.getBoundingClientRect();
+  let dx = 0, dy = 0;
+  try { const tf = getComputedStyle(t).transform; if (tf && tf !== "none") { const m = new DOMMatrixReadOnly(tf); dx = m.e; dy = m.f; } } catch (e) { /* no matrix: the rect as it is */ }
+  return { left: r.left - dx, top: r.top - dy, right: r.right - dx, bottom: r.bottom - dy };
+}
 let dragCueKey = "";                        // the cue already on screen (see paintDragCue): a tick that would paint the same one touches nothing
 let dragUnions: readonly TagUnion[] = [];   // the unions the frozen strip was drawn from, snapshotted at dragstart beside the geometry
 function paintDragCue(strip: HTMLElement, dragged: HTMLElement, d: TabDrop, head: HTMLElement | null,
@@ -6102,9 +6112,10 @@ function paintDragCue(strip: HTMLElement, dragged: HTMLElement, d: TabDrop, head
   // on every pointer tick, and the drag's budget belongs to the live reorder's hit-test: a querySelectorAll and a
   // rect read per tick cost Chromium enough ticks to change WHERE A DROP LANDS (found by the strip's own drag lab,
   // whose slot expectations moved when this cue first painted unconditionally). The dragged tab's box joins the key
-  // only while the leave line or the badge is up, since both are pinned to it — and the handler has just read that
-  // rect for its own guard, so the read is free.
-  const r = words.leaving.length || plus ? dragged.getBoundingClientRect() : null;
+  // only while the leave line or the badge is up, since both are pinned to it: its PLACED box (placedRect), which a
+  // FLIP easing the tab into its new slot does not move, so the cue lands where the tab is going and the ticks of
+  // the slide leave the key as it is.
+  const r = words.leaving.length || plus ? placedRect(dragged) : null;
   const key = [ring?.dataset.group ?? "", words.leaving.join(""), words.more, plus ? "+" : "",
                r ? Math.round(r.left) : 0, r ? Math.round(r.top) : 0, r ? Math.round(r.right) : 0, r ? Math.round(r.bottom) : 0].join(" ");
   if (key === dragCueKey) return;

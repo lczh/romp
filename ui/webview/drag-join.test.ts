@@ -219,8 +219,10 @@ test("render.ts wires the rule into the strip's drag: one decision, the cue and 
   assert.match(RENDER, /for \(const op of ops\) nv = applyTagEdit\(nv, op\);/, "the optimistic copy through the shared applier");
   assert.match(RENDER, /if \(ops\.length\) for \(const op of ops\) postTagEdit\(nv, op\);/,
     "every op of one drop rides ONE optimistic blob, so the strip never shows a half-moved session");
-  // the + badge is up exactly while an add is what the release does
+  // the + badge is up exactly while an add is what the release does, and it and the leave line are pinned to the
+  // dragged tab's PLACED box, never the rect a FLIP slide is still carrying from its old slot
   assert.match(RENDER, /const plus = d\.kind === "join";/);
+  assert.match(RENDER, /const r = words\.leaving\.length \|\| plus \? placedRect\(dragged\) : null;/);
   // and the cue belongs to the gesture: cleared when the pointer leaves the strip and at dragend
   assert.equal((RENDER.match(/clearDragCue\(\)/g) || []).length, 3, "the definition, the dragleave and the dragend");
   assert.match(RENDER, /if \(dragAddEl\) dragAddEl\.style\.display = "none";\n\}/, "…the badge with it");
