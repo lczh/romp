@@ -19368,22 +19368,28 @@ def _comment_merge(parent_sid, tid):
     prior, th = _comment_update_if(parent_sid, tid, ("open", "resolved"), status="merging")
     if th is None:
         return _comment_status_refusal(prior)
+    _comment_update(parent_sid, tid, mergePrior=prior)   # what a boot gives a latch back that no relay holds (_comment_latch_boot_pass)
 
     def _revert(msg):
         _comment_update(parent_sid, tid, status=prior)
         return msg
-    msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
-    # A LATER relay sends only the NEW tail (T145: the thread stays talkable after a relay, and
-    # relaying again must not repeat what the session already has). relayedT is EVIDENCE time — the
-    # last relayed message's own stamp, never wall clock (the design rule; wall clocks also skew
-    # cross-host). First relay: everything.
-    floor = th.get("relayedT") or 0
-    if floor:
-        msgs = [m for m in msgs if (m.get("t") or 0) > floor]
-    if not any((m.get("text") or "").strip() for m in msgs):
-        return _revert("nothing new to send back yet." if floor else "this thread has no discussion to send back yet.")
-    body = _merge_body(th.get("exact"), msgs)
-    be = Sessions.backend_for(parent_sid)
+    # The latch is released on EVERY way out: a read that raised here left the row 'merging' for good (the user
+    # 2026-09-30) — off the chat's scroll rail, its popover stuck on "Relaying…", every reply and relay refused.
+    try:
+        msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
+        # A LATER relay sends only the NEW tail (T145: the thread stays talkable after a relay, and
+        # relaying again must not repeat what the session already has). relayedT is EVIDENCE time — the
+        # last relayed message's own stamp, never wall clock (the design rule; wall clocks also skew
+        # cross-host). First relay: everything.
+        floor = th.get("relayedT") or 0
+        if floor:
+            msgs = [m for m in msgs if (m.get("t") or 0) > floor]
+        if not any((m.get("text") or "").strip() for m in msgs):
+            return _revert("nothing new to send back yet." if floor else "this thread has no discussion to send back yet.")
+        body = _merge_body(th.get("exact"), msgs)
+        be = Sessions.backend_for(parent_sid)
+    except Exception as e:
+        return _revert("the discussion could not be read for the relay: %s" % e)
     try:
         delivered = _user_send(be, parent_sid, body)     # the merge is the user's gesture (T315: it retries a stood-down attach)
     except Exception as e:
@@ -19403,6 +19409,31 @@ def _comment_merge(parent_sid, tid):
             pass
     _push_soon()
     return None
+
+
+def _comment_latch_boot_pass():
+    """Give every thread still in 'merging' back the status its relay latched over (the row's mergePrior; 'open' for a
+    latch taken before that was recorded). The relay runs inside the kernel process and holds its latch only while it
+    runs, so a row still 'merging' when a kernel starts belongs to a relay that died with the last kernel: the boot is
+    the event that frees it. Unfreed, the thread was lost to the user for good (the user 2026-09-30): off the chat's
+    scroll rail, its popover stuck on "Relaying…" with no Relay or Delete, every reply and relay refused. Returns how
+    many rows it freed."""
+    freed = 0
+    try:
+        files = sorted((jd.STATE / "comments").glob("*.json"))
+    except OSError:
+        return 0
+    for f in files:
+        with _comments_lock:
+            data = _load_comments(f.stem)
+            hit = False
+            for th in data.get("threads") or []:
+                if th.get("status") == "merging":
+                    th["status"] = th.get("mergePrior") if th.get("mergePrior") in ("open", "resolved") else "open"
+                    hit, freed = True, freed + 1
+            if hit:
+                _save_comments(f.stem, data)
+    return freed
 
 
 def _comment_resolve(parent_sid, tid):
@@ -75886,6 +75917,12 @@ def main():
             sys.stderr.write("romp-kernel: re-armed %d given-up summary line(s) at startup\n" % _n)   # promised this since 07-03; now wired)
     except Exception:
         sys.stderr.write("startup rearm: %s\n" % traceback.format_exc())
+    try:                                                      # a comment relay's latch no relay holds any more
+        _n = _comment_latch_boot_pass()                       # (it died with the last kernel): the thread gets
+        if _n:                                                # its status back instead of 'merging' for good
+            sys.stderr.write("romp-kernel: freed %d comment thread(s) a relay left mid-flight\n" % _n)
+    except Exception:
+        sys.stderr.write("comment latch boot pass: %s\n" % traceback.format_exc())
     try:                                                      # a stored model pinned to a family's PRE-FIX seed
         _model_alias_boot_pass()                              # head (claude-fable-5) → the family alias, so the
     except Exception:                                         # next reconnect follows the CLI's newest.

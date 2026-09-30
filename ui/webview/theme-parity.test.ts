@@ -185,6 +185,43 @@ for (const sheet of ["styles.css", "feed.css"]) {
   });
 }
 
+/** OKLab distance x100 between two sRGB colours: about 2 is where two flat fills start to read as two. */
+function okDist(a: [number, number, number], b: [number, number, number]): number {
+  const lab = (c: [number, number, number]) => {
+    const [r, g, bl] = c.map((v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl);
+    return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s, 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+  };
+  const [x, y] = [lab(a), lab(b)];
+  return 100 * Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+}
+
+test("styles.css: a RESOLVED comment's wash reads on the page in both themes, and stays dimmer than an open one", () => {
+  // The resolved mark wore a white 8% wash in both themes: a grey smudge on dark and NOTHING on the light theme's cream
+  // (0.5 by the measure below), and a relayed thread shared it, so its comment vanished there (the user 2026-09-30). The
+  // wash is a token per theme now; over each theme's page it must read (2.5 or more) and stay under the open mark's 30%
+  // wash of --cmt-hl, so resolved still says "dimmed".
+  const css = read("styles.css");
+  assert.match(css, /mark\.cmt-hl\.resolved \{ background: var\(--cmt-hl-resolved\); \}/, "the rule paints the token");
+  for (const [name, opener] of [["dark", ":root {"], ["light", "body.theme-light {"]] as const) {
+    const t = props(block(css, opener));
+    const page = rgbOf(t.get("--bg")!, [30, 30, 30])!;
+    const v = t.get("--cmt-hl-resolved");
+    assert.ok(v, name + ": --cmt-hl-resolved is declared in this theme's block");
+    assert.doesNotMatch(v!, /^rgba\(255, 255, 255/, name + ": never a white wash (it vanishes on cream)");
+    const resolved = rgbOf(v!, page);
+    assert.ok(resolved, name + ": a colour the check can composite: " + v);
+    const hl = rgbOf(t.get("--cmt-hl")!, page)!;
+    const open = [0, 1, 2].map((i) => Math.round(hl[i] * 0.3 + page[i] * 0.7)) as [number, number, number];
+    const dR = okDist(resolved!, page), dO = okDist(open, page);
+    assert.ok(dR >= 2.5, `${name}: the resolved wash reads on the page: ${dR.toFixed(1)} < 2.5`);
+    assert.ok(dR < dO, `${name}: …and dimmer than the open wash: ${dR.toFixed(1)} vs ${dO.toFixed(1)}`);
+  }
+});
+
 test("styles.css: the light theme's scrollbar thumbs clear 3:1 over the ground they sit on; the dark ones keep their values", () => {
   const css = read("styles.css");
   const dark = props(block(css, ":root {")), light = props(block(css, "body.theme-light {"));

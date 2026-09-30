@@ -131,6 +131,7 @@ import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAn
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
+import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
 import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
 import { resolveTabDrop, writesTag, leaveWords, type TabDrop, type LeaveWords } from "./drag-join";
@@ -10238,7 +10239,7 @@ function updateCommentRail(): void {
   const v = activeId ? views.get(activeId) : null;
   const s = activeId ? liveSession(activeId) : null;
   const threads = ((activeId && commentThreads.get(activeId)) || [])
-    .filter((t) => t.status === "open" || t.status === "resolved" || t.status === "merged");
+    .filter((t) => threadOnRail(t.status));
   if (!content || !v || !s || !threads.length || v.el.style.display === "none") { rail?.remove(); cmtRailSig = ""; return; }
   const r = content.getBoundingClientRect();
   if (!r.height) { rail?.remove(); cmtRailSig = ""; return; }              // hidden pane
@@ -10263,7 +10264,7 @@ function updateCommentRail(): void {
   rail.style.left = (r.right - 16) + "px";
   rail.style.top = r.top + "px";
   rail.style.height = r.height + "px";
-  const cls = (th: CommentThread) => "cmt-tick" + (th.status === "resolved" || th.status === "merged" ? " resolved" : "")
+  const cls = (th: CommentThread) => "cmt-tick" + (threadSettled(th.status) ? " resolved" : "")
     + (th.unread && th.status === "open" ? " unread" : "")
     + (commentInFlight(th) ? " busy" : "");   // green while working OR a reply is owed (2026-08-24)
   const pads = railPads(ticks.map((t) => ({ y: t.y, h: t.th.unread && t.th.status === "open" ? 6 : 4 })), TICK_PAD, r.height);
@@ -10352,15 +10353,15 @@ function ensureCommentMark(turn: HTMLElement, th: CommentThread): void {
     const host = segs[i].parentElement;
     if (host && host.tagName === "CODE" && host.parentElement?.tagName !== "PRE"
         && host.childNodes.length === 1) {
-      host.classList.toggle("cmt-hl-host", th.status !== "resolved" && th.status !== "merged");
+      host.classList.toggle("cmt-hl-host", !threadSettled(th.status));
     }
     const kat = segs[i].parentElement?.closest(".katex") as HTMLElement | null;
-    if (kat) kat.classList.toggle("cmt-hl-host", th.status !== "resolved" && th.status !== "merged");
+    if (kat) kat.classList.toggle("cmt-hl-host", !threadSettled(th.status));
   }
 }
 
 function styleCommentMark(m: HTMLElement, th: CommentThread): void {
-  m.classList.toggle("resolved", th.status === "resolved" || th.status === "merged");
+  m.classList.toggle("resolved", threadSettled(th.status));   // a RELAYED thread is still open: it keeps the open look (the user 2026-09-30)
   m.classList.toggle("unread", !!th.unread && th.status === "open");
   if (!(th.unread && th.status === "open")) m.classList.toggle("cmt-ring", false);   // the ring is the painter's call on an UNREAD mark (paintCommentOutlines, by row count): it goes with the bit, on this same pass
   m.classList.toggle("busy", commentInFlight(th));
@@ -14582,11 +14583,11 @@ function ownTurnIndices(s: Session): number[] {
   }
   return out;
 }
-/** The comment threads a move steps through (the rail's set: open, resolved, merged), each at its anchor's display unit
+/** The comment threads a move steps through (the rail's set, threadOnRail: open, resolved, relayed), each at its anchor's display unit
  *  (-1: anchored in history the page has not loaded) and ranked within its unit by creation, so two threads on one
  *  passage are both reachable. */
 function navThreads(s: Session, evUnit: Int32Array): Array<{ th: CommentThread; unit: number; rank: number }> {
-  const list = (commentThreads.get(s.id) || []).filter((t) => t.status === "open" || t.status === "resolved" || t.status === "merged")
+  const list = (commentThreads.get(s.id) || []).filter((t) => threadOnRail(t.status))
     .map((th) => { const i = s.events.findIndex((e) => e.uuid === th.anchorUuid); return { th, unit: i >= 0 ? evUnit[i] : -1, rank: 0 }; })
     .sort((a, b) => a.unit - b.unit || a.th.createdT - b.th.createdT || (a.th.tid < b.th.tid ? -1 : 1));
   for (let k = 1; k < list.length; k++) if (list[k].unit === list[k - 1].unit) list[k].rank = list[k - 1].rank + 1;
@@ -14723,7 +14724,7 @@ function updateJumpCluster(): void {
   const evUnit = eventUnitIndex(s);   // once per update: both kinds place their stops in the same units
   const mine = navStops("mine", s, v, c, evUnit);
   const threads = commentThreads.get(s.id) || [];
-  const threadsHere = threads.some((t) => t.status === "open" || t.status === "resolved" || t.status === "merged");
+  const threadsHere = threads.some((t) => threadOnRail(t.status));
   const unreadHere = threads.some(isReplyReady);   // the unread row shows while any thread's reply waits
   const cmt = threadsHere ? navStops("comment", s, v, c, evUnit).stops : [];
   const unread = unreadHere ? navStops("unread", s, v, c, evUnit).stops : [];
