@@ -70,6 +70,7 @@ import { notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, t
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
+import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
 import { type FrameWm, frameOlder, droppedLandedHuman, dropsLandedRow, forgetHeldWm } from "./frame-guard";   // the frame watermark guard (2026-09-22): an older build's frame is ignored, a vanished landed turn is filed; a reconnect forgets the held watermarks
 import { type LandEvent, LandingWatch } from "./send-landing";   // the send-landing invariant (2026-09-23): observation only, around the frame dispatch (landingBefore / landingAfter)
@@ -93,7 +94,8 @@ import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   /
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { ICON_FILE } from "./icons";   // a file tab's glyph (2026-09-30)
-import { mountFileTabView, setFileViewPopOut, type FileTabView } from "./file-view";   // a file TAB's view, and the modal's pop-out (2026-09-30)
+import { mountFileTabView, setFileViewPopOut, type FileTabView } from "./file-view";
+import { setFileViewComposer, type FileViewComposeBar } from "./file-view";   // the viewer's message bar (2026-09-30)   // a file TAB's view, and the modal's pop-out (2026-09-30)
 import { readFileTabs, writeFileTabs, addFileTab, removeFileTab, moveFileTab, weaveFileTabs, navWithFiles, fileTabLabels, fileDropPlace, fileHost, isFileTabId,
          FILETABS_CAP, FILETABS_EVENT, FILETABS_SHARED_KEY, type FileTab } from "./file-tabs";   // the file tabs' model and store (2026-09-30)
 import { viewerPathGate } from "./file-view-links";       // the viewer's code-aware path gate, for the chat's fenced blocks (2026-09-12)
@@ -105,6 +107,7 @@ import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
+import { sessionLabelNodes } from "./host-prefix";   // the viewer's message bar names its session the strip's way (2026-09-30)
 import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
@@ -5156,7 +5159,7 @@ function rescindQueued(el: HTMLElement, toComposer: boolean): void {
     const goal = (el as any)._qgoal as { itemId: string; title: string } | null | undefined;
     const armedCites: string[] = [], armedFiles: string[] = [];   // what THIS press puts into the box, by identity: the refusal takes exactly these back
     if (goal && goal.itemId) { setCitation(sidQ, { itemId: goal.itemId, title: goal.title }); armedCites.push("g:" + goal.itemId); }
-    else if (back.cites.length) { composerCitations.set(sidQ, back.cites.map((c) => ({ title: c.quote.split("\n")[0].slice(0, 80), quote: c.quote, src: c.src }))); persistDrafts(); renderComposerChips(sidQ); for (const c of back.cites) armedCites.push("q:" + c.quote + "\n" + (c.src || "")); }
+    else if (back.cites.length) { composerCitations.set(sidQ, back.cites.map((c) => ({ title: c.quote.split("\n")[0].slice(0, 80), quote: c.quote, src: c.src, ...(c.kind ? { kind: c.kind, path: c.path, lines: c.lines } : {}) }))); persistDrafts(); renderComposerChips(sidQ); for (const c of back.cites) armedCites.push("q:" + c.quote + "\n" + (c.src || "")); }
     for (const f of back.files) { addComposerFile(sidQ, f); armedFiles.push(f); }
     restoreToComposer(back.text);
     // a provisional rescind gets no cancelResult (nothing was posted) — no stash to consume, none kept
@@ -17815,7 +17818,8 @@ const drafts = new Map<string, string>();
 // follows). A plain select still replaces, as before. Flavors never mix: the send routes goal XOR quotes, so
 // a goal chip always rides alone — any quote seed drops it, and a goal seed (feed card click) drops the
 // quotes. Each chip keeps its own ✕; Backspace-at-start eats the newest first.
-interface Citation { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string }   // src = a VS Code editor highlight's origin, workspace-relative file:lines (the user 2026-07-13)
+interface Citation { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string;   // src = a VS Code editor highlight's origin, workspace-relative file:lines (the user 2026-07-13)
+                   kind?: "file"; path?: string; lines?: [number, number] | null }   // a passage of a file the viewer shows (staged-messages.ts FileQuote, 2026-09-30)
 const composerCitations = new Map<string, Citation[]>();
 let fireStage: () => void = () => { /* assigned by the composer closure */ };
 
@@ -18038,7 +18042,8 @@ try {
           list.push({ itemId: typeof c.itemId === "string" ? c.itemId : undefined, title: c.title,
                       quote: typeof c.quote === "string" ? c.quote : undefined,
                       uuid: typeof c.uuid === "string" ? c.uuid : null,
-                      src: typeof c.src === "string" ? c.src : undefined });
+                      src: typeof c.src === "string" ? c.src : undefined,
+                      ...(c.kind === "file" && typeof c.path === "string" ? { kind: "file" as const, path: c.path, lines: Array.isArray(c.lines) && c.lines.length === 2 ? [Number(c.lines[0]), Number(c.lines[1])] as [number, number] : null } : {}) });
       }
       if (list.length) composerCitations.set(k, list);
     }
@@ -18176,6 +18181,7 @@ function syncStagedLabel(): void {
   // (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
   function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void { renderStagedStripInner(id, opts); syncComposerPh(); }
   function renderStagedStripInner(id: string | null, opts?: { reveal?: "last" }): void {
+  paintViewerStaged();   // every viewer message bar's staged line follows the stack too (2026-09-30)
   const strip = document.getElementById("composer-staged");
   if (!strip) return;
   // the list's scroll position survives the rebuild: expanding or discarding an item re-renders the
@@ -18247,7 +18253,7 @@ function syncStagedLabel(): void {
       // "its little blue background chip", not restyle inside the staged box)
       const cite = el("div", "composer-chip staged-cite" + (cOpen ? " open" : ""));
       const cm = el("span", "composer-chip-mark"); cm.textContent = "“";
-      const cl = el("span", "composer-chip-label"); cl.textContent = quotes[j].quote || "";
+      const cl = el("span", "composer-chip-label"); cl.textContent = (quotes[j].kind === "file" && quotes[j].src ? quotes[j].src + " — " : "") + (quotes[j].quote || "");   // a file's quote says where it is from (2026-09-30)
       const ch = el("span", "staged-expand"); ch.textContent = cOpen ? "(collapse)" : "(expand)";
       cite.append(cm, cl, ch);
       cite.addEventListener("click", (ev) => {
@@ -18285,6 +18291,124 @@ function syncStagedLabel(): void {
   });
   strip.appendChild(list);
   list.scrollTop = opts?.reveal === "last" ? list.scrollHeight : (stagedScroll.get(id) || 0);
+}
+
+// ── THE VIEWER'S MESSAGE BAR (the user 2026-09-30, who wanted the chat's select-and-stage flow in the file viewer) ──────
+// The viewer (file-view.ts), the modal's and a file tab's alike, mounts this bar at its foot: a passage selected in the
+// file becomes a quote chip here, cited to the file (and to the lines it spans in a view with line rows); what is typed
+// goes to the session the file was opened from, which the bar names. Cmd/Ctrl+Enter STAGES it onto that session's staged
+// stack, the chat composer's own (stagedMsgs), so the chat's staged strip shows it and a file's quotes and the chat's
+// quotes release together; Enter SENDS through the same release (flushStaged: the stack, then the typed message) and the
+// same routing (routeUserMessage), so the optimistic bubble, the quote body and the kernel post are the composer's own.
+// One staging implementation; this is only the bar's box. The draft and the chips are kept per session and file for the
+// page's life (a file tab's view is rebuilt on each visit). The bar stands down while the file is being edited.
+// A slash command is refused here, since its guards (the /clear confirm, the /mcp panel) live in the session's own box.
+type ViewerDraft = { text: string; cites: Citation[] };
+const viewerDrafts = new Map<string, ViewerDraft>();   // sid + "\0" + path → what that bar holds
+const viewerBars = new Set<() => void>();              // every mounted bar's repaint of its staged line (the stack moves from the chat too)
+function paintViewerStaged(): void { for (const f of Array.from(viewerBars)) f(); }
+/** A quote chip for a passage of a file the viewer shows: the chat's quote chip, labelled with the path (and its lines),
+ *  marked `kind: "file"` so the send's lead-in names the file (staged-messages.ts quoteLeadIn). */
+function mkFileQuoteCitation(quote: string, path: string, lines: [number, number] | null): Citation {
+  const src = path + (lines ? ":" + lines[0] + (lines[1] > lines[0] ? "-" + lines[1] : "") : "");
+  return { ...mkQuoteCitation(quote, null, src), kind: "file", path, lines };
+}
+function mountViewerBar(host: HTMLElement, sid: string, path: string): FileViewComposeBar {
+  const key = sid + "\u0000" + path;
+  const d: ViewerDraft = viewerDrafts.get(key) || { text: "", cites: [] };
+  viewerDrafts.set(key, d);
+  const who = sessions.get(sid) ?? tabMeta.get(sid);
+  const name = who?.name || hostStub(sid)?.name || "the session";
+  const chips = el("div", "fv-compose-chips");
+  const row = el("div", "fv-compose-row");
+  const to = el("span", "fv-compose-to");
+  to.append(document.createTextNode("to "), ...sessionLabelNodes(name, sid, who?.color ?? null));
+  const inp = el("textarea", "fv-compose-input") as HTMLTextAreaElement;
+  inp.rows = 1;
+  inp.value = d.text;
+  inp.placeholder = "About this file…  (⏎ send · ⇧⏎ newline · ⌘⏎ stage)";
+  inp.setAttribute("aria-label", "Message " + name + " about this file");
+  const send = el("button", "fv-compose-send") as HTMLButtonElement;
+  send.type = "button"; send.textContent = "➤";
+  send.title = "Send to " + name + " (Enter)"; send.setAttribute("aria-label", "Send to " + name);
+  const note = el("div", "fv-compose-note");
+  row.append(to, inp, send);
+  host.replaceChildren(chips, row, note);
+  const grow = () => { inp.style.height = "auto"; inp.style.height = Math.min(inp.scrollHeight + 2, 160) + "px"; };
+  // the bar is built once per open and never rebuilt by a push (the viewer is a static overlay), so its own listeners are
+  // click-safe; a chip's ✕ repaints the chips alone
+  const paintChips = () => {
+    chips.replaceChildren();
+    chips.hidden = !d.cites.length;
+    d.cites.forEach((c, i) => {
+      const chip = el("div", "composer-chip");
+      chip.title = "replying to this part of the file · ✕ to remove";
+      const mark = el("span", "composer-chip-mark"); mark.textContent = "“";
+      const label = el("span", "composer-chip-label"); label.textContent = c.title;
+      const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Remove quote"); x.textContent = "✕";
+      x.addEventListener("click", (e) => { e.stopPropagation(); d.cites.splice(i, 1); paintChips(); });
+      chip.append(mark, label, x);
+      chips.appendChild(chip);
+    });
+  };
+  let said = "";   // a one-off acknowledgement ("Sent to web."), until the next paint of the line
+  let placed = false;   // the viewer puts the host in the page after this returns; a host that has LEFT it is a closed viewer
+  const paintStaged = () => {
+    if (host.isConnected) placed = true;
+    else if (placed) { viewerBars.delete(paintStaged); return; }
+    const n = stagedMsgs.count(sid);
+    note.textContent = said || (n ? stagedLabel(n, liveAsks.has(sid)) : "");
+    note.hidden = !note.textContent;
+    said = "";
+  };
+  viewerBars.add(paintStaged);
+  const refuseSlash = (text: string): boolean => {
+    if (!isSlashCommand(text)) return false;
+    ephemeralWarnToast("A slash command goes in the session's own message box.");
+    return true;
+  };
+  const stage = () => {
+    const text = inp.value.trim();
+    if (!text && !d.cites.length) return;
+    if (refuseSlash(text)) return;
+    stagedMsgs.push(sid, { text, cites: d.cites.slice() });   // the chat composer's stack: its strip shows it, its release sends it
+    d.cites = []; d.text = ""; inp.value = ""; grow(); paintChips();
+    persistDrafts();
+    if (sid === activeId) renderStagedStrip(sid, { reveal: "last" }); else paintViewerStaged();
+  };
+  const sendIt = () => {
+    const text = inp.value.trim();
+    if (!text && !d.cites.length && !stagedMsgs.count(sid)) return;
+    if (refuseSlash(text)) return;
+    if (hostIsDown(sid) || isProvisionalId(sid) || !(sessions.has(sid) || tabMeta.has(sid))) {
+      ephemeralWarnToast("“" + name + "” isn't reachable right now, so this wasn't sent. It's still in the box.");
+      return;
+    }
+    const cites = d.cites.slice();
+    flushStaged(sid, text || cites.length ? { text, cites: cites.length ? cites : undefined } : undefined);   // the release: the stack, then this message
+    d.cites = []; d.text = ""; inp.value = ""; grow(); paintChips();
+    said = "Sent to " + name + ".";
+    paintStaged();
+  };
+  inp.addEventListener("input", () => { d.text = inp.value; grow(); });
+  inp.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    e.preventDefault(); e.stopPropagation();
+    if (e.metaKey || e.ctrlKey) stage(); else sendIt();
+  });
+  send.addEventListener("click", () => { send.classList.add("romp-acted"); sendIt(); inp.focus(); });
+  send.addEventListener("animationend", () => send.classList.remove("romp-acted"));
+  paintChips(); paintStaged(); grow();
+  return {
+    seed: (quote, lines, add) => {
+      const chip = mkFileQuoteCitation(quote, path, lines);
+      if (!add) d.cites = [];
+      d.cites = d.cites.filter((c) => !(c.quote === chip.quote && c.src === chip.src));   // identical text never lists twice
+      d.cites.push(chip);
+      paintChips();
+    },
+    setEditing: (on) => { host.hidden = on; },
+  };
 }
 
 function beginComposerEdit(sid: string, uuid: string, orig: string): void {
@@ -21030,7 +21154,15 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // the kernel's typed move refusal → the reason where the path was typed, or a toast if the dialog is gone
     moveFailedLocal(String(m.id), String(m.name || m.id), String(m.text || "unknown error"));
   }
-  else if (m.type === "focusComposer") { const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; ta?.focus(); }
+  else if (m.type === "focusComposer") {
+    // The shell focuses this column's window and posts this in the same breath (palette-main.ts: the column cycle, a session's
+    // hot key, the shortcuts dialog handing the keyboard back), and the post is handled a task later. A chord pressed in that
+    // gap moves the focus to another column first; taking it back here then dragged the shell's focus ring back to this
+    // column, and the press after it cycled from the wrong one (the served split test's CI reds, 2026-09-25 to 2026-09-30).
+    // So the post is acted on only while this document still holds the focus the shell gave it.
+    if (!document.hasFocus()) return;
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; ta?.focus();
+  }
   else if (m.type === "glowTurns") applyGlow(Array.isArray(m.groups) ? m.groups : [], Array.isArray(m.mids) ? m.mids : []);
   else if (m.type === "askLive") setLiveAsk(m.id, m.ask ?? null);
   else if (m.type === "askLiveClear") clearLiveAsk(m.id);
@@ -21928,7 +22060,12 @@ function setupComposer() {
   // is the user's own act (a click, Tab, Enter over a selection, Quote, a citation seed, a slash pick, an edit
   // recall). Retiring on pointerdown alone left the note over a box they were typing in by any other route.
   ta.addEventListener("focus", () => { if (composerNoteSid) clearComposerNote(); });
-  ta.addEventListener("blur", () => window.setTimeout(closeSlash, 120));   // close when leaving (a row's mousedown keeps focus, so it fires only on a real leave)
+  // close when leaving (a row's mousedown keeps focus, so it fires only on a real leave), and the box taking the focus back
+  // cancels a close still due: that close shut the menu a "/" typed after the return had just opened (the shape of the
+  // comment-key lab's two CI reds on 2026-09-30: the box left for the comment box, clicked again, "/" typed, no menu)
+  let slashLeave: number | undefined;
+  ta.addEventListener("blur", () => { clearTimeout(slashLeave); slashLeave = window.setTimeout(closeSlash, 120); });
+  ta.addEventListener("focus", () => { clearTimeout(slashLeave); slashLeave = undefined; });
   window.addEventListener("resize", positionSlash);
 
   // ── @-MENTION autocomplete (the user 2026-09-07): an "@" opening a word, plus one or more characters,
@@ -22121,7 +22258,10 @@ function setupComposer() {
   ta.addEventListener("selectionchange", updateMention);
   ta.addEventListener("compositionstart", () => { mComposing = true; });
   ta.addEventListener("compositionend", () => { mComposing = false; updateMention(); });
-  ta.addEventListener("blur", () => window.setTimeout(closeMention, 120));   // a row's mousedown keeps focus, so this fires only on a real leave
+  // a row's mousedown keeps focus, so this fires only on a real leave; a return cancels the close, as the slash menu's does
+  let mentionLeave: number | undefined;
+  ta.addEventListener("blur", () => { clearTimeout(mentionLeave); mentionLeave = window.setTimeout(closeMention, 120); });
+  ta.addEventListener("focus", () => { clearTimeout(mentionLeave); mentionLeave = undefined; });
   window.addEventListener("resize", positionMention);
 
   // ── PROMPT HISTORY (the user 2026-08-16): ↑ with the caret on the box's FIRST line recalls the
@@ -23141,6 +23281,8 @@ setFileViewIdentity((id) => {
 });
 // …and the viewer's POP-OUT opens the file as a tab of this strip (2026-09-30), on a page that can show one
 if (canPreview()) setFileViewPopOut((path, sid) => openFileAsTab(path, sid));
+// …and its MESSAGE BAR is this document's composer, lent to the viewer (mountViewerBar): the modal's and a file tab's
+setFileViewComposer((host, ctx) => mountViewerBar(host, ctx.sid, ctx.path));
 // the FILE TAB this page showed before a reload (2026-09-30), up again at once when this browser's copy of the list names it
 // (a new device hears the list from the kernel first: onFileTabsChanged restores it then)
 if (wantFile && fileTabById(wantFile)) selectFileTab(wantFile);

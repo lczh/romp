@@ -247,6 +247,26 @@ _install_hang_asserts() {   # the copy is removed with the reason said, and noth
     [[ "$output" == *"cannot run from"* ]]
 }
 
+@test "install (macOS), the watchdog path: a TERM between the fork of the sleep and the assignment of its pid still ends the sleep" {
+    # CI 2026-09-29 and 2026-09-30 (trees that did not touch the install): the session checks here saw a leftover sleep. A trap
+    # runs between commands, and `sleep &` and `s=$!` are two, so the watchdog's TERM could run its trap with the sleep running
+    # and its pid not yet known; that trap ended nothing and exited. The window is a fork wide, so this case holds it open:
+    # bash runs the install with a DEBUG trap that pauses half a second before `s=$!` (set -T carries it into the watchdog's
+    # subshell), the fast probe ends inside the pause and the install TERMs the watchdog there. At the base the sleep outlives
+    # the install every time (the launcher's twin, tests/romp-node-launch.bats).
+    command -v setsid >/dev/null 2>&1 || skip "needs setsid to scope the process-group check (Linux)"
+    local bare="$TEST_DIR/bare-window"; mkdir -p "$bare"
+    local t p
+    for t in bash sh cmp cp chmod mv mkdir rm ps pgrep setsid id date cut head tr printf sed cat grep dirname readlink sleep; do p="$(command -v "$t" 2>/dev/null || true)"; [ -n "$p" ] && ln -s "$p" "$bare/$t"; done
+    printf '%s\n' 'set -T' 'trap '\''[ "$BASH_COMMAND" = "s=\$!" ] && sleep 0.5'\'' DEBUG' > "$TEST_DIR/pause-before-pid.sh"
+    PATH="$bare" BASH_ENV="$TEST_DIR/pause-before-pid.sh" ROMP_OS_OVERRIDE=Darwin run setsid -w bash -c 'printf "%s\n" "$$" > "$1"; exec "$2" install' _ "$TEST_DIR/pgid" "$SVC"
+    [ "$status" -eq 0 ]
+    [ -x "$XDG_STATE_HOME/romp/romp-node" ]
+    local pgid; pgid="$(cat "$TEST_DIR/pgid")"
+    run bash -c 'ps -eo pgid=,args= | awk -v g="$1" "\$1==g"' _ "$pgid"
+    [ -z "$output" ]
+}
+
 @test "install (macOS), the watchdog path: a sleep on PATH that FORKS its sleep leaves no child behind: the sleep's tree is ended" {
     command -v setsid >/dev/null 2>&1 || skip "needs setsid to scope the process-group check (Linux)"
     local bare="$TEST_DIR/bare-fork"; mkdir -p "$bare"
