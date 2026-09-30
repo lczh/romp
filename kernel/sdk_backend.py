@@ -5347,6 +5347,17 @@ def _model_same_tier(x, y):
     return va is None or vb is None or va == vb
 
 
+def _lands_on_pick(pm, pick):
+    """Is `pm` the very model a VERSIONED pick names, its family and its version ('Opus 4.8' for claude-opus-4-8 or
+    claude-opus-4-8[1m])? A move onto it is the pick landing, never an automatic fallback: a fallback moves a session
+    away from what was picked. This holds where a report from before the pick moved the live name above it (a reply of a
+    turn the CLI opened itself, still streaming when the pick went live; 2026-09-30, the #33 follow-up). An alias or
+    `default` names no version, so nothing lands on it by name. Only ever suppresses a card; never mints one."""
+    lab = _alias_label(str(pick or ""))
+    v = _model_version(lab)
+    return v is not None and _model_rank(pm) == _model_rank(lab) and _model_version(pm) == v
+
+
 def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False, category=""):
     """The model picker's REQUESTED-model mark (the user 2026-09-17): while a session's live model sits a tier below
     its pick, the picker draws a yellow tick beside the requested model with a tooltip saying why and whether romp is
@@ -5516,7 +5527,15 @@ class SdkSession:
         # connect-time flag this session's next _options applies, and the chosen model alias
         # (reg['model']) rides the same connect — the switch is effectively applied, so pending is over.
         if reg.get("effortPending") or reg.get("modelPending") or reg.get("authPending"):
-            backend._update_reg(self.sid, effortPending=False, modelPending=False, authPending=False)
+            _heal = {"effortPending": False, "modelPending": False, "authPending": False}
+            if reg.get("modelPending") and "model" in reg:
+                # …and a model pick that never landed starts from the PICK's label, as _on_session_gone leaves it
+                # (2026-09-30, the #33 follow-up): a thread that dies mid-turn is rebuilt here (its heal's _ensure)
+                # BEFORE that reset runs, a hard kernel death skips it, and the old label read the pick's first report
+                # as a fallback nobody asked for. A flagged row with no pick on record keeps its label.
+                _heal["liveModel"] = _alias_label(str(reg.get("model") or ""))
+                reg = dict(reg, liveModel=_heal["liveModel"])   # self.model and _served_model seed from it below
+            backend._update_reg(self.sid, **_heal)
         # protocol/runtime state
         self.loop: asyncio.AbstractEventLoop | None = None
         self.client = None
@@ -5641,6 +5660,8 @@ class SdkSession:
         # write it too — and is ruled per WRITE, by token, in SdkBackend._seed_write_*: no per-session
         # view of that layer exists here on purpose (see _seed_write_refused). Under self._lock.
         self._model_accepted = reg.get("model")
+        self._pick_seq = 0                           # bumped by every live pick (SdkBackend.set_model); a context refresh
+        #                                              reads it at its ask and again at its answer (_do_refresh_context)
         self._model_pending = ""                     # target ALIAS while a /model switch is resolving: the badge shows
         #   animated dots until the LIVE model actually reflects the pick (the user 2026-07-03: a switch stamped the
         #   chosen alias but left liveModel stale, and model_label PREFERS liveModel → the badge kept the OLD name).
@@ -6813,6 +6834,7 @@ class SdkSession:
             self._ctx_refresh_again = True
             return
         self._ctx_refreshing = True
+        asked = getattr(self, "_pick_seq", 0)   # the picks this ask went out after (getattr: __new__-built test doubles)
         try:
             cu = await self.client.get_context_usage()
         except Exception as e:
@@ -6849,6 +6871,11 @@ class SdkSession:
         if isinstance(tt, (int, float)) and int(tt) != self._ctx_tokens:
             self._ctx_tokens, changed = int(tt), True
         raw = str(cu.get("model") or "").strip()
+        if getattr(self, "_pick_seq", 0) != asked:
+            # a pick landed while this ask was out (2026-09-30, the #33 follow-up): the model it reports is the world
+            # before the pick, so it neither answers the pick nor moves the label (the pick's own refresh reruns behind
+            # it, _ctx_refresh_again); the percentage still lands
+            raw = ""
         pm = pretty_model(raw)
         if pm and self._resolve_model_pending(pm):
             changed = True
@@ -7921,15 +7948,18 @@ class SdkSession:
                 self.backend._poke()
             return
         if self.model and not self._model_pending and not cleared \
+                and not _lands_on_pick(pm, getattr(self, "chosen_model", "")) \
                 and _model_downgrade(self.model, pm):
             # A DOWN-TIER transition nobody asked for (no /model pick pending): the API fell back
             # mid-turn. Surface it as a completed card via the kernel-wired hook (the user
             # 2026-08-23) — never silently (the swap was invisible before this). DOWNGRADES ONLY
-            # (the user 2026-08-23, from a card reading "fallback" on their own upgrade): romp only
-            # sees ITS OWN picks pending — a /model typed inside the CLI, or any user-side switch,
-            # arrives here as an unrequested transition too, and a capacity fallback never moves a
-            # session UP-tier. An up-tier, lateral, or unknown-name change is treated as the user's
-            # doing and just updates the badge, exactly as before the card existed.
+            # (the user 2026-08-23, from a card reading "fallback" on their own upgrade): every live
+            # pick romp makes is pending from the pick until its first report (set_model), and a move
+            # onto a versioned pick's own model is that pick landing (_lands_on_pick; 2026-09-30, the
+            # #33 follow-up) — but a /model typed inside the CLI, or any user-side switch, arrives here
+            # as an unrequested transition too, and a capacity fallback never moves a session UP-tier.
+            # An up-tier, lateral, or unknown-name change is treated as the user's doing and just
+            # updates the badge, exactly as before the card existed.
             arm = self._retry_armed()
             if arm and arm.get("to") == pm and arm.get("attempts", 0) > arm.get("logged", 0):
                 # the retry's own re-fallback (the user 2026-09-17), said once per attempt with the real wait; the card
@@ -12376,7 +12406,13 @@ class SdkBackend:
                     # _options), so heal here for sessions that stay DORMANT; SdkSession.__init__
                     # heals the same way for ones that respawn.
                     if r.get("effortPending") or r.get("modelPending"):
-                        self._update_reg(sid, effortPending=False, modelPending=False)
+                        _heal = {"effortPending": False, "modelPending": False}
+                        if r.get("modelPending") and "model" in r:
+                            # a pick in flight at a hard kernel death starts from its own label, as SdkSession.__init__
+                            # heals it (2026-09-30, the #33 follow-up); this sweep runs first for every alive row, so
+                            # the construction never sees the flag
+                            _heal["liveModel"] = _alias_label(str(r.get("model") or ""))
+                        self._update_reg(sid, **_heal)
                     if str(r.get("lastSid") or "") in spared_fsids:
                         # A claude process this kernel did not start (another kernel's state tag, or none) still holds
                         # this session's conversation: the reap above spared it and named it on its left-alone line.
@@ -16231,9 +16267,14 @@ class SdkBackend:
                 # a turn in the new model kept showing the OLD name. Now the pick marks pending; _do_set_model
                 # pulls the real name, which clears it (and the dormant/never-driven trap can't happen — the
                 # refresh resolves an idle session, and _on_session_gone resolves a thread that exits mid-switch).
-                already = _model_reflects_alias(s.model, value)
-                s._model_pending = "" if already else value
-                pending = bool(s._model_pending)
+                # EVERY live pick is in flight until the first report of it lands (2026-09-30, the #33 follow-up): a
+                # family word says nothing about the version (claude-opus-4-8 picked on Opus 5.5), an alias or the
+                # default names none, and a pick left unmarked read its own first report, a turn's init before the
+                # refresh, as a fallback nobody asked for. The counter lets a context refresh asked BEFORE this pick
+                # stand aside for it.
+                s._pick_seq = getattr(s, "_pick_seq", 0) + 1
+                s._model_pending = value or "default"   # "" goes out as set_model(None), as "default" does
+                pending = True
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
                 s._fallback_cause = ""        # …and the standing fallback's cause; the served model is learned afresh on the pick
                 s._fallback_category = ""
@@ -16456,7 +16497,8 @@ class SdkBackend:
                                  "" if s.quiet() else " once the session is quiet"))
                     s.want_switch_reconnect("always fast")
                     asked += 1
-                s._arm_if_below_pick()
+                if not getattr(s, "_model_pending", ""):   # a pick still resolving: the live name is the world before it
+                    s._arm_if_below_pick()                  # (2026-09-30, the #33 follow-up: armed from it, then a false "back on")
             except Exception as e:
                 self._log("model switches (%s): %s" % (s.name, e), problem=True)
         return asked
