@@ -135,6 +135,25 @@ class DowngradeOnlyGate(unittest.TestCase):
                               ("gw-mini", "gw-mini", "a name with no family word carries no version")):
             self.assertFalse(lands(pm, pick), "%s on a %r pick: %s" % (pm, pick, why))
 
+    def test_a_session_rebuilt_with_a_pick_in_flight_starts_from_the_picks_name_unless_the_pick_is_above_it(self):
+        # (2026-09-30, the #33 follow-up's review) the name a session rebuilt with a model pick in flight starts from:
+        # the pick's own, so the pick's first report is not read as a fallback from the model it replaced; but the old
+        # one for a pick ABOVE it, since the rebuilt session can attach to a CLI that never got the pick (an attach tells
+        # the CLI nothing) or replay a reply from before it, and relabeled, that report of the old model read as the
+        # pick falling back
+        self.assertTrue(hasattr(sb, "_heal_pick_label"), "a rebuilt session has no reading of the name to start from")
+        heal = sb._heal_pick_label
+        for pick, old, want, why in (("claude-opus-4-8", "Opus 5.5", "Opus 4.8", "an older version: the pick's name"),
+                                     ("claude-sonnet-5", "Opus 5.5", "Sonnet 5", "a lower family: the pick's name"),
+                                     ("opus", "Opus 5.5", "Opus", "a Latest click names no version: the pick's name"),
+                                     ("default", "Opus 5.5", "", "the account default names no model"),
+                                     ("", "Opus 5.5", "", "an empty pick is the default"),
+                                     ("opus", "", "Opus", "no name before the pick"),
+                                     ("claude-opus-5-5", "Opus 4.8", "Opus 4.8", "a newer version: the old name stays"),
+                                     ("fable", "Opus 5.5", "Opus 5.5", "a higher family: the old name stays"),
+                                     ("opus", "Sonnet 5", "Sonnet 5", "a Latest click above the old family: the old name stays")):
+            self.assertEqual(heal(pick, old), want, "%r picked on %r: %s" % (pick, old, why))
+
 
 class SidechainNeverLearns(unittest.TestCase):
     """Subagent traffic must never teach the session its model (the user 2026-08-24): a Task/Agent

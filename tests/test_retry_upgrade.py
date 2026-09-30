@@ -301,19 +301,51 @@ async def _spin(n=5):
         await asyncio.sleep(0)
 
 
+class _InOrderCli:
+    """A CLI that handles control requests in the order they are written. set_model moves the model it runs at once
+    (`resolves` maps a pick to the id it resolves to, None to the account default's); each context refresh reports the
+    model the CLI ran when that request was written. `refresh` scripts each refresh's outcome in order: "answer", an
+    exception to raise, or an asyncio.Event to hold the answer on. `log` records the requests in the order the CLI saw
+    them."""
+
+    def __init__(self, model, refresh, resolves=None):
+        self.model = model
+        self.refresh = list(refresh)
+        self.resolves = dict(resolves or {"opus": "claude-opus-5", None: "claude-sonnet-5"})
+        self.log = []
+
+    async def set_model(self, model=None):
+        self.log.append(("set_model", model))
+        self.model = self.resolves.get(model, model)
+
+    async def get_context_usage(self):
+        at = self.model
+        self.log.append(("refresh", at))
+        how = self.refresh.pop(0) if self.refresh else "answer"
+        if isinstance(how, asyncio.Event):
+            await how.wait()
+        elif isinstance(how, BaseException):
+            raise how
+        return {"percentage": 3, "model": at}
+
+
 class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
-    """(2026-09-30, the #33 follow-up) Since the learn reads versions inside a family, a model the user picked could be
-    read as an automatic fallback: the pick was marked in flight only when the live name did not already carry the
-    pick's family word, so claude-opus-4-8 picked on Opus 5.5, a Latest click (the alias `opus`) and the account default
-    went unmarked, and when the pick's first report was a turn's init rather than the context refresh, the move read as
-    Opus 5.5 falling back: a Completed card saying the model changed automatically and, with Retry upgrades on, a retry
-    asking for the model the user left every ten minutes, never ended by turns served on the pick. Every live pick is
-    now in flight from the click until a report of it lands; a refresh asked before the pick answers nothing for it; a
-    session revived with a pick in flight starts from the pick's name; and a move onto a versioned pick's own model is
-    that pick landing. A real fallback after the pick lands is still carded and armed. Every road drives the real
-    backend: set_model, _do_set_model and _do_refresh_context against a fake client, and the learn."""
+    """(2026-09-30, the #33 follow-up) A model the user picked could be read as an automatic fallback: the pick was
+    marked in flight only when the live name did not already carry the pick's family word, so claude-opus-4-8 picked on
+    Opus 5.5, a Latest click (the alias `opus`) and the account default went unmarked, and when the pick's first report
+    was a turn's init rather than the context refresh, the move read as Opus 5.5 falling back: a Completed card saying the
+    model changed automatically and, with Retry upgrades on, a retry that reconnected the session every ten minutes (on
+    the pick; only its log line named Opus 5.5), never ended by turns served on the pick. Since #33 reads versions inside
+    a family, an older version and a Latest click are carded this way too; the default resolving to a lower family, and a
+    pick to a lower family on the death roads, were carded before #33 as well. Every live pick is now in flight from the
+    click until a report naming its family; a context refresh the CLI answered before it had the pick answers nothing for
+    it; a session revived with a pick in flight starts from the pick's name, unless the pick is above the name it had; and
+    a move onto a versioned pick's own model is that pick landing. A real fallback after the pick lands is still carded
+    and armed. Every road drives the real backend: set_model, _do_set_model and _do_refresh_context against a fake
+    client, and the learn."""
 
     LIVE = {"name": "web", "model": "claude-opus-5-5", "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5"}
+    ON48 = {"model": "claude-opus-4-8", "liveModel": "Opus 4.8", "liveModelId": "claude-opus-4-8"}
     DOWN = "control channel down"
 
     def _world(self, stub_live=True, **reg):
@@ -348,9 +380,9 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
 
     def _assert_nothing(self, be, s, h, road):
         self.assertEqual(h.fallbacks, [], "%s: a pick of the user's own was carded as an automatic fallback" % road)
-        self.assertIsNone(s._upgrade_retry, "%s: a pick of the user's own armed a retry of the model the user left" % road)
+        self.assertIsNone(s._upgrade_retry, "%s: a pick of the user's own armed a retry as if the model had fallen back" % road)
         self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 0,
-                         "%s: the tick asked for the model the user left" % road)
+                         "%s: the tick reconnected the session as if the model had fallen back" % road)
         self.assertEqual(s._asks, [], "%s: a reconnect was asked for" % road)
         self.assertEqual([m for m in be._logs if m.startswith("retry upgrade")], [], "%s: the retry was logged" % road)
 
@@ -378,6 +410,16 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 self._init(s, pick); self._served(s, pick)          # the next turn: its init, then its reply, on the pick
                 self._assert_nothing(be, s, h, road)
                 self._assert_landed(be, s, label, pick, at_pick, road)
+        road = "the pick's refresh answers first, the ordinary road"
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            at_pick = self._pick(be, s, "claude-opus-4-8")
+            self._settle(s, ["claude-opus-4-8"])
+            after = (s._model_pending, s.model)
+            self._init(s, "claude-opus-4-8"); self._served(s, "claude-opus-4-8")
+            self._assert_nothing(be, s, h, road)
+            self.assertEqual(after, ("", "Opus 4.8"), "%s: the refresh's report of the pick lands it" % road)
+            self._assert_landed(be, s, "Opus 4.8", "claude-opus-4-8", at_pick, road)
         road = "the next turn's init lands while the pick's refresh is still out"
         with self.subTest(road=road), _Hooks() as h:
             # a pick made mid-turn parks, a message typed after it parks behind it, and both leave in one pass at the
@@ -415,6 +457,18 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self._init(s, "claude-opus-5"); self._served(s, "claude-opus-5")
             self._refresh(s, "claude-opus-5")
             self._assert_nothing(be, s, h, road)
+            self._assert_landed(be, s, "Opus 5", "opus", at_pick, road)
+        road = "a Latest click whose answer is lost, its refresh reporting the model before it, a later launch running it"
+        with self.subTest(road=road), _Hooks() as h:
+            # a lost answer says nothing about whether the CLI has the pick, so the refresh behind it cannot answer for it
+            be, s = self._world()
+            at_pick = self._pick(be, s, "opus")
+            self._settle(s, ["claude-opus-5-5"], Exception("Control request timeout: set_model"))
+            after = (s._model_pending, s.model)
+            self._init(s, "claude-opus-5"); self._served(s, "claude-opus-5")   # the next launch's --model carried it
+            self._assert_nothing(be, s, h, road)
+            self.assertEqual(after, ("opus", "Opus 5.5"), "%s: with the CLI's answer lost, a report of the model before "
+                                                          "the pick ended its switching dots" % road)
             self._assert_landed(be, s, "Opus 5", "opus", at_pick, road)
 
     def test_a_default_pick_resolving_to_a_lower_family_is_not_a_fallback(self):
@@ -474,6 +528,66 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                                          "%s: a refresh asked before the pick moved the label back above the pick "
                                          "(its percentage still lands)" % road)
                     self._assert_landed(be, s, label, marker, seen["at_pick"], road)
+        for kind, pick, resolved, label, marker in picks[1:]:
+            # order C: the stale answer lands before the pick's request has even reached the loop (set_model runs on the
+            # kernel's thread; set_model_live hops to the loop later), so only a counter bumped AT the pick can tell it
+            # from an answer to the pick. The versioned pick is closed twice already (_lands_on_pick).
+            road = "%s pick, order C: the stale answer, before the pick's request leaves" % kind
+            with self.subTest(pick=kind, order="C"), _Hooks() as h:
+                be, s = self._world()
+                seen = {}
+
+                async def main():
+                    old_ask = asyncio.Event()
+                    s.client = _Cli([(old_ask, stale), RuntimeError(self.DOWN)])
+                    before = asyncio.ensure_future(s._do_refresh_context())   # asked before the pick
+                    await asyncio.sleep(0)
+                    seen["at_pick"] = self._pick(be, s, pick)
+                    old_ask.set()
+                    await before                                              # answered before the hop runs
+                    seen["after_stale"] = (s._model_pending, s.model, s._ctx_pct())
+                    await s._do_set_model(*s._sent[-1])                       # the pick's request; its refresh raises
+                    self._init(s, resolved); self._served(s, resolved)
+                asyncio.run(main())
+                self._assert_nothing(be, s, h, road)
+                self.assertEqual(seen["after_stale"], (marker, "Opus 5.5", 37),
+                                 "%s: a refresh answered before the pick's request left answered for the pick or moved "
+                                 "the label (its percentage still lands)" % road)
+                self._assert_landed(be, s, label, marker, seen["at_pick"], road)
+
+    def test_a_refresh_written_before_the_picks_own_request_answers_nothing_for_it(self):
+        # the pick's request reaches the CLI through a loop hop (set_model_live), so a refresh a turn's end scheduled can
+        # take its first step after the pick was made and still be written before the pick's request, and a CLI that
+        # answers in order reports the model before the pick. Driven through the real set_model_live on a running loop.
+        # The versioned pick is closed twice already (_lands_on_pick): the roads are the Latest click and the default.
+        for kind, pick, resolved, label, marker in (("alias", "opus", "claude-opus-5", "Opus 5", "opus"),
+                                                   ("default", "default", "claude-sonnet-5", "Sonnet 5", "default")):
+            for then in ("raises", "held"):
+                road = "%s pick, the pick's own refresh %s" % (
+                    kind, "raising" if then == "raises" else "answering after the next turn's init")
+                with self.subTest(pick=kind, then=then), _Hooks() as h:
+                    be, s = self._world(stub_live=False)
+                    held = asyncio.Event()
+                    cli = _InOrderCli("claude-opus-5-5", ["answer", RuntimeError(self.DOWN) if then == "raises" else held])
+                    seen = {}
+
+                    async def main():
+                        s.loop, s.client = asyncio.get_running_loop(), cli
+                        before = asyncio.ensure_future(s._do_refresh_context())   # scheduled at the turn's end, not yet run
+                        seen["at_pick"] = self._pick(be, s, pick)                 # the drain's pick, before the loop yields
+                        await _spin(10)
+                        await before
+                        self._init(s, resolved); self._served(s, resolved)       # the next turn, on the pick
+                        held.set()
+                        await _spin(10)
+                    try:
+                        asyncio.run(main())
+                    finally:
+                        s.loop = None
+                    self.assertEqual(cli.log[:2], [("refresh", "claude-opus-5-5"), ("set_model", None if pick == "default" else pick)],
+                                     "%s: the refresh reached the CLI before the pick's request" % road)
+                    self._assert_nothing(be, s, h, road)
+                    self._assert_landed(be, s, label, marker, seen["at_pick"], road)
 
     def test_a_move_onto_a_versioned_pick_is_the_pick_landing(self):
         # a reply of a turn the CLI opened by itself, still streaming on Opus 5.5 when the pick went live, can move the
@@ -508,7 +622,7 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # the pick; only a served reply shows what the API served, and a served reply below the pick's resolution
         # after the pick landed is a fallback, carded and armed exactly as before
         down = RuntimeError(self.DOWN)
-        on48 = {"model": "claude-opus-4-8", "liveModel": "Opus 4.8", "liveModelId": "claude-opus-4-8"}
+        on48 = self.ON48
         roads = (("a versioned upward pick whose refresh answers", on48, "claude-opus-5-5", ["claude-opus-5-5"],
                   "claude-opus-5-5", "claude-opus-4-8", ("Opus 5.5", "Opus 4.8")),
                  ("a versioned upward pick whose refresh raises", on48, "claude-opus-5-5", [down],
@@ -540,6 +654,21 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                     self._served(s, "claude-opus-5-5")
                     self.assertEqual(h.restored, [("Opus 4.8", "Opus 5.5")], "%s: a turn served on the pick ends it" % road)
                     self.assertIsNone(s._upgrade_retry)
+        road = "the live model picked again, its refresh raising, a served fallback the pick's first report"
+        with self.subTest(road=road), _Hooks() as h:
+            # a turn the CLI opened itself can serve the pick's first report; that reply ends the pick's switching dots
+            # and is not carded, so the card waits for the next report of the pick and the next reply below it: one turn
+            # late, pinned here so it cannot go missing
+            be, s = self._world()
+            self._pick(be, s, "claude-opus-5-5")
+            self._settle(s, [down])
+            self._served(s, "claude-opus-4-8")
+            first = (list(h.fallbacks), s._upgrade_retry)
+            self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-4-8")   # the next turn: the pick, then below it
+            self.assertEqual(first, ([], None), "%s: the reply that ends the pick's switching dots is carded" % road)
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.8")], "%s: the next reply below the pick is carded, "
+                                                                      "exactly once" % road)
+            self.assertIsNotNone(s._upgrade_retry, "%s: and arms the retry" % road)
         road = "no pick: a served fallback (the control)"
         with self.subTest(road=road), _Hooks() as h:
             be, s = self._world()
@@ -549,7 +678,8 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
-             ("default", "default", "claude-sonnet-5", ""))
+             ("default", "default", "claude-sonnet-5", ""),
+             ("empty", "", "claude-sonnet-5", ""))      # a backend caller's empty pick is the default (set_model)
 
     @staticmethod
     def _revived(t):
@@ -557,6 +687,19 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         t._asks = []
         t.request_reconnect = lambda *a, **k: t._asks.append(a)
         return t
+
+    def _stranded(self, be, pick, **reg):
+        """The registry a pick in flight at a hard kernel death leaves behind."""
+        sb.write_reg(be.state_dir, SID, dict({"sid": SID, "cwd": "/tmp", "alive": True, "lastSid": SID}, **dict(
+            self.LIVE, **dict(reg, model=pick, modelPending=True))))
+
+    @staticmethod
+    def _sweep(be):
+        sb.append_state(Path(be.state_dir), SID, "waiting")
+        be._ensure = lambda sid, on_boot_settled=None: None
+        with mock.patch.object(sb.subprocess, "run", return_value=mock.Mock(stdout="")):
+            be._boot_reconcile([sb.read_reg(be.state_dir, SID)])
+        del be._ensure
 
     def test_a_thread_that_dies_before_the_pick_lands_revives_on_the_picks_label(self):
         for when in ("idle", "mid-turn"):
@@ -585,15 +728,9 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 with self.subTest(where=where, pick=kind), _Hooks() as h:
                     be = _backend()
                     Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
-                    sb.write_reg(be.state_dir, SID, {"sid": SID, "name": "web", "cwd": "/tmp", "alive": True, "lastSid": SID,
-                                                     "model": pick, "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5",
-                                                     "modelPending": True})   # what a marked pick leaves behind
+                    self._stranded(be, pick)
                     if where == "the boot sweep":
-                        sb.append_state(Path(be.state_dir), SID, "waiting")
-                        be._ensure = lambda sid, on_boot_settled=None: None
-                        with mock.patch.object(sb.subprocess, "run", return_value=mock.Mock(stdout="")):
-                            be._boot_reconcile([sb.read_reg(be.state_dir, SID)])
-                        del be._ensure
+                        self._sweep(be)
                     s = self._revived(sb.SdkSession(be, sb.read_reg(be.state_dir, SID)))
                     be.sessions[SID] = s
                     revived, healed = s.model, sb.read_reg(be.state_dir, SID)
@@ -602,6 +739,92 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                     self.assertEqual(revived, label, "%s: the session restarts from the pick's name" % road)
                     self.assertEqual((healed.get("liveModel"), healed.get("modelPending")), (label, False),
                                      "%s: the registry is healed onto the pick's name, its flag cleared" % road)
+        for where in ("the session's construction", "the boot sweep"):
+            road = "a row stranded with an effort switch only, its model picked long before, healed by %s" % where
+            with self.subTest(where=where, pick="none in flight"):
+                be = _backend()
+                sb.write_reg(be.state_dir, SID, dict({"sid": SID, "cwd": "/tmp", "alive": True, "lastSid": SID},
+                                                     **dict(self.LIVE, model="opus", effortPending=True)))
+                if where == "the boot sweep":
+                    self._sweep(be)
+                s = sb.SdkSession(be, sb.read_reg(be.state_dir, SID))
+                self.assertEqual((s.model, sb.read_reg(be.state_dir, SID).get("liveModel")), ("Opus 5.5", "Opus 5.5"),
+                                 "%s: only a stranded MODEL pick moves the name; the one the session reported stays" % road)
+
+    # (road, the registry before the pick, the pick, the model the CLI ran before it, the model the pick runs)
+    UPWARD = (("an upward pick in the family", ON48, "claude-opus-5-5", "claude-opus-4-8", "claude-opus-5-5"),
+              ("a Latest click from Sonnet", {"model": "claude-sonnet-5", "liveModel": "Sonnet 5", "liveModelId": "claude-sonnet-5"},
+               "opus", "claude-sonnet-5", "claude-opus-5-5"),
+              ("an upward pick to another family", {}, "fable", "claude-opus-5-5", "claude-fable-5-1"))
+
+    def test_a_session_rebuilt_on_a_cli_still_before_an_upward_pick_reads_no_fallback(self):
+        # an attach tells a surviving CLI nothing, so a session rebuilt with a pick in flight can report the model from
+        # before the pick: its CLI never got the pick, or a reply from before it is replayed first (the host's acks trail
+        # the stream). A pick above the old name keeps the old name, so that report changes nothing; relabeled onto the
+        # pick, it read as the pick falling back, with Retry upgrades off (as here) too (the #33 follow-up's review)
+        for rebuild in ("boot sweep", "construction", "idle thread death", "mid-turn thread death"):
+            for road, reg, pick, old_raw, new_raw in self.UPWARD:
+                for cli in ("never got the pick", "took it, a reply from before it replayed first"):
+                    name = "%s, rebuilt by the %s, the CLI %s" % (road, rebuild, cli)
+                    with self.subTest(rebuild=rebuild, road=road, cli=cli.split(",")[0]), _Hooks() as h, \
+                            mock.patch.object(sb.SdkSession, "start", lambda self: None):
+                        if rebuild.endswith("thread death"):
+                            be, s = self._world(**reg)
+                            Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("off")
+                            self._pick(be, s, pick)
+                            s.inflight = 1 if rebuild.startswith("mid-turn") else 0
+                            be._on_session_gone(s)
+                            if rebuild.startswith("idle"):
+                                be._ensure(SID)
+                            t = be.sessions.get(SID)
+                            self.assertTrue(t is not None and t is not s, "%s: the session was revived" % name)
+                        else:
+                            be = _backend()                           # Retry upgrades off, the default
+                            self._stranded(be, pick, **reg)
+                            if rebuild == "boot sweep":
+                                self._sweep(be)
+                            t = sb.SdkSession(be, sb.read_reg(be.state_dir, SID))
+                            be.sessions[SID] = t
+                        revived = self._revived(t).model
+                        if cli == "never got the pick":
+                            self._refresh(t, RuntimeError(self.DOWN))    # the attach's refresh fails
+                            self._init(t, old_raw); self._served(t, old_raw)
+                        else:
+                            self._served(t, old_raw)                     # the replayed reply from before the pick
+                            self._init(t, new_raw); self._served(t, new_raw)
+                        self._assert_nothing(be, t, h, name)
+                        self.assertEqual(revived, sb.pretty_model(old_raw),
+                                         "%s: a pick above the old name keeps the old name" % name)
+
+    def test_after_a_restart_the_attach_arms_from_an_upward_pick_the_surviving_cli_may_not_have(self):
+        # the attach re-arm (_arm_if_below_pick) reads the healed name before the attach's refresh answers. Kept on the old
+        # name, a session below an upward pick is taken up at the attach as before this change (the retry's reconnect
+        # launches on the pick, which is how a pick the surviving CLI never got reaches it) and nothing is carded; a
+        # downward pick healed onto its own name has nothing to take up
+        for road, reg, pick, cli_raw, armed in (
+                ("an upward pick the surviving CLI never got", self.ON48, "claude-opus-5-5", "claude-opus-4-8",
+                 ("Opus 5.5", "Opus 4.8")),
+                ("a downward pick the surviving CLI took", {}, "claude-opus-4-8", "claude-opus-4-8", None)):
+            with self.subTest(road=road), _Hooks() as h:
+                be = _backend()
+                Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+                self._stranded(be, pick, **reg)
+                self._sweep(be)
+                s = self._revived(sb.SdkSession(be, sb.read_reg(be.state_dir, SID)))
+                be.sessions[SID] = s
+                got = s._arm_if_below_pick()                     # the attach's re-arm, before its refresh answers
+                self._refresh(s, cli_raw)                         # the attach's refresh: the surviving CLI's own report
+                self._init(s, cli_raw); self._served(s, cli_raw)
+                self.assertEqual(h.fallbacks, [], "%s: a pick of the user's own was carded as an automatic fallback" % road)
+                if armed:
+                    self.assertTrue(got, "%s: the session sits below its pick with Retry upgrades on and nothing asks "
+                                         "for the pick" % road)
+                    self.assertEqual((s._upgrade_retry["from"], s._upgrade_retry["to"]), armed)
+                    self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1,
+                                     "%s: due, the reconnect launches on the pick" % road)
+                else:
+                    self.assertFalse(got, "%s: armed with nothing to take up" % road)
+                    self.assertIsNone(s._upgrade_retry)
 
     def test_the_switch_turned_on_while_a_pick_is_in_flight_arms_nothing(self):
         with _Hooks() as h:

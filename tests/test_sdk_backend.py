@@ -2088,10 +2088,18 @@ class SetModelModePure(unittest.TestCase):
         self.assertTrue(sess.snapshot()["modelPending"], "…and the badge shows its switching dots")
 
         class _Client:
+            model = "claude-opus-5-5"                 # the CLI runs the model before the pick until it has the pick
+
+            async def set_model(self, model=None):
+                self.model = model
+
             async def get_context_usage(self):
-                return {"percentage": 12, "model": "claude-opus-4-8"}
+                return {"percentage": 12, "model": self.model}
         sess.client = _Client()
-        asyncio.run(sess._do_refresh_context())
+        asyncio.run(sess._do_refresh_context())       # a refresh the CLI answers before the pick's request reaches it
+        self.assertEqual((sess._model_pending, sess.model), ("claude-opus-4-8", "Opus 5.5"),
+                         "a refresh the CLI answered before it had the pick answered for the pick")
+        asyncio.run(sess._do_set_model(*sent[-1]))     # the CLI takes the pick; the refresh behind its answer reports it
         self.assertEqual((sess._model_pending, sess.model), ("", "Opus 4.8"), "the refresh's report of the pick lands it")
         self.assertFalse(sb.read_reg(self.d, sid).get("modelPending"))
         self.assertTrue(self.be.set_model(sid, "claude-opus-4-8"))
@@ -5196,12 +5204,13 @@ class SpawnedAtStampedOncePerCli(unittest.TestCase):
         sb.write_lease(root, {"sid": self.SID, "fsid": self.SID, "name": "web", "pid": pid, "start": start,
                               "holder": {"kind": "host", "pid": pid, "start": start}, "version": "test", "spawnedAt": self.T0, "t": now})
 
-    def _drive(self, be, s, root, roads, marking_raises=False):
+    def _drive(self, be, s, root, roads, marking_raises=False, ctx=None):
         """Run the real connect loop. `roads` is one dict per iteration: {"road": "attach" | "spawn-host" | "child",
         "hello": the host's hello (host roads), "fail": None | "before-hello" (the connect fails before any CLI exists) |
         "after-hello" (the host's CLI is up and its hello arrived, then the SDK's initialize fails: the loop's own retry
         road)}. The fake client's connect delivers the hello as HostTransport.connect does, then fails or completes; the
-        thread ends after the last road's connect. Returns the reg's (spawnedAt, spawnedAtCli) after each fresh-CLI block."""
+        thread ends after the last road's connect. `ctx` is the model id every context refresh reports (None: no answer).
+        Returns the reg's (spawnedAt, spawnedAtCli) after each fresh-CLI block."""
         seen = []; calls = {"n": 0}; sid = self.SID; roads = list(roads)
         class FakeTransport:
             hello = None; _init_pending = True; exit_info = None; ack_offset = -1
@@ -5241,7 +5250,7 @@ class SpawnedAtStampedOncePerCli(unittest.TestCase):
                 if False:
                     yield None
             async def get_context_usage(self):
-                return None
+                return {"percentage": 3, "model": ctx} if ctx else None
             async def get_server_info(self):
                 return None
         if marking_raises:
@@ -5401,6 +5410,58 @@ class SpawnedAtStampedOncePerCli(unittest.TestCase):
                 else:
                     self.assertEqual(seen, [], "the CLI the reg names keeps its epoch")
                     self.assertEqual(self._reg(root), (self.T0, "4242:a1"))
+
+
+class APickIsCarriedByALaunchNeverByAnAttach(unittest.TestCase):
+    """(2026-09-30, the #33 follow-up's review) A context refresh answers for a model pick only once the CLI has had the
+    pick: its set_model answered, or a launch whose --model carried it. A pick made while no client is up is sent nowhere,
+    so a LAUNCH carries it and its connect's refresh lands it, while an ATTACH to a CLI that outlived its client tells that
+    CLI nothing: the attach's refresh reports the model the surviving CLI still runs and must not end the pick's switching
+    dots (for a Latest click that report named the pick's family and cleared it, and the pick's later launch on a lower
+    version then read as a fallback). Drives the real connect loop with the road pins' harness (SpawnedAtStampedOncePerCli)."""
+
+    SID = SpawnedAtStampedOncePerCli.SID
+    CLI_A, CLI_B = SpawnedAtStampedOncePerCli.CLI_A, SpawnedAtStampedOncePerCli.CLI_B
+    T_HOST = SpawnedAtStampedOncePerCli.T_HOST
+    setUp = SpawnedAtStampedOncePerCli.setUp
+    tearDown = SpawnedAtStampedOncePerCli.tearDown
+    _hello = SpawnedAtStampedOncePerCli._hello
+    _drive = SpawnedAtStampedOncePerCli._drive
+
+    def test_a_pick_made_with_no_client_is_landed_by_a_launch_and_never_by_an_attach(self):
+        for road, hosts, cli, ctx, want in (
+                ("attach", "on", self.CLI_A, "claude-opus-5-5", ("opus", "Opus 5.5")),
+                ("spawn-host", "on", self.CLI_B, "claude-opus-5", ("", "Opus 5")),
+                ("child", "off", None, "claude-opus-5", ("", "Opus 5"))):
+            with self.subTest(road=road):
+                root = tempfile.mkdtemp()
+                open(os.path.join(root, "session-hosts"), "w").write(hosts)
+                be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+                be._ack_cmd_chip = lambda *a, **k: None          # the acknowledging chip needs a chat this lab has none of
+                sb.write_reg(root, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "spawnedAt": 1700000000,
+                                              "spawnedAtCli": "4242:a1", "model": "claude-opus-5-5",
+                                              "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5"})
+                s = sb.SdkSession(be, sb.read_reg(root, self.SID))
+                be.sessions[self.SID] = s
+                self.assertTrue(be.set_model(self.SID, "opus"))   # a Latest click with no client up: nothing is sent
+                self.assertEqual(s._model_pending, "opus", "the pick is in flight from the click")
+                seen = []
+                real = s._do_refresh_context
+
+                async def refresh():
+                    asked = s.client is not None
+                    await real()
+                    if asked:
+                        seen.append((s._model_pending, s.model))
+                s._do_refresh_context = refresh                    # the connect's refresh, observed as it answers
+                r = {"road": road}
+                if cli:
+                    r["hello"] = self._hello(cli)
+                self._drive(be, s, root, [r], ctx=ctx)
+                self.assertEqual(seen[:1], [want], "%s: %s" % (road, (
+                    "the refresh of a CLI the attach told nothing answered for the pick" if road == "attach" else
+                    "the launch carried the pick, so its refresh lands it")))
+
 
 class HealCwdPendingUnderAnUnreadableSlug(unittest.TestCase):
     """The queued low (b): the boot reconcile decided a mid-move reg by two os.path.exists calls, so an unsearchable pending slug
