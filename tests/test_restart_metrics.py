@@ -412,10 +412,134 @@ class LiveHelpers(unittest.TestCase):
         procs = rm.parse_ps(lines)
         self.assertEqual(len(procs), 6)
         regs = {SID: {"name": "web", "lastSid": SID, "alive": True}, SID2: {"name": "api", "lastSid": SID2, "alive": True}}
-        trees = sorted(rm.ps_session_trees(procs, regs), key=lambda t: t["cliPid"])
+        env = {100: SID, 200: SID, 300: SID2, 400: SID}     # the ROMP_SID each process was launched with
+        trees = sorted(rm.ps_session_trees(procs, regs, env.get), key=lambda t: t["cliPid"])
         self.assertEqual([(t["name"], t["cliPid"], t["procs"], t["memBytes"], t["cpuPct"]) for t in trees],
                          [("web", 100, 3, 1750 * 1024, 1.5), ("web", 200, 1, 2000 * 1024, 2.0), ("api", 300, 1, 900 * 1024, 0.0)])
-        self.assertEqual(rm.duplicate_clis(procs, [SID, SID2]), {SID: [100, 200]}, "a terminal CLI (no stream-json mark: someone's own claude, never romp's) never counts")
+        self.assertEqual(rm.duplicate_clis(procs, regs, env.get), {SID: [100, 200]}, "a terminal CLI (no stream-json mark: someone's own claude, never romp's) never counts")
+
+    def test_session_id_read_from_the_process_environment(self):
+        class Out:
+            stdout = "/x/claude --resume %s --input-format stream-json HOME=/h ROMP_SID=%s TERM=x" % (SID2, SID)
+        self.assertEqual(rm.proc_session_id(42, run=lambda *a, **k: Out, procfs=False), SID,
+                         "ps -E: the environment follows the argv, and the argv's conversation id is not the session")
+        Out.stdout = "/x/claude --resume %s HOME=/h" % SID
+        self.assertIsNone(rm.proc_session_id(42, run=lambda *a, **k: Out, procfs=False), "no ROMP_SID: unknown, never the argv's id")
+        self.assertIsNone(rm.proc_session_id(2 ** 30, procfs=True), "a gone pid reads nothing")
+        if os.path.isdir("/proc"):
+            import subprocess
+            p = subprocess.Popen(["sleep", "30"], env={**os.environ, "ROMP_SID": SID2})
+            try:
+                self.assertEqual(rm.proc_session_id(p.pid), SID2)
+            finally:
+                p.kill()
+                p.wait()
+
+
+# A parent session and the comment threads forked from it, on the notes-api demo (synthetic sids): each thread's
+# CLI was launched as a fork (--resume <the parent's conversation> --fork-session --session-id=<its own sid>), so
+# its argv names the PARENT's conversation id and its environment names its own session.
+T1 = "33333333-4444-4555-8666-000000000304"          # a comment thread of web
+T2 = "34343434-4444-4555-8666-000000000304"          # another comment thread of web
+FORK = "44444444-5555-4666-8777-000000000304"        # a deliberate fork of web: a session of its own, no threadOf
+TESTS = "66666666-7777-4888-8999-000000000304"       # a session whose conversation id has moved on from its sid
+TESTS_FSID = "77777777-8888-4999-8aaa-000000000304"
+STRANGER = "88888888-9999-4aaa-8bbb-000000000304"    # a session id no registry row names
+GIB = 1 << 30
+
+
+def _cli(pid, argv, rss_kb=1000):
+    return "%6d     1 %6d  0.0 /x/claude --output-format stream-json %s --input-format stream-json" % (pid, rss_kb, argv)
+
+
+def _fork_argv(parent_fsid, sid):
+    return "--resume %s --session-id=%s --fork-session" % (parent_fsid, sid)
+
+
+class ThreadsAreNotDuplicates(unittest.TestCase):
+    """The mislabel: the live block grouped CLIs by the conversation id on their argv, so a parent's CLI and every
+    comment thread forked from it (all carrying the parent's id) read as DUPLICATE CLIs of one session, which
+    looks like a process leak. A duplicate is two CLIs for ONE session; a thread is its own session."""
+
+    REGS = {SID: {"name": "web", "lastSid": SID, "alive": True, "threadOf": ""},
+            T1: {"name": "web thread one", "lastSid": T1, "alive": True, "threadOf": SID},
+            T2: {"name": "web thread two", "lastSid": T2, "alive": True, "threadOf": SID},
+            FORK: {"name": "web-fork", "lastSid": FORK, "alive": True, "threadOf": ""},
+            SID2: {"name": "api", "lastSid": SID2, "alive": True, "threadOf": ""},
+            TESTS: {"name": "tests", "lastSid": TESTS_FSID, "alive": True, "threadOf": ""}}
+    LINES = [_cli(100, "--resume %s" % SID), _cli(200, _fork_argv(SID, T1)), _cli(300, _fork_argv(SID, T2)),
+             _cli(400, _fork_argv(SID, FORK)),
+             _cli(500, "--resume %s" % SID2), _cli(600, "--resume=%s" % SID2),     # a genuine duplicate: two for api
+             _cli(700, "--resume %s" % TESTS_FSID)]
+    ENV = {100: SID, 200: T1, 300: T2, 400: FORK, 500: SID2, 600: SID2, 700: TESTS}
+
+    def test_parent_and_its_threads_are_separate_sessions(self):
+        procs = rm.parse_ps(self.LINES)
+        by_sid, unknown = rm.cli_sessions(procs, self.REGS, self.ENV.get)
+        self.assertEqual(by_sid, {SID: [100], T1: [200], T2: [300], FORK: [400], SID2: [500, 600], TESTS: [700]})
+        self.assertEqual(unknown, [])
+        self.assertEqual(rm.duplicate_clis(procs, self.REGS, self.ENV.get), {SID2: [500, 600]},
+                         "web and its threads are not duplicates; two CLIs for api still are")
+
+    def test_unreadable_session_id_is_said_not_guessed(self):
+        procs = rm.parse_ps(self.LINES)
+        env = {**self.ENV, 200: None, 600: STRANGER}     # 200 unreadable; 600 names a session with no registry row
+        by_sid, unknown = rm.cli_sessions(procs, self.REGS, env.get)
+        self.assertEqual(unknown, [200, 600])
+        self.assertNotIn(T1, by_sid)
+        self.assertEqual(by_sid[SID], [100], "the thread whose environment is unreadable is never filed under its argv's id")
+        self.assertEqual(rm.duplicate_clis(procs, self.REGS, env.get), {})
+
+    def _state(self, with_regs=True):
+        state = Path(tempfile.mkdtemp())
+        if with_regs:
+            for sid, r in self.REGS.items():
+                _write(state, "sdk/%s.json" % sid, [dict(r, sid=sid)])
+        cg = Path(tempfile.mkdtemp())
+        mem = {100: 300 << 20, 200: GIB + GIB // 2, 300: GIB, 400: 200 << 20, 500: 400 << 20, 600: 400 << 20, 700: 100 << 20}
+        for pid, sid in self.ENV.items():
+            d = cg / ("romp-session-%s-%d-1757374800.scope" % (sid[:8], pid))   # bin/romp-cli-scope's name: ROMP_SID's prefix
+            d.mkdir()
+            (d / "memory.current").write_text("%d\n" % mem[pid])
+        return state, rm.cgroup_scope_dirs(str(cg))
+
+    def _live(self, state, dirs):
+        with mock.patch.object(rm, "cgroup_scope_dirs", return_value=dirs), \
+             mock.patch.object(rm, "ps_lines", return_value=self.LINES), \
+             mock.patch.object(rm, "kernel_live", return_value={"port": 1, "error": "kernel not reachable on :1 (test)"}), \
+             mock.patch.object(rm, "proc_session_id", self.ENV.get, create=True):
+            return rm.live_snapshot(state)
+
+    def test_summary_lists_threads_as_threads_and_keeps_the_real_duplicate(self):
+        state, dirs = self._state()
+        live = self._live(state, dirs)
+        self.assertEqual([(d["name"], d["pids"]) for d in live["duplicateClis"]], [("api", [500, 600])])
+        self.assertEqual([(g["parentName"], g["threads"], g["memBytes"]) for g in live["threads"]],
+                         [("web", 2, 2 * GIB + GIB // 2)], "the deliberate fork has no threadOf: a session, not a thread")
+        names = {s["cliPid"]: s["name"] for s in live["sessions"]}
+        self.assertEqual(names[700], "tests", "a scope is named by the session's sid, not by its conversation id")
+        self.assertEqual(live["unmatchedScopes"], 0)
+        doc = rm.collect(state, live=False)
+        doc["live"] = live
+        text = rm.summary(doc)
+        self.assertIn("7 session scopes (2 of them comment threads)", text)
+        self.assertIn("comment threads running, each its own session forked from the one named (not duplicates): "
+                      "web: 2 threads, 2.5 GB", text)
+        self.assertIn("DUPLICATE CLIs NOW (more than one process for one session): api pids [500, 600]", text)
+        self.assertNotIn("web pids", text)
+        self.assertNotIn("NOT CHECKED", text)
+
+    def test_no_registry_is_said(self):
+        state, dirs = self._state(with_regs=False)
+        live = self._live(state, dirs)
+        self.assertEqual(live["duplicateClis"], [])
+        self.assertEqual(live["threads"], [])
+        doc = rm.collect(state, live=False)
+        doc["live"] = live
+        text = rm.summary(doc)
+        self.assertIn("live: no registry rows under sdk/", text)
+        self.assertIn("7 scope(s) match no registry row", text)
+        self.assertNotIn("DUPLICATE", text)
 
     def test_kernel_live_unreachable_is_said(self):
         state = Path(tempfile.mkdtemp())
