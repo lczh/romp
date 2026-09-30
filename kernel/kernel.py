@@ -70729,6 +70729,76 @@ def _state_write_route(path, b):
     return 404, {"ok": False, "error": "no such route"}
 
 
+def _security_headers(send_header, opener_policy=True):
+    """Write the security headers through `send_header`, on each page Handler._send writes and on each error page
+    http.server writes itself with a header block (Handler.send_error; its comment says when a reply has none).
+    opener_policy=False leaves the opener policy out, for the one exempt route (below)."""
+    # Take the declared type at its word. Without this a browser may sniff a response whose
+    # bytes look like markup and run it as HTML on the dashboard's own origin, which is the
+    # same escalation the /remote/…/file relay's own type check closes from the other side.
+    send_header("X-Content-Type-Options", "nosniff")
+    # Framing gate (clickjacking): the authenticated dashboard must not be loadable in a
+    # cross-origin frame, or a hostile same-site loopback page (the same attacker the cookie
+    # Origin gate below defends against) could frame it and drive it invisibly. SAMEORIGIN keeps
+    # the dashboard's own same-origin sub-frames (/chat, /feed) working, and 'self' is tight
+    # enough to need no allowlist: the VS Code panes are extension-authored webviews that load
+    # their bundle via asWebviewUri and reach the kernel only over connect-src (fetch + WS);
+    # they never frame this origin as a document, and neither header applies to fetch/XHR/WS.
+    # Phone and tailnet frame the kernel's own origin, which 'self' permits.
+    send_header("X-Frame-Options", "SAMEORIGIN")
+    send_header("Content-Security-Policy", "frame-ancestors 'self'")
+    # Opener isolation (2026-09-27): a page on another origin that opens a dashboard page with window.open keeps
+    # a handle to it, and a handle is what lets that page post window messages to it. Under this policy a
+    # top-level document this origin serves, opened by a page on another origin, starts a browsing context group
+    # of its own: the opener gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file
+    # image or PDF it opens with window.open) are documents on this origin carrying the same policy, so window.open
+    # still returns a handle and the in-app view does not take over (preview.ts openFileTab reads only whether it
+    # got one).
+    # same-origin-allow-popups, not same-origin: a data pane (plans/panes-as-data.md) may open a popup and hear back
+    # from it through window.opener, as a sign-in or a picker does; a URL pane's frame is sandboxed with
+    # allow-popups for that. Under same-origin, a URL pane's window.open returns null and a state-root pane's
+    # popup on another origin leaves it a closed handle, and neither pane hears from its popup. What allow-popups
+    # gives up is the other direction: a popup the dashboard opens onto another origin keeps its opener. So every
+    # window.open in romp's own pages passes noopener (render.ts, pr-links.ts, file-view.ts, the timeline boot's
+    # fallback) or severs the opener on the handle it gets back (preview.ts openFileTab, which needs the handle to
+    # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
+    # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
+    # a browser.
+    # One exemption, opener_policy=False: a state-root pane's own files (/pane/<id>/ and the files under its
+    # directory, the pane author's documents). A sign-in popup a pane opens comes back to a callback page, and a
+    # state-root pane's callback naturally lives beside its page, on this origin. A callback that declared this
+    # policy would start a browsing context group of its own on arrival, because its policy does not match the
+    # provider's page it replaces: the popup would lose its opener and the pane would hold a closed handle
+    # (Chromium and WebKit, whether the provider sends it back by a script or a 302; Firefox, by a script). The
+    # cost: a page on another origin that opens a pane author's document keeps a handle to it. The pane shim has
+    # no window listener, and the page's own listeners are its author's. The handle reaches no romp page: sending
+    # that window on to one lands on a document with this policy, which severs it. The pane's shim, its theme and
+    # every other response the route makes are the kernel's own and keep the header. The served lab's legs 6 and 7
+    # witness the round trip, the cost and its bound (the shell).
+    # Residual: a URL pane cannot open one of the dashboard's pages in a tab (a state-root pane's own files, which carry
+    # no policy, it can). Its popup inherits the frame's sandbox, and a browser shows the response of a sandboxed tab or
+    # popup (a top-level navigation) only when its opener policy is unsafe-none, so the tab shows no page, as it did
+    # under same-origin: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit an
+    # empty one, each leaving the handle open (witness: test_pane_popup_opener_served.py
+    # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page, which asserts only that the file is not shown).
+    # Allowing it would take allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes every popup the
+    # pane opens.
+    # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
+    # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
+    # document navigations only, so it is inert on JSON, assets and sockets.
+    if opener_policy:
+        send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+    # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
+    # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
+    # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
+    # origin and nothing cross-origin (a transcript's <img> from another host, a link out), whatever
+    # the browser's default, on every page the kernel serves: the SECURITY.md claim that a cross-site
+    # page cannot obtain the token then holds by construction. same-origin and not no-referrer: a
+    # same-origin GET carries no Origin header, so the Referer is the one header that names the page
+    # origin behind it to the kernel, and this keeps it.
+    send_header("Referrer-Policy", "same-origin")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -70740,70 +70810,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        # Take the declared type at its word. Without this a browser may sniff a response whose
-        # bytes look like markup and run it as HTML on the dashboard's own origin, which is the
-        # same escalation the /remote/…/file relay's own type check closes from the other side.
-        self.send_header("X-Content-Type-Options", "nosniff")
-        # Framing gate (clickjacking): the authenticated dashboard must not be loadable in a
-        # cross-origin frame, or a hostile same-site loopback page (the same attacker the cookie
-        # Origin gate below defends against) could frame it and drive it invisibly. SAMEORIGIN keeps
-        # the dashboard's own same-origin sub-frames (/chat, /feed) working, and 'self' is tight
-        # enough to need no allowlist: the VS Code panes are extension-authored webviews that load
-        # their bundle via asWebviewUri and reach the kernel only over connect-src (fetch + WS) —
-        # they never frame this origin as a document, and neither header applies to fetch/XHR/WS.
-        # Phone and tailnet frame the kernel's own origin, which 'self' permits.
-        self.send_header("X-Frame-Options", "SAMEORIGIN")
-        self.send_header("Content-Security-Policy", "frame-ancestors 'self'")
-        # Opener isolation (2026-09-27): a page on another origin that opens a dashboard page with window.open keeps
-        # a handle to it, and a handle is what lets that page post window messages to it. Under this policy a
-        # top-level document this origin serves, opened by a page on another origin, starts a browsing context group
-        # of its own: the opener gets a closed handle and the page gets no opener. The dashboard's own tabs (a /file
-        # image or PDF it opens with window.open) are documents on this origin carrying the same policy, so window.open
-        # still returns a handle and the in-app view does not take over (preview.ts openFileTab reads only whether it
-        # got one).
-        # same-origin-allow-popups, not same-origin: a data pane (plans/panes-as-data.md) may open a popup and hear back
-        # from it through window.opener, as a sign-in or a picker does; a URL pane's frame is sandboxed with
-        # allow-popups for that. Under same-origin, a URL pane's window.open returns null and a state-root pane's
-        # popup on another origin leaves it a closed handle, and neither pane hears from its popup. What allow-popups
-        # gives up is the other direction: a popup the dashboard opens onto another origin keeps its opener. So every
-        # window.open in romp's own pages passes noopener (render.ts, pr-links.ts, file-view.ts, the timeline boot's
-        # fallback) or severs the opener on the handle it gets back (preview.ts openFileTab, which needs the handle to
-        # tell a blocked popup from an open one); tests/test_window_open_opener.py holds each call to that. And every
-        # window message listener checks its sender. tests/test_pane_popup_opener_served.py drives both directions in
-        # a browser.
-        # One exemption, opener_policy=False: a state-root pane's own files (/pane/<id>/ and the files under its
-        # directory, the pane author's documents). A sign-in popup a pane opens comes back to a callback page, and a
-        # state-root pane's callback naturally lives beside its page, on this origin. A callback that declared this
-        # policy would start a browsing context group of its own on arrival, because its policy does not match the
-        # provider's page it replaces: the popup would lose its opener and the pane would hold a closed handle
-        # (Chromium and WebKit, whether the provider sends it back by a script or a 302; Firefox, by a script). The
-        # cost: a page on another origin that opens a pane author's document keeps a handle to it. The pane shim has
-        # no window listener, and the page's own listeners are its author's. The handle reaches no romp page: sending
-        # that window on to one lands on a document with this policy, which severs it. The pane's shim, its theme and
-        # every other response the route makes are the kernel's own and keep the header. The served lab's legs 6 and 7
-        # witness the round trip, the cost and its bound (the shell).
-        # Residual: a URL pane cannot open one of the dashboard's pages in a tab (a state-root pane's own files, which
-        # carry no policy, it can). Its popup inherits the frame's sandbox, and a browser shows a sandboxed
-        # navigation's response only when its opener policy is unsafe-none, so the tab shows no page, as it did under
-        # same-origin: Chromium shows its error page and closes the handle; Firefox shows a blocked page and WebKit an
-        # empty one, each leaving the handle open (witness: test_pane_popup_opener_served.py
-        # test_residual_a_url_panes_popup_onto_a_kernel_page_shows_no_page, which asserts only that the file is not
-        # shown). Allowing it would take allow-popups-to-escape-sandbox on the URL pane's frame, which unsandboxes
-        # every popup the pane opens.
-        # Browsers enforce the policy only on secure contexts (https, localhost); on a plain-http tailnet address it is
-        # ignored, and the sender checks in the pages' own listeners are the defence everywhere. Browsers read it on
-        # document navigations only, so it is inert on JSON, assets and sockets.
-        if opener_policy:
-            self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
-        # Referrer policy: a document's URL is what its requests send as Referer, and the shell's URL is
-        # `/?token=` on its first load (the address scrub in _landing's head script drops it; a pane page
-        # opened bare as `/chat?token=` keeps it). same-origin sends the full Referer on requests to this
-        # origin and nothing cross-origin (a transcript's <img> from another host, a link out), whatever
-        # the browser's default, on every page the kernel serves: the SECURITY.md claim that a cross-site
-        # page cannot obtain the token then holds by construction. same-origin and not no-referrer: a
-        # same-origin GET carries no Origin header, so the Referer is the one header that names the page
-        # origin behind it to the kernel, and this keeps it.
-        self.send_header("Referrer-Policy", "same-origin")
+        _security_headers(self.send_header, opener_policy)
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         if cache:                                     # e.g. "no-cache" — keeps a tab from running a stale bundle
@@ -70831,6 +70838,43 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
+
+    # http.server answers some requests itself, before any route here runs, with a small text/html page of its own
+    # (BaseHTTPRequestHandler.send_error): a request line over 65,536 bytes gets a 414; a header line over 65,536 bytes,
+    # or more than 100 header lines, a 431 (3.10 to 3.14 count the closing blank line too, so they refuse 100 headers);
+    # a method this class has no do_ method for (PUT, DELETE) a 501; and any other request line it refuses a 400, or a
+    # 505 for a version of 2.0 and up, though an empty or whitespace-only line gets no reply at all. A long enough URL
+    # takes a browser to the 414.
+    # Those pages never pass through _send, so they carry _security_headers here, which keeps SECURITY.md's claim that
+    # every page the kernel serves carries the opener policy true of them too (the post-merge review of #32 found them
+    # carrying none of these headers). send_error marks the response as its own and end_headers adds the headers to it
+    # last, before the block is flushed; the rest of the page (the status line, the escaped body, Connection: close)
+    # stays the standard library's, so it follows the running interpreter's rules, which differ between versions.
+    # The headers ride every error page http.server writes with a header block, and cannot ride a reply that has none.
+    # The standard library writes no status line and no header while the request's version, as it holds it, is exactly
+    # HTTP/0.9, the value it starts from; for any other version the reply has a header block. On every interpreter,
+    # then, no reply to a request line it accepts as HTTP/0.9, a two-word GET or three words ending in HTTP/0.9, has a
+    # header block, whether the route writes it or http.server does (a 431, a 501). Before CPython's gh-54930 change
+    # neither does the 400 or 505 to a request line refused for its version (malformed, or 2.0 and up) or for having
+    # none (one word, or two not starting with GET), nor the 400 to four or more words ending in HTTP/0.9; with that
+    # change each of those refusals has a header block. Browsers send none of these requests, so no page a browser loads
+    # is one of these replies.
+    # The mark, rather than adding the headers in end_headers for every response: _send has already written them on its
+    # own responses, and a second Cross-Origin-Opener-Policy, even of the same value, leaves a browser with no policy.
+    # No route here calls send_error: a route's own error statuses go through _send. tests/test_kernel_auth_hardening.py
+    # ServerErrorPages reads the 414, both 431s and the 501 (for PUT and for DELETE) off a socket; it drives no request
+    # line http.server answers with a 400 or 505, and none it accepts as HTTP/0.9.
+    def send_error(self, code, message=None, explain=None):
+        self._server_error_page = True
+        try:
+            super().send_error(code, message, explain)
+        finally:
+            self._server_error_page = False
+
+    def end_headers(self):
+        if getattr(self, "_server_error_page", False):
+            _security_headers(self.send_header)
+        super().end_headers()
 
     # ── serve-layer security (docs/read-side.md): Origin/Host gate always; token required for ALL
     # access, loopback included (Jupyter's model — loopback is shared by every local user on the
@@ -71775,7 +71819,7 @@ class Handler(BaseHTTPRequestHandler):
                       "json": "application/json", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
                       "woff": "font/woff", "woff2": "font/woff2", "ttf": "font/ttf", "map": "application/json"}.get(fp.suffix.lstrip("."), "text/plain")
                 # the pane author's own file: no opener policy, so a sign-in popup the pane opens keeps its opener when it
-                # comes back to a callback page here (Handler._send's comment says why, and what that costs)
+                # comes back to a callback page here (the comment in _security_headers says why, and what that costs)
                 return self._send(200, fp.read_bytes(), ct, cache="no-cache", opener_policy=False)
             if p.startswith("/dist/") or p.startswith("/media/"):
                 base = DIST if p.startswith("/dist/") else MEDIA

@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
-"""The documents name the opener policy, the sender checks and the URL-pane tab limit (2026-09-29).
+"""The documents name the opener policy, the sender checks, the URL-pane tab limit and the shim queue's caps
+(2026-09-29).
 
 The sender hardening (every page the kernel serves declares Cross-Origin-Opener-Policy: same-origin-allow-popups, a
 state-root pane's own files aside, and every window message listener checks its sender) shipped with no line in any
 document. SECURITY.md is where the repository points security readers, and plans/panes-as-data.md section 5 is the
-pane protocol's contract, which `romp pane`'s help points to. Each claim is read against the code it describes, so the
-text cannot state a header value, a file or a sandbox the tree does not have:
+pane protocol's contract, which `romp pane`'s help points to; docs/read-side.md describes the pane shim's reconnect
+queue, which the window-sender rows joined under a cap of their own. Each claim is read against the code it describes,
+so the text cannot state a header value, a file, a sandbox or a cap the tree does not have:
   - SECURITY.md's list of what is already hardened has a Window isolation bullet: the header and its value as
-    Handler._send sends it, the state-root exemption, what it keeps from a page on another origin (a handle, which the
-    popup lab witnesses), the sender checks in the listeners romp installs and their helper's path, and the diagnostic
-    row a pane's listener files for its first drop from each sender origin, up to window-sender.ts's cap a page load;
+    _security_headers writes it on every page (each one Handler._send writes, and every error page http.server writes
+    with a header block, whose executed witness is tests/test_kernel_auth_hardening.py ServerErrorPages), the
+    state-root exemption, what it keeps from a page on another origin (a handle, which the popup lab witnesses), the
+    sender checks in the listeners romp installs and their helper's path, and the diagnostic row a pane's listener
+    files for its first drop from each sender origin, up to window-sender.ts's cap a page load;
   - its residual cautions say where browsers ignore the policy (a plain-http address other than localhost and
     127.0.0.1), that the sender checks are what remains there, and that the default address (the kernel's bind
     default) and the https route are secure contexts;
   - the plan's section 5 says a URL pane cannot open one of the dashboard's pages in a new tab, why (the inherited
-    sandbox against the policy), what lifting it would take short of dropping the policy, and names its witness, a
-    test the popup lab defines; it states the outcome that witness asserts (the tab opens without the page) and no
-    engine's refusal page, which nothing asserts; the paragraph follows "The pin:", which pins the bullets above it;
-    the URL frame's sandbox in the kernel lacks the token that would lift it.
-Every sentence of the three passages is also read whole, with the values the code sets filled in: while the test read
-fragments, four clauses (the bullet's scope, the parenthetical, the verb of the browser's rule and the cost of lifting
-the limit) could each be reversed with every test green (the 2026-09-29 review).
+    sandbox against the policy, a rule stated for a sandboxed tab or popup, since a browser reads the policy only for a
+    top-level document), what lifting it would take short of dropping the policy, and names its witness, a test the
+    popup lab defines; it states the outcome that witness asserts (the tab opens without the page) and no engine's
+    refusal page, which nothing asserts; the paragraph follows "The pin:", which pins the bullets above it; the URL
+    frame's sandbox in the kernel lacks the token that would lift it;
+  - docs/read-side.md says how many breadcrumbs the pane shim's queue holds for a reconnect: the page's own up to one
+    cap and the window-sender rows up to another, each as kernel.py _shim sets it.
+Every sentence of the first three passages is also read whole, with the values the code sets filled in: while the test
+read fragments, four clauses (the bullet's scope, the parenthetical, the verb of the browser's rule and the cost of
+lifting the limit) could each be reversed with every test green (the 2026-09-29 review), and a sentence added to the
+plan's paragraph could widen the browser's rule again. The read-side sentence is read from its "and at most" to its
+full stop, the clause that names the caps.
 Reads the tree only: no kernel, no browser.
 """
 import os
@@ -66,11 +75,22 @@ class SecurityDoc(unittest.TestCase):
         hardened = _section(self.doc, "\n## What is already hardened\n", "\n## ")
         b = _flat(_bullet(hardened, "**Window isolation:**"))
         sent = re.findall(r'send_header\("Cross-Origin-Opener-Policy", "([^"]+)"\)', self.kernel)
-        self.assertEqual(sent, ["same-origin-allow-popups"], "Handler._send sends the header once, with this value")
+        self.assertEqual(sent, ["same-origin-allow-popups"],
+                         "_security_headers writes the header once, with this value")
         self.assertIn("every page the kernel serves carries `Cross-Origin-Opener-Policy: %s` (" % sent[0], b,
-                      "the scope: Handler._send sends the header on every page, not the shell's alone")
+                      "the scope: every page, not the shell's alone")
         self.assertIn("a state-root pane's own files excepted", b, "the exemption Handler._send's opener_policy=False makes")
         self.assertEqual(self.kernel.count("opener_policy=False)"), 1, "one exempt route: a state-root pane's own files")
+        # "every page" is executed, not read here. tests/test_kernel_auth_hardening.py OpenerIsolation reads the header
+        # off the shell, every pane page, the sign-in page, a static asset, each document shape the /file route builds
+        # and a state-root pane's shim and theme; the /remote relay's shapes are read by
+        # tests/test_kernel_remote_file_relay.py. ServerErrorPages reads it off http.server's own error pages (a 414,
+        # two 431s, and a 501 for PUT and for DELETE), which carried none of the headers until Handler.send_error marked
+        # them for Handler.end_headers to add (the post-merge review of #32).
+        auth = _read("tests", "test_kernel_auth_hardening.py")
+        for witness in ("class OpenerIsolation(unittest.TestCase):", "class ServerErrorPages(unittest.TestCase):"):
+            with self.subTest(witness=witness):
+                self.assertEqual(auth.count("\n" + witness + "\n"), 1, "the scope's executed witness")
 
     def test_the_window_isolation_bullet_reads_whole(self):
         # One sentence, read whole with the header value and the cap the code sets: the tests around this one read each
@@ -112,10 +132,13 @@ class SecurityDoc(unittest.TestCase):
         self.assertIn("export function windowSender(", helper)
         self.assertIn("export function noteForeign(", helper)
         # the trace is the panes' (window-sender.ts noteForeign); the shell's source check drops without one. A listener
-        # files one row per sender origin a page life, so a repeat from that origin files none, and at most NOTE_MAX rows
+        # files one row per sender origin a page life, so a repeat from that origin files none, and at most NOTE_MAX
+        # rows. That behaviour is ui/webview/window-sender.test.ts's to execute (one row per site and origin, at most
+        # NOTE_MAX); this module reads only the cap's value, for the sentence. It no longer pins the text of the dedupe
+        # line: rewrites that keep the behaviour turned that pin red, and a changed dedupe key left it green (the
+        # post-merge review of #32).
         cap = re.findall(r"(?m)^export const NOTE_MAX = (\d+);$", helper)
         self.assertEqual(len(cap), 1, "window-sender.ts caps the rows a page files")
-        self.assertIn("if (seen.has(key) || seen.size >= NOTE_MAX) return;", helper, "the row per site and origin, and the cap")
         self.assertIn("(in a pane, `ui/webview/window-sender.ts`, where each listener's first drop from a given sender origin"
                       " leaves a diagnostic row, up to %s rows per page load)" % cap[0], b)
         self.assertEqual(len(re.findall(r"\.(?:\s|$)", b)), 1, "one sentence: its only full stop ends it")
@@ -163,17 +186,22 @@ class PanesPlan(unittest.TestCase):
         return self.sec5[at:end if end >= 0 else len(self.sec5)]
 
     def test_section_five_says_a_url_pane_cannot_open_a_dashboard_page_in_a_tab_and_why(self):
-        # Each sentence whole, the header value as Handler._send sends it: while this read fragments, the parenthetical
-        # (allow-popups does not lift the sandbox), the verb of the browser's rule (renders only when) and the cost of
-        # lifting the limit (unsandbox every popup) could each be reversed with every test green (the 2026-09-29 review)
+        # Each sentence whole, the header value as _security_headers writes it: while this read fragments, the
+        # parenthetical (allow-popups does not lift the sandbox), the verb of the browser's rule (renders only when) and
+        # the cost of lifting the limit (unsandbox every popup) could each be reversed with every test green (the
+        # 2026-09-29 review). The browser's rule is stated for a tab or popup and no wider: a browser reads the opener
+        # policy only when a top-level document loads, so the rule says nothing of the URL pane's own sandboxed frame
+        # navigating itself, and stated for every sandboxed navigation it read as if it did (the post-merge review of
+        # #32)
         p = _flat(self._para())
         sent = re.findall(r'send_header\("Cross-Origin-Opener-Policy", "([^"]+)"\)', self.kernel)
-        self.assertEqual(len(sent), 1, "Handler._send sends the header once")
+        self.assertEqual(len(sent), 1, "_security_headers writes the header once")
         self.assertIn("A tab the pane opens inherits the frame's sandbox (`allow-popups` lets the pane open it but"
-                      " does not lift the sandbox), and a browser renders a sandboxed navigation's response only"
-                      " when that response's `Cross-Origin-Opener-Policy` is `unsafe-none`.", p,
-                      "why: the tab keeps the frame's sandbox, and a sandboxed navigation renders only under"
+                      " does not lift the sandbox), and a browser renders the response of a sandboxed tab or popup (a"
+                      " top-level navigation) only when that response's `Cross-Origin-Opener-Policy` is `unsafe-none`.",
+                      p, "why: the tab keeps the frame's sandbox, and a sandboxed tab or popup renders only under"
                       " unsafe-none")
+        self.assertNotIn("sandboxed navigation", p, "the rule holds for a top-level navigation only, not every one")
         self.assertIn("Every page the kernel serves declares `%s` except a state-root pane's own files, so a tab"
                       " onto one of the dashboard's pages opens without showing that page." % sent[0], p,
                       "the scope of the policy, and the outcome the witness asserts")
@@ -182,6 +210,19 @@ class PanesPlan(unittest.TestCase):
                       " `allow-popups-to-escape-sandbox` on the frame, which would unsandbox every popup the pane"
                       " opens.", p, "the one token that lifts it, and its cost")
         self.assertNotIn("\u2014", p)
+        # and the paragraph whole: every sentence above is read whole, and a sentence added beside them could widen the
+        # browser's rule again in other words (an added sentence extending the refusal to any frame that navigates
+        # itself passed every fragment above)
+        self.assertEqual(
+            p.strip(),
+            "**A URL pane cannot open one of the dashboard's pages in a new tab.** A tab the pane opens inherits the"
+            " frame's sandbox (`allow-popups` lets the pane open it but does not lift the sandbox), and a browser"
+            " renders the response of a sandboxed tab or popup (a top-level navigation) only when that response's"
+            " `Cross-Origin-Opener-Policy` is `unsafe-none`. Every page the kernel serves declares `%s` except a"
+            " state-root pane's own files, so a tab onto one of the dashboard's pages opens without showing that page."
+            " A URL pane can open a state-root pane's own files. Short of dropping the policy, lifting the limit would"
+            " take `allow-popups-to-escape-sandbox` on the frame, which would unsandbox every popup the pane opens."
+            " `tests/test_pane_popup_opener_served.py` witnesses the refusal (`%s`)." % (sent[0], self.WITNESS))
 
     def test_the_tab_limit_follows_the_pin_so_the_pin_reads_as_the_bullets_own(self):
         # "The pin:" pins the URL-pane bullets' source check; the tab limit comes after it, not between them
@@ -217,6 +258,21 @@ class PanesPlan(unittest.TestCase):
         r = body.index('r = self._result()["residual"]')
         self.assertIn('self.assertTrue(r["opened"], ', body[r:], "the tab opened")
         self.assertIn('self.assertNotIn(MARK, r["text"] or "", ', body[r:], "and does not show the page")
+
+
+class ReadSideDoc(unittest.TestCase):
+    def test_the_shim_queue_sentence_names_both_caps_the_shim_sets(self):
+        # While a pane's socket is down the shim queues the page's own breadcrumbs under DIAG_QUEUE_MAX and the
+        # window-sender rows under FOREIGN_QUEUE_MAX, each on its own count (kernel.py _shim), so an outage can hold
+        # both. The sentence kept the single cap of 20 it had before the split (the post-merge review of #32).
+        side = _flat(_read("docs", "read-side.md"))
+        kernel = _read("kernel", "kernel.py")
+        own = re.findall(r"\bDIAG_QUEUE_MAX\s*=\s*(\d+)", kernel)
+        foreign = re.findall(r"\bFOREIGN_QUEUE_MAX\s*=\s*(\d+)", kernel)
+        self.assertEqual((len(own), len(foreign)), (1, 1), "one cap of each kind in the shim")
+        want = ("and at most %s of the page's own breadcrumbs, plus at most %s window-sender rows, wait in the shim's"
+                " queue for it." % (own[0], foreign[0]))
+        self.assertTrue(want in side, "docs/read-side.md does not say: " + want)   # not assertIn, which prints the page
 
 
 if __name__ == "__main__":

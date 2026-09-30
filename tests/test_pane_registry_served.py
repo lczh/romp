@@ -9,12 +9,13 @@ route pane. A Chromium driver opens the dashboard and reads:
      hears the pane-set broadcast naming it;
   3. the URL pane is a sandboxed iframe with its URL as given (no ?v=, no token), marked protocol none; the forged
      toggleFleet, notify and reveal it posts on load change nothing, and it is told nothing (its beacons say so);
-  3b. the URL pane posts openSettings, a settingsSync with another theme, viewFile and logUnseen into each of the shell's
-     frames but its own (parent.frames, every pane's window and the gear's): the modal stays closed, the settings store
-     is unchanged, no viewer opens and the Open log badge stays as it was, and each pane that dropped one filed its
-     trace in the kernel's client-diag journal (ui/webview/window-sender.ts noteForeign: the site and the origin
-     "null", nothing of the message); the same openSettings from the notes pane, a window on the shell's origin, opens
-     the modal;
+  3b. the URL pane posts openSettings, a settingsSync with another theme, viewFile and logUnseen into each of the
+     shell's frames but its own (parent.frames, every pane's window and the gear's), and every read of the frames reads
+     each of them that has loaded a kernel page (the feed and the Files pane among them; an off pane's frame loads
+     none), with none failing: the modal stays closed, the settings store is unchanged, no viewer opens and the Open log
+     badge stays as it was, and each pane that dropped one filed its trace in the kernel's client-diag journal
+     (ui/webview/window-sender.ts noteForeign: the site and the origin "null", nothing of the message); the same
+     openSettings from the notes pane, a window on the shell's origin, opens the modal;
   4. the gear's Panes section has a row per data pane, the experimental one off; turning it on brings the pane on screen;
   5. a define at the kernel while the page is open: the pane-set revision on the next keepalive stands the reload OFFER
      with the panes' wording, the page does not reload on its own, and the Reload click shows the new pane.
@@ -171,11 +172,15 @@ if (!sf) await die("no /settings frame");
 out.gearUp = await sf.waitForFunction(() => !!document.getElementById("rsettings") && typeof window.__rompSetLogCount === "function" && typeof window.__rompSettingsClose === "function",
   null, { timeout: 15000 }).then(() => true).catch(() => false);
 await page.waitForTimeout(500);
-// every same-origin frame's modal, viewer and Open log badge (null where the frame has none), and the store they share
+// every frame holding a page on the kernel's origin: its modal, viewer and Open log badge (null where the frame has
+// none), and the store they share (a frame with no kernel page, an off pane's empty one or the URL pane's own, is not
+// read). A frame whose read fails is a row of its own, {path, error}, never dropped: a frame missing from a read would
+// pass every check below that filters the read for an open modal or viewer
 const ownFrames = async () => { const rows = []; for (const f of page.frames()) { if (f === page.mainFrame() || !f.url().startsWith(cfg.api)) continue;
   const r = await f.evaluate(() => ({ path: location.pathname, modal: (() => { const p = document.getElementById("rsettings"); return p ? !p.hidden : null; })(),
-    viewer: !!document.getElementById("romp-fileview"), badge: (() => { const b = document.querySelector("#rs-log-open .rs-log-n"); return b ? b.textContent : null; })() })).catch(() => null);
-  if (r) rows.push(r); } return rows.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)); };
+    viewer: !!document.getElementById("romp-fileview"), badge: (() => { const b = document.querySelector("#rs-log-open .rs-log-n"); return b ? b.textContent : null; })() }))
+    .catch((e) => ({ path: new URL(f.url()).pathname, error: String(e).slice(0, 300) }));
+  rows.push(r); } return rows.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)); };
 const store = () => page.evaluate(() => localStorage.getItem("romp:settings"));
 out.foreignBefore = { store: await store(), frames: await ownFrames() };
 const theme = (() => { try { return JSON.parse(out.foreignBefore.store || "{}").theme || "classic"; } catch (e) { return "classic"; } })();
@@ -599,22 +604,35 @@ class ServedPaneRegistry(unittest.TestCase):
         self.assertTrue(r["gearUp"], "the gear's frame loaded and installed its listeners before the posts")
         before, badged, mid, after = r["foreignBefore"], r["foreignBadge"], r["foreignMid"], r["foreignAfter"]
         paths = [f["path"] for f in before["frames"]]
-        for need in ("/chat", "/settings", "/pane/notes/"):
+        print("the frames each read reads: %s" % ", ".join(paths))   # read off a passing run's log (-rP)
+        # the first read holds the frames the checks below name: the chat, the feed and the Files pane (each opens a
+        # viewer on viewFile), the gear's frame (openSettings and the badge), the timeline (whose boot files one of the
+        # traces required below) and the notes pane (the control's sender). A frame the first read holds beyond these,
+        # the Outline's among them, is held to every later read by the equality below
+        for need in ("/chat", "/feed", "/files", "/pane/notes/", "/settings", "/timeline"):
             self.assertIn(need, paths, "the frame the posts must reach is up: %r" % paths)
+        # every read read every frame holding a kernel page: a failed read is a row with an error (ownFrames), and each
+        # later read holds the first read's frames, so a frame that went missing cannot pass the modal and viewer checks
+        # below as clean
+        for label, read in (("before the posts", before), ("after logUnseen", badged), ("after settingsSync and viewFile", mid),
+                            ("after openSettings", after)):
+            with self.subTest(read=label):
+                self.assertEqual([f for f in read["frames"] if "error" in f], [], "a frame read failed")
+                self.assertEqual([f["path"] for f in read["frames"]], paths, "the same frames as the first read")
         self.assertEqual(r["foreignPosted"], [r["shellFrames"] - 1] * 3, "each pass, the docs page posted into every one of the shell's frames but its own")
         self.assertGreaterEqual(r["shellFrames"], 6, "the panes and the gear's frame: %r" % paths)
         gear = [f for f in before["frames"] if f["path"] == "/settings"]
         print("the gear's frame before and after each pass: %r" % [[f for f in x["frames"] if f["path"] == "/settings"] for x in (before, badged, mid, after)])
-        self.assertEqual([(f["modal"], isinstance(f["badge"], str)) for f in gear], [(False, True)], "before the posts: the modal closed, the badge there: %r" % gear)
+        self.assertEqual([(f.get("modal"), isinstance(f.get("badge"), str)) for f in gear], [(False, True)], "before the posts: the modal closed, the badge there: %r" % gear)
         with self.subTest(post="settingsSync"):
             self.assertEqual((badged["store"], mid["store"], after["store"]), (before["store"],) * 3, "a foreign settingsSync must not rewrite the settings store (theme %r forged)" % r["forgedTheme"])
         with self.subTest(post="openSettings"):
-            self.assertEqual([f["path"] for f in after["frames"] if f["modal"]], [], "a foreign openSettings must not open the modal: %r" % after["frames"])
+            self.assertEqual([f["path"] for f in after["frames"] if f.get("modal")], [], "a foreign openSettings must not open the modal: %r" % after["frames"])
         with self.subTest(post="viewFile"):
-            self.assertEqual([f["path"] for f in mid["frames"] + after["frames"] if f["viewer"]], [], "a foreign viewFile must not open a viewer: %r" % mid["frames"])
+            self.assertEqual([f["path"] for f in mid["frames"] + after["frames"] if f.get("viewer")], [], "a foreign viewFile must not open a viewer: %r" % mid["frames"])
         with self.subTest(post="logUnseen"):
             # the badge as it stood before the posts: the shell's own count of the lines the lab's earlier legs logged
-            self.assertEqual([f["badge"] for f in badged["frames"] if f["path"] == "/settings"], [gear[0]["badge"]],
+            self.assertEqual([f.get("badge") for f in badged["frames"] if f["path"] == "/settings"], [gear[0].get("badge")],
                              "a foreign logUnseen (n 7) must leave the Open log badge as it was")
         with self.subTest(what="the trace"):
             rows = []
