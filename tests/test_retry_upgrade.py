@@ -198,6 +198,68 @@ class TheWayBack(unittest.TestCase):
             self.assertIsNone(s._upgrade_retry, "the user chose: nothing to retry")
 
 
+
+class AnOlderVersionOfThePickedFamily(unittest.TestCase):
+    """A safeguards fallback that stays inside the family (a newer Opus answered by an older one, first seen 2026-09-23): the family
+    rank alone read it as lateral, so no retry armed, the tick never asked, and the session ran on the older model until
+    something unrelated happened to reconnect it, for hours and once for days. The pick here is a versioned id, the shape
+    the model picker writes; the learn compares the badge names."""
+
+    PICK = {"name": "api", "model": "claude-opus-5-5", "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5"}
+
+    def test_the_fallback_arms_the_retry_the_tick_asks_and_a_served_turn_on_the_pick_ends_it(self):
+        be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+        with _Hooks() as h:
+            s = _sess(be, **self.PICK)
+            s._learn_model("Opus 4.8", raw="claude-opus-4-8", served=True)
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.8")], "carded like any other downgrade")
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "the retry arms")
+            self.assertEqual((arm["from"], arm["to"], arm["pick"]), ("Opus 5.5", "Opus 4.8", "claude-opus-5-5"))
+            self.assertTrue(any(m.startswith("retry upgrade (api): Opus 5.5 fell back to Opus 4.8") for m in be._logs), be._logs)
+            self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1, "due: the pick is asked for again")
+            self.assertEqual(len(s._asks), 1)
+            s._learn_model("Opus 5.5", raw="claude-opus-5-5")                   # the reconnect's init: configured, not served
+            self.assertIsNotNone(s._upgrade_retry, "the CLI running on the pick is not the API serving it")
+            s._learn_model("Opus 4.8", raw="claude-opus-4-8", served=True)      # refused again: back on the older version
+            self.assertIsNotNone(s._upgrade_retry, "still below the pick: the arm stands")
+            self.assertEqual(h.restored, [])
+            self.assertTrue(any("fell back to Opus 4.8 again after attempt 1" in m for m in be._logs), be._logs)
+            s._learn_model("Opus 5.5", raw="claude-opus-5-5")
+            s._learn_model("Opus 5.5", raw="claude-opus-5-5", served=True)      # served on the pick
+            self.assertIsNone(s._upgrade_retry, "done")
+            self.assertEqual(h.restored, [("Opus 4.8", "Opus 5.5")])
+
+    def test_a_point_release_down_counts_and_a_newer_version_than_the_pick_does_not(self):
+        be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+        with _Hooks() as h:
+            s = _sess(be, **self.PICK)
+            s._learn_model("Opus 5", raw="claude-opus-5", served=True)          # 5.5 answered by 5
+            self.assertIsNotNone(s._upgrade_retry)
+            s._learn_model("Opus 5.5", raw="claude-opus-5-5", served=True)
+            self.assertIsNone(s._upgrade_retry)
+            t = _sess(be, sid="11111111-2222-4333-8444-000000000713", name="tests", model="claude-opus-4-8",
+                      liveModel="Opus 4.8", liveModelId="claude-opus-4-8")
+            t._learn_model("Opus 5.5", raw="claude-opus-5-5", served=True)
+            self.assertIsNone(t._upgrade_retry, "a newer version than the pick is nobody's fallback")
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 5")], "…and no card for it")
+
+    def test_turning_the_switch_on_or_an_attach_takes_up_a_session_already_on_the_older_version(self):
+        be = _backend()
+        with _Hooks():
+            s = _sess(be, name="api", model="claude-opus-5-5", liveModel="Opus 4.8", liveModelId="claude-opus-4-8",
+                      servedModel="Opus 4.8")
+            Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+            be.apply_model_switches()
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm)
+            self.assertEqual((arm["from"], arm["to"]), ("Opus 5.5", "Opus 4.8"))
+            t = _sess(be, sid="11111111-2222-4333-8444-000000000714", name="tests", model="opus", liveModel="Opus 4.8",
+                      liveModelId="claude-opus-4-8", servedModel="Opus 4.8")
+            be.apply_model_switches()
+            self.assertIsNone(t._upgrade_retry, "a bare alias pick names no version, so nothing says it sits below it")
+
+
 class KernelWiring(unittest.TestCase):
     def setUp(self):
         with open(os.path.join(BIN, "romp-kernel")) as f:

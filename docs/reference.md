@@ -396,7 +396,10 @@ following to every connected machine's kernel):
   change model.
 - **Retry upgrades after downgrades** acts when a session's model changes to a
   lower tier without a pick, the automatic fallback the Completed card reports
-  (`Model changed automatically: … → …`). Every ten minutes the kernel asks for
+  (`Model changed automatically: … → …`). A lower tier is a smaller model family
+  or an older version of the same one (Opus 4.8 answering for Opus 5.5); a bare
+  alias pick such as `opus` names no version, so the requested-model mark below
+  compares its family alone. Every ten minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
