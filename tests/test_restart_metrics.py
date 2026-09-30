@@ -386,6 +386,24 @@ class Document(unittest.TestCase):
         self.assertEqual(rm.main(["--since", "not-a-date", "--no-live", "--state", str(self.state)]), 2)
 
 
+class DuplicateRowShapes(unittest.TestCase):
+    """The boot sweep's duplicate row was keyed by the conversation id (fsid) and is keyed by the session (sid) since a
+    comment thread shares its parent's conversation id; the reader counts both shapes, and the sweep's row for CLIs whose
+    session it could not read, so a window's duplicate count says when it is a floor."""
+
+    def test_old_and_new_rows_count_and_unchecked_boots_are_said(self):
+        state = Path(tempfile.mkdtemp())
+        t = D0 + 3600
+        _write(state, "session-events.jsonl", [
+            {"t": t, "pid": 1, "kind": "reconcile.duplicate-cli", "sid": SID, "name": "web", "fsid": SID, "pids": "7,8", "n": 2},
+            {"t": t + 60, "pid": 2, "kind": "reconcile.duplicate-cli", "sid": SID2, "name": "api", "pids": "9,10", "n": 2},
+            {"t": t + 60, "pid": 2, "kind": "reconcile.duplicate-unchecked", "pids": "11", "n": 1}])
+        doc = rm.collect(state, kind="day", tz=TZ, live=False)
+        (b,) = doc["buckets"]
+        self.assertEqual((b["duplicateClis"], b["duplicateUnchecked"]), (2, 1))
+        self.assertIn("duplicate CLIs 2 (1 boot(s) could not check every CLI) · crash heals 0", rm.summary(doc))
+
+
 class LiveHelpers(unittest.TestCase):
     """The live reads, on synthetic files and listings: no cgroup, no ps, no kernel is touched."""
 

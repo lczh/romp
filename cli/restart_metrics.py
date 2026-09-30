@@ -14,8 +14,9 @@ Sources, and what each stamp is (every stamp is an EVENT's time, never the clock
                          parked deploy's wait from parked to restart (waitedS) and whether the fifteen-minute
                          backstop fired (backstop)
   session-events.jsonl   what went wrong with a session's process (kernel/sdk_backend.py problem_row): an
-                         orphaned CLI ended at boot, a leftover scope stopped, two CLIs holding one
-                         conversation, a crash heal or loop, a session the drain left closing, the lease
+                         orphaned CLI ended at boot, a leftover scope stopped, two CLIs serving one
+                         session (keyed by fsid in rows before the sid key, by sid since; either counts)
+                         or a boot that could not read every CLI's session, a crash heal or loop, a session the drain left closing, the lease
                          work's `lease.*` kinds; plus reconcile.boot, the boot sweep's summary (resumed =
                          continuation notices queued)
   turns.jsonl            one row per settled turn: fedT (the feed pop), firstOutT (the first streamed work
@@ -54,7 +55,7 @@ SCHEMA = 1
 SCOPE_RE = re.compile(r"romp-session-([0-9a-fA-F]{1,8})-(\d+)-\d+\.scope\Z")
 SDK_CLI_MARK = "--input-format stream-json"
 SID_ENV = "ROMP_SID"      # the session id the kernel sets on every session CLI it launches (sdk_backend _options)
-PROBLEM_KINDS = ("reconcile.orphan-reaped", "reconcile.scope-stopped", "reconcile.duplicate-cli",
+PROBLEM_KINDS = ("reconcile.orphan-reaped", "reconcile.scope-stopped", "reconcile.duplicate-cli", "reconcile.duplicate-unchecked",
                  "crash.heal", "crash.loop", "drain.unjoined")
 QUIET_JOIN_S = 180        # a cut row within this many seconds after a quiet-window row is that window's restart
 
@@ -350,7 +351,7 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
                     "restartsWithoutCutRow": 0, "cutSessions": {}, "reasons": {}, "_outage": [], "_settle": [],
                     "drainUnjoinedCount": 0, "drainReapedCount": 0,
                     "quietWindows": 0, "backstopFires": 0, "_quietWait": [],
-                    "events": {}, "orphansReaped": 0, "scopesStopped": 0, "duplicateClis": 0, "crashHeals": 0,
+                    "events": {}, "orphansReaped": 0, "scopesStopped": 0, "duplicateClis": 0, "duplicateUnchecked": 0, "crashHeals": 0,
                     "crashLoops": 0, "drainLeftClosing": 0, "leaseProblems": 0, "boots": 0, "resumedTurns": 0,
                     "attachedAtBoot": 0, "attachedLater": 0,
                     "redo": {"turns": 0, "usd": 0.0, "tokens": 0}, "_l_res": [], "_l_first": [], "_l_api": [],
@@ -405,6 +406,8 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
             b["scopesStopped"] += 1
         elif k == "reconcile.duplicate-cli" or k == "lease.duplicate-cli":
             b["duplicateClis"] += 1
+        elif k == "reconcile.duplicate-unchecked":        # a boot that could not read every CLI's session (ROMP_SID),
+            b["duplicateUnchecked"] += 1                  #  so its duplicate count is a floor
         elif k == "crash.heal":
             b["crashHeals"] += 1
         elif k == "crash.loop":
@@ -889,9 +892,10 @@ def summary(doc: dict) -> str:
             lines.append("  reasons: " + ", ".join("%s %d" % (k, v) for k, v in sorted(b["reasons"].items(), key=lambda kv: -kv[1])))
         lines.append("  outage to first serve %s · reconcile settle %s" % (_st(b["outageS"]), _st(b["settleS"])))
         lines.append("  quiet windows %d · wait %s · backstop fired %d" % (b["quietWindows"], _st(b["quietWaitS"]), b["backstopFires"]))
-        lines.append("  boot sweeps %d · orphans reaped %d · scopes stopped %d · duplicate CLIs %d · crash heals %d · "
+        unchecked = (" (%d boot(s) could not check every CLI)" % b["duplicateUnchecked"]) if b.get("duplicateUnchecked") else ""
+        lines.append("  boot sweeps %d · orphans reaped %d · scopes stopped %d · duplicate CLIs %d%s · crash heals %d · "
                      "crash loops %d · drain left closing %d (cut rows: unjoined %d, reaped %d) · lease problems %d"
-                     % (b["boots"], b["orphansReaped"], b["scopesStopped"], b["duplicateClis"], b["crashHeals"],
+                     % (b["boots"], b["orphansReaped"], b["scopesStopped"], b["duplicateClis"], unchecked, b["crashHeals"],
                         b["crashLoops"], b["drainLeftClosing"], b["drainUnjoinedCount"], b["drainReapedCount"], b["leaseProblems"]))
         lines.append("  hosts attached: at boot %d · later %d" % (b["attachedAtBoot"], b["attachedLater"]))
         red = b["redo"]
