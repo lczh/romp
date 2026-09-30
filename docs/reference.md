@@ -399,15 +399,22 @@ following to every connected machine's kernel):
   (`Model changed automatically: … → …`). A lower tier is a smaller model family
   or an older version of the same one (Opus 4.8 answering for Opus 5.5); a bare
   alias pick such as `opus` names no version, so the requested-model mark below
-  compares its family alone. A pick of your own is never read as one, even a
-  pick of an older version or a family alias that resolves below the version the
-  session was on: nothing the session reports while the pick is taking effect
-  counts as a change, and the session landing on a version you picked is that
-  pick. Every ten minutes the kernel asks for
+  compares its family alone. A model you pick yourself is not read as an
+  automatic fallback, even an older version or a family alias that resolves
+  below the version the session was on: from the pick until the session reports
+  a model of the picked family (any model, for the account default), no change
+  counts as a fallback, and the session landing on the exact version you picked
+  is that pick. Three cases can still read a pick as a fallback: a reply from a
+  turn the session started on its own (a background task's notice, a scheduled
+  prompt) arriving after a Latest or default pick; a Latest or default pick made
+  while the session is reconnecting, which can miss its CLI; and a reply from
+  before the pick that the session replays after a kernel restart. Every ten
+  minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
-  below its pick when you turn the switch on is taken up at once. A fallback that
+  below its pick when you turn the switch on is taken up at once, unless a pick
+  of its own is still taking effect. A fallback that
   happens again is logged once per attempt; its card follows the board's usual
   rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.

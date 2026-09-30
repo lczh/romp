@@ -5358,6 +5358,18 @@ def _lands_on_pick(pm, pick):
     return v is not None and _model_rank(pm) == _model_rank(lab) and _model_version(pm) == v
 
 
+def _heal_pick_label(pick, old):
+    """The name a session rebuilt with a model pick still in flight starts from (a thread's death, a hard kernel death):
+    the pick's own label, so the pick's first report is not read as a fallback from the model it replaced, unless the
+    pick sits ABOVE the old name. Then the old name stays: the rebuilt session can attach to a CLI that never got the
+    pick, or replay a reply from before it (an attach tells the CLI nothing), and relabeled, that report of the old model
+    read as the pick falling back (2026-09-30, the #33 follow-up's review). Kept, the pick's report is an upgrade and the
+    old model's changes nothing."""
+    lab = _alias_label(str(pick or ""))
+    old = str(old or "")
+    return old if _model_downgrade(lab, old) else lab
+
+
 def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False, category=""):
     """The model picker's REQUESTED-model mark (the user 2026-09-17): while a session's live model sits a tier below
     its pick, the picker draws a yellow tick beside the requested model with a tooltip saying why and whether romp is
@@ -5532,8 +5544,9 @@ class SdkSession:
                 # …and a model pick that never landed starts from the PICK's label, as _on_session_gone leaves it
                 # (2026-09-30, the #33 follow-up): a thread that dies mid-turn is rebuilt here (its heal's _ensure)
                 # BEFORE that reset runs, a hard kernel death skips it, and the old label read the pick's first report
-                # as a fallback nobody asked for. A flagged row with no pick on record keeps its label.
-                _heal["liveModel"] = _alias_label(str(reg.get("model") or ""))
+                # as a fallback nobody asked for; a pick above the old label keeps the old one (_heal_pick_label). A
+                # flagged row with no pick on record keeps its label.
+                _heal["liveModel"] = _heal_pick_label(reg.get("model"), reg.get("liveModel"))
                 reg = dict(reg, liveModel=_heal["liveModel"])   # self.model and _served_model seed from it below
             backend._update_reg(self.sid, **_heal)
         # protocol/runtime state
@@ -5660,8 +5673,10 @@ class SdkSession:
         # write it too — and is ruled per WRITE, by token, in SdkBackend._seed_write_*: no per-session
         # view of that layer exists here on purpose (see _seed_write_refused). Under self._lock.
         self._model_accepted = reg.get("model")
-        self._pick_seq = 0                           # bumped by every live pick (SdkBackend.set_model); a context refresh
-        #                                              reads it at its ask and again at its answer (_do_refresh_context)
+        self._pick_seq = 0                           # bumped by every live pick (SdkBackend.set_model), at the pick
+        self._pick_taken = 0                         # the latest pick the CLI has had: its set_model answered (taken or
+        #   refused), or a spawn's --model carried it (never an attach, which tells the CLI nothing). A context refresh
+        #   answers for the model only when, at its ask, the CLI had had every pick made by its answer (_do_refresh_context)
         self._model_pending = ""                     # target ALIAS while a /model switch is resolving: the badge shows
         #   animated dots until the LIVE model actually reflects the pick (the user 2026-07-03: a switch stamped the
         #   chosen alias but left liveModel stale, and model_label PREFERS liveModel → the badge kept the OLD name).
@@ -6705,6 +6720,16 @@ class SdkSession:
             self._interrupted = False
             self.backend._poke()
 
+    def _pick_answered(self, prev):
+        """The CLI answered the set_model request of the pick `prev` names (it took it or refused it). Control requests
+        are answered in the order they are written, so a context refresh asked from here on reports the world after that
+        pick (the #33 follow-up's review, 2026-09-30: the pick's request reaches the CLI a loop hop after the pick, and a
+        refresh written in that gap reported the model before it, which ended a Latest or default pick's switching dots
+        and let the pick's own report read as a fallback). A lost answer says nothing and marks nothing."""
+        seq = (prev or {}).get("seq")
+        if isinstance(seq, int) and seq > getattr(self, "_pick_taken", 0):
+            self._pick_taken = seq
+
     async def _do_set_model(self, model, prev=None):
         try:
             await self.client.set_model(model)
@@ -6740,6 +6765,8 @@ class SdkSession:
             picked = prev.get("picked") if prev else None
             tok = prev.get("tok") if prev else None
             refusal = _cli_refusal(e)
+            if refusal:
+                self._pick_answered(prev)   # a refusal is the CLI's answer too: it runs what it ran before the pick
             with self._lock:
                 superseded = prev is not None and self.chosen_model != picked
             if superseded:
@@ -6791,6 +6818,7 @@ class SdkSession:
                     except Exception as e2:
                         self.backend._log("model-pick forget (%s): %s" % (self.name, e2), problem=True)
         else:
+            self._pick_answered(prev)
             if prev is not None:
                 self._model_accept(prev.get("picked"))   # the verdict that moves the accepted state
                 self.backend._seed_write_settled(prev.get("tok"))
@@ -6834,7 +6862,7 @@ class SdkSession:
             self._ctx_refresh_again = True
             return
         self._ctx_refreshing = True
-        asked = getattr(self, "_pick_seq", 0)   # the picks this ask went out after (getattr: __new__-built test doubles)
+        asked = getattr(self, "_pick_taken", 0)   # the latest pick the CLI had had when this ask went out (getattr: __new__-built test doubles)
         try:
             cu = await self.client.get_context_usage()
         except Exception as e:
@@ -6872,9 +6900,10 @@ class SdkSession:
             self._ctx_tokens, changed = int(tt), True
         raw = str(cu.get("model") or "").strip()
         if getattr(self, "_pick_seq", 0) != asked:
-            # a pick landed while this ask was out (2026-09-30, the #33 follow-up): the model it reports is the world
-            # before the pick, so it neither answers the pick nor moves the label (the pick's own refresh reruns behind
-            # it, _ctx_refresh_again); the percentage still lands
+            # a pick was made that the CLI had not had when this ask went out (2026-09-30, the #33 follow-up): its
+            # set_model was unanswered then, or the pick came later, so the model this reports can be the world before
+            # the pick, and it neither answers the pick nor moves the label. The pick's own refresh follows the CLI's
+            # answer (_do_set_model; a rerun behind this one, _ctx_refresh_again); the percentage still lands
             raw = ""
         pm = pretty_model(raw)
         if pm and self._resolve_model_pending(pm):
@@ -7641,6 +7670,7 @@ class SdkSession:
             # a stamp at the connect's outcome missed a host whose CLI came up and whose handshake then failed, since the
             # retry ATTACHED to that fresh CLI and nothing stamped for its life (the spawnedAt fix's rounds, 2026-09-14).
             # _options builds the options only.
+            carried = getattr(self, "_pick_seq", 0)   # read BEFORE _options reads the pick: one made in between counts as not carried
             try:
                 opts = self.backend._options(self, ClaudeAgentOptions)
             except Exception as e:
@@ -7739,6 +7769,8 @@ class SdkSession:
                     # first message. get_context_usage() is the DESIGNED control request behind the CLI's /context
                     # and returns BOTH the live model id and the % pre-turn, so this one refresh fills both. Runs on
                     # every (re)connect; guarded + idempotent + pokes only on change.
+                    if not getattr(self, "_host_is_attach", False) and carried > getattr(self, "_pick_taken", 0):
+                        self._pick_taken = carried   # a launch runs the pick its --model carried; an attach tells the CLI nothing
                     asyncio.ensure_future(self._do_refresh_context())
                     # …and the fast-mode fields the same way: they ride the initialize response the
                     # SDK already holds (get_server_info), so the badge exists pre-turn too — without
@@ -12409,9 +12441,11 @@ class SdkBackend:
                         _heal = {"effortPending": False, "modelPending": False}
                         if r.get("modelPending") and "model" in r:
                             # a pick in flight at a hard kernel death starts from its own label, as SdkSession.__init__
-                            # heals it (2026-09-30, the #33 follow-up); this sweep runs first for every alive row, so
-                            # the construction never sees the flag
-                            _heal["liveModel"] = _alias_label(str(r.get("model") or ""))
+                            # heals it, or keeps the old one when the pick is above it: a session that ATTACHES to a CLI
+                            # that survived tells it nothing, so its first report can be the old model (_heal_pick_label;
+                            # 2026-09-30, the #33 follow-up); this sweep runs first for every alive row, so the
+                            # construction never sees the flag
+                            _heal["liveModel"] = _heal_pick_label(r.get("model"), r.get("liveModel"))
                         self._update_reg(sid, **_heal)
                     if str(r.get("lastSid") or "") in spared_fsids:
                         # A claude process this kernel did not start (another kernel's state tag, or none) still holds
@@ -16267,12 +16301,15 @@ class SdkBackend:
                 # a turn in the new model kept showing the OLD name. Now the pick marks pending; _do_set_model
                 # pulls the real name, which clears it (and the dormant/never-driven trap can't happen — the
                 # refresh resolves an idle session, and _on_session_gone resolves a thread that exits mid-switch).
-                # EVERY live pick is in flight until the first report of it lands (2026-09-30, the #33 follow-up): a
-                # family word says nothing about the version (claude-opus-4-8 picked on Opus 5.5), an alias or the
-                # default names none, and a pick left unmarked read its own first report, a turn's init before the
-                # refresh, as a fallback nobody asked for. The counter lets a context refresh asked BEFORE this pick
-                # stand aside for it.
+                # EVERY live pick is in flight from the click (2026-09-30, the #33 follow-up) until the first report
+                # naming the pick's family (any report, for the default; a context refresh only once the CLI has had
+                # the pick): a family word says nothing about the version (claude-opus-4-8 picked on Opus 5.5), an
+                # alias or the default names none, and a pick left unmarked read its own first report, a turn's init
+                # before the refresh, as a fallback nobody asked for. The counter, bumped here at the pick and not at
+                # the loop hop that sends it, lets a context refresh the CLI answered before it had the pick stand
+                # aside for it (_do_refresh_context).
                 s._pick_seq = getattr(s, "_pick_seq", 0) + 1
+                seq = s._pick_seq
                 s._model_pending = value or "default"   # "" goes out as set_model(None), as "default" does
                 pending = True
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
@@ -16281,7 +16318,8 @@ class SdkBackend:
                 s._served_model = ""
             # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
             tok = self._seed_write_pending(sid, value)
-            prev = {"picked": value, "tok": tok}   # what the layers hold until the CLI rules — the revert's CAS keys
+            prev = {"picked": value, "tok": tok, "seq": seq}   # what the layers hold until the CLI rules — the revert's CAS
+            #                                                    keys — and which pick the CLI's answer is to (_pick_answered)
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
             self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
@@ -17998,9 +18036,9 @@ class SdkBackend:
         self._heal_stale_awaiting(sess.sid)
         self.retire_live_work(sess.sid)   # no stream left → unlanded work atoms must not hold the turn open
         if sess._model_pending:           # a switch that never resolved before the thread died → don't trap the dots
-            sess._model_pending = ""
+            sess._model_pending = ""      # (the pick's label, or the old one for a pick above it: _heal_pick_label)
             try:
-                self._update_reg(sess.sid, liveModel=_alias_label(sess.chosen_model), modelPending=False)
+                self._update_reg(sess.sid, liveModel=_heal_pick_label(sess.chosen_model, sess.model), modelPending=False)
             except Exception as e:
                 self._log("session gone (%s): model-pending clear failed: %s" % (sess.name, e))
         self._seed_writes_dropped(sess.sid)   # no verdict can reach its pending shared-model writes now
