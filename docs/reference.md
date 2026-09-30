@@ -5036,14 +5036,15 @@ copy of it.
 
 Select a passage in a message and right-click it: **Comment** opens a box on the passage for the
 first message of a side conversation about it, and **Quote** puts the passage in the message box
-instead. **Ctrl+Alt+M** (**⌘⌥M** on a Mac, the key Google Docs uses for a comment) opens the same
+instead. **Ctrl+/** (**⌘/** on a Mac, the key code editors use to toggle a comment) opens the same
 box from the keyboard, just under the selection, from anywhere in the chat including the message
-box; the right-click menu shows the key under **Comment**. The command palette's **Comment on
+box, where it types no "/" and opens no slash-command menu; the right-click menu shows the key
+under **Comment**. The key is the "/" character, however your layout types it: on a German
+keyboard, where "/" is Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on
 selection** does the same for the passage that was selected when you opened the palette. With
 nothing selected in a message, or in a session that has not finished starting or loading, it says
 so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
-there; on a keyboard where Ctrl+Alt+M types a character (AltGr+M on a German layout), the
-character wins.
+there.
 
 On a phone or tablet a long-press selection opens no menu, so a **Comment** button appears just
 below the selection instead (above it when the message box leaves no room), and tapping it opens

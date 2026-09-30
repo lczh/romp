@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """A key and a palette command for commenting on selected chat text, on the real dashboard (the user 2026-09-30, who
-wanted a keyboard shortcut for adding a comment; until then the only way in was right-click, Comment).
+wanted a keyboard shortcut for adding a comment, then wanted it two keys rather than three; until then the only way in
+was right-click, Comment).
 
 A hermetic kernel serves the shell page over a synthetic chat (the notes-api demo world, session web: one prompt, one
 reply). Asserted in the browser, in the shell's first chat column:
-  a passage selected in the reply and Ctrl+Alt+M pressed opens the comment box in its create mode, on that turn, quoting
+  a passage selected in the reply and Ctrl+/ pressed opens the comment box in its create mode, on that turn, quoting
   exactly that passage, with its corner just under the selection (the pointer a right-click would have supplied), and
   the box takes the caret;
-  the same key with the caret in the message box and the selection still in the transcript opens it too;
+  the same key with the caret in the message box and the selection still in the transcript opens it too, and the message
+  box stays empty with no slash menu (a plain "/" typed there does open the menu, the control that makes this mean
+  something);
+  a German layout's Ctrl+/ (key "/" typed as Shift+7, code Digit7) opens it from the message box; the key a US keyboard
+  has "/" on, which types "-" there (Ctrl+-), does not;
   with nothing selected the key opens nothing and a toast says to select some text;
   the command palette lists "Comment on selection" with its key, and a run from the palette comments on the passage
   that was selected when the palette opened, even though the chat's selection was gone by the time it ran;
-  the right-click menu's Comment names the key on its sub-line;
-  on a Mac, where Option composes a character and ⌘⌥M reaches the page as key "µ" (code KeyM), the key still opens it.
-Red before the change: the key does nothing, the palette has no such row, the menu no key.
+  the right-click menu's Comment and the shortcuts dialog name the key, Ctrl+/;
+  on a Mac, ⌘/ opens it, and so does a German Mac's ⌘⇧7; the menu, the palette row and the dialog say ⌘/; and a ⌘⌥M the
+  reader binds in place of it, which reaches the page as key "µ" (code KeyM) because Option composes a character, still
+  opens it.
+Red before the change: Ctrl+/ and ⌘/ do nothing, and the hints name Ctrl+Alt+M.
 With COMMENT_KEY_SHOTS=<dir> the driver writes the box the key opened, the menu with its key, the palette row and the
 toast. Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs,
 invented prose, host TESTHOST)."""
@@ -133,10 +140,41 @@ const ctx = await browser.newContext({ viewport: { width: 1300, height: 850 } })
 const page = await ctx.newPage();
 const fr = await boot(page);
 
+const composer = (fr) => fr.evaluate(() => ({ value: document.getElementById("composer-input").value, slash: !!document.getElementById("slash-pop") }));
+// a keydown the page's keyboard cannot type (another layout's, a Mac's composed glyph), dispatched where the focus is
+// (`active` is where it was dispatched: a box the key opens takes the focus before the dispatch returns)
+const dispatchKey = (fr, init) => fr.evaluate((init) => {
+  const at = document.activeElement || document.body;
+  const ev = new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true });
+  at.dispatchEvent(ev);
+  return { prevented: ev.defaultPrevented, platform: navigator.platform, active: at.id || at.tagName };
+}, init);
+// the key's row in the shortcuts dialog (the shell's), read and closed again
+const dialogChip = async (p) => {
+  await p.evaluate(() => window.__rompKeysOpen());
+  await p.waitForSelector('#rkeys-back .rkeys-row[data-cmd="chat.commentSelection"]', { timeout: 8000 }).catch(() => {});
+  const chip = await p.evaluate(() => { const r = document.querySelector('#rkeys-back .rkeys-row[data-cmd="chat.commentSelection"]'); return r ? ((r.querySelector(".rkeys-chip") || {}).textContent || "") : null; });
+  await p.keyboard.press("Escape");
+  return chip;
+};
+const menuItems = (fr, text) => fr.evaluate((text) => {
+  const turn = Array.from(document.querySelectorAll("#content .turn")).find((n) => (n.textContent || "").includes(text));
+  const sel = window.getSelection(), r = sel.getRangeAt(0).getBoundingClientRect();
+  turn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.right - 4, clientY: r.bottom - 4, button: 2 }));
+  return Array.from(document.querySelectorAll(".ctx-menu .ctx-item")).map((i) => ({ label: (i.querySelector(".ctx-item-label") || {}).textContent || "", sub: (i.querySelector(".ctx-item-sub") || {}).textContent || null }));
+}, text);
+const paletteRow = async (p, openKey) => {
+  await p.keyboard.press(openKey);
+  await p.waitForFunction(() => { const b = document.getElementById("rpal-back"); return !!b && !b.hidden; }, null, { timeout: 8000 }).catch(() => {});
+  await p.keyboard.type("Comment on selection");
+  await p.waitForFunction(() => { const r = document.querySelector("#rpal-list .rpal-row.active"); return !!r && /Comment on selection/.test(r.textContent || ""); }, null, { timeout: 8000 }).catch(() => {});
+  return p.evaluate(() => { const r = document.querySelector("#rpal-list .rpal-row.active"); return r ? { title: (r.querySelector(".rpal-title") || {}).textContent || "", kbd: (r.querySelector(".rpal-kbd") || {}).textContent || "" } : null; });
+};
+
 // 1. the key, with the focus in the transcript
 await focusChat(fr);
 out.keySel = await select(fr, cfg.passage);
-await page.keyboard.press("Control+Alt+M");
+await page.keyboard.press("Control+/");
 out.keyOpened = await waitPop(fr);
 out.keyPop = await pop(fr);
 await shot(page, "popover-by-key");
@@ -144,19 +182,44 @@ const pr = await pageRect(page, "#cmt-pop", 60);
 if (pr) await shot(page, "popover-by-key-zoom", pr);
 await closePop(fr);
 
-// 2. the key with the caret in the message box, the selection still in the transcript
+// 2. the key with the caret in the message box, the selection still in the transcript: it comments, and the box gets no
+// "/", so its slash menu stays shut
 await fr.click("#composer-input");
 out.boxSel = await select(fr, cfg.second);
-await page.keyboard.press("Control+Alt+M");
+await page.keyboard.press("Control+/");
 out.boxOpened = await waitPop(fr);
 out.boxPop = await pop(fr);
+out.boxAfter = await composer(fr);
+await closePop(fr);
+// the control: a plain "/" typed into the empty box does open the slash menu
+await fr.click("#composer-input");
+await page.keyboard.type("/");
+await fr.waitForSelector("#slash-pop", { state: "attached", timeout: 8000 }).catch(() => {});
+out.slashControl = await composer(fr);
+await fr.fill("#composer-input", "");
+await fr.waitForFunction(() => !document.getElementById("slash-pop"), null, { timeout: 5000 }).catch(() => {});
+
+// 2b. a German layout, where "/" is Shift+7: its Ctrl+/ from the message box comments too; its Ctrl+- (the key a US keyboard
+// has "/" on) does not
+await fr.click("#composer-input");
+out.deSel = await select(fr, cfg.passage);
+out.deKey = await dispatchKey(fr, { key: "/", code: "Digit7", ctrlKey: true, shiftKey: true });
+out.deOpened = await waitPop(fr);
+out.dePop = await pop(fr);
+out.deAfter = await composer(fr);
+await closePop(fr);
+await fr.click("#composer-input");
+out.dashSel = await select(fr, cfg.passage);
+out.dashKey = await dispatchKey(fr, { key: "-", code: "Slash", ctrlKey: true });
+await fr.waitForTimeout(400);
+out.dashPop = await pop(fr);
 await closePop(fr);
 
 // 3. nothing selected: a toast, no box
 await clearToasts(fr);
 await focusChat(fr);
 await fr.evaluate(() => window.getSelection().removeAllRanges());
-await page.keyboard.press("Control+Alt+M");
+await page.keyboard.press("Control+/");
 await fr.waitForFunction((m) => Array.from(document.querySelectorAll(".warn-toast-msg")).some((t) => t.textContent === m), cfg.noneToast, { timeout: 5000 }).catch(() => {});
 out.noneToasts = await toasts(fr);
 out.nonePop = await pop(fr);
@@ -182,31 +245,47 @@ await closePop(fr);
 // 5. the right-click menu's Comment names the key
 await focusChat(fr);
 out.menuSel = await select(fr, cfg.passage);
-out.menu = await fr.evaluate((text) => {
-  const turn = Array.from(document.querySelectorAll("#content .turn")).find((n) => (n.textContent || "").includes(text));
-  const sel = window.getSelection(), r = sel.getRangeAt(0).getBoundingClientRect();
-  turn.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.right - 4, clientY: r.bottom - 4, button: 2 }));
-  return Array.from(document.querySelectorAll(".ctx-menu .ctx-item")).map((i) => ({ label: (i.querySelector(".ctx-item-label") || {}).textContent || "", sub: (i.querySelector(".ctx-item-sub") || {}).textContent || null }));
-}, cfg.passage);
+out.menu = await menuItems(fr, cfg.passage);
 await shot(page, "menu-key-hint");
 const mr = await pageRect(page, ".ctx-menu", 40);
 if (mr) await shot(page, "menu-key-hint-zoom", mr);
 await page.keyboard.press("Escape");
+out.dialogChip = await dialogChip(page);
 
-// 6. a Mac: navigator.platform says so, and ⌘⌥M reaches the page as key "µ" with code KeyM (Option composes a character)
+// 6. a Mac: navigator.platform says so. ⌘/ pressed for real, then a German Mac's ⌘⇧7 (key "/", code Digit7)
 const mctx = await browser.newContext({ viewport: { width: 1300, height: 850 } });
 await mctx.addInitScript(() => { Object.defineProperty(Navigator.prototype, "platform", { get: () => "MacIntel", configurable: true }); });
 const mpage = await mctx.newPage();
 const mfr = await boot(mpage);
 await focusChat(mfr);
 out.macSel = await select(mfr, cfg.passage);
-out.macDispatch = await mfr.evaluate(() => {
-  const ev = new KeyboardEvent("keydown", { key: "µ", code: "KeyM", altKey: true, metaKey: true, bubbles: true, cancelable: true });
-  (document.activeElement || document.body).dispatchEvent(ev);
-  return { prevented: ev.defaultPrevented, platform: navigator.platform };
-});
+await mpage.keyboard.press("Meta+/");
 out.macOpened = await waitPop(mfr);
 out.macPop = await pop(mfr);
+await closePop(mfr);
+await focusChat(mfr);
+out.macDeSel = await select(mfr, cfg.second);
+out.macDeKey = await dispatchKey(mfr, { key: "/", code: "Digit7", metaKey: true, shiftKey: true });
+out.macDeOpened = await waitPop(mfr);
+out.macDePop = await pop(mfr);
+await closePop(mfr);
+// the hints say ⌘/ there: the menu's sub-line, the palette's chip, the dialog's
+await focusChat(mfr);
+await select(mfr, cfg.passage);
+out.macMenu = await menuItems(mfr, cfg.passage);
+await mpage.keyboard.press("Escape");
+out.macPalRow = await paletteRow(mpage, "Meta+P");
+await mpage.keyboard.press("Escape");
+out.macDialogChip = await dialogChip(mpage);
+
+// 7. a Mac whose reader bound ⌘⌥M instead: it reaches the page as key "µ" with code KeyM (Option composes a character), and
+// the chord still matches its binding
+await mfr.evaluate(() => localStorage.setItem("romp:keys", JSON.stringify({ "chat.commentSelection": "Mod+Alt+M" })));
+await focusChat(mfr);
+out.boundSel = await select(mfr, cfg.passage);
+out.boundKey = await dispatchKey(mfr, { key: "µ", code: "KeyM", altKey: true, metaKey: true });
+out.boundOpened = await waitPop(mfr);
+out.boundPop = await pop(mfr);
 await done();
 """
 
@@ -323,29 +402,50 @@ class ServedCommentKey(unittest.TestCase):
         r = self._drive()
         # 1. the key with the focus in the transcript
         self.assertEqual((r["keySel"] or {}).get("text"), PASSAGE, r["keySel"])
-        self.assertTrue(r["keyOpened"], "Ctrl+Alt+M over a selected passage opened no comment box: %r" % r)
+        self.assertTrue(r["keyOpened"], "Ctrl+/ over a selected passage opened no comment box: %r" % r)
         self._anchored(r["keyPop"], r["keySel"], "the key")
-        # 2. from the message box, the selection still in the transcript
+        # 2. from the message box, the selection still in the transcript; the box types no "/" and opens no slash menu
         self.assertEqual(r["boxSel"]["active"], "composer-input", "the caret sat in the message box as the key was pressed: %r" % r["boxSel"])
         self.assertTrue(r["boxOpened"], "the key from the message box opened nothing: %r" % r)
         self._anchored(r["boxPop"], r["boxSel"], "from the message box")
+        self.assertEqual(r["boxAfter"], {"value": "", "slash": False}, "Ctrl+/ put a \"/\" in the message box or opened its slash menu: %r" % r["boxAfter"])
+        self.assertEqual(r["slashControl"], {"value": "/", "slash": True}, "the control: a typed \"/\" opens the slash menu: %r" % r["slashControl"])
+        # 2b. a German layout: Ctrl+Shift+7 spells "/" and comments; Ctrl+- on the US slash key's position does not
+        self.assertEqual(r["deKey"]["active"], "composer-input", r["deKey"])
+        self.assertTrue(r["deKey"]["prevented"], "a German Ctrl+/ was taken: %r" % r["deKey"])
+        self.assertTrue(r["deOpened"], "a German Ctrl+/ (Ctrl+Shift+7) opened no comment box: %r" % r)
+        self._anchored(r["dePop"], r["deSel"], "a German Ctrl+/")
+        self.assertEqual(r["deAfter"], {"value": "", "slash": False}, r["deAfter"])
+        self.assertEqual(r["dashSel"]["text"], PASSAGE, r["dashSel"])
+        self.assertFalse(r["dashKey"]["prevented"], "Ctrl+- stays the browser's: %r" % r["dashKey"])
+        self.assertIsNone(r["dashPop"], "Ctrl+- (a German keyboard's key where a US one has \"/\") must not comment: %r" % r["dashPop"])
         # 3. nothing selected: a toast, and nothing opens
         self.assertIsNone(r["nonePop"], "nothing selected must open nothing: %r" % r["nonePop"])
         self.assertIn(NONE_TOAST, r["noneToasts"], r["noneToasts"])
         # 4. the palette: listed with its key; its run comments on the passage selected as it opened, which the chat lost since
-        self.assertEqual(r["palRow"], {"title": "Comment on selection", "kbd": "Ctrl+Alt+M"}, r["palRow"])
+        self.assertEqual(r["palRow"], {"title": "Comment on selection", "kbd": "Ctrl+/"}, r["palRow"])
         self.assertEqual(r["palLiveSelAfter"], "", "the chat's own selection was gone before the run: %r" % r["palLiveSelAfter"])
         self.assertTrue(r["palOpened"], "the palette's run opened no comment box: %r" % r)
         self._anchored(r["palPop"], r["palSel"], "the palette")
-        # 5. the right-click menu names the key under Comment, and only there
+        # 5. the right-click menu names the key under Comment, and only there; the shortcuts dialog shows it on its row
         menu = {m["label"]: m["sub"] for m in r["menu"]}
-        self.assertEqual(menu.get("Comment"), "Ctrl+Alt+M", "the menu's Comment names the key: %r" % r["menu"])
+        self.assertEqual(menu.get("Comment"), "Ctrl+/", "the menu's Comment names the key: %r" % r["menu"])
         self.assertIsNone(menu.get("Quote"), r["menu"])
-        # 6. a Mac: ⌘⌥M spelled as µ with code KeyM
-        self.assertEqual(r["macDispatch"]["platform"], "MacIntel", r["macDispatch"])
-        self.assertTrue(r["macDispatch"]["prevented"], "the chord was taken on a Mac: %r" % r["macDispatch"])
-        self.assertTrue(r["macOpened"], "⌘⌥M on a Mac opened no comment box: %r" % r)
-        self._anchored(r["macPop"], r["macSel"], "a Mac's ⌘⌥M")
+        self.assertEqual(r["dialogChip"], "Ctrl+/", "the shortcuts dialog's row: %r" % r["dialogChip"])
+        # 6. a Mac: ⌘/, and a German Mac's ⌘⇧7; every hint says ⌘/
+        self.assertTrue(r["macOpened"], "⌘/ on a Mac opened no comment box: %r" % r)
+        self._anchored(r["macPop"], r["macSel"], "a Mac's ⌘/")
+        self.assertEqual(r["macDeKey"]["platform"], "MacIntel", r["macDeKey"])
+        self.assertTrue(r["macDeKey"]["prevented"], "a German Mac's ⌘/ was taken: %r" % r["macDeKey"])
+        self.assertTrue(r["macDeOpened"], "a German Mac's ⌘/ (⌘⇧7) opened no comment box: %r" % r)
+        self._anchored(r["macDePop"], r["macDeSel"], "a German Mac's ⌘/")
+        self.assertEqual({m["label"]: m["sub"] for m in r["macMenu"]}.get("Comment"), "⌘/", r["macMenu"])
+        self.assertEqual(r["macPalRow"], {"title": "Comment on selection", "kbd": "⌘/"}, r["macPalRow"])
+        self.assertEqual(r["macDialogChip"], "⌘/", r["macDialogChip"])
+        # 7. a Mac with ⌘⌥M bound in its place: spelled as µ with code KeyM, it still matches
+        self.assertTrue(r["boundKey"]["prevented"], "the bound ⌘⌥M was taken on a Mac: %r" % r["boundKey"])
+        self.assertTrue(r["boundOpened"], "a bound ⌘⌥M on a Mac opened no comment box: %r" % r)
+        self._anchored(r["boundPop"], r["boundSel"], "a Mac's bound ⌘⌥M")
 
 
 if __name__ == "__main__":

@@ -7379,11 +7379,12 @@ function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
     && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
-// The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+Alt+M). With focus in
+// The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+/). With focus in
 // the chat this capture handler answers, reading the overrides store per press, so a rebind in the shortcuts dialog moves
 // it too (the chat.navBack pattern); with focus in the shell the command's run posts commentSelection here. It fires from
-// the message box too, as the jump cluster's keys do: the chord types nothing there, and the selection it reads is the
-// transcript's.
+// the message box too, as the jump cluster's keys do, and the selection it reads is the transcript's: taken in the
+// capture phase with its default prevented, the chord's "/" never reaches the box, so no "/" is typed and the slash menu
+// (which opens on the box's input) stays shut.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a command
   const ch = chordOf(e);
