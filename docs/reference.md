@@ -5453,6 +5453,50 @@ it; click one to open it again. The gear's **Files** row (Settings, General,
 Panes) adds a Files toggle to the bottom bar (on a phone, a Files tab like the
 others), and that toggle turns the pane on.
 
+## File tabs
+
+The file viewer's pop-out button (the window with an arrow, beside Copy path;
+also the palette's **Open this file as a tab** while a viewer is up) closes the
+viewer and opens the file as a tab of the chat strip. The tab goes right after
+the session the file was opened from, inside that session's tag group, and
+shows a file glyph in the session's colour and the file's name. When two open
+files share a name, the part of their folders that tells them apart shows
+beside it; a file on another machine wears that machine's `host:` prefix. The
+tooltip gives the full path and the session. The same file on the same machine
+has one tab: opening it again selects that tab. A relative path is the session's
+own (the kernel resolves it against that session's folder), so the same relative
+path from two sessions is two tabs.
+
+Picking a file tab puts the file in the pane in the transcript's place, with the
+viewer's own bar, a Reload button added and the close cross closing the tab. The
+message box, the jump column and the transcript's rail and marks leave while it
+shows; picking any session brings them back, with the transcript where you left
+it. The file is read again each time its tab is picked. With unsaved edits in the
+file, switching away or closing the tab asks first. A file opened from the file
+browser in the feed or from the Files pane pops out the same way: the pane hands
+it to the chat column that shows its session.
+
+A file tab behaves like a tab: the strip's arrows, the window's arrows and the
+session pair (Ctrl+Alt+Left and Right) step onto and off it, the phone's session
+picker lists it under its session, and the session switcher (Cmd/Ctrl+O) lists
+the open files after the sessions. Its right-click menu has **Close tab**, **Copy
+path** and **Show in Files** (the file browser at its folder); a middle click or
+its cross closes it. Dragging moves it beside another session, into that
+session's group; a file tab carries no tags of its own, so a drag never writes
+one. It moves with its session when the session is dragged, and follows the
+session into every group the session is tagged with. If that session leaves the
+strip, the tab goes back beside the session it was opened from, and if that one
+is gone too it trails the strip in the first column.
+
+The open tabs are kept by the kernel beside the tab order and the folded groups
+(`view-files.json`, the `files` half of the `viewOrder` frame, the `viewFiles`
+capability), so every device shows the same ones, and a reload brings the pane
+back to the file tab it was showing. A page or a kernel from before file tabs
+ignores them; a kernel without the capability leaves them in the browser that
+opened them. The editor extension's chat does not show file tabs, since its
+webview cannot read files through the kernel. In a split, a file tab sits in the
+column that holds its session; there is no dragging it to another column.
+
 ## The Artifacts pane (experimental)
 
 A column listing the files a session's thread put in: a grid of large

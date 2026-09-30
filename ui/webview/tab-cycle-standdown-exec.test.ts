@@ -140,6 +140,7 @@ function lift(): Lifted {
     const collapsedTabIds = new Set();
     const liveAsks = new Map();
     const pickFirstVisibleTab = () => false;
+    let fileTabOpen = null; const fileStep = () => false;   // no file tab on the walk (2026-09-30): the session walk runs
     const visibleOrder = () => H.order.slice();
     const neighborOfFolded = () => null;
     const setActive = (id) => { H.switched.push([id, gestureHeld]); activeId = id; };

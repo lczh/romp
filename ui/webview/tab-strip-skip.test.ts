@@ -49,6 +49,7 @@ test("every input the strip renders is in the signature", () => {
     "settings.tabCtx", "settings.stripGroupRows", "settings.theme", "settings.colormap", 'titleWithKey("Open a session", "session.new")',
     'surfaceLens(effViews(), "chat")', "unions",
     "snapView",   // the section the pane shows at a glance: a header's mark, its way-back act and its words derive from it
+    "files.sig",  // the file tabs (2026-09-30): where each shows, its label, its session's name, tint and host, and the one open (fileStripPaint)
     "m?.name", "m?.color?.bg", "m?.color?.fg",
     "s.name", "s.color?.bg", "s.color?.fg", "st.state", "tabStateClass(st)", "!!st.faded",
     "st.ctx", "st.ctxColor", "st.ctxTone", "!!s.sub", "hostIsDown(id)", "hostDownNote(id)",

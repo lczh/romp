@@ -78,7 +78,7 @@ test("renderTabs draws a skeleton tab BEFORE the placeholder branch; both draw t
 
 test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no swirl, honest chip, click-safe, draggable, closable", () => {
   const sk = fn("makeSkeletonTab");
-  assert.match(sk, /el\("div", "tab tab-skeleton" \+ \(id === activeId \? " active" : ""\)\)/);
+  assert.match(sk, /el\("div", "tab tab-skeleton" \+ \(id === activeId && !fileTabOpen \? " active" : ""\)\)/);   // a file tab up is the selected one (2026-09-30)
   assert.match(sk, /const meta = tabMeta\.get\(id\);/, "name + color from the pushed tab meta (fresh)");
   assert.match(sk, /const name = meta\?\.name \|\| stale\?\.name \|\| "";/, "…falling back to the stale session's name — a name is still the name");
   assert.match(sk, /tab\.tabIndex = 0;/);
@@ -244,7 +244,7 @@ test("the click path's loader latch: showActive latches the skeleton it is loadi
   // on the click path the strip that RELEASES the id lands before its full, so onFull() reports no skeleton —
   // the latch is what routes that full to showActive (review find 2026-09-07)
   assert.match(RENDER, /let skeletonLoading: string \| null = null;/);
-  const show = RENDER.slice(RENDER.indexOf("function showActive("), RENDER.indexOf("function showActive(") + 9000);   // the section-at-a-glance branch sits ahead of the loading branch
+  const show = RENDER.slice(RENDER.indexOf("function showActive("), RENDER.indexOf("function showActive(") + 10000);   // the section-at-a-glance branch and the file tab's (2026-09-30) sit ahead of the loading branch
   assert.match(show, /const skeleton = skeletonTabs\.ids\.has\(activeId\);\s*\n\s*skeletonLoading = skeleton \? activeId : null;/);
   assert.match(show, /document\.getElementById\("tab-loading"\)\?\.remove\(\);[^\n]*\n\s*skeletonLoading = null;/);
   assert.doesNotMatch(RENDER, /window\.addEventListener\("romp:wsup", \(\) => \{ onSocketUp/, "the socket flip is a frame now, never the onopen event");
@@ -348,6 +348,7 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     const paintEmptyState = () => {}, syncComposerPh = () => {}, order = [];
     // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken
     let snapView = null, snapKeep = null;
+    let fileTabOpen = null;   // no file tab up (2026-09-30): showActive's file branch is not taken
     const renderSnapshot = () => false, hideSnapshot = () => {}, composerRestingPlaceholder = () => "";
     const setSnapMode = () => {}, growComposer = () => {};   // the overview mode's switch and the box re-measure on leaving it (T322)
     const tailBackShow = () => {};   // the tailback watch's switch end (tail-back.ts, 2026-09-23): observation only, inert here

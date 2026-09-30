@@ -1327,6 +1327,33 @@ body.snap-mode #tabs .tab.active:not(.tab-blocked):hover { color: var(--fg); bac
 body.snap-mode:not(.chat-theme-yatharth) #tabs .tab.active:not(.tab-blocked):not(.tab-add) { border-color: rgba(255, 255, 255, 0.06); }
 body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked) { background: color-mix(in srgb, var(--chip-bg) 9%, transparent); border-color: transparent; }
 body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked):hover { background: color-mix(in srgb, var(--chip-bg) 15%, transparent); }
+/* A FILE TAB IS A MODE TOO (the user 2026-09-30; render.ts setFileMode, file-tabs.ts): while a file opened as a tab shows,
+   the pane holds the file (#filetab-host, the shared viewer mounted in it: file-view.ts mountFileTabView) and nothing of
+   the session under it — its transcript, the goals strip above it, the boxes below it, the footer (there is no session to
+   send to), the jump column, the comment rail and the transcript's time stamps and scroll marks. The boxes show themselves with an empty inline display, which this
+   rule outranks; the host is the pane's flex child in the transcript's place. */
+body.filetab-mode #content, body.filetab-mode #ledger, body.filetab-mode #notices, body.filetab-mode #bg-tasks,
+body.filetab-mode #footer, body.filetab-mode #jump-cluster, body.filetab-mode #jump-bottom, body.filetab-mode #cmt-rail,
+body.filetab-mode .rail-day, body.filetab-mode .rail-sticky, body.filetab-mode .scroll-marks { display: none; }
+#filetab-host { display: none; }
+body.filetab-mode #filetab-host { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+/* the viewer as the tab's view: the modal's card filling the area, no backdrop, no inset, no corners or shadow (the Files
+   pane's variant, files-pane.css, for the same card) */
+.fileview-inline { display: flex; flex: 1 1 auto; min-height: 0; }
+.fileview-inline .fileview { width: 100%; height: 100%; border: 0; border-radius: 0; box-shadow: none; }
+/* the tab itself: a tab of the strip in every metric (padding, the rest outline, the active fill), its text neutral, the
+   file glyph first in the colour of the session it came from (--ftab-tint), which is the link to that session; under the
+   Yatharth theme a quiet flat wash of that colour too, about half a session's own (identity washes live under that theme
+   alone: tab-theme.test.ts). "host:" is the strip's own quiet prefix; the parent path, when two open files share a name,
+   is dim beside it. */
+.tab-file .tab-label { display: inline-flex; align-items: center; min-width: 0; }
+.tab-file-glyph { display: inline-flex; flex: 0 0 auto; margin-right: 5px; color: var(--ftab-tint, var(--dim)); opacity: 0.9; }
+.tab-file-glyph svg { width: 12px; height: 12px; }
+.tab-file-hint { margin-left: 5px; color: var(--dim); font-size: 0.82em; }
+body.chat-theme-yatharth .tab.tab-file { background: color-mix(in srgb, var(--ftab-tint, transparent) 5%, transparent); }
+body.chat-theme-yatharth .tab.tab-file:hover { background: color-mix(in srgb, var(--ftab-tint, var(--fg)) 10%, transparent); }
+body.chat-theme-yatharth .tab.tab-file.active { background: color-mix(in srgb, var(--ftab-tint, var(--fg)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ftab-tint, var(--fg)) 30%, transparent); }
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
   flex: 0 0 auto;

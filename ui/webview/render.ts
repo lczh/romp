@@ -59,7 +59,7 @@ import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { applyViewOrder, hearSharedOrder, readViewOrder, setViewOrderPublisher, writeViewOrder } from "./view-order";   // the read: a page with no federation manager arranges its own strip (applyTabOrder, frame-listener.ts paneArranges)
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
          followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, revealedTabs, phoneStandIns, hearSharedFolds,
-         setFoldsPublisher, TABGROUPS_KEY, TABGROUPS_SHARED_KEY, TABGROUPS_EVENT, type TabSection, type StripItem } from "./tab-groups";
+         setFoldsPublisher, TABGROUPS_KEY, TABGROUPS_SHARED_KEY, TABGROUPS_EVENT, type TabSection, type StripItem, type PaintItem } from "./tab-groups";
 import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow } from "./tab-snapshot";
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
@@ -92,6 +92,10 @@ import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   /
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
+import { ICON_FILE } from "./icons";   // a file tab's glyph (2026-09-30)
+import { mountFileTabView, setFileViewPopOut, type FileTabView } from "./file-view";   // a file TAB's view, and the modal's pop-out (2026-09-30)
+import { readFileTabs, writeFileTabs, addFileTab, removeFileTab, moveFileTab, weaveFileTabs, navWithFiles, fileTabLabels, fileDropPlace, fileHost, isFileTabId,
+         FILETABS_CAP, FILETABS_EVENT, FILETABS_SHARED_KEY, type FileTab } from "./file-tabs";   // the file tabs' model and store (2026-09-30)
 import { viewerPathGate } from "./file-view-links";       // the viewer's code-aware path gate, for the chat's fenced blocks (2026-09-12)
 import { isMarkdownUrl } from "./md-links";
 import { openPathLink, linkifyPathTokens, selectionOpenIn, type PathLinkOptions } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
@@ -6610,7 +6614,7 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
     snapshotDragGeometry(tab);           // widths once at dragstart — the virtual hit-test's stable input (dragslot.ts)
     dragUnions = viewTagUnion(effViews());   // …and the tags the strip was drawn from: the drag cue describes THAT strip, which no push rebuilds mid-gesture (the drop re-reads the live blob, which is what it writes against)
     dragCueKey = "";
-    postTabDrag(true, id);               // the shell mounts its drop zones: the other columns, the right edge (the chat split, 2026-09-11)
+    if (!isFileTabId(id)) postTabDrag(true, id);   // the shell mounts its drop zones: the other columns, the right edge (the chat split, 2026-09-11); a file tab moves within its strip only
   });
   // dragend closes EVERY drag (drop, Escape, released outside). The pointerdown that started the
   // drag latched tabPointerHeld, and the drag swallowed the matching pointerup — so the hold is
@@ -6647,7 +6651,7 @@ function makeSkeletonTab(id: string): HTMLElement {
   const stale = sessions.get(id);   // identity only — never its events or status (see liveSession)
   const name = meta?.name || stale?.name || "";
   const color = meta?.color || stale?.color || null;
-  const tab = el("div", "tab tab-skeleton" + (id === activeId ? " active" : ""));
+  const tab = el("div", "tab tab-skeleton" + (id === activeId && !fileTabOpen ? " active" : ""));   // a file tab up is the selected one (2026-09-30)
   tab.tabIndex = 0;
   tab.dataset.id = id;
   tab.dataset.act = "select";   // click → setActive via the stable #tabs delegate (./actions), click-safe as every tab
@@ -6715,7 +6719,7 @@ function appendTabAfterWidgets(tab: HTMLElement, s: { id?: string; status: Parti
 // the panes, so a tab still building reads as "romp is working on this," consistent everywhere.
 function makePlaceholderTab(id: string): HTMLElement {
   const meta = tabMeta.get(id);
-  const tab = el("div", "tab tab-placeholder" + (id === activeId ? " active" : ""));
+  const tab = el("div", "tab tab-placeholder" + (id === activeId && !fileTabOpen ? " active" : ""));
   tab.dataset.id = id;
   tab.dataset.act = "select";   // the SAME stable #tabs delegate every real tab rides (click-safe)
   tab.tabIndex = 0;
@@ -6891,7 +6895,7 @@ function renderTabs() {
   // the re-point below — and the persisted tab then names a member, so a reload lands here on one of its own.
   if (activeId && ids.includes(activeId) && !heldHere(activeId) && visibleIds.length) {
     const moved = activeId, first = visibleIds[0];
-    setTimeout(() => { if (activeId === moved && !heldHere(moved) && stripLists(first) && stripShows(first)) setActive(first); }, 0);
+    setTimeout(() => { if (activeId === moved && !heldHere(moved) && stripLists(first) && stripShows(first)) quietly(() => setActive(first)); }, 0);
   }
   else if (activeId && ids.includes(activeId) && !visibleIds.includes(activeId)) {
     const hid = activeId;
@@ -6903,7 +6907,7 @@ function renderTabs() {
     // the paint's own rule: order and the placeholders, less a closing tab), not only the predicate: a torn-down tab has
     // left the strip while its reason may still read "hidden", and stripShows knows the view and the filter, not the
     // strip (the review's low, and the next review's: the schedule and the fire read ONE membership rule)
-    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && stripLists(back) && stripShows(back)) setActive(back); }, 0);
+    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && stripLists(back) && stripShows(back)) quietly(() => setActive(back)); }, 0);
   }
   staleActiveFallback(ids, visibleIds);   // no active tab and none on its way (the chat split): the first visible member, deferred like the re-point
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
@@ -6929,6 +6933,7 @@ function renderTabs() {
   const paint = phoneLayout() ? phoneStandIns(plan.items, activeId, plan.folded) : plan.items;
   collapsedTabIds = plan.folded;
   lastStripItems = plan.items;   // before the skip below: the section view (stripAftermath, renderSnapshot) and the folded stand-in read the plan from here on either path
+  const files = fileStripPaint(paint, plan.sectioned);   // the FILE tabs woven in beside their sessions (2026-09-30): what the loop paints, and what they paint, for the signature
   // A REVEAL RE-ARMS THE IDLE PREFETCH, whatever caused the repaint (the user 2026-09-14: hidden tabs are not built until shown, and
   // shown ones are). The reveal is a STATE change, so it is detected HERE, where the shown set is computed (visibleIds less the plan's
   // folded ids), never at the callers: a views or lens change of this page's or a peer's (the kernel's tabOrder frame: captureViews,
@@ -6966,6 +6971,7 @@ function renderTabs() {
     settings.tabCtx, settings.stripGroupRows, settings.tabsLocked, settings.tabStateBadge, settings.theme, settings.colormap, settings.tabWidgets, titleWithKey("Open a session", "session.new"),   // tabWidgets: which widgets a tab carries, their order and options (T379); tabsLocked: the tab lock (T395); tabStateBadge: badge vs ring (the badge repaints the whole strip when flipped)
     surfaceLens(effViews(), "chat"), unions,
     snapView,   // the section whose view the pane shows (makeGroupHead: the header's mark and its way-back act)
+    files.sig,  // the file tabs (2026-09-30): which show where, their labels, their sessions' names, tints and hosts, and the one open
     visibleIds.map((id) => {
       const s = sessions.get(id), down = hostIsDown(id), note = down ? hostDownNote(id) : "";
       if (renderKind(skeletonTabs, id, !!s) === "skeleton") {                                              // makeSkeletonTab's reads:
@@ -7025,7 +7031,7 @@ function renderTabs() {
     if (!("away" in item)) return;
     node.classList.add("tab-away"); node.setAttribute("aria-hidden", "true"); node.tabIndex = -1; node.draggable = false;
   };
-  for (const item of paint) {
+  for (const item of files.items) {
     if ("head" in item) {
       // every group on its own line (T264), under the one-group-per-row setting: a row break ahead of
       // each header except the strip's first item, which already opens the first row, and except a
@@ -7039,6 +7045,13 @@ function renderTabs() {
       continue;
     }
     const id = item.id;
+    if ("file" in item) {   // a FILE tab (2026-09-30), a copy per group its session shows in
+      const rec = files.byId.get(id);
+      if (!rec) continue;
+      const ft = makeFileTab(rec, files.labels.get(id) ?? { base: rec.path, hint: "" });
+      if (copyGroup !== undefined) ft.dataset.copy = copyGroup ?? "";
+      bar.appendChild(ft); continue;
+    }
     const s = sessions.get(id);
     // a SKELETON draws from the kernel's list + its status frames, never from the stale session it may hold (2026-09-07)
     if (renderKind(skeletonTabs, id, !!s) === "skeleton") {
@@ -7053,7 +7066,7 @@ function renderTabs() {
       markAway(ph, item);
       bar.appendChild(ph); continue;
     }
-    const tab = el("div", "tab" + (id === activeId ? " active" : ""));
+    const tab = el("div", "tab" + (id === activeId && !fileTabOpen ? " active" : ""));   // a file tab up is the selected one (2026-09-30)
     tab.tabIndex = 0;            // focusable for keyboard nav
     tab.dataset.id = id;
     if (copyGroup !== undefined) tab.dataset.copy = copyGroup ?? "";   // sectioned strip: which group this copy sits in
@@ -7075,7 +7088,7 @@ function renderTabs() {
     // ...and the whole tab dims when that host is unreachable, so a disconnected session reads as one at
     // a glance rather than only on inspection (the user 2026-07-29). The marked "host:" carries the why.
     if (hostIsDown(id)) { tab.classList.add("host-off"); tab.title = hostDownNote(id); }
-    if (s.status.faded && (id !== activeId || snapView) && s.color) {   // in the overview mode the active tab fades like any other (no residual selection cue, T322)
+    if (s.status.faded && (id !== activeId || snapView || fileTabOpen) && s.color) {   // in the overview mode the active tab fades like any other (no residual selection cue, T322)
       const full = s.color.bg;
       label.style.color = fadedColor(full);
       // The "host:" prefix declares its OWN color (quiet gray), so the parent's faded color can't inherit
@@ -8189,6 +8202,7 @@ function onTabKey(e: KeyboardEvent) {
   if (!order.length) return;
   if (e.ctrlKey || e.altKey || e.metaKey) return;   // a modified key on a focused tab is a chord, the shell's (the session pair): the dispatcher takes its
   //                                                   first press and skips its auto-repeats, which must not step here as bare arrows (review, 2026-09-23)
+  if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && fileStep(e.key === "ArrowRight" ? 1 : -1)) { e.preventDefault(); focusActiveTab(); return; }   // from or onto a file tab (2026-09-30)
   if (!activeId) {   // from the unfocused pane an arrow lands on the first visible tab (T357)
     if ((e.key === "ArrowRight" || e.key === "ArrowLeft" || e.key === "ArrowUp" || e.key === "ArrowDown") && pickFirstVisibleTab()) { e.preventDefault(); focusActiveTab(); }
     return;
@@ -8207,8 +8221,8 @@ function onTabKey(e: KeyboardEvent) {
     focusActiveTab();
   } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
     e.preventDefault();
-    const t = tabInAdjacentRow(activeId, e.key === "ArrowDown" ? 1 : -1);
-    if (t) { setActive(t); focusActiveTab(); }
+    const t = tabInAdjacentRow(fileTabOpen ?? activeId, e.key === "ArrowDown" ? 1 : -1);   // from the tab shown: a file tab's too (2026-09-30)
+    if (t) { selectStripTab(t); focusActiveTab(); }
   } else if (e.key === "Enter") {
     // in "tab mode", Enter drops back into the now-selected session below the transcript (the user
     // 2026-06-25), the mirror of Escape (composer → tabs). ←/→ pick the session, Enter starts. If a live
@@ -8220,7 +8234,7 @@ function onTabKey(e: KeyboardEvent) {
 }
 function focusActiveTab() {
   const bar = document.getElementById("tabs");
-  const tab = bar?.querySelector(`.tab[data-id="${activeId}"]`) as HTMLElement | null;
+  const tab = bar?.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;   // a file tab up is the one shown (2026-09-30)
   if (tab) { tab.focus(); return; }
   // the active tab is folded away under its section: the header is its stand-in (tab-groups.ts)
   const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
@@ -8271,6 +8285,12 @@ window.addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (isTypingTarget(e.target)) return;
   if (pickerOverlayUp()) return;   // #picker / #confirm up (shown: the picker hides in place)
+  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && fileStep(e.key === "ArrowRight" ? 1 : -1)) { e.preventDefault(); return; }   // from or onto a file tab (2026-09-30)
+  if (fileTabOpen) {   // a file tab up: the keys scroll the file, and there is no box to drop into (2026-09-30)
+    const fb = document.querySelector("#filetab-host .fileview-body") as HTMLElement | null;
+    if (fb && (e.key === "ArrowUp" || e.key === "ArrowDown")) { e.preventDefault(); fb.scrollBy({ top: e.key === "ArrowDown" ? NAV_SCROLL_STEP : -NAV_SCROLL_STEP }); }
+    return;
+  }
   if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
     if (!activeId) { if (pickFirstVisibleTab()) e.preventDefault(); return; }   // from the unfocused pane: the first visible tab (T357)
     if (order.length < 2) return;
@@ -8326,6 +8346,7 @@ window.addEventListener("keydown", (e) => {
 function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box (covers key repeat; a paste there is native)
+  if (fileTabOpen) return null;   // a file tab up: the box is not on screen (2026-09-30)
   if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return null;
   if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
   if (ctxMenuEl || pickerOverlayUp()) return null;   // an open menu / a shown #picker / #confirm owns the keys
@@ -13528,6 +13549,286 @@ function runPrebuild(deadline: IdleDeadline): void {
   renderingOwnerSid = savedOwnerSid;
 }
 
+// ── FILE TABS (the user 2026-09-30) ──────────────────────────────────────────────────────────────────────────────────
+// A file opened as a TAB (the viewer's pop-out, file-view.ts; the model and its store, file-tabs.ts): the strip shows it
+// beside the session it came from, and picking it puts the file in the pane in the transcript's place, the viewer's own
+// bar intact. A MODE, like the section at a glance (snapView): activeId is untouched while a file shows (the kernel's
+// active hint, the MRU and the drafts still name the session being read), the message box, the jump column and the rail
+// go (body.filetab-mode; there is no session to send to), and the transcript's place is held for the way back. A pick
+// of any session leaves the mode (setActive); a restore that is not a pick (a reload's, a tab's return) leaves it up
+// (quietActivation). The open tab survives a reload (persisted beside the active tab), and the list itself follows the
+// user across devices through the kernel (file-tabs.ts). A VS Code webview has no /file route to show a file from, so its
+// strip shows none; the list is not touched there.
+let fileTabOpen: string | null = null;            // the file tab the pane shows, or null (page state, never stored as such)
+let fileTabRec: FileTab | null = null;            // …its record as it was opened (a close from elsewhere with edits up puts it back)
+let fileTabView: FileTabView | null = null;       // …and its mounted viewer
+let fileKeep: { v: View; scrollTop: number; stick: boolean } | null = null;   // the transcript's place while a file shows
+const fileTabSpots = new Map<string, number>();   // each file tab's reading place across visits, for this page's life
+let quietActivation = false;                      // a setActive that is a restore, not a pick: a file tab stays up
+// the file tab this page showed before a reload, restored once the list names it (a new device hears it from the kernel)
+let wantFile: string | null = (() => { try { return ((vscodeApi?.getState?.() || {}) as any).activeFile || null; } catch { return null; } })();
+/** The file tabs this page shows (see the block's head: none in a VS Code webview). */
+function fileTabsNow(): FileTab[] { return canPreview() ? readFileTabs().tabs : []; }
+function fileTabById(id: string): FileTab | undefined { return fileTabsNow().find((t) => t.id === id); }
+/** Run a restore's setActive without leaving a file tab up (the reload's tab restore, a tab's return, a column's re-point). */
+function quietly(fn: () => void): void { const was = quietActivation; quietActivation = true; try { fn(); } finally { quietActivation = was; } }
+function persistActiveFile(id: string | null): void {
+  try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeFile: id }); } catch { /* ignore */ }
+}
+/** The pane's file-tab area: one stable node beside #content, made on first use (the snapshot host's idiom). */
+function fileTabHost(): HTMLElement | null {
+  let host = document.getElementById("filetab-host");
+  if (host) return host;
+  const content = document.getElementById("content");
+  if (!content || !content.parentElement) return null;
+  host = el("div", "filetab-host");
+  host.id = "filetab-host";
+  host.setAttribute("role", "region");
+  host.setAttribute("aria-label", "File");
+  content.parentElement.insertBefore(host, content.nextSibling);
+  return host;
+}
+/** The MODE's one switch: the body carries it (the sheets hide the transcript, the boxes under it and the footer) and so
+ *  does the strip (the theme rules read the mode off #tabs, as snap-mode's do). The box gives up the keyboard. */
+function setFileMode(on: boolean): void {
+  document.body.classList.toggle("filetab-mode", on);
+  document.getElementById("tabs")?.classList.toggle("filetab-mode", on);
+  if (!on) return;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (ta && document.activeElement === ta) ta.blur();
+  hideTabTip();
+}
+/** The session a new file tab sits beside: the one it came from when this column shows it, else the tab being read. */
+function fileAnchorFor(sid: string | null): string | null {
+  if (sid && stripLists(sid) && heldHere(sid)) return sid;
+  if (activeId && stripLists(activeId)) return activeId;
+  return sid;
+}
+/** The pop-out's opener in this document (file-view.ts setFileViewPopOut), and the shell's relay from a pane without a
+ *  strip (openFileTab): `path` as its session knows it, `sid` that session. The same file on the same machine already
+ *  open is that tab. True when a tab is shown. */
+function openFileAsTab(path: string, sid: string | null): boolean {
+  if (!canPreview() || !path) return false;
+  const anchor = fileAnchorFor(sid);
+  if (!anchor) { ephemeralWarnToast("A file tab sits beside a session: open a session first."); return false; }
+  const r = addFileTab(readFileTabs(), path, sid, anchor);
+  if (r.full) { warnToast("You have " + FILETABS_CAP + " files open as tabs. Close one to open another."); return false; }
+  if (r.added) writeFileTabs(r.st);
+  return selectFileTab(r.id);
+}
+/** Show a file tab. Leaving another file tab with unsaved edits asks first (the viewer's own discard ask). */
+function selectFileTab(id: string): boolean {
+  const t = fileTabById(id);
+  if (!t) return false;
+  wantFile = null;
+  if (fileTabOpen === id) { renderTabs(); return true; }
+  if (fileTabOpen && fileTabView && !fileTabView.confirmLeave()) return false;
+  if (!fileTabOpen) {
+    // the transcript's place, held for the way back (the section view's snapKeep, whose spot it inherits when that view was up)
+    const hadSnap = snapView !== null;
+    if (hadSnap) { snapView = null; hideSnapshot(); }
+    const content = document.getElementById("content"), v = activeId ? views.get(activeId) : undefined;
+    fileKeep = v && content ? { v, scrollTop: hadSnap ? v.scrollTop : content.scrollTop, stick: hadSnap ? v.stick : atBottom(content) } : null;
+  }
+  dropFileTabView();
+  closeMetaMenu();
+  fileTabOpen = id;
+  fileTabRec = t;
+  persistActiveFile(id);
+  setFileMode(true);
+  mountOpenFileTab();
+  renderTabs();
+  showActive();
+  return true;
+}
+function mountOpenFileTab(): void {
+  const t = fileTabRec, host = fileTabHost();
+  if (!t || !host || fileTabOpen !== t.id) return;
+  fileTabView = mountFileTabView(host, t.path, t.sid, {
+    onClose: () => closeFileTab(t.id),
+    onReload: () => { if (fileTabOpen !== t.id) return; dropFileTabView(); mountOpenFileTab(); },
+    scrollTop: fileTabSpots.get(t.id) ?? 0,
+  });
+}
+function dropFileTabView(): void {
+  if (!fileTabView) return;
+  if (fileTabOpen) fileTabSpots.set(fileTabOpen, fileTabView.scrollTop());
+  fileTabView.destroy();
+  fileTabView = null;
+}
+/** Back to the transcript (a session pick, the file tab closed): false when the viewer's discard ask kept the file up
+ *  (a no keeps the file, and the pick is dropped whole). setActive calls it for every pick; a restore that is not a
+ *  pick (quietActivation: a reload's, a tab's return) leaves the file up, activeId moving under it as under the view. */
+function leaveFileTab(): boolean {
+  if (!fileTabOpen) return true;
+  if (fileTabView && !fileTabView.confirmLeave()) return false;
+  dropFileTabView();
+  fileTabOpen = null; fileTabRec = null;
+  persistActiveFile(null);
+  setFileMode(false);
+  // the transcript comes back where its reader left it: the held spot, written before the show reads it (the view on
+  // screen is the one left, so showActive keeps its place rather than landing it as a switch)
+  const k = fileKeep; fileKeep = null;
+  const content = document.getElementById("content");
+  if (k && content && activeId && views.get(activeId) === k.v) {
+    k.v.scrollTop = k.scrollTop; k.v.stick = k.stick;
+    writeScroll(content, k.scrollTop, "file-tab-back");
+  }
+  return true;
+}
+/** Close a file tab (its ✕, a middle click, the menu, the bar's ✕): the open one first asks about unsaved edits and puts
+ *  the transcript under it back; the list loses it on every device. */
+function closeFileTab(id: string): void {
+  if (fileTabOpen === id) {
+    if (!leaveFileTab()) return;
+    showActive();
+    focusActiveTab();
+  }
+  fileTabSpots.delete(id);
+  writeFileTabs(removeFileTab(readFileTabs(), id));
+  renderTabs();
+}
+/** The list changed (this pane's write, another pane's, the kernel's push from another device). */
+function onFileTabsChanged(): void {
+  if (fileTabOpen && !fileTabById(fileTabOpen)) {
+    // closed elsewhere: the pane goes back to the transcript, unless an edit is up in it, which keeps the tab (never a
+    // silent loss of what was typed): it goes back on the list
+    if (fileTabView && fileTabView.unsaved() && fileTabRec) writeFileTabs({ v: 1, tabs: [...readFileTabs().tabs, fileTabRec] });
+    else { dropFileTabView(); fileTabOpen = null; fileTabRec = null; persistActiveFile(null); fileKeep = null; setFileMode(false); showActive(); }
+  }
+  if (wantFile && !fileTabOpen && fileTabById(wantFile)) { const w = wantFile; selectFileTab(w); return; }
+  renderTabs();
+}
+/** A strip pick: a file tab or a session. */
+function selectStripTab(id: string): void {
+  if (isFileTabId(id)) selectFileTab(id); else setActive(id);
+}
+/** The keyboard's walk with the file tabs in it (file-tabs.ts navWithFiles over the walk visibleOrder is): the sessions it
+ *  walks, each with its files beside it, and the files that trail the strip last (the first column paints those). */
+function navOrderWithFiles(tabs: readonly FileTab[]): string[] {
+  return navWithFiles(visibleOrder(), tabs, stripLists, !COL);
+}
+/** A step (←/→ on the strip or the window, the session pair) that a file tab is part of: from a file tab, or onto one.
+ *  True when it acted. With no file tab on the walk, or a step from one session to the next, it does nothing and the
+ *  session walk runs as it always has (the woven walk less its files IS that walk). */
+function fileStep(dir: 1 | -1): boolean {
+  const tabs = fileTabsNow();
+  if (!tabs.length) return false;
+  const cur = fileTabOpen ?? activeId;
+  if (!cur) return false;
+  const ord = navOrderWithFiles(tabs);
+  const i = ord.indexOf(cur);
+  if (i < 0) return false;
+  if (ord.length < 2) return true;
+  const to = ord[(i + dir + ord.length) % ord.length];
+  if (!fileTabOpen && !isFileTabId(to)) return false;
+  selectStripTab(to);
+  return true;
+}
+/** What the strip paints for the file tabs: the plan's items with the files woven in beside their sessions (as items
+ *  wearing `file`), the trailing ones after the last group (the first column only, behind the trail's divider when the
+ *  strip is sectioned), and every input a file tab paints, for the strip's signature. */
+type FilePaintItem = PaintItem | { id: string; file: true };
+type FileStrip = { items: readonly FilePaintItem[]; sig: unknown; byId: Map<string, FileTab>; labels: Map<string, { base: string; hint: string }> };
+function fileStripPaint(paint: readonly PaintItem[], sectioned: boolean): FileStrip {
+  const tabs = fileTabsNow();
+  if (!tabs.length) return { items: paint, sig: null, byId: new Map(), labels: new Map() };
+  const woven = weaveFileTabs(paint, (it) => ("id" in it && !("away" in it) ? it.id : null), tabs, stripLists);
+  const items: FilePaintItem[] = woven.items.map((it) => ("file" in it ? { id: it.file, file: true as const } : it));
+  // the files beside no listed session trail the first column's strip; a later column paints only the one it shows (a
+  // file tab up in it whose session left), so the tab the pane is on never leaves the strip
+  const trail = COL ? woven.trail.filter((t) => t.id === fileTabOpen) : woven.trail;
+  if (trail.length) {
+    const last = [...paint].reverse().find((it) => "head" in it);
+    if (sectioned && !(last && "head" in last && last.head.name === null))
+      items.push({ head: { name: null, localId: null, color: "", ids: [] }, folded: false, active: false, hidden: [], packed: false });
+    for (const t of trail) items.push({ id: t.id, file: true });
+  }
+  const labels = fileTabLabels(tabs);
+  const shown = new Set(items.filter((it) => "file" in it).map((it) => it.id));
+  const sig = tabs.filter((t) => shown.has(t.id)).map((t) => {
+    const src = t.sid ? (sessions.get(t.sid) ?? tabMeta.get(t.sid)) : undefined;
+    return [t.id, t.path, t.sid, labels.get(t.id), src?.name, src?.color?.bg, t.sid ? hostIsDown(t.sid) : false];
+  });
+  return { items, sig: [fileTabOpen, sig], byId: new Map(tabs.map((t) => [t.id, t] as const)), labels };
+}
+/** A file tab on the strip: the file glyph and the basename (the parent path beside it when another open file shares the
+ *  name; the quiet "host:" of a file on another machine), a quiet wash of the source session's colour, the full path and
+ *  the session in the tooltip, the ✕, a middle click to close, the menu on a right click. Click-safe like every tab: the
+ *  select and the ✕ ride the strip's stable delegate (data-act). */
+function makeFileTab(t: FileTab, lab: { base: string; hint: string }): HTMLElement {
+  const id = t.id;
+  const tab = el("div", "tab tab-file" + (id === fileTabOpen ? " active" : ""));
+  tab.tabIndex = 0;
+  tab.dataset.id = id;
+  tab.dataset.ftab = "1";
+  tab.dataset.act = "select";
+  tab.addEventListener("keydown", onTabKey);
+  tab.draggable = !settings.tabsLocked;
+  wireTabDrag(tab, id);
+  const src = t.sid ? (sessions.get(t.sid) ?? tabMeta.get(t.sid)) : undefined;
+  if (src?.color?.bg) tab.style.setProperty("--ftab-tint", src.color.bg);
+  if (t.sid && hostIsDown(t.sid)) tab.classList.add("host-off");
+  const label = el("span", "tab-label");
+  const glyph = el("span", "tab-file-glyph");
+  glyph.innerHTML = ICON_FILE;
+  glyph.setAttribute("aria-hidden", "true");
+  label.appendChild(glyph);
+  const host = fileHost(t.sid);
+  label.append(...hostNameNodes(host ? host + ":" + lab.base : lab.base, t.sid));
+  if (lab.hint) { const h = el("span", "tab-file-hint"); h.textContent = lab.hint; label.appendChild(h); }
+  tab.appendChild(label);
+  const where = (host ? host + ":" : "") + t.path;
+  tab.title = where + (src?.name ? "\nOpened from " + src.name : "");
+  tab.setAttribute("aria-label", "File " + lab.base + (lab.hint ? " in " + lab.hint : ""));
+  const close = el("span", "tab-close");
+  close.textContent = "×";
+  close.title = "Close tab";
+  close.dataset.act = "close";
+  close.dataset.id = id;
+  tab.appendChild(close);
+  // the middle button closes it, the browser's own tab idiom (its press is cancelled so no autoscroll starts)
+  tab.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+  tab.addEventListener("auxclick", (e) => { if (e.button !== 1) return; e.preventDefault(); e.stopPropagation(); closeFileTab(id); });
+  tab.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); showFileTabMenu(e, id); });
+  return tab;
+}
+/** A file tab's menu: close it, copy its path, show its folder in the file browser (the viewer's directory link's road). */
+function showFileTabMenu(e: MouseEvent, id: string): void {
+  const t = fileTabById(id);
+  if (!t) return;
+  dismissTabMenu();
+  const cut = t.path.lastIndexOf("/");
+  const items: { label: string; sub?: string; pick: () => void }[] = [
+    { label: "Close tab", pick: () => closeFileTab(id) },
+    { label: "Copy path", pick: () => copyToClipboard(t.path) },
+  ];
+  if (cut >= 0) items.push({ label: "Show in Files", sub: "the folder it is in", pick: () => openBrowse(t.path.slice(0, cut) || "/", t.sid) });
+  ctxMenuEl = openContextMenu(e.clientX, e.clientY, items, { onClose: onTabMenuClosed });
+}
+/** A dragged FILE tab's drop: it sits beside the session before it in its group (after it), else before the session after
+ *  it (the head of a group), keeping its place among that session's files; no tag is written (a file carries none: it
+ *  shows in the group of the session it sits beside). False when no session is in reach. */
+function dropFileTab(dragged: HTMLElement, id: string): boolean {
+  if (settings.tabsLocked) return false;
+  const edge = (n: Element) => n.classList.contains("tab-group-head") || n.classList.contains("tab-group-break") || n.classList.contains("tab-group-sep");
+  const isSession = (n: Element | null) => !!n && !!(n as HTMLElement).dataset?.id && !(n as HTMLElement).dataset?.ftab;
+  const walk = (n: Element | null, step: (x: Element) => Element | null): string | null => {
+    while (n && !isSession(n)) { if (edge(n)) return null; n = step(n); }
+    return n ? (n as HTMLElement).dataset.id || null : null;
+  };
+  const prev = walk(dragged.previousElementSibling, (x) => x.previousElementSibling);
+  const next = walk(dragged.nextElementSibling, (x) => x.nextElementSibling);
+  const after = dragged.nextElementSibling as HTMLElement | null;
+  const place = fileDropPlace(prev, next, after && after.dataset?.ftab ? after.dataset.id || null : null);
+  if (!place) return false;
+  writeFileTabs(moveFileTab(readFileTabs(), id, place.anchor, place.lead, place.before));
+  tabDragJustCommitted = true;
+  renderTabs();
+  return true;
+}
+(window as any).__rompFileTabList = () => fileTabsNow().map((t) => ({ id: t.id, path: t.path, sid: t.sid, host: fileHost(t.sid) }));   // the shell's session switcher lists the open files too (palette-main.ts)
+
 // A SECTION AT A GLANCE (tab-snapshot.ts owns the model). `snapView` is the section the pane is showing:
 // page state like the peek, never stored. A header click sets it (the #tabs delegate's toggle-group), any
 // session pick clears it (setActive), Escape and the header's second click leave it (leaveSnapshot). The
@@ -13778,7 +14079,7 @@ function stripLists(id: string): boolean {
  *  back (1 frame of 70 per push). */
 function restoreIfShown(id: string): boolean {
   if (!stripLists(id)) return false;
-  if (stripShows(id)) { setActive(id); return true; }
+  if (stripShows(id)) { quietly(() => setActive(id)); return true; }   // a restore, not a pick: a file tab up stays up (2026-09-30)
   if (!activeId) { vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || vanishedName || wantActiveName || ""; }
   return false;
 }
@@ -13886,6 +14187,18 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     const sendBtn = document.getElementById("composer-send") as HTMLButtonElement | null;
     if (sendBtn) sendBtn.disabled = true;
     updateStatusline();
+    return;
+  }
+  // A FILE TAB up (2026-09-30): the pane shows the file (its own area, #filetab-host) and nothing of the session under
+  // it; the sheets hide the transcript, the boxes and the footer (body.filetab-mode). activeId is untouched, as under the
+  // section view, and nothing here builds or lands its view: leaveFileTab puts the held place back and shows it then.
+  if (fileTabOpen) {
+    setSnapMode(false);
+    hideSnapshot();
+    document.getElementById("tab-loading")?.remove();
+    if (empty) empty.style.display = "none";
+    updateStatusline();
+    updateJumpBtn();
     return;
   }
   setSnapMode(false);   // a session's transcript: the message box and the selected tab are back
@@ -18554,6 +18867,11 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
     const p = subParts(id);
     if (p) { openSubagentView(p.parentId, p.agentId, null); return; }
   }
+  if (!quietActivation) wantFile = null;   // a pick leaves a FILE TAB (leaveFileTab: its discard ask; quietActivation: a restore does not)
+  if (fileTabOpen && !quietActivation) {
+    if (!leaveFileTab()) return;
+    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); return; }   // the session under the file
+  }
   // A session pick ends the section view (the header put it up; the pick names a session) and brings the
   // picked tab on screen: a tab folded away under its header (a row of the view, a feed deep link, the
   // arrows from the header) opens its section, since the gesture named that session.
@@ -18617,6 +18935,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
 }
 
 function cycleTab(dir: number) {
+  if (fileStep(dir > 0 ? 1 : -1)) return;       // a step from or onto a file tab (2026-09-30); every other step is the session walk below
   if (pickFirstVisibleTab()) return;            // from the unfocused pane: the first visible tab (T357)
   if (!activeId) return;
   const ord = visibleOrder();                   // never cycle onto a view-hidden session
@@ -20424,6 +20743,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // "Send without it" then sent the other session's draft, and the VS Code view's command, which posts straight to
   // this arm, switched under the picture viewer (review, 2026-09-24). The braces keep the next arm's else off the
   // inner if.
+  // a FILE TAB (2026-09-30): the shell's relay of a pop-out from a pane with no strip (the feed's file browser, the Files
+  // pane: kernel.py openFileTab), and the session switcher's pick of an open file (palette-main.ts)
+  else if (m.romp === "openFileTab" && typeof m.path === "string" && m.path) { revealSelfPane(); openFileAsTab(m.path, typeof m.sid === "string" && m.sid ? m.sid : null); }
+  else if (m.type === "jumpFileTab" && typeof m.id === "string") { revealSelfPane(); selectFileTab(m.id); }
   else if (m.type === "nextTab") { if (!paneLayerOpen()) asGesture(() => cycleTab(1)); }    // the shell's session pair or the VS Code host's command: the reader's own act, whichever posted it
   else if (m.type === "prevTab") { if (!paneLayerOpen()) asGesture(() => cycleTab(-1)); }
   else if (m.type === "settingRefused" && typeof m.text === "string" && m.text) {
@@ -22225,6 +22548,10 @@ window.addEventListener("storage", (e) => { if (e.key === TABGROUPS_SHARED_KEY) 
 // source's own dragend render already read the new sets in the same task)
 window.addEventListener("storage", (e) => { if (e.key === "romp-chat-cols") renderTabs(); });
 window.addEventListener(TABGROUPS_EVENT, () => renderTabs());
+// …and so does the FILE TABS' list (2026-09-30): this window's write (the CustomEvent), a sibling pane's or the kernel's
+// push from another device (its cache write, the storage event); a close made elsewhere also takes the file off the pane
+window.addEventListener("storage", (e) => { if (e.key === FILETABS_SHARED_KEY) onFileTabsChanged(); });
+window.addEventListener(FILETABS_EVENT, () => onFileTabsChanged());
 // a hot key bound or removed (the shell's dialog writes the bindings store; this document's own Remove does too)
 // repaints the tabs' badges — the store's key doubles as the same-document event name
 window.addEventListener("storage", (e) => { if (e.key === KEYS_EVENT) renderTabs(); });
@@ -22575,7 +22902,7 @@ setupSettings();
     // Clicking a tab leaves focus ON the tab (renderTabs rebuilds the tab during setActive, which dropped
     // focus to the body — so Enter afterward did nothing). Now focus the (rebuilt) active tab, so the model
     // is consistent: tab focused → Enter drops into the message box; Escape there returns to the tabs.
-    select: (el) => { const id = el.dataset.id; if (id) { setActive(id); focusActiveTab(); } },
+    select: (el) => { const id = el.dataset.id; if (id) { selectStripTab(id); focusActiveTab(); } },   // a session, or a file tab (2026-09-30)
     // a section header (tab groups): fold or open that group — the new state is the opposite of the
     // one the header RENDERED (data-folded), never a toggle of the stored bit (a header can render a
     // state the store does not hold). The write notifies (TABGROUPS_EVENT) and the listener re-renders:
@@ -22589,7 +22916,7 @@ setupSettings();
       const name = el.dataset.group;
       if (!name) return;
       const phone = phoneLayout();
-      if (!phone) snapView = name;
+      if (!phone && leaveFileTab()) snapView = name;   // the view takes the pane from a file tab too (its discard ask first; a no folds and shows nothing)
       writeTabGroups(setSectionCollapsed(tabGroups(), name, el.dataset.folded !== "1"));
       if (!phone) showActive();
     },
@@ -22598,6 +22925,7 @@ setupSettings();
     "show-transcript": () => leaveSnapshot(),
     close: (el) => {
       const id = el.dataset.id;
+      if (id && isFileTabId(id)) { closeFileTab(id); return; }   // a file tab (2026-09-30): nothing to end, the tab goes
       if (id && isSubId(id)) { closeSubagentView(id); return; }   // a subagent viewer: nothing to end, just close
       if (!id || !vscodeApi) return;
       // dead → just drop the read-only tab (optimistically too: it's the same kernel round-trip to wait
@@ -22722,6 +23050,7 @@ setupSettings();
     // the cue and the drop below can only agree; a plain reorder shows nothing at all. Off the unions
     // snapshotted at dragstart (dragUnions), the ones this frozen strip was drawn from, so the tick costs
     // no blob walk; the drop re-reads the live blob, which is what it writes against.
+    if (isFileTabId(draggedId)) return;   // a file tab joins no group and leaves none: no tag cue (2026-09-30)
     const { drop: d, head } = tabDropFor(dragged, draggedId, dragUnions);
     paintDragCue(tabs, dragged, d, head, dragUnions);
   });
@@ -22756,6 +23085,8 @@ setupSettings();
     e.preventDefault();
     const dragged = draggedEl && draggedEl.isConnected ? draggedEl : null;   // THIS copy, not the first tab wearing the id (T264b)
     if (!dragged) return;
+    // a FILE tab (2026-09-30): it lands beside the session it was dropped next to, and writes no tag (dropFileTab)
+    if (isFileTabId(draggedId)) { tabDragCommitted = dropFileTab(dragged, draggedId); return; }
     // WHAT THIS DROP DOES TO THE SESSION'S TAGS, read BEFORE the reorder moves anything (drag-join.ts;
     // the same rule the cue painted, off the same zone): a drop in a group's row the session is not in
     // ADDS that tag, a drop on the ungrouped trail REMOVES the tag of the copy that was dragged, and
@@ -22769,9 +23100,10 @@ setupSettings();
     // to the nearest tab across groups (the flat strip has no edges, so it walks as it always did).
     // Never the dragged SESSION's own copy: reorderTo against itself would move nothing.
     const own = (n: Element | null) => !!n && (n as HTMLElement).dataset?.id === draggedId;
+    const fileTab = (n: Element | null) => !!n && !!(n as HTMLElement).dataset?.ftab;   // …nor a FILE tab: a session is placed by sessions, and its files follow it (2026-09-30)
     const edge = (n: Element) => n.classList.contains("tab-group-head") || n.classList.contains("tab-group-break") || n.classList.contains("tab-group-sep");
     const walk = (n: Element | null, step: (x: Element) => Element | null, inGroup: boolean): HTMLElement | null => {
-      while (n && (!(n as HTMLElement).dataset?.id || own(n))) { if (inGroup && edge(n)) return null; n = step(n); }
+      while (n && (!(n as HTMLElement).dataset?.id || own(n) || fileTab(n))) { if (inGroup && edge(n)) return null; n = step(n); }
       return n as HTMLElement | null;
     };
     const back = (x: Element) => x.previousElementSibling, fwd = (x: Element) => x.nextElementSibling;
@@ -22807,4 +23139,9 @@ setFileViewIdentity((id) => {
   const s = sessions.get(id) ?? tabMeta.get(id);
   return s && s.name ? { name: s.name, color: s.color ?? null } : hostStub(id);
 });
+// …and the viewer's POP-OUT opens the file as a tab of this strip (2026-09-30), on a page that can show one
+if (canPreview()) setFileViewPopOut((path, sid) => openFileAsTab(path, sid));
+// the FILE TAB this page showed before a reload (2026-09-30), up again at once when this browser's copy of the list names it
+// (a new device hears the list from the kernel first: onFileTabsChanged restores it then)
+if (wantFile && fileTabById(wantFile)) selectFileTab(wantFile);
 if (vscodeApi) vscodeApi.postMessage({ type: "ready", proto: 2 });   // proto 2: the uuid-anchored chat wire (T323 stage 4b); an older kernel ignores the field and sends index frames

@@ -458,7 +458,8 @@ class ChatSessionPicker(unittest.TestCase):
         # (Close tab / End session / Cancel) + the endSession/closeTab plumbing — no new backend.
         js, css = km._CHAT_MOBILE_JS, km._CHAT_MOBILE_CSS
         self.assertIn("x.className='mclose'", js)
-        self.assertIn("x.title='End session'", js)
+        self.assertIn("x.title=s.file?'Close tab':'End session'", js)   # a file tab's row closes the tab (2026-09-30): nothing to end
+        self.assertIn("file:t.classList.contains('tab-file')", js)
         # it triggers the real tab's close x, and stops propagation so it doesn't also switch sessions
         self.assertIn("var rtc=realTab(id);var c=rtc&&rtc.querySelector('.tab-close');if(c)c.click();", js)   # delegated form (2026-08-19 click-safe rewrite)
         self.assertIn("e.stopPropagation();hide();", js)

@@ -86,7 +86,7 @@ test("5. no tab renders as selected while the overview shows; selecting any tab 
   assert.match(CSS, new RegExp("body\\.chat-theme-yatharth #tabs\\.snap-mode \\.tab\\.active\\.colored:not\\(\\.tab-blocked\\) \\{ background: " + rest.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "; border-color: transparent; \\}"), "Yatharth: the theme's own resting wash, no selection border");
   assert.doesNotMatch(CSS, /body\.snap-mode #tabs \.tab\.active \{/, "no rule neutralises a blocked tab's fill");
   // the faded-label exemption for the active tab stands down in the mode: no residual selection cue among faded siblings
-  assert.match(RENDER, /if \(s\.status\.faded && \(id !== activeId \|\| snapView\) && s\.color\) \{/);
+  assert.match(RENDER, /if \(s\.status\.faded && \(id !== activeId \|\| snapView \|\| fileTabOpen\) && s\.color\) \{/);   // …and under a file tab (2026-09-30), the same mode's rule
   // the footer's hide is not a box below the reader: the boxes-below follow rule stands down while the overview owns #content
   assert.match(RENDER, /if \(content && !snapView && lastH >= 0 && content\.clientHeight > 0 && v && v\.shown && followBoxBelow\(v\.stick \|\| wasAtBottom, dh\)\) \{/);
   // leaving the overview re-measures the message box, which a pick's draft swap measured under display:none
@@ -95,7 +95,7 @@ test("5. no tab renders as selected while the overview shows; selecting any tab 
   assert.match(CSS, /body\.dense-chrome \.tab-group-head \{ gap: 4px; padding: 3px 5px; \}/);
   assert.match(CSS, /body\.dense-chrome \.tab \{ gap: 3px; padding: 3px 5px;/);
   // the class itself stays on the tab: activeId is the way back, focus and the arrows key on it
-  assert.match(RENDER, /const tab = el\("div", "tab" \+ \(id === activeId \? " active" : ""\)\);/);
+  assert.match(RENDER, /const tab = el\("div", "tab" \+ \(id === activeId && !fileTabOpen \? " active" : ""\)\);/);   // (a file tab up is the selected one, 2026-09-30)
   // a pick clears the view (setActive), as before
   const sa = fn("function setActive(");
   assert.match(sa, /const leavingSnap = snapView !== null;\s*\n\s*snapView = null;/);
