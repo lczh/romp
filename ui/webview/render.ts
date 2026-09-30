@@ -18926,8 +18926,17 @@ function upsert(msg: any) {
   // WIRE_TAIL events, a full-session push re-windows to the last N, so the first uuid changes though it's the
   // same transcript — which dropped the DOM and snapped the view to the bottom (the user 2026-07-06). Detect a
   // fork by the ABSENCE of any shared event uuid instead.
-  const forked = !!(existed && msg.events && msg.events.length && prev && prev.events.length
-                    && !sharesAnyUuid(msg.events, prev.events));
+  // …among the KERNEL's events the page held (2026-09-29): its own pending group and its held-copies group wear ids
+  // the client minted, which no kernel event can share. A page holding nothing else (a send into an empty session:
+  // the dashed bubble alone) read the kernel's first frame after the send as a new transcript: it tore the view down
+  // and rebuilt it at the next animation frame, the DOM holding only the loader in between (never painted; a served
+  // clear lab read the page there). clearBoundarySeen (send-pending.ts) never counts the page's own groups either, but
+  // its fork test compares transcript turns alone, where this reading takes EVERY kernel event (the head, the send's
+  // echo, the kernel's overlay cards): read by turns, a page with the head and an echo beside its bubble would read
+  // each full frame (a reconnect's, a repair's; never a delta) of an empty session's first exchange as a first build.
+  const prevKernel = prev ? prev.events.filter((e) => !isOptimistic(e) && !isHeldGroup(e)) : [];
+  const forked = !!(existed && msg.events && msg.events.length && prev && prevKernel.length
+                    && !sharesAnyUuid(msg.events, prevKernel));
   // A view that never held an event is a PLACEHOLDER (a fork's provisional tab, a revive's stub):
   // the payload that fills it is the tab's FIRST content-bearing build, not an append onto a
   // transcript someone is reading. The append path measured "was the reader at the bottom?"
@@ -18935,7 +18944,8 @@ function upsert(msg: any) {
   // scrollTop 0, and the never-yank rule then held the top forever (the user 2026-09-02: an
   // opened or forked session sat at the top after its context loaded). A first build takes the
   // showActive branch below, where landActive pins the bottom exactly like a brand-new tab.
-  const firstBuild = !!(existed && prev && !prev.events.length && msg.events && msg.events.length);
+  // A view that held only the client's own groups is one too: the frame is its first kernel content (2026-09-29).
+  const firstBuild = !!(existed && prev && !prevKernel.length && msg.events && msg.events.length);
   // Preserve the reader's position across ANY active-tab rebuild (fork OR slid tail-window): capture whether
   // they were at the bottom + their anchor turn BEFORE we drop/rebuild the DOM, so a push never SNAPS a
   // scrolled-up reader down (the user 2026-07-06). Only a genuinely-at-bottom reader follows new content.
@@ -18961,6 +18971,12 @@ function upsert(msg: any) {
     // view as it is.
     const v = views.get(msg.id);
     if (v) { v.rediff = true; v.rendered = Math.min(v.rendered, s.events.length); }   // a shorter list is the keyed paint's too, never the rewind path's tail rebuild
+    // A first build over a view that painted only the client's groups builds FRESH, as a placeholder's does (syncView's
+    // empty branch leaves rendered at 0): the tail window from the newest compaction, in the task that replaces the
+    // bubble's nodes. The keyed paint would stretch the bubble's one-unit window over the whole arriving history; the
+    // fork's teardown used to give this fresh build (2026-09-29). And its row average, measured off the bubble alone, is
+    // measured again off the new rows, as every fresh rebuild's is: the spacers of a long arriving history are sized by it.
+    if (v && firstBuild) { v.rendered = 0; v.avgTurnH = undefined; }
   }
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
   adoptArrival(order, msg.id, existed);   // once: its tabOrder frame usually carried it already (tab-order.ts)
