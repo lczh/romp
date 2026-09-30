@@ -426,6 +426,9 @@ await composerFocused("f-chat-3");
 await page.evaluate(() => window.__armFocusComposerHold(["f-chat", "f-chat-2", "f-chat-3"]));
 await page.keyboard.press("Alt+Shift+J"); await waitFocused("f-chat");
 await page.keyboard.press("Alt+Shift+J"); await waitFocused("f-chat-2");
+// the ring moves at each press, the posts land later (on a busy runner after this step's release, when the hold let them
+// through and there was nothing stale to hold: CI 2026-09-30, both seen as passed): the release waits for both at the hold
+await waitFn(() => { const h = window.__fcHeld.map((x) => x[2]); return h.includes("f-chat") && h.includes("f-chat-2"); }, null, "the two presses' composer posts never reached their columns");
 out.hk.gap = await page.evaluate(() => { const held = window.__fcHeld.map((h) => h[2]); const hooked = ["f-chat", "f-chat-2", "f-chat-3"].map((id) => !!document.getElementById(id).contentWindow.__fcHooked); window.__ringSeq = []; return { held, hooked, released: window.__releaseFocusComposer() }; });
 await composerFocused("f-chat-2");
 out.hk.gap.ring = await page.evaluate(() => { const r = window.__ringSeq; window.__ringSeq = null; return r; });
