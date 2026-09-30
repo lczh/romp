@@ -393,12 +393,17 @@ class ViewFoldsStore(ViewOrderStore):
         # A publish landing at the first moment the lock is free after the folds are read (here, injected at that very
         # release) must pair neither its name nor its count with the folds before it: all three describe the earlier
         # publish. A second acquisition for either read, or a read after the release, would take the injected one's.
+        # And the folds themselves are read with the lock held (2026-09-30, the second review round): read above the
+        # block, a publish landing between that read and the acquisition would put its name and count on the older folds,
+        # which the injection at the release cannot see.
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 1}))
         want = km._view_order_frame()
-        real, saved_served, state = km._view_order_lock, km._view_folds_served, {"read": False, "injected": False}
+        real, saved_served = km._view_order_lock, km._view_folds_served
+        state = {"read": False, "injected": False, "locked": None}
 
         def served():
             state["read"] = True
+            state["locked"] = real.locked()
             return saved_served()
 
         C = self.C
@@ -430,6 +435,7 @@ class ViewFoldsStore(ViewOrderStore):
         finally:
             km._view_order_lock, km._view_folds_served = real, saved_served
         self.assertTrue(state["injected"], "premise: a publish landed at the release after the folds were read")
+        self.assertIs(state["locked"], True, "the folds were read with the store's lock held")
         self.assertEqual(fr, want, "the folds, their name and the count: all the earlier publish's")
         after = km._view_order_frame()
         self.assertEqual((after["foldsBy"], after["foldsSeq"]["n"]), ({"browser": self.C, "n": 1}, want["foldsSeq"]["n"] + 1),
@@ -524,10 +530,11 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([(m[0], m[2].get("foldsBy")) for m in sent], [("phone", {"browser": self.B, "n": 1}), ("desktop", {"browser": self.B, "n": 1})],
                          "numbered under the kept 3, and taken: pushed to every viewer, named without the count")
         self.assertEqual(self.stored_folds(), again)
-        self.assertEqual(km._view_folds_seen[self.B], {"n": 1, "at": seq["n"] + 1}, "remembered at its own number now, and the count it took")
+        self.assertEqual(km._view_folds_seen[self.B], {"n": 1, "at": seq["n"] + 1, "top": 3, "top_at": at},
+                         "remembered at its own number now, and the count it took, beside the largest taken from it and that one's count")
         self.assertEqual(self.logged, [], "nothing dropped")
-        [on] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 2}))
-        self.assertEqual(len(on), 2, "and the browser's next publish is taken on its own number")
+        [on] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 2, "received": seq}))
+        self.assertEqual(len(on), 2, "and the browser's next publish, made before the answer to the last, is taken on its own number")
 
     def test_only_a_count_of_this_kernel_life_at_or_above_the_kept_publishes_takes_a_lower_number(self):
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 3}))
@@ -540,7 +547,7 @@ class ViewFoldsStore(ViewOrderStore):
             self.assertEqual([m[0] for m in out], ["desktop"], "dropped, the poster answered: %r" % (received,))
             self.assertEqual(len(self.logged), 1, repr(received))
         self.assertEqual(self.stored_folds(), FOLDS, "none of them written")
-        self.assertEqual(km._view_folds_seen[self.B], {"n": 3, "at": at}, "and the kept publish is as it was")
+        self.assertEqual(km._view_folds_seen[self.B], {"n": 3, "at": at, "top": 3, "top_at": at}, "and the kept publish is as it was")
         [out] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 1, "received": {"boot": km._BOOT_ID, "n": at}}))
         self.assertEqual([m[0] for m in out], ["phone", "desktop"], "exactly the kept publish's count: taken")
 
@@ -572,8 +579,54 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual(got["phone"], [], "no push")
         self.assertEqual(got["desktop"], [km._view_order_frame()], "the poster: the kernel's frame once (the second deduped), and no warn")
         self.assertEqual(err.getvalue().splitlines(), [
-            "romp-kernel: setViewFolds dropped: browser bbbbbbbb n=1 received=none, kept n=3 taken at %d" % at,
-            "romp-kernel: setViewFolds dropped: browser bbbbbbbb n=2 received=%s:%d, kept n=3 taken at %d" % (km._BOOT_ID, at - 1, at)])
+            "romp-kernel: setViewFolds dropped: browser 'bbbbbbbb' n=1 received=none, kept n=3 taken at %d" % at,
+            "romp-kernel: setViewFolds dropped: browser 'bbbbbbbb' n=2 received=%r:%d, kept n=3 taken at %d" % (km._BOOT_ID, at - 1, at)])
+
+    def test_a_drops_log_line_stays_one_line_whatever_the_page_sent(self):
+        # the browser id and the received boot are the page's own strings, written with %r, so a newline in either cannot
+        # forge a second kernel line
+        forged = "b\nromp-kernel: forged"
+        self.dispatch(self.publish(FOLDS, {"browser": forged, "n": 3}))
+        self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": forged, "n": 1, "received": {"boot": "x\nromp-kernel: forged", "n": 0}}))
+        self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=1 received=%r:0, kept n=3 taken at 1"
+                                       % (forged[:8], "x\nromp-kernel: forged")])
+
+    # ── the largest number taken (2026-09-30, the second review round) ───────────────────────────────────
+    # A lower number taken on its count replaced the kept n, so an older publish numbered between it and the largest taken
+    # was then taken as newer. The largest n taken from each browser is kept beside the latest, with the count it took.
+    def test_a_lower_number_taken_on_its_count_lets_no_older_publish_between_it_and_the_largest_back_in(self):
+        # In tab T, pane A folds api on a slow socket (publish 11) and pane B folds web over it (12), which lands first. A
+        # pane in tab Y, another renderer process whose copy of the record lacks both, has 12's count from a sibling that
+        # heard its frame, and folds tests as publish 10: taken on that count. Then A's 11 lands, made before its browser
+        # received any frame built after 12 was taken. It is not under the kept 10, but it is under the largest, 12, and is
+        # dropped (before: taken, and the kernel went back to api alone)
+        self.dispatch(self.publish({"collapsed": [], "expanded": [], "pinned": []}, {"browser": self.B, "n": 9}))
+        seq9 = km._view_order_frame()["foldsSeq"]       # what every pane of the browser had received when A and B folded
+        api = {"collapsed": ["api"], "expanded": [], "pinned": []}
+        both = {"collapsed": ["api", "web"], "expanded": [], "pinned": []}
+        three = {"collapsed": ["api", "web", "tests"], "expanded": [], "pinned": []}
+        [b12] = self.dispatch(self.publish(both, {"browser": self.B, "n": 12, "received": seq9}))
+        seq12 = b12[0][2]["foldsSeq"]                   # the frame Y's sibling pane heard
+        [y10, a11] = self.dispatch(self.publish(three, {"browser": self.B, "n": 10, "received": seq12}),
+                                   self.publish(api, {"browser": self.B, "n": 11, "received": seq9}))
+        self.assertEqual([m[0] for m in y10], ["phone", "desktop"], "premise: Y's 10, on 12's count, taken and pushed")
+        self.assertEqual(self.stored_folds(), three, "all three folds stand (before: api alone)")
+        self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
+        self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, largest n=12 taken at %d"
+                                       % (self.B[:8], km._BOOT_ID, seq9["n"], seq12["n"])])
+
+    def test_a_record_that_came_back_older_still_lands_every_publish_even_in_quick_succession(self):
+        # the browser was killed before its storage was written: the kernel keeps its 5, and its record says 1. Each publish
+        # it makes from then on carries the count of its connect push, built after 5 was taken: the first is taken under
+        # the kept 5, and each made before the answer to the one before it is taken under the largest, 5, on that count.
+        # A single kept n raised to the largest, or a largest whose count each lower take refreshed, would drop those
+        self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 5}))
+        seq = km._view_order_frame()["foldsSeq"]        # the connect push the browser hears when it comes back
+        sent = self.dispatch(*[self.publish(dict(FOLDS, collapsed=["g%d" % n]), {"browser": self.B, "n": n, "received": seq})
+                               for n in (2, 3, 4)])
+        self.assertEqual([[m[0] for m in out] for out in sent], [["phone", "desktop"]] * 3, "each taken and pushed")
+        self.assertEqual(self.stored_folds(), dict(FOLDS, collapsed=["g4"]))
+        self.assertEqual(self.logged, [], "nothing dropped")
 
     def test_a_new_kernel_life_counts_from_nothing_and_a_count_from_the_last_life_proves_nothing(self):
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 3}))
