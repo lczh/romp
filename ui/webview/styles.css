@@ -1354,6 +1354,25 @@ body.chat-theme-yatharth .tab.tab-file { background: color-mix(in srgb, var(--ft
 body.chat-theme-yatharth .tab.tab-file:hover { background: color-mix(in srgb, var(--ftab-tint, var(--fg)) 10%, transparent); }
 body.chat-theme-yatharth .tab.tab-file.active { background: color-mix(in srgb, var(--ftab-tint, var(--fg)) 14%, transparent);
   border-color: color-mix(in srgb, var(--ftab-tint, var(--fg)) 30%, transparent); }
+/* THE VIEWER'S MESSAGE BAR (render.ts mountViewerBar, file-view.ts; the user 2026-09-30): the foot of the file viewer, the
+   modal's and a file tab's, a compact twin of the message box. The quote chips are the composer's own (.composer-chip);
+   "to <session>" names where it goes, the session in the strip's label ink; the box and the send wear the composer's
+   input and send dress at the chips' size; the line under it counts what is staged for that session. */
+.fileview-compose { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 7px 10px 8px;
+  border-top: 1px solid var(--box-border); }
+.fileview-compose[hidden], .fv-compose-chips[hidden], .fv-compose-note[hidden] { display: none; }
+.fv-compose-chips { display: flex; flex-flow: row wrap; align-items: center; gap: 6px; }
+.fv-compose-chips .composer-chip { max-width: 100%; }
+.fv-compose-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.fv-compose-to { flex: 0 0 auto; align-self: center; font-size: 12px; color: var(--dim); white-space: nowrap; }
+.fv-compose-input { flex: 1 1 auto; min-width: 0; resize: none; box-sizing: border-box; min-height: calc(1.4em + 14px);
+  padding: 6px 10px; font: inherit; font-size: 12px; line-height: 1.4; color: var(--fg);
+  background: var(--vscode-input-background, var(--overlay-05)); border: 1px solid var(--box-border); border-radius: 8px; }
+.fv-compose-input:focus { outline: none; border-color: var(--accent); }
+.fv-compose-send { flex: 0 0 auto; width: 30px; height: 30px; padding: 0; border: none; border-radius: 8px; background: transparent;
+  color: var(--accent); opacity: 0.85; font-size: 14px; line-height: 1; cursor: pointer; }
+.fv-compose-send:hover { opacity: 1; background: var(--menu-hover); }
+.fv-compose-note { font-size: 12px; color: var(--dim); }
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
   flex: 0 0 auto;

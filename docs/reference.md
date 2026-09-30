@@ -4999,15 +4999,22 @@ dashboard, a file is refused (the cursor says so) rather than opened in place of
 
 ### Quoting a passage into the composer
 
-Select any passage in the file viewer and it lands in the
-composer as a quote chip, labeled with the file and the line the passage lives on. Type
-what should change and press **⌘⏎** to set the note aside; keep reading, select the next
-passage, and repeat: each staged note remembers its quote and its place. The list above
-the composer shows about four staged notes and scrolls for the rest; its caret collapses
-it to the count. **⏎** sends everything you staged along with whatever is in the box as
-one message, so the session applies the lot in one pass, and you never copy a line out of
-the document by hand. The line in each label is checked against the file at the moment
-you select, so numbers that moved under you are caught rather than quietly carried. When
+The file viewer, over the chat and as a file tab, has a message bar at its foot addressed
+to the session the file was opened from ("to web"). Select a passage and it becomes a quote
+chip in that bar, labelled with the file and, in the code view or a markdown file's Raw
+view, the lines it spans (`src/app.py:12-18`); a passage of a rendered document has no
+lines. Selecting again replaces the chip; holding ⌘ (Ctrl elsewhere) while you select adds
+one. Type what should change and press **⌘⏎** to stage it onto that session's staged
+list, the same list the chat's message box keeps, so the chat shows it above the box and
+quotes from the chat and from files go out together. **⏎** sends everything staged for the
+session, then what is in the bar, as one message. Each quote reaches the session under a
+line naming where it is from: `Replying to this part of src/app.py (lines 12–18):`, or
+`Replying to this part of docs/guide.md:` for a rendered document. The bar hides while the
+file is being edited, keeps what you typed while you look elsewhere, and leaves slash
+commands to the session's own box. A viewer opened in the feed's file browser or the Files
+pane has no bar; a passage selected there lands in the chat's message box as a quote chip,
+labelled with the file and the line it lives on, checked against the file at the moment
+you select. When
 several sessions work in the same repository, or in worktrees of it, the viewer's title
 bar says which one you opened the file from: a chip with the session's name, in the same
 color as its tab. The title bar's **GitHub ↗** button opens the file on GitHub. While the
@@ -5442,8 +5449,8 @@ of the **System context** card and **Browse files** on a tab's right-click menu
 open a listing of that folder by the same rule: in this pane while it is open,
 otherwise over the chat. Pick a file in the
 listing and it opens where the listing is. Selecting a passage in the viewer
-puts the quote in the chat's composer, as it does from the viewer over the
-chat. When no file is open, the pane lists the files most recently opened in
+puts the quote in the chat's message box (the viewer over the chat has a message bar of
+its own instead). When no file is open, the pane lists the files most recently opened in
 it; click one to open it again. The gear's **Files** row (Settings, General,
 Panes) adds a Files toggle to the bottom bar (on a phone, a Files tab like the
 others), and that toggle turns the pane on.

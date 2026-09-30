@@ -327,7 +327,10 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   assert.match(RENDER, /if \(aim === "session"\) \{ ephemeralWarnToast\("This session isn't ready for comments yet\."\); return; \}/);
   // a file tab asked for with no session to sit beside (2026-09-30): a state a fresh page shows for itself
   assert.match(RENDER, /if \(!anchor\) \{ ephemeralWarnToast\("A file tab sits beside a session: open a session first\."\); return false; \}/);
-  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 11, "the definition, the two reachability sites and the eight state refusals (the queued edit's two went with the in-place editor, T373; the picker's went 2026-09-25, when staging over a question became allowed; the comment key's two came 2026-09-30, and the file tab's one); the bell toggle's word on the new state is the NOTE twin's (review 2026-09-14), counted below");
+  // the viewer's message bar (2026-09-30): its unreachable session, a reachability site, and its slash command, a state
+  assert.match(RENDER, /ephemeralWarnToast\("“" \+ name \+ "” isn't reachable right now, so this wasn't sent\. It's still in the box\."\);/);
+  assert.match(RENDER, /ephemeralWarnToast\("A slash command goes in the session's own message box\."\);/);
+  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 13, "the definition, the three reachability sites and the nine state refusals (the queued edit's two went with the in-place editor, T373; the picker's went 2026-09-25, when staging over a question became allowed; the comment key's two came 2026-09-30, and the file tab's one; the viewer bar's reachability and slash refusals, 2026-09-30); the bell toggle's word on the new state is the NOTE twin's (review 2026-09-14), counted below");
   assert.equal((RENDER.match(/ephemeralNoteToast\(/g) || []).length, 2, "the definition and the bell toggle (2026-09-11: a confirmation for a flip whose only other witness is the tab menu's row; a state the fresh page reads from the kernel, so not replayed)");
   // what the nack, the dismissal and the other-tab ack say stays true after the reload, so they ride it unmarked
   assert.match(RENDER, /warnToast\(m\.name \+ " couldn't be saved on the kernel, so it was not attached/);

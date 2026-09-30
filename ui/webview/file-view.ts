@@ -581,6 +581,24 @@ function popOutTarget(): ((path: string, sid: string | null) => boolean) | null 
   return null;
 }
 
+// ── the viewer's MESSAGE BAR (the user 2026-09-30, who wanted the chat's select-and-stage flow in the viewer) ───────────
+// A compact bar at the foot of the viewer, the modal's and a file tab's alike, that speaks to the session the file was
+// opened from: select a passage and it becomes a quote chip there (one chip per selection gesture; a Cmd/Ctrl-held
+// gesture adds one), type, and Cmd/Ctrl+Enter stages it onto that session's staged stack or Enter sends it. The bar itself
+// is the chat document's (render.ts registers it): the staging and the send are the chat composer's own code, so there is
+// one staging implementation. A document with no chat composer registers none, and its viewer keeps the older road (the
+// selection goes to the chat's composer through the shell).
+export interface FileViewComposeBar {
+  /** a passage selected in the body: its text, its 1-based line span in a view with line rows (null in a rendered
+   *  document), and whether the gesture asked to ADD a chip rather than replace the one held */
+  seed(quote: string, lines: [number, number] | null, add: boolean): void;
+  /** the file is being edited: the bar stands down (the edit owns the viewer's keys) */
+  setEditing(on: boolean): void;
+}
+export type FileViewComposer = (host: HTMLElement, ctx: { sid: string; path: string }) => FileViewComposeBar | null;
+let composeBarOf: FileViewComposer | null = null;
+export function setFileViewComposer(fn: FileViewComposer | null): void { composeBarOf = fn; }
+
 /** A file TAB's view (the user 2026-09-30): the same viewer, built by the same code as the modal, mounted in `host` (the
  *  chat pane's file-tab area) with no backdrop, its bar intact. One at a time: mounting replaces the last (the caller
  *  asked it first, through confirmLeave). `onClose` is the bar's ✕ (it closes the tab); `onReload` re-mounts it, which is
@@ -975,6 +993,11 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
   body.appendChild(load);
 
   box.appendChild(bar); box.appendChild(body);
+  // the message bar, when this document has a composer to lend it and the file has a session to speak to (see
+  // FileViewComposeBar above)
+  const composeHost = el("div", "fileview-compose");
+  const compose = composeBarOf && sid ? composeBarOf(composeHost, { sid, path }) : null;
+  if (compose) box.appendChild(composeHost);
   wrap.appendChild(box);
   (tab ? tab.host : document.body).appendChild(wrap);
 
@@ -1043,6 +1066,7 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     }
     editBtn.hidden = editing || text === null || !isText || !mtimeNs;
     if (popBtn) popBtn.hidden = editing;      // the edit lives in this modal: no pop-out while it is up
+    compose?.setEditing(editing);             // …and the message bar stands down while it is up
     textSize.sync();                          // the text-size control follows every paint: shown over a text view only
     syncViewGroup();
     saveBtn.hidden = !editing;
@@ -1086,8 +1110,29 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
   // chip lands in the session the file was opened FOR even if the active tab changed while the
   // modal was up (the 2026-08-19 routing rule: the gesture's session, never activeId-at-gesture).
   let seedSeq = 0;                                 // last gesture wins if two fresh reads race
+  // the gesture's own modifier, read where it starts (the chat's rule, render.ts quoteAddHeld): Cmd/Ctrl held ADDS a chip;
+  // a shift-press extends the live selection and is the same gesture
+  let quoteAdd = false;
+  body.addEventListener("mousedown", (ev) => { if (!ev.shiftKey) quoteAdd = ev.metaKey || ev.ctrlKey; });
+  // the 1-based line span of the selection in a view with line rows (the code view, a markdown file's Raw view, an SVG's
+  // Source view: codeBlock's .fv-cl rows); null in a rendered document, which has no lines. A selection that ends at the
+  // very start of a row (a triple-click, a drag to a line's head) ends on the row before it.
+  const selectionLines = (sel: Selection): [number, number] | null => {
+    if (!sel.rangeCount) return null;
+    const rows = Array.from(body.querySelectorAll("code.hljs .fv-cl"));
+    if (!rows.length) return null;
+    const r = sel.getRangeAt(sel.rangeCount - 1);
+    const rowOf = (n: Node): number => { const e = n instanceof Element ? n : n.parentElement; const row = e ? e.closest(".fv-cl") : null; return row ? rows.indexOf(row) : -1; };
+    let a = rowOf(r.startContainer), b = rowOf(r.endContainer);
+    if (a < 0 && b < 0) return null;
+    if (a < 0) a = b; if (b < 0) b = a;
+    if (b > a && r.endOffset === 0) b--;
+    return [a + 1, b + 1];
+  };
   box.addEventListener("mouseup", (ev) => {
     if (editing) return;   // CodeMirror selections are edit gestures, not quotes
+    // the message bar's own presses (its box, its chips, its send) are not selections in the file
+    if (compose && composeHost.contains(ev.target as Node)) return;
     // A press on a title-bar CONTROL (A−, A+, the readout, Raw, Copy path, the GitHub link) settles no
     // selection: the mouseup lands on the button while a passage may still stand selected in the body,
     // and the seed below would re-read the file and re-seed the quote chip on every step of the text
@@ -1100,7 +1145,7 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     // label's fresh read dead work. The target is this document's composer (the chat-hosted viewer)
     // or, from a pane without one — the feed — the shell, which forwards the seed into the chat pane
     // (composerWindow above).
-    const seedTarget = composerWindow();
+    const seedTarget = compose ? window : composerWindow();
     if (!seedTarget) return;
     // RENDERED media has no honest text to quote — an <img>/iframe body owns its own selection
     // surface; the SVG SOURCE view is a real text view and quotes like any other (renderBody's
@@ -1110,6 +1155,14 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     if (!sel || sel.isCollapsed || !sel.anchorNode || !box.contains(sel.anchorNode)) return;
     const picked = sel.toString().trim();
     if (!picked) return;
+    // THE MESSAGE BAR (above): the chip is the bar's, cited to this file and the lines the rows say, read off the view the
+    // passage was selected in (the rows ARE the file's lines as shown now); a rendered document has none
+    if (compose) {
+      if (!body.contains(sel.anchorNode)) return;
+      compose.seed(picked, selectionLines(sel), quoteAdd);
+      quoteAdd = false;
+      return;
+    }
     // The label's line is minted NOW, not at open: agents edit these same trees, so the open-time
     // snapshot's numbering may have quietly moved. Anchor against a fresh read; a FAILED re-read
     // falls back to the snapshot rather than fabricating drift nobody observed (the old Submit

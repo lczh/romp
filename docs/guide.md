@@ -34,8 +34,9 @@ inserts it. The pencil on a message the session has not taken yet puts it back
 in the box.
 
 A path or a markdown link in the chat opens the file in the viewer, rendered. A
-passage selected there lands in the composer as a quote, labelled with the file
-and the line it came from.
+passage selected there becomes a quote in the viewer's own message bar, which
+writes to the session the file came from; ⌘⏎ stages it with the chat's staged
+messages and ⏎ sends.
 
 The viewer's pop-out button keeps the file open as a tab, right after the
 session it came from. File tabs sit in the strip with your sessions, the arrows
