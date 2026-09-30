@@ -7352,8 +7352,12 @@ function commentAim(): CommentAim | "none" | "session" {
   if (!q?.uuid) return "none";
   if (!activeId || isProvisionalId(activeId) || !liveSession(activeId)) return "session";
   const sel = window.getSelection();
-  const b = sel && sel.rangeCount ? sel.getRangeAt(sel.rangeCount - 1).getBoundingClientRect() : null;
-  return { sid: activeId, uuid: q.uuid, text: q.text, x: b ? b.left : 0, y: b ? b.bottom + 6 : 0 };
+  const r = sel && sel.rangeCount ? sel.getRangeAt(sel.rangeCount - 1) : null;
+  // the passage must be in the view on screen: a selection left in another tab's hidden view still reads as transcript
+  // text, and its turn's uuid is that session's, never the active one's
+  if (!r || !views.get(activeId)?.el.contains(r.startContainer)) return "none";
+  const b = r.getBoundingClientRect();
+  return { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
 }
 /** The command's run. `held` is the aim the palette captured as it opened (its input took the focus since, which may
  *  have moved the selection); absent, the live selection is read. A held aim whose tab is no longer the one shown, or

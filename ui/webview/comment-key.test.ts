@@ -75,6 +75,7 @@ type World = {
   sel: { text: string; uuid: string | null } | null;            // what transcriptSelection returns
   live?: boolean;                                                // liveSession(activeId) answers
   rect?: { left: number; bottom: number };                       // the selection's box
+  elsewhere?: boolean;                                           // the selection sits in another tab's (hidden) view
 };
 function chat(w: World) {
   const opened: Array<[string, string, string, number, number]> = [];
@@ -86,11 +87,12 @@ function chat(w: World) {
     transcriptSelection: () => w.sel,
     isProvisionalId: (id: string) => id.startsWith("pending:"),
     liveSession: (id: string) => (w.live === false ? undefined : { id }),
-    window: { getSelection: () => ({ rangeCount: 1, getRangeAt: () => ({ getBoundingClientRect: () => w.rect || { left: 0, bottom: 0 } }) }) },
+    window: { getSelection: () => ({ rangeCount: 1, getRangeAt: () => ({ startContainer: "the passage", getBoundingClientRect: () => w.rect || { left: 0, bottom: 0 } }) }) },
+    views: new Map([[w.activeId, { el: { contains: (n: unknown) => n === "the passage" && !w.elsewhere } }]]),
     openCommentComposer: (sid: string, uuid: string, exact: string, x: number, y: number) => { opened.push([sid, uuid, exact, x, y]); },
     ephemeralWarnToast: (msg: string) => { toasts.push(msg); },
   };
-  const api = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, openCommentComposer, ephemeralWarnToast } = env;\n"
+  const api = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, views, openCommentComposer, ephemeralWarnToast } = env;\n"
     + "let activeId = env.activeId;\n" + src + "\nreturn { commentAim, commentOnSelection, heldCommentAim };")(env) as {
     commentAim: () => Aim | "none" | "session"; commentOnSelection: (held?: unknown) => void; heldCommentAim: (v: unknown) => Aim | "none" | "session" };
   return { ...api, opened, toasts };
@@ -110,6 +112,7 @@ test("with nothing usable selected it toasts and opens nothing: no selection, a 
   for (const [why, w, msg] of [
     ["nothing selected", { activeId: SID, sel: null }, NONE],
     ["outside a transcript turn", { activeId: SID, sel: { text: PASSAGE, uuid: null } }, NONE],
+    ["left in another tab's hidden view", { activeId: SID, sel: { text: PASSAGE, uuid: UUID }, elsewhere: true }, NONE],
     ["a tab still being created", { activeId: "pending:web", sel: { text: PASSAGE, uuid: UUID } }, "This session isn't ready for comments yet."],
     ["a skeleton this page has not loaded", { activeId: SID, sel: { text: PASSAGE, uuid: UUID }, live: false }, "This session isn't ready for comments yet."],
   ] as Array<[string, World, string]>) {
