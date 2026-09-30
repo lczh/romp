@@ -22,59 +22,98 @@ const VIEWS = { active: "all", tags: [{ id: "g1", name: "api", color: "#1EA1EB",
 const UNIONS = viewTagUnion(VIEWS);
 
 /** The kernel's viewer store and its push, as kernel.py implements them (_write_view_folds, _view_order_frame), with the
- *  publish's name (2026-09-29): the name of the last publish it handled (written, unchanged or refused) rides the frame
- *  as `foldsBy`, an unnamed publish clears it, and a browser's publish older than one it already handled from that
- *  browser is dropped. */
+ *  publish's name (2026-09-29) and the count of taken publishes (2026-09-30). Every publish not dropped is TAKEN: the
+ *  count rises by one whether it is written, unchanged or refused, the name of the last one taken rides the frame as
+ *  `foldsBy` (an unnamed publish clears it), and the count as `foldsSeq` with the kernel's life. A browser's publish
+ *  numbered under the one kept from that browser is dropped, unless the count it says its browser had received
+ *  (`by.received`) is of this life and at or above the count the kept one was taken at; a drop is logged and answered
+ *  with the kernel's frame on the poster's own slot, which sends nothing when that slot already holds the same frame. */
 function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
   const keepsFolds = opts.folds !== false;    // a kernel from before 2026-09-23 sends no folds half at all
-  const keepsStamps = opts.stamps !== false;  // one from before 2026-09-29 keeps no name and serves none
+  const keepsStamps = opts.stamps !== false;  // one from before 2026-09-29 keeps no name and no count, and serves neither
+  let life = 1;
   const k = {
+    boot: "1000.1",                           // the kernel life's id (kernel.py _BOOT_ID), a new one per restart()
+    taken: 0,                                 // the fold publishes this life has taken (kernel.py _view_folds_taken)
     folds: null as Record<string, unknown> | null,
     by: null as { browser: string; n: number } | null,
-    seen: new Map<string, number>(),
+    seen: new Map<string, { n: number; at: number }>(),   // browser -> its kept publish's n, and the count it was taken at
     refuse: false,
     warns: 0,
+    drops: [] as string[],                    // the kernel's log line for each publish it dropped
     viewers: [] as Viewer[],
     posts: [] as unknown[],
     bys: [] as unknown[],
+    slot: new Map<Viewer, string>(),          // the last viewOrder frame sent to each viewer's socket (its dedup slot)
     frame(): any {
       const fr: any = { type: "viewOrder", order: [], stored: false };
       if (keepsFolds) {
         fr.folds = k.folds === null ? null : JSON.parse(JSON.stringify(k.folds));
         if (keepsStamps && k.by) fr.foldsBy = { ...k.by };
+        if (keepsStamps) fr.foldsSeq = { boot: k.boot, n: k.taken };
       }
       return fr;
     },
-    post(folds: Record<string, unknown>, by?: any) {
+    send(v: Viewer, fr: any) { k.slot.set(v, JSON.stringify(fr)); v.deliver(fr); },
+    post(folds: Record<string, unknown>, by?: any, from?: Viewer) {
       k.posts.push(folds);
       k.bys.push(by);
       if (!keepsFolds) return;                                      // an older kernel answers unknownOp; nothing is kept
       const st = keepsStamps && by && typeof by.browser === "string" && by.browser.length >= 1 && by.browser.length <= 64
         && Number.isInteger(by.n) && by.n >= 1 ? { browser: by.browser as string, n: by.n as number } : null;
-      if (st && st.n < (k.seen.get(st.browser) ?? 0)) return;      // this browser's older state, overtaken on another socket
-      if (st) k.seen.set(st.browser, st.n);
+      const r = st && by.received && typeof by.received.boot === "string" && Number.isInteger(by.received.n) ? by.received : null;
+      const kept = st ? k.seen.get(st.browser) : undefined;
+      if (st && kept && st.n < kept.n && !(r && r.boot === k.boot && r.n >= kept.at)) {
+        // this browser's older state, overtaken: logged, and answered on the poster's own slot
+        k.drops.push(`browser ${st.browser.slice(0, 8)} n=${st.n} received=${r ? r.boot + ":" + r.n : "none"}, kept n=${kept.n} taken at ${kept.at}`);
+        if (from && from.connected) k.answer(from);
+        return;
+      }
+      k.taken++;
+      if (st) k.seen.set(st.browser, { n: st.n, at: k.taken });
       k.by = st;
       if (k.refuse) { k.warns++; return; }                          // refused: a warning to the poster, no push
       if (k.folds !== null && JSON.stringify(k.folds) === JSON.stringify(folds)) return;   // unchanged: no push
       k.folds = JSON.parse(JSON.stringify(folds));
       k.push();
     },
+    /** the kernel's frame to one socket on its dedup slot: nothing when the slot already holds this very frame */
+    answer(v: Viewer) { const fr = k.frame(); if (k.slot.get(v) !== JSON.stringify(fr)) k.send(v, fr); },
     /** the one viewOrder push to every connected viewer (a dropped socket hears nothing): a fold change's, or an
-     *  arrangement change's, which carries the folds and their name as they stand */
-    push() { for (const v of k.viewers) if (v.connected) v.deliver(k.frame()); },
-    connect(v: Viewer) { v.connected = true; v.deliver(k.frame()); },
+     *  arrangement change's, which carries the folds, their name and the count as they stand */
+    push() { for (const v of k.viewers) if (v.connected) k.send(v, k.frame()); },
+    connect(v: Viewer) { v.connected = true; k.slot.delete(v); k.send(v, k.frame()); },
     /** the page's socket drops: the kernel no longer reaches it, and what it sends waits in the shim's queue
      *  (the page shim queues every send while its socket is down and flushes the queue when a new one opens) */
     drop(v: Viewer) { v.connected = false; },
-    /** a new socket opens: the shim flushes what the page queued while down, the reconnect's `wsup` frame reaches the
-     *  page, then (before the kernel's viewOrder frame) whatever the connect push's earlier frames make the page write
-     *  (`beforeFrame`: the views frame's rename follow, say), then the viewOrder frame */
+    /** a FRESH dial: a new socket (an empty slot) opens, the shim flushes what the page queued while down, the
+     *  reconnect's `wsup` frame reaches the page, then (before the kernel's viewOrder frame) whatever the connect push's
+     *  earlier frames make the page write (`beforeFrame`: the views frame's rename follow, say), then the viewOrder frame
+     *  of the connect push, which the ready this dial sends earns */
     reconnect(v: Viewer, beforeFrame?: () => void) {
       v.connected = true;
-      for (const m of v.queued.splice(0)) k.post(m.folds, m.by);
+      k.slot.delete(v);
+      for (const m of v.queued.splice(0)) k.post(m.folds, m.by, v);
       v.deliver({ type: "wsup" });
       if (beforeFrame) beforeFrame();
-      v.deliver(k.frame());
+      k.send(v, k.frame());
+    },
+    /** a DECLARED redial: the shim's socket comes back without a new ready, so no connect push answers it, and the page
+     *  hears no viewOrder frame until the kernel next pushes one (a change, on any device) */
+    declaredReconnect(v: Viewer) {
+      v.connected = true;
+      for (const m of v.queued.splice(0)) k.post(m.folds, m.by, v);
+      v.deliver({ type: "wsup" });
+    },
+    /** the kernel restarts: a new life, counting from nothing, with no name and no browsers remembered (memory only);
+     *  the folds on disk stand, and every socket drops */
+    restart() {
+      life++;
+      k.boot = "1000." + life;
+      k.taken = 0;
+      k.seen.clear();
+      k.by = null;
+      for (const v of k.viewers) v.connected = false;
     },
   };
   return k;
@@ -126,7 +165,7 @@ function makeViewer(name: string, k: Kernel, seed: Record<string, unknown> = {},
   v.as(() => {
     const fm: any = new FederationManager();
     fm.start();
-    fm.outbound = (m: any) => { if (m && m.type === "setViewFolds") { if (v.connected) k.post(m.folds, m.by); else v.queued.push(m); } };
+    fm.outbound = (m: any) => { if (m && m.type === "setViewFolds") { if (v.connected) k.post(m.folds, m.by, v); else v.queued.push(m); } };
     v.fm = fm;
   });
   k.viewers.push(v);
@@ -480,6 +519,7 @@ test("two panes of one browser fold inside one round trip and their publishes la
   assert.deepEqual([out.held.length, (k.folds as any).collapsed], [1, ["api", "web"]], "premise: the Sessions pane's publish, carrying both folds, landed first");
   out.flush();
   assert.deepEqual(k.folds, { collapsed: ["api", "web"], expanded: [], pinned: [] }, "the chat pane's older publish does not put api alone back");
+  assert.equal(k.drops.length, 1, "dropped as an older state, and logged (its answer is the frame that pane's slot already holds)");
   assert.deepEqual([shape(phone, true), shape(strip, false)], [BOTH, BOTH]);
 });
 
@@ -493,7 +533,7 @@ test("a browser whose record of its publishes comes back older (killed before it
   for (const v of [desktop, phone]) k.connect(v);
   fold(desktop, "api", true); fold(desktop, "web", true); fold(desktop, "web", false);
   const rec = JSON.parse(shared.get(PUBLISHES)!);
-  assert.deepEqual([rec.n, k.seen.get(rec.browser)], [3, 3], "premise: three publishes, all handled");
+  assert.deepEqual([rec.n, k.seen.get(rec.browser)?.n], [3, 3], "premise: three publishes, all handled");
   k.drop(desktop);
   shared.set(PUBLISHES, JSON.stringify({ browser: rec.browser, n: 1, live: {} }));   // the browser comes back with the record of its first
   const again = makeViewer("desktop after the restart", k, {}, shared);
@@ -635,6 +675,166 @@ test("a REMOTE kernel's frame is ignored even when it names this browser's own p
   assert.deepEqual(shape(desktop, false), BOTH, "untouched");
   k.push();
   assert.deepEqual(shape(desktop, false), BOTH, "and the local kernel's next frame is taken");
+});
+
+// ── a frame built before this browser's publish was taken, whoever it names (2026-09-30) ─────────────────────────────
+// A name says whose publish a frame reflects, not whether this browser's latest had landed when it was built: a push for
+// an arrangement change (a drag on either device, a session arriving, closing or pruned) built inside one round trip
+// before a fold names another device's publish, or nothing, and lacks the fold. The kernel's count of taken publishes
+// (`foldsSeq`) on every frame, and the count each publish says its browser had received, tell such a frame apart.
+test("a push built before this browser's fold landed does not reopen the group when it names another device", () => {
+  const k = fakeKernel();
+  const desktop = makeViewer("desktop", k), phone = makeViewer("phone", k);
+  for (const v of [desktop, phone]) k.connect(v);
+  fold(phone, "web", true);                                            // the kernel's last publish is the phone's
+  const link = slowLink(desktop);
+  k.push();                                                            // a drag on the phone: its push is on the wire…
+  fold(desktop, "api", true);                                          // …when the desktop folds api
+  assert.equal(link.inflight.length, 2, "premise: the drag's push, then the fold's answer");
+  link.flush(1);                                                       // the drag's push: it names the phone and lacks api's fold
+  assert.deepEqual(shape(desktop, false), BOTH, "api stays folded (before: it reopened until its own answer landed)");
+  link.flush();
+  assert.deepEqual([shape(desktop, false), shape(phone, true)], [BOTH, BOTH]);
+});
+
+test("…nor when it names no publish at all (a page from before the name published last)", () => {
+  const k = fakeKernel();
+  const desktop = makeViewer("desktop", k);
+  k.connect(desktop);
+  k.post({ collapsed: ["web"], expanded: [], pinned: [] });            // an older page folds web: unnamed, so frames name nobody
+  const link = slowLink(desktop);
+  k.push();                                                            // a session arrives: a push naming nothing
+  fold(desktop, "api", true);
+  link.flush(1);
+  assert.deepEqual(shape(desktop, false), BOTH, "api stays folded");
+  link.flush();
+  assert.deepEqual(shape(desktop, false), BOTH);
+});
+
+test("a change waiting in an unheard pane is not merged over a push built before this browser's fold landed: the fold stands on every device", () => {
+  // merged over that push, the change went up without the fold, the kernel took it, and every device showed the group open
+  const k = fakeKernel();
+  const shared = new Map<string, string>();
+  const clicked = makeViewer("clicked pane", k, {}, shared), phone = makeViewer("phone", k);
+  for (const v of [clicked, phone]) k.connect(v);
+  fold(phone, "web", true);
+  const unheard = makeViewer("unheard pane", k, {}, shared);
+  const l3 = slowLink(unheard);
+  k.connect(unheard);                                                  // its connect push is still on the wire
+  const l1 = slowLink(clicked);
+  k.push();                                                            // a drag's push, on the wire to both panes…
+  fold(clicked, "api", true);                                          // …when the clicked pane folds api
+  const pin = { sid: TESTS, name: "api", id: "g1" };
+  unheard.as(() => writeTabGroups({ ...readTabGroups(UNIONS), pinned: [pin] }));   // no publisher there: kept as a change
+  l3.flush(2);                                                         // the unheard pane hears the connect push, then the drag's
+  assert.deepEqual(k.folds, { collapsed: ["web", "api"], expanded: [], pinned: [] }, "nothing merged over either: api's fold stands on the kernel");
+  assert.ok(shared.has(PENDING), "the change waits for a frame built after the fold");
+  l3.flush(); l1.flush();
+  assert.deepEqual(k.folds, { collapsed: ["web", "api"], expanded: [], pinned: [pin] }, "then lands over it");
+  assert.deepEqual(shape(phone, true), ["#api(folded)", TESTS, "#web(folded)"], "and every device shows both folds and the pin");
+});
+
+test("a group opened while a push built before it is on the wire never shows folded again, for the push or for its own late answer", () => {
+  // before: the push was taken, folding api back, and api's own answer, older than the web fold made after it, was passed
+  // over, so api stayed folded one frame longer than on a page that took every frame
+  const k = fakeKernel();
+  const desktop = makeViewer("desktop", k), phone = makeViewer("phone", k);
+  for (const v of [desktop, phone]) k.connect(v);
+  fold(desktop, "api", true);
+  phone.as(() => writeTabGroups({ ...readTabGroups(UNIONS), pinned: [{ sid: WEB, name: "web", id: "g2" }] }));   // the phone published last
+  const link = slowLink(desktop);
+  k.push();                                                            // a drag's push: api folded, as the kernel has it
+  fold(desktop, "api", false);                                         // the desktop opens api…
+  fold(desktop, "web", true);                                          // …and folds web, inside one round trip
+  const shown: string[][] = [];
+  for (let i = 0; i < 3; i++) { link.flush(1); shown.push(desktop.as(() => readTabGroups(UNIONS).collapsed)); }
+  assert.deepEqual(shown, [["web"], ["web"], ["web"]], "api open throughout, web folded");
+});
+
+test("a browser whose record comes back older lands its next fold even when another device published first, so no frame named it", () => {
+  // the kernel keeps this browser's publish 3 and the record says 1; the connect push names the phone, so nothing raised
+  // the number past 3 and the publish goes out as 2. It carries the count that connect push had, built after 3 was taken,
+  // so the kernel takes it (before: dropped, with no push, no warning and no log line)
+  const k = fakeKernel();
+  const shared = new Map<string, string>();
+  const desktop = makeViewer("desktop", k, {}, shared), phone = makeViewer("phone", k);
+  for (const v of [desktop, phone]) k.connect(v);
+  fold(desktop, "api", true); fold(desktop, "web", true); fold(desktop, "web", false);
+  const rec = JSON.parse(shared.get(PUBLISHES)!);
+  k.drop(desktop);
+  shared.set(PUBLISHES, JSON.stringify({ browser: rec.browser, n: 1, live: {} }));   // the browser comes back with the record of its first
+  fold(phone, "web", true);                                            // meanwhile the phone publishes
+  const again = makeViewer("desktop after the restart", k, {}, shared);
+  k.connect(again);
+  fold(again, "api", false);
+  assert.deepEqual([(k.bys.at(-1) as any).n, k.drops], [2, []], "numbered under the kernel's 3, and taken");
+  assert.deepEqual(k.folds, { collapsed: ["web"], expanded: [], pinned: [] });
+  assert.deepEqual(shape(phone, false), ["#api", API, TESTS, "#web(folded)"], "and the phone opens api");
+});
+
+test("a publish dropped as an older state is logged and answered: the page shows the kernel's folds at once, and its next fold lands", () => {
+  // two renderer processes of one browser publishing inside the storage delay: this tab's record lags the other's, so its
+  // publish goes out numbered under the one the kernel kept, before it received any frame built after that one
+  const k = fakeKernel();
+  const E = "e".repeat(32);
+  k.folds = { collapsed: ["api"], expanded: [], pinned: [] };
+  const tab = makeViewer("tab", k, { [PUBLISHES]: { browser: E, n: 2, live: {} } });
+  k.connect(tab);
+  k.post({ collapsed: ["api"], expanded: [], pinned: [] }, { browser: E, n: 5 });   // the other tab's publish 5: unchanged, so no push
+  fold(tab, "web", true);                                              // numbered 3 here, made before any frame built after 5
+  assert.deepEqual([(k.bys.at(-1) as any).n, k.drops.length, k.folds], [3, 1, { collapsed: ["api"], expanded: [], pinned: [] }], "dropped, and logged");
+  assert.deepEqual(shape(tab, false), ["#api(folded)", "#web", WEB], "answered with the kernel's frame: the tab shows the kernel's folds, not a fold no device keeps");
+  fold(tab, "web", true);
+  assert.deepEqual([(k.bys.at(-1) as any).n, k.folds], [6, { collapsed: ["api", "web"], expanded: [], pinned: [] }], "numbered past the 5 the answer named: taken");
+});
+
+test("a declared redial gets no frame until a change is pushed: a fold made meanwhile waits, and lands over the next push", () => {
+  // reconnect() above is a fresh dial, whose ready earns a connect push; a redial the shim declares sends no new ready, so
+  // the page stays unheard (its publisher withdrawn at wsup) until the kernel pushes a change
+  const k = fakeKernel();
+  const desktop = makeViewer("desktop", k), phone = makeViewer("phone", k);
+  for (const v of [desktop, phone]) k.connect(v);
+  k.drop(desktop);
+  desktop.as(() => (globalThis as any).window.dispatchEvent(new Event("romp:wsdown")));
+  k.declaredReconnect(desktop);
+  fold(desktop, "api", true);
+  assert.equal(k.posts.length, 0, "no frame heard on this socket yet: nothing published");
+  fold(phone, "web", true);                                            // another device's change: the push the desktop hears next
+  assert.deepEqual(k.folds, { collapsed: ["web", "api"], expanded: [], pinned: [] }, "the waiting fold landed over it");
+  assert.deepEqual([shape(desktop, false), shape(phone, true)], [BOTH, BOTH]);
+});
+
+test("a restarted kernel: its new life's frames end every entry of the old one, so a publish lost with a page gone without pagehide holds nothing back", () => {
+  const k = fakeKernel();
+  const shared = new Map<string, string>();
+  const clicked = makeViewer("clicked pane", k, {}, shared), sibling = makeViewer("sibling pane", k, {}, shared);
+  for (const v of [clicked, sibling]) k.connect(v);
+  k.drop(clicked);                                                     // its socket is gone, and the page has not noticed
+  fold(clicked, "api", true);                                          // publish 1, queued by the shim
+  loseSends(sibling);
+  fold(sibling, "web", true);                                          // publish 2, lost; then the sibling's page goes, no pagehide
+  k.viewers.splice(k.viewers.indexOf(sibling), 1);
+  k.restart();
+  k.reconnect(clicked);                                                // the shim flushes publish 1 into the new life
+  assert.deepEqual(k.folds, { collapsed: ["api"], expanded: [], pinned: [] }, "premise: the new life took publish 1, and never saw 2");
+  k.push();                                                            // a drag: the new life's frame names publish 1 again
+  assert.deepEqual(shape(clicked, false), ["#api(folded)", "#web", WEB], "the kernel's folds: the old life's lost publish holds nothing back");
+});
+
+test("a publish lost with a page gone without pagehide is held for only until a later publish is taken and heard", () => {
+  const k = fakeKernel();
+  const shared = new Map<string, string>();
+  const clicked = makeViewer("clicked pane", k, {}, shared), sibling = makeViewer("sibling pane", k, {}, shared), phone = makeViewer("phone", k);
+  for (const v of [clicked, sibling, phone]) k.connect(v);
+  const out = slowSend(clicked);
+  fold(clicked, "api", true);                                          // publish 1, held on a slow socket
+  loseSends(sibling);
+  fold(sibling, "web", true);                                          // publish 2, lost; then the sibling's page goes, no pagehide
+  k.drop(sibling);
+  phone.as(() => writeTabGroups({ ...readTabGroups(UNIONS), pinned: [{ sid: TESTS, name: "api", id: "g1" }] }));   // a later publish, taken and heard
+  out.flush();                                                         // publish 1 lands after it
+  assert.deepEqual(k.folds, { collapsed: ["api"], expanded: [], pinned: [] }, "premise: the kernel's last word is publish 1");
+  assert.deepEqual(shape(clicked, false), ["#api(folded)", "#web", WEB], "its answer is heard: the lost web fold holds it back no longer");
 });
 
 // ── the active session on the phone ───────────────────────────────────────────────────────────────

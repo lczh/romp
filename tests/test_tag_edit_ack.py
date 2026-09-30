@@ -889,8 +889,13 @@ class Capability(_Wire):
         # the viewer's arrangement rides the connect push too (2026-09-23), before the caps frame like
         # every other part of it — its own frame, on its own dedup slot
         self.assertLess(types.index("viewOrder"), types.index("caps"))
-        self.assertEqual(next(m for m in self.sent if m["type"] == "viewOrder"),
-                         {"type": "viewOrder", "order": [], "stored": False, "folds": None},
+        vo = dict(next(m for m in self.sent if m["type"] == "viewOrder"))
+        seq = vo.pop("foldsSeq", None)
+        self.assertTrue(isinstance(seq, dict) and set(seq) == {"boot", "n"} and seq["boot"] == km._BOOT_ID
+                        and isinstance(seq["n"], int) and not isinstance(seq["n"], bool),
+                        "the folds half carries this kernel life's count of taken fold publishes, null folds "
+                        "included (2026-09-30): %r" % (seq,))
+        self.assertEqual(vo, {"type": "viewOrder", "order": [], "stored": False, "folds": None},
                          "no arrangement stored here yet, nor any folds (2026-09-23), which is what a browser "
                          "carrying either publishes against")
         caps = next(m for m in self.sent if m["type"] == "caps")

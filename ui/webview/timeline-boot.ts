@@ -76,7 +76,7 @@ export function dispatchFrame(panel: any, m: any): boolean {
       const served = m.order.filter((x: any) => typeof x === "string");
       hearSharedOrder(served, m.stored === true, orderPost, setViewOrderPublisher);
     }
-    if ("folds" in m && foldsPost) hearSharedFolds(m.folds, foldsPost, setFoldsPublisher, m.foldsBy);
+    if ("folds" in m && foldsPost) hearSharedFolds(m.folds, foldsPost, setFoldsPublisher, m.foldsBy, m.foldsSeq);
     return true;
   }
   // (No drop edge to withdraw the arrangement's or the folds' publisher on: the extension gives this view no pipe-state
@@ -90,7 +90,8 @@ export function dispatchFrame(panel: any, m: any): boolean {
 let orderPost: ViewOrderPublisher | null = null;
 
 // the host pipe a fold is published through, set by bridgeFunctions (which holds `post`); null before the bridge exists.
-// It sends each publish's name (`by`) when it has one, which the frame's `foldsBy` answers (tab-groups.ts, 2026-09-29)
+// It sends each publish's name (`by`) when it has one, which the frame's `foldsBy` answers (tab-groups.ts, 2026-09-29),
+// with the count this browser had received, which the frame's `foldsSeq` sets (2026-09-30)
 let foldsPost: FoldsSender | null = null;
 
 /** The tab-groups store's one write, for the view's folds (romp-timeline-view.js writeTabGroupsBlob reads it off

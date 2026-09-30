@@ -1316,9 +1316,10 @@ export class FederationManager {
       // here on, on THIS connection, this page publishes its folds, the slot every bundle on it reads (the view-order
       // slot's pattern); a drop withdraws it with the arrangement's (unhearViewOrder). Each publish carries its name
       // (`by`) and the frame names the last publish the kernel handled (`foldsBy`), so this browser's own earlier publish
-      // coming back is told from another device's word (2026-09-29, tab-groups.ts TABGROUPS_PUBLISHES_KEY).
+      // coming back is told from another device's word (2026-09-29, tab-groups.ts TABGROUPS_PUBLISHES_KEY), and its count
+      // of taken publishes (`foldsSeq`) tells a frame built before this browser's latest publish landed (2026-09-30).
       if ("folds" in m) {
-        hearSharedFolds(m.folds, (f, by) => this.outbound({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) }), (fn) => { w.__rompPublishViewFolds = fn; }, m.foldsBy);
+        hearSharedFolds(m.folds, (f, by) => this.outbound({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) }), (fn) => { w.__rompPublishViewFolds = fn; }, m.foldsBy, m.foldsSeq);
       }
       return;
     }
