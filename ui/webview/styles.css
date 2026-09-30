@@ -194,6 +194,9 @@ body.scheme-solarized-dark {
      chip. Text-highlight use only — comment chrome (badge, buttons, chips) stays var(--accent). */
   --cmt-hl: #ffd54a;
   --cmt-hl-outline: #ffd54a;   /* the ink of the comment notch (the rail tick's fill): the fill's yellow here, darker on cream (T310) */
+  /* a RESOLVED thread's highlight: the comment yellow dimmed well under the open 30% wash, still on the page. It was a white
+     8% wash in both themes, a grey smudge here and nothing at all on cream (the user 2026-09-30) */
+  --cmt-hl-resolved: rgba(255, 213, 74, 0.12);
   /* fast mode ON — the CLI's own fastMode orange, a STATUS color (means "this session runs fast
      mode"), so the badge reads the same here as in the Claude Code TUI. Not the accent. */
   --fast: #ff6a00;
@@ -306,6 +309,7 @@ body.theme-light {
   --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the same fill the dark tab wears: a whiter sheet over cream (T322) */
   --cmt-hl: #FFDF70;
   --cmt-hl-outline: #8f6a00;   /* amber ink: 4.2:1 on the cream page — the fill's yellow measures 1.1:1 there, invisible as a line (T310) */
+  --cmt-hl-resolved: rgba(143, 106, 0, 0.08);   /* the amber ink faintly: the pale yellow cannot dim and still read on cream, and a white wash vanished there */
   --fast: #D45500;
   --warn: #9A6A00;
   /* the WORKING gold and the COMPACTING teal are re-inked for cream (the user 2026-09-08, decision 3 of the
@@ -4013,7 +4017,7 @@ mark.cmt-hl.unread.cmt-ring { outline: 1.5px dashed var(--st-awaiting-bg); outli
    moment the thread is viewed. */
 .turn.cmt-rail-unread::before { background: var(--cmt-hl); opacity: 1; width: 3px; left: 10px; }
 mark.cmt-hl:hover { background: color-mix(in srgb, var(--cmt-hl) 58%, transparent); }
-mark.cmt-hl.resolved { background: rgba(255, 255, 255, 0.08); }
+mark.cmt-hl.resolved { background: var(--cmt-hl-resolved); }
 /* WRITING (the user 2026-08-17; re-reshaped 2026-08-23 — the marching ants left the PROSE: a crawl
    around the passage read as distraction, not progress; the tick's marching ants followed it out
    2026-08-24 — the user wanted no crawling cue at all): while the thread is mid-reply the region
@@ -4133,9 +4137,11 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 }
 .cmt-max:hover { opacity: 1; border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 .cmt-max + .cmt-x { margin-left: 0; }
+/* the bar is a LINE, so it wears the comment's line ink (the fill's yellow on dark, amber on cream, where the fill's yellow
+   read 1.1:1), and the ground the theme's own faint wash: white washes vanish on the light theme (the user 2026-09-30) */
 .cmt-quote {
-  padding: 4px 8px; border-left: 2px solid var(--cmt-hl); border-radius: 2px;
-  background: rgba(255, 255, 255, 0.04);
+  padding: 4px 8px; border-left: 2px solid var(--cmt-hl-outline); border-radius: 2px;
+  background: var(--overlay-05);
   font-size: 0.92em; opacity: 0.75;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
@@ -4194,7 +4200,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-sent .notice-gist { color: var(--dim); white-space: normal; }
 .cmt-msg { padding: 5px 8px; border-radius: 6px; line-height: 1.35; overflow-wrap: anywhere; }
 .cmt-msg.you { background: color-mix(in srgb, var(--accent) 14%, transparent); align-self: flex-end; max-width: 92%; white-space: pre-wrap; }
-.cmt-msg.agent { background: rgba(255, 255, 255, 0.05); align-self: flex-start; max-width: 96%; }
+.cmt-msg.agent { background: var(--overlay-05); align-self: flex-start; max-width: 96%; }
 .cmt-msg.agent > *:first-child { margin-top: 0; }
 .cmt-msg.agent > *:last-child { margin-bottom: 0; }
 .cmt-note { font-size: 0.92em; opacity: 0.7; padding: 2px 6px; }

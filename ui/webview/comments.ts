@@ -82,6 +82,22 @@ export function pickMarkToOpen(chain: { tid: string; unread: boolean }[]): strin
   return (ring || chain[0]).tid;
 }
 
+/** Does the thread wear the DIMMED look (the mark's .resolved wash, no code/math host tint, the rail tick's .resolved
+ *  fade)? Only a thread the user CLOSED. A relayed thread (merged, and merging on its way there) is still an open
+ *  conversation (T145: Relay sends the discussion back and the thread stays open for more talk), so it renders like an
+ *  open one; dimming it too made its highlight vanish on the light theme's page (the user 2026-09-30, who pressed Relay
+ *  and watched the comment stop showing). */
+export function threadSettled(status: CommentThread["status"]): boolean {
+  return status === "resolved";
+}
+
+/** Does the thread get a tick on the scroll rail and a stop in the comment jumps? Open, resolved and relayed threads,
+ *  merging included: the relay holds `merging` while it delivers, and the thread must not drop off the rail meanwhile
+ *  (nor for good, should a relay ever fail to settle). A promoted thread's talk lives in its own session. */
+export function threadOnRail(status: CommentThread["status"]): boolean {
+  return status === "open" || status === "resolved" || status === "merging" || status === "merged";
+}
+
 /** The thread session is mid-turn — the popover shows its thinking dots. */
 export function threadBusy(state: string): boolean {
   return state === "working" || state === "retrying" || state === "compacting";
