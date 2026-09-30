@@ -606,21 +606,24 @@ function passesOver(rec: PublishRecord, seen: FoldsSeen, by: unknown, s: FoldsSe
  *  webview (render.ts) and a VS Code timeline (timeline-boot.ts), the last two through setFoldsPublisher.
  *
  *  `by` is the frame's `foldsBy` (2026-09-29, the note above) and `seq` its `foldsSeq` (2026-09-30). A frame whose
- *  folds are an object is passed over WHOLE when one of passesOver's three rules holds (older than a frame this
- *  browser has received; no newer than what it had received when it made a publish still out; naming one of its own
- *  publishes older than one still out), before the pending change is read: nothing adopted, cached or announced, and
- *  the pending change waits for a frame that is heard. Every other frame is heard as before. Then the frame's count is
- *  noted in ONE write of the counts' own key (TABGROUPS_FOLDS_SEEN_KEY), never of the record, and only when it raises
- *  one: as received, and as heard unless it was passed over or names one of this browser's publishes (a frame whose
- *  folds are null counts too), BEFORE anything below publishes, so a publish made over this frame carries it. Whether a
- *  frame naming one of this browser's publishes is its older state turns on entries that a tab in another renderer
- *  process may not have seen yet, so, once this browser's record has reached a tab, such a frame never raises the
- *  heard count there, and that tab cannot end an entry it has not seen with the very frame the entry holds back
- *  (stands). A frame with no count (an older kernel) is judged by the third rule alone, with every entry standing, as
- *  before the count. A hearing with no publisher installed is a new connection's first (every drop withdraws the
- *  publisher; the VS Code timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). A
- *  frame naming one of this browser's publishes, heard or passed over, also raises the number this page's next
- *  publish goes past (noteFoldsFloor). */
+ *  folds are an object, or null (the kernel keeps none, and serves its count beside that too), is passed over WHOLE
+ *  when one of passesOver's three rules holds (older than a frame this browser has received; no newer than what it had
+ *  received when it made a publish still out; naming one of its own publishes older than one still out), before the
+ *  pending change is read: nothing adopted, cached, announced or published against none, and the pending change waits
+ *  for a frame that is heard (2026-09-30: heard, a null push built before a sibling's publish was taken spent a change
+ *  that left nothing folded, opened or pinned, since against none a page publishes only folds that hold something,
+ *  and the publish's answer then put the group back on every device). Every other frame is heard as before. Then the
+ *  frame's count is noted in ONE write of the counts' own key (TABGROUPS_FOLDS_SEEN_KEY), never of the record, and only
+ *  when it raises one: as received, and as heard unless it was passed over or names one of this browser's publishes (a
+ *  frame whose folds are null counts too), BEFORE anything below publishes, so a publish made over this frame carries
+ *  it. Whether a frame naming one of this browser's publishes is its older state turns on entries that a tab in
+ *  another renderer process may not have seen yet, so, once this browser's record has reached a tab, such a frame
+ *  never raises the heard count there, and that tab cannot end an entry it has not seen with the very frame the entry
+ *  holds back (stands). A frame with no count (an older kernel) is judged by the third rule alone, with every entry
+ *  standing, as before the count. A hearing with no publisher installed is a new connection's first (every drop
+ *  withdraws the publisher; the VS Code timeline reloads instead), and starts this document's entry afresh
+ *  (newFoldsConnection). A frame naming one of this browser's publishes, heard or passed over, also raises the number
+ *  this page's next publish goes past (noteFoldsFloor). */
 export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn: FoldsPublisher) => void, by?: unknown, seq?: unknown): void {
   const g = (globalThis as any).window;
   const w = g && typeof g === "object" ? g : null;
@@ -632,7 +635,7 @@ export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn
   if (w) {
     const s = validFoldsSeq(seq) ? seqOf(seq) : null;
     const rec = readPublishRecord(), seen = readFoldsSeen();
-    passed = isObj && passesOver(rec, seen, by, s);
+    passed = (isObj || served === null) && passesOver(rec, seen, by, s);
     if (s) {
       const mine = validFoldsBy(by) && by.browser === rec.browser;
       const rises = (c: FoldsSeq | undefined, to: FoldsSeq) => !c || c.boot !== to.boot || c.n < to.n;

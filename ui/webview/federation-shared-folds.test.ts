@@ -734,6 +734,29 @@ test("a change waiting in an unheard pane is not merged over a push built before
   assert.deepEqual(shape(phone, true), ["#api(folded)", TESTS, "#web(folded)"], "and every device shows both folds and the pin");
 });
 
+test("a push saying the kernel keeps no folds, built before this browser's fold was taken, is passed over too: a change waiting in an unheard pane lands", () => {
+  // the kernel keeps none (its first run since the folds were shared, a new state directory, a lost store). Heard, the null
+  // push spent a change that leaves nothing folded, opened or pinned (against none a page publishes only folds that hold
+  // something), and once the fold's answer was heard the group was folded on every device, the change on none
+  const k = fakeKernel();
+  const shared = new Map<string, string>();
+  const first = makeViewer("first pane", k, {}, shared), phone = makeViewer("phone", k);
+  for (const v of [first, phone]) k.connect(v);                        // both hear that the kernel keeps none
+  const unheard = makeViewer("unheard pane", k, {}, shared);
+  const l2 = slowLink(unheard);
+  k.connect(unheard);                                                  // its connect push, folds null, is on the wire…
+  const l1 = slowLink(first);
+  fold(first, "web", true);                                            // …when the first pane folds web
+  assert.deepEqual(k.folds, { collapsed: ["web"], expanded: [], pinned: [] }, "premise: the kernel took the fold");
+  fold(unheard, "web", false);                                         // the unheard pane opens it again: kept as a change
+  l2.flush(1);                                                         // the null push, built before the fold was taken
+  assert.ok(shared.has(PENDING), "passed over: the change waits (before: spent on the null push, and nothing published)");
+  l2.flush(); l1.flush();                                              // the fold's answer, heard by both panes
+  assert.deepEqual(k.folds, { collapsed: [], expanded: [], pinned: [] }, "the change landed over the fold");
+  const open = ["#api", API, TESTS, "#web", WEB];
+  assert.deepEqual([shape(first, false), shape(unheard, false), shape(phone, true)], [open, open, open], "and web is open on every device");
+});
+
 test("a group opened while a push built before it is on the wire never shows folded again, for the push or for its own late answer", () => {
   // before: the push was taken, folding api back, and api's own answer, older than the web fold made after it, was passed
   // over, so api stayed folded one frame longer than on a page that took every frame
