@@ -428,12 +428,17 @@ class LiveHelpers(unittest.TestCase):
         self.assertIsNone(rm.proc_session_id(2 ** 30, procfs=True), "a gone pid reads nothing")
         if os.path.isdir("/proc"):
             import subprocess
-            p = subprocess.Popen(["sleep", "30"], env={**os.environ, "ROMP_SID": SID2})
+            # the child says it is up before the read: straight after Popen the exec can still be setting up the
+            # new image, whose environ then reads empty (seen in CI, and 16 of 300 tries on a dev box)
+            p = subprocess.Popen([sys.executable, "-c", "print('up', flush=True); import sys; sys.stdin.read()"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, env={**os.environ, "ROMP_SID": SID2})
             try:
+                self.assertEqual(p.stdout.readline().strip(), b"up")
                 self.assertEqual(rm.proc_session_id(p.pid), SID2)
             finally:
-                p.kill()
-                p.wait()
+                p.stdin.close()
+                p.stdout.close()
+                p.wait(timeout=10)
 
 
 # A parent session and the comment threads forked from it, on the notes-api demo (synthetic sids): each thread's
