@@ -124,7 +124,7 @@ test("a viewer whose document has no composer seeds THROUGH the shell: the feed 
   // unchanged message into the chat pane. No composer and no shell (VS Code's cross-origin parent, a
   // standalone pane) still stands the gesture down before the fresh read (the no-sink gating).
   assert.match(VIEW, /function composerWindow\(\): Window \| null \{\n\s*if \(document\.getElementById\("composer-input"\)\) return window;\n\s*try \{ if \(window\.parent !== window && window\.parent\.document\.getElementById\("chat-pane"\)\) return window\.parent; \}\n\s*catch \{[^}]*\}\n\s*return null;\n\}/);
-  assert.match(VIEW, /const seedTarget = composerWindow\(\);\n\s*if \(!seedTarget\) return;/);
+  assert.match(VIEW, /const seedTarget = compose \? window : composerWindow\(\);\n\s*if \(!seedTarget\) return;/);   // a viewer with the chat's message bar seeds its own chip (2026-09-30)
   // the shell's arm: the SAME message, forwarded whole into the chat frame — sid intact, so the chip
   // lands in the session the file was opened for (the 2026-08-19 routing rule holds across documents)
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");

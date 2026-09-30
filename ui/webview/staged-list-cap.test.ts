@@ -457,7 +457,9 @@ test("the composer closure's call sites: deliver sends only through flushStaged 
   // the STAGE path is the one caller with the reveal intent: the new item is the event that justifies the
   // move, and every other rebuild keeps the place (executed above)
   assert.match(RENDER, /stagedMsgs\.push\(activeId, \{ text: typed, cites: \(composerCitations\.get\(activeId\) \|\| \[\]\)\.slice\(\) \}\);[\s\S]*?renderStagedStrip\(activeId, \{ reveal: "last" \}\);/);
-  assert.equal((RENDER.match(/renderStagedStrip\(\w+, \{ reveal/g) || []).length, 1, "only the stage path reveals");
+  // …and the viewer's message bar staging onto the same stack (render.ts mountViewerBar, 2026-09-30): the same event
+  assert.match(RENDER, /stagedMsgs\.push\(sid, \{ text, cites: d\.cites\.slice\(\) \}\);[\s\S]*?if \(sid === activeId\) renderStagedStrip\(sid, \{ reveal: "last" \}\);/);
+  assert.equal((RENDER.match(/renderStagedStrip\(\w+, \{ reveal/g) || []).length, 2, "only the two stage paths reveal (the box's and the viewer bar's)");
   // the collapse has exactly three writers, all in the strip: the click's toggle (two) and the empty stack's clear
   assert.equal((RENDER.match(/stagedCollapsed\.(add|delete|clear)\(/g) || []).length, 3, "the renderer never collapses or expands a list on its own");
   // one routing loop over the module's post list; the composition and its exceptions are decided there,

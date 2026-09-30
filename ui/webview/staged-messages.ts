@@ -12,17 +12,37 @@
 
 export interface StagedMsg { text: string; cites: unknown[] }
 
+/** A passage quoted from a file shown in romp's file viewer (the user 2026-09-30, who wanted the chat's select-and-stage
+ *  flow in the viewer): `kind: "file"`, the file's `path` as the session knows it (on the session's own machine), and the
+ *  1-based `lines` it spans when it was selected in a view with line rows (the code view, a markdown file's Raw view);
+ *  none from a rendered document, which has no lines. Marked apart from the VS Code editor's `src` flavour so each keeps
+ *  its own lead-in. */
+export interface FileQuote { kind: "file"; path: string; lines?: [number, number] | null }
+export type QuoteCite = { quote?: string; src?: string | null; kind?: string; path?: string; lines?: [number, number] | null };
+
+/** A quote's lead-in: the words that tell the agent what the quote block under it is. A file from the viewer names the file
+ *  and, when it has them, the lines; the editor's highlight names its workspace-relative file:lines; a transcript passage
+ *  is part of the conversation. */
+export function quoteLeadIn(c: QuoteCite): string {
+  if (c.kind === "file" && c.path) {
+    const ln = c.lines && c.lines[0] > 0 ? c.lines : null;
+    const where = !ln ? "" : ln[1] > ln[0] ? " (lines " + ln[0] + "\u2013" + ln[1] + ")" : " (line " + ln[0] + ")";
+    return "Replying to this part of " + c.path + where + ":";
+  }
+  return c.src ? "Replying to this highlighted code (" + c.src + "):" : "Replying to this part of the conversation:";
+}
+
 /** The outgoing body for QUOTE citations (the user 2026-07-13): the highlighted text rides ahead of the
  *  typed message as a markdown quote block, so the agent knows exactly which part is being replied to.
  *  Also what the chip's audit preview shows: one function, no drift. Stacked chips (the user 2026-08-04)
  *  become one section each, in the order they sit in the strip. `src` (the VS Code editor flavor,
  *  2026-07-13) names where a highlight came from, a workspace-relative file:lines, so that section's
- *  lead-in points the agent at the code, not the conversation. No quote at all is the text alone. */
-export function quoteReplyBody(cites: { quote?: string; src?: string | null }[], text: string): string {
+ *  lead-in points the agent at the code, not the conversation; a file viewer's quote names its file and lines
+ *  (quoteLeadIn). No quote at all is the text alone. */
+export function quoteReplyBody(cites: QuoteCite[], text: string): string {
   const sections = cites.map((c) => {
     const q = (c.quote || "").split("\n").map((l) => "> " + l).join("\n");
-    const lead = c.src ? "Replying to this highlighted code (" + c.src + "):" : "Replying to this part of the conversation:";
-    return lead + "\n" + q;
+    return quoteLeadIn(c) + "\n" + q;
   });
   const quoted = sections.join("\n\n");
   return quoted && text ? quoted + "\n\n" + text : quoted || text;
@@ -37,7 +57,7 @@ export function quoteReplyBody(cites: { quote?: string; src?: string | null }[],
 export function stagedRunBody(items: readonly StagedMsg[], typed?: { text: string; cites?: unknown[] } | null): string {
   const parts: string[] = [];
   for (const it of typed ? [...items, typed] : items) {
-    const quotes = (it.cites || []).filter((c): c is { quote: string; src?: string | null } =>
+    const quotes = (it.cites || []).filter((c): c is QuoteCite & { quote: string } =>
       !!c && typeof (c as { quote?: unknown }).quote === "string" && !!(c as { quote?: string }).quote);
     const s = quoteReplyBody(quotes, it.text || "");
     if (s) parts.push(s);
