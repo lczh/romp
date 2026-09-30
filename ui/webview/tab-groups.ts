@@ -36,19 +36,28 @@ export const TABGROUPS_SHARED_KEY = "romp:tabgroups:shared";
  *  applies the change (the cache less this base) over them (mergeFolds). Origin-wide, not per page: the pane that
  *  hears first may not be the pane that was clicked. Absent when nothing is pending. */
 export const TABGROUPS_PENDING_KEY = "romp:tabgroups:pending";
-/** This browser's record of its own fold publishes (2026-09-29): {browser, n, live, received, heard}. `browser` is an
- *  id minted once and kept here, `n` the number of the latest publish any page of this browser made, and `live`, by a
- *  connection id its page mints, each open connection's latest publish: its number, and the kernel's count of taken
- *  fold publishes this browser had received when it was made (2026-09-30). `received` and `heard` are the highest
- *  counts any pane of this browser has received on a frame, and heard on one it did not pass over (the viewOrder
- *  frame's `foldsSeq`, one kernel life's). Every publish names itself from it ({browser, n, received},
- *  hearSharedFolds' note). Origin-wide, like the two keys above, because the state it guards is: every pane caches
- *  the kernel's copy and merges the pending change, so a pane that knew only its own publishes let a sibling adopt
- *  the clicked pane's late answer into the browser's copy. And an entry is never retired on an answer: the panes hear
- *  the same frame at different times, so the first to hear an answer cannot speak for the others. It is retired when
- *  its connection ends (the next hearing after a drop, or pagehide), and stops counting for the pass-over once a
- *  frame newer than its count is heard, or a frame of another kernel life received (hearSharedFolds' rules). */
+/** This browser's record of its own fold publishes (2026-09-29): {browser, n, live}. `browser` is an id minted once and
+ *  kept here, `n` the number of the latest publish any page of this browser made, and `live`, by a connection id its
+ *  page mints, each open connection's latest publish: its number, and the kernel's count of taken fold publishes this
+ *  browser had received when it was made (2026-09-30, TABGROUPS_FOLDS_SEEN_KEY). Only a publish and a connection's end
+ *  write it. Every publish names itself from it ({browser, n, received}, hearSharedFolds' note). Origin-wide, like the
+ *  two keys above, because the state it guards is: every pane caches the kernel's copy and merges the pending change,
+ *  so a pane that knew only its own publishes let a sibling adopt the clicked pane's late answer into the browser's
+ *  copy. And an entry is never retired on an answer: the panes hear the same frame at different times, so the first to
+ *  hear an answer cannot speak for the others. It is retired when its connection ends (the next hearing after a drop,
+ *  or pagehide), and stops counting for the pass-over once a frame newer than its count, naming no publish of this
+ *  browser's, is heard, or a frame of another kernel life received (hearSharedFolds' rules). */
 export const TABGROUPS_PUBLISHES_KEY = "romp:tabgroups:publishes";
+/** How far this browser has got in the kernel's count of taken fold publishes (2026-09-30; the viewOrder frame's
+ *  `foldsSeq`, one kernel life's): {received, heard}, the highest count any pane of this browser has received on a frame,
+ *  and the highest it has heard on a frame it did not pass over that names no publish of this browser's. A key of its
+ *  own, which only a hearing writes and a hearing writes nothing else of: nearly every push raises a count, so every open
+ *  pane writes here on nearly every push, and a tab in another renderer process, which sees this browser's writes only
+ *  after a delay, would otherwise write back the record above as it last saw it, dropping a sibling's newest entry or
+ *  setting its number back. Two tabs writing here inside that delay can set a count back: a lower received count only
+ *  passes over less (and a publish carrying it can be dropped by the kernel, which answers it), and a lower heard count
+ *  only keeps an entry standing longer, as entries stood before the count. */
+export const TABGROUPS_FOLDS_SEEN_KEY = "romp:tabgroups:folds-seen";
 export const TABGROUPS_EVENT = "romp-tabgroups";
 /** sections that start folded until the user opens them (remembered, on every device, once toggled) */
 export const DEFAULT_COLLAPSED: ReadonlySet<string> = new Set(["archived"]);
@@ -401,7 +410,9 @@ const PUBLISHES_LIVE_CAP = 32;
 /** A connection's latest publish: its number, and the count this browser had received when it was made (absent when
  *  none had been: a kernel from before the count, or an entry the record kept from before it). */
 interface LiveEntry { n: number; received?: FoldsSeq }
-interface PublishRecord { browser: string; n: number; live: Record<string, LiveEntry>; received?: FoldsSeq; heard?: FoldsSeq }
+interface PublishRecord { browser: string; n: number; live: Record<string, LiveEntry> }
+/** TABGROUPS_FOLDS_SEEN_KEY as read: each count absent until a frame carrying one is received (or heard). */
+interface FoldsSeen { received?: FoldsSeq; heard?: FoldsSeq }
 
 /** 16 random bytes as 32 hex characters: a browser's id and a connection's. getRandomValues, which every page has
  *  (randomUUID needs a secure origin, and a dashboard is often served over plain http on a LAN), else Math.random. */
@@ -427,10 +438,10 @@ function validFoldsSeq(s: unknown): s is FoldsSeq {
 }
 const seqOf = (s: FoldsSeq): FoldsSeq => ({ boot: s.boot, n: s.n });
 
-/** The record as stored; absent or malformed reads as a fresh one, with a new browser id that is kept only once the
- *  record is written (a publish, or a frame carrying the kernel's count: a page that does neither leaves nothing
- *  behind). A connection's entry kept as a bare number (the record before the count) reads as an entry with no count;
- *  a malformed entry is dropped, and so is a malformed count in an entry, `received` or `heard`. */
+/** The record as stored; absent or malformed reads as a fresh one, with a new browser id that is kept only once a
+ *  publish writes the record (a page that never publishes leaves nothing behind in it). A connection's entry kept as a
+ *  bare number (the record before the count) reads as an entry with no count; a malformed entry is dropped, and so is a
+ *  malformed count in an entry. */
 function readPublishRecord(): PublishRecord {
   const live: Record<string, LiveEntry> = Object.create(null);
   try {
@@ -445,10 +456,7 @@ function readPublishRecord(): PublishRecord {
           }
         }
       }
-      const rec: PublishRecord = { browser: o.browser, n: o.n, live };
-      if (validFoldsSeq(o.received)) rec.received = seqOf(o.received);
-      if (validFoldsSeq(o.heard)) rec.heard = seqOf(o.heard);
-      return rec;
+      return { browser: o.browser, n: o.n, live };
     }
   } catch { /* unparseable → a fresh record */ }
   return { browser: mintFoldsId(), n: 0, live };
@@ -456,11 +464,29 @@ function readPublishRecord(): PublishRecord {
 
 /** False when the record could not be kept (quota, blocked storage): the publish then goes unnamed. */
 function writePublishRecord(rec: PublishRecord): boolean {
-  const o: Record<string, unknown> = { browser: rec.browser, n: rec.n, live: { ...rec.live } };
-  if (rec.received) o.received = rec.received;
-  if (rec.heard) o.heard = rec.heard;
-  try { localStorage.setItem(TABGROUPS_PUBLISHES_KEY, JSON.stringify(o)); return true; }
+  try { localStorage.setItem(TABGROUPS_PUBLISHES_KEY, JSON.stringify({ browser: rec.browser, n: rec.n, live: { ...rec.live } })); return true; }
   catch { return false; }
+}
+
+/** The counts as stored; absent, unparseable or not an object reads as none, and a malformed count is dropped on its own. */
+function readFoldsSeen(): FoldsSeen {
+  const seen: FoldsSeen = {};
+  try {
+    const o = JSON.parse(getKey(TABGROUPS_FOLDS_SEEN_KEY) || "null");
+    if (o && typeof o === "object" && !Array.isArray(o)) {
+      if (validFoldsSeq(o.received)) seen.received = seqOf(o.received);
+      if (validFoldsSeq(o.heard)) seen.heard = seqOf(o.heard);
+    }
+  } catch { /* unparseable → none */ }
+  return seen;
+}
+
+/** A count that cannot be kept (quota, blocked storage) is simply not noted: the pass-over then has less to go on. */
+function writeFoldsSeen(seen: FoldsSeen): void {
+  const o: Record<string, unknown> = {};
+  if (seen.received) o.received = seen.received;
+  if (seen.heard) o.heard = seen.heard;
+  try { localStorage.setItem(TABGROUPS_FOLDS_SEEN_KEY, JSON.stringify(o)); } catch { /* not kept */ }
 }
 
 /** A connection's entry ends: its page heard a new connection's first frame, or went away. */
@@ -502,28 +528,28 @@ function noteFoldsFloor(w: any, by: FoldsBy): void {
 
 /** The page's publisher over `send`: each publish takes this browser's next number (past both the record's and the
  *  highest a frame has named, noteFoldsFloor), notes it as the latest of the connection `w` holds when it is made, with
- *  the count this browser had received then, and goes out named, that count with it (`by.received`: the kernel takes a
- *  publish numbered under the one it kept from this browser when the count says this browser had received a frame
- *  built after that one was taken, kernel.py _write_view_folds). The record is written BEFORE the send, because the
- *  kernel's answer can arrive inside it: that answer's hearing reads the entry, raises the record's counts and, on a
+ *  the count this browser had received then (TABGROUPS_FOLDS_SEEN_KEY), and goes out named, that count with it
+ *  (`by.received`: the kernel takes a publish numbered under the one it kept from this browser when the count says this
+ *  browser had received a frame built after that one was taken, kernel.py _write_view_folds). The record is written
+ *  BEFORE the send, because the kernel's answer can arrive inside it: that answer's hearing reads the entry and, on a
  *  first hearing (heard before this document's publisher is installed), starts the connection afresh and retires the
- *  entry, all of which a write after the send would put back (the id is read per publish, so no publisher keeps naming
- *  an ended one). A send that throws sent nothing, and the connection's entry goes back to what it was. No window, or a
+ *  entry, which a write after the send would put back (the id is read per publish, so no publisher keeps naming an
+ *  ended one). A send that throws sent nothing, and the connection's entry goes back to what it was. No window, or a
  *  record that cannot be written: the publish goes unnamed, as before the stamp, and nothing is passed over for it. */
 function stampingFolds(send: FoldsSender, w: any): FoldsPublisher {
   return (f) => {
     const conn: string | null = w && typeof w.__rompFoldsConn === "string" ? w.__rompFoldsConn : null;
     if (conn === null) { send(f, null); return; }
-    const rec = readPublishRecord();
+    const rec = readPublishRecord(), got = readFoldsSeen().received;
     const fl = typeof w.__rompFoldsFloor === "number" ? w.__rompFoldsFloor : 0;
     const n = Math.max(rec.n, fl) + 1, prev = rec.live[conn];
     rec.n = n;
-    rec.live[conn] = rec.received ? { n, received: seqOf(rec.received) } : { n };
+    rec.live[conn] = got ? { n, received: seqOf(got) } : { n };
     const others = Object.keys(rec.live).filter((c) => c !== conn);
     others.sort((a, b) => rec.live[a].n - rec.live[b].n);
     for (const c of others.slice(0, Math.max(0, others.length + 1 - PUBLISHES_LIVE_CAP))) delete rec.live[c];
     if (!writePublishRecord(rec)) { send(f, null); return; }
-    try { send(f, rec.received ? { browser: rec.browser, n, received: seqOf(rec.received) } : { browser: rec.browser, n }); }
+    try { send(f, got ? { browser: rec.browser, n, received: seqOf(got) } : { browser: rec.browser, n }); }
     catch (e) {
       const now = readPublishRecord();
       if (now.live[conn] && now.live[conn].n === n) {
@@ -537,15 +563,18 @@ function stampingFolds(send: FoldsSender, w: any): FoldsPublisher {
 
 /** Does a connection's entry still count for the pass-over? One with no count always does (the rule before the count).
  *  One with a count does while this browser's received count is of the same kernel life as it, and no frame newer than
- *  it has been HEARD: such a frame reflects a later publish taken and heard, and from then on every frame at or below
- *  the entry's count is older than one received (the first rule at passesOver). So the first frame received from a
- *  new kernel life ends every entry of the old one, and an entry left by a page gone without pagehide ends once a later
- *  publish is taken and heard. */
-function stands(rec: PublishRecord, e: LiveEntry): boolean {
+ *  it has been HEARD (TABGROUPS_FOLDS_SEEN_KEY: a frame naming no publish of this browser's). Such a frame reflects a
+ *  later publish that is not this browser's, taken and heard, and from then on every frame at or below the entry's count
+ *  is older than one received (the first rule at passesOver). It is never a frame the entry itself passes over, whatever
+ *  the pane that heard it had seen of the record: the second rule passes over only frames at or below the entry's
+ *  count, and the third only frames naming this browser's publishes. So the first frame received from a new kernel life
+ *  ends every entry of the old one, and an entry left by a page gone without pagehide ends once a later publish that is
+ *  not this browser's (another device's, or an unnamed one from a page before the name) is taken and heard. */
+function stands(seen: FoldsSeen, e: LiveEntry): boolean {
   const r = e.received;
   if (!r) return true;
-  if (!rec.received || rec.received.boot !== r.boot) return false;
-  return !(rec.heard && rec.heard.boot === r.boot && rec.heard.n > r.n);
+  if (!seen.received || seen.received.boot !== r.boot) return false;
+  return !(seen.heard && seen.heard.boot === r.boot && seen.heard.n > r.n);
 }
 
 /** Is a frame passed over whole? `by` is its foldsBy and `s` its count (null when it carries none: a kernel from before
@@ -557,14 +586,14 @@ function stands(rec: PublishRecord, e: LiveEntry): boolean {
  *    received.
  *  - R3, the frame names one of this browser's publishes numbered below one that still stands: this browser's own
  *    older state. Without a count, R3 alone, with every entry standing: the rule before the count exactly. */
-function passesOver(rec: PublishRecord, by: unknown, s: FoldsSeq | null): boolean {
+function passesOver(rec: PublishRecord, seen: FoldsSeen, by: unknown, s: FoldsSeq | null): boolean {
   const live = Object.values(rec.live);
   if (s) {
-    if (rec.received && rec.received.boot === s.boot && s.n < rec.received.n) return true;
-    if (live.some((e) => e.received !== undefined && e.received.boot === s.boot && s.n <= e.received.n && stands(rec, e))) return true;
+    if (seen.received && seen.received.boot === s.boot && s.n < seen.received.n) return true;
+    if (live.some((e) => e.received !== undefined && e.received.boot === s.boot && s.n <= e.received.n && stands(seen, e))) return true;
   }
   if (!validFoldsBy(by) || by.browser !== rec.browser) return false;
-  return live.some((e) => e.n > by.n && (s === null || stands(rec, e)));
+  return live.some((e) => e.n > by.n && (s === null || stands(seen, e)));
 }
 
 /** A page HEARS the kernel's folds: the viewOrder frame's `folds` half (kernel.py _view_order_frame), on the
@@ -579,13 +608,16 @@ function passesOver(rec: PublishRecord, by: unknown, s: FoldsSeq | null): boolea
  *  browser has received; no newer than what it had received when it made a publish still out; naming one of its own
  *  publishes older than one still out), before the pending change is read: nothing adopted, cached or announced, and
  *  the pending change waits for a frame that is heard. Every other frame is heard as before. Then the frame's count is
- *  noted in ONE record write, and only when it raises one: as received, and as heard unless it was passed over (a
- *  frame whose folds are null counts too), BEFORE anything below publishes, so a publish made over this frame carries
- *  it. A frame with no count (an older kernel) is judged by the third rule alone, with every entry standing, as before
- *  the count. A hearing with no publisher installed is a new connection's first (every drop withdraws the publisher;
- *  the VS Code timeline reloads instead), and starts this document's entry afresh (newFoldsConnection). A frame naming
- *  one of this browser's publishes, heard or passed over, also raises the number this page's next publish goes past
- *  (noteFoldsFloor). */
+ *  noted in ONE write of the counts' own key (TABGROUPS_FOLDS_SEEN_KEY), never of the record, and only when it raises
+ *  one: as received, and as heard unless it was passed over or names one of this browser's publishes (a frame whose
+ *  folds are null counts too), BEFORE anything below publishes, so a publish made over this frame carries it. Whether a
+ *  frame naming one of this browser's publishes is its older state turns on entries that a tab in another renderer
+ *  process may not have seen yet, so such a frame never raises the heard count: a tab that has not seen an entry cannot
+ *  end it with the very frame it holds back (stands). A frame with no count (an older kernel) is judged by the third
+ *  rule alone, with every entry standing, as before the count. A hearing with no publisher installed is a new
+ *  connection's first (every drop withdraws the publisher; the VS Code timeline reloads instead), and starts this
+ *  document's entry afresh (newFoldsConnection). A frame naming one of this browser's publishes, heard or passed over,
+ *  also raises the number this page's next publish goes past (noteFoldsFloor). */
 export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn: FoldsPublisher) => void, by?: unknown, seq?: unknown): void {
   const g = (globalThis as any).window;
   const w = g && typeof g === "object" ? g : null;
@@ -596,14 +628,15 @@ export function hearSharedFolds(served: unknown, send: FoldsSender, install: (fn
   let passed = false;
   if (w) {
     const s = validFoldsSeq(seq) ? seqOf(seq) : null;
-    const rec = readPublishRecord();
-    passed = isObj && passesOver(rec, by, s);
+    const rec = readPublishRecord(), seen = readFoldsSeen();
+    passed = isObj && passesOver(rec, seen, by, s);
     if (s) {
+      const mine = validFoldsBy(by) && by.browser === rec.browser;
       const rises = (c: FoldsSeq | undefined, to: FoldsSeq) => !c || c.boot !== to.boot || c.n < to.n;
-      const r = rises(rec.received, s), h = !passed && rises(rec.heard, s);
-      if (r) rec.received = seqOf(s);
-      if (h) rec.heard = seqOf(s);
-      if (r || h) writePublishRecord(rec);
+      const r = rises(seen.received, s), h = !passed && !mine && rises(seen.heard, s);
+      if (r) seen.received = seqOf(s);
+      if (h) seen.heard = seqOf(s);
+      if (r || h) writeFoldsSeen(seen);
     }
   }
   if (passed) { install(publish); return; }

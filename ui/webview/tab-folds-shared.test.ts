@@ -117,6 +117,8 @@ function hearing(sent: Sent[]) {
   return (served: unknown, by?: unknown, seq?: unknown) => hearSharedFolds(served, send, setFoldsPublisher, by, seq);
 }
 const record = (store: Map<string, string>) => JSON.parse(store.get(PUBLISHES) ?? '{"live":{}}');
+const SEEN = "romp:tabgroups:folds-seen";       // TABGROUPS_FOLDS_SEEN_KEY: the counts received and heard, a key of their own
+const counts = (store: Map<string, string>) => JSON.parse(store.get(SEEN) ?? "{}");
 
 test("the kernel's answer to this page's EARLIER publish does not reopen a group folded since: two folds inside one round trip", () => {
   withStore({}, (_store, events) => {
@@ -355,8 +357,8 @@ test("a frame no newer than what this browser had received when it published is 
     const sent: Sent[] = [];
     const hear = hearing(sent);
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), { browser: OTHER, n: 3 }, at(4));
-    const id = record(store).browser;
     writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+    const id = record(store).browser;                                   // minted, and kept by this first publish
     assert.deepEqual(sent.map((s) => s.by), [{ browser: id, n: 1, received: at(4) }], "the publish carries the count this browser had received");
     const painted = events.length;
     for (const by of [{ browser: OTHER, n: 3 }, undefined]) {
@@ -365,7 +367,8 @@ test("a frame no newer than what this browser had received when it published is 
       assert.deepEqual([readTabGroups().collapsed, events.length], [["docs", "api"], painted], "passed over, api stays folded: " + JSON.stringify(by));
     }
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs", "api"] }), { browser: id, n: 1 }, at(5));   // the publish's own answer
-    assert.deepEqual([record(store).received, record(store).heard], [at(5), at(5)], "heard, and both counts raised");
+    assert.deepEqual([counts(store).received, counts(store).heard], [at(5), at(4)],
+      "heard, and the received count raised; the heard count is not, since the frame names this browser's own publish");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), { browser: OTHER, n: 4 }, at(6));      // later, another device's change
     assert.deepEqual(readTabGroups().collapsed, ["web"], "a frame built after the publish landed is heard, whoever it names");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), { browser: OTHER, n: 3 }, at(4));      // a copy of the old push, very late
@@ -373,41 +376,80 @@ test("a frame no newer than what this browser had received when it published is 
   });
 });
 
-test("a hearing notes the frame's count in one record write, only when a count rises, null folds included", () => {
+test("a hearing notes the frame's count in one write of the counts' own key, only when a count rises, null folds included, and never writes the record", () => {
   withStore({}, (store) => {
     const g: any = globalThis;
     const inner = g.localStorage;
-    let writes = 0;
-    g.localStorage = { ...inner, setItem: (k: string, v: string) => { if (k === PUBLISHES) writes++; inner.setItem(k, v); } };
+    let writes = 0, recordWrites = 0;
+    g.localStorage = { ...inner, setItem: (k: string, v: string) => { if (k === SEEN) writes++; if (k === PUBLISHES) recordWrites++; inner.setItem(k, v); } };
     const hear = hearing([]);
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), { browser: OTHER, n: 2 }, at(7));
-    assert.deepEqual([writes, record(store).received, record(store).heard], [1, at(7), at(7)], "one write raises both");
+    assert.deepEqual([writes, counts(store).received, counts(store).heard], [1, at(7), at(7)], "one write raises both");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), { browser: OTHER, n: 2 }, at(7));
     assert.equal(writes, 1, "the same count again raises nothing: no write");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), { browser: OTHER, n: 1 }, at(6));   // a sibling's slower socket: an older frame
     assert.deepEqual([readTabGroups().collapsed, writes], [["web"], 1], "passed over, and nothing written");
     hear(kernelCopy(NO_FOLDS), undefined, at(9, "4243.1700000001"));                          // a new kernel life's frame
-    assert.deepEqual([writes, record(store).received, record(store).heard], [2, at(9, "4243.1700000001"), at(9, "4243.1700000001")],
+    assert.deepEqual([writes, counts(store).received, counts(store).heard], [2, at(9, "4243.1700000001"), at(9, "4243.1700000001")],
       "another life's count replaces both, lower or not");
+    assert.equal(recordWrites, 0, "no hearing wrote the record: a tab in another renderer process would write back a copy it has not updated yet");
     g.localStorage = inner;
     hear(null, undefined, at(10, "4243.1700000001"));                                          // a kernel whose folds are gone: null
-    assert.deepEqual([record(store).received, record(store).heard], [at(10, "4243.1700000001"), at(10, "4243.1700000001")], "null folds count too");
+    assert.deepEqual([counts(store).received, counts(store).heard], [at(10, "4243.1700000001"), at(10, "4243.1700000001")], "null folds count too");
+  });
+});
+
+/** A tab in ANOTHER renderer process: `fn` runs in a document of its own over `copy`, that tab's view of the storage, which
+ *  this tab's latest writes have not reached yet; each key it writes then reaches this tab, the last write winning, as the
+ *  storage event delivers it. Returns the keys it wrote. */
+function inAnotherProcess(store: Map<string, string>, copy: Map<string, string>, fn: () => void): string[] {
+  const g: any = globalThis;
+  const saved = [g.localStorage, g.window];
+  const wrote = new Map<string, string | null>();
+  g.localStorage = { getItem: (k: string) => copy.get(k) ?? null, setItem: (k: string, v: string) => { copy.set(k, v); wrote.set(k, v); },
+                     removeItem: (k: string) => { copy.delete(k); wrote.set(k, null); } };
+  g.window = new EventTarget();
+  try { fn(); } finally { [g.localStorage, g.window] = saved; }
+  for (const [k, v] of wrote) { if (v === null) store.delete(k); else store.set(k, v); }
+  return [...wrote.keys()];
+}
+
+test("a tab in another renderer process hears this tab's earlier answer before this tab's later publish reaches it: this tab still passes that answer over", () => {
+  // that tab judges the answer without the later publish, and hears it. Its hearing writes only the counts, so this tab's
+  // entry and number stand; and a frame naming one of this browser's publishes never raises the heard count, so the
+  // count that ends an entry is not raised past this tab's entry by the very frame the entry holds back
+  withStore({}, (store, events) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy(NO_FOLDS), { browser: OTHER, n: 1 }, at(3));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));   // publish 1
+    const copy = new Map(store);                                         // the other tab's view: publish 1 has reached it
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "web", true));   // publish 2, which has not
+    const answer = kernelCopy(sent[0].f), by1 = { browser: sent[0].by.browser, n: 1 };
+    const wrote = inAnotherProcess(store, copy, () => hearSharedFolds(answer, () => {}, () => {}, by1, at(4)));   // the answer to 1 reaches that tab first
+    assert.ok(!wrote.includes(TABGROUPS_SHARED_KEY), "premise: the answer changes nothing that tab holds, so it caches nothing: " + JSON.stringify(wrote));
+    const rec = record(store);
+    assert.deepEqual([rec.n, Object.values(rec.live)], [2, [{ n: 2, received: at(3) }]], "this tab's number and its entry for publish 2 stand");
+    const painted = events.length;
+    hear(answer, by1, at(4));                                            // then the same answer reaches this tab
+    assert.deepEqual([readTabGroups().collapsed, events.length], [["api", "web"], painted], "passed over: web stays folded");
+    assert.deepEqual([wrote, counts(store)], [[SEEN], { received: at(4), heard: at(3) }], "that tab wrote the counts alone, the heard one unraised");
   });
 });
 
 test("an entry stops counting once a newer frame is heard, or once a frame of a new kernel life is received", () => {
   const E = "e".repeat(32);
   // a sibling pane's publish 5, made having received count 4, that never landed; its page went away without pagehide
-  withStore({ [PUBLISHES]: { browser: E, n: 5, live: { gone: { n: 5, received: at(4) } }, received: at(4), heard: at(4) } }, () => {
+  withStore({ [PUBLISHES]: { browser: E, n: 5, live: { gone: { n: 5, received: at(4) } } }, [SEEN]: { received: at(4), heard: at(4) } }, () => {
     const hear = hearing([]);
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["a"] }), { browser: E, n: 3 }, at(4));
     assert.deepEqual(readTabGroups().collapsed, [], "it stands: a frame at its count, naming this browser's publish 3, is passed over");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["b"] }), { browser: OTHER, n: 1 }, at(5));
-    assert.deepEqual(readTabGroups().collapsed, ["b"], "a later publish, taken and heard");
+    assert.deepEqual(readTabGroups().collapsed, ["b"], "a later publish, another device's, taken and heard");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["c"] }), { browser: E, n: 4 }, at(6));
     assert.deepEqual(readTabGroups().collapsed, ["c"], "and from then on the entry holds nothing of this browser's back");
   });
-  withStore({ [PUBLISHES]: { browser: E, n: 5, live: { gone: { n: 5, received: at(4, "old") } }, received: at(4, "old"), heard: at(4, "old") } }, () => {
+  withStore({ [PUBLISHES]: { browser: E, n: 5, live: { gone: { n: 5, received: at(4, "old") } } }, [SEEN]: { received: at(4, "old"), heard: at(4, "old") } }, () => {
     const hear = hearing([]);
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["a"] }), { browser: E, n: 3 }, at(4, "old"));
     assert.deepEqual(readTabGroups().collapsed, [], "in its own kernel life it stands");
@@ -417,14 +459,31 @@ test("an entry stops counting once a newer frame is heard, or once a frame of a 
   });
 });
 
-test("a frame of the previous kernel life delivered late is heard once, and the new life's next frame corrects it", () => {
-  withStore({}, () => {
-    const hear = hearing([]);
-    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), undefined, at(2, "new"));
+test("a frame of the previous kernel life delivered late is heard; until the new life's next frame, no publish made in the new life counts for the pass-over", () => {
+  withStore({}, (store) => {
+    const sent: Sent[] = [];
+    const hear = hearing(sent);
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), undefined, at(4, "new"));
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));    // publish 1
+    writeTabGroups(setSectionCollapsed(readTabGroups(), "docs", true));   // publish 2, both made having received new:4
+    const id = record(store).browser;
+    assert.deepEqual(sent.map((s) => s.by.received), [at(4, "new"), at(4, "new")], "premise: both carry new:4");
     hear(kernelCopy({ ...NO_FOLDS, collapsed: ["old"] }), undefined, at(9, "old"));    // the old life's frame, very late
-    assert.deepEqual(readTabGroups().collapsed, ["old"], "heard: another life's count says nothing about this one's");
-    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), undefined, at(2, "new"));    // the new life's next frame (a drag's push)
-    assert.deepEqual(readTabGroups().collapsed, ["web"], "heard again: the new life's word");
+    assert.deepEqual([readTabGroups().collapsed, counts(store)], [["old"], { received: at(9, "old"), heard: at(9, "old") }],
+      "heard, and both counts set back to the old life: another life's count says nothing about this one's");
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web", "api"] }), { browser: id, n: 1 }, at(5, "new"));   // publish 1's own answer, publish 2 still out
+    assert.deepEqual(readTabGroups().collapsed, ["web", "api"],
+      "heard: publish 2's entry, made in the new life, no longer counts, so the older state shows until publish 2's answer lands");
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web", "api", "docs"] }), { browser: id, n: 2 }, at(6, "new"));
+    assert.deepEqual(readTabGroups().collapsed, ["web", "api", "docs"], "publish 2's answer: the new life's word");
+  });
+  withStore({}, (store) => {
+    const hear = hearing([]);
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), undefined, at(4, "new"));
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["old"] }), undefined, at(9, "old"));
+    hear(kernelCopy({ ...NO_FOLDS, collapsed: ["docs"] }), undefined, at(3, "new"));   // an older frame of the new life, later still
+    assert.deepEqual([readTabGroups().collapsed, counts(store).received], [["docs"], at(3, "new")],
+      "heard, and the new life's received count comes back lower than it was (4, now 3)");
   });
 });
 
@@ -446,8 +505,7 @@ test("a record from before the count: a bare-number entry is an entry with no co
 
 test("the record is written before the send: an answer heard inside the send finds the entry, and nothing puts back what its hearing wrote", () => {
   // the kernel's answer can arrive inside the send; on a first hearing it starts the connection afresh, retiring the entry
-  // the publish was made on, and raises the counts. A record written after the send would put the retired entry back,
-  // standing, and the counts back down
+  // the publish was made on. A record written after the send would put the retired entry back, standing
   withStore({ [TABGROUPS_KEY]: { on: true, collapsed: ["web"], expanded: [], pinned: [] } }, (store) => {
     let answers = 0;
     const send = (f: TabFolds, by: any) => {
@@ -455,13 +513,13 @@ test("the record is written before the send: an answer heard inside the send fin
       hearSharedFolds(kernelCopy(f), send, setFoldsPublisher, { browser: by.browser, n: by.n }, at(1));   // answered at once
     };
     hearSharedFolds(null, send, setFoldsPublisher, undefined, at(0));   // a kernel with no folds: this browser's go up
-    const rec = record(store);
-    assert.deepEqual([answers, rec.live, rec.received, rec.heard], [1, {}, at(1), at(1)]);
+    assert.deepEqual([answers, record(store).live, counts(store)], [1, {}, { received: at(1), heard: at(0) }],
+      "the entry retired, and the answer, naming this browser's publish, raised the received count alone");
   });
 });
 
-test("a record whose shape is wrong reads as a fresh one: a new browser id, number 1, and none of its entries or counts", () => {
-  withStore({ [PUBLISHES]: { browser: 7, n: 9, live: { a: { n: 12, received: at(2) } }, received: at(2), heard: at(2) } }, (store) => {
+test("a record whose shape is wrong reads as a fresh one: a new browser id, number 1, and none of its entries", () => {
+  withStore({ [PUBLISHES]: { browser: 7, n: 9, live: { a: { n: 12, received: at(2) } } } }, (store) => {
     const sent: Sent[] = [];
     const hear = hearing(sent);
     hear(kernelCopy(NO_FOLDS), { browser: OTHER, n: 1 }, at(3));
@@ -473,11 +531,11 @@ test("a record whose shape is wrong reads as a fresh one: a new browser id, numb
   });
 });
 
-test("a record's malformed entries are dropped one by one, and a malformed count drops the count alone", () => {
+test("a record's malformed entries are dropped one by one, and a malformed count in an entry drops the count alone", () => {
   const E = "e".repeat(32);
   const live = { good: { n: 9, received: at(3) }, old: 8, badCount: { n: 4, received: { boot: "", n: 1 } },
                  zero: 0, text: "7", frac: 1.5, none: null, list: [9], noN: { received: at(3) }, badN: { n: 0 } };
-  withStore({ [PUBLISHES]: { browser: E, n: 9, live, received: { boot: "", n: 3 }, heard: "x" } }, (store) => {
+  withStore({ [PUBLISHES]: { browser: E, n: 9, live } }, (store) => {
     const sent: Sent[] = [];
     const hear = hearing(sent);
     hear(kernelCopy(NO_FOLDS));                                          // a frame with no count: nothing noted
@@ -485,9 +543,30 @@ test("a record's malformed entries are dropped one by one, and a malformed count
     const rec = record(store);
     const [mine] = Object.keys(rec.live).filter((c) => !(c in live));
     assert.deepEqual(rec.live, { good: { n: 9, received: at(3) }, old: { n: 8 }, badCount: { n: 4 }, [mine]: { n: 10 } });
-    assert.deepEqual([sent.map((s) => s.by), "received" in rec, "heard" in rec], [[{ browser: E, n: 10 }], false, false],
-      "the record's malformed counts are gone: the publish says it received none");
+    assert.deepEqual(sent.map((s) => s.by), [{ browser: E, n: 10 }], "no count noted: the publish says it received none");
   });
+});
+
+test("the counts' own key read malformed: a malformed count is dropped on its own, and a key that is not an object reads as none", () => {
+  const E = "e".repeat(32);
+  const cases: [unknown, unknown][] = [
+    [{ received: at(3), heard: "x" }, at(3)],
+    [{ received: { boot: "", n: 3 }, heard: at(3) }, undefined],
+    [{ received: { boot: LIFE, n: -1 } }, undefined],
+    [{ received: { boot: LIFE, n: 1.5 } }, undefined],
+    ["{not json", undefined],
+    [[at(3)], undefined],
+  ];
+  for (const [seed, received] of cases) {
+    withStore({ [PUBLISHES]: { browser: E, n: 1, live: {} }, [SEEN]: seed }, (store) => {
+      const sent: Sent[] = [];
+      const hear = hearing(sent);
+      hear(kernelCopy(NO_FOLDS));                                        // a frame with no count: nothing noted
+      writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));
+      assert.deepEqual(sent.map((s) => s.by), [received ? { browser: E, n: 2, received } : { browser: E, n: 2 }], JSON.stringify(seed));
+      assert.deepEqual(Object.values(record(store).live), [received ? { n: 2, received } : { n: 2 }], "and the entry alike: " + JSON.stringify(seed));
+    });
+  }
 });
 
 test("a named fold goes to the LOCAL kernel whole, its name with it", () => {
