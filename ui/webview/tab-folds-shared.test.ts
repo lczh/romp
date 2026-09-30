@@ -325,8 +325,10 @@ test("a browser that cannot keep the record publishes unnamed: the message is ex
 });
 
 test("the record keeps at most 32 connections, dropping the smallest number and never the publishing one's", () => {
+  // kept largest first, so the order the record holds them in is not the order of their numbers: a cap that dropped
+  // the entries it met first would drop the nine LARGEST
   const live: Record<string, number> = {};
-  for (let i = 1; i <= 40; i++) live["c" + i] = i;
+  for (let i = 40; i >= 1; i--) live["c" + i] = i;
   withStore({ [PUBLISHES]: { browser: "e".repeat(32), n: 40, live } }, (store) => {
     const sent: Sent[] = [];
     const hear = hearing(sent);

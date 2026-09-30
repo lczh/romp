@@ -487,13 +487,14 @@ function newFoldsConnection(w: any): void {
 }
 
 /** A frame naming one of this browser's publishes says the kernel has handled that number from it, and the kernel drops
- *  any later publish of this browser's numbered below it as an older state (kernel.py _write_view_folds). The record
- *  agrees unless it came back older than the kernel's word (2026-09-29): a browser killed before its storage was
- *  written, whose next folds would then be dropped with no push and no warning. So the page keeps, on its window, the
- *  highest number of this browser's that a frame has named, and numbers its next publish past it (stampingFolds). This
- *  browser's own only: another device's number says nothing about this browser's count, and its frame leaves standing
- *  what an earlier frame said. In memory only, like the connection id, so no extra storage write can race another
- *  renderer process. */
+ *  a later publish of this browser's numbered below it as an older state unless the count that publish carries proves
+ *  it newer (kernel.py _write_view_folds). The record agrees unless it came back older than the kernel's word
+ *  (2026-09-29): a browser killed before its storage was written. So the page keeps, on its window, the highest number
+ *  of this browser's that a frame has named, and numbers its next publish past it (stampingFolds); when no frame has
+ *  named this browser (another device published since), the count its publish carries is what lands it (2026-09-30).
+ *  This browser's own only: another device's number says nothing about this browser's count, and its frame leaves
+ *  standing what an earlier frame said. In memory only, like the connection id, so no extra storage write can race
+ *  another renderer process. */
 function noteFoldsFloor(w: any, by: FoldsBy): void {
   if (by.browser !== readPublishRecord().browser) return;
   if (!(typeof w.__rompFoldsFloor === "number" && w.__rompFoldsFloor >= by.n)) w.__rompFoldsFloor = by.n;

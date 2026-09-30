@@ -6490,9 +6490,10 @@ _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": th
 # own publishes older than one it has sent since (tab-groups.ts hearSharedFolds). The last handled publish
 # counts whether it was written, unchanged or refused, since any of them is what the page last said here. A
 # browser's publish older than one already handled from that browser (two panes, two sockets, landing out of
-# order) is dropped: it would put back a state that browser has already replaced. Memory only, never in
+# order) is dropped: it would put back a state that browser has already replaced (a lower number whose count
+# proves it newer is not older: the note below). Memory only, never in
 # view-folds.json, whose object stays the browser's byte for byte; a restarted kernel names nothing until the
-# next publish, and a page then adopts every frame, as before the stamp.
+# next publish, so until then no frame is passed over for its name (its count starts again too: the note below).
 #
 # HOW FAR THIS KERNEL HAS GOT (2026-09-30). The name says whose publish a frame reflects, which cannot say whether
 # THIS browser's latest publish had landed when a frame naming another device, or nothing, was built: an
