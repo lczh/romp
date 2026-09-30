@@ -5034,6 +5034,12 @@ so instead of opening anything. The key is a command in the shortcuts dialog and
 there; on a keyboard where Ctrl+Alt+M types a character (AltGr+M on a German layout), the
 character wins.
 
+On a phone or tablet a long-press selection opens no menu, so a **Comment** button appears just
+below the selection instead (above it when the message box leaves no room), and tapping it opens
+the same box. It steps aside while you drag the selection's handles or scroll with your finger and
+comes back on the selection once you lift it; it goes when the selection is cleared or scrolled out
+of view, and when the box opens.
+
 ### Stepping through your messages and comments
 
 The arrows in the chat's bottom-left corner form one narrow column above the go-to-bottom chip, which
