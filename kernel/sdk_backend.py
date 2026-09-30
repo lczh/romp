@@ -7217,11 +7217,21 @@ class SdkSession:
         """A PARENT turn was served on `pm` while a retry stands (the AssistantMessage learn, never the init's report of
         the configured model or a context refresh: the CLI running on the pick is not the API serving it). At or above
         the tier the session fell from, the retry is done: the arm clears and the kernel-wired hook mints the completed
-        card saying the session is back (on_model_restored, the on_model_fallback idiom)."""
+        card saying the session is back (on_model_restored, the on_model_fallback idiom). At or above a VERSIONED pick's
+        own model too (2026-09-30, the #33 follow-up's review): the learn arms from the live name, which after a pick below
+        it can still sit above the pick when a real fallback lands (a reply from before the pick moved it back), and the
+        retry's reconnect runs the pick, so the model it was armed from never comes back. A pick that names no version
+        (a Latest click, the account default) keeps the end at the tier it fell from."""
         arm = self._retry_armed()
         if not arm:
             return
-        if _model_rank(pm) is None or _model_rank(arm.get("from")) is None or _model_downgrade(arm.get("from"), pm):
+        if _model_rank(pm) is None:
+            return
+        frm = arm.get("from")
+        lab = _alias_label(str(arm.get("pick") or ""))
+        back = _model_rank(frm) is not None and not _model_downgrade(frm, pm)
+        on_pick = _model_version(lab) is not None and not _model_downgrade(lab, pm)
+        if not (back or on_pick):
             return
         self._upgrade_retry = None
         self.backend._log("retry upgrade (%s): back on %s after %d attempt(s)" % (self.name, pm, arm.get("attempts", 0)))
@@ -7826,6 +7836,9 @@ class SdkSession:
                     # out): the host and its CLI live on; detach (the transport's close already did) and try
                     # again, bounded — never the crash heal, whose resume would put a second CLI beside the host's
                     self._host_attach_retries += 1
+                    if not getattr(self, "_host_is_attach", False) and carried > getattr(self, "_pick_taken", 0):
+                        self._pick_taken = carried   # this LAUNCH's CLI is up with the pick's --model, and the attach that
+                        #   retries it tells that CLI nothing (2026-09-30, the #33 follow-up's review)
                     self.backend._log("host (%s): attach did not complete (%s); retry %d" % (self.name, type(e).__name__, self._host_attach_retries))
                     if self._host_attach_retries <= 3:
                         self.inflight = 0
