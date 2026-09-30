@@ -6548,6 +6548,61 @@ def _write_view_folds(folds):
     return True
 
 
+# ── …and the viewer's FILE TABS, kept beside them the same way (the user 2026-09-30) ─────────────────────────────────
+# A file opened from the viewer as a tab of the chat strip (ui/webview/file-tabs.ts) sits beside a session tab, and the
+# user wants one arrangement on every device, so the list rides this store's frame and push too: the viewOrder frame
+# carries `files` beside `order` and `folds`, and view-files.json sits beside their files. Its own FILE, not entries in
+# the arrangement, so a page from before file tabs (which prunes the arrangement to the sessions it knows) can never drop
+# them, and its own frame half, so such a page ignores it. The same opaque-data contract as the folds: this kernel checks
+# that it is an object and that it is bounded, and reads nothing inside it (paths, session ids and host prefixes are the
+# viewer's). Last write wins.
+_VIEW_FILES_CAP = 256 * 1024             # bytes of JSON; refused whole over it, never cut (the folds' rule)
+_view_files_lkg = [None]                 # last known good, as _view_folds_lkg
+
+
+def _view_files_path():
+    return jd.STATE / "view-files.json"
+
+
+def _view_files_served():
+    """The file tabs to serve: the stored object, None when this kernel keeps NONE (absent file: a browser holding
+    tabs of its own publishes them against exactly that, file-tabs.ts hearSharedFileTabs), or _VIEW_FOLDS_UNKNOWN when
+    the file could not be read and nothing is known-good (the frame then carries no files half). _view_folds_served's
+    reasoning, for the same kind of store."""
+    p = _view_files_path()
+    try:
+        raw = _read_state_json(p, expect=dict)
+    except _StateUnreadable as e:
+        _note_state_fault(e)
+        lkg = _view_files_lkg[0]
+        return dict(lkg) if lkg is not None else _VIEW_FOLDS_UNKNOWN
+    _clear_state_fault(p)
+    if raw is None:
+        return None
+    _view_files_lkg[0] = dict(raw)
+    return raw
+
+
+def _write_view_files(files):
+    """Publish the viewer's file tabs. Raises _StateUnwritable on a failed publish and on an object over the cap
+    (refused whole), so the gesture is refused loudly. Returns whether anything CHANGED."""
+    if not isinstance(files, dict):
+        raise _StateUnwritable(_view_files_path(), "not an object")
+    text = json.dumps(files, sort_keys=True)
+    if len(text) > _VIEW_FILES_CAP:
+        raise _StateUnwritable(_view_files_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FILES_CAP))
+    with _view_order_lock:                           # one lock for the viewer's store, every file
+        try:
+            raw = _read_state_json(_view_files_path(), expect=dict)
+        except _StateUnreadable:
+            raw = _VIEW_ORDER_NO_PROOF               # cannot prove it unchanged -> publish (a whole replace)
+        if raw is not _VIEW_ORDER_NO_PROOF and raw == files:
+            return False
+        _write_state_json(_view_files_path(), text)
+        _view_files_lkg[0] = json.loads(text)
+    return True
+
+
 def _merge_session_order(incoming):
     """Splice a drag's order into the persisted one WITHOUT disturbing lanes the drag didn't touch. A drag
     publishes the order of the sids on ONE surface (chat tabs, or timeline lanes) — usually a SUBSET of all
@@ -54289,9 +54344,10 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagEdit — the targeted `tagEdit` op (create / rename / recolor / addMember / removeMember /
 #             delete / move, by tag id), the `tagEditAck` / `viewsAck` answers on the poster's socket,
 #             and the write sequence (`seq`) on every views blob.
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
-#                                              viewFolds: …and its folded groups, on the same frame (2026-09-23)
+#                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
+#                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05
@@ -54343,18 +54399,25 @@ def _view_order_frame():
     same slot, so the folds converge on the same event the arrangement does (a setViewFolds that CHANGES
     the store).
 
+    `files` rides beside them too (2026-09-30): the viewer's file tabs (_view_files_served), an object, or null when
+    this kernel keeps none (file-tabs.ts hearSharedFileTabs publishes a browser's own against that), on the same
+    event (a setViewFiles that CHANGES the store).
+
     Each half is left OUT when its store could not be read and nothing is known-good, and the page keeps
     what it is showing for that half rather than adopting a guess (federation.ts reads a half only when it
-    is present); None, no frame at all, when neither half can be said."""
+    is present); None, no frame at all, when no half can be said."""
     served = _view_order_served()
     folds = _view_folds_served()
-    if served is None and folds is _VIEW_FOLDS_UNKNOWN:
+    files = _view_files_served()
+    if served is None and folds is _VIEW_FOLDS_UNKNOWN and files is _VIEW_FOLDS_UNKNOWN:
         return None
     fr = {"type": "viewOrder"}
     if served is not None:
         fr["order"], fr["stored"] = served
     if folds is not _VIEW_FOLDS_UNKNOWN:
         fr["folds"] = folds
+    if files is not _VIEW_FOLDS_UNKNOWN:
+        fr["files"] = files
     return fr
 
 
@@ -64589,6 +64652,9 @@ _CHAT_MOBILE_CSS = (
     ".mrow .workdot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--st-working-bg,#e0b020)}"
     ".mrow .workdot.await{background:var(--st-awaitbg-bg,#54B204)}"   # green: idle-waiting-on-bg-work
     ".mrow .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dddddd}"
+    # a FILE TAB's row (2026-09-30): the file beside its session, set in under it at the text's own weight, so it reads as
+    # the session's file and never as a session; the glyph the strip's tab wears rides the cloned label
+    ".mrow.file{padding-left:28px}.mrow.file .nm{font-weight:400}.mrow.file .tab-file-glyph{margin-right:6px}"
     # per-row end-session x (the mobile picker's only way to end a session — desktop has the tab x)
     ".mrow .mclose{flex:0 0 auto;order:1;margin-left:8px;padding:0 6px;color:#8a8a8a;font-size:20px;line-height:1}"   # order:1 keeps the x right of the Needs-you pill
     ".mrow .mclose:active{color:#e5484d}"
@@ -64677,7 +64743,7 @@ var lab=t.querySelector('.tab-label'),id=t.getAttribute('data-id'),copy=t.getAtt
 out.push({key:'t:'+id+'/'+(copy===null?'':copy),id:id,copy:copy,name:(lab?lab.textContent:id),lab:lab,
 bg:t.style.getPropertyValue('--chip-bg').trim(),fg:t.style.getPropertyValue('--chip-fg').trim(),
 working:t.classList.contains('tab-working'),awaitbg:!!t.querySelector('.tab-dot.await'),retrying:!!t.querySelector('.tab-dot.retrying'),ask:t.classList.contains('ring-waiting-on-you'),badgeNeeds:!!t.querySelector('.tab-badge'),needsCount:(function(){var b=t.querySelector('.tab-badge');return b?b.textContent:'';})(),needsLabel:(function(){var b=t.querySelector('.tab-badge');return b?(b.getAttribute('aria-label')||''):'';})(),active:t.classList.contains('active'),
-ph:t.classList.contains('tab-placeholder'),away:t.classList.contains('tab-away')});});return out;}
+ph:t.classList.contains('tab-placeholder'),away:t.classList.contains('tab-away'),file:t.classList.contains('tab-file')});});return out;}
 // A name is filled from the desktop label's own CHILD NODES, cloned — not from its flattened text. A
 // federated session's name carries a <span class="host-prefix"> that renders the "host:" as quiet
 // metadata (host-prefix.ts: dim, italic, never bold, a step smaller), and textContent threw that span
@@ -64696,6 +64762,7 @@ function rowUpdate(row,s){row.classList.toggle('active',!!s.active);
 // who tapped a remote session on the phone and nothing happened)
 row.classList.toggle('ph',!!s.ph&&pendingId!==s.id);
 row.classList.toggle('pending',pendingId===s.id);
+row.classList.toggle('file',!!s.file);   // a file tab's row (2026-09-30)
 row.classList.toggle('ask',!!s.ask);   // RING mode: the desktop tab's magenta ring (ring-waiting-on-you, a widget with a switch; switched off it puts no class on the tab, so the phone follows): a card of this session's needs you
 var mb=row.querySelector('.m-badge');   // BADGE mode: the desktop tab wears a .tab-badge dot with a count instead of the ring; the phone shows the same dot in the row's flow, before the close (plans/tab-state-badge.md)
 if(s.badgeNeeds){if(!mb){mb=document.createElement('span');mb.className='m-badge';mb.setAttribute('role','img');row.appendChild(mb);}mb.textContent=s.needsCount||'';mb.setAttribute('aria-label',s.needsLabel||'needs you');}
@@ -64711,7 +64778,7 @@ var lbl=row.querySelector('.nm');fillName(lbl,s);lbl.style.color=s.bg||'';
 if(s.copy!==null)row.setAttribute('data-copy',s.copy);else row.removeAttribute('data-copy');}
 function rowMake(s){var row=document.createElement('div');row.className='mrow';row.setAttribute('data-id',s.id);row.setAttribute('data-key',s.key);
 var lbl=document.createElement('span');lbl.className='nm';row.appendChild(lbl);
-var x=document.createElement('span');x.className='mclose';x.textContent='\u00d7';x.title='End session';
+var x=document.createElement('span');x.className='mclose';x.textContent='\u00d7';x.title=s.file?'Close tab':'End session';   // a file tab's row (2026-09-30) closes the tab
 row.appendChild(x);rowUpdate(row,s);return row;}
 // a GROUP HEADING: the header's own chip (tag-menu.ts tagChip, cloned — the one tag treatment, T251), the caret,
 // the count (folded: the members the fold hides, as the header counts them) and, folded, the header's member-state
@@ -67424,6 +67491,14 @@ else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
     try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}}
   try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time
   try{bf&&bf.contentWindow&&bf.contentWindow.postMessage({romp:'browseFiles',path:m.path,sid:m.sid},'*');}catch(e){}}
+// A file POPPED OUT of a viewer hosted by a pane with no tab strip (the feed's file browser, the Files pane: file-view.ts
+// popOutTarget, 2026-09-30) posts up as openFileTab; the shell forwards it to the chat column that shows that session (the
+// one last used when none does), bringing a toggled-off chat pane forward and, on a phone, the chat tab, so the tab that
+// opens is on screen. The chat opens it beside the session it came from (render.ts openFileAsTab).
+if(m.romp==='openFileTab'&&typeof m.path==='string'&&m.path){var ft=(window.__rompChatTarget&&window.__rompChatTarget(m.sid))||(window.__rompFocusedChatId&&document.getElementById(window.__rompFocusedChatId()))||document.getElementById('f-chat');
+  if(!document.body.classList.contains('po-chat')){try{window.__rompPaneToggle&&window.__rompPaneToggle('chat',true);}catch(e){}}
+  try{if(window.__rompMobileOn&&window.__rompMobileOn())window.__rompMobileTab&&window.__rompMobileTab('chat');}catch(e){}
+  try{ft&&ft.contentWindow&&ft.contentWindow.postMessage({romp:'openFileTab',path:m.path,sid:m.sid||null},'*');}catch(e){}}
 // A passage selected in a viewer hosted by a pane with NO composer (the feed) posts up in the
 // editorSelection shape the chat already handles (file-view.ts composerWindow); the shell forwards it
 // whole into the chat pane, whose composer seeds the labeled quote chip for the session the file was
@@ -74625,6 +74700,19 @@ class Handler(BaseHTTPRequestHandler):
                 # the next reload, and no other device would ever hear of it
                 sys.stderr.write("romp-kernel: setViewFolds refused: %s\n" % e)
                 _reply(client, {"type": "warn", "text": "Couldn't save the folded groups: %s" % e})
+            else:
+                if changed:                          # the change is the event; an unchanged republish pushes nothing
+                    _broadcast_view_order()
+        elif msg and msg.get("type") == "setViewFiles" and isinstance(msg.get("files"), dict):
+            # A file opened as a tab, closed, or dragged, on ANY viewer of this kernel (the user 2026-09-30, who wanted
+            # the files open beside their sessions to follow them like the tab order does). Kept WHOLE and OPAQUE beside
+            # the arrangement, pushed on the same frame. Last write wins.
+            try:
+                changed = _write_view_files(msg["files"])
+            except (_StateUnreadable, _StateUnwritable) as e:
+                # refused out loud: the tab sits on this page and would silently vanish on the next reload
+                sys.stderr.write("romp-kernel: setViewFiles refused: %s\n" % e)
+                _reply(client, {"type": "warn", "text": "Couldn't save your file tabs: %s" % e})
             else:
                 if changed:                          # the change is the event; an unchanged republish pushes nothing
                     _broadcast_view_order()

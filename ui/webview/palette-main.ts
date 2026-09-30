@@ -90,7 +90,7 @@ installMenuEcho();
     for (const id of mru.slice(1)) { const r = byId.get(id); if (r) { ordered.push(r); byId.delete(id); } }
     for (const r of rows) if (byId.has(r.id) && r.id !== mru[0]) ordered.push(r);
     const base = (d: string) => (d || "").replace(/\/+$/, "").split("/").pop() || "";
-    return ordered.map((r) => {
+    return ordered.map((r): PickItem => {
       const p = hostPrefix(r.name, r.id);   // remote → {host:"host:", rest}; local (bare uuid) → null
       return {
         title: p ? p.host + p.rest : r.name,
@@ -99,6 +99,17 @@ installMenuEcho();
         dim: base(r.dir),
         run: () => chatPost({ type: "jumpSession", id: r.id }),
       };
+    }).concat(fileTabItems());
+  }
+  // …and the FILES open as tabs (2026-09-30), after the sessions: the basename with its folder dim beside it, a remote file's
+  // "host:" as a session's is, and a pick shows the tab in the column that holds it (chatPost's column: the last used)
+  function fileTabItems(): PickItem[] {
+    let rows: Array<{ id: string; path: string; host: string }> = [];
+    try { const ls = (chatPane()?.contentWindow as any)?.__rompFileTabList; rows = ls ? ls() : []; } catch (e) { rows = []; }
+    return rows.map((r) => {
+      const cut = r.path.lastIndexOf("/");
+      const pre = r.host ? r.host + ":" : "";
+      return { title: pre + r.path.slice(cut + 1), hostLen: pre.length, dim: cut > 0 ? r.path.slice(0, cut) : "", run: () => chatPost({ type: "jumpFileTab", id: r.id }) };
     });
   }
   function openSessionSwitcher(): void {
@@ -279,6 +290,16 @@ installMenuEcho();
   const stepSession = (type: "nextTab" | "prevTab"): void => { if (fullPaneUp()) return; chatPost({ type, gesture: true }); };
   registerCommand({ id: "chat.nextTab", title: "Go to the next session", run: () => stepSession("nextTab") });
   registerCommand({ id: "chat.prevTab", title: "Go to the previous session", run: () => stepSession("prevTab") });
+  // "Open this file as a tab" (2026-09-30): listed while a file viewer is up in any pane (a chat column, the feed's file
+  // browser, the Files pane); the run presses that viewer's own pop-out, so the palette and the button are one path
+  const popOutButton = (): HTMLElement | null => {
+    const ids: string[] = [...(w.__rompChatColumnIds ? w.__rompChatColumnIds() : ["f-chat"]), "f-feed", "f-files"];
+    for (const id of ids) {
+      try { const b = pane(id)?.contentDocument?.querySelector("#romp-fileview .fileview-popout:not([hidden])") as HTMLElement | null; if (b) return b; } catch (e) { /* a pane not loaded */ }
+    }
+    return null;
+  };
+  registerCommand({ id: "file.openAsTab", title: "Open this file as a tab", when: () => !!popOutButton(), run: () => { popOutButton()?.click(); } });
   // Per-tab hot keys (the user 2026-09-10): a session with a hot key is a command "Switch to <name>" whose chord
   // lives in the bindings store like any other, so the dispatcher below, the conflict check and the shortcuts
   // dialog cover it. The set of such sessions (romp:tabkeys) is read at boot, before any pane has loaded, and

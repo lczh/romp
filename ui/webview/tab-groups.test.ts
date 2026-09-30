@@ -329,7 +329,7 @@ test("executed: the header click sets the fold state from what it RENDERED — n
   // the header carries its rendered state; the delegate reads it
   const head = RENDER.slice(RENDER.indexOf("function makeGroupHead("), RENDER.indexOf("function sectionHeadOf("));
   assert.match(head, /head\.dataset\.folded = collapsed \? "1" : "0";/);
-  assert.match(RENDER, /if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone\) snapView = name;\s*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);\s*\n\s*if \(!phone\) showActive\(\);/,
+  assert.match(RENDER, /if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone && leaveFileTab\(\)\) snapView = name;[^\n]*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);\s*\n\s*if \(!phone\) showActive\(\);/,   // a file tab up gives the pane to the view (2026-09-30)
     "rendered open → fold; rendered folded → open (and on the desktop the section shows in the pane: snapView; the phone's picker folds through the same handler and shows nothing, 2026-09-23)");
 });
 
@@ -385,7 +385,7 @@ test("headers are click-safe: data-act on the node, the action on the stable #ta
   assert.match(RENDER, /head\.dataset\.act = "toggle-group";/);
   // the click derives the next fold state from the one the header RENDERED (data-folded), never from the store, and
   // shows the section in the pane (snapView; tab-snapshot-pane.test.ts)
-  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone\) snapView = name;\s*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);/);
+  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone && leaveFileTab\(\)\) snapView = name;[^\n]*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);/);
   // …and the kernel's copy of the folds, cached by a sibling pane (a fold there, or the kernel's push of one made on another device)
   assert.match(RENDER, /window\.addEventListener\("storage", \(e\) => \{ if \(e\.key === TABGROUPS_SHARED_KEY\) renderTabs\(\); \}\);/, "a fold cached by a sibling pane, or pushed from another device, repaints");
   assert.match(RENDER, /window\.addEventListener\(TABGROUPS_EVENT, \(\) => renderTabs\(\)\);/, "the same-window delivery");
@@ -484,7 +484,7 @@ test("executed + pinned: the one-group-per-row setting is on by default; off, th
   // the gate itself is executed here off the source text: on, every head but the first gets a break; off, none
   // (the loop walks the PAINT: the plan's items, plus on the phone the folded-away active tab's node — tab-groups.ts phoneStandIns)
   assert.match(RENDER, /const paint = phoneLayout\(\) \? phoneStandIns\(plan\.items, activeId, plan\.folded\) : plan\.items;/);
-  const loop = RENDER.slice(RENDER.indexOf("for (const item of paint) {"), RENDER.indexOf("const id = item.id;"));
+  const loop = RENDER.slice(RENDER.indexOf("for (const item of files.items) {"), RENDER.indexOf("const id = item.id;"));   // the paint with the file tabs woven in (2026-09-30: fileStripPaint)
   assert.equal((loop.match(/makeRowBreak\(/g) ?? []).length, 1, "one break site in the loop");
   assert.equal((loop.match(/bar\.appendChild\(/g) ?? []).length, 2, "the head branch appends the break (gated) and the header; nothing else sits between a head and its tabs");
   const gate = loop.match(/if \((settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount && !item\.packed)\) bar\.appendChild\(makeRowBreak\(false\)\);/);
@@ -1894,7 +1894,7 @@ test("the group header wears the SHARED tag chip — one vocabulary with the tag
 test("every copy is the full tab of the ONE session, and the by-copy readers tell copies apart (T264b)", () => {
   const loop = RENDER.slice(RENDER.indexOf("collapsedTabIds = plan.folded;"), RENDER.indexOf('const close = el("span", "tab-close");'));
   // the active highlight, the state class and the dot come from the same per-item loop, so every copy wears them
-  assert.match(loop, /const tab = el\("div", "tab" \+ \(id === activeId \? " active" : ""\)\);/);
+  assert.match(loop, /const tab = el\("div", "tab" \+ \(id === activeId && !fileTabOpen \? " active" : ""\)\);/);   // a file tab up is the selected one (2026-09-30)
   assert.match(loop, /if \(copyGroup !== undefined\) tab\.dataset\.copy = copyGroup \?\? "";/, "data-copy names the copy's group (sectioned strip only)");
   assert.match(loop, /const ph = makePlaceholderTab\(id\);\s*\n\s*if \(copyGroup !== undefined\) ph\.dataset\.copy = copyGroup \?\? "";/, "…on a placeholder copy too (a create in flight under two tags), so flipTabs keys never collide");
   assert.match(loop, /tab\.dataset\.act = "select";/, "a click on any copy selects the session through the #tabs delegate, by id");
@@ -1924,7 +1924,7 @@ test("the tab drag moves THIS copy and reorders within its group's neighbours (T
   // other tab falls back to the nearest tab across groups (a drop at a group's head used to anchor on the
   // group above's last tab, so the session's other copy jumped)
   assert.match(drop, /const edge = \(n: Element\) => n\.classList\.contains\("tab-group-head"\) \|\| n\.classList\.contains\("tab-group-break"\) \|\| n\.classList\.contains\("tab-group-sep"\);/);
-  assert.match(drop, /while \(n && \(!\(n as HTMLElement\)\.dataset\?\.id \|\| own\(n\)\)\) \{ if \(inGroup && edge\(n\)\) return null; n = step\(n\); \}/);
+  assert.match(drop, /while \(n && \(!\(n as HTMLElement\)\.dataset\?\.id \|\| own\(n\) \|\| fileTab\(n\)\)\) \{ if \(inGroup && edge\(n\)\) return null; n = step\(n\); \}/);
   assert.match(drop, /const prev = prevIn \?\? \(nextIn \? null : walk\(dragged\.previousElementSibling, back, false\)\);/);
   assert.match(drop, /const next = nextIn \?\? \(prevIn \? null : walk\(dragged\.nextElementSibling, fwd, false\)\);/);
   assert.doesNotMatch(drop, /\n\s*tabDragCommitted = true;\s*\/\//, "no unconditional commit: a drop that moved nothing takes dragend's cancel path");

@@ -147,9 +147,9 @@ test("the feed bundle carries the sanitizer but neither the math grammar nor KaT
 
 test("the submit backstop: one preventDefault listener on the viewer body in openFileView AND openUrlView, installed before any render swaps the body's children", () => {
   const VIEW = read("file-view.ts");
-  const local = VIEW.split("export function openFileView(")[1].split("\nexport function ")[0];
+  const local = VIEW.split("function buildFileView(")[1].split("\nexport function ")[0];   // the viewer's builder, the modal's and a file tab's (2026-09-30)
   const url = VIEW.split("export function openUrlView(")[1].split("\nexport function ")[0];
-  for (const [name, fn] of [["openFileView", local], ["openUrlView", url]] as const) {
+  for (const [name, fn] of [["buildFileView", local], ["openUrlView", url]] as const) {
     assert.equal((fn.match(/body\.addEventListener\("submit", \(ev\) => \{ ev\.preventDefault\(\); \}\);/g) || []).length, 1, name + " installs the backstop once per open");
     assert.ok(fn.indexOf('body.addEventListener("submit"') < fn.indexOf("body.replaceChildren("), name + ": installed before any render swaps the body's children");
   }

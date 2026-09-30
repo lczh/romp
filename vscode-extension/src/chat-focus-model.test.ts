@@ -14,7 +14,8 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 const TL = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "romp-timeline-view.js"), "utf8");
 
 test("clicking a tab focuses the (rebuilt) active tab so Enter drops into the box", () => {
-  assert.match(SRC, /select: \(el\) => \{ const id = el\.dataset\.id; if \(id\) \{ setActive\(id\); focusActiveTab\(\); \} \}/);
+  assert.match(SRC, /select: \(el\) => \{ const id = el\.dataset\.id; if \(id\) \{ selectStripTab\(id\); focusActiveTab\(\); \} \}/);   // a session, or a file tab (2026-09-30)
+  assert.match(SRC, /function selectStripTab\(id: string\): void \{\n\s*if \(isFileTabId\(id\)\) selectFileTab\(id\); else setActive\(id\);\n\}/);
 });
 
 test("Enter on a focused tab → the message box (or the live-ask picker if one is up)", () => {
@@ -43,7 +44,7 @@ test("Enter from the bare chat area (no focused control) drops into the message 
   // gated on activeElement === body so it never steals Enter from a control/tab/the live-ask card, and it
   // hooks no clicks → highlighting + expanding folds are unaffected
   const i = SRC.indexOf('window.addEventListener("keydown"', SRC.indexOf("NAV_SCROLL_STEP"));
-  const block = SRC.slice(i, i + 3600);   // the tail grew a hold line (T236: the hand-over note stands the default down) and the arrows' folded-away branch (the header as the active tab's stand-in)
+  const block = SRC.slice(i, i + 4400);   // a file tab's step and scroll lead it (2026-09-30); the tail grew a hold line (T236: the hand-over note stands the default down) and the arrows' folded-away branch (the header as the active tab's stand-in)
   assert.match(block, /e\.key === "Enter"/);
   assert.match(block, /const ae = document\.activeElement;\s*if \(ae && ae !== document\.body\) return;/);
   assert.match(block, /if \(focusComposerOrAsk\(\)\) e\.preventDefault\(\);/);
