@@ -6517,8 +6517,13 @@ _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": th
 # publish it makes carries a count at or above both), and so do quick successive publishes after it, which a single
 # kept n raised to the largest would drop. A publish under either without such a count is an overtaken state:
 # dropped, logged, and answered with the kernel's frame (the setViewFolds branch). Within one renderer process,
-# while storage writes succeed, it is only ever the older state it looks like; a tab in another renderer process
-# that publishes inside the storage delay can have its change dropped, and shown undone there by that answer.
+# while storage writes succeed, it is an older state, and it carries nothing the later one lacks unless a frame was
+# heard between the two that replaced the browser's copy without it (another device's publish, taken before this
+# one landed): a sibling pane's publish made over that frame and landing first is then kept, and this one is
+# dropped with its change. A tab in another renderer process that publishes inside the storage delay can have its
+# own change dropped too. The answer shows the poster's tab the kernel's folds, its change undone, unless that tab
+# passes the frame over: a drop under the largest n is answered by a frame that can name the lower n taken on its
+# count, which a tab holding a standing entry above that n takes for its own older state.
 _view_folds_by = [None]                  # the {browser, n} of the last setViewFolds handled, None when it carried none
 _view_folds_seen = {}                    # browser -> {"n": its kept (latest taken) publish's n, "at": the count that
 #                                          publish took, "top": the largest n taken from it, "top_at": the count that
@@ -6611,8 +6616,12 @@ def _write_view_folds(folds, by=None, received=None):
     remembered as they were), unless `received` is of this kernel life and at or above the count that publish was
     taken at. A drop is an overtaken state: a publish made before its browser received any frame built after a
     later-numbered publish of its own was taken. Within one renderer process, while storage writes succeed, that is
-    only ever an older state, which cannot carry anything the later one lacks; a tab in another renderer process
-    that publishes inside the storage delay can have its change dropped, and the answer then shows it undone there.
+    an older state, and it carries nothing the later one lacks unless a frame was heard between the two that
+    replaced the browser's copy without it (another device's publish, taken before this one landed): a sibling
+    pane's publish made over that frame and landing first is then kept, and this one is dropped with its change. A
+    tab in another renderer process that publishes inside the storage delay can have its own change dropped too.
+    The answer then shows the poster's tab the kernel's folds, its change undone, unless that tab passes it over (a
+    drop under the largest n: the frame can name the lower n taken on its count, under an entry standing there).
     Every other publish is TAKEN: the count rises by one, a stamped one's browser is remembered with its n (lower
     than before when the received count proved it newer) and the count it took, beside the largest n taken from
     that browser and the count that one took (this publish's own when its n is at or above the largest), and its
@@ -54177,7 +54186,8 @@ def _view_order_frame():
     its `ready` -- the connect push -- and to every client the moment a setViewOrder CHANGES the store,
     which is the event the viewer's other devices converge on; and to one client, with nothing changed, when
     the kernel drops that client's setViewFolds as an overtaken state (2026-09-30), the answer that shows its
-    page the kernel's folds at once. Nothing periodic reads it.
+    page the kernel's folds at once unless the page passes it over (a drop under the largest n taken from its
+    browser: the frame can name the lower n taken on its count). Nothing periodic reads it.
 
     `folds` rides beside them (2026-09-23): the viewer's fold state (_view_folds_served), an object, or null
     when this kernel has none, which is what a browser carrying folds of its own publishes against
@@ -74435,13 +74445,17 @@ class Handler(BaseHTTPRequestHandler):
                 changed = _write_view_folds(msg["folds"], _view_folds_by_of(by_raw), _view_folds_received_of(by_raw))
             except _ViewFoldsDropped as d:
                 # An overtaken state: the kernel keeps the later one. Two panes' sockets landing out of order drop
-                # an older state, which carries nothing the kept one lacks; a tab in another renderer process that
-                # publishes inside the storage delay can have its own change dropped here, and this answer then
-                # shows it undone on that tab. Logged, and answered with the kernel's frame on the poster's own
-                # dedup slot, which is nothing when that slot already holds it (the later publish's push), so a page
-                # whose publish this was shows the kernel's folds at once. No warn: out-of-order panes drop
-                # publishes legitimately, and a warn would be false. The browser id and the received boot are the
-                # page's own strings, so both go in with %r and a newline in either cannot forge a second line.
+                # an older state, which carries nothing the kept one lacks unless a frame was heard between the two
+                # that replaced the browser's copy without it (another device's publish, taken before this one
+                # landed): the sibling pane's publish made over that frame landed first and is kept, and this one is
+                # dropped with its change. A tab in another renderer process that publishes inside the storage delay
+                # can have its own change dropped here too. Logged, and answered with the kernel's frame on the
+                # poster's own dedup slot, which is nothing when that slot already holds it (the later publish's
+                # push), so a page whose publish this was shows the kernel's folds at once, its change undone, unless
+                # it passes that frame over (a drop under the largest: the frame can name the lower number taken on
+                # its count). No warn: out-of-order panes drop publishes legitimately, and a warn would be false. The
+                # browser id and the received boot are the page's own strings, so both go in with %r and a newline in
+                # either cannot forge a second line.
                 sys.stderr.write("romp-kernel: setViewFolds dropped: browser %r n=%d received=%s, %s n=%d taken at %d\n"
                                  % (d.browser[:8], d.n, "%r:%d" % (d.received["boot"], d.received["n"]) if d.received else "none",
                                     d.under, d.kept_n, d.kept_at))
