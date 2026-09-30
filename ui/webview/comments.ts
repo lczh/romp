@@ -41,14 +41,19 @@ export type CommentThread = {
   effort?: string;            // the thread's effort level (ditto)
   msgs: CommentMsg[];
   events?: unknown[];         // the CHAT's own ChatEvents from the branch point on (render parity)
-  /** a thread on a passage from before the session's last compaction: what its opening message carried beyond the
-   *  quote and the comment (the turns around the passage, where the transcript is saved), verbatim from the thread
-   *  row — the popover's note under the opening message (render.ts cmtPriorNote); absent on every other thread */
-  priorContext?: string;
+  /** what romp sent with the user's comment, verbatim: everything its opening message carried around their words (the
+   *  split-off line and the quote; on a passage from before the last compaction also the turns around it, where the
+   *  transcript is saved and the ask's label). From the thread row, or read back from the stored opening message for a
+   *  thread made before rows kept it; absent when romp added nothing. The popover's note (render.ts cmtSentNote) */
+  sent?: string;
+  /** the passage predates the session's last compaction, so `sent` carries the turns around it (the note's longer line) */
+  sentBeforeSummary?: boolean;
 };
 
-/** The note's one line (the user 2026-09-30): text romp sent on the user's behalf is visible, one click from its words. */
-export const CMT_PRIOR_GIST = "From before the summary: also sent the turns around it and where the full conversation is saved";
+/** The note's line (the user 2026-09-30): they can always see exactly what romp sent on their behalf, one click from its
+ *  words. User-facing UI, so it names romp. */
+export const CMT_SENT_GIST = "What romp sent with your comment";
+export const CMT_SENT_GIST_PRIOR = "What romp sent with your comment, including the turns around it (from before the summary)";
 
 export type CommentsFrame = { type: "comments"; id: string; threads: CommentThread[] };
 

@@ -18066,7 +18066,7 @@ def _seed_fork_stores(parent_sid, sid, path, cut_uuid):
 # re-served to a just-connected page by the ready reset (_client_reset_chat_base); the client joins it with the anchored turn to draw the mark (render.ts applyCommentMarks).
 
 _comments_lock = threading.Lock()          # store read-modify-writes from WS handler threads
-_thread_msgs_cache = {}                    # thread sid -> (path, mtime, cut_uuid, msgs)
+_thread_msgs_cache = {}                    # thread sid -> (path, mtime, cut_uuid, msgs, what romp sent with the opener)
 
 
 def _comments_path(sid):
@@ -18238,12 +18238,16 @@ def _comment_cut_target(path, sid, anchor_uuid):
 # TIP fork of the whole current conversation (the restart-seam precedent). That conversation holds only the
 # compaction's SUMMARY of what surrounded the passage, so the opening message carries it back: the nearest thing the
 # other side said before the passage's turn and after it, each capped, and where the full transcript is saved, with
-# the passage's own record id. Injected-voice rules apply (the person the agent works for speaking; no romp nouns;
-# tests/test_injected_voice.py renders it). The block is stored verbatim on the thread row (priorContext) so the
-# popover can show the user exactly what was sent on their behalf; _comment_strip_frame keeps it out of the bubble.
-_PRECOMPACT_LEAD = ("This is from before our conversation was summarized, so you may only have the summary of "
+# the passage's own record id; and the comment itself is labelled as the ask (_COMMENT_ASK_HEAD), so after a block of
+# quoted context the model reads which part is the request (the user 2026-09-30, reviewing the first draft, where the
+# comment followed the file pointer unlabelled). Injected-voice rules apply (the person the agent works for speaking; no
+# romp nouns; tests/test_injected_voice.py renders it). An ordinary thread's opening message is unchanged. What romp
+# added around the user's words is kept on the thread row (sent) for the popover's note; _comment_strip_frame keeps it
+# out of the bubble.
+_PRECOMPACT_LEAD = ("It's from before our conversation was summarized, so you may only have the summary of "
                     "what was around it.")
-_PRECOMPACT_FILE_LEAD = "If you need more, the full conversation is saved in "
+_PRECOMPACT_FILE_LEAD = "The full conversation is saved in "
+_COMMENT_ASK_HEAD = "What I'm asking:"
 _PRECOMPACT_EXCERPT_CAP = 1200     # characters per side: enough to place the passage, never a second transcript
 
 
@@ -18289,21 +18293,22 @@ def _precompact_block(before, after, transcript, anchor_uuid):
     """The context a pre-compaction thread's opening message carries after the quote: `before` / `after` are the
     ("me" | "you", text) said nearest the passage's turn on each side (None when there is none: the first or the last
     message), `transcript` the absolute path of the file that holds the passage's record. Starts with
-    _PRECOMPACT_LEAD and ends with the one-line _PRECOMPACT_FILE_LEAD sentence, the two ends _comment_strip_frame
-    finds it by."""
+    _PRECOMPACT_LEAD and ends with the one-line _PRECOMPACT_FILE_LEAD sentence, the two ends _comment_opener_split
+    finds it by; _comment_first_message puts the _COMMENT_ASK_HEAD label between it and the comment."""
     quote = lambda t: "\n".join("> " + ln for ln in t.splitlines())
     who = lambda side: "I" if side == "me" else "you"
     parts, lead = [], _PRECOMPACT_LEAD
     if before:
-        parts += ["%s Just before it, %s said:" % (lead, who(before[0])), quote(_precompact_excerpt(before[1], True))]
+        parts += ["%s Right before it, %s said:" % (lead, who(before[0])), quote(_precompact_excerpt(before[1], True))]
         lead = ""
     if after:
-        label = "Just after it, %s said:" % who(after[0])
+        label = "Right after it, %s said:" % who(after[0])
         parts += [("%s %s" % (lead, label)) if lead else label, quote(_precompact_excerpt(after[1], False))]
         lead = ""
     if lead:
         parts.append(lead)
-    parts.append("%s%s, and this passage is the entry with uuid %s." % (_PRECOMPACT_FILE_LEAD, transcript, anchor_uuid))
+    parts.append("%s%s (this passage is the entry with uuid %s) if you need more."
+                 % (_PRECOMPACT_FILE_LEAD, transcript, anchor_uuid))
     return "\n\n".join(parts)
 
 
@@ -18398,18 +18403,27 @@ _FORK_FRAME = ("I've split this conversation off from the original at this point
                "tasks or background work.")
 
 
+def _comment_opener_parts(exact, comment, prior="", frame=None):
+    """(sent, comment) for a thread's opening message, which is exactly sent + "\n\n" + comment: `sent` is everything
+    romp adds around the user's words (the identity line, the quote head and the quote, and for a passage from before
+    the last compaction the context block and the _COMMENT_ASK_HEAD label), `comment` the user's own words. The
+    thread row keeps `sent` so the popover can show the user, word for word, what went with their comment."""
+    q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
+    parts = [frame or _THREAD_FRAME, _COMMENT_FRAME_HEAD, q] + ([prior, _COMMENT_ASK_HEAD] if prior else [])
+    return "\n\n".join(parts), str(comment or "").strip()
+
+
 def _comment_first_message(exact, comment, prior="", frame=None):
     """The thread's opening message — romp-authored FRAMING around the user's own words, read by an
     agent that has the conversation up to the highlight and no idea it is being tracked, so it
     speaks as the person it works for quoting the conversation back (test_injected_voice scans it;
     it must never name romp machinery). It opens with _THREAD_FRAME, what this conversation is,
     then the quote and the comment. `prior` (a thread on a passage from before the last compaction,
-    _precompact_block) rides between the quote and the comment: what surrounded the passage, which
-    the thread's own history holds only as a summary. `frame` replaces the identity line: _FORK_FRAME
-    for a dispatched thread (raw_opener) that has a passage to quote."""
-    q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
-    parts = [frame or _THREAD_FRAME, _COMMENT_FRAME_HEAD, q] + ([prior] if prior else []) + [str(comment or "").strip()]
-    return "\n\n".join(parts)
+    _precompact_block) rides between the quote and the comment, which then wears the _COMMENT_ASK_HEAD
+    label: what surrounded the passage, which the thread's own history holds only as a summary.
+    `frame` replaces the identity line: _FORK_FRAME for a dispatched thread (raw_opener) that has a
+    passage to quote."""
+    return "%s\n\n%s" % _comment_opener_parts(exact, comment, prior, frame)
 
 
 def _strip_fork_opener(text):
@@ -18422,32 +18436,51 @@ def _strip_fork_opener(text):
     return rest or text
 
 
+def _comment_opener_split(text):
+    """(sent, comment): a thread's opening message split into what romp added around the user's words, verbatim, and
+    the user's own words — read back from the stored message, so a thread made before its row kept `sent` shows the
+    same note. The identity line (_THREAD_FRAME, or _FORK_FRAME on a dispatched thread), the quote head with the
+    quote under it, a pre-compaction thread's context block (its lead sentence through its one-line transcript
+    pointer) and the _COMMENT_ASK_HEAD label are romp's; what follows is the comment. A thread opened before the
+    identity line existed starts at the quote head and splits the same way. A message romp added nothing to (an
+    unframed send, or a dispatched thread from before the fork line) is ("", text), and so is one that would leave
+    no comment at all."""
+    if not text:
+        return "", text
+    pos = 0
+    for line in (_THREAD_FRAME, _FORK_FRAME):
+        if text.startswith(line):
+            pos = len(line)
+            break
+    rest = text[pos:]
+    pos += len(rest) - len(rest.lstrip())
+    if text.startswith(_COMMENT_FRAME_HEAD, pos):
+        lines = text[pos:].splitlines(keepends=True)
+        off, i = len(lines[0]), 1
+        while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
+            off += len(lines[i]); i += 1
+        if i < len(lines) and lines[i].startswith(_PRECOMPACT_LEAD):
+            end = next((k for k in range(i, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
+            if end is not None:
+                k = end + 1
+                while k < len(lines) and not lines[k].strip():
+                    k += 1
+                if k < len(lines) and lines[k].strip() == _COMMENT_ASK_HEAD:
+                    k += 1
+                off += sum(len(ln) for ln in lines[i:k])
+        pos += off
+    comment = text[pos:].strip()
+    if not pos or not comment:
+        return "", text
+    return text[:pos].rstrip(), comment
+
+
 def _comment_strip_frame(text):
     """The opening message, shown as the user's COMMENT alone — the framing + quote it was wrapped
-    in for the thread's agent already sit in the popover header, so rendering them again would say
-    everything twice. The identity line (_THREAD_FRAME, or _FORK_FRAME on a dispatched thread) goes with
-    it; a thread opened before that line existed starts at the quote head and strips the same way. A
-    pre-compaction thread's context block (_precompact_block, from its lead sentence through its
-    one-line transcript pointer) goes too: the popover shows it as its own note, from the thread row."""
-    if not text:
-        return text
-    if text.startswith(_THREAD_FRAME):
-        body = text[len(_THREAD_FRAME):].lstrip()
-    else:
-        body = _strip_fork_opener(text)
-    if not body.startswith(_COMMENT_FRAME_HEAD):
-        return body
-    lines = body.splitlines()
-    i = 1
-    while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
-        i += 1
-    if i < len(lines) and lines[i].startswith(_PRECOMPACT_LEAD):
-        end = next((k for k in range(i, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
-        if end is not None:
-            i = end + 1
-            while i < len(lines) and not lines[i].strip():
-                i += 1
-    return "\n".join(lines[i:]).strip() or text
+    in for the thread's agent already sit in the popover (the quote above the bubble, everything romp
+    added in the note under it), so rendering them again would say everything twice. The split is
+    _comment_opener_split's."""
+    return _comment_opener_split(text)[1]
 
 
 def _comment_msg_text(rec):
@@ -18604,8 +18637,9 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
                              "t": int(em.parse_z(r.get("timestamp")) or 0)})
         u = parent_of.get(u); hops += 1
     rows.reverse()
-    if rows and rows[0]["who"] == "you":            # the opening message: show the comment, not its frame
-        rows[0]["text"] = _comment_strip_frame(rows[0]["text"])
+    sent = ""
+    if rows and rows[0]["who"] == "you":            # the opening message: show the comment, not its frame (which
+        sent, rows[0]["text"] = _comment_opener_split(rows[0]["text"])   # the note shows: _thread_sent_fields)
     for r in rows:
         r["text"] = r["text"][:4000]
     merged = []                                     # one assistant turn can span records — read as one reply
@@ -18618,8 +18652,30 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     merged = merged[-40:]
     if len(_thread_msgs_cache) > 512:
         _thread_msgs_cache.clear()
-    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), merged)
+    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), merged, sent)
     return merged
+
+
+def _thread_opener_sent(tsid):
+    """What romp added to the thread's opening message, read back from the message itself by the last _thread_messages
+    pass (the opener is the first thing after the branch point, however long the thread grows past the projection's
+    cap); "" before that message is in the transcript, and when romp added nothing."""
+    hit = _thread_msgs_cache.get(tsid)
+    return hit[4] if hit and len(hit) > 4 else ""
+
+
+def _thread_sent_fields(th, tsid, status):
+    """The comments frame's `sent` / `sentBeforeSummary` for thread row `th`: what romp sent with the user's comment,
+    verbatim, for the popover's note (the user 2026-09-30: they can always see exactly what was sent on their behalf).
+    The row's own copy (every create since writes one), else the thread's stored opening message read back
+    (_thread_opener_sent, after this frame's _thread_messages pass), so a thread made before rows kept it shows the
+    same note. Nothing for a promoted thread (its popover points at the session) or when romp added nothing."""
+    if status == "promoted":
+        return {}
+    sent = str(th.get("sent") or "") or _thread_opener_sent(tsid)
+    if not sent:
+        return {}
+    return {"sent": sent, "sentBeforeSummary": bool(th.get("beforeSummary"))}
 
 
 _built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_at): the popover's chat build,
@@ -18721,7 +18777,7 @@ def _thread_opener_shown(evs):
     """`evs` with the thread's OPENING message (its first user event after the branch point) shown as the user's
     comment alone, the msgs projection's rule (_comment_strip_frame): the identity line, the quote and a
     pre-compaction thread's context block are written for the thread's agent, and the popover already shows the
-    quote above the bubble and the context block as its own note. The chat builder strips only a plain fork's line
+    quote above the bubble and everything romp added in its own note under it (_thread_sent_fields). The chat builder strips only a plain fork's line
     (_strip_fork_opener), so the popover's events arm showed the whole frame, quote twice included. A copy of the
     event, never the built one (the build cache holds it)."""
     i = next((k for k, e in enumerate(evs) if e.get("kind") == "user"), None)
@@ -19091,9 +19147,9 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
-                        # a passage from before the last compaction: what the opening message carried beyond the quote
-                        # and the comment, verbatim from the row the create wrote (the popover's note, _comment_cut_resolve)
-                        **({"priorContext": str(th.get("priorContext"))} if th.get("priorContext") else {}),
+                        # what romp sent with the user's comment, verbatim (the popover's note, the user 2026-09-30): the
+                        # row's copy, or for a thread made before rows kept one, read back from its opening message
+                        **_thread_sent_fields(th, tsid, status),
                         # the thread's mail state (T356): off by default until broken out. An open thread's popover does
                         # not announce it (the user 2026-09-11; the tab hover and the Sessions pane carry the state) and
                         # shows only how many messages wait in the box (they land within the bus's retry interval of a
@@ -19345,8 +19401,8 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     exact/name as usual; nothing kernel-side consumes meta beyond storing it.
 
     An anchor from BEFORE the last compaction is a tip fork as well (the user 2026-09-30; _comment_cut_resolve):
-    the opening message adds what surrounded the passage and where the transcript is saved, and the row keeps
-    that addition verbatim (priorContext) for the popover's note."""
+    the opening message adds what surrounded the passage and where the transcript is saved. Every row keeps what
+    romp added around the user's words verbatim (sent) for the popover's note."""
     be = Sessions.backend_for(parent_sid)
     if not (hasattr(be, "fork") and _sdk_ready()):
         return "threads need a Claude Code session; this one runs on another backend, so there is nothing to fork.", None
@@ -19397,9 +19453,17 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
            "createdT": int(now), "lastSeenT": int(now)}
     if isinstance(meta, dict) and (meta.get("thread") or meta.get("note")):
         row["meta"] = {k: str(meta.get(k) or "")[:500] for k in ("thread", "note") if meta.get(k)}
+    # the opening message, as romp's part and the user's (the first message says what this conversation is:
+    # _THREAD_FRAME / _FORK_FRAME, why there). A dispatched thread's caller-authored prompt rides verbatim BEHIND the fork
+    # line; a passage from before the last compaction adds what surrounded it (prior), quoted like any passage
+    if raw_opener and not prior:
+        sent, said = _FORK_FRAME, str(text)
+    else:
+        sent, said = _comment_opener_parts(exact, text, prior, frame=_FORK_FRAME if raw_opener else None)
+    row["sent"] = sent                # VERBATIM what romp added around the user's words: the popover's note shows it (the
+    #                                   user 2026-09-30: they can always see exactly what was sent on their behalf)
     if prior:
-        row["priorContext"] = prior   # VERBATIM what the opening message carried beyond the quote and the comment: the
-        #                               popover's note shows it (the user 2026-09-30: text sent on their behalf is visible)
+        row["beforeSummary"] = True   # the note's line names the turns around the passage
     if nm:
         refusal = _claim_session_name(nm, "thread", tsid)
         if refusal:
@@ -19436,14 +19500,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            # the first message says what this conversation is (_THREAD_FRAME / _FORK_FRAME, why there): a
-            # dispatched thread's caller-authored prompt rides verbatim BEHIND the fork line; a passage from before
-            # the last compaction adds what surrounded it (prior), quoted like any passage
-            if raw_opener and not prior:
-                opener = "%s\n\n%s" % (_FORK_FRAME, text)
-            else:
-                opener = _comment_first_message(exact, text, prior, frame=_FORK_FRAME if raw_opener else None)
-            _user_send(be, tsid, opener)
+            _user_send(be, tsid, "%s\n\n%s" % (sent, said))   # the opening message (row["sent"] above)
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)

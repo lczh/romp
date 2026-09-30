@@ -241,25 +241,25 @@ class PreCompactionContext(CommentBase):
         self.assertEqual(cut, "", "a tip fork")
         self.assertEqual(cut_t, int(em.parse_z(iso(self.now - 900 + 65))), "the passage's own time")
         # the tool call and its result between the question and the answer are the answer's own turn, never quoted
-        self.assertEqual(prior, km._PRECOMPACT_LEAD + " Just before it, I said:\n\n"
+        self.assertEqual(prior, km._PRECOMPACT_LEAD + " Right before it, I said:\n\n"
                          "> How should it back off when the server is down?\n\n"
-                         "Just after it, I said:\n\n> and the cap?\n\n"
+                         "Right after it, I said:\n\n> and the cap?\n\n"
                          + km._PRECOMPACT_FILE_LEAD + os.path.abspath(str(p))
-                         + ", and this passage is the entry with uuid pa2.")
+                         + " (this passage is the entry with uuid pa2) if you need more.")
 
     def test_the_persons_message_is_framed_by_what_the_agent_said(self):
         _, (cut, _t, err, prior) = self._resolve("p2")
         self.assertIsNone(err)
-        self.assertIn(km._PRECOMPACT_LEAD + " Just before it, you said:\n\n"
+        self.assertIn(km._PRECOMPACT_LEAD + " Right before it, you said:\n\n"
                       "> Done: the loop polls the server every thirty seconds.\n\n", prior)
-        self.assertIn("Just after it, you said:\n\n> Use exponential backoff with a jitter of ten percent.\n\n", prior,
+        self.assertIn("Right after it, you said:\n\n> Use exponential backoff with a jitter of ten percent.\n\n", prior,
                       "past the tool traffic to the reply itself")
 
     def test_the_first_message_has_nothing_before_it(self):
         _, (_c, _t, err, prior) = self._resolve("p1")
         self.assertIsNone(err)
-        self.assertNotIn("Just before it", prior)
-        self.assertTrue(prior.startswith(km._PRECOMPACT_LEAD + " Just after it, you said:\n\n"
+        self.assertNotIn("Right before it", prior)
+        self.assertTrue(prior.startswith(km._PRECOMPACT_LEAD + " Right after it, you said:\n\n"
                                          "> Done: the loop polls the server every thirty seconds.\n\n"), prior)
 
     def test_the_last_message_has_nothing_after_it(self):
@@ -268,8 +268,8 @@ class PreCompactionContext(CommentBase):
         _, (cut, _t, err, prior) = self._resolve("pa3", recs)
         self.assertIsNone(err)
         self.assertEqual(cut, "")
-        self.assertIn("Just before it, I said:\n\n> and the cap?\n\n", prior)
-        self.assertNotIn("Just after it", prior, "the compaction's summary is nobody talking")
+        self.assertIn("Right before it, I said:\n\n> and the cap?\n\n", prior)
+        self.assertNotIn("Right after it", prior, "the compaction's summary is nobody talking")
         self.assertIn("\n\n" + km._PRECOMPACT_FILE_LEAD, prior)
 
     def test_neither_side_leaves_the_lead_and_the_pointer(self):
@@ -279,7 +279,8 @@ class PreCompactionContext(CommentBase):
         p, (cut, _t, err, prior) = self._resolve("n1", recs)
         self.assertIsNone(err)
         self.assertEqual(prior, km._PRECOMPACT_LEAD + "\n\n" + km._PRECOMPACT_FILE_LEAD + os.path.abspath(str(p))
-                         + ", and this passage is the entry with uuid n1.")
+                         + " (this passage is the entry with uuid n1) if you need more.",
+                         "no Right before / Right after sentences: the summary sentence and the file line")
 
     def test_excerpts_are_capped_on_a_word_boundary_tail_before_head_after(self):
         t = self.now - 900
@@ -316,7 +317,7 @@ class PreCompactionContext(CommentBase):
         cut, cut_t, err, prior = km._comment_cut_resolve(str(cur), PARENT, "pa2")
         self.assertIsNone(err)
         self.assertEqual(cut, "")
-        self.assertIn(km._PRECOMPACT_FILE_LEAD + os.path.abspath(str(old)) + ", and this passage", prior,
+        self.assertIn(km._PRECOMPACT_FILE_LEAD + os.path.abspath(str(old)) + " (this passage", prior,
                       "the file that holds the passage's record, not the current one")
         self.assertNotIn(new_fsid, prior)
 
@@ -511,16 +512,32 @@ class OpeningMessage(unittest.TestCase):
     def test_strip_leaves_an_unframed_message_alone(self):
         self.assertEqual(km._comment_strip_frame("plain reply"), "plain reply")
 
-    PRIOR = (km._PRECOMPACT_LEAD + " Just before it, I said:\n\n> How should it back off?\n\n"
-             "Just after it, I said:\n\n> and the cap?\n\n" + km._PRECOMPACT_FILE_LEAD
-             + "/TESTDIR/.claude/projects/-TESTDIR-notes-api/11111111-2222-3333-4444-555555555555.jsonl, "
-             "and this passage is the entry with uuid pa2.")
+    TRANSCRIPT = "/TESTDIR/.claude/projects/-TESTDIR-notes-api/11111111-2222-3333-4444-555555555555.jsonl"
+    PRIOR = km._precompact_block(("me", "How should it back off?"), ("me", "and the cap?"), TRANSCRIPT, "pa2")
 
-    def test_a_pre_compaction_opener_carries_the_context_between_the_quote_and_the_comment(self):
+    def test_a_pre_compaction_opener_reads_as_the_user_approved_it(self):
+        # the user 2026-09-30, reviewing the first draft: arranged for what the model parses most easily, the comment
+        # last and labelled as the ask. Pinned verbatim, the identity line included
         body = km._comment_first_message("Use exponential backoff.", "Why ten percent?", self.PRIOR)
-        self.assertEqual(body, km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> Use exponential backoff.\n\n"
-                         + self.PRIOR + "\n\nWhy ten percent?")
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n"
+                         "About this part of the conversation:\n\n"
+                         "> Use exponential backoff.\n\n"
+                         "It's from before our conversation was summarized, so you may only have the summary of what was "
+                         "around it. Right before it, I said:\n\n"
+                         "> How should it back off?\n\n"
+                         "Right after it, I said:\n\n"
+                         "> and the cap?\n\n"
+                         "The full conversation is saved in " + self.TRANSCRIPT + " (this passage is the entry with uuid "
+                         "pa2) if you need more.\n\n"
+                         "What I'm asking:\n\n"
+                         "Why ten percent?")
         self.assertEqual(km._comment_strip_frame(body), "Why ten percent?", "the bubble shows the comment alone")
+
+    def test_an_ordinary_opener_is_unchanged_and_wears_no_ask_label(self):
+        body = km._comment_first_message("Use exponential backoff.", "Why ten percent?")
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> Use exponential backoff.\n\n"
+                         "Why ten percent?")
+        self.assertNotIn(km._COMMENT_ASK_HEAD, body)
 
     def test_the_strip_keeps_a_multi_paragraph_comment_whole(self):
         body = km._comment_first_message("line one\nline two", "The comment.\n\n> quoting myself\n\nAnd more.", self.PRIOR)
@@ -530,6 +547,28 @@ class OpeningMessage(unittest.TestCase):
         body = km._comment_first_message("Use exponential backoff.", "Review the cap.", self.PRIOR, frame=km._FORK_FRAME)
         self.assertTrue(body.startswith(km._FORK_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD))
         self.assertEqual(km._comment_strip_frame(body), "Review the cap.")
+
+    # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
+    def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
+        for prior, frame in (("", None), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):
+            sent, said = km._comment_opener_parts("line one\nline two", "Why ten percent?", prior, frame)
+            opener = km._comment_first_message("line one\nline two", "Why ten percent?", prior, frame)
+            self.assertEqual(opener, sent + "\n\n" + said, "the opener is romp's part, then the user's")
+            self.assertEqual(km._comment_opener_split(opener), (sent, "Why ten percent?"), (prior[:20], frame))
+        sent, _ = km._comment_opener_parts("line one", "c", self.PRIOR)
+        self.assertTrue(sent.endswith(self.PRIOR + "\n\n" + km._COMMENT_ASK_HEAD), "the ask label is romp's, sent with it")
+
+    def test_older_and_dispatched_openers_split_to_what_romp_added_in_their_case(self):
+        split = km._comment_opener_split
+        # a thread from before the identity line: the quote head and the quote
+        self.assertEqual(split(km._COMMENT_FRAME_HEAD + "\n\n> line one\n\nThe comment."),
+                         (km._COMMENT_FRAME_HEAD + "\n\n> line one", "The comment."))
+        # a dispatched thread: the fork line only
+        self.assertEqual(split(km._FORK_FRAME + "\n\nReview the tracked edits."), (km._FORK_FRAME, "Review the tracked edits."))
+        # romp added nothing (an unframed send, a dispatched thread from before the fork line): no note
+        self.assertEqual(split("Review the tracked edits."), ("", "Review the tracked edits."))
+        self.assertEqual(split(km._FORK_FRAME), ("", km._FORK_FRAME), "nothing but the line leaves no comment: whole")
+        self.assertEqual(split(""), ("", ""))
 
 
 # ── the transcript → popover projection ───────────────────────────────────────────────────────────
@@ -934,39 +973,77 @@ class ThreadProjection(CommentBase):
         self.assertTrue(km._agent_landed_after([], [{"who": "agent", "t": seen + 1, "text": "x"}], seen), "no events → the msgs projection")
         self.assertFalse(km._agent_landed_after([], [{"who": "agent", "t": seen, "text": "x"}], seen), "t == seen is already seen")
 
-    # ── the opening message as the popover shows it, and a pre-compaction thread's note (the user 2026-09-30) ──────
-    PRIOR = (km._PRECOMPACT_LEAD + " Just before it, I said:\n\n> how should the retry loop back off?\n\n"
-             + km._PRECOMPACT_FILE_LEAD + "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + PARENT + ".jsonl, "
-             "and this passage is the entry with uuid a1.")
+    # ── the opening message as the popover shows it, and the note of what romp sent (the user 2026-09-30) ──────────
+    PRIOR = km._precompact_block(("me", "how should the retry loop back off?"), None,
+                                 "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + PARENT + ".jsonl", "a1")
 
     def _seed_precompact_thread(self, comment="Why jitter at all?"):
         """A thread as _comment_create leaves one on a passage from before the last compaction: a TIP fork (cutUuid ""),
-        the row carrying the block its opener sent, the opener itself after the copied history."""
+        the row carrying what romp sent with the comment, the opener itself after the copied history."""
         t = self.now - 500
-        opener = km._comment_first_message("exponential backoff", comment, self.PRIOR)
+        sent, said = km._comment_opener_parts("exponential backoff", comment, self.PRIOR)
         recs = [uline(t, "how should the retry loop back off?", "u1"),
                 aline(t + 5, "Use exponential backoff with a jitter of ten percent.", "a1", parent="u1"),
-                uline(self.now - 100, opener, "cu1", parent="a1"),
+                uline(self.now - 100, sent + "\n\n" + said, "cu1", parent="a1"),
                 aline(self.now - 90, "Jitter prevents thundering herds.", "ca1", parent="cu1")]
         self._write(THREAD, recs)
         (jd.SDKDIR / (THREAD + ".json")).write_text(json.dumps(
             {"sid": THREAD, "name": "thread-x", "cwd": self.cdir, "lastSid": THREAD, "alive": True, "threadOf": PARENT}))
         km._save_comments(PARENT, {"threads": [
             {"tid": THREAD, "sid": THREAD, "anchorUuid": "a1", "cutUuid": "", "anchorT": t + 5,
-             "exact": "exponential backoff", "status": "open", "priorContext": self.PRIOR,
+             "exact": "exponential backoff", "status": "open", "sent": sent, "beforeSummary": True,
              "createdT": self.now - 110, "lastSeenT": self.now}]})
         return recs
 
-    def test_the_frame_ships_a_pre_compaction_threads_context_from_its_row(self):
+    def test_the_frame_ships_what_romp_sent_from_the_row(self):
         recs = self._seed_precompact_thread()
         th = self._frame_thread(recs, state="")
-        self.assertEqual(th["priorContext"], self.PRIOR, "verbatim, from the row: it survives a reload")
+        sent, _ = km._comment_opener_parts("exponential backoff", "c", self.PRIOR)
+        self.assertEqual(th["sent"], sent, "verbatim, from the row: it survives a reload")
+        self.assertTrue(th["sentBeforeSummary"], "the line names the turns around the passage")
 
-    def test_an_ordinary_thread_ships_no_context(self):
+    def test_a_thread_from_before_rows_kept_it_reads_what_romp_sent_back_from_its_opener(self):
+        # every thread gets the note, the ones created before this change included: their row has no copy, so the
+        # frame reads it back from the stored opening message (the identity line and the quote)
         self._seed_thread()
         th = self._frame_thread(self._thread_side(aline(self.now - 380, "Jitter prevents thundering herds.", "ca1",
                                                         parent="cu1")), state="")
-        self.assertNotIn("priorContext", th)
+        self.assertEqual(th["sent"], km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> exponential backoff")
+        self.assertFalse(th["sentBeforeSummary"])
+        self.assertEqual(th["msgs"][0]["text"], "Why jitter at all?", "the bubble is still the comment alone")
+
+    def test_a_long_threads_note_outlives_the_projection_cap(self):
+        # the msgs projection keeps the newest 40 rows; the opener is read before that cap, so a long thread keeps its note
+        self._seed_thread()
+        t = self.now - 500
+        tail, prev = [], "cu1"
+        for i in range(60):
+            tail.append(aline(t + 101 + i, "reply %d" % i, "r%d" % i, parent=prev) if i % 2
+                        else uline(t + 101 + i, "follow-up %d" % i, "r%d" % i, parent=prev))
+            prev = "r%d" % i
+        th = self._frame_thread(self._thread_side(*tail), state="")
+        self.assertNotIn("Why jitter at all?", [m["text"] for m in th["msgs"]], "the opener is past the cap")
+        self.assertTrue(th["sent"].startswith(km._THREAD_FRAME))
+
+    def test_romp_added_nothing_so_there_is_no_note(self):
+        # a dispatched thread from before the fork line: its opening message is the caller's prompt, verbatim
+        self._seed_thread(records=[uline(self.now - 500, "how should the retry loop back off?", "u1"),
+                                   aline(self.now - 495, "Use exponential backoff.", "a1", parent="u1"),
+                                   uline(self.now - 400, "Review the tracked edits.", "cu1", parent="a1")])
+        th = self._frame_thread([uline(self.now - 500, "how should the retry loop back off?", "u1"),
+                                 aline(self.now - 495, "Use exponential backoff.", "a1", parent="u1"),
+                                 uline(self.now - 400, "Review the tracked edits.", "cu1", parent="a1")], state="")
+        self.assertNotIn("sent", th)
+        self.assertNotIn("sentBeforeSummary", th)
+
+    def test_a_dispatched_threads_note_is_the_fork_line(self):
+        self._seed_thread()
+        recs = [uline(self.now - 500, "how should the retry loop back off?", "u1"),
+                aline(self.now - 495, "Use exponential backoff.", "a1", parent="u1"),
+                uline(self.now - 400, km._FORK_FRAME + "\n\nReview the tracked edits.", "cu1", parent="a1")]
+        th = self._frame_thread(recs, state="")
+        self.assertEqual(th["sent"], km._FORK_FRAME)
+        self.assertEqual(th["msgs"][0]["text"], "Review the tracked edits.")
 
     def test_the_popover_events_show_the_opening_message_as_the_comment_alone(self):
         # the events arm (what the popover renders) showed the whole opener: the identity line, the quote (a second
@@ -1688,7 +1765,8 @@ class CommentOps(CommentBase):
     def test_create_on_a_pre_compaction_passage_forks_the_tip_and_sends_what_surrounded_it(self):
         # the user 2026-09-30: a passage from before the last compaction opens a thread (it was refused). The thread takes
         # the whole conversation, whose history holds only a summary around the passage, so the opening message adds the
-        # turns on either side and where the full transcript is; the row keeps that addition verbatim for the popover
+        # turns on either side and where the full transcript is, and labels the comment as the ask; the row keeps what
+        # romp added verbatim for the popover's note
         t = self.now - 900
         self._write(PARENT, compacted_records(t))
         err, tid = km._comment_create(PARENT, "pa2", "exponential backoff with a jitter", "Why ten percent?")
@@ -1699,21 +1777,26 @@ class CommentOps(CommentBase):
         row = km._comment_thread(PARENT, tid)
         self.assertEqual((row["anchorUuid"], row["cutUuid"]), ("pa2", ""))
         self.assertEqual(row["anchorT"], int(em.parse_z(iso(t + 65))), "the square and the mark land on the passage itself")
-        prior = row["priorContext"]
-        self.assertTrue(prior.startswith(km._PRECOMPACT_LEAD))
-        self.assertIn(km._PRECOMPACT_FILE_LEAD + os.path.abspath(str(self.parent_path)), prior)
-        self.assertEqual(self.be.sent[0][1], km._comment_first_message("exponential backoff with a jitter",
-                                                                        "Why ten percent?", prior),
-                         "the opener: identity line, quote, the stored block verbatim, then the comment")
-        self.assertIn("\n\n> exponential backoff with a jitter\n\n" + prior + "\n\nWhy ten percent?", self.be.sent[0][1])
+        self.assertTrue(row["beforeSummary"])
+        sent = row["sent"]
+        self.assertTrue(sent.startswith(km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> exponential backoff"))
+        self.assertIn("\n\n" + km._PRECOMPACT_LEAD + " Right before it, I said:", sent)
+        self.assertIn(km._PRECOMPACT_FILE_LEAD + os.path.abspath(str(self.parent_path)) + " (this passage is the entry "
+                      "with uuid pa2) if you need more.\n\n" + km._COMMENT_ASK_HEAD, sent)
+        self.assertTrue(sent.endswith(km._COMMENT_ASK_HEAD))
+        self.assertEqual(self.be.sent[0][1], sent + "\n\nWhy ten percent?",
+                         "the opener is exactly what the row says romp sent, then the comment")
 
     def test_create_on_a_post_compaction_passage_is_unchanged(self):
         self._write(PARENT, compacted_records(self.now - 900))
         err, tid = km._comment_create(PARENT, "pa4", "retry state", "Which endpoints?")
         self.assertIsNone(err)
         self.assertEqual(self.be.calls[0][3], "pa4", "a cut fork at the passage")
-        self.assertNotIn("priorContext", km._comment_thread(PARENT, tid))
+        row = km._comment_thread(PARENT, tid)
+        self.assertNotIn("beforeSummary", row)
         self.assertEqual(self.be.sent[0][1], km._comment_first_message("retry state", "Which endpoints?"))
+        self.assertEqual(row["sent"], km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> retry state",
+                         "every thread's row keeps what romp sent: the identity line and the quote")
 
     def test_a_dispatched_thread_on_a_pre_compaction_passage_takes_the_same_tip_fork(self):
         # the raw-opener door (a caller-authored prompt behind the fork line) rides the same road when it names a passage
@@ -1721,9 +1804,15 @@ class CommentOps(CommentBase):
         err, tid = km._comment_create(PARENT, "pa2", "exponential backoff", "Review the cap.", raw_opener=True)
         self.assertIsNone(err)
         self.assertEqual(self.be.calls[0][3], "")
-        prior = km._comment_thread(PARENT, tid)["priorContext"]
-        self.assertEqual(self.be.sent[0][1], km._comment_first_message("exponential backoff", "Review the cap.", prior,
-                                                                        frame=km._FORK_FRAME))
+        row = km._comment_thread(PARENT, tid)
+        self.assertTrue(row["sent"].startswith(km._FORK_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD))
+        self.assertEqual(self.be.sent[0][1], row["sent"] + "\n\nReview the cap.")
+
+    def test_a_dispatched_thread_with_no_passage_keeps_the_fork_line_as_what_romp_sent(self):
+        err, tid = km._comment_create(PARENT, "", "a review thread", "Review the tracked edits.", raw_opener=True)
+        self.assertIsNone(err)
+        self.assertEqual(self.be.sent[0][1], km._FORK_FRAME + "\n\nReview the tracked edits.", "the opener as before")
+        self.assertEqual(km._comment_thread(PARENT, tid)["sent"], km._FORK_FRAME)
 
     def test_break_out_sends_nothing_and_leaves_the_opener_as_it_was(self):
         # break-out promotes the running thread; its first message already said what it is, and a

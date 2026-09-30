@@ -160,12 +160,17 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             "comment thread opener": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?"),
             # …on a passage from before the last compaction (the user 2026-09-30): the opener adds what surrounded
-            # the passage and where the transcript is saved, rendered by the REAL block builder so the scan reads the
-            # words the code emits; the excerpts are the conversation's own words, synthetic here
+            # the passage and where the transcript is saved, and labels the comment as the ask, rendered by the REAL
+            # builders so the scan reads the words the code emits; the excerpts are the conversation's own words,
+            # synthetic here
             "comment thread opener (from before a summary)": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?",
                 km._precompact_block(("me", "and the cap on the delay?"), ("me", "ok, write that into the README"),
                                      "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + SID + ".jsonl",
+                                     "33333333-4444-5555-6666-777777777777")),
+            "comment thread opener (from before a summary, neither side)": km._comment_first_message(
+                "Cap the retry delay at two minutes.", "Why two minutes and not five?",
+                km._precompact_block(None, None, "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + SID + ".jsonl",
                                      "33333333-4444-5555-6666-777777777777")),
             "the context from before a summary, with only the passage's other side before it": km._precompact_block(
                 ("you", "The sync loop polls every thirty seconds."), None,
@@ -321,6 +326,7 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
                         "debt reminder (question)", "debt reminder (handoff)",
                         "debt reminder (several)", "comment thread opener", "edit trace",
                         "comment thread opener (from before a summary)",
+                        "comment thread opener (from before a summary, neither side)",
                         "the context from before a summary, with only the passage's other side before it",
                         "comment-thread merge", "compaction suggestion", "spend ceiling",
                         "relayed question", "relayed question (procedural why)",
