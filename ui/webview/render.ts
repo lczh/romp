@@ -7321,15 +7321,15 @@ function showSelectionMenu(e: MouseEvent) {
   if (!content || !sel || !sel.anchorNode || !content.contains(sel.anchorNode) || !text.trim()) return;
   e.preventDefault();
   dismissTabMenu();
-  const items: { label: string; pick: () => void }[] = [];
-  const mk = (labelText: string, fn: () => void) => { items.push({ label: labelText, pick: fn }); };
+  const items: { label: string; sub?: string; pick: () => void }[] = [];
+  const mk = (labelText: string, fn: () => void, sub?: string) => { items.push({ label: labelText, sub, pick: fn }); };
   // Comment first, Quote second (the user 2026-08-23): Comment is the primary act — a side thread
   // about the passage — and Quote is the lighter one. Comment only when the selection sits in a real
-  // transcript turn (transcriptSelection's uuid) on a real session.
-  const q = transcriptSelection();
-  if (q?.uuid && activeId && !isProvisionalId(activeId) && liveSession(activeId)) {
-    const sid = activeId, uuid = q.uuid, qtext = q.text;
-    mk("Comment", () => openCommentComposer(sid, uuid, qtext, e.clientX, e.clientY));
+  // transcript turn on a real session: commentAim's gate, the one the key asks too. Its sub-line names
+  // the key while one is bound (keyHint reads the live overrides), the tab menu bell row's way.
+  const aim = commentAim();
+  if (typeof aim === "object") {
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), keyHint("chat.commentSelection") || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7338,6 +7338,56 @@ function showSelectionMenu(e: MouseEvent) {
   mk("Copy", () => copyToClipboard(text));
   ctxMenuEl = openContextMenu(e.clientX, e.clientY, items, { onClose: onTabMenuClosed });   // the shared card: placed, dismissed and keyed the one way
 }
+
+// Comment on the selection from the keyboard or the palette (chat.commentSelection, the user 2026-09-30, who wanted a key
+// for it): exactly what the menu's Comment opens, through the same gate (commentAim) and the same openCommentComposer.
+type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number };
+/** The passage a new comment anchors to, and where its box opens: the transcript selection in a real turn
+ *  (transcriptSelection's uuid) on the active session, the box's corner just under the selection's box, since the
+ *  keyboard has no pointer to open it at (the menu's pick uses its own). "none" when nothing in a turn is selected;
+ *  "session" when the session cannot take a comment yet (a tab still being created, or a skeleton this page has not
+ *  loaded). Also read by the shell's palette as it opens (__rompCommentAim below). */
+function commentAim(): CommentAim | "none" | "session" {
+  const q = transcriptSelection();
+  if (!q?.uuid) return "none";
+  if (!activeId || isProvisionalId(activeId) || !liveSession(activeId)) return "session";
+  const sel = window.getSelection();
+  const b = sel && sel.rangeCount ? sel.getRangeAt(sel.rangeCount - 1).getBoundingClientRect() : null;
+  return { sid: activeId, uuid: q.uuid, text: q.text, x: b ? b.left : 0, y: b ? b.bottom + 6 : 0 };
+}
+/** The command's run. `held` is the aim the palette captured as it opened (its input took the focus since, which may
+ *  have moved the selection); absent, the live selection is read. A held aim whose tab is no longer the one shown, or
+ *  whose session stopped being ready, is refused like a live one. Nothing to anchor to: a toast says what to do. */
+function commentOnSelection(held?: CommentAim | "none" | "session"): void {
+  let aim = held === undefined ? commentAim() : held;
+  if (typeof aim === "object" && aim.sid !== activeId) aim = "none";
+  else if (typeof aim === "object" && (isProvisionalId(aim.sid) || !liveSession(aim.sid))) aim = "session";
+  if (aim === "none") { ephemeralWarnToast("Select some text in the chat to comment on it."); return; }
+  if (aim === "session") { ephemeralWarnToast("This session isn't ready for comments yet."); return; }
+  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y);
+}
+/** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. */
+function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
+  if (v === "none" || v === "session") return v;
+  const a = v as Partial<CommentAim> | null;
+  return a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
+    && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
+}
+(window as any).__rompCommentAim = commentAim;
+// The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+Alt+M). With focus in
+// the chat this capture handler answers, reading the overrides store per press, so a rebind in the shortcuts dialog moves
+// it too (the chat.navBack pattern); with focus in the shell the command's run posts commentSelection here. It fires from
+// the message box too, as the jump cluster's keys do: the chord types nothing there, and the selection it reads is the
+// transcript's.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a command
+  const ch = chordOf(e);
+  if (!ch || !ch.includes("+")) return;
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], loadOverrides(), mac)) return;
+  e.preventDefault(); e.stopPropagation();
+  commentOnSelection();
+}, true);
 
 function copyToClipboard(text: string) {
   navigator.clipboard?.writeText(text).catch(() => { try { document.execCommand("copy"); } catch { /* best effort */ } });
@@ -12303,7 +12353,9 @@ function ensureToastBox(): HTMLElement {
 // says the same host is unreachable and that romp is re-dialing it; the send into a tab whose create failed (deliver
 // too) says the session never started; the staging refusals (stageComposer) say an edit of a past message is in
 // progress or attachments are on the composer; the branch jump's
-// refusal (branchjump) says the session is not on this dashboard. The fresh page shows each state for itself (the host
+// refusal (branchjump) says the session is not on this dashboard; the comment key's (commentOnSelection) say nothing in
+// the chat is selected or the session is not ready for comments (a selection never survives a reload, and a tab still
+// being created does not either). The fresh page shows each state for itself (the host
 // mark and the transcript foot, from the kernel's tunnel health, which the page reads afresh into a disconnected set
 // that starts empty; the staged strip; the attachments and the roster come back from the kernel and the
 // persisted drafts, the refused message among them) or no longer has it (a provisional tab, pending or failed, does not
@@ -20099,6 +20151,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
   // the shell's palette / shell-focus chords for the jump cluster's moves (palette-main.ts chat.prevMine and the rest)
   if (m.romp === "chatJump") { if ((MOVES as readonly string[]).includes(m.move)) runJump(m.move as Move); return; }
+  // the shell's palette / shell-focus key for "Comment on selection" (palette-main.ts chat.commentSelection); a palette run
+  // carries the aim captured as the palette opened
+  if (m.romp === "commentSelection") { commentOnSelection("held" in m ? heldCommentAim(m.held) : undefined); return; }
   // a moved tab's drafts (the chat split): the shell took them from the source page (__rompTakeSessionState) and
   // hands them to this page, the session's column now — into the maps, persisted, and into the box when it is active
   if (m.romp === "adopt") { adoptSessionState(m.sid, m.state); return; }

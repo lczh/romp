@@ -158,9 +158,9 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_backend.py"), "utf8");
 
-test("the selection menu offers Comment, gated on a real transcript turn", () => {
-  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(/);
-  assert.match(UI, /q\?\.uuid && activeId && !isProvisionalId\(activeId\)/);
+test("the selection menu offers Comment, gated on a real transcript turn (commentAim: the gate the comment key shares)", () => {
+  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY\)/);
+  assert.match(UI, /if \(!q\?\.uuid\) return "none";\n\s*if \(!activeId \|\| isProvisionalId\(activeId\) \|\| !liveSession\(activeId\)\) return "session";/);
 });
 
 test("marks, badges AND every popover button ride the stable document.body delegate", () => {

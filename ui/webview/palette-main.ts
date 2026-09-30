@@ -162,6 +162,21 @@ installMenuEcho();
                              ["chat.prevUnread", "Go to the previous unread reply"], ["chat.nextUnread", "Go to the next unread reply"]] as const) {
     registerCommand({ id, title, run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatJump", move: id.slice(5) }, "*"); } catch (e) { /* chat not loaded */ } } });
   }
+  // Comment on the selected chat text (the user 2026-09-30, who wanted a key for it; Mod+Alt+M): the chat pane owns the
+  // selection and the comment box, so the run posts there and the pane opens what the right-click menu's Comment opens
+  // (render.ts commentOnSelection); with focus in the chat its own capture handler answers the key, the chat.navBack
+  // pattern. The palette's input takes the focus as it opens, so the command captures the pane's aim at that moment
+  // (commands.ts capture) and a run FROM the palette hands it over; a run by key carries none and the pane reads its
+  // selection. Listed always, never behind a `when`: with nothing selected the pane's toast says what to do, which a
+  // missing row cannot, and the key and the palette then answer alike.
+  registerCommand({
+    id: "chat.commentSelection", title: "Comment on selection",
+    capture: () => {
+      try { const aim = (chatPane()?.contentWindow as any)?.__rompCommentAim; return typeof aim === "function" ? aim() : undefined; }
+      catch (e) { return undefined; }   // chat pane not loaded: the run falls back to the pane's own selection
+    },
+    run: (held) => chatPost(held === undefined ? { romp: "commentSelection" } : { romp: "commentSelection", held }),
+  });
   registerCommand({ id: "log.open", title: "Open the log", run: () => { if (w.__rompOpenErrs) w.__rompOpenErrs(); } });
   registerCommand({ id: "net.open", title: "Remote kernels", run: () => { if (w.__rompOpenNet) w.__rompOpenNet(); } });
   registerCommand({ id: "usage.open", title: "Token usage", run: () => { if (w.__rompUsagePanel) w.__rompUsagePanel(); } });
