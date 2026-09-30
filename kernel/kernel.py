@@ -27707,6 +27707,46 @@ def _maybe_auto_push(r):
 _P2P_REF = "romp-p2p-sync"   # scratch branch the local kernel force-pushes its HEAD to on the remote
 
 
+def _p2p_ref_on(push_url, env):
+    """The full sha the scratch ref names on the peer right now, read with `git ls-remote` over the push's
+    own ssh; "" when it names nothing or the read fails (the caller then reports the push's failure as is).
+    Read only after a push failed, to tell a push another sender beat to the same commit from a real one."""
+    want_ref = "refs/heads/" + _P2P_REF
+    try:
+        r = subprocess.run(["git", "-C", str(ROOT), "ls-remote", push_url, want_ref],
+                           capture_output=True, text=True, timeout=30, env=env)
+    except Exception:
+        return ""
+    if r.returncode != 0:
+        return ""
+    for ln in (r.stdout or "").splitlines():
+        sha, _, ref = ln.partition("\t")
+        if ref.strip() == want_ref and re.fullmatch(r"[0-9a-f]{40}", sha.strip()):
+            return sha.strip()
+    return ""
+
+
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# the lines of a failed push's output that say WHY: git's and ssh's errors, a rejected ref, the pre-push hook's
+# own refusal. "failed to push some refs" is git's summary of any of them, kept only when nothing says more.
+_PUSH_VERDICT_RE = re.compile(r"^(?:remote: +)?(?:error|fatal)\b|^ssh\b|\[(?:remote )?rejected\]|^romp pre-push: BLOCKED"
+                              r"|Permission denied|Connection (?:closed|refused|reset|timed out)"
+                              r"|Could not resolve hostname|Host key verification failed|Timeout, server", re.I)
+_PUSH_SUMMARY_RE = re.compile(r"^error: failed to push some refs", re.I)
+
+
+def _git_push_reason(stderr, stdout=""):
+    """What a failed `git push` said about why, for the row's detail and the Log. Its stderr LEADS with
+    whatever the local pre-push hook printed, and this repo's hook runs a secret scanner whose coloured
+    progress lines filled the whole 160-character detail on 2026-09-30, so a push the peer had rejected read
+    as three lines of a scan that found nothing. Keeps the lines that carry the verdict (_PUSH_VERDICT_RE),
+    in order, colour codes stripped; the last three lines when none match."""
+    text = _ANSI_SGR_RE.sub("", _ssh_err(stderr) or (stdout or ""))
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    hits = [ln for ln in lines if _PUSH_VERDICT_RE.search(ln)]
+    return "; ".join([ln for ln in hits if not _PUSH_SUMMARY_RE.search(ln)] or hits or lines[-3:])
+
+
 def _discover_remote_clone(host):
     """ssh-discover the remote romp clone and its state. The remote's OWN authority first — the
     repo-root file its kernel persists at boot (_persist_repo_root; ROMP_REPO_ROOT on the target
@@ -27815,8 +27855,17 @@ def _update_remote(host, head=None):
                            capture_output=True, text=True, timeout=120, env=env)
     except Exception as e:
         return False, "git push to %s failed: %s" % (host, str(e)[:160])
-    if p.returncode != 0:
-        return False, "git push to %s failed: %s" % (host, (_ssh_err(p.stderr) or p.stdout or "").strip()[:160])
+    # A push that ANOTHER push of the same commit beat to the scratch ref has done its job. git's ref update
+    # is a compare-and-swap against the value the peer advertised when the push began, --force or not, so a
+    # sender that lands in between gets ours rejected ("cannot lock ref ... reference already exists") while
+    # the ref now names exactly the commit we pushed. The usual such sender is this machine's previous
+    # kernel: a deploy moves HEAD and restarts the kernel seconds later, the kernel being restarted has
+    # already started pushing the new HEAD, and its `git push` child outlives it and lands while the apply,
+    # its next step, never runs. Refusing there left the peer on its old build through two deploys in a row
+    # (2026-09-30). The apply below binds to WANT itself, so the peer's ref naming lfull, whoever put it
+    # there, is all this step owes it; any other value is a real failure, reported in git's own words.
+    if p.returncode != 0 and _p2p_ref_on(push_url, env) != lfull:
+        return False, "git push to %s failed: %s" % (host, _git_push_reason(p.stderr, p.stdout)[:160])
     # (3) bind to the advertised sha, verify no divergence, re-check the tree, reset the remote to that sha,
     #     clean up, restart
     apply_cmd = (
