@@ -406,9 +406,10 @@ following to every connected machine's kernel):
   counts as a fallback, and the session landing on the exact version you picked
   is that pick. Three cases can still read a pick as a fallback: a reply from a
   turn the session started on its own (a background task's notice, a scheduled
-  prompt) arriving after a Latest or default pick; a Latest or default pick made
-  while the session is reconnecting, which can miss its CLI; and a reply from
-  before the pick that the session replays after a kernel restart. Every ten
+  prompt) arriving after a Latest or default pick, or after any pick above the
+  model the session was on; a Latest or default pick made while the session is
+  reconnecting, which can miss its CLI; and a reply from before the pick that
+  the session replays after a kernel restart. Every ten
   minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
