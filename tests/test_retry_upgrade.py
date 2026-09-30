@@ -676,6 +676,61 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.8")], "%s: carded" % road)
             self.assertIsNotNone(s._upgrade_retry, "%s: armed" % road)
 
+    def test_a_real_fallback_armed_above_a_versioned_pick_ends_at_a_turn_served_on_the_pick(self):
+        # the learn arms the retry from the live name, and after a versioned pick below the live model that name can
+        # still sit above the pick when a real fallback lands: a reply of a turn already running on Opus 5.5 moved it
+        # back after the pick landed, or the init of a turn begun before the CLI took the pick ended the pick's
+        # switching dots on Opus 5.5. The retry's reconnect runs the pick, so the model it was armed from never comes
+        # back, and a turn served on the pick's own version or above it ends it (the #33 follow-up's review, round
+        # one). A pick that names no version keeps the old end, at the model it fell from: the controls
+        down = RuntimeError(self.DOWN)
+        for road in ("the pick lands, a reply of a turn already running on Opus 5.5 moves the name back, "
+                     "then Sonnet 5 serves",
+                     "the init of a turn begun before the CLI took the pick ends its dots on Opus 5.5, "
+                     "then Sonnet 5 serves"):
+            with self.subTest(road=road), _Hooks() as h:
+                be, s = self._world()
+                self._pick(be, s, "claude-opus-4-8")
+                if road.startswith("the pick lands"):
+                    self._settle(s, ["claude-opus-4-8"])
+                    self._served(s, "claude-opus-5-5")
+                else:
+                    self._init(s, "claude-opus-5-5")
+                    self._settle(s, [down])
+                self._served(s, "claude-sonnet-5")                       # a real fallback
+                self.assertEqual(h.fallbacks, [("Opus 5.5", "Sonnet 5")], "%s: the real fallback is carded" % road)
+                arm = s._upgrade_retry
+                self.assertIsNotNone(arm, "%s: and armed" % road)
+                self.assertEqual((arm["from"], arm["to"], arm["pick"]), ("Opus 5.5", "Sonnet 5", "claude-opus-4-8"), road)
+                now = time.time()
+                self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
+                self._init(s, "claude-opus-4-8"); self._served(s, "claude-sonnet-5")   # the attempt falls back again
+                self.assertIsNotNone(s._upgrade_retry, "%s: a turn served below the pick ended the retry" % road)
+                self._init(s, "claude-opus-4-8"); self._served(s, "claude-opus-4-8")   # a turn served on the pick
+                self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick left the retry reconnecting the "
+                                                    "session every ten minutes" % road)
+                self.assertEqual(h.restored, [("Sonnet 5", "Opus 4.8")], "%s: the session is back on the pick" % road)
+                self.assertEqual(be.retry_model_upgrades(now + 3 * sb.RETRY_UPGRADE_S), 0, "%s: no attempt after it" % road)
+                self.assertEqual(len(s._asks), 1, road)
+        for road, reg, pick, ctx, init_raw, low_raw, card in (
+                ("a Latest click on a live Opus 5.5, answered by Opus 4.8 again", {}, "opus", ["claude-opus-5-5"],
+                 "claude-opus-5-5", "claude-opus-4-8", ("Opus 5.5", "Opus 4.8")),
+                ("the account default resolving to Sonnet 5, answered by Haiku 4.5 again", {}, "default", [down],
+                 "claude-sonnet-5", "claude-haiku-4-5", ("Sonnet 5", "Haiku 4.5"))):
+            with self.subTest(road=road), _Hooks() as h:
+                be, s = self._world(**reg)
+                self._pick(be, s, pick)
+                self._settle(s, ctx)
+                self._init(s, init_raw); self._served(s, low_raw)
+                self.assertEqual(h.fallbacks, [card], "%s: carded" % road)
+                self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1, "%s: due" % road)
+                self._init(s, init_raw); self._served(s, low_raw)       # the attempt falls back to the same model
+                self.assertIsNotNone(s._upgrade_retry, "%s: a pick that names no version ended the retry at the very "
+                                                       "model it fell to" % road)
+                self._init(s, init_raw); self._served(s, init_raw)
+                self.assertIsNone(s._upgrade_retry, "%s: back on the model it fell from" % road)
+                self.assertEqual(h.restored, [(card[1], card[0])], road)
+
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
              ("default", "default", "claude-sonnet-5", ""),
@@ -796,11 +851,12 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                         self.assertEqual(revived, sb.pretty_model(old_raw),
                                          "%s: a pick above the old name keeps the old name" % name)
 
-    def test_after_a_restart_the_attach_arms_from_an_upward_pick_the_surviving_cli_may_not_have(self):
-        # the attach re-arm (_arm_if_below_pick) reads the healed name before the attach's refresh answers. Kept on the old
-        # name, a session below an upward pick is taken up at the attach as before this change (the retry's reconnect
-        # launches on the pick, which is how a pick the surviving CLI never got reaches it) and nothing is carded; a
-        # downward pick healed onto its own name has nothing to take up
+    def test_the_re_arm_on_the_healed_name_takes_up_an_upward_pick_and_not_a_downward_one(self):
+        # the re-arm (_arm_if_below_pick), called here directly on the name the boot sweep healed, as the attach calls it
+        # before its refresh answers. Kept on the old name, a session below an upward pick is taken up as before this
+        # change (the retry's reconnect launches on the pick, which is how a pick the surviving CLI never got reaches it)
+        # and nothing is carded; a downward pick healed onto its own name has nothing to take up. The attach's own call is
+        # pinned through the real connect loop in tests/test_sdk_backend.py (APickIsCarriedByALaunchNeverByAnAttach)
         for road, reg, pick, cli_raw, armed in (
                 ("an upward pick the surviving CLI never got", self.ON48, "claude-opus-5-5", "claude-opus-4-8",
                  ("Opus 5.5", "Opus 4.8")),

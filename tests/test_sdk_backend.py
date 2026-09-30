@@ -5429,14 +5429,27 @@ class APickIsCarriedByALaunchNeverByAnAttach(unittest.TestCase):
     _drive = SpawnedAtStampedOncePerCli._drive
 
     def test_a_pick_made_with_no_client_is_landed_by_a_launch_and_never_by_an_attach(self):
-        for road, hosts, cli, ctx, want in (
-                ("attach", "on", self.CLI_A, "claude-opus-5-5", ("opus", "Opus 5.5")),
-                ("spawn-host", "on", self.CLI_B, "claude-opus-5", ("", "Opus 5")),
-                ("child", "off", None, "claude-opus-5", ("", "Opus 5"))):
+        # a host launch whose handshake fails after the hello leaves its CLI up, launched with the pick's --model, and the
+        # loop's retry ATTACHES to it, so the launch is what carried the pick (the #33 follow-up's review, round one); an
+        # attach whose handshake fails the same way carried nothing, and neither does the attach that retries it
+        a, b = self.CLI_A, self.CLI_B
+        for road, hosts, iters, ctx, want in (
+                ("attach", "on", [{"road": "attach", "hello": self._hello(a)}], "claude-opus-5-5", ("opus", "Opus 5.5")),
+                ("spawn-host", "on", [{"road": "spawn-host", "hello": self._hello(b)}], "claude-opus-5", ("", "Opus 5")),
+                ("child", "off", [{"road": "child"}], "claude-opus-5", ("", "Opus 5")),
+                ("a host launch whose handshake fails after the hello, then the attach that retries it", "on",
+                 [{"road": "spawn-host", "hello": self._hello(b), "fail": "after-hello"},
+                  {"road": "attach", "hello": self._hello(b)}],
+                 "claude-opus-5", ("", "Opus 5")),
+                ("an attach whose handshake fails after the hello, then the attach that retries it", "on",
+                 [{"road": "attach", "hello": self._hello(a), "fail": "after-hello"},
+                  {"road": "attach", "hello": self._hello(a)}],
+                 "claude-opus-5-5", ("opus", "Opus 5.5"))):
             with self.subTest(road=road):
                 root = tempfile.mkdtemp()
                 open(os.path.join(root, "session-hosts"), "w").write(hosts)
-                be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+                logs = []
+                be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=logs.append)
                 be._ack_cmd_chip = lambda *a, **k: None          # the acknowledging chip needs a chat this lab has none of
                 sb.write_reg(root, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "spawnedAt": 1700000000,
                                               "spawnedAtCli": "4242:a1", "model": "claude-opus-5-5",
@@ -5454,13 +5467,50 @@ class APickIsCarriedByALaunchNeverByAnAttach(unittest.TestCase):
                     if asked:
                         seen.append((s._model_pending, s.model))
                 s._do_refresh_context = refresh                    # the connect's refresh, observed as it answers
-                r = {"road": road}
-                if cli:
-                    r["hello"] = self._hello(cli)
-                self._drive(be, s, root, [r], ctx=ctx)
+                self._drive(be, s, root, iters, ctx=ctx)
+                if len(iters) > 1:
+                    self.assertTrue(any("attach did not complete" in str(m) for m in logs),
+                                    "%s: the loop's own retry road was taken" % road)
                 self.assertEqual(seen[:1], [want], "%s: %s" % (road, (
-                    "the refresh of a CLI the attach told nothing answered for the pick" if road == "attach" else
-                    "the launch carried the pick, so its refresh lands it")))
+                    "the launch carried the pick, so its refresh lands it" if want[0] == "" else
+                    "the refresh of a CLI the attach told nothing answered for the pick")))
+
+    def test_an_attach_after_a_restart_arms_from_an_upward_pick_and_nothing_for_a_downward_one(self):
+        """The attach's own re-arm (_arm_if_below_pick, called by the connect loop on an attach): Retry upgrades on, a pick
+        in flight at a hard kernel death, the construction heal, one attach to the CLI that survived. An upward pick keeps
+        the old name (_heal_pick_label), so the session sits below its pick and the attach arms from it, the way a pick the
+        surviving CLI never got reaches it (the retry's reconnect launches on it); a downward pick is healed onto its own
+        name and arms nothing. Through the real connect loop: until the #33 follow-up's review the attach's call ran only
+        with Retry upgrades off, and its one guard was a source pin a commented-out call satisfies."""
+        for road, pick, live, armed in (
+                ("an upward pick, Opus 5.5 stranded in flight over Opus 4.8", "claude-opus-5-5",
+                 ("Opus 4.8", "claude-opus-4-8"), ("Opus 5.5", "Opus 4.8")),
+                ("a downward pick, Opus 4.8 stranded in flight under Opus 5.5", "claude-opus-4-8",
+                 ("Opus 5.5", "claude-opus-5-5"), None)):
+            with self.subTest(road=road):
+                root = tempfile.mkdtemp()
+                open(os.path.join(root, "session-hosts"), "w").write("on")
+                open(os.path.join(root, sb.RETRY_UPGRADE_STORE), "w").write("on")
+                logs = []
+                be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=logs.append)
+                sb.write_reg(root, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "spawnedAt": 1700000000,
+                                              "spawnedAtCli": "4242:a1", "model": pick, "modelPending": True,
+                                              "liveModel": live[0], "liveModelId": live[1]})
+                s = sb.SdkSession(be, sb.read_reg(root, self.SID))   # the construction heal
+                be.sessions[self.SID] = s
+                before = (s.model, s._model_pending, s._upgrade_retry)
+                self._drive(be, s, root, [{"road": "attach", "hello": self._hello(self.CLI_A)}], ctx="claude-opus-4-8")
+                arm = s._upgrade_retry
+                if armed:
+                    self.assertEqual(before, ("Opus 4.8", "", None), "%s: the heal keeps the old name, nothing armed yet" % road)
+                    self.assertIsNotNone(arm, "%s: the session sits below its pick with Retry upgrades on, and the "
+                                              "attach armed nothing to ask for the pick" % road)
+                    self.assertEqual((arm["from"], arm["to"], arm["pick"]), armed + (pick,), road)
+                    self.assertTrue(any(str(m).startswith("retry upgrade (web): Opus 5.5 fell back to Opus 4.8") for m in logs),
+                                    "%s: the arm is said in the log" % road)
+                else:
+                    self.assertEqual(before, ("Opus 4.8", "", None), "%s: the heal lands the pick's name" % road)
+                    self.assertIsNone(arm, "%s: the attach armed a retry for a pick nothing sits below" % road)
 
 
 class HealCwdPendingUnderAnUnreadableSlug(unittest.TestCase):
