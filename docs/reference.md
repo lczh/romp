@@ -2243,7 +2243,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the block reads on its own (how near the next collection is); `frozen`
   counts the objects moved out of the collector's reach by `gc.freeze`, which
   it never scans (reading the count is a linear walk of the frozen generation,
-  3.6 to 12 ms per million frozen in the lab, so, like `heap.allocatedBlocks`, it is read
+  about 2 to 14 ms per million frozen in the lab, set by what is frozen, so, like `heap.allocatedBlocks`, it is read
   only on `GET /perf?walk=1` and is `null` on a plain read); `errors` counts callback failures (counted, never raised
   into the collector; the first in the process is said once on stderr, a
   line prefixed `perf: gc hook:`, the rest counted only); `hooked` says

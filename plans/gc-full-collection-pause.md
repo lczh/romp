@@ -98,4 +98,4 @@ The LOAD fold-in is unchanged: keyed on the record cache's insert counter, a che
 
 A reconcile's own collection pause lands after the pusher cycle has closed its ring row, so the pusher and jobs rings never carry it; the acceptance evidence reads it from `/perf`'s `gc.freeze.lastReconcileMs`. Reading `gc.frozen` (`gc.get_freeze_count()`) is a linear walk of the frozen generation, about 7 ms per million frozen, paid by the `/perf` read.
 
-(2026-09-29) The plain `/perf` read no longer pays that walk: `gc.frozen` is `null` there and only `GET /perf?walk=1` reads it, at 3.6 to 12 ms per million frozen as re-measured.
+(2026-09-29) The plain `/perf` read no longer pays that walk: `gc.frozen` is `null` there and only `GET /perf?walk=1` reads it, at about 2 to 14 ms per million frozen as re-measured, set mostly by what is frozen.

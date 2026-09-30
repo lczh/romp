@@ -324,11 +324,11 @@ def _perf_walks(snap):
     leaves None (the macOS runner flake, 2026-09-29). heap.allocatedBlocks is sys.getallocatedblocks, which visits every
     pool of the small-object allocator (a median of 1.2 to 1.7 ms at 2 GB of small objects in the lab, Python 3.10, 3.12
     and 3.13 alike, the spread being the machine's); gc.frozen is gc.get_freeze_count, a walk of the frozen generation's
-    list (3.6 to 12 ms per million frozen in the lab, a median of 15 calls: on 2-CPU nodes 3.6 at one million rising to
-    6.3 to 7.7 at four under 3.10, 3.12 and 3.13 alike, apart from one node's one-million reading of 8.9 under 3.10 and
-    3.13; about 7 under 3.12 and 3.13 and 12 under 3.10 on another machine). Each is one C call that holds the interpreter
-    lock, so where the operating system has paged out or compressed the heap one read faults it back in while every kernel
-    thread waits. On request they read what they always read, through the same per-key guards."""
+    list (about 2 to 14 ms per million frozen in the lab, a median of 15 calls, set mostly by what is frozen: 2.3 to 14
+    across object shapes at one version on one machine; on 2-CPU nodes one shape read 3.6 at one million and 6.3 to 7.7
+    at four under 3.10, 3.12 and 3.13 alike). Each is one C call that holds the interpreter lock, so where the operating
+    system has paged out or compressed the heap one read faults it back in while every kernel thread waits. On request
+    they read what they always read, through the same per-key guards."""
     snap["heap"]["allocatedBlocks"] = _heap_read("allocatedBlocks", lambda: sys.getallocatedblocks())
     snap["gc"]["frozen"] = _gc_read("frozen", lambda: gc.get_freeze_count())
     return snap
