@@ -508,6 +508,19 @@ test("a frame of the previous kernel life delivered late is heard; until the new
     assert.deepEqual([readTabGroups().collapsed, counts(store).received], [["docs"], at(3, "new")],
       "heard, and the new life's received count comes back lower than it was (4, now 3)");
   });
+  // the second rule counts only an entry that stands (2026-09-30, the second review round): after the late frame, a push of
+  // the new life at the entry's own count, built before its publish was taken and naming another device or nothing, is
+  // heard, so the older state shows until the publish's answer lands, rather than the old life's being kept
+  for (const by of [{ browser: OTHER, n: 1 }, undefined]) {
+    withStore({}, () => {
+      const hear = hearing([]);
+      hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), undefined, at(4, "new"));
+      writeTabGroups(setSectionCollapsed(readTabGroups(), "api", true));    // a publish made having received new:4
+      hear(kernelCopy({ ...NO_FOLDS, collapsed: ["old"] }), undefined, at(9, "old"));    // the old life's frame, very late
+      hear(kernelCopy({ ...NO_FOLDS, collapsed: ["web"] }), by, at(4, "new"));   // the new life's push at the entry's count
+      assert.deepEqual(readTabGroups().collapsed, ["web"], "heard: the entry does not stand until a frame of its life is received again: " + JSON.stringify(by));
+    });
+  }
 });
 
 test("a record from before the count: a bare-number entry is an entry with no count, which stands as before, and is written back as one", () => {

@@ -51,12 +51,13 @@ export const TABGROUPS_PUBLISHES_KEY = "romp:tabgroups:publishes";
 /** How far this browser has got in the kernel's count of taken fold publishes (2026-09-30; the viewOrder frame's
  *  `foldsSeq`, one kernel life's): {received, heard}, the highest count any pane of this browser has received on a frame,
  *  and the highest it has heard on a frame it did not pass over that names no publish of this browser's. A key of its
- *  own: only a hearing writes it, and noting a count writes nothing else. Nearly every push raises a count, so every open
- *  pane writes here on nearly every push, and a tab in another renderer process, which sees this browser's writes only
- *  after a delay, would otherwise write back the record above as it last saw it, dropping a sibling's newest entry or
- *  setting its number back. Two tabs writing here inside that delay can set a count back: a lower received count only
- *  passes over less (and a publish carrying it can be dropped by the kernel, which answers it), and a lower heard count
- *  only keeps an entry standing longer, as entries stood before the count. */
+ *  own: only a hearing writes it, and noting a count writes nothing else. The counts rise with each publish the kernel
+ *  takes and with a new kernel life's first frame (or this browser's first), and the first pane in each renderer process
+ *  to receive a rise writes it here, once; were the counts kept in the record, a tab in another renderer process, which
+ *  sees this browser's writes only after a delay, would write back the record above as it last saw it at each such rise,
+ *  dropping a sibling's newest entry or setting its number back. Two tabs writing here inside that delay can set a count
+ *  back: a lower received count only passes over less (and a publish carrying it can be dropped by the kernel, which
+ *  answers it), and a lower heard count only keeps an entry standing longer, as entries stood before the count. */
 export const TABGROUPS_FOLDS_SEEN_KEY = "romp:tabgroups:folds-seen";
 export const TABGROUPS_EVENT = "romp-tabgroups";
 /** sections that start folded until the user opens them (remembered, on every device, once toggled) */
