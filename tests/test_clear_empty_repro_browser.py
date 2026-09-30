@@ -16,6 +16,12 @@ red-first: no kernel change is warranted for the clear-to-empty case. (The real 
 RESUME a truly empty transcript, so a live empty-session /clear takes a different path; the user's own
 reported leftover remains the province of the 2103 diagnostic trap, not this fixture scene.) SYNTHETIC
 fixtures only; skips LOUDLY without the extension deps or a browser.
+
+The in-flight read is ONE evaluation keyed on the kernel's clearing row (2026-09-29). The earlier driver waited,
+swallowed the wait's timeout and read again in a second round trip, and that read sometimes landed after the page
+had torn its thread view down and before it rebuilt it at the next animation frame: neither the bubble nor the row
+was on the page, and the test went red on a state no screen ever shows. The dashed bubble and the kernel's
+echo are now read apart, since the echo carries the same text once the pending /clear is gone.
 """
 import json
 import os
@@ -53,7 +59,7 @@ const page = await browser.newPage({ viewport: { width: 1000, height: 760 } });
 page.on("console", (m) => { if (m.type() === "error") fs.appendFileSync(cfg.consoleLog, m.text() + "\n"); });
 await page.addInitScript(() => {
   window.__sent = []; window.__frames = [];
-  window.addEventListener("message", (e) => { const m = e.data; if (m && m.type) window.__frames.push({ type: m.type, state: m.status && m.status.state, kinds: Array.isArray(m.events) ? m.events.map((x) => x.kind).filter(Boolean) : null }); });
+  window.addEventListener("message", (e) => { const m = e.data; if (m && m.type) window.__frames.push({ type: m.type, state: m.status && m.status.state, kinds: Array.isArray(m.events) ? m.events.map((x) => x.kind).filter(Boolean) : null, t: Math.round(performance.now()) }); });
   const s = WebSocket.prototype.send;
   WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type === "sendMessage") window.__sent.push({ text: m.text, qid: m.qid }); } catch (e) {} return s.call(this, d); };
 });
@@ -64,14 +70,43 @@ await page.waitForFunction(() => (window.__frames || []).some((f) => f.type === 
 await page.fill("#composer-input", "/clear"); await page.press("#composer-input", "Enter");
 const btn = await page.$("button.confirm-btn.danger, .confirm button.danger"); if (btn) await btn.click();
 await page.waitForFunction(() => (window.__sent || []).some((x) => x.text === "/clear"), null, { timeout: 8000 });
-// IN FLIGHT: the dashed /clear bubble is on the page (the fake holds the clear on the gate file)
-await page.waitForFunction(() => Array.from(document.querySelectorAll("#content .turn-queued .queued-bubble, #content .turn.echo")).some((b) => (b.textContent || "").indexOf("/clear") >= 0), null, { timeout: 8000 }).catch((e) => { if (e.name !== "TimeoutError") throw e; });
-const mid = await page.evaluate(() => ({
-  clearBubble: Array.from(document.querySelectorAll("#content .turn-queued .queued-bubble, #content .turn.echo")).some((b) => (b.textContent || "").indexOf("/clear") >= 0),
-  clearingRow: !!document.querySelector("#content .turn-clearing"),
-}));
-// RELEASE the in-flight clear on an EVENT (the gate file), now the in-flight snapshot is read; the fake SDK
-// waits on this file before running the /clear
+// IN FLIGHT (the fake holds the clear on the gate file): ONE evaluation, keyed on the kernel's "Clearing
+// conversation..." row, returns the snapshot it read (2026-09-29, after this lab failed intermittently in CI). The
+// old form waited on "bubble OR echo", swallowed that wait's timeout and read the page again in a second round trip.
+// The kernel's first frame after a send into an EMPTY session shares no id with the page's own pending group, so the
+// page reads it as a new transcript (render.ts upsert, `forked`): the view is torn down in that frame's task and
+// rebuilt at the next animation frame, and a read landing between the two found only the loader, neither the bubble
+// nor the row. The row is never on the page in that gap, so this predicate cannot fire there; and every paint that
+// shows the row paints from a list already holding the pending /clear, so the snapshot it returns sees the bubble.
+// It also checks what the old read often skipped: in about half of the passing runs that read came before the
+// clearing frame, so it never saw the page's in-flight state. 10 s from seeing the send stays well under the fake
+// SDK's gate cap (about 15 s from when the fake takes the /clear, which can only follow that send), so the fixture
+// the clear-batch lab shares is unchanged. A timeout is recorded, never thrown, so the gate is still written and
+// the test names the premise that failed.
+const midRead = (final) => {
+  const clearingRow = !!document.querySelector("#content .turn-clearing");
+  if (!clearingRow && !final) return false;   // nothing is read before the row is on the page
+  const has = (sel) => Array.from(document.querySelectorAll(sel)).some((b) => (b.textContent || "").indexOf("/clear") >= 0);
+  return {
+    t: Math.round(performance.now()),
+    clearingRow,
+    // the SENDER's dashed bubble and the kernel's echo of the same /clear, read apart: the echo is hidden behind the
+    // bubble while the /clear is pending and un-hides, carrying the same text, if the pending entry is retired early,
+    // so "bubble OR echo" passed the very regression this reads for whenever the echo rode the clearing frame
+    clearBubble: has("#content .turn-queued .queued-bubble"),
+    clearEcho: has("#content .turn.echo"),
+  };
+};
+let mid;
+try {
+  mid = { timeout: false, ...(await (await page.waitForFunction(midRead, false, { timeout: 10000 })).jsonValue()) };
+} catch (e) {
+  if (e.name !== "TimeoutError") throw e;
+  mid = { timeout: true, ...(await page.evaluate(midRead, true)) };
+}
+// RELEASE the in-flight clear on an EVENT (the gate file), only now the in-flight snapshot is read. The pending
+// /clear ends at the fresh episode the /clear forks (or at the user's cancel or a never-delivered verdict, neither of
+// which this lab makes), so it cannot leave the page before this write
 fs.writeFileSync(cfg.gate, "");
 // POLL, event-based, for the settled state: the /clear LANDED as a command row (.turn-cmd), the fresh
 // episode the CLI's record group produces. Then one animation frame so the paint has settled. In the
@@ -182,7 +217,15 @@ class ClearEmptySessionEndsClean(unittest.TestCase):
 
     def test_a_solo_clear_on_an_empty_session_ends_clean(self):
         r = self._result()
-        self.assertTrue(r["mid"]["clearBubble"], "the dashed /clear bubble is on the page while the clear is in flight: " + json.dumps(r["mid"]))
+        m = r["mid"]
+        mid = "\n  mid=" + json.dumps(m)
+        # In order, so the first red names the first premise that broke (2026-09-29): the in-flight snapshot was
+        # taken, with the clearing row up, and then what the sender sees while the clear runs. The bubble and the
+        # echo are asserted apart: an early-retired /clear un-hides the kernel's echo with the same text.
+        self.assertFalse(m["timeout"], "the 'Clearing conversation...' row reached the page within 10 s of the send, while the fake SDK held the /clear" + mid + "\n  frames=" + json.dumps(r["frames"]))
+        self.assertTrue(m["clearingRow"], "the in-flight snapshot was read with the 'Clearing conversation...' row on the page" + mid)
+        self.assertTrue(m["clearBubble"], "the dashed /clear bubble is on the page while the clear is in flight" + mid)
+        self.assertFalse(m["clearEcho"], "the kernel's echo of the /clear stays hidden behind the dashed bubble while the clear is in flight (one bubble per message)" + mid)
         a = r["after"]
         table = "\n  after=" + json.dumps(a)
         # With the CLI-shaped fixture the /clear LANDS as a command row and nothing stays stuck. (Under the
