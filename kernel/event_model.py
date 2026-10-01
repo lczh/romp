@@ -1421,9 +1421,11 @@ def _write_then_drop(key, ent, pop=True):
     exists. The write runs with neither lock held (checkpoint_write takes _CKPT_LOCK and _JSONL_CACHE_LOCK itself); it
     charges the pusher cycle's byte budget shared with the converge pass, and over the budget the write AND the drop are
     deferred by one cycle (the entry stays; the read is not lost), the drop owed (paid at the next cycle's start, or at the
-    next quiet fold over the file), counted under checkpoints.converge.dropDeferred. Then, with `pop`, the very entry `ent`
-    goes through the pin (_drop_unless_pinned_locked). Returns (wrote, outcome): outcome "dropped", "kept" (pinned),
-    "deferred", None when the cache no longer holds `ent`, or "stayed" without `pop`."""
+    next quiet fold over the file, once the file is _DROP_AFTER_QUIESCENT_S old: both pay through _drop_quiescent_entry and
+    its age gate, so a release's deferred drop waits for the file's quiet too), counted under
+    checkpoints.converge.dropDeferred. Then, with `pop`, the very entry `ent` goes through the pin
+    (_drop_unless_pinned_locked). Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the
+    cache no longer holds `ent`, or "stayed" without `pop`."""
     try:
         needs = checkpoint_drop_writes_on() and _path_needs_write(key, ent, at_drop=True)   # off (a cap of 0): the pop alone
     except Exception:

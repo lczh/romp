@@ -1647,9 +1647,10 @@ reads whole as before, so a complete state is never replaced by a tail-only one.
 The record drops at the events that end a file's use (a leaf a second /clear
 retired, a dead timeline lane's leaf and anchor) take the same write, budget
 and deferral with no two-minute wait, since the event says the file's use
-ended: the judges' episode scan after the second /clear, and the next named
-fold over a dead lane's leaf, restore from the document instead of reading the
-file whole again.
+ended (a drop the budget defers is paid later through the quiet drop's own
+path, after that wait): the judges' episode scan after the second /clear, and
+the next named fold over a dead lane's leaf, restore from the document instead
+of reading the file whole again.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
 it (the drop then pops as it did before the write existed, except under the
 incident scan's memo, which keeps a walked file's records resident when the
