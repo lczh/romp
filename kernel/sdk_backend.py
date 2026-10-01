@@ -5813,8 +5813,10 @@ class SdkSession:
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
         #   kernel's tick asks for the pick again every RETRY_UPGRADE_S (retry_model_upgrades → request_reconnect); cleared
-        #   when a parent turn is SERVED on a model at least `from`'s tier again (_note_model_served), by a new pick
-        #   (set_model), or with the session. In memory only: a kernel restart reconnects every session on its pick anyway.
+        #   when a parent turn is SERVED on a model at least `from`'s tier again, or at least a versioned pick's own model
+        #   (_note_model_served), by a new pick (set_model), by a refusal that puts back a versioned pick at or below `to`
+        #   (the refusal's stand-down, _do_set_model), or with the session. `pick` is informational (_arm_upgrade_retry).
+        #   In memory only: a kernel restart reconnects every session on its pick anyway.
         self._fast_unlocked = False   # whether THIS connection was made with the opt-in flag — the
         #   per-CONNECTION snapshot of fast_opt, taken where _connect_once builds options and never
         #   persisted. Only an unlocked connection accepts literal '/fast on|off' sends; without the
@@ -7465,11 +7467,12 @@ class SdkSession:
 
     def _arm_if_below_pick(self) -> bool:
         """Retry upgrades after downgrades, for a session ALREADY sitting below its pick: arm from the pick's label when the
-        switch is on, no arm stands, and the model last served ranks below the pick. Two callers: the switch flip
-        (apply_model_switches) and a host ATTACH after a kernel restart (review 2026-09-17: the arm is in memory only,
+        switch is on, no arm stands, and the model last served ranks below the pick. Three callers: the switch flip
+        (apply_model_switches), a host ATTACH after a kernel restart (review 2026-09-17: the arm is in memory only,
         and an attach to a CLI that survived the restart replays no init and serves no new fallback, so a standing
-        fallback lost its retry — and the picker's tooltip promised a cadence nothing was running). Off: the switch
-        going off ends any arm (_retry_armed). Returns True when it armed."""
+        fallback lost its retry — and the picker's tooltip promised a cadence nothing was running), and a pick the CLI
+        refuses (_do_set_model: the pick it puts back is judged afresh, 2026-10-01). The flip and the refusal skip a
+        pick still in flight. Off: the switch going off ends any arm (_retry_armed). Returns True when it armed."""
         pick = getattr(self, "chosen_model", "") or ""
         if not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             self._retry_armed()
@@ -7489,6 +7492,8 @@ class SdkSession:
         if getattr(self, "_upgrade_retry", None) or not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             return
         now = time.time()
+        # `pick` (the pick on record at the arm) is informational: no product code has read it since the retry's end at
+        # the pick moved to chosen_model, the pick the reconnect asserts (_note_model_served)
         self._upgrade_retry = {"from": frm, "to": to, "pick": getattr(self, "chosen_model", "") or "",
                                "since": now, "next": now + RETRY_UPGRADE_S, "attempts": 0}
         self.backend._log("retry upgrade (%s): %s fell back to %s — the picked model is asked for again every %d min, "
@@ -16931,7 +16936,9 @@ class SdkBackend:
         when there is no pick) on a fresh CLI, the moment the session is quiet (want_switch_reconnect: no turn in flight or
         queued, no live subagent or background task): nothing is cut. Every RETRY_UPGRADE_S until a parent turn is served on the pick's tier again
         (_note_model_served clears the arm and mints the "back on" card), the user picks a model (set_model clears it),
-        the session ends, or the switch is turned off — read here at every tick, so off leaves an armed session inert.
+        the CLI refuses a pick and puts back a versioned one at or below the model the session fell to (the refusal's
+        stand-down, _do_set_model), the session ends, or the switch is turned off — read here at every tick, so off
+        leaves an armed session inert.
         Returns how many sessions were asked this tick. The fallback's cause is outside romp's view (the trigger lives in
         the task's context and ages out of the window), so the cadence is the designed read; the boundary is the event."""
         for s in list(self.sessions.values()):
