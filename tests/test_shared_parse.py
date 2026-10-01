@@ -6,6 +6,8 @@ stat pair over the candidates and the states file, the pending cut, sdk_human), 
 leaf transcript so a spent cut's tree goes and an override render of another file under the same sid never evicts
 the live leaf's tree, evicts least recently used instead of clearing wholesale,
 and answers the kernel's path-keyed readers through a view. Hermetic: synthetic transcripts under a temp root."""
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -47,6 +49,71 @@ def _entries_over(em, path):
     """The assembly entries that fold over `path`'s reader entry (its row in their recs): what a record drop would ask about."""
     with em._ASM_LOCK:
         return [k for k, e in em._ASM_CACHE.items() if e and path in (e.get("recs") or {})]
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _chat_file(d, sid, n, tag, t0, parent=None, rewind=False):
+    """n settled turns under uuids <tag>u<k> and <tag>a<k>, a minute apart from t0, chained onto `parent`; with `rewind`, the
+    first prompt's follow-up asked again from the first reply, so the turns after that reply leave the active branch: a rewind
+    the judges' walks find inside the file."""
+    p = Path(d) / (sid + ".jsonl")
+    recs = []
+    for k in range(n):
+        u, a = "%su%d" % (tag, k), "%sa%d" % (tag, k)
+        recs.append({"type": "user", "uuid": u, "parentUuid": parent, "timestamp": _iso(t0 + 60 * k), "promptSource": "typed",
+                     "cwd": "/w/notes-api", "message": {"role": "user", "content": "%s: page the notes-api index, step %d" % (tag, k)}})
+        recs.append({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": _iso(t0 + 60 * k + 20), "cwd": "/w/notes-api",
+                     "message": {"id": "msg_%s%d" % (tag, k), "role": "assistant", "stop_reason": "end_turn",
+                                 "content": [{"type": "text", "text": "%s: step %d of the notes-api index is paged" % (tag, k)}]}})
+        parent = a
+    if rewind:
+        t = t0 + 60 * n
+        recs.append({"type": "user", "uuid": tag + "ru", "parentUuid": tag + "a0", "timestamp": _iso(t), "promptSource": "typed",
+                     "cwd": "/w/notes-api", "message": {"role": "user", "content": "%s: no, page by cursor from step 0" % tag}})
+        recs.append({"type": "assistant", "uuid": tag + "ra", "parentUuid": tag + "ru", "timestamp": _iso(t + 20), "cwd": "/w/notes-api",
+                     "message": {"id": "msg_%sr" % tag, "role": "assistant", "stop_reason": "end_turn",
+                                 "content": [{"type": "text", "text": "%s: cursor paging it is" % tag}]}})
+    p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    return str(p)
+
+
+_EPI_T = [time.time() - 5000]
+
+
+def _episodes(tc, sid, fsids):
+    """The session's episode rows as the episode log records them: one per transcript, oldest first, the newest the current
+    episode. Each write gets a distinct mtime, since the episode memo keys on it."""
+    p = Path(jd.EPIDIR) / (sid + ".jsonl")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps({"head": "h%d" % i, "fsid": f, "t": time.time()}) + "\n" for i, f in enumerate(fsids)))
+    _EPI_T[0] += 10
+    os.utime(p, (_EPI_T[0], _EPI_T[0]))
+    tc.addCleanup(lambda: p.unlink(missing_ok=True))
+
+
+def _open_budget(tc):
+    """The pusher cycle's checkpoint budget opened wide for one test, so a drop's document write is never deferred by what
+    earlier tests in this process spent, and set back after."""
+    em = jd.em
+    saved = dict(em._CKPT_CYCLE)
+    em.checkpoint_cycle_begin(1 << 40)
+    tc.addCleanup(lambda: (em._CKPT_CYCLE.clear(), em._CKPT_CYCLE.update(saved)))
+
+
+def _read_bytes(path):
+    with jd.em._READ_BYTES_LOCK:
+        return jd.em._READ_BYTES.get(str(path), 0)
+
+
+def _judge_pass(sid, leaf):
+    """The judges' own walks over a session, as a pass runs them: the chain membership over the leaf's lineage, then the
+    episode scan over the candidates and every episode row's file. Returns (chain verdicts, rewound set, scan failures)."""
+    chain = jd._chain_membership(sid, str(leaf), "")
+    out, fails = jd._per_file_rewound(sid, jd._judge_candidates(sid, [str(leaf)]))
+    return chain, out, fails
 
 
 class OneParseForBoth(unittest.TestCase):
@@ -421,45 +488,95 @@ class OneParseForBoth(unittest.TestCase):
         leaf1 = _transcript(self.d, "88888888-2222-4333-8444-000000000882", n=1)
         rp = os.path.realpath(anchor)
 
-        def entries():
+        def entries(sid=C):
             with em._ASM_LOCK:
-                return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == C]
+                return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == sid]
         jd._note_leaf(C, anchor)
         km._parse(anchor, C, self.now)
         self.assertTrue(entries())
         jd._note_leaf(C, leaf1)                            # the /clear's flip
         self.assertEqual(entries(), [], "released at the flip")
+        peer = "88888888-2222-4333-8444-000000000889"     # another session's parse of the same file (a fork child's first leaf)
+        km._parse(anchor, peer, self.now)
+        self.assertTrue(entries(peer), "the premise: a peer session's entry of the retired file")
         tree = jd.parsed_session(C, [anchor], self.now)   # the pass's replay over the rows it took before the flip
         self.assertTrue(tree["turns"], "the caller is handed its parse")
         self.assertEqual([k for k in jd._PARSE_CACHE if k[0] == C and k[2] == anchor], [], "no slot stored for the retired leaf")
         self.assertEqual(entries(), [], "and no assembly entry left behind for it")
+        self.assertTrue(entries(peer), "the release at the refused store is this session's only: the peer's entry stays")
+
+    def test_a_release_that_raises_never_fails_the_flip_or_the_parse(self):
+        """The flip's release does file I/O inside discover, which every pane rides (a stat, a sidecar read, the states log, a
+        fold document's write), and the refused store's release inside a parse: a raise in either is noted once per file and
+        the event goes on as it did before the release existed (round one of the review: discover raised)."""
+        em = jd.em
+        C = "88888888-2222-4333-8444-00000000088a"
+        anchor = _transcript(self.d, C, n=3)
+        leaf1 = _transcript(self.d, "88888888-2222-4333-8444-00000000088b", n=1, tag="r")
+        jd._note_leaf(C, anchor)
+        km._parse(anchor, C, self.now)
+        f0 = em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(em, "release_assembly", side_effect=OSError("permission denied")), \
+                contextlib.redirect_stderr(err):
+            jd._note_leaf(C, leaf1)                        # discover's flip
+            tree = jd.parsed_session(C, [anchor], self.now)   # a parse of the retired leaf: its release raises as well
+            jd.parsed_session(C, [anchor], self.now)
+        self.assertEqual(jd._LEAF_SEEN.get(C), leaf1, "the flip took effect")
+        self.assertEqual([k for k in jd._PARSE_CACHE if k[0] == C and k[2] == anchor], [], "and its slots went as before")
+        self.assertTrue(tree["turns"], "the parse is handed back")
+        self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 3, "every failure counted")
+        self.assertEqual((err.getvalue().count("leaf flip"), err.getvalue().count("retired parse")), (1, 1),
+                         "said once per file and event: %r" % err.getvalue())
 
     def test_a_second_clear_drops_the_first_clears_leaf_from_the_record_cache_and_keeps_the_anchor(self):
         """After a first /clear the retired leaf is the session's anchor, a candidate of the new leaf's parse: its records stay.
         After a second one the retired leaf is the first clear's file, which no live lineage reads: its record entry, whole
         from its days as the leaf, goes at the flip (unless a whole assembly entry still folds over it), where it stayed
-        until the reader's LRU reached it."""
+        until the reader's LRU reached it. The judges' episode scan still walks that file, after the flip in the same pass
+        (discover flips before the judges run), so the drop writes the file's fold document first, the scan's rewound memo in
+        it, and the scan restores the memo from the document at the guard bytes' cost (round one of the review: the drop
+        popped with no write, and the scan read the whole file again and kept what it read)."""
         em = jd.em
-        C = "88888888-2222-4333-8444-000000000883"
-        anchor = _transcript(self.d, C, n=3)
-        leaf1 = _transcript(self.d, "88888888-2222-4333-8444-000000000884", n=2)
-        leaf2 = _transcript(self.d, "88888888-2222-4333-8444-000000000885", n=1)
+        _open_budget(self)
+        C, L1, L2 = ("88888888-2222-4333-8444-000000000883", "88888888-2222-4333-8444-000000000884",
+                     "88888888-2222-4333-8444-000000000885")
+        t0 = self.now - 86400
+        anchor = _chat_file(self.d, C, 3, "sca", t0)
+        leaf1 = _chat_file(self.d, L1, 30, "scb", t0 + 3600, rewind=True)
+        leaf2 = _chat_file(self.d, L2, 1, "scc", t0 + 7200)
 
         def held(p):
             with em._JSONL_CACHE_LOCK:
                 return p in em._JSONL_CACHE
         jd._note_leaf(C, anchor)
+        _episodes(self, C, [C])
         km._parse(anchor, C, self.now)
         jd._note_leaf(C, leaf1)                            # the first /clear
+        _episodes(self, C, [C, L1])
         self.assertTrue(held(anchor), "the anchor is the new leaf's candidate: kept")
         km._parse(leaf1, C, self.now)
+        _, rewound1, _ = _judge_pass(C, leaf1)             # the judges' pass while L1 is the leaf: its walks read it whole
+        self.assertTrue(any(u.startswith("scb") for u in rewound1), "the premise: the scan finds L1's rewind")
         self.assertTrue(held(leaf1) and held(anchor))
         d0 = em.record_cache_stats()["dropped"]
         jd._note_leaf(C, leaf2)                            # the second /clear
+        _episodes(self, C, [C, L1, L2])
         self.assertFalse(held(leaf1), "the first clear's file is in no live lineage: dropped at the flip")
         self.assertTrue(held(anchor), "the anchor is still the new leaf's candidate")
         self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
         km._parse(leaf2, C, self.now)                      # the new leaf parses over the anchor the reader still holds
+        b0 = _read_bytes(leaf1)
+        _, rewound2, fails = _judge_pass(C, leaf2)         # the same pass's episode scan walks L1: its episode row names it
+        read = _read_bytes(leaf1) - b0
+        self.assertEqual(fails, 0)
+        self.assertEqual({u for u in rewound2 if u.startswith("scb")}, {u for u in rewound1 if u.startswith("scb")},
+                         "the scan's verdicts on L1 are the ones it found while L1 was the leaf")
+        self.assertLessEqual(read, 4 * em._JSONL_TAIL_GUARD, "the scan restored L1's memo from its fold document, reading %d bytes "
+                             "of the %d-byte file" % (read, os.path.getsize(leaf1)))
+        with em._JSONL_CACHE_LOCK:
+            ent = em._JSONL_CACHE.get(leaf1)
+        self.assertTrue(ent is None or not ent[4], "and L1's records stay out of memory: %s" % (None if ent is None else len(ent[4])))
 
     def test_a_fork_childs_flip_keeps_the_parents_live_leaf_in_the_record_cache_with_no_entry_pinning_it(self):
         """A fork child's first leaf is its parent's live transcript; the child's flip to its own file must not drop that
@@ -588,6 +705,140 @@ class OneParseForBoth(unittest.TestCase):
                                 "promptSource": "typed", "message": {"role": "user", "content": "grown"}}) + "\n")
         self.assertIsNone(jd.parse_cached(B, [p]), "a moved file is not the cached version")
         self.assertEqual(self._misses() - m0, 1, "and the cache-only read still parsed nothing")
+
+
+def _norm(uuids):
+    """A run's uuids without the run's one-letter prefix, so two runs over the same world compare."""
+    return sorted(str(u)[1:] for u in uuids)
+
+
+class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
+    """Judge verdict parity, driven through the events themselves (round one of the review: the earlier check called the event
+    model's walks directly and handed the releases an empty keep set, so no keep or pin rule could fail it). Each event runs
+    the way discover, the parse store and the timeline build run it: the leaf flips (_note_leaf) of a first /clear, a second
+    /clear and a resume fork, a fork child flipping off its registered parent's file, and a dead lane's release (the step the
+    timeline build takes, _release_dead_lane), each followed by the judges' own pass over the session (_chain_membership,
+    then the episode scan _per_file_rewound). The same world runs twice, once as shipped and once with the releases stubbed
+    out, and every pass must give the same verdicts, make the same whole reads and read the same bytes of every transcript,
+    but for the two costs the releases are documented to pay: after the second /clear the episode scan restores the first
+    clear's file from its fold document (the guard bytes, never the file), and a session revived after its dead lane let go
+    reads its leaf and its anchor at most once more each. A keep that let a live lineage's file go (the anchor at a /clear,
+    the resumed-from file at a resume fork, a registered session's own file at a child's flip) shows as a whole read the
+    stubbed run never makes. The world is synthetic: placeholder ids, the notes-api demo wording."""
+
+    def setUp(self):
+        km._display_sdk_human(A)
+        jd.parse_cache_clear()
+        self.now = int(time.time())
+        _open_budget(self)
+
+    def _world(self, run, stubbed):
+        em = jd.em
+        d = tempfile.mkdtemp()
+
+        def sid(k):
+            return "eeeeeeee-2222-4333-8444-%012d" % (run * 100 + k)
+        C, L1, L2, L3, P, PL1, CH = (sid(k) for k in range(1, 8))
+        r, t0 = "xy"[run], self.now - 86400                # the run's uuid prefix: the hydrated memo is keyed by uuid alone
+        f = {"C": _chat_file(d, C, 6, r + "c", t0, rewind=True),
+             "L1": _chat_file(d, L1, 30, r + "l", t0 + 3600, rewind=True),
+             "L2": _chat_file(d, L2, 4, r + "m", t0 + 7200),
+             "L3": _chat_file(d, L3, 4, r + "n", t0 + 9000, parent=r + "ma3"),   # resumed from L2's last record
+             "P": _chat_file(d, P, 6, r + "p", t0, rewind=True),
+             "PL1": _chat_file(d, PL1, 3, r + "q", t0 + 3600),
+             "CH": _chat_file(d, CH, 2, r + "h", t0 + 5000)}
+        Path(jd.SDKDIR).mkdir(parents=True, exist_ok=True)
+        reg = Path(jd.SDKDIR) / (P + ".json")
+        reg.write_text(json.dumps({"sid": P, "name": "api", "cwd": "/TESTDIR"}))
+        self.addCleanup(lambda: reg.unlink(missing_ok=True))
+        states = Path(jd.STATESDIR) / (C + ".jsonl")
+        states.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: states.unlink(missing_ok=True))
+        steps, facts = [], {}
+
+        def step(name, sess, leaf, event):
+            b0 = {k: _read_bytes(p) for k, p in f.items()}
+            w0 = em.record_cache_stats().get("wholeReads") or {}
+            event()
+            chain, out, fails = _judge_pass(sess, f[leaf])
+            w1 = em.record_cache_stats().get("wholeReads") or {}
+            steps.append({"step": name, "chain": {k: _norm(v) for k, v in chain.items()}, "rewound": _norm(out), "fails": fails,
+                          "bytes": {k: _read_bytes(p) - b0[k] for k, p in f.items()},
+                          "whole": {k: v.get("count", 0) - (w0.get(k) or {}).get("count", 0) for k, v in w1.items()
+                                    if v.get("count", 0) != (w0.get(k) or {}).get("count", 0)}})
+
+        def start():
+            jd._note_leaf(C, f["C"]); _episodes(self, C, [C]); km._parse(f["C"], C, self.now)
+
+        def first_clear():
+            jd._note_leaf(C, f["L1"]); _episodes(self, C, [C, L1]); km._parse(f["L1"], C, self.now)
+
+        def second_clear():
+            jd._note_leaf(C, f["L2"]); _episodes(self, C, [C, L1, L2]); km._parse(f["L2"], C, self.now)
+
+        def resume_fork():
+            states.write_text(json.dumps({"t": self.now, "resumeFork": {"from": L2, "to": L3}}) + "\n")
+            jd._note_leaf(C, f["L3"])
+            tree = km._parse(f["L3"], C, self.now)
+            facts["doc"] = em.asm_checkpoint_write(f["L3"], C, sdk_human=bool(km._display_sdk_human(C)), tree=tree)
+            facts["docWhy"] = dict(em.asm_checkpoint_stats()["skipped"])
+
+        def fork_child():
+            jd._note_leaf(P, f["P"]); km._parse(f["P"], P, self.now)
+            jd._note_leaf(P, f["PL1"])                     # the parent's /clear: its own file is its anchor now
+            jd._note_leaf(CH, f["P"]); jd.parsed_session(CH, [f["P"]], self.now)   # a fork child's registry first names it
+            jd._note_leaf(CH, f["CH"])                     # the child's init flips it
+            km._parse(f["PL1"], P, self.now)
+
+        def dead_lane():
+            km._parse_cache.pop(f["L3"], None)             # the lever's own pop, then the lane's release
+            km._release_dead_lane(C, f["L3"], ("v1",), [{"sid": C, "path": f["L3"]}], {})
+            with em._JSONL_CACHE_LOCK:
+                facts["deadHeld"] = (f["L3"] in em._JSONL_CACHE, f["C"] in em._JSONL_CACHE)
+
+        with contextlib.ExitStack() as stack:
+            if stubbed:
+                stack.enter_context(mock.patch.object(em, "release_assembly", lambda *a, **k: 0))
+                stack.enter_context(mock.patch.object(em, "release_records", lambda *a, **k: 0))
+            step("start", C, "C", start)
+            step("first clear", C, "L1", first_clear)
+            step("second clear", C, "L2", second_clear)
+            step("resume fork", C, "L3", resume_fork)
+            step("fork child", P, "PL1", fork_child)
+            step("dead lane", C, "L3", dead_lane)       # the session revived: the judges pass over it again
+        return f, steps, facts
+
+    def test_every_release_leaves_the_judges_verdicts_and_their_reads_as_they_were(self):
+        f, live, lf = self._world(0, stubbed=False)
+        _, base, bf = self._world(1, stubbed=True)
+        self.assertTrue(lf["doc"] and bf["doc"], "the premise: the resumed leaf's document stands (%s)" % lf.get("docWhy"))
+        self.assertEqual((lf["deadHeld"], bf["deadHeld"]), ((False, False), (True, True)),
+                         "the premise: the dead lane let its leaf and anchor go, and the stubbed run kept them")
+        by, bb = {s["step"]: s for s in live}, {s["step"]: s for s in base}
+        self.assertEqual(list(by), list(bb))
+        self.assertTrue(any(u.startswith("l") for u in by["second clear"]["rewound"]) and
+                        any(u.startswith("c") for u in by["second clear"]["rewound"]),
+                        "the premise: the scan finds the anchor's and the first clear's rewinds: %s" % by["second clear"]["rewound"])
+        guard = 4 * jd.em._JSONL_TAIL_GUARD
+        self.assertGreater(os.path.getsize(f["L1"]), 10 * guard)
+        for name in by:
+            a, b = by[name], bb[name]
+            self.assertEqual((a["chain"], a["rewound"], a["fails"]), (b["chain"], b["rewound"], b["fails"]),
+                             "%s: the judges' verdicts are the same with the releases as without" % name)
+            want = dict(b["bytes"])
+            if name == "second clear":
+                self.assertEqual(b["bytes"]["L1"], 0)
+                self.assertLessEqual(a["bytes"]["L1"], guard, "the episode scan restored the first clear's file from its fold "
+                                     "document, reading %d bytes of %d" % (a["bytes"]["L1"], os.path.getsize(f["L1"])))
+                want["L1"] = a["bytes"]["L1"]
+            if name == "dead lane":
+                for role in ("L3", "C"):
+                    self.assertLessEqual(a["bytes"][role], os.path.getsize(f[role]) + guard,
+                                         "the revived session reads its %s at most once more" % role)
+                    want[role] = a["bytes"][role]
+            else:
+                self.assertEqual(a["whole"], b["whole"], "%s: the same whole reads with the releases as without" % name)
+            self.assertEqual(a["bytes"], want, "%s: every transcript read the bytes it read with the releases stubbed out" % name)
 
 
 class DeadCodexSessionKeepsItsAuthor(unittest.TestCase):

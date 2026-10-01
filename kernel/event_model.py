@@ -683,6 +683,9 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
                        #                   whether frozen or not, so an unfreeze reclaim on a pop would collect nothing (the
                        #                   2026-09-21 review's correction)
                        "pinnedKept": 0,   # drops that kept an entry a whole assembly entry folds over (_drop_unless_pinned)
+                       "droppedHeld": 0, "droppedHeldBytes": 0,   # the drops (of `dropped`) whose records an assembly entry folding
+                       #                   over that generation still holds, and those records' bytes, held until its next visit:
+                       #                   counted bytes gone, memory kept (_drop_unless_pinned_locked, 2026-10-01)
                        "wholeReads": {}}   # "kind<-caller" -> {"count", "bytes"}: every read that pulled a file WHOLE (from zero, or a
 #                                          tail entry upgraded to the whole file), named by the reader's kind and the first frame
 #                                          outside this module (T384: the way hydratedBy named the planner; the 0.8 GB of whole
@@ -1325,17 +1328,56 @@ def _asm_entry_pins(e, key):
     return bool(e.get("keepWhole")) or not _asm_document_would_restore(e.get("path") or key)
 
 
-def _asm_pins_gen(key, gen):
-    """Whether an assembly entry folding over `key`'s reader entry at generation `gen` (its recs row, the (gen, base, count)
-    the fold's gate compares) holds a drop of that entry back (_asm_entry_pins). Takes _ASM_LOCK for the snapshot alone, never
-    under the reader's lock; the pin test's stat and sidecar read run with no lock held."""
+def _asm_held_bytes(e, key, ent):
+    """The bytes of reader entry `ent`'s records that assembly entry `e`'s adapter still holds through its source list for
+    `key` (FileAdapter._src): the run of the reader's list that the adapter's list shares by identity, weighed by the reader's
+    offsets. The adapter's list starts either at the reader's first record (a whole entry, or a restored entry that folded over
+    a whole reader's upgrade and took the reader's whole list) or at the record its row's base names (a restored entry over a
+    tail entry that has since grown by appends), and it ends where the adapter's own read ended (an append since made the
+    reader a longer list over the same records). 0 when neither start is shared (a whole reader's upgrade decodes every record
+    afresh, so a restored entry that has not folded since holds none of the upgraded list), or no offsets say where the run
+    ends."""
+    try:
+        src = (getattr(e.get("ad"), "_src", None) or {}).get(key)
+        recs, base = ent[4], int(ent[5])
+        if not src or not recs:
+            return 0
+        row = (e.get("recs") or {}).get(key)
+        i0 = None
+        for c in (0, int(row[1]) - base if row and len(row) == 3 else -1):
+            if 0 <= c < len(recs) and src[0] is recs[c]:
+                i0 = c
+                break
+        if i0 is None:
+            return 0
+        i1 = min(len(recs), i0 + len(src))
+        offs = ent[7] if len(ent) > 7 else None           # flat (start, length) pairs, one pair per held record
+        if not offs or len(offs) < 2 * len(recs):
+            return _entry_weight(ent) if i0 == 0 and i1 == len(recs) else 0
+        end = int(ent[1]) if i1 >= len(recs) else int(offs[2 * i1])
+        return max(0, end - int(offs[2 * i0]))
+    except Exception:
+        return 0
+
+
+def _asm_hold_of(key, ent):
+    """What the assembly entries folding over `key`'s reader entry `ent` at its generation (their recs row, the (gen, base,
+    count) the fold's gate compares) make of a drop of that entry: ("pin", 0) when one of them holds it back
+    (_asm_entry_pins); ("held", bytes) when some fold over it without pinning, `bytes` being the most of its records any one
+    of their adapters still holds (_asm_held_bytes), which the pop cannot free before that entry's next visit replaces it (a
+    restored entry; a whole one whose leaf has a document a restore would take); (None, 0) when none folds over it. Takes
+    _ASM_LOCK for the snapshot alone, never under the reader's lock; the pin test's stat and sidecar read run with no lock
+    held."""
     with _ASM_LOCK:
         entries = list(_ASM_CACHE.values())
+    gen, kind, held = ent[6], None, 0
     for e in entries:
         row = (e.get("recs") or {}).get(key) if e else None
-        if row is not None and len(row) == 3 and row[0] == gen and _asm_entry_pins(e, key):
-            return True
-    return False
+        if row is not None and len(row) == 3 and row[0] == gen:
+            if _asm_entry_pins(e, key):
+                return "pin", 0
+            kind, held = "held", max(held, _asm_held_bytes(e, key, ent))
+    return kind, held
 
 
 def _drop_unless_pinned(key, ent):
@@ -1343,29 +1385,97 @@ def _drop_unless_pinned(key, ent):
     the record cache does: popped, unless a whole assembly entry folding over its generation pins it (_asm_entry_pins,
     2026-10-01), in which case it is kept as it stands, at the same generation and in its place in the LRU, counted
     recordCache.pinnedKept. Returns "dropped", "kept", or None when the cache no longer holds `ent`."""
-    pinned = _asm_pins_gen(key, ent[6])
+    hold = _asm_hold_of(key, ent)
     with _JSONL_CACHE_LOCK:
         if _JSONL_CACHE.get(key) is not ent:
             return None
-        return _drop_unless_pinned_locked(key, ent, pinned)
+        return _drop_unless_pinned_locked(key, ent, hold)
 
 
-def _drop_unless_pinned_locked(key, ent, pinned):
-    """_drop_unless_pinned's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and `pinned`
-    _asm_pins_gen's answer for its generation, taken before the lock."""
-    if pinned:
+def _drop_unless_pinned_locked(key, ent, hold):
+    """_drop_unless_pinned's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and `hold`
+    _asm_hold_of's answer for it, taken before the lock. A pop of records an assembly entry's adapter still holds without
+    pinning them is counted again under droppedHeld, and the bytes it holds under droppedHeldBytes: recordCache.bytes falls
+    by the entry's whole weight while that much memory stays until the holding entry's next visit replaces it, so the fall is
+    not read as memory freed (round one of the review: a restored entry that folded an append over a whole reader's upgrade
+    holds the reader's whole list, pre-cut records included, and a pop of it freed nothing)."""
+    kind, held = hold
+    if kind == "pin":
         _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
         return "kept"
     w = _cache_pop_locked(key)
     _RECORD_CACHE_STATS["dropped"] += 1
     _RECORD_CACHE_STATS["droppedBytes"] += w
+    if kind == "held" and held > 0:
+        _RECORD_CACHE_STATS["droppedHeld"] = _RECORD_CACHE_STATS.get("droppedHeld", 0) + 1
+        _RECORD_CACHE_STATS["droppedHeldBytes"] = _RECORD_CACHE_STATS.get("droppedHeldBytes", 0) + min(w, held)
     return "dropped"
+
+
+def _write_then_drop(key, ent, pop=True):
+    """The quiescence drop's T362 half, shared by the quiet fold's drop (_drop_quiescent_entry, after its age gate) and the
+    explicit release at the end of a file's use (release_records, with no age gate): if the file's fold document lacks
+    something this process holds (_path_needs_write, the one rule), it is written NOW, before any pop, from the entry the
+    process already read, so the folds' cursors (the judges' rewound memo, the kernel's named folds) restore from it at
+    their next visit, reading the guard bytes, rather than reading the whole file again under a generation that no longer
+    exists. The write runs with neither lock held (checkpoint_write takes _CKPT_LOCK and _JSONL_CACHE_LOCK itself); it
+    charges the pusher cycle's byte budget shared with the converge pass, and over the budget the write AND the drop are
+    deferred by one cycle (the entry stays; the read is not lost), the drop owed (paid at the next cycle's start, or at the
+    next quiet fold over the file), counted under checkpoints.converge.dropDeferred. Then, with `pop`, the very entry `ent`
+    goes through the pin (_drop_unless_pinned_locked). Returns (wrote, outcome): outcome "dropped", "kept" (pinned),
+    "deferred", None when the cache no longer holds `ent`, or "stayed" without `pop`."""
+    try:
+        needs = checkpoint_drop_writes_on() and _path_needs_write(key, ent, at_drop=True)   # off (a cap of 0): the pop alone
+    except Exception:
+        needs = False
+    wrote = False
+    if needs:
+        cp = _ckpt_file(key)
+        try:
+            est = cp.stat().st_size if cp is not None and cp.exists() else 0
+        except OSError:
+            est = 0
+        if est <= 0:                                      # no previous document (a first write, or one the fallback removed): an
+            est = max(4096, int(ent[1]) // 8)             #  estimate from the file, never a free pass against the budget
+        if not checkpoint_cycle_take(2 * est):           # the previous document read for the carry, and about as much written:
+            oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
+            with _CKPT_LOCK:
+                _CKPT_STATS["converge"]["dropDeferred"] += 1
+                if pop:
+                    _DROP_OWED[key] = time.time()
+                    if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
+                        oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
+                        _DROP_OWED.pop(oldest, None)
+            if oldest is not None:
+                _pop_owed_entry(oldest)                   # outside _CKPT_LOCK: the reader's lock alone
+            return False, "deferred"
+        if checkpoint_write(key):
+            try:
+                written = cp.stat().st_size if cp is not None else 0
+            except OSError:
+                written = 0
+            checkpoint_cycle_charge(written - est)       # the true-up: what was written against the estimate taken above
+            wrote = True
+            with _CKPT_LOCK:
+                _CKPT_STATS["converge"]["dropWrites"] += 1
+    if not pop:
+        return wrote, "stayed"
+    hold = _asm_hold_of(key, ent)                         # a whole assembly entry folding over it keeps it (_drop_unless_pinned,
+    with _JSONL_CACHE_LOCK:                               #  2026-10-01)
+        if _JSONL_CACHE.get(key) is not ent:
+            return wrote, None
+        return wrote, _drop_unless_pinned_locked(key, ent, hold)
 
 
 def release_records(paths, keep=()):
     """The record side of the events that end a file's use (2026-10-01): each of `paths` outside `keep` (the files a live
-    session still reads) leaves the reader's cache through _drop_unless_pinned, so a file a whole assembly entry still folds
-    over stays. Counted under dropped and droppedBytes. Returns how many entries were dropped."""
+    session still reads) leaves the reader's cache the way the quiet fold's drop lets a file go (_write_then_drop): the file's
+    fold document is written first when it lacks something this process holds, so the next fold or walk over the file
+    restores from it at the guard bytes' cost instead of reading the whole file again (round one of the review: a pop with no
+    write sent the judges' episode scan after a second /clear, and the next named fold over a dead lane's leaf, back to the
+    whole file); over the cycle's budget the drop is deferred and owed; and a file a whole assembly entry still folds over
+    stays (_drop_unless_pinned_locked). There is no age gate: the event, not the file's quiet, says the use ended. Counted
+    under dropped and droppedBytes. Returns how many entries were dropped now."""
     keep = {str(p) for p in keep}
     n = 0
     for p in paths:
@@ -1374,7 +1484,12 @@ def release_records(paths, keep=()):
             continue
         with _JSONL_CACHE_LOCK:
             ent = _JSONL_CACHE.get(key)
-        if ent is not None and _drop_unless_pinned(key, ent) == "dropped":
+        if ent is None:
+            continue
+        with _CKPT_LOCK:
+            _DROP_OWED.pop(key, None)                     # an earlier deferral of this file's drop is taken here (re-owed if this
+        #                                                   one is deferred too)
+        if _write_then_drop(key, ent, pop=True)[1] == "dropped":
             n += 1
     return n
 
@@ -2358,51 +2473,9 @@ def _drop_quiescent_entry(key, ent, pop=True):
     # T362: the entry a quiescent-drop fold ends over is a read that already happened (the boot's, by whichever fold read the
     # file whole); if the file's document lacks something this process holds (the one rule), it is written NOW, before any
     # pop, from that read: the idle sessions' documents converge here, where no settle reaches them and the converge pass must
-    # refuse them (a heal on the cycle re-read them whole). The write runs with neither lock held (checkpoint_write takes
-    # _CKPT_LOCK and _JSONL_CACHE_LOCK itself); it charges the pusher cycle's byte budget shared with the pass, and over the
-    # budget the write AND the drop are deferred by one cycle (the entry stays; the read is not lost), counted under
-    # checkpoints.converge.dropDeferred.
-    try:
-        needs = checkpoint_drop_writes_on() and _path_needs_write(key, ent, at_drop=True)   # off (a cap of 0): the pop alone
-    except Exception:
-        needs = False
-    wrote = False
-    if needs:
-        cp = _ckpt_file(key)
-        try:
-            est = cp.stat().st_size if cp is not None and cp.exists() else 0
-        except OSError:
-            est = 0
-        if est <= 0:                                      # no previous document (a first write, or one the fallback removed): an
-            est = max(4096, int(ent[1]) // 8)             #  estimate from the file, never a free pass against the budget
-        if not checkpoint_cycle_take(2 * est):           # the previous document read for the carry, and about as much written:
-            oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
-            with _CKPT_LOCK:
-                _CKPT_STATS["converge"]["dropDeferred"] += 1
-                if pop:
-                    _DROP_OWED[key] = time.time()
-                    if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
-                        oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
-                        _DROP_OWED.pop(oldest, None)
-            if oldest is not None:
-                _pop_owed_entry(oldest)                   # outside _CKPT_LOCK: the reader's lock alone
-            return False
-        if checkpoint_write(key):
-            try:
-                written = cp.stat().st_size if cp is not None else 0
-            except OSError:
-                written = 0
-            checkpoint_cycle_charge(written - est)       # the true-up: what was written against the estimate taken above
-            wrote = True
-            with _CKPT_LOCK:
-                _CKPT_STATS["converge"]["dropWrites"] += 1
-    if not pop:
-        return wrote
-    pinned = _asm_pins_gen(key, ent[6])                   # a whole assembly entry folding over it keeps it (_drop_unless_pinned,
-    with _JSONL_CACHE_LOCK:                               #  2026-10-01)
-        if _JSONL_CACHE.get(key) is ent:
-            _drop_unless_pinned_locked(key, ent, pinned)
-    return wrote
+    # refuse them (a heal on the cycle re-read them whole). The write, its budget and its deferral, and the pop through the
+    # assembly pin are _write_then_drop's, shared with the explicit release at the end of a file's use (release_records).
+    return _write_then_drop(key, ent, pop=pop)[0]
 
 
 _UNPINNED = object()
@@ -5414,6 +5487,22 @@ def evict_document(leaf_path):
     return len(popped), dropped
 
 
+def _asm_lazy_uuids(e):
+    """The uuids of the pre-cut records assembly entry `e` serves as lazy atoms, whose bodies the hydrated memo holds, one at a
+    time (no set is built for an entry only checked against): its lazy index's record rows, or the atoms-only form's prefix
+    atoms (read without materializing any). Nothing for a whole entry."""
+    ix = e.get("index") if e else None
+    if ix is not None:
+        for r in ix.records or ():
+            if r:
+                yield r[0]
+    pre = e.get("prefix") if e else None
+    if isinstance(pre, list):
+        for a in list.__iter__(pre):
+            if isinstance(a, dict) and a.get("uuid"):
+                yield a["uuid"]
+
+
 def release_assembly(leaf_path, rompuuid=None):
     """Drop a leaf's assembly entries at an event that ends its use (2026-10-01): a /clear or a resume fork retiring the
     leaf (the judges' _note_leaf), a dead timeline lane, the last viewer of a subagent closing. Before, nothing left at
@@ -5424,20 +5513,24 @@ def release_assembly(leaf_path, rompuuid=None):
     With `rompuuid`, only that session's entries go (a fork child's flip leaves the parent's entry of the same file). Each
     popped entry's lazy index gives its memo back outside _ASM_LOCK (_asm_release), and the hydrated bodies of its pre-cut
     records leave the memo: nothing serves that entry's atoms again, and the session parsed again restores and hydrates
-    afresh, as after an eviction. Returns how many entries went, counted `released` among the parse's road counters."""
+    afresh, as after an eviction. The memo is keyed by uuid alone, and other live entries can name the same records (an SDK
+    fork child's transcript carries its parent's history verbatim, a resume fork's leaf walks through the old one's), so a
+    body any remaining entry's lazy index or atoms-only prefix still names stays (round one of the review: removing it only
+    turned that entry's next read of it into a seek read from disk). Returns how many entries went, counted `released`
+    among the parse's road counters."""
     rp = os.path.realpath(str(leaf_path))
     with _ASM_LOCK:
         keys = [k for k in _ASM_CACHE if k[0] == rp and (rompuuid is None or k[1] == str(rompuuid))]
         popped = [e for e in (_ASM_CACHE.pop(k, None) for k in keys) if e is not None]
+        others = list(_ASM_CACHE.values()) if popped else []
     uuids = set()
     for e in popped:
         _asm_release(e)                              # OUTSIDE _ASM_LOCK: release takes _MAT_LOCK, never nested with it
-        ix = e.get("index")
-        if ix is not None:
-            uuids.update(r[0] for r in (ix.records or ()) if r)
-        pre = e.get("prefix")
-        if isinstance(pre, list):                    # the atoms-only form's lazy atoms, read without materializing any
-            uuids.update(a.get("uuid") for a in list.__iter__(pre) if isinstance(a, dict) and a.get("uuid"))
+        uuids.update(_asm_lazy_uuids(e))
+    for e in others:                                 # at most the cache's 256 entries, their record rows read once, outside the lock
+        if not uuids:
+            break
+        uuids.difference_update(_asm_lazy_uuids(e))
     if uuids:
         with _ASM_CKPT_LOCK:
             for u in uuids:
@@ -5447,6 +5540,28 @@ def release_assembly(leaf_path, rompuuid=None):
     if popped:
         _asm_stat("released", len(popped))
     return len(popped)
+
+
+_RELEASE_FAILED = set()            # (where, path) whose release at the end of a file's use raised: said once each
+
+
+def release_failed(where, path, exc):
+    """A release at the end of a file's use raised (a stat or a sidecar read refused, a lineage that does not resolve): the
+    caller carries on with the memory as it stood before the release existed, since a trim must never fail the event it rides
+    (discover's leaf flip, under every pane; a timeline frame; a viewer's close). Counted `releaseFailed` among the parse's
+    road counters at every failure, said on stderr once per (where, path) (2026-10-01)."""
+    _asm_stat("releaseFailed")
+    k = (str(where), str(path))
+    if k in _RELEASE_FAILED:
+        return
+    if len(_RELEASE_FAILED) >= 4096:
+        _RELEASE_FAILED.clear()                      # re-arm past the bound: a repeated line beats a silence that never lifts
+    _RELEASE_FAILED.add(k)
+    try:
+        sys.stderr.write("romp event-model: releasing the caches of %s at %s failed (memory left as it stood; said once per "
+                         "file): %s\n" % (path, where, ("%s: %s" % (type(exc).__name__, exc))[:200]))
+    except Exception:
+        pass
 
 
 def _asm_gates(entry, leaf_path, candidate_files, links):

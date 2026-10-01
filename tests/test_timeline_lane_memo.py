@@ -30,6 +30,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
+from unittest import mock
 from romp_load import load_source
 from fs_clock import move_ctime   # noqa: E402  the shared test helper, on the path the line above put there
 from pathlib import Path
@@ -273,12 +274,20 @@ class DeadLaneMemo(unittest.TestCase):
         finally:
             km._parse = real
 
+    def _open_budget(self):
+        """The pusher cycle's checkpoint budget opened wide for the test, so the release's document write (the quiet drop's
+        write half) is never deferred by what earlier tests in this process spent, and set back after."""
+        saved = dict(km.em._CKPT_CYCLE)
+        km.em.checkpoint_cycle_begin(1 << 40)
+        self.addCleanup(lambda: (km.em._CKPT_CYCLE.clear(), km.em._CKPT_CYCLE.update(saved)))
+
     def _three_turns(self):
         recs = [_rec("user", T0, "u1", None, "run the long benchmark"), _rec("assistant", T0 + 10, "a1", "u1", "Launched it."),
                 _rec("user", T0 + 600, "u2", "a1", "and the cap?"), _rec("assistant", T0 + 610, "a2", "u2", "Raised to 4096."),
                 _rec("user", T0 + 1200, "u3", "a2", "ship it"), _rec("assistant", T0 + 1210, "a3", "u3", "Shipped.")]
         self._write(recs)
         getattr(km, "_dead_lane_released", {}).clear()
+        self._open_budget()
         return str(self.tpath)
 
     def _asm_keys(self, path):
@@ -368,6 +377,73 @@ class DeadLaneMemo(unittest.TestCase):
         with km.em._JSONL_CACHE_LOCK:
             self.assertNotIn(p, km.em._JSONL_CACHE, "no live lane reads it any more: dropped")
 
+    def test_after_a_dead_lane_release_the_next_named_fold_over_the_leaf_restores_from_its_document(self):
+        """The release drops the leaf's record entry the way the quiet fold's drop does, its fold document written first when
+        it lacks what this process holds (round one of the review: a pop with no write left the kernel's named folds over the
+        leaf with cursors at a generation that no longer existed, so the next one read the whole file again and put the whole
+        entry back). The next named fold restores its cursor from the document and steps nothing, reading the guard bytes."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        km._parse_cache.pop(p, None)
+        name = "deadLaneNamedFold"
+        self.addCleanup(lambda: km.em._FOLD_REG.pop(name, None))
+        cache = {}
+        s1 = km.em.fold_records(cache, p, lambda: 0, lambda s, r: s + 1, ckpt=name)   # a named fold over the leaf, as the kernel's
+        self.assertEqual(s1, 6)
+        self._build()                                                 # dead: the lane is cached and released
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE, "the premise: the release dropped the leaf's records")
+        with km.em._READ_BYTES_LOCK:
+            b0 = km.em._READ_BYTES.get(p, 0)
+        kinds = []
+        s2 = km.em.fold_records(cache, p, lambda: 0, lambda s, r: s + 1, on=kinds.append, ckpt=name)
+        with km.em._READ_BYTES_LOCK:
+            read = km.em._READ_BYTES.get(p, 0) - b0
+        self.assertEqual(kinds, ["restore"], "the next fold restores from the document the release wrote, not a whole refold")
+        self.assertEqual(s2, s1, "to the same state")
+        self.assertLessEqual(read, 4 * km.em._JSONL_TAIL_GUARD, "reading the guard bytes, not the %d-byte file" % os.path.getsize(p))
+
+    def test_a_dead_lane_after_a_clear_drops_its_leaf_and_its_anchor(self):
+        """After a /clear the dead lane's leaf is a file of its own and the session's first file is its anchor, the new leaf's
+        candidate: the release drops both record entries (round one of the review: every dead-lane test had a leaf that was its
+        own anchor, so a release that left the anchor passed them all)."""
+        self._three_turns()
+        anchor = str(self.tpath)
+        leaf = str(self.tpath.with_name("11111111-2222-3333-4444-5555555555c2.jsonl"))
+        Path(leaf).write_text("\n".join(json.dumps(r) for r in [
+            _rec("user", T0 + 1800, "cu1", None, "page the notes-api index"), _rec("assistant", T0 + 1810, "ca1", "cu1", "Paged."),
+            _rec("user", T0 + 2400, "cu2", "ca1", "and by cursor?"), _rec("assistant", T0 + 2410, "ca2", "cu2", "By cursor too."),
+            _rec("user", T0 + 3000, "cu3", "ca2", "ship it"), _rec("assistant", T0 + 3010, "ca3", "cu3", "Shipped.")]) + "\n")
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(leaf, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(leaf, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertTrue(leaf in km.em._JSONL_CACHE and anchor in km.em._JSONL_CACHE, "the premise: the parse read both files")
+        km._parse_cache.pop(leaf, None)
+        km._release_dead_lane(SID, leaf, ("v1",), [{"sid": SID, "path": leaf}], {})
+        self.assertEqual(self._asm_keys(leaf), [], "the session's entry of its leaf is released")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(leaf, km.em._JSONL_CACHE, "the leaf's records go")
+            self.assertNotIn(anchor, km.em._JSONL_CACHE, "and so do its anchor's: no live lane reads it")
+
+    def test_a_release_that_raises_never_drops_the_frame(self):
+        """The dead lane's release does file I/O (a stat, a sidecar read, a document write) inside the timeline build's lane
+        loop, whose other steps each report through a complaint of their own: a raise there is noted once per file, and the
+        frame is built with the lane in it, the memory left as it stood (round one of the review: the raise left the build)."""
+        p = self._three_turns()
+        f0 = km.em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")), redirect_stderr(err):
+            tl = self._build()
+        self.assertTrue(tl["turns"][SID], "the lane is drawn")
+        self.assertIn(SID, km._dead_lane_memo, "and cached as any dead lane is")
+        self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the failure is counted")
+        self.assertIn("dead lane", err.getvalue())
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE, "nothing was released")
+
     def _many_turns(self, n):
         recs, parent = [], None
         for k in range(n):
@@ -377,6 +453,7 @@ class DeadLaneMemo(unittest.TestCase):
             parent = a
         self._write(recs)
         getattr(km, "_dead_lane_released", {}).clear()
+        self._open_budget()
         return str(self.tpath), recs
 
     def test_a_revived_session_restores_once_after_the_release_and_then_folds(self):

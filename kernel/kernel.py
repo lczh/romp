@@ -33997,7 +33997,8 @@ def _release_subagent_view(sid, agent_id):
     """closeSubagent (2026-10-01): when no client still views this agent, its file's parse slot for this session and its
     assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
     until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
-    memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records."""
+    memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records. A release that
+    raises is noted once per file (em.release_failed) and the close goes on."""
     if any((c.get("subagents") or {}).get((sid, agent_id)) for c in list(_clients)):
         return
     try:
@@ -34006,8 +34007,11 @@ def _release_subagent_view(sid, agent_id):
     except Exception:
         return
     if apath is not None:
-        jd.parse_cache_drop_leaf(str(apath), sid)
-        em.release_assembly(str(apath), rompuuid=sid)
+        try:
+            jd.parse_cache_drop_leaf(str(apath), sid)
+            em.release_assembly(str(apath), rompuuid=sid)
+        except Exception as e:                    # noqa: BLE001 — a trim never fails the viewer's close
+            em.release_failed("viewer close", apath, e)
 
 
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
@@ -51543,18 +51547,26 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     nothing: the first miss after the release restores, and the restored entry (the document's lazy rows and the tail past
     its cut) and the reader's tail entry stay until the transcript moves or the caches' bounds reach them. The record entries
     that go are the leaf's and its anchor's, less every live lane's leaf and anchor in this build; a file a whole assembly
-    entry still folds over stays (em.release_records)."""
-    if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
-        return
-    if len(_dead_lane_released) > _DEAD_LANE_MEMO_MAX:
-        _dead_lane_released.pop(next(iter(_dead_lane_released)))
-    _dead_lane_released[sid] = tk
-    em.release_assembly(path, rompuuid=sid)
-    keep = set()
-    for o in alive:
-        if live_map.get(o["sid"]) is not None:
-            keep.update((str(o["path"]), os.path.join(os.path.dirname(str(o["path"])), o["sid"] + ".jsonl")))
-    em.release_records({str(path), os.path.join(os.path.dirname(str(path)), sid + ".jsonl")}, keep=keep)
+    entry still folds over stays (em.release_records), and each one's fold document is written first when it lacks what
+    this process holds, so the next named fold over the leaf restores rather than reading it whole. This is the one step of
+    the lane loop that reports through no complaint of its own: a raise in it is noted once per file (em.release_failed)
+    and the frame is built as before, the memory left as it stood. It runs only in the full timeline build, so only while a
+    timeline client is connected, and only for a dead lane inside the build's window: a session that ends while no timeline
+    is open is released when a timeline build next sees its dead lane."""
+    try:
+        if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
+            return
+        if len(_dead_lane_released) > _DEAD_LANE_MEMO_MAX:
+            _dead_lane_released.pop(next(iter(_dead_lane_released)))
+        _dead_lane_released[sid] = tk
+        em.release_assembly(path, rompuuid=sid)
+        keep = set()
+        for o in alive:
+            if live_map.get(o["sid"]) is not None:
+                keep.update((str(o["path"]), os.path.join(os.path.dirname(str(o["path"])), o["sid"] + ".jsonl")))
+        em.release_records({str(path), os.path.join(os.path.dirname(str(path)), sid + ".jsonl")}, keep=keep)
+    except Exception as e:                        # noqa: BLE001 — a trim never drops a timeline frame
+        em.release_failed("dead lane", path, e)
 
 
 def _dead_lane_marks(marks, t0):

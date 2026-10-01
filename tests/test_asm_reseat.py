@@ -740,6 +740,8 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         self.assertIsNone(_reader_entry(self.leaf), "a restored entry does not hold the drop back: popped")
         st1 = em.record_cache_stats()
         self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
+        self.assertEqual(st1.get("droppedHeld", 0) - st0.get("droppedHeld", 0), 0, "the upgrade decoded a copy of its own, which "
+                         "the drop frees: the restored entry holds only the tail it read, not counted as held")
         s0 = self.stats()
         out, mode = self.parse()
         self.assertEqual(mode, "restore", "the next visit restores: %s" % self.moved(s0, self.stats()))
@@ -748,7 +750,9 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
     def test_a_restored_entry_that_folded_over_the_upgrade_does_not_hold_the_drop_back_either(self):
         """The same after a fold over the upgraded reader entry, which leaves the restored adapter holding the reader's WHOLE
         list (_src) under its tail row: a keep or a trim of the reader entry would free nothing there, so the drop pops, and
-        the restore at the next visit replaces the entry and what it held."""
+        the restore at the next visit replaces the entry and what it held. Until then the drop freed nothing, though
+        recordCache.bytes fell by the whole file: counted under droppedHeld and droppedHeldBytes, so the fall is not read as
+        memory freed (round one of the review)."""
         _aged(self.leaf)
         out, _ = self.parse()
         self.assertTrue(self.settle(out))
@@ -769,6 +773,11 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         self.assertIsNone(_reader_entry(self.leaf), "popped")
         st1 = em.record_cache_stats()
         self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
+        fell = st1["droppedBytes"] - st0["droppedBytes"]
+        self.assertGreater(fell, 0)
+        self.assertEqual((st1.get("droppedHeld", 0) - st0.get("droppedHeld", 0),
+                          st1.get("droppedHeldBytes", 0) - st0.get("droppedHeldBytes", 0)), (1, fell),
+                         "every byte the count lost is still held by the adapter: counted as held, not as freed")
         out, mode = self.parse()
         self.assertEqual(mode, "restore")
         self.assertColdEqual(out)
@@ -824,10 +833,11 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         _aged(other, self.leaf)
         self.parse()
         em._read_jsonl_entry(str(other), tail_ok=False)
-        d0 = em.record_cache_stats()["dropped"]
+        d0, h0 = em.record_cache_stats()["dropped"], em.record_cache_stats().get("droppedHeld", 0)
         _quiet_drop(other)
         self.assertIsNone(_reader_entry(other), "nothing pins it: dropped as before")
         self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        self.assertEqual(em.record_cache_stats().get("droppedHeld", 0), h0, "nothing holds its records: freed, not counted as held")
         gen = self.entry()["recs"][self.leaf][0]
         em._read_jsonl_entry(self.leaf, tail_ok=False)
         with em._JSONL_CACHE_LOCK:                                    # an entry at another generation does not pin it either
@@ -850,7 +860,8 @@ class ReleaseOnTheEndOfUse(Episode):
         em.hydrate(out, SID)                                          # the consumers read the pre-cut bodies: the memo holds them
         e = self.entry()
         ix = e.get("index")
-        pre = {r[0] for r in ix.records} if ix is not None else {a.get("uuid") for a in e.get("prefix") or [] if a.get("uuid")}
+        self.assertIsNotNone(ix, "the premise: a document with its turns section restores through a lazy index")
+        pre = {r[0] for r in ix.records}
         with em._ASM_CKPT_LOCK:
             held = set(em._HYDRATED) & pre
             em._HYDRATED["peer-body-uuid"] = ({"uuid": "peer-body-uuid"}, 10); em._HYDRATED_BYTES[0] += 10
@@ -864,8 +875,10 @@ class ReleaseOnTheEndOfUse(Episode):
             em._CKPT_DIR_FN = saved
         rec0 = _reader_entry(self.leaf)
         r0 = em._ASM_STATS.get("released", 0)
+        slots0 = em._ASM_INDEX_STATS["released"]
         self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
         self.assertIsNone(self.entry(), "this session's entry is gone")
+        self.assertGreater(em._ASM_INDEX_STATS["released"] - slots0, 0, "its lazy index gave the atoms it built back to the LRU")
         with em._ASM_LOCK:
             self.assertIn((os.path.realpath(self.leaf), PEER, False), em._ASM_CACHE, "another session's entry of the same file stays")
         self.assertIs(_reader_entry(self.leaf), rec0, "the record cache is not the release's to touch")
@@ -898,15 +911,80 @@ class ReleaseOnTheEndOfUse(Episode):
         self.assertEqual(em.release_records([self.leaf]), 1, "once its entry is released, the leaf goes too")
         self.assertIsNone(_reader_entry(self.leaf))
 
+    def test_a_release_over_the_atoms_only_form_drops_its_hydrated_bodies_too(self):
+        """A document written with no tree carries no turns section, and its restore serves the pre-cut atoms as a list (the
+        atoms-only form) rather than through a lazy index: the release drops those atoms' hydrated bodies the same way (round
+        one of the review: only the lazy index's form was checked)."""
+        self.parse()
+        self.assertTrue(em.asm_checkpoint_write(self.leaf, SID), em.asm_checkpoint_stats()["skipped"])   # no tree: atoms only
+        self.fresh()
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        e = self.entry()
+        self.assertIsNone(e.get("index"), "the premise: the atoms-only form, no lazy index")
+        pre = {a.get("uuid") for a in list.__iter__(e["prefix"]) if isinstance(a, dict) and a.get("uuid")}
+        self.assertTrue(pre, "the premise: pre-cut atoms in the prefix")
+        em.hydrate(out, SID)
+        with em._ASM_CKPT_LOCK:
+            held = set(em._HYDRATED) & pre
+        self.assertTrue(held, "the restored prefix's bodies were memoized")
+        self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
+        with em._ASM_CKPT_LOCK:
+            self.assertEqual(len(set(em._HYDRATED) & pre), 0, "the atoms-only entry's bodies went with it (of %d held)" % len(held))
+            self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()))
 
-class ReleasesKeepTheJudgesVerdicts(Episode):
-    """Verdict parity: the judges' facts (chain membership, the per-file rewinds, the parsed tree) over a synthetic corpus are
-    the same after every release this change adds: a /clear's flip, the end of each session's use, a quiet drop over each
-    leaf, every record entry dropped, and the judges' own walk with its drop. The corpus: a long session with compactions, a
-    rewind and its document (restored); a session that cleared, its anchor carrying a rewind; a session resumed from another
-    file."""
+    def test_a_release_keeps_the_hydrated_bodies_another_entry_still_names(self):
+        """The hydrated memo is keyed by uuid alone, and another live entry can name the same records: an SDK fork child's
+        transcript carries its parent's history verbatim. Releasing one session's entry leaves the bodies the other entry's
+        lazy index still names, which removing would only have turned into seek reads from disk at that entry's next read
+        (round one of the review), and they go with the last entry that names them."""
+        twin = str(self.td / (PEER + ".jsonl"))
+        shutil.copyfile(self.leaf, twin)                              # the fork child's file: the history, record for record
+
+        def parse_twin():
+            mode = []
+            tree = em.parse_session(twin, rompuuid=PEER, name="api", dir="/w/notes-api", candidate_files=[twin], states=None,
+                                    postal_log=[], now=NOW, asm_mode_out=mode)
+            return tree, (mode[-1] if mode else None)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        t2, _ = parse_twin()
+        self.assertTrue(em.asm_checkpoint_write(twin, PEER, tree=t2), em.asm_checkpoint_stats()["skipped"])
+        self.fresh()
+        out, m1 = self.parse()
+        t2, m2 = parse_twin()
+        self.assertEqual((m1, m2), ("restore", "restore"), "the premise: both sessions restored")
+        with em._ASM_LOCK:
+            theirs = em._ASM_CACHE[(os.path.realpath(twin), PEER, False)]
+        shared = {r[0] for r in self.entry()["index"].records} & {r[0] for r in theirs["index"].records}
+        self.assertTrue(shared, "the premise: both lazy indexes name the same pre-cut records")
+        em.hydrate(out, SID)
+        with em._ASM_CKPT_LOCK:
+            held = set(em._HYDRATED) & shared
+        self.assertTrue(held, "the bodies were memoized")
+        self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
+        with em._ASM_CKPT_LOCK:
+            self.assertEqual(set(em._HYDRATED) & shared, held, "the bodies the peer's index still names stay")
+        self.assertEqual(em.release_assembly(twin, rompuuid=PEER), 1)
+        with em._ASM_CKPT_LOCK:
+            self.assertEqual(set(em._HYDRATED) & shared, set(), "and go with the last entry that names them")
+            self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()))
+
+
+class ReleasesLeaveTheFactsARebuildFinds(Episode):
+    """Cache independence across the releases: the facts the judges read (chain membership, the per-file rewinds, the parsed
+    tree), computed here by the event model's own walks over a synthetic corpus, are the same after every release this change
+    adds as before it: a /clear's flip, the end of each session's use, a quiet drop over each leaf, every record entry dropped,
+    and the judges' walk with its drop. It calls the releases directly with no keep set, so it guards no keep or pin rule:
+    the judges' verdict parity, driven through the events and their keep sets with the reads compared, is
+    ReleasesKeepTheJudgesVerdicts in test_shared_parse (round one of the review). The corpus: a long session with
+    compactions, a rewind and its document (restored); a session that cleared, its anchor carrying a rewind; a session
+    resumed from another file."""
 
     def test_every_release_leaves_the_judges_facts_as_they_were(self):
+        saved = dict(em._CKPT_CYCLE)
+        em.checkpoint_cycle_begin(1 << 40)                             # the record drops' document writes are never deferred here
+        self.addCleanup(lambda: (em._CKPT_CYCLE.clear(), em._CKPT_CYCLE.update(saved)))
         last = self.last_uuid()
         last_prompt = next(r for r in reversed(self.recs) if r.get("type") == "user" and r.get("promptSource") == "typed")
         self.append(rewind(self.last_t() + 60, last_prompt["parentUuid"]) + [

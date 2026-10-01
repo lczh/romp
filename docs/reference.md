@@ -1644,6 +1644,12 @@ document over a tail read instead of reading the file whole, provided the
 document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
+The record drops at the events that end a file's use (a leaf a second /clear
+retired, a dead timeline lane's leaf and anchor) take the same write, budget
+and deferral with no two-minute wait, since the event says the file's use
+ended: the judges' episode scan after the second /clear, and the next named
+fold over a dead lane's leaf, restore from the document instead of reading the
+file whole again.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
 it (the drop then pops as it did before the write existed, except under the
 incident scan's memo, which keeps a walked file's records resident when the
@@ -2737,7 +2743,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `fallback`, and `released` (assembly entries dropped at an event that ended
   their file's use: a leaf a /clear or a resume fork retired, and again any
   entry a later parse of that retired leaf installed, a dead timeline lane with
-  a document a restore would take, the last viewer of a subagent closing); the same block rides `asmCheckpoint.parse` on GET /perf,
+  a document a restore would take, the last viewer of a subagent closing),
+  and `releaseFailed` (such a release that raised and was left undone, the
+  memory as it stood; said on stderr once per file); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar
@@ -2785,7 +2793,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `docReadBytes`, the documents the pass's writes read for their carry,
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
-  for the documents written at the reader's quiescence drop and the drops
+  for the documents written at the reader's quiescence drop (and at the record
+  drops of the events that end a file's use) and the drops
   deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
@@ -2855,7 +2864,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
   bytes stay counted; a restored entry, or a whole one whose leaf has a document a
-  restore would take, never holds a drop back), `released` (every pop that removed an entry, whatever the
+  restore would take, never holds a drop back), `droppedHeld` and
+  `droppedHeldBytes` (the drops, of `dropped`, whose records an assembly entry
+  folding over that generation still holds until its next visit, a restored
+  entry or a whole one whose leaf has a document a restore would take, and the
+  bytes of those records: `bytes` fell by them while the memory stayed, so the
+  memory drops freed is about `droppedBytes` less `droppedHeldBytes`), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,

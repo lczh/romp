@@ -3153,7 +3153,10 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
     after it put one back that nothing would release again before the cache's count cap. A leaf discover never
     handed out (a subagent's agent file) is never retired and stores as an override slot."""
     if _leaf_retired(fsid, leaf):
-        em.release_assembly(leaf, rompuuid=fsid)
+        try:
+            em.release_assembly(leaf, rompuuid=fsid)
+        except Exception as e:                    # noqa: BLE001 — a trim never fails the parse it rides
+            em.release_failed("retired parse", leaf, e)
         return
     slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
@@ -9076,7 +9079,9 @@ def _note_leaf(sid, path_str):
     the flip (a pass that snapshotted its rows before a mid-pass /clear) is refused by _parse_store rather than
     kept as a live slot; a leaf handed out again (the anchor, while a fresh lastSid names a file not yet on disk)
     is current again and stores as before. With the slots go this sid's assembly entry of the retired leaf and, when no
-    live lineage reads the file, its record entry (_release_retired_records, 2026-10-01)."""
+    live lineage reads the file, its record entry (_release_retired_records, 2026-10-01). Those two do file I/O (a stat, a
+    sidecar read, a states read, a document write) inside discover, which every pane rides: a raise there is noted once per
+    file (em.release_failed) and the flip goes on, the memory left as it stood."""
     with _LEAF_LOCK:
         prev = _LEAF_SEEN.get(sid)
         _LEAF_SEEN[sid] = path_str
@@ -9086,20 +9091,26 @@ def _note_leaf(sid, path_str):
             retired.add(prev)
     if prev is not None and prev != path_str:
         parse_cache_drop_leaf(prev, sid)
-        em.release_assembly(prev, rompuuid=sid)   # and this sid's assembly entry of it (2026-10-01), which held every record of the
-        #                                           retired leaf until the cache's count cap
-        _release_retired_records(sid, prev, path_str)
+        try:
+            em.release_assembly(prev, rompuuid=sid)   # and this sid's assembly entry of it (2026-10-01), which held every record
+            #                                           of the retired leaf until the cache's count cap
+            _release_retired_records(sid, prev, path_str)
+        except Exception as e:                        # noqa: BLE001 — a trim never fails discover
+            em.release_failed("leaf flip", prev, e)
 
 
 def _release_retired_records(sid, prev, leaf):
     """The record side of a leaf flip (2026-10-01): the retired leaf's reader entry goes when no live lineage of the session
     reads it. After a first /clear the retired leaf is the session's anchor, a candidate of the new leaf's parse, and stays.
-    After a second one it is the first clear's file: neither the new leaf's candidates nor its lineage closure name it, the
-    judges' episode scan answers it from its rewound memo before any drop, and its whole entry (the judges read the leaf
-    whole while it was current) stayed until the reader's LRU reached it. A file discover hands out as ANY session's
-    current leaf stays (a fork child's first leaf is its parent's live transcript), so does a registered session's own
-    file, as the episode scan keeps it (_per_file_rewound), and so does a file a whole assembly entry still folds over
-    (em.release_records)."""
+    After a second one it is the first clear's file: neither the new leaf's candidates nor its lineage closure name it, and
+    its whole entry (the judges read the leaf whole while it was current) stayed until the reader's LRU reached it. The
+    judges' episode scan still walks that file (the session's episode rows name it), and the flip runs inside discover,
+    BEFORE that scan: so the drop writes the file's fold document first when it lacks what this process holds, the scan's
+    rewound memo among it (em.release_records takes the quiet drop's write half), and the scan restores the memo from the
+    document at the guard bytes' cost (round one of the review: a pop with no write sent the scan back to the whole file,
+    and the entry it re-read stayed). A file discover hands out as ANY session's current leaf stays (a fork child's first
+    leaf is its parent's live transcript), so does a registered session's own file, as the episode scan keeps it
+    (_per_file_rewound), and so does a file a whole assembly entry still folds over (em.release_records)."""
     try:
         cands = _judge_candidates(sid, [leaf])
         links = em.resume_fork_links(em._load_states(str(STATESDIR / (sid + ".jsonl"))))

@@ -17,13 +17,16 @@ Kernel half, pinned here:
   - a bg-tasks row carries agentId only when the launch is an agent;
   - the chat fold never seals a running agent's launch turn, and folds byte-identically to a full build.
 Synthetic data only: placeholder ids, TESTHOST-free paths, the notes-api demo world."""
+import io
 import json
 import os
 import shutil
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
+from unittest import mock
 from romp_load import load_source
 from pathlib import Path
 
@@ -38,6 +41,7 @@ jd = km.jd
 em = km.em
 
 SID = "11111111-2222-3333-4444-555555555555"
+PEER_SID = "11111111-2222-3333-4444-5555555555a2"   # another session's placeholder id (an entry of the same agent file)
 AID_BG = "a1111111111111111"      # the background agent
 AID_FG = "a2222222222222222"      # the foreground agent
 TU_BG = "toolu_bg_0001"
@@ -659,12 +663,19 @@ class OpenClose(World):
             self._dispatch(c1, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
             self._dispatch(c2, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
             self.assertTrue(entries(), "the viewer's frame parsed the agent's file into an assembly entry")
+            peer = (rp, PEER_SID, False)                   # another session's entry of the same file (round one of the review)
+            em.parse_session(str(self.bg_file), rompuuid=PEER_SID, name="api", dir=self.cwd, candidate_files=[str(self.bg_file)],
+                             states=None, postal_log=[], now=NOW)
+            with em._ASM_LOCK:
+                self.assertIn(peer, em._ASM_CACHE, "the premise: a peer session's entry of the agent's file")
             self._dispatch(c1, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
             self.assertTrue(entries(), "another viewer still has the agent open: kept")
             self.assertTrue(slots())
             self._dispatch(c2, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
             self.assertEqual(entries(), [], "the last viewer closed: the agent file's assembly entry is released")
             self.assertEqual(slots(), [], "and its parse slot")
+            with em._ASM_LOCK:
+                self.assertIn(peer, em._ASM_CACHE, "the close releases this session's entry only: the peer's stays")
             self.assertTrue(records(), "the record entry is the agent folds' to drop")
             append_jsonl(self.bg_file, [dict(arec(T0 + 40, "%s-a9" % AID_BG, [{"type": "text", "text": "Nearly done."}],
                                                   "%s-fin" % AID_BG), isSidechain=True, agentId=AID_BG)])
@@ -680,6 +691,27 @@ class OpenClose(World):
             fresh = km.build_subagent(SID, AID_BG, int(time.time()), self.tm)
             self.assertEqual((reopened["events"], reopened["running"]), (fresh["events"], fresh["running"]),
                              "the reopened frame shows what a fresh build does")
+        finally:
+            km._clients[:] = saved
+
+    def test_a_release_that_raises_does_not_fail_the_viewers_close(self):
+        """The close's release does file I/O (the agent file's path, the caches' locks): a raise there is noted once per file
+        and the close goes on, the viewer unregistered and the memory left as it stood (round one of the review: the handler
+        raised out of the close)."""
+        c = _Client()
+        saved = list(km._clients)
+        km._clients[:] = [c]
+        try:
+            self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
+            f0 = em._ASM_STATS.get("releaseFailed", 0)
+            err = io.StringIO()
+            with mock.patch.object(em, "release_assembly", side_effect=OSError("permission denied")), redirect_stderr(err):
+                self._dispatch(c, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
+                self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
+                self._dispatch(c, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
+            self.assertNotIn((SID, AID_BG), c["subagents"], "the close took effect")
+            self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "each failure counted")
+            self.assertEqual(err.getvalue().count("viewer close"), 1, "said once for the file: %r" % err.getvalue())
         finally:
             km._clients[:] = saved
 
