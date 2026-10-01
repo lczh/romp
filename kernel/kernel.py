@@ -33706,9 +33706,10 @@ def _agent_launch_ids(agent_path):
     """The launch tool_use ids in one agent's own file (_launch_ids_step), folded append-incrementally like
     the head's steps (a growing file steps only its new records; an unchanged one costs a stat). The
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
-    file was launched by THIS agent. set() when unreadable."""
+    file was launched by THIS agent. set() when unreadable. Its drop policy is "returned" (2026-10-01): a returned agent's
+    records leave memory at the first fold that finds nothing new, and the spend guard routes its agent reads through here."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="quiescent")
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="returned")
     except Exception:
         return set()
 
@@ -33722,7 +33723,7 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since, _gist_of) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="quiescent")
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="returned")
     except Exception:
         return None
     if not st["since"]:
@@ -48986,7 +48987,18 @@ def _spend_window_files(leaf, since, now=None, stat=True):
     return [key] + [p for p, mt in m["files"].items() if mt >= since]
 
 
-def _spend_file_rows(f, since, prices, dearest):
+def _spend_tail_covers(records, floor):
+    """Whether a tail entry's records reach back past `floor`: its first stamped record is older, so nothing before the
+    document's cut can be in the window (a transcript is chronological, the premise of the scan's own break)."""
+    for o in records:
+        if isinstance(o, dict):
+            t = _msg_epoch(o)
+            if t is not None:
+                return t < floor
+    return False
+
+
+def _spend_file_rows(f, since, prices, dearest, agent=False):
     """One file's (t, usd) rows at or after `since`, from the record cache, memoized on the file's (mtime, size) stamp:
     a file that did not change since its last scan serves its rows without a walk (LOW 2 of the review). The scan runs
     from the tail back to SPEND_GUARD_MEMO_SLACK_S before `since`, so the memo also serves the next cycles, whose windows
@@ -48994,7 +49006,24 @@ def _spend_file_rows(f, since, prices, dearest):
     largest usage; a record whose model the table cannot place is priced at the table's dearest row (a guard errs high).
     The reader's entry is taken with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores
     a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
-    transcript on the guard's first cycle; the window wants the newest records, which a tail holds."""
+    transcript on the guard's first cycle; the window wants the newest records, which a tail holds.
+    `agent` (an agent transcript beside the leaf, never the leaf; 2026-10-01): a returned agent's entry leaves the record
+    cache (the agent folds' drop_after="returned", which _spend_window_usd routes the guard's agent reads through), so a
+    memo scanned from the WHOLE file is served on a stat while the reader holds no entry for the path, instead of the
+    guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
+    read whole once when its first stamped record is not older than the window's floor, since the records before the
+    document's cut may then be in the window (an agent that resumed after its drop, a fresh process restoring a file the
+    window still covers), and a window priced from the tail alone would read low."""
+    if agent:
+        hit = _SPEND_ROWS_CACHE.get(f)
+        if hit is not None and hit[0][2] == 0 and hit[1] <= since and f not in em._JSONL_CACHE:
+            try:
+                st = os.stat(f)
+            except OSError:
+                st = None
+            if st is not None and (st.st_mtime, st.st_size) == hit[0][:2]:
+                _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
+                return [r for r in hit[2] if r[0] >= since]
     ent = em._read_jsonl_entry(f, tail_ok=True)
     if ent is None:
         _SPEND_ROWS_CACHE.pop(f, None)
@@ -49002,12 +49031,16 @@ def _spend_file_rows(f, since, prices, dearest):
     stamp = (ent[0], ent[1], ent[5])                     # mtime, size, and the entry's BASE (the round-two review's LOW a):
     #   a tail entry accepted after a restart holds the records past the checkpoint's cut, and a later whole-file
     #   upgrade of the same file (base 0) changes what the window can see without moving mtime or size; the base in
-    #   the stamp invalidates the memo the moment the entry's shape changes, not when the file next grows
+    #   the stamp invalidates the memo the moment the entry's base goes DOWN, not when the file next grows. A base that
+    #   went UP over the same bytes (a drop, then a tail restored at the document's cut) is served: the memo saw them all
     hit = _SPEND_ROWS_CACHE.get(f)
-    if hit is not None and hit[0] == stamp and hit[1] <= since:
+    if hit is not None and hit[0][:2] == stamp[:2] and hit[0][2] <= stamp[2] and hit[1] <= since:
         _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
         return [r for r in hit[2] if r[0] >= since]
     floor = since - SPEND_GUARD_MEMO_SLACK_S
+    if agent and ent[5] > 0 and not _spend_tail_covers(ent[4], floor):
+        ent = em._read_jsonl_entry(f) or ent             # the whole file, once (the tail upgraded in place, its generation kept)
+        stamp = (ent[0], ent[1], ent[5])
     best, rows = {}, []
     for o in reversed(ent[4]):
         if not isinstance(o, dict):
@@ -49054,12 +49087,22 @@ def _spend_file_rows(f, since, prices, dearest):
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
     """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
-    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh)."""
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh). Every agent file whose
+    WHOLE entry the reader holds is then folded through _agent_launch_ids (2026-10-01): the guard's read of a workflow
+    agent, which has no card, was the only one, and with no fold over it a returned agent's records stayed in the record
+    cache for the kernel's life; the launch-ids fold (the agent-file fold with the smallest state) drops a returned file
+    under the cards' own rule, and leaves it a document to restore from. The leaf, the first file, is never folded here."""
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
-    return sum(c for f in _spend_window_files(leaf, since, now, stat=stat) for _t, c in _spend_file_rows(f, since, prices, dearest))
+    total = 0
+    for i, f in enumerate(_spend_window_files(leaf, since, now, stat=stat)):
+        for _t, c in _spend_file_rows(f, since, prices, dearest, agent=i > 0):
+            total += c
+        if i > 0 and em.entry_whole_resident(f):
+            _agent_launch_ids(f)
+    return total
 
 
 def _spend_guard_seed():

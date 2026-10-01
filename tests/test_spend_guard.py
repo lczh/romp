@@ -125,14 +125,21 @@ class SpendRate(unittest.TestCase):
         sub = Path(self.leaf).with_suffix("") / "subagents"
         write_jsonl(sub / "agent-1.jsonl", [assistant(NOW - 50, "msg_s", out_tokens=1000, in_tokens=0)], mtime=NOW - 50)
         calls = []
-        real = km.em._read_jsonl_entry
+        real, real_inc = km.em._read_jsonl_entry, km.em._read_jsonl_incremental
         def entry(path, on_fail=None, tail_ok=False, tail_from=None):
             calls.append((os.path.basename(str(path)), tail_ok)); return real(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        def incremental(path, on_fail=None):              # a fold's read (the tail flag up) passes; the whole-file road does not
+            if not getattr(km.em._TAIL_OK, "flag", False):
+                raise AssertionError("the whole-file road")
+            return real_inc(path, on_fail=on_fail)
         with mock.patch.object(km.em, "_read_jsonl_entry", side_effect=entry), \
-             mock.patch.object(km.em, "_read_jsonl_incremental", side_effect=AssertionError("the whole-file road")):
+             mock.patch.object(km.em, "_read_jsonl_incremental", side_effect=incremental):
             usd = km._spend_window_usd(self.leaf, NOW, 600, PRICES)
         self.assertAlmostEqual(usd, 2 * 1000 * 25e-6, places=9)
-        self.assertEqual(sorted(calls), sorted([(os.path.basename(self.leaf), True), ("agent-1.jsonl", True)]), "each file once, a tail accepted")
+        # each file read once by the guard, a tail accepted, and the agent file once more by the dropping fold the guard routes
+        # its agent reads through (2026-10-01), which accepts a tail too
+        self.assertEqual(sorted(calls), sorted([(os.path.basename(self.leaf), True), ("agent-1.jsonl", True), ("agent-1.jsonl", True)]),
+                         "every read accepts a tail")
 
     def test_an_unpriced_model_counts_at_the_dearest_row_and_a_record_without_usage_counts_nothing(self):
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_x", out_tokens=1000, model="mystery-9", in_tokens=0),

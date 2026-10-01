@@ -2118,6 +2118,11 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     cache once this fold has stepped them, when the file has not changed for _DROP_AFTER_QUIESCENT_S (a subagent
     that returned; the user's rule: nothing stays resident that nobody looks at). The cursor and its checkpoint stand;
     a later fold of an unchanged file re-reads it once, a growing file keeps its records (see _drop_quiescent_entry).
+    "returned" (a subagent's OWN transcript, 2026-10-01) does that and more: a fold that finds nothing new drops the
+    quiescent entry too, once the file's document stands at the entry's witness (_document_at_witness). A subagent the
+    kernel follows live writes its last record while its file is still fresh, so its last stepping fold kept the entry and
+    every later fold found nothing new: under "quiescent" its whole entry stayed for the kernel's life. Never for a
+    session's leaf, which the judges read whole again if it leaves memory.
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
@@ -2180,9 +2185,10 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
                 on("hit" if kind is None else kind)
             if kind is not None:
                 cache[key] = hit                          # a restore at the witness: the cursor stands, nothing stepped
-            if drop_after == "quiescent" and ent is not None:
-                _drop_quiescent_entry(key, ent, pop=False)   # T362: the document is written here too; the entry stays, since
-            #                                                   nothing was stepped (unless a deferred drop is owed)
+            if drop_after in ("quiescent", "returned") and ent is not None:   # T362: the document is written here too; the
+                _drop_quiescent_entry(key, ent, pop="witness" if drop_after == "returned" else False)   #  entry stays, since
+            #                                                   nothing was stepped (unless a deferred drop is owed), except under
+            #                                                   "returned", where it goes once its document stands at the witness
             return _fold_eof_fragment(key, ent, state0, step)   # unchanged records; a newline-less tail may still sit past them
         if g0 == gen and base <= n0 < total:
             state, start = copy.deepcopy(state0), n0 - base
@@ -2247,7 +2253,7 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     if on is not None:
         on(kind)
     out = _fold_eof_fragment(key, ent, state, step)
-    if drop_after == "quiescent" and ent is not None:
+    if drop_after in ("quiescent", "returned") and ent is not None:
         _drop_quiescent_entry(key, ent)
     return out
 
@@ -2258,8 +2264,11 @@ def _drop_quiescent_entry(key, ent, pop=True):
     once a fold has stepped them: the fold's cursor (and its checkpoint) stands, the file's bytes leave memory. Only the
     very entry this fold read is dropped (another thread's newer entry is left alone); a file still changing keeps its
     records, since its next append would otherwise re-read it whole. Without `pop` (a fold that stepped nothing: a hit or
-    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. Returns
-    True when the document was written here."""
+    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. `pop`
+    "witness" (a drop_after="returned" fold that stepped nothing, 2026-10-01): the write runs as without `pop`, and the
+    entry then goes only when _document_at_witness says the next fold restores from the document over a zero-byte tail;
+    such a drop is never owed for the budget nor taken under a hold (the next quiet fold takes it). Returns True when the
+    document was written here."""
     try:
         if time.time() - float(ent[0]) < _DROP_AFTER_QUIESCENT_S:
             return False
@@ -2267,7 +2276,7 @@ def _drop_quiescent_entry(key, ent, pop=True):
         return False
     held = getattr(_DROP_HOLD, "held", None)
     if held is not None:                                  # the converge pass is healing and priming this leaf on this thread: held,
-        held[key] = held.get(key, False) or pop           #  paid once after (pay_held_drops), with the pop if any fold stepped
+        held[key] = held.get(key, False) or pop is True   #  paid once after (pay_held_drops), with the pop if any fold stepped
         return False
     with _CKPT_LOCK:
         if key in _DROP_OWED:                             # a drop deferred for the budget is taken at the next fold over the file
@@ -2296,7 +2305,7 @@ def _drop_quiescent_entry(key, ent, pop=True):
             oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
             with _CKPT_LOCK:
                 _CKPT_STATS["converge"]["dropDeferred"] += 1
-                if pop:
+                if pop is True:
                     _DROP_OWED[key] = time.time()
                     if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
                         oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
@@ -2313,6 +2322,8 @@ def _drop_quiescent_entry(key, ent, pop=True):
             wrote = True
             with _CKPT_LOCK:
                 _CKPT_STATS["converge"]["dropWrites"] += 1
+    if pop == "witness":
+        pop = _document_at_witness(key, ent)
     if not pop:
         return wrote
     with _JSONL_CACHE_LOCK:
@@ -2321,6 +2332,42 @@ def _drop_quiescent_entry(key, ent, pop=True):
             _RECORD_CACHE_STATS["dropped"] += 1
             _RECORD_CACHE_STATS["droppedBytes"] += w
     return wrote
+
+
+def _document_at_witness(key, ent):
+    """Whether a fold that stepped nothing may drop `ent` (drop_after="returned"): the entry holds records (an empty restored
+    tail frees nothing, and dropping it would make every later fold a restore), the path is not dirty, and the file's fold
+    document stands at the entry's witness, the very count, offset, guard bytes, size and mtime, carrying a complete state
+    at that count for every fold whose cursor sits at the entry's generation. The next fold over the file then restores
+    from the document over a zero-byte tail, never a whole read. False with checkpoints off (no document), for a document
+    behind the entry (a lagging fold's cut), and for a cursor of this generation that lags or is missing from the document
+    (an over-the-cap or cold fold included). A cursor of another generation does not hold the drop: its fold restores from
+    the document when the document carries it, else reads once, as after any drop."""
+    try:
+        recs = ent[4]
+        if not recs:
+            return False
+        with _CKPT_LOCK:
+            if key in _FOLD_DIRTY:
+                return False
+        doc = _ckpt_doc_shared(key)
+        if not isinstance(doc, dict):
+            return False
+        total, gen = int(ent[5]) + len(recs), ent[6]
+        if (int(doc["count"]), int(doc["offset"]), int(doc["size"]), float(doc.get("mtime") or 0), doc.get("guard") or "") \
+                != (total, int(ent[2]), int(ent[1]), float(ent[0]), bytes(ent[3]).hex()):
+            return False
+        folds = doc.get("folds") or {}
+        for name, cache in list(_FOLD_REG.items()):
+            cur = cache.get(key)
+            if cur is None or cur[1] != gen:
+                continue
+            f = folds.get(name)
+            if cur[0] != total or not (isinstance(f, dict) and "state" in f and int(f.get("count", -1)) == total):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 _UNPINNED = object()
