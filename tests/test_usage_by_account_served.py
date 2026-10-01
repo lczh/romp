@@ -222,5 +222,25 @@ class NoWindowsServed(UsageByAccountServed):
         self.assertEqual((o["rail"]["windows"], o["rail"]["pcts"]), ([], []), "no window bars on the rail: %r" % o["rail"])
 
 
+class MonthlyAllowanceServed(NoWindowsServed):
+    """The same account, now answering with its monthly spend limit (2026-10-01): the block draws that one bar, the
+    percent used and the date it resets, in place of the one-line note."""
+    test_an_account_without_windows_is_said_once_and_the_spend_splits_by_account = None
+
+    def _rows(self, now):
+        rows, extra = NoWindowsServed._rows(self, now)
+        rows[0]["usage"]["monthly"] = {"pct": 23, "resetsOn": "2026-11-01", "color": [84, 178, 4], "tone": [81, 150, 184]}
+        return rows, extra
+
+    def test_the_seats_monthly_allowance_is_its_one_bar(self):
+        o = self._drive()
+        b = o["tip"]["blocks"][0]
+        self.assertEqual(b["head"], NAME2, "headed by the account's kind")
+        self.assertEqual((b["windows"], b["resets"], b["used"]), (["Monthly allowance"], ["resets Nov 1"], ["23%"]))
+        self.assertEqual(b["nowin"], "", "the bar takes the one-line note's place")
+        self.assertEqual(b["age"], "", "no age line")
+        self.assertFalse(o["tip"]["email"])
+        self.assertEqual((o["rail"]["windows"], o["rail"]["pcts"]), ([], []), "the hover's bar, not the rail's")
+
 if __name__ == "__main__":
     unittest.main()

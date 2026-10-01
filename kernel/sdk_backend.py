@@ -13881,7 +13881,13 @@ class SdkBackend:
         limits[] row: an enterprise seat metered by a monthly spend limit instead) is recorded as such, stamped,
         `noWindows` (the user 2026-10-01, whose rail showed a 26-day-old reading as the account's allowance:
         every answer since the account stopped reporting windows was dropped, and the unstamped reading before
-        them stayed). A null rate_limits is the endpoint unavailable, which says nothing about the account."""
+        them stayed). A null rate_limits is the endpoint unavailable, which says nothing about the account.
+        Such an answer's `extra_usage` is the seat's monthly allowance, kept as `monthly` with the same stamp: the
+        five fields the CLI's get_usage schema documents for it (is_enabled, monthly_limit, used_credits,
+        utilization, currency; amounts in the currency's minor units), as answered. The answer carries no reset
+        date, so the file is also rewritten when an answer lands in a later calendar month than the reading it
+        holds (the kernel's _monthly_allowance dates the reset as Claude Code's own /usage screen does): an
+        unchanged answer leaves the reading in the month it was taken, and a new month's needs its own stamp."""
         rl = r.get("rate_limits") if isinstance(r, dict) else None
         if not isinstance(rl, dict):
             return
@@ -13922,6 +13928,9 @@ class SdkBackend:
                 and rl["five_hour"] is None and rl["seven_day"] is None)
         if not out and not none:
             return
+        eu = rl.get("extra_usage") if none else None
+        monthly = ({k: eu.get(k) for k in ("is_enabled", "monthly_limit", "used_credits", "utilization", "currency")}
+                   if isinstance(eu, dict) else None)
         with self._rl_lock:
             try:
                 cur = json.loads((self.state_dir / "usage.json").read_text())
@@ -13929,15 +13938,20 @@ class SdkBackend:
                     cur = {}
             except Exception:
                 cur = {}
-            data = {"t": int(time.time()),
+            now = int(time.time())
+            data = {"t": now,
                     "acct": acct_digest(),   # whose reading this is — the kernel drops the bars the moment that login is gone
                     "five_hour": None if none else out.get("five_hour", cur.get("five_hour")),
                     "seven_day": None if none else out.get("seven_day", cur.get("seven_day")),
                     "fable": None if none else out.get("fable", cur.get("fable"))}
             if none:
                 data["noWindows"] = True
-            if all(data.get(k) == cur.get(k) for k in ("five_hour", "seven_day", "fable", "noWindows")) \
-                    and (not none or data["acct"] == cur.get("acct")):
+            if monthly:
+                data["monthly"] = monthly
+            ct = cur.get("t") if isinstance(cur.get("t"), (int, float)) else 0
+            same_month = time.strftime("%Y-%m", time.localtime(ct)) == time.strftime("%Y-%m", time.localtime(now))
+            if all(data.get(k) == cur.get(k) for k in ("five_hour", "seven_day", "fable", "noWindows", "monthly")) \
+                    and (not none or (data["acct"] == cur.get("acct") and (not monthly or same_month))):
                 return                                # no change → keep t honest
             try:
                 tmp = self.state_dir / "usage.json.tmp"

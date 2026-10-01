@@ -186,7 +186,7 @@ test("same-account hosts share the FRESHEST window reading — one truth per log
   assert.ok(usageJS.includes("r.lag=!b.noWindows&&['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];"),
     "a member whose own reading differed from the freshest is marked lagging (never beside an account with no windows)");
   assert.ok(usageJS.includes("if(tr>tb)best=r;"), "freshest reading wins the group");
-  assert.ok(usageJS.includes("['fiveHour','sevenDay','fable','t','limited','acctName','noWindows'].forEach"), "window fields shared — spend deliberately not");
+  assert.ok(usageJS.includes("['fiveHour','sevenDay','fable','t','limited','acctName','noWindows','monthly'].forEach"), "window fields shared (the seat's monthly allowance with them) — spend deliberately not");
   assert.ok(usageJS.includes("shareFreshest(live);"), "…and it runs on every render");
 });
 

@@ -4536,6 +4536,77 @@ class ReconnectReconcilesInflight(unittest.TestCase):
         self.backend.kill(sid)
 
 
+class SeatMonthlyAllowanceRecord(unittest.TestCase):
+    """An account with no usage windows (an enterprise seat) answers get_usage with its monthly spend limit in
+    rate_limits.extra_usage; the snapshot writer keeps the five fields the CLI's schema documents for it as `monthly`,
+    stamped with the login that answered, beside noWindows, so the usage hover can draw the seat's one bar (2026-10-01).
+    The kernel half (percent, reset date, staleness) executes in tests/test_usage_per_account.py. Synthetic figures."""
+
+    EU = {"is_enabled": True, "monthly_limit": 50000, "used_credits": 11500, "utilization": 23.0, "currency": "USD"}
+
+    def _answer(self, **eu):
+        # decimal_places: a field the live answer carries that the schema does not document, so it is not kept
+        return {"rate_limits": {"five_hour": None, "seven_day": None,
+                                "extra_usage": dict(self.EU, decimal_places=2, **eu)}}
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        _hosts_off(self.d)
+        self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        self._real = sb.acct_digest
+        sb.acct_digest = lambda: "a1" * 6
+
+    def tearDown(self):
+        sb.acct_digest = self._real
+
+    def _usage(self):
+        return json.loads((Path(self.d) / "usage.json").read_text())
+
+    def _write_usage(self, data):
+        (Path(self.d) / "usage.json").write_text(json.dumps(data))
+
+    def test_the_monthly_fields_are_kept_with_the_login_stamp(self):
+        self.be._record_usage_snapshot(self._answer())
+        out = self._usage()
+        self.assertTrue(out.get("noWindows"))
+        self.assertEqual(out["acct"], "a1" * 6, "stamped with the login that answered")
+        self.assertEqual(out["monthly"], self.EU, "the documented fields as answered, nothing else")
+
+    def test_a_changed_figure_is_a_new_reading_and_the_same_one_is_not(self):
+        self.be._record_usage_snapshot(self._answer())
+        out = self._usage()
+        self._write_usage(dict(out, t=out["t"] - 100))
+        self.be._record_usage_snapshot(self._answer())
+        self.assertEqual(self._usage()["t"], out["t"] - 100, "the same answer again, the same month: t stays")
+        self.be._record_usage_snapshot(self._answer(used_credits=12500, utilization=25.0))
+        now = self._usage()
+        self.assertEqual(now["monthly"]["utilization"], 25.0)
+        self.assertGreater(now["t"], out["t"] - 100, "a new figure is a new reading")
+
+    def test_an_unchanged_answer_in_a_later_month_restamps_the_reading(self):
+        # the answer carries no reset date and the kernel calls a reading from an earlier month stale, so an unchanged
+        # answer that lands in a new month must give the reading this month's stamp
+        self.be._record_usage_snapshot(self._answer())
+        last_month = int(time.time()) - 40 * 86400
+        self._write_usage(dict(self._usage(), t=last_month))
+        self.be._record_usage_snapshot(self._answer())
+        self.assertGreater(self._usage()["t"], last_month + 39 * 86400)
+
+    def test_an_answer_without_the_allowance_leaves_no_old_figure(self):
+        self.be._record_usage_snapshot(self._answer())
+        self.be._record_usage_snapshot({"rate_limits": {"five_hour": None, "seven_day": None}})
+        out = self._usage()
+        self.assertTrue(out.get("noWindows"))
+        self.assertNotIn("monthly", out)
+
+    def test_an_account_with_windows_keeps_none(self):
+        self.be._record_usage_snapshot({"rate_limits": {"five_hour": {"utilization": 10, "resets_at": "2026-07-03T00:59:59+00:00"},
+                                                        "seven_day": None, "extra_usage": dict(self.EU)}})
+        out = self._usage()
+        self.assertEqual(out["five_hour"]["pct"], 10)
+        self.assertNotIn("monthly", out, "the bar is for an account with no windows")
+
+
 class RateLimitUsageStaleness(unittest.TestCase):
     """usage.json (the /usage rail's 5h + weekly bars) is written by BOTH the tmux statusline — the CLI's
     CURRENT rate_limits handed to it every render, always fresh — and the SDK backend's _record_rate_limit,

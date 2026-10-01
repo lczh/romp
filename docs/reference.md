@@ -638,7 +638,13 @@ enterprise seat metered by a monthly spend limit) is recorded as such and its
 block says `no 5-hour or weekly limits on this account`, with no bars, no age
 and no lagging note, even beside a machine on an older build still holding a
 reading from before; a usage request the endpoint cannot answer says nothing
-about the account and changes nothing. Under the spend's per-machine line, a
+about the account and changes nothing. When that answer carries the seat's
+monthly spend limit, the block shows it instead as one `Monthly allowance`
+bar: the percent used and the date it resets, the first of the next month as
+Claude Code's own `/usage` screen dates it (the answer carries no reset date).
+A reading from before that reset shows no bar, only `reset <date>; no reading
+since`; an answer with no limit to measure against (none, or unlimited) leaves
+the one-line note. Under the spend's per-machine line, a
 `by account · 1 week` line splits the week the way the spend detail's By
 account summary does, one entry per account, a seat's dollars wearing `≈`; it
 shows only when something besides the key billed the week, and a machine whose
