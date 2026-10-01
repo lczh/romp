@@ -540,7 +540,7 @@ class CapsSizedToTheMachine(unittest.TestCase):
         self.assertEqual(em._machine_memory_bytes(text), 123634396 * 1024)
         self.assertEqual(em._machine_memory_bytes("garbage"), 0, "unreadable: zero, so the floors apply")
         self.assertGreaterEqual(em._MAT_CAP, 500_000)
-        self.assertGreaterEqual(em._HYDRATED_CAP, 1024 ** 3)
+        self.assertGreaterEqual(em._HYDRATED_CAP, 256 * 1024 ** 2)   # real memory since 2026-10-01 (tests/test_hydrated_memo.py)
         self.assertEqual(em._CKPT_FOLD_CAP, 8 * 1024 * 1024)
 
     def test_the_environment_sets_each_cap_outright(self):
@@ -554,7 +554,8 @@ class CapsSizedToTheMachine(unittest.TestCase):
     def test_the_caps_are_derived_in_source_not_literals(self):
         src = open(em.__file__).read()
         self.assertIn('_MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))', src)
-        self.assertIn('_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)', src)
+        self.assertIn('_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 128), 1024 * 1024)',
+                      src)
         self.assertIn('_CKPT_FOLD_CAP = _env_or("ROMP_CKPT_FOLD_CAP_KB", 8 * 1024 * 1024, 1024)', src)
 
 
