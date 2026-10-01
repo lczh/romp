@@ -15,7 +15,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("the effort badge shows switching-dots while a reconnect is pending, like the model badge", () => {
   assert.match(RENDER, /effortPending\?: boolean;/);   // status carries it
   assert.match(MODULE, /\(kind === "effort" && !!st\.effortPending\)/);          // effort feeds `pending`
-  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort"\);/);   // dots for both reconnect-style badges (billing moved to the tab menu, 2026-08-09)
+  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort" \|\| kind === "fast"\);/);   // dots for both reconnect-style badges (billing moved to the tab menu, 2026-08-09)
 });
 
 test("a live reconnect has its own ChatEvent kind, dispatched to renderReconnecting", () => {
@@ -42,5 +42,5 @@ test("a reload that waits for the session to go quiet says what it waits for (20
   assert.match(RENDER, /kind: "reconnecting"; effort\?: string; waits\?: string;/);
   assert.match(RENDER, /if \(waits\) return effort \? `Applying \$\{effort\} effort after \$\{waits\}…` : `Reloading session after \$\{waits\}…`;/);
   assert.match(RENDER, /gist: reconnectingGist\(ev\.effort, ev\.waits\) \};/, "the compact run's brief says the same");
-  assert.match(RENDER, /relaunchWaits\?: string; \}/, "the status carries it");
+  assert.match(RENDER, /relaunchWaits\?: string;/, "the status carries it");
 });

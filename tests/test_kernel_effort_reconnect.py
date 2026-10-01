@@ -94,9 +94,10 @@ class EffortReconnect(unittest.TestCase):
             self.assertIn(pin, BACKEND_SRC)
 
     def test_backend_clears_the_pending_flag_when_the_reconnect_lands(self):
-        # cleared the instant the new client connects (reconnect loop) — event-based, mirrors _model_pending
-        self.assertIn('if self._effort_pending:', BACKEND_SRC)
-        self.assertIn('self.backend._update_reg(self.sid, effortPending=False)', BACKEND_SRC)
+        # cleared at the connect that reached a CLI LAUNCHED with the pick (2026-10-01: an attach to a CLI launched before
+        # it keeps the dots; the connect's reconcile decides, tests/test_pick_survives_restart.py) — event-based
+        self.assertIn('self._reconcile_waiting_picks(launch, launched_here, spawned_at=self._hello_spawned_at)', BACKEND_SRC)
+        self.assertIn('fields["effortPending"] = False', BACKEND_SRC)
         # exposed on both the live snapshot and the reg-backed live_sessions (for dormant/all sessions)
         self.assertIn('"effortPending": bool(self._effort_pending),', BACKEND_SRC)
         self.assertIn('"effortPending": bool(reg.get("effortPending")),', BACKEND_SRC)

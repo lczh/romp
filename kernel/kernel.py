@@ -22479,6 +22479,7 @@ class Sessions:
                                 "ctxTokens": st.get("ctxTokens"),   # raw totalTokens (SDK only) — the
                                 #   compaction-suggestion thresholds key on true tokens (2026-08-30)
                                 "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
+                                "fastPending": bool(st.get("fastPending")),   # a fast opt-in waiting for its relaunch → the badge's dots
                                 "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
                                 "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
                                 "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
@@ -42987,6 +42988,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # no badge — a row without the field stays ""). A non-empty
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
                   "fast": "" if tm.get("fastReason") else tm.get("fast", ""),
+                  "fastPending": bool(tm.get("fastPending")),   # the opt-in waits for its relaunch: dots on the fast badge (2026-10-01)
                   "modelFallback": tm.get("modelFallback"),   # the picker's yellow tick beside the requested model, with why and the retry cadence (2026-09-17)
                   # which account this session bills ('login'|'key') — ALWAYS reported when the backend
                   # knows it (the user 2026-08-09: the tab hover says Billing even on a one-auth

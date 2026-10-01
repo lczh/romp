@@ -547,7 +547,12 @@ class LiveTail(unittest.TestCase):
         self.assertFalse(reconnects[0].get("cut"), "on the road that waits for a quiet session (2026-10-01)")
         self.assertEqual(s.pending(), [], "no literal send — this connection would refuse it")
         self.assertTrue(s.fast_opt, "the next _options carries the flag")
-        self.assertEqual(s.fast, "on", "optimistic for the badge; init re-asserts")
+        # 2026-10-01: the relaunch waits for a quiet session, so the badge wears its dots until a launch carries the flag
+        # instead of flipping to On at the pick (the launch's reconcile flips it; the init re-asserts the truth)
+        self.assertNotEqual(s.fast, "on", "no early flip while the opt-in waits")
+        self.assertEqual(s._fast_pending, "on")
+        self.assertTrue(s.snapshot()["fastPending"], "the badge's dots")
+        self.assertIn("fast", sb.read_reg(d, sid)["relaunchWait"]["picks"], "the waiting pick is on record across a restart")
         self.assertTrue(sb.read_reg(d, sid)["fast"])
 
     def test_set_fast_off_on_a_locked_connection_is_a_no_op_beyond_the_reg(self):

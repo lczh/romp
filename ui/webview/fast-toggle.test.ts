@@ -57,6 +57,18 @@ test("the kernel threads fast_mode_state from the SDK init to the chat status", 
   assert.match(KERNEL, /"fast": "" if tm\.get\("fastReason"\) else tm\.get\("fast", ""\)/);
 });
 
+test("a fast opt-in waiting for its relaunch wears the badge's dots, never an early Fast (2026-10-01)", () => {
+  // the first opt-in relaunches the CLI with the flag, and that relaunch waits until nothing the session runs would be cut;
+  // the pick used to flip the badge to Fast at once, while the session still ran without the flag
+  assert.match(SDK, /s\._fast_pending = "on"\s+# the badge's dots until a launch carries the flag/);
+  assert.doesNotMatch(SDK, /s\.fast = "on"\s+# optimistic for the badge; init re-asserts the truth/, "no early flip at the pick");
+  assert.match(SDK, /"fastPending": bool\(getattr\(self, "_fast_pending", ""\)\)/);   // snapshot carries it
+  assert.match(KERNEL, /"fastPending": bool\(st\.get\("fastPending"\)\)/);           // merged into the live map
+  assert.match(KERNEL, /"fastPending": bool\(tm\.get\("fastPending"\)\)/);           // …and the chat status
+  assert.match(RENDER, /fastPending\?: boolean; \}/);
+  assert.match(MODULE, /\(kind === "fast" && !!st\.fastPending\)/);
+});
+
 test("a refusal answering the user's ask is loud — warn toast, ask cleared, badge restored", () => {
   // Behavior is covered in tests/test_sdk_backend.py; these pins keep the shape findable from the
   // badge's own test. Before this, the CLI's refusal (e.g. extra_usage_disabled) just hid the toggle

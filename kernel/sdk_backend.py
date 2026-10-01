@@ -1621,6 +1621,26 @@ def append_effort_applied(state_dir: Path, sid: str, effort: str, t: int | None 
         f.write(json.dumps(rec) + "\n")
 
 
+# A pick waiting for its relaunch survives a kernel restart (2026-10-01). Under a session host the CLI outlives the kernel,
+# so a pick still waiting for a quiet session when the kernel restarts was never applied: the new kernel attached to the
+# CLI launched before the pick, cleared the pick's pending marks as moot, and recorded the effort as applied. The pick is
+# persisted (the reg's `relaunchWait`: which picks wait, with the values asked for) and every connect compares it with
+# what the connected CLI was LAUNCHED with: the launch record _options builds (SdkSession.launch_values), which the host
+# spawn writes into its spec and the host echoes in every hello (cli.launch). Each pick names the launch values it
+# decides; the env is compared by digest, never by value.
+PICK_LAUNCH_KEYS = {"effort": ("effort",), "billing": ("auth", "authLogin"), "fast": ("fast",), "mode": ("mode",),
+                    "env": ("env",)}
+
+
+def env_digest(env) -> str:
+    """A short digest of a session's per-session env, for the launch record: the values never leave the reg."""
+    try:
+        blob = json.dumps(env or {}, sort_keys=True, default=str)
+    except Exception:
+        blob = repr(env)
+    return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def append_cmd_gesture(state_dir: Path, sid: str, text: str, t: int | None = None) -> None:
     """Record a command GESTURE — a /model-/effort-/auth-style pick — at the moment it was ASKED FOR. The
     synthesized live chip that acknowledges the pick is in-memory only and prune_live's stale_cmd retires it
@@ -5576,8 +5596,16 @@ class SdkSession:
         # in live_sessions). A FRESH construction makes them moot by definition: effort is a
         # connect-time flag this session's next _options applies, and the chosen model alias
         # (reg['model']) rides the same connect — the switch is effectively applied, so pending is over.
+        # EXCEPT a pick still waiting for its relaunch (relaunchWait) when a session host keeps the CLI across the
+        # restart (2026-10-01): the next connect ATTACHES to the CLI launched before the pick, so nothing is applied
+        # and the marks stay up; the connect compares the pick with that CLI's launch record (_reconcile_waiting_picks).
+        _wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
+        _waiting = [p for p in (_wait.get("picks") or {}) if p in PICK_LAUNCH_KEYS] \
+            if isinstance(_wait.get("picks"), dict) and backend._lease_survives(self.sid) else []
         if reg.get("effortPending") or reg.get("modelPending") or reg.get("authPending"):
-            backend._update_reg(self.sid, effortPending=False, modelPending=False, authPending=False)
+            backend._update_reg(self.sid, modelPending=False,
+                                **({} if "effort" in _waiting else {"effortPending": False}),
+                                **({} if "billing" in _waiting else {"authPending": False}))
         # protocol/runtime state
         self.loop: asyncio.AbstractEventLoop | None = None
         self.client = None
@@ -5780,6 +5808,21 @@ class SdkSession:
         self.auth_login = SdkBackend.reg_login(reg) if self.auth == "login" else ""
         self._auth_pending = ""      # target while the applying reconnect is in flight (auth is
         #   connect-time env, no runtime control) — mirrors _effort_pending's dots + notice
+        self._fast_pending = ""      # "on" while the first fast-mode opt-in waits for its relaunch: the fast badge's dots
+        #   (2026-10-01; it used to flip to On at the pick, before the flag had reached any CLI)
+        # waiting picks a session host carried across the restart: their marks stand from construction (the reconcile at
+        # the connect decides from the attached CLI's launch record whether they are applied)
+        if "effort" in _waiting:
+            self._effort_pending = self.effort or DEFAULT_EFFORT
+        if "billing" in _waiting:
+            self._auth_pending = self.auth or "login"
+        if "fast" in _waiting:
+            self._fast_pending = "on"
+        self._launch_record = None   # what the last launch from _options carried (launch_values at that moment)
+        self._hello_launch = None    # the connected host's echo of its spawn's launch record (cli.launch), this connect only
+        self._hello_spawned_at = None   # …and that CLI's spawn time (cli.spawnedAt), for an effort marker it vouches for
+        self._reattach_keeps_cli = False   # the next connect re-attaches to the SAME CLI (a host re-exec, an attach retry):
+        #   its subagents and background tasks live on, so the loop top keeps them instead of retiring them as cut
         self._launched_keyed = False  # what _options actually handed the CLI (key injected or not);
         #   _note_auth_source compares the init's apiKeySource against THIS, so a CLI that lands on
         #   the other auth (a stale login, a key found via apiKeyHelper) is flagged loudly instead
@@ -7062,6 +7105,90 @@ class SdkSession:
         except Exception:
             return False
 
+    def launch_values(self) -> dict:
+        """The picks a launch from this session's state right now carries, in romp's own words (PICK_LAUNCH_KEYS): the
+        effort pick (ultracode included, which _options turns into --effort xhigh and a settings key), the billing pick and
+        the stored login it names (the inputs the launch decides its side from, so a pick that falls to the other side at
+        every launch still reads as launched), whether the fast-mode flag rides the launch, the permission mode, and a
+        digest of the per-session env. _options records it for each launch (_launch_record); the reconcile compares a
+        launch's record with it."""
+        return {"effort": getattr(self, "effort", "") or DEFAULT_EFFORT, "auth": getattr(self, "auth", "") or "",
+                "authLogin": getattr(self, "auth_login", "") or "", "fast": bool(self.fast_effective()),
+                "mode": getattr(self, "mode", "") or "", "env": env_digest(getattr(self, "env_vars", None))}
+
+    def _reconcile_waiting_picks(self, launch, launched_here: bool, spawned_at=None) -> None:
+        """At every connect: which waiting picks (the reg's relaunchWait, plus any pending mark in memory) the connected CLI
+        was launched with. `launch` is that CLI's launch record: this connect's own (_launch_record) when this kernel just
+        launched it, else the host's echo of its spawn spec (the hello's cli.launch), None when the hello carries none (a
+        host spawned by code older than the record). A pick the launch carries is applied: dropped from the record, its
+        pending mark cleared, and an effort pick's durable marker written (now for a launch made here, at the CLI's own
+        spawn time for one an earlier kernel made). A pick it does not carry, or that no record can vouch for, still waits:
+        its pending mark stays up and the wait-for-quiet relaunch is asked for again (_switch_wanted), carried by the next
+        event that leaves the session quiet or the tick behind them, never at once, so the attach's replay lands first and
+        nothing the surviving CLI runs is cut. Loop thread."""
+        try:
+            reg = read_reg(self.backend.state_dir, self.sid) or {}
+        except Exception:
+            reg = {}
+        wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
+        recorded = wait.get("picks") if isinstance(wait.get("picks"), dict) else {}
+        picks = [p for p in recorded if p in PICK_LAUNCH_KEYS]
+        for name, mark in (("effort", "_effort_pending"), ("billing", "_auth_pending"), ("fast", "_fast_pending")):
+            if getattr(self, mark, "") and name not in picks:
+                picks.append(name)               # a pending mark the record lacks (a pick made before the record existed)
+        if not picks:
+            return
+        want = self.launch_values()
+        known = isinstance(launch, dict)
+        left = [p for p in picks if not known or any(launch.get(k) != want.get(k) for k in PICK_LAUNCH_KEYS[p])]
+        done = [p for p in picks if p not in left]
+        effort_applied = self._effort_pending or (want["effort"] if "effort" in recorded else "")
+        still = {p: recorded.get(p) for p in left if p in recorded}
+        fields = {}
+        if "effort" in done:
+            fields["effortPending"] = False
+        if "billing" in done:
+            fields["authPending"] = False
+        try:                                    # the record first: a death before the marker below never writes it twice
+            if still:
+                self.backend._update_reg(self.sid, relaunchWait={"why": wait.get("why") or "a settings change",
+                                                                 "t": wait.get("t"), "picks": still}, **fields)
+            elif recorded and hasattr(self.backend, "_update_reg_dropping"):
+                self.backend._update_reg_dropping(self.sid, drop=("relaunchWait",), **fields)
+            elif fields or recorded:
+                self.backend._update_reg(self.sid, relaunchWait=None, **fields)
+        except Exception as e:
+            self.backend._log("waiting picks (%s): registry write failed: %s" % (self.name, e), problem=True)
+        if "effort" in done:
+            if effort_applied:
+                try:
+                    append_effort_applied(self.backend.state_dir, self.sid, effort_applied,
+                                          t=None if launched_here else (spawned_at or None))
+                except Exception as e:
+                    self.backend._log("waiting picks (%s): the effort marker failed: %s" % (self.name, e), problem=True)
+            self._effort_pending = ""
+        if "billing" in done:
+            self._auth_pending = ""
+        if "fast" in done:
+            if getattr(self, "_fast_pending", ""):
+                self.fast = "on" if want["fast"] else self.fast   # the launch carried the flag; its init re-asserts the truth
+            self._fast_pending = ""
+        if left:
+            if "effort" in left and not self._effort_pending:
+                self._effort_pending = want["effort"]
+            if "billing" in left and not self._auth_pending:
+                self._auth_pending = want["auth"] or "login"
+            if "fast" in left and not getattr(self, "_fast_pending", "") and want["fast"]:
+                self._fast_pending = "on"
+            if not getattr(self, "_switch_wanted", ""):
+                self._switch_wanted = wait.get("why") or "a settings change"
+            self.backend._log("waiting picks (%s): %s %s; it relaunches once nothing would be cut"
+                              % (self.name, ", ".join(left),
+                                 "not carried by the CLI this kernel attached to" if known
+                                 else "cannot be vouched for (the host's hello carries no launch record)"))
+        if done or left:
+            self.backend._poke()
+
     def relaunch_waits(self) -> str:
         """What a standing relaunch ask (_switch_wanted) waits for, in the user's words: "the running turn", "2 background
         tasks", "1 subagent and 2 background tasks"; "" when no ask stands or nothing holds it any more. The snapshot
@@ -7568,6 +7695,10 @@ class SdkSession:
         False on a DELIBERATE reconnect inside a live thread (the waker's effort or model change), whose forwarded sends land
         through the resume."""
         prev = (read_reg(self.backend.state_dir, self.sid) or {}).get("spawnedAt")
+        # work kept for a reattach that reached a NEW CLI instead (the host died during its re-exec and the connect spawned
+        # again): it ran in the old CLI and ended with it, so it is retired here, the session told, as at any teardown
+        if getattr(self, "_sub_lock", None) is not None and (getattr(self, "_bg_tasks", None) or getattr(self, "_subagents", None)):
+            self._drop_live_work("a fresh CLI")
         self.backend._update_reg(self.sid, spawnedAt=int(spawned_at), spawnedAtCli=str(cli_ident or ""))
         if isinstance(prev, int) and not isinstance(prev, bool) and prev > 0 and int(spawned_at) != prev:
             _RESTAMPS[self.sid] = (prev, int(spawned_at))   # the kernel's build counts what the move dropped, once (memos
@@ -7762,8 +7893,14 @@ class SdkSession:
                     self._inflight_texts.append(u.get("item", u["text"]))
                     self.inflight = max(self.inflight, 1)
             # the abandoned client's live subagents and background tasks died with it — retire them on
-            # the teardown event itself (and tell the session what it lost, as a CLI death does)
-            self._drop_live_work("reconnect")
+            # the teardown event itself (and tell the session what it lost, as a CLI death does). NOT when the next
+            # connect re-attaches to the same CLI (a host re-exec at a turn's end, an attach retry): that CLI and its
+            # work live on, and retiring them told the session its tasks were cut while they ran and left quiet() reading
+            # an empty set, so a relaunch waiting for quiet cut them for real (2026-10-01)
+            keeps, self._reattach_keeps_cli = getattr(self, "_reattach_keeps_cli", False), False
+            if not keeps:
+                self._drop_live_work("reconnect")
+            self._hello_launch = self._hello_spawned_at = None   # the next hello says what ITS CLI launched with
             # settle + recover anything the abandoned client stranded — see _reconcile_stranded
             self._reconcile_stranded()
             # The launch-login stamp (T346) and the fresh-CLI block are decided per CLI, never per connect road and never at a
@@ -7836,32 +7973,24 @@ class SdkSession:
                     # hold once the window resets: the next _ensure connects, the error record goes, and
                     # the queue the limit was holding drains on the following pusher cycle.
                     self.backend._clear_launch_error(self.sid)
-                    # A pending /effort switch is APPLIED the instant this (re)connect lands (--effort rode _options
-                    # above) → clear the switching-dots + "Reloading session…" notice (the user 2026-07-06). Covers
-                    # the immediate (idle) reconnect, the deferred (turn-end) one, and a first connect that picked up
-                    # a pending value from the reg. Event-based on the connect itself; pokes a push so it clears now.
-                    if self._effort_pending:
-                        # a DURABLE "effort set to X" marker at the apply moment: the reconnect writes no
-                        # transcript record, so without this the only trace is the synthesized /effort chip,
-                        # which prunes on the next message (the user 2026-07-16). Written here, not at request
-                        # time, so it pins when the new effort became REAL — turn-end for a busy session, whose
-                        # in-flight turn ran at the OLD effort (recording at request would misdate it).
-                        # self.backend.state_dir, not self.state_dir: a session has no state_dir of its own,
-                        # and the typo raised straight out of the connect path — killing the session thread
-                        # on any /effort switch that applied at reconnect (found 2026-07-28 in the backend's
-                        # own crash log, which until now nothing showed the user).
-                        append_effort_applied(self.backend.state_dir, self.sid, self._effort_pending)
-                        self._effort_pending = ""
-                        self.backend._update_reg(self.sid, effortPending=False)
-                        self.backend._poke()
-                    # A pending AUTH switch is applied the same way — the key rode (or was withheld
-                    # from) _options' env on THIS connect. The init's apiKeySource is the CLI's own
-                    # confirmation and _note_auth_source flags a mismatch loudly; here we just clear
-                    # the switching-dots, event-based on the connect like effort above.
-                    if self._auth_pending:
-                        self._auth_pending = ""
-                        self.backend._update_reg(self.sid, authPending=False)
-                        self.backend._poke()
+                    # A pending /effort, billing or fast-mode pick is APPLIED when the CLI this connect reached was
+                    # LAUNCHED with it (the user 2026-07-06, for the switching-dots and the "Reloading session…" notice;
+                    # 2026-10-01 for which CLI): a connect that launched a CLI from _options above carries every pick, but
+                    # an ATTACH reaches a CLI an earlier launch made (a session host keeps it across a kernel restart; a
+                    # host re-exec or an attach retry keeps it inside this kernel's life), and that one carries the picks
+                    # of ITS launch, which the host echoes (cli.launch). Clearing the marks at every connect said a pick
+                    # that never reached the CLI had applied, and wrote the effort's durable "effort set to X" marker
+                    # for it. A pick the CLI was not launched with keeps its marks and its wait-for-quiet relaunch.
+                    # The effort marker (the user 2026-07-16) pins when the new effort became REAL; written by the
+                    # reconcile, from this kernel's own state dir (a session has no state_dir of its own, and that typo
+                    # once raised out of the connect path and killed the session thread, 2026-07-28).
+                    if self._host is not None and getattr(self, "_host_is_attach", False):
+                        launch, launched_here = self._hello_launch, False
+                        if isinstance(launch, dict):
+                            self._fast_unlocked = bool(launch.get("fast"))   # the launch's own word, not today's rule
+                    else:
+                        launch, launched_here = self._launch_record, True
+                    self._reconcile_waiting_picks(launch, launched_here, spawned_at=self._hello_spawned_at)
                     # PRE-TURN PUBLISH (the user 2026-06-27): pull the live model + context % the INSTANT we
                     # connect — before any turn — so a freshly-created SDK session shows its model and context on
                     # OPEN, like a tmux session does on launch. The old path keyed model/ctx resolution off the
@@ -7931,6 +8060,7 @@ class SdkSession:
                     if self._host_attach_retries <= 3:
                         self.inflight = 0
                         self._reconnect = True
+                        self._reattach_keeps_cli = True   # the same CLI again: its work lives on (the loop top keeps it)
                         continue
                     # past the bound on a host that still lives: stand down, never the crash heal (whose resume
                     # would put a second CLI beside the host's) and never a launch error for a CLI that is up.
@@ -10699,6 +10829,7 @@ class SdkSession:
                 #   would wake it in seconds (the user 2026-08-13). Dormant rows carry no spawning
                 #   key at all, so they read ready.
                 "fast": self.fast,   # fast-mode state from init ("on"/"off"/"cooldown"; "" = unknown → no badge)
+                "fastPending": bool(getattr(self, "_fast_pending", "")),   # the opt-in waits for its relaunch → the fast badge's dots
                 "modelFallback": model_fallback_row(self.chosen_model, getattr(self, "_served_model", "") or self.model, getattr(self, "_fallback_cause", ""),
                                                     getattr(self, "_upgrade_retry", None),
                                                     retry_upgrade_on(self.backend.state_dir) if retry_on is None else bool(retry_on),
@@ -11658,6 +11789,9 @@ class SdkBackend:
             spec["login"] = str(getattr(sess, "_options_login", "") or "")   # the login IDENTIFIER this launch bills, echoed
             #   in every hello as cli.login, so the kernel that first sees the CLI stamps the login the launch used (never a
             #   token or key: those ride the env overlay, and the hello never carries them)
+            spec["launch"] = dict(getattr(sess, "_launch_record", None) or {})   # the picks this launch carries, echoed in
+            #   every hello as cli.launch: what a kernel attaching after a restart compares a waiting pick with (2026-10-01).
+            #   Pick values and an env DIGEST only (launch_values), never a credential
             spec_path = ht.write_spawn_spec(self.state_dir, sess.sid, spec)
             sock = ht.host_sock(self.state_dir, sess.sid)
             try:
@@ -11872,6 +12006,7 @@ class SdkBackend:
         (2026-09-22, the refresh review)."""
         sess._reconnect = True
         sess._host_reexec_closed = True
+        sess._reattach_keeps_cli = True   # an exec keeps the CLI and its children: its subagents and background tasks live on
         self._log("host (%s): re-exec at the turn's end; reconnecting to the re-executed host" % sess.name)
 
     def _on_host_socket_lost(self, sess, t) -> None:
@@ -12078,7 +12213,14 @@ class SdkBackend:
         h, c, j = hello.get("host") or {}, hello.get("cli") or {}, hello.get("journal") or {}
         if not isinstance(c, dict):
             c = {}
-        self._fresh_cli_decision(sess, c)
+        # what this CLI was launched with (the spawn spec's launch record, echoed) and when: the connect's reconcile of the
+        # picks still waiting for a relaunch reads them (_reconcile_waiting_picks); None from a host older than the record
+        sess._hello_launch = c.get("launch") if isinstance(c.get("launch"), dict) else None
+        _sp = c.get("spawnedAt")
+        sess._hello_spawned_at = _sp if isinstance(_sp, int) and not isinstance(_sp, bool) and _sp > 0 else None
+        decided = self._fresh_cli_decision(sess, c)
+        if decided == "survivor" and getattr(sess, "_host_is_attach", False):
+            self._seed_surviving_work(sess)
         try:
             open_turns = int(hello.get("inflight") or 0)
         except (TypeError, ValueError):
@@ -12113,16 +12255,18 @@ class SdkBackend:
                              parked=len(hello.get("parked") or []))
         self._file_host_log_rows(sess)
 
-    def _fresh_cli_decision(self, sess, cli: dict) -> None:
-        """The fresh-CLI decision at a host's hello (the rule in _on_host_hello's docstring), from the hello's `cli` dict."""
+    def _fresh_cli_decision(self, sess, cli: dict) -> str:
+        """The fresh-CLI decision at a host's hello (the rule in _on_host_hello's docstring), from the hello's `cli` dict.
+        Returns what it decided: "survivor" (the CLI the reg's epoch already names), "fresh", "older" (a host older than the
+        spawn time, its CLI recorded) or "unknown" (no CLI identity)."""
         pid, start = cli.get("pid"), cli.get("start")
         if pid is None or not start:
             self._log("host (%s): the hello names no CLI identity; nothing stamped (a host older than the identity)" % sess.name)
-            return
+            return "unknown"
         ident = "%s:%s" % (pid, start)
         reg = read_reg(self.state_dir, sess.sid) or {}
         if ident == str(reg.get("spawnedAtCli") or ""):
-            return                                        # the CLI the reg's epoch already belongs to: a survivor, or a retry
+            return "survivor"                             # the CLI the reg's epoch already belongs to: a survivor, or a retry
         spawned = cli.get("spawnedAt")
         if isinstance(spawned, bool) or not isinstance(spawned, int) or spawned <= 0:
             # a host running code older than the spawn-time field: its CLI predates this kernel (every host spawned by this
@@ -12130,7 +12274,7 @@ class SdkBackend:
             self._update_reg(sess.sid, spawnedAtCli=ident)
             self._log("host (%s): the hello carries no CLI spawn time (older host code); CLI %s recorded, nothing stamped"
                       % (sess.name, ident))
-            return
+            return "older"
         login = cli.get("login")
         # the reading (the follow-up's read, 2026-09-14): an EMPTY string is an identifier, the machine's own login, and is
         # stamped as such, because the host echoes what the launch billed; an ABSENT field means a host older than the field
@@ -12138,6 +12282,37 @@ class SdkBackend:
         self._stamp_launch_login(sess, login_id=login if isinstance(login, str) else None)
         sess._fresh_cli_stamp(spawned, ident, mark_echoes=not getattr(sess, "_deliberate_connect", False))
         self._log("host (%s): a fresh CLI %s (spawned at %d); its epoch and launch login stamped" % (sess.name, ident, spawned))
+        return "fresh"
+
+    def _seed_surviving_work(self, sess) -> None:
+        """A kernel attaching to the CLI its host kept across the restart: the background tasks that CLI runs are seeded
+        from the reg's mirror (bgTasks, written at every change of the live set by the kernel that saw them start, and
+        kept across that kernel's drain for exactly this), and the host's replay of what this kernel missed then ends the
+        ones that finished meanwhile (a task's end is idempotent). Without it the set read empty after every restart while
+        the CLI ran its monitors, so quiet() said quiet and a relaunch waiting for quiet cut them (2026-10-01). A set
+        already holding tasks (an attach inside this kernel's life) is left as it is. Only a task the mirror names with
+        its lifecycle id is seeded."""
+        try:
+            with sess._sub_lock:
+                if sess._bg_tasks:
+                    return
+            rows = (read_reg(self.state_dir, sess.sid) or {}).get("bgTasks") or []
+            seeded = 0
+            with sess._sub_lock:
+                for t in rows:
+                    if not isinstance(t, dict) or not t.get("taskId"):
+                        continue
+                    sess._bg_tasks[str(t["taskId"])] = {"desc": str(t.get("desc") or ""), "type": str(t.get("type") or ""),
+                                                        "since": int(t.get("since") or 0) or int(time.time()),
+                                                        "toolUseId": str(t.get("toolUseId") or ""),
+                                                        "lastTool": str(t.get("lastTool") or "")}
+                    seeded += 1
+            if seeded:
+                self._log("host (%s): %d background task%s the surviving CLI runs, from the mirror"
+                          % (sess.name, seeded, "" if seeded == 1 else "s"))
+                self._poke()
+        except Exception as e:
+            self._log("host (%s): the background-task mirror could not be read: %s" % (sess.name, e), problem=True)
 
     def _file_host_log_rows(self, sess) -> None:
         """host.log lines not yet filed become problem rows. The position is kept in the registry beside hostAck
@@ -12556,8 +12731,12 @@ class SdkBackend:
                     # The switch is moot at the next connect (effort + chosen alias both ride
                     # _options), so heal here for sessions that stay DORMANT; SdkSession.__init__
                     # heals the same way for ones that respawn.
-                    if r.get("effortPending") or r.get("modelPending"):
-                        self._update_reg(sid, effortPending=False, modelPending=False)
+                    # …except an effort pick still WAITING for its relaunch on a CLI a session host kept (relaunchWait): the
+                    # attach reaches the CLI launched before it, so it is not moot; the connect decides (2026-10-01)
+                    _w = r.get("relaunchWait") if isinstance(r.get("relaunchWait"), dict) else {}
+                    _keep = isinstance(_w.get("picks"), dict) and "effort" in _w["picks"] and self._lease_survives(sid)
+                    if r.get("modelPending") or (r.get("effortPending") and not _keep):
+                        self._update_reg(sid, modelPending=False, **({} if _keep else {"effortPending": False}))
                     if str(r.get("lastSid") or "") in spared_fsids:
                         # A claude process this kernel did not start (another kernel's state tag, or none) still holds
                         # this session's conversation: the reap above spared it and named it on its left-alone line.
@@ -14310,6 +14489,9 @@ class SdkBackend:
         # running stamps the login the launch used (2026-09-14).
         sess._options_login = login_id
         sess._launched_unkeyed_pick = side == "key" and not launch_keyed
+        # the picks THIS launch carries (launch_values): the reconcile at the connect compares the waiting picks with it, and
+        # the host road writes it into the spawn spec, so a later kernel attaching to this CLI reads what it launched with
+        sess._launch_record = sess.launch_values()
         if self.session_hosts_on():
             # under a host, a hook the kernel cannot answer in time (a restart in progress) is answered by the
             # host itself before the CLI's own 600 s budget cancels it; every matcher carries the bound
@@ -16693,9 +16875,12 @@ class SdkBackend:
             self._wake_push()
             return True
         if value == "off":                     # no flag at connect → fast mode is already off; nothing to send
+            s._fast_pending = ""               # …and an opt-in still waiting for its relaunch is withdrawn
             return True
+        s._fast_pending = "on"                 # the badge's dots until a launch carries the flag (2026-10-01: it flipped to
+        #                                        On here, while the opt-in still waited for a quiet session)
+        self._note_pick_waits(s, "fast", "fast mode")
         s.request_reconnect(why="fast mode")   # first opt-in: the flag applies at the relaunch, once nothing would be cut
-        s.fast = "on"                          # optimistic for the badge; init re-asserts the truth
         self._wake_push()
         return True
 
@@ -16729,6 +16914,7 @@ class SdkBackend:
                 # apply is the RECONNECT (effort's pattern): the relaunch carries
                 # permission_mode=bypassPermissions, which the SDK maps to the launch flag — resume
                 # continues the conversation and the next init confirms perm_mode.
+                self._note_pick_waits(s, "mode", "bypass mode")
                 s.request_reconnect(why="bypass mode")
             else:
                 s.set_mode_live(mode, prev=prev)
@@ -16753,6 +16939,26 @@ class SdkBackend:
     def rewind_files(self, sid: str, uuid: str) -> bool:
         s = self.sessions.get(sid)
         return bool(s and s.request_rewind_files(uuid))
+
+    def _note_pick_waits(self, s, pick: str, why: str) -> None:
+        """Persist that `pick` (PICK_LAUNCH_KEYS) waits for its relaunch, with the values it asks for: the reg's
+        `relaunchWait` {why, t, picks: {pick: {launch key: value}}}. A session host keeps the CLI across a kernel restart,
+        and the kernel that attaches to it reads this to tell a pick the CLI never got from one it did
+        (SdkSession._reconcile_waiting_picks, which also drops each entry the moment a launch carries it). Locked RMW."""
+        try:
+            vals = s.launch_values()
+            with self._reg_lock:
+                reg = read_reg(self.state_dir, s.sid)
+                if reg is None:
+                    return
+                wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
+                picks = dict(wait.get("picks") or {}) if isinstance(wait.get("picks"), dict) else {}
+                picks[pick] = {k: vals.get(k) for k in PICK_LAUNCH_KEYS[pick]}
+                reg["relaunchWait"] = {"why": why, "t": int(time.time()), "picks": picks}
+                write_reg(self.state_dir, s.sid, reg)
+        except Exception as e:
+            self._log("waiting picks (%s): could not record the %s pick: %s" % (getattr(s, "name", s.sid[:8]), pick, e),
+                      problem=True)
 
     def set_effort(self, sid: str, value: str) -> bool:
         """Change the reasoning effort. effort is a connect-time CLI flag (--effort) with no SDK runtime
@@ -16783,6 +16989,7 @@ class SdkBackend:
         if s:
             s.effort = value        # picker label reflects it now; the reconnect makes it real
             s._effort_pending = value   # switching-dots on the effort badge + "Reloading session…" notice until the reconnect lands
+            self._note_pick_waits(s, "effort", "effort")   # …and across a kernel restart that keeps the CLI
             s.request_reconnect(why="effort")   # once the session is quiet (request_reconnect): the pending marks wait with it
         # Synthesize the "/effort X" invocation atom, exactly as set_model does for "/model X": the
         # reconnect leaves NO transcript record at all, so without this an idle-session effort change
@@ -16820,6 +17027,7 @@ class SdkBackend:
         s = self.sessions.get(sid)
         if s:
             s.env_vars = dict(env)
+            self._note_pick_waits(s, "env", "session env")
             s.request_reconnect(why="session env")
             self._log("env (%s): per-session env set (%s) — reconnecting to apply"
                       % (s.name, ", ".join(sorted(env)) or "cleared"))
@@ -16874,6 +17082,7 @@ class SdkBackend:
             s._wrong_landing_reconnected = False   # a new pick may take the documented fall again (review 2026-09-11)
             s.auth_live = ""   # the last init's report predates this switch — the Billing row shows
             #   the plain intent (no "CLI reports" parenthetical) until the next init re-confirms
+            self._note_pick_waits(s, "billing", "billing")
             s.request_reconnect(why="billing")   # once the session is quiet (request_reconnect): authPending waits with it
             # Acknowledge the pick in the chat exactly as set_effort does: the reconnect writes no
             # transcript record, so without a synthesized chip an idle session's auth change shows
@@ -18155,6 +18364,7 @@ class SdkBackend:
             except Exception as e:
                 self._log("session gone (%s): model-pending clear failed: %s" % (sess.name, e))
         self._seed_writes_dropped(sess.sid)   # no verdict can reach its pending shared-model writes now
+        sess._fast_pending = ""           # a fast opt-in that never launched: the next connect is a launch from the reg's ask
         if sess._effort_pending:          # an /effort reconnect that never landed before the thread died → clear the dots/notice
             sess._effort_pending = ""
             try:

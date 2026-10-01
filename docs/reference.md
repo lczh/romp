@@ -372,7 +372,9 @@ mode. Turning it on while the session is on a non-Opus model makes the CLI
 switch to a fast-capable one, which the chat shows as the command's own
 confirmation. If the CLI refuses the toggle (for example, the account has
 extra usage turned off), a toast says why and the pick reverts to off;
-the control never silently disappears.
+the control never silently disappears. The first time a session is turned on,
+the flag rides a relaunch of its CLI, which waits for a quiet session; until
+then the badge shows switching-dots rather than **Fast**.
 
 ### Always fast, and retrying an upgrade after a downgrade
 
@@ -1411,6 +1413,17 @@ saying what it waits for. Restart session and editing or deleting an earlier
 message relaunch without waiting, and a setting still waiting to apply rides
 that relaunch; the session is then told which background tasks were cut off,
 with a request to check whether each is still running before relaunching it.
+
+A setting still waiting for its relaunch survives a kernel restart. The kernel
+records which settings wait, and every launch records the settings it carried,
+which the session host keeps and reports back when a kernel attaches. A kernel
+attaching to a CLI launched before the setting keeps its pending mark and its
+wait for a quiet session; one attaching to a CLI that already carries it marks
+it applied. A host too old to report its launch cannot vouch for anything, so
+the setting is applied at the next quiet moment. The attaching kernel also
+reads the background tasks the surviving CLI runs from the registry, so the
+wait holds for them; a re-attach to the same CLI inside one kernel's life (a
+host re-exec, a retried attach) keeps them as they were.
 
 The dashboard page stays on screen across a restart. Its panes reconnect as they
 do after a dropped socket (the watched tab rebuilt whole, the other tabs as
