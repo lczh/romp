@@ -682,8 +682,7 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
                        #                   whether frozen or not, so an unfreeze reclaim on a pop would collect nothing (the
                        #                   2026-09-21 review's correction)
-                       "pinnedKept": 0, "pinnedFreedBytes": 0,   # drops that kept an entry an assembly entry folds over
-                       #                   (_drop_or_reseat), and the bytes of the records before a restored entry's cut they let go
+                       "pinnedKept": 0,   # drops that kept an entry a whole assembly entry folds over (_drop_unless_pinned)
                        "wholeReads": {}}   # "kind<-caller" -> {"count", "bytes"}: every read that pulled a file WHOLE (from zero, or a
 #                                          tail entry upgraded to the whole file), named by the reader's kind and the first frame
 #                                          outside this module (T384: the way hydratedBy named the planner; the 0.8 GB of whole
@@ -1291,12 +1290,12 @@ def checkpoint_drop_writes_on():
 
 def _pop_owed_entry(key):
     """Release `key`'s cached entry unwritten (an owed drop paid by the pop alone), under the reader's lock only. A file still
-    on disk goes through _drop_or_reseat, so an entry an assembly entry folds over stays (2026-10-01); a file that is gone
-    is popped."""
+    on disk goes through _drop_unless_pinned, so an entry a whole assembly entry folds over stays (2026-10-01); a file that is
+    gone is popped."""
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(key)
     if ent is not None and os.path.exists(key):
-        _drop_or_reseat(key, ent)
+        _drop_unless_pinned(key, ent)
         return
     with _JSONL_CACHE_LOCK:
         w = _cache_pop_locked(key)
@@ -1305,71 +1304,68 @@ def _pop_owed_entry(key):
             _RECORD_CACHE_STATS["droppedBytes"] += w
 
 
-def _asm_pinned_base(key, gen):
-    """(pinned, low) for `key`'s reader entry at generation `gen`: whether an assembly entry that keeps folding over that
-    generation needs it, and the lowest record number ANY assembly entry at that generation read from (its recs row, the
-    (gen, base, count) the fold's gate compares; None when there is none). Two entries over the generation do not pin it,
-    since a drop sends their next visit to the restore road, which reads the tail from the document's cut: a whole entry that
-    wrote its own document (the settle's or the converge pass's write; one marked for re-seat restores at its next visit
-    anyway), and a restored entry that read over a whole entry (base 0). They still floor `low`: their adapters hold the
-    records from there, so a trim above it would free nothing and would leave a whole entry folding over a tail. Takes
-    _ASM_LOCK for the snapshot alone, never under the reader's lock."""
+def _asm_entry_pins(e, key):
+    """Whether assembly entry `e`, which folds over `key`'s reader entry at its generation, holds a drop of that entry back:
+    a WHOLE entry whose next visit after the drop would parse whole again (2026-10-01). Its adapter holds the very records
+    list (_src), so the drop frees nothing; it retires the generation, so that next visit demotes (g:rewrite, g:nonleaf) to a
+    whole parse, and a whole reader in between decodes a second copy. That is a whole entry with no document a restore would
+    take (none stands, or a refusal mark stands; a restore that refuses a document without marking it removes it), or one
+    whose own document would not keep it restored: written but not marked for re-seat (a restore refused the document and
+    the whole parse after it rewrote it, keepWhole; the tail past its cut at the churn bound's share; a postal author
+    waiting). Two kinds do not pin, since their next visit restores from a document anyway and the restore that replaces
+    them frees what they hold: a whole entry marked for re-seat (its own document stands, and the next visit re-seats on it
+    whatever the drop does), and a RESTORED entry (round one of the review: a reader entry kept, or trimmed to its cut,
+    under a restored entry held a whole reader's second decoding of the tail next to the restore's own until the entry next
+    demoted). The document asked about is the entry's LEAF's (`path`), whichever of its files `key` is: a lineage file's
+    drop demotes the entry under g:nonleaf, and that demotion restores from the leaf's document."""
+    if getattr(e.get("ad"), "seed", None) is not None or e.get("reseat"):
+        return False
+    if e.get("docWritten"):
+        return True
+    return not _asm_document_would_restore(e.get("path") or key)
+
+
+def _asm_pins_gen(key, gen):
+    """Whether an assembly entry folding over `key`'s reader entry at generation `gen` (its recs row, the (gen, base, count)
+    the fold's gate compares) holds a drop of that entry back (_asm_entry_pins). Takes _ASM_LOCK for the snapshot alone, never
+    under the reader's lock; the pin test's stat and sidecar read run with no lock held."""
     with _ASM_LOCK:
         entries = list(_ASM_CACHE.values())
-    pinned, low = False, None
     for e in entries:
         row = (e.get("recs") or {}).get(key) if e else None
-        if row is None or len(row) != 3 or row[0] != gen:
-            continue
-        low = row[1] if low is None else min(low, row[1])
-        if not e.get("docWritten") and not (row[1] == 0 and getattr(e.get("ad"), "seed", None) is not None):
-            pinned = True
-    return pinned, low
+        if row is not None and len(row) == 3 and row[0] == gen and _asm_entry_pins(e, key):
+            return True
+    return False
 
 
-def _drop_or_reseat(key, ent):
+def _drop_unless_pinned(key, ent):
     """Let `key`'s reader entry `ent` go (that very entry, never a newer one another thread stored), the way every drop of
-    the record cache does: popped, unless an assembly entry still folds over its generation (2026-10-01). Such an entry's
-    adapter holds the same records, so the drop freed nothing, made recordCache.bytes fall while the memory stayed, and
-    retired the generation: the assembly entry's next visit demoted (g:rewrite, g:nonleaf) to a restore, or to a whole parse
-    when no document stood, and a whole reader in between decoded a second copy. The entry is kept instead, from the lowest
-    record an assembly entry at its generation read from (_asm_pinned_base), at the same generation and in its place in the
-    LRU: under a whole assembly entry all of it, so nothing changes; under restored ones alone the tail from their cut, which
-    lets go of the records before the cut a whole reader's upgrade decoded (the gate's base test still passes; a fold whose
-    cursor sits before the cut reads the file whole once, at the same generation). Returns ("dropped" | "kept" | None, the
-    bytes let go)."""
-    pinned, low = _asm_pinned_base(key, ent[6])
+    the record cache does: popped, unless a whole assembly entry folding over its generation pins it (_asm_entry_pins,
+    2026-10-01), in which case it is kept as it stands, at the same generation and in its place in the LRU, counted
+    recordCache.pinnedKept. Returns "dropped", "kept", or None when the cache no longer holds `ent`."""
+    pinned = _asm_pins_gen(key, ent[6])
     with _JSONL_CACHE_LOCK:
         if _JSONL_CACHE.get(key) is not ent:
-            return None, 0
-        return _drop_or_reseat_locked(key, ent, pinned, low)
+            return None
+        return _drop_unless_pinned_locked(key, ent, pinned)
 
 
-def _drop_or_reseat_locked(key, ent, pinned, low):
-    """_drop_or_reseat's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and (pinned, low)
-    _asm_pinned_base's answer for its generation, taken before the lock."""
-    if not pinned:
-        w = _cache_pop_locked(key)
-        _RECORD_CACHE_STATS["dropped"] += 1
-        _RECORD_CACHE_STATS["droppedBytes"] += w
-        return "dropped", w
-    _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
-    cut = low - ent[5]
-    offs = ent[7] if len(ent) > 7 else None
-    if cut <= 0 or cut > len(ent[4]) or offs is None or len(offs) < 2 * len(ent[4]):
-        return "kept", 0
-    new = (ent[0], ent[1], ent[2], ent[3], ent[4][cut:], low, ent[6], array.array("q", offs[2 * cut:]))
-    w0, w1 = _entry_weight(ent), _entry_weight(new)
-    _JSONL_CACHE[key] = new                              # a new value under the same key: the LRU position stands
-    _JSONL_CACHE_BYTES[0] = max(0, _JSONL_CACHE_BYTES[0] - w0 + w1)
-    _RECORD_CACHE_STATS["pinnedFreedBytes"] = _RECORD_CACHE_STATS.get("pinnedFreedBytes", 0) + (w0 - w1)
-    return "kept", w0 - w1
+def _drop_unless_pinned_locked(key, ent, pinned):
+    """_drop_unless_pinned's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and `pinned`
+    _asm_pins_gen's answer for its generation, taken before the lock."""
+    if pinned:
+        _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
+        return "kept"
+    w = _cache_pop_locked(key)
+    _RECORD_CACHE_STATS["dropped"] += 1
+    _RECORD_CACHE_STATS["droppedBytes"] += w
+    return "dropped"
 
 
 def release_records(paths, keep=()):
     """The record side of the events that end a file's use (2026-10-01): each of `paths` outside `keep` (the files a live
-    session still reads) leaves the reader's cache through _drop_or_reseat, so a file an assembly entry still folds over
-    stays. Counted under dropped and droppedBytes. Returns how many entries were dropped."""
+    session still reads) leaves the reader's cache through _drop_unless_pinned, so a file a whole assembly entry still folds
+    over stays. Counted under dropped and droppedBytes. Returns how many entries were dropped."""
     keep = {str(p) for p in keep}
     n = 0
     for p in paths:
@@ -1378,7 +1374,7 @@ def release_records(paths, keep=()):
             continue
         with _JSONL_CACHE_LOCK:
             ent = _JSONL_CACHE.get(key)
-        if ent is not None and _drop_or_reseat(key, ent)[0] == "dropped":
+        if ent is not None and _drop_unless_pinned(key, ent) == "dropped":
             n += 1
     return n
 
@@ -2402,10 +2398,10 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 _CKPT_STATS["converge"]["dropWrites"] += 1
     if not pop:
         return wrote
-    pinned, low = _asm_pinned_base(key, ent[6])           # an assembly entry folding over it keeps it (_drop_or_reseat, 2026-10-01)
-    with _JSONL_CACHE_LOCK:
+    pinned = _asm_pins_gen(key, ent[6])                   # a whole assembly entry folding over it keeps it (_drop_unless_pinned,
+    with _JSONL_CACHE_LOCK:                               #  2026-10-01)
         if _JSONL_CACHE.get(key) is ent:
-            _drop_or_reseat_locked(key, ent, pinned, low)
+            _drop_unless_pinned_locked(key, ent, pinned)
     return wrote
 
 
@@ -6546,6 +6542,26 @@ def asm_document_stands(leaf_path):
     existence half of asm_document_seeds, the predicate the judges' incident scan asks before taking the leaf road."""
     cp = _asm_ckpt_file(leaf_path)
     return cp is not None and cp.exists()
+
+
+def _asm_document_would_restore(leaf_path):
+    """Whether a restore of `leaf_path` would take its document, as far as a stat and the sidecar's few bytes can tell (never
+    the document, so not the load's proof): the file stands and no refusal mark stands at the leaf's current stat."""
+    return asm_document_stands(leaf_path) and not _asm_refusal_stands(leaf_path)
+
+
+def asm_document_restores(leaf_path, rompuuid=None):
+    """Whether the next parse of `leaf_path` would restore from its document rather than parse whole, as far as a cheap check
+    can tell (_asm_document_would_restore), and no assembly entry of the session (`rompuuid`; any session's when None) was
+    kept whole because a restore in this process refused that document (keepWhole). The release at a dead timeline lane asks
+    it before letting the session's entry and records go (2026-10-01): with no document a restore would take, the next parse
+    after the release would be a whole one."""
+    if not _asm_document_would_restore(leaf_path):
+        return False
+    rp = os.path.realpath(str(leaf_path))
+    with _ASM_LOCK:
+        entries = [e for k, e in _ASM_CACHE.items() if k[0] == rp and (rompuuid is None or k[1] == str(rompuuid))]
+    return not any(e.get("keepWhole") for e in entries)
 
 
 def _asm_ckpt_file(leaf_path):

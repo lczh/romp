@@ -322,6 +322,94 @@ class DeadLaneMemo(unittest.TestCase):
         with km.em._JSONL_CACHE_LOCK:
             self.assertIn(p, km.em._JSONL_CACHE)
 
+    def test_a_dead_lane_whose_document_a_restore_would_refuse_keeps_its_assembly_entry(self):
+        """A document under a standing refusal mark (the chain proof refused it for the tail's shape at this very stat), or one
+        a restore in this process refused (the session's entry kept whole for it), would not be restored from: a parse after
+        a release would be a whole parse, so the lever leaves the entry and the records as before."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        self.assertTrue(km.em._asm_mark_refused(p, "shape", rompuuid=SID, sdk_human=human))
+        self._build()                                                 # the lane's parse is the store's (a hit): the entry as it stands
+        self.assertTrue(self._asm_keys(p), "kept: the document stands, but a refusal mark stands over it")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE)
+
+    def test_a_dead_lane_whose_entry_a_restore_refused_keeps_it(self):
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        for k in self._asm_keys(p):
+            with km.em._ASM_LOCK:
+                km.em._ASM_CACHE[k]["keepWhole"] = True                # as the whole parse after a refused restore marks it
+        self._build()
+        self.assertTrue(self._asm_keys(p), "kept: a restore here already refused the document")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE)
+
+    def test_the_dead_lanes_record_release_keeps_every_file_a_live_lane_reads(self):
+        """The record half of the release drops the dead lane's leaf and anchor only outside every live lane's leaf and anchor:
+        a fork child that is live while its registry still names the dead parent's file reads that very file."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        child = "11111111-2222-3333-4444-5555555555c1"
+        alive = [{"sid": SID, "path": p}, {"sid": child, "path": p}]
+        km._release_dead_lane(SID, p, ("v1",), alive, {child: {"state": "waiting"}})
+        self.assertEqual(self._asm_keys(p), [], "the dead session's own assembly entry goes")
+        with km.em._ASM_LOCK:
+            self.assertFalse([k for k in km.em._ASM_CACHE if k[0] == os.path.realpath(p)], "no entry pins the file")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE, "a live lane reads the file: its records stay")
+        km._release_dead_lane(SID, p, ("v2",), alive, {})              # the child ended too (a new transcript version)
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE, "no live lane reads it any more: dropped")
+
+    def _many_turns(self, n):
+        recs, parent = [], None
+        for k in range(n):
+            u, a = "u%d" % k, "a%d" % k
+            recs += [_rec("user", T0 + 60 * k, u, parent, "page %d of the notes-api index" % k),
+                     _rec("assistant", T0 + 60 * k + 10, a, u, "Paged %d." % k)]
+            parent = a
+        self._write(recs)
+        getattr(km, "_dead_lane_released", {}).clear()
+        return str(self.tpath), recs
+
+    def test_a_revived_session_restores_once_after_the_release_and_then_folds(self):
+        """The release's own regression risk: a session revived after its dead lane let go of its entry and records pays one
+        restore (the document's pre-cut rows and the tail from its cut), never a whole parse, for its lane and its chat's
+        parse together, and folds its next turn over the restored entry."""
+        p, recs = self._many_turns(48)
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        km._parse_cache.pop(p, None)
+        self._build()                                                 # dead: the lane is cached and the session released
+        self.assertEqual(self._asm_keys(p), [], "released at the lever")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE)
+        live = {SID: {"state": "waiting", "since": NOW - 100, "model": "", "effort": "", "context": None, "compactPct": None,
+                      "color": None, "mode": ""}}
+        km._live_map = lambda: live
+        s0 = dict(km.em._ASM_STATS)
+        km.build_timeline(NOW, live, with_bars=True)                  # revived: its lane parses
+        km._parse(p, SID, NOW)                                        # and its chat build's parse, through the same store
+        roads = {k: km.em._ASM_STATS.get(k, 0) - s0.get(k, 0) for k in ("restore", "full", "fold")}
+        self.assertEqual(roads, {"restore": 1, "full": 0, "fold": 0}, "one restore, no whole parse")
+        self.assertTrue(self._asm_keys(p), "the restored entry stands for the live session")
+        recs = recs + [_rec("user", T0 + 60 * 48, "u48", "a47", "and the last page?"),
+                       _rec("assistant", T0 + 60 * 48 + 10, "a48", "u48", "Paged the last one.")]
+        self._write(recs)
+        s1 = dict(km.em._ASM_STATS)
+        km.build_timeline(NOW, live, with_bars=True)
+        roads = {k: km.em._ASM_STATS.get(k, 0) - s1.get(k, 0) for k in ("restore", "full", "fold")}
+        self.assertEqual(roads, {"restore": 0, "full": 0, "fold": 1}, "the next turn folds over the restored entry")
+        self.assertEqual(len(km._parse(p, SID, NOW)["turns"]), 49)
+
 
 class HorizonFilterIsExact(unittest.TestCase):
     """The cached marks filtered on their stamped compare value are the marks a fresh derivation at that

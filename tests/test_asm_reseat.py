@@ -575,12 +575,14 @@ def _chat(prefix, t0, n, parent=None):
 
 class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
     """Release on the events that end a file's use (2026-10-01), the record side. The reader drops a quiet file on a fold (the
-    quiescence drop, a deferred drop paid later), and when an assembly entry folds over that very entry (its generation), the
-    drop freed nothing, since the adapter holds the same records, made recordCache.bytes fall while the memory stayed, and
-    retired the generation: the entry's next visit demoted (g:rewrite) to a restore, or to a whole parse with no document,
-    and a whole reader in between decoded a second copy. The reader now keeps the entry from the lowest record any such
-    assembly entry read from, at the same generation: all of it under a whole assembly entry, the tail from the cut under a
-    restored one (the records before the cut, which a whole reader's upgrade decoded, are freed)."""
+    quiescence drop, a deferred drop paid later), and when a WHOLE assembly entry folds over that very entry (its generation)
+    the drop freed nothing, since the adapter holds the same records list, made recordCache.bytes fall while the memory
+    stayed, and retired the generation: the entry's next visit demoted (g:rewrite) and, with no document a restore would take,
+    parsed whole, while a whole reader in between decoded a second copy. Such a reader entry is now kept as it stands, at the
+    same generation. A RESTORED entry, or a whole one marked to re-seat on its own document, does not hold a drop back: its
+    next visit restores from the document anyway, and the restore that replaces it frees what it held (round one of the
+    review: keeping or trimming a reader entry under a restored entry held a whole reader's second decoding of the tail next
+    to the restore's own until the entry next demoted, and counted bytes as freed that the adapter still held)."""
 
     def test_a_quiet_drop_under_a_whole_entry_keeps_the_generation_and_the_next_parse_folds(self):
         _aged(self.leaf)
@@ -593,9 +595,12 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         ent1 = _reader_entry(self.leaf)
         self.assertIsNotNone(ent1, "the drop would free nothing the whole entry does not hold: the reader keeps the entry")
         self.assertEqual((ent1[6], ent1[5], len(ent1[4])), (ent0[6], 0, len(ent0[4])), "the same generation, whole")
+        self.assertIs(ent1[4], self.entry()["ad"]._src[self.leaf], "the very records list the assembly entry's adapter holds: "
+                      "one copy, which the drop could not have freed")
         st1 = em.record_cache_stats()
-        self.assertEqual(st1["pinnedKept"] - st0.get("pinnedKept", 0), 1, "counted as kept for the assembly entry")
+        self.assertEqual(st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), 1, "counted as kept for the assembly entry")
         self.assertEqual(st1["dropped"] - st0["dropped"], 0, "and not as a drop")
+        self.assertEqual(st1["bytes"], st0["bytes"], "the counted bytes stay with the memory that stays")
         self.append_turn()
         s0 = self.stats()
         out, mode = self.parse()
@@ -603,64 +608,197 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
                          "parse went %s: %s" % (mode, self.moved(s0, self.stats())))
         self.assertColdEqual(out)
 
-    def test_a_quiet_drop_under_a_restored_entry_trims_the_upgrade_to_the_cut_and_the_next_parse_folds(self):
+    def test_a_whole_entry_kept_whole_after_a_refused_restore_holds_the_drop_back(self):
+        """A whole entry built after a restore refused the leaf's document (keepWhole) also wrote that document (the refusal's
+        own write), unmarked for re-seat: a drop would retire its generation and its next visit would be refused again and
+        parse whole. It pins, whatever the document it wrote."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.fresh()                                                  # a restart: the next parse offers the document to the restore
+        with mock.patch.object(em, "_tail_chains_onto_the_document", lambda *a, **k: False):
+            out, mode = self.parse()
+            e = self.entry()
+            self.assertEqual((mode, bool(e.get("keepWhole")), bool(e.get("docWritten")), bool(e.get("reseat"))),
+                             ("full", True, True, False), "the premise: a whole entry kept whole, its document written, no re-seat")
+            ent0 = _reader_entry(self.leaf)
+            st0 = dict(em.record_cache_stats())
+            _quiet_drop(self.leaf)
+            self.assertIs(_reader_entry(self.leaf), ent0, "kept as it stands: the drop would only retire the generation")
+            st1 = em.record_cache_stats()
+            self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (1, 0))
+            self.append_turn()
+            s0 = self.stats()
+            out, mode = self.parse()
+            self.assertEqual(mode, "fold", "the appended turn folds: %s" % self.moved(s0, self.stats()))
+        self.assertColdEqual(out)
+
+    def test_a_whole_entry_whose_document_meets_the_share_holds_the_drop_back(self):
+        """A whole entry that wrote its document but is not marked for re-seat (the tail past that cut already meets the churn
+        bound's share) pins too: popped, its next visit would restore and demote to a whole parse at the first fold."""
+        recs = episode(NOW - 86400, turns=40, compact_every=1000)
+        t = max(em.parse_z(r["timestamp"]) for r in recs) + 60
+        recs.append({"type": "user", "uuid": "ou", "parentUuid": recs[-1]["uuid"], "timestamp": iso(t), "promptSource": "typed",
+                     "cwd": "/w/notes-api", "message": {"role": "user", "content": "run the whole index suite, file by file"}})
+        for k in range(6):
+            recs += tool_round(t + 10 * (k + 1), k, recs[-1]["uuid"])
+        self.begin(recs)
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        e = self.entry()
+        self.assertEqual((bool(e.get("docWritten")), bool(e.get("reseat")), bool(e.get("keepWhole"))), (True, False, False),
+                         "the premise: a document written, the entry not marked for re-seat")
+        ent0 = _reader_entry(self.leaf)
+        k0 = em.record_cache_stats().get("pinnedKept", 0)
+        _quiet_drop(self.leaf)
+        self.assertIs(_reader_entry(self.leaf), ent0, "kept as it stands")
+        self.assertEqual(em.record_cache_stats().get("pinnedKept", 0) - k0, 1)
+        self.append(tool_round(self.last_t() + 10, 6, self.last_uuid()))
+        s0 = self.stats()
+        out, mode = self.parse()
+        self.assertEqual(mode, "fold", "the next call of the open turn folds: %s" % self.moved(s0, self.stats()))
+        self.assertColdEqual(out)
+
+    def test_a_lineage_file_with_a_document_of_its_own_is_pinned_by_a_leaf_entry_that_has_none(self):
+        """After a /clear the anchor (the old leaf) carries the document written in its days as the leaf, while the new leaf
+        has none yet: a drop of the anchor would demote the new leaf's whole entry (g:nonleaf) to a restore of the NEW leaf's
+        document, which does not stand, and so to a whole parse. The leaf's entry pins the anchor: the document asked about
+        is the entry's leaf's, not the dropped file's."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))                             # the anchor's own document, from its days as the leaf
+        em.release_assembly(self.leaf, rompuuid=SID)                  # the /clear's flip released its entry
+        new_leaf = str(self.td / "5ea70924-2222-4333-8444-00000000a5e9.jsonl")
+        Path(new_leaf).write_text("".join(json.dumps(r) + "\n" for r in _chat("cl", NOW - 600, 3)))   # a fresh root
+
+        def parse_new():
+            mode = []
+            em.parse_session(new_leaf, rompuuid=SID, name="web", dir="/w/notes-api", candidate_files=[new_leaf, self.leaf],
+                             states=None, postal_log=[], now=NOW, asm_mode_out=mode)
+            return mode[-1] if mode else None
+        self.assertEqual(parse_new(), "full")
+        self.assertTrue(em.asm_document_stands(self.leaf) and not em.asm_document_stands(new_leaf),
+                        "the premise: the anchor has a document, the new leaf none")
+        ent0 = _reader_entry(self.leaf)
+        k0 = em.record_cache_stats().get("pinnedKept", 0)
+        _quiet_drop(self.leaf)
+        self.assertIs(_reader_entry(self.leaf), ent0, "the anchor is kept for the new leaf's entry")
+        self.assertEqual(em.record_cache_stats().get("pinnedKept", 0) - k0, 1)
+        with open(new_leaf, "a") as f:
+            f.write("".join(json.dumps(r) + "\n" for r in _chat("cm", NOW - 300, 1, parent="cla2")))
+        self.assertEqual(parse_new(), "fold", "the anchor's generation stands: the new leaf's turn folds")
+
+    def test_a_whole_entry_marked_to_re_seat_on_its_document_does_not_hold_the_drop_back(self):
+        """The settle's document marks the whole entry for re-seat: its next visit restores from that document whatever the drop
+        does, so the drop pops as before (the converge pass's drop right after its write pops too, test_asm_checkpoint)."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.assertTrue(self.entry().get("reseat"), "the premise: marked for re-seat")
+        d0 = em.record_cache_stats()["dropped"]
+        _quiet_drop(self.leaf)
+        self.assertIsNone(_reader_entry(self.leaf), "popped")
+        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore", "the next visit re-seats on the document")
+        self.assertColdEqual(out)
+
+    def test_a_quiet_drop_under_a_restored_entry_pops_the_reader_entry_and_the_next_parse_restores(self):
+        """A restored entry whose leaf a whole reader upgraded (a judge's walk): the drop pops the reader entry, as it always
+        did, and the entry's next visit restores from its document, a single decoding of the tail again."""
         _aged(self.leaf)
         out, _ = self.parse()
         self.assertTrue(self.settle(out), em.asm_checkpoint_stats()["skipped"])
         self.fresh()
         out, mode = self.parse()
         self.assertEqual(mode, "restore")
-        gen, base, count = self.entry()["recs"][self.leaf]
+        gen, base, _count = self.entry()["recs"][self.leaf]
         self.assertGreater(base, 0, "the restore read the leaf from the document's cut")
         whole = em._read_jsonl_entry(self.leaf, tail_ok=False)        # a whole reader (a judge's walk) upgrades the entry
         self.assertEqual((whole[6], whole[5]), (gen, 0), "the upgrade keeps the generation and holds every record")
-        w_whole = em._entry_weight(whole)
         st0 = dict(em.record_cache_stats())
         _quiet_drop(self.leaf)
-        ent = _reader_entry(self.leaf)
-        self.assertIsNotNone(ent, "kept, trimmed")
-        self.assertEqual((ent[6], ent[5], ent[5] + len(ent[4])), (gen, base, len(whole[4])),
-                         "the same generation, from the restored entry's base to the end")
-        self.assertIs(ent[4][0], whole[4][base], "the very records the assembly entry reads, not a second copy")
-        self.assertLess(em._entry_weight(ent), w_whole, "the records before the cut were let go")
+        self.assertIsNone(_reader_entry(self.leaf), "a restored entry does not hold the drop back: popped")
         st1 = em.record_cache_stats()
-        self.assertEqual(st1["pinnedFreedBytes"] - st0.get("pinnedFreedBytes", 0), w_whole - em._entry_weight(ent))
-        self.append_turn()
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
         s0 = self.stats()
         out, mode = self.parse()
-        self.assertEqual(mode, "fold", "the restored entry folds the appended turn: %s" % self.moved(s0, self.stats()))
+        self.assertEqual(mode, "restore", "the next visit restores: %s" % self.moved(s0, self.stats()))
         self.assertColdEqual(out)
 
-    def test_a_whole_entry_at_the_same_generation_floors_the_trim(self):
-        """A whole entry that wrote its document does not hold the drop back (its next visit restores anyway), but it reads the
-        records from zero: a restored entry beside it at the same generation keeps the reader's entry, untrimmed, so no whole
-        entry is left folding over a tail and nothing is trimmed that an adapter still holds."""
+    def test_a_restored_entry_that_folded_over_the_upgrade_does_not_hold_the_drop_back_either(self):
+        """The same after a fold over the upgraded reader entry, which leaves the restored adapter holding the reader's WHOLE
+        list (_src) under its tail row: a keep or a trim of the reader entry would free nothing there, so the drop pops, and
+        the restore at the next visit replaces the entry and what it held."""
         _aged(self.leaf)
         out, _ = self.parse()
         self.assertTrue(self.settle(out))
         self.fresh()
         _, mode = self.parse()
         self.assertEqual(mode, "restore")
-        gen, base, _count = self.entry()["recs"][self.leaf]
+        em._read_jsonl_entry(self.leaf, tail_ok=False)               # the whole reader's upgrade
+        self.append_turn()
+        _aged(self.leaf)
+        _, mode = self.parse()
+        self.assertEqual(mode, "fold")
+        e = self.entry()
+        gen, base, count = e["recs"][self.leaf]
         self.assertGreater(base, 0)
-        em._read_jsonl_entry(self.leaf, tail_ok=False)               # a whole reader upgrades the entry at the same generation
-        saved = em._CKPT_DIR_FN
-        em._CKPT_DIR_FN = None                                        # another session's whole parse over the upgraded entry
-        try:
-            em.parse_session(self.leaf, rompuuid=PEER, name="api", dir="/w/notes-api", candidate_files=[self.leaf], states=None,
-                             postal_log=[], now=NOW)
-        finally:
-            em._CKPT_DIR_FN = saved
-        with em._ASM_LOCK:
-            peer = em._ASM_CACHE[(os.path.realpath(self.leaf), PEER, False)]
-        self.assertEqual(peer["recs"][self.leaf][:2], (gen, 0), "the whole entry read the same generation from record zero")
-        peer["docWritten"] = True                                     # as the settle's write from it marks it
-        k0 = em.record_cache_stats()["pinnedKept"]
+        self.assertEqual(len(e["ad"]._src[self.leaf]), count, "the premise: the adapter holds the whole upgraded list")
+        st0 = dict(em.record_cache_stats())
         _quiet_drop(self.leaf)
-        ent = _reader_entry(self.leaf)
-        self.assertIsNotNone(ent, "the restored entry still folds over it: kept")
-        self.assertEqual((ent[6], ent[5]), (gen, 0), "and whole: the whole entry beside it reads from record zero")
-        self.assertEqual(em.record_cache_stats()["pinnedKept"] - k0, 1)
+        self.assertIsNone(_reader_entry(self.leaf), "popped")
+        st1 = em.record_cache_stats()
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        self.assertColdEqual(out)
+
+    def test_a_restored_entry_over_a_whole_reader_entry_does_not_hold_the_drop_back(self):
+        """A restore that met a whole reader entry first reads over it (its row's base 0): popped as well, and restored again."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.fresh()
+        em._read_jsonl_entry(self.leaf, tail_ok=False)               # a whole reader first
+        _, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        self.assertEqual(self.entry()["recs"][self.leaf][1], 0, "the premise: the restore read over the whole reader entry")
+        d0 = em.record_cache_stats()["dropped"]
+        _quiet_drop(self.leaf)
+        self.assertIsNone(_reader_entry(self.leaf), "popped")
+        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        self.assertColdEqual(out)
+
+    def test_an_owed_drop_paid_by_its_pop_alone_keeps_a_pinned_entry_too(self):
+        """An owed drop past the owed table's bound is paid by the pop alone (_pop_owed_entry): a reader entry a whole assembly
+        entry pins stays there too, and a file nothing pins is popped."""
+        other = self.td / "frozen.jsonl"
+        other.write_text("".join(json.dumps(r) + "\n" for r in _chat("ow", NOW - 7200, 3)))
+        _aged(other, self.leaf)
+        self.parse()                                                  # a whole entry, no document: it pins the leaf
+        em._read_jsonl_entry(str(other), tail_ok=False)
+        ent0 = _reader_entry(self.leaf)
+        saved = (dict(em._CKPT_CYCLE), em._DROP_OWED_MAX, dict(em._DROP_OWED))
+        em._CKPT_CYCLE.update(cap=1, spent=1)                         # the drop write on, the cycle's budget spent: the drop is owed
+        em._DROP_OWED_MAX = 0                                         # and the owed table past its bound at once: paid by the pop
+        em._DROP_OWED.clear()
+        st0 = dict(em.record_cache_stats())
+        try:
+            with mock.patch.object(em, "_path_needs_write", lambda *a, **k: True):
+                for p in (self.leaf, str(other)):
+                    em.fold_records({}, p, lambda: 0, lambda s, r: s + 1, drop_after="quiescent")
+        finally:
+            em._CKPT_CYCLE.clear(); em._CKPT_CYCLE.update(saved[0])
+            em._DROP_OWED_MAX = saved[1]
+            em._DROP_OWED.clear(); em._DROP_OWED.update(saved[2])
+        st1 = em.record_cache_stats()
+        self.assertIs(_reader_entry(self.leaf), ent0, "the pinned leaf stays, at its generation")
+        self.assertIsNone(_reader_entry(other), "the file nothing pins is popped")
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (1, 1))
 
     def test_a_quiet_drop_of_a_file_no_assembly_entry_folds_over_still_drops_it(self):
         other = self.td / "frozen.jsonl"
@@ -797,7 +935,8 @@ class ReleasesKeepTheJudgesVerdicts(Episode):
                         "the corpus carries rewinds for the walks to find: %s" % {k: v["leafRewound"] for k, v in before.items()})
         em.release_assembly(p_anchor, rompuuid=P)                     # the /clear's flip
         for leaf, _cands, _rid in sessions.values():
-            _quiet_drop(leaf)                                         # a quiet fold over each leaf: kept for its entry
+            _quiet_drop(leaf)                                         # a quiet fold over each leaf: kept under a whole entry,
+        #                                                               popped under the restored one
         for leaf, _cands, rid in sessions.values():
             em.release_assembly(leaf, rompuuid=rid)                   # the end of each session's use
         files = sorted({f for _l, cands, _r in sessions.values() for f in cands})

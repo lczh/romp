@@ -2735,8 +2735,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `full:noDocument`, `full:noDir` (no checkpoint directory), `full:refused` (a document that stood but did not verify,
   its fallback reason counted), `bypass` (a pending cut armed on the session),
   `fallback`, and `released` (assembly entries dropped at an event that ended
-  their file's use: a leaf a /clear or a resume fork retired, a dead timeline
-  lane whose document stands, the last viewer of a subagent closing); the same block rides `asmCheckpoint.parse` on GET /perf,
+  their file's use: a leaf a /clear or a resume fork retired, and again any
+  entry a later parse of that retired leaf installed, a dead timeline lane with
+  a document a restore would take, the last viewer of a subagent closing); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar
@@ -2848,11 +2849,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop, and the files a dead timeline lane releases), `pinnedKept`
-  (drops that kept an entry because an assembly entry still folds over its
-  generation: the drop would have freed nothing the assembly entry does not hold,
-  and its next parse would have demoted) and `pinnedFreedBytes` (the bytes before
-  a restored entry's cut those kept entries let go), `released` (every pop that removed an entry, whatever the
+  quiescence drop, the files a dead timeline lane releases, and a leaf a second
+  /clear retired), `pinnedKept` (drops that kept an entry because a whole assembly
+  entry still folds over its generation and its next parse after a drop would be
+  whole again: the drop would have freed nothing that entry does not hold, so the
+  bytes stay counted; a restored entry or one marked to re-seat on its document
+  never holds a drop back), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,

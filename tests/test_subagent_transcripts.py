@@ -668,16 +668,18 @@ class OpenClose(World):
             self.assertTrue(records(), "the record entry is the agent folds' to drop")
             append_jsonl(self.bg_file, [dict(arec(T0 + 40, "%s-a9" % AID_BG, [{"type": "text", "text": "Nearly done."}],
                                                   "%s-fin" % AID_BG), isSidechain=True, agentId=AID_BG)])
+            r0 = dict(em._ASM_STATS)
             self._dispatch(c1, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
-            self.assertEqual([m for p, m in km._parse_mode.items() if os.path.realpath(p) == rp], ["full"],
-                             "the reopen parses the agent's file once, whole")
+            roads = {k: em._ASM_STATS.get(k, 0) - r0.get(k, 0) for k in ("full", "restore")}
+            self.assertEqual(roads, {"full": 1, "restore": 0}, "the reopen parses the agent's file once, whole")
             reopened = c1.out[-1]
             self.assertEqual(reopened["events"][-1]["md"], "Nearly done.")
+            self.assertTrue(entries(), "and its entry stands again while the viewer is open")
             km._SUBAGENT_FRAMES.clear(); km._parse_cache.clear()
+            em.release_assembly(str(self.bg_file))         # the reference parses from nothing, not from the reopen's entry
             fresh = km.build_subagent(SID, AID_BG, int(time.time()), self.tm)
             self.assertEqual((reopened["events"], reopened["running"]), (fresh["events"], fresh["running"]),
                              "the reopened frame shows what a fresh build does")
-            self.assertTrue(entries(), "and its entry stands again while the viewer is open")
         finally:
             km._clients[:] = saved
 

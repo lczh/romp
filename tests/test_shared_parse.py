@@ -405,6 +405,75 @@ class OneParseForBoth(unittest.TestCase):
         with em._READ_BYTES_LOCK:
             self.assertEqual(em._READ_BYTES.get(anchor, 0), b0, "the new leaf's parse read the anchor from the reader, not the disk")
 
+    def test_a_parse_of_the_retired_leaf_after_the_flip_leaves_no_assembly_entry(self):
+        """The flip releases the retired leaf's assembly entry once. A parse of that leaf afterwards (a pass that took its rows
+        before a mid-pass /clear) is refused its parse slot, since nothing would drop it again; the assembly entry the parse
+        installed is released there too, for the same reason, instead of staying until the cache's count cap."""
+        em = jd.em
+        C = "88888888-2222-4333-8444-000000000881"
+        anchor = _transcript(self.d, C, n=3)
+        leaf1 = _transcript(self.d, "88888888-2222-4333-8444-000000000882", n=1)
+        rp = os.path.realpath(anchor)
+
+        def entries():
+            with em._ASM_LOCK:
+                return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == C]
+        jd._note_leaf(C, anchor)
+        km._parse(anchor, C, self.now)
+        self.assertTrue(entries())
+        jd._note_leaf(C, leaf1)                            # the /clear's flip
+        self.assertEqual(entries(), [], "released at the flip")
+        tree = jd.parsed_session(C, [anchor], self.now)   # the pass's replay over the rows it took before the flip
+        self.assertTrue(tree["turns"], "the caller is handed its parse")
+        self.assertEqual([k for k in jd._PARSE_CACHE if k[0] == C and k[2] == anchor], [], "no slot stored for the retired leaf")
+        self.assertEqual(entries(), [], "and no assembly entry left behind for it")
+
+    def test_a_second_clear_drops_the_first_clears_leaf_from_the_record_cache_and_keeps_the_anchor(self):
+        """After a first /clear the retired leaf is the session's anchor, a candidate of the new leaf's parse: its records stay.
+        After a second one the retired leaf is the first clear's file, which no live lineage reads: its record entry, whole
+        from its days as the leaf, goes at the flip (unless a whole assembly entry still folds over it), where it stayed
+        until the reader's LRU reached it."""
+        em = jd.em
+        C = "88888888-2222-4333-8444-000000000883"
+        anchor = _transcript(self.d, C, n=3)
+        leaf1 = _transcript(self.d, "88888888-2222-4333-8444-000000000884", n=2)
+        leaf2 = _transcript(self.d, "88888888-2222-4333-8444-000000000885", n=1)
+
+        def held(p):
+            with em._JSONL_CACHE_LOCK:
+                return p in em._JSONL_CACHE
+        jd._note_leaf(C, anchor)
+        km._parse(anchor, C, self.now)
+        jd._note_leaf(C, leaf1)                            # the first /clear
+        self.assertTrue(held(anchor), "the anchor is the new leaf's candidate: kept")
+        km._parse(leaf1, C, self.now)
+        self.assertTrue(held(leaf1) and held(anchor))
+        d0 = em.record_cache_stats()["dropped"]
+        jd._note_leaf(C, leaf2)                            # the second /clear
+        self.assertFalse(held(leaf1), "the first clear's file is in no live lineage: dropped at the flip")
+        self.assertTrue(held(anchor), "the anchor is still the new leaf's candidate")
+        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        km._parse(leaf2, C, self.now)                      # the new leaf parses over the anchor the reader still holds
+
+    def test_a_fork_childs_flip_keeps_the_parents_live_leaf_in_the_record_cache_with_no_entry_pinning_it(self):
+        """A fork child's first leaf is its parent's live transcript; the child's flip to its own file must not drop that
+        file's record entry, even when no assembly entry folds over it: it is the leaf discover hands out for the parent."""
+        em = jd.em
+        P, CH = "88888888-2222-4333-8444-000000000886", "88888888-2222-4333-8444-000000000887"
+        parent_leaf = _transcript(self.d, P, n=2)
+        child_leaf = _transcript(self.d, CH, n=1)
+        jd._note_leaf(P, parent_leaf)
+        jd._note_leaf(CH, parent_leaf)
+        jd.parsed_session(CH, [parent_leaf], self.now)    # the child's row parsed over the parent's file
+        with em._JSONL_CACHE_LOCK:
+            rec0 = em._JSONL_CACHE.get(parent_leaf)
+        self.assertIsNotNone(rec0)
+        jd._note_leaf(CH, child_leaf)                      # the child's flip releases its own entry of the parent's file
+        with em._ASM_LOCK:
+            self.assertFalse([k for k in em._ASM_CACHE if k[0] == os.path.realpath(parent_leaf)], "no entry pins the file")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIs(em._JSONL_CACHE.get(parent_leaf), rec0, "the parent's live leaf keeps its records")
+
     def test_the_kernel_view_reads_the_store(self):
         p = _transcript(self.d, A)
         self.assertNotIn(p, km._parse_cache)

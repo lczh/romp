@@ -51534,13 +51534,17 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     """The rest of the RSS lever (2026-10-01): when a dead lane is cached, its session's assembly entry (an adapter over every
     record of the leaf, its atoms and maps) and the record entries of its leaf and anchor were left resident while the
     parse slot went. They go too, under two rules that keep the release from costing more than it frees. Only while the
-    leaf's assembly document stands: a later parse (the session revived, its chat opened, a keyed input moving the lane)
-    then restores from the document and reads the tail from its cut, never the whole transcript. And once per transcript
-    version (`tk`, the transcript's stat key): the lane is derived again whenever a keyed input moves (a caption, a goals
-    write, any session's flags), and a release at every such miss would trade every serve of the entry for a restore; what
-    the first restore after the release rebuilds stays. The record entries that go are the leaf's and its anchor's, less
-    every live lane's leaf and anchor in this build; a file an assembly entry still folds over stays (em.release_records)."""
-    if _dead_lane_released.get(sid) == tk or not em.asm_document_stands(path):
+    leaf has a document a restore would take (em.asm_document_restores: the file stands, no refusal mark stands at the leaf's
+    stat, and no entry of the session was kept whole because a restore here refused it): a later parse (the session revived,
+    its chat opened, a keyed input moving the lane) then restores from the document and reads the tail from its cut, never
+    the whole transcript. And once per transcript version (`tk`, the transcript's stat key): the lane is derived again
+    whenever a keyed input moves (a caption, a goals write, any session's flags, the archive, recorded downtime), and a
+    release at every such miss would trade every serve of the entry for a restore. So the end state is a downgrade, not
+    nothing: the first miss after the release restores, and the restored entry (the document's lazy rows and the tail past
+    its cut) and the reader's tail entry stay until the transcript moves or the caches' bounds reach them. The record entries
+    that go are the leaf's and its anchor's, less every live lane's leaf and anchor in this build; a file a whole assembly
+    entry still folds over stays (em.release_records)."""
+    if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
         return
     if len(_dead_lane_released) > _DEAD_LANE_MEMO_MAX:
         _dead_lane_released.pop(next(iter(_dead_lane_released)))
