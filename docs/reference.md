@@ -205,7 +205,9 @@ session waiting on your answer to a prompt, it also says that the question goes
 away with the turn. The
 turn is interrupted and the relaunch follows at that turn's end, so the program
 is never torn down from under a live turn. Work the old process was running,
-its subagents and its background tasks, ends with it. A message you had queued
+its subagents and its background tasks, ends with it, and the session is told
+which background tasks were cut off; a billing or effort change still waiting
+for the session to go quiet applies with the restart. A message you had queued
 survives. One the session has already taken runs in the old process, and the
 relaunch follows the first turn to end with every message the old process has
 taken already in the conversation. Before that the old process keeps taking your
@@ -325,8 +327,10 @@ chat shows the CLI's own reply.
 
 A Claude Code session switches model live but reloads to apply a new effort:
 the chat shows "Reloading session…" and the effort badge shows switching-dots
-until the reload completes, and a session that is mid-turn reloads when the
-turn ends.
+until the reload completes. The reload waits until it would cut nothing (no
+turn running or queued, no subagent, no background task), and while it waits
+the chat line says on what, as in "Applying high effort after 2 background
+tasks…". Restart session applies a waiting change at once, ending that work.
 
 ### What a session needs from you
 
@@ -491,7 +495,9 @@ and the machine's default beside it. The flyout opens on hover over the
 Billing row, as the Tags flyout does (one gesture: a short hover opens, a
 click opens at once, leaving both the row and the flyout closes it), and on
 click. Switching reconnects the session to apply, with the same switching-dots
-the effort badge wears.
+the effort badge wears, and waits the same way for a quiet session: until then
+the row's sub-line reads "applying…", or "applies after 2 background tasks"
+when work the reconnect would end is still running.
 
 Below the session's choices, behind a rule, the flyout carries one entry,
 **Set default billing**, which opens a submenu holding exactly the same
@@ -1392,6 +1398,19 @@ a separate process the CLI started, and a CLI killed by SIGKILL runs no cleanup,
 so its shells are re-parented and may keep running. A kernel restart has never
 touched work a session deliberately detached: a tmux server it started itself,
 `setsid` children and other processes that outlive their shell.
+
+A session's own CLI is also relaunched, with no kernel restart, to apply a
+setting it reads only at launch: billing, effort, the first fast-mode opt-in,
+bypass mode, the per-session environment, and the corrections after a refused
+fast mode or a login that landed on another credential. The subagents, timers
+and monitors inside that CLI would end with it, so the relaunch waits until the
+session is quiet: no turn running or queued, no subagent, no background task and
+no question waiting on you. It happens at the event that ends the last of that
+work, never on a timer, and the setting's pending mark stays up meanwhile,
+saying what it waits for. Restart session and editing or deleting an earlier
+message relaunch without waiting, and a setting still waiting to apply rides
+that relaunch; the session is then told which background tasks were cut off,
+with a request to check whether each is still running before relaunching it.
 
 The dashboard page stays on screen across a restart. Its panes reconnect as they
 do after a dropped socket (the watched tab rebuilt whole, the other tabs as

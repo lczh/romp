@@ -520,7 +520,7 @@ class LiveTail(unittest.TestCase):
         be, s = self._live_fast_session(d, sid, unlocked=True)
         self.assertTrue(s._fast_unlocked, "precondition: THIS connection carries the opt-in flag")
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         self.assertTrue(be.set_fast(sid, "on"))
         self.assertEqual(s.pending(), ["/fast on"], "the literal command is queued for the CLI to interpret")
         echoes = [a for a in be.live_atoms(sid) if a.get("_echo_text") == "/fast on"]
@@ -536,14 +536,15 @@ class LiveTail(unittest.TestCase):
     def test_set_fast_first_opt_in_reconnects_to_apply_the_flag(self):
         # The current connection was made WITHOUT the flag, so the CLI would refuse the literal send;
         # the opt-in applies at the (re)connect that carries it — request_reconnect, the /effort
-        # machinery: immediately if idle, at the end of the current turn if busy.
+        # machinery: at once if quiet, else once no turn, subagent or background task would be cut.
         d = tempfile.mkdtemp()
         sid = "11111111-2222-3333-4444-888888888888"
         be, s = self._live_fast_session(d, sid, unlocked=False)
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         self.assertTrue(be.set_fast(sid, "on"))
         self.assertEqual(len(reconnects), 1, "the flag is connect-time here → reconnect to apply")
+        self.assertFalse(reconnects[0].get("cut"), "on the road that waits for a quiet session (2026-10-01)")
         self.assertEqual(s.pending(), [], "no literal send — this connection would refuse it")
         self.assertTrue(s.fast_opt, "the next _options carries the flag")
         self.assertEqual(s.fast, "on", "optimistic for the badge; init re-asserts")
@@ -557,7 +558,7 @@ class LiveTail(unittest.TestCase):
         be, s = self._live_fast_session(d, sid, unlocked=False)
         sb.write_reg(d, sid, dict(sb.read_reg(d, sid), fast=True))   # a stale on-disk ask to clear
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         self.assertTrue(be.set_fast(sid, "off"))
         self.assertEqual(s.pending(), [], "nothing to send — the connection never had fast mode")
         self.assertEqual(reconnects, [], "and nothing to reconnect for")
@@ -682,7 +683,7 @@ class LiveTail(unittest.TestCase):
         async def _noop(): pass
         s._do_refresh_context = _noop
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         async def run(data):
             s._on_message(_Sys(data), _AssistantMessage, _ResultMessage, _Sys)
             await asyncio.sleep(0)

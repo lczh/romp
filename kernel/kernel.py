@@ -22495,6 +22495,7 @@ class Sessions:
                                 # fell to the other side, the Billing menu says so (2026-09-08)
                                 "authPickUnavailable": st.get("authPickUnavailable", ""),
                                 "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
+                                "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
                                 "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
                                 "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
                                 # live BACKGROUND TASKS (the CLI's task lifecycle stream) — the awaiting
@@ -42562,8 +42563,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # leaves NO record in the chat. While that reconnect is pending, show an animated "Reloading session…"
     # element (mirrors the compacting one) so the user sees the "rereading transcript" step the TUI narrates;
     # it clears the instant the new client connects (effortPending drops). Appended before the queued bubble.
+    # Since 2026-10-01 the reconnect waits for a quiet session (no turn, subagent or background task it would cut), so the
+    # element carries what it waits for (relaunchWaits) and says so instead of reading as a reload that never finishes.
     if (tm0 or {}).get("effortPending"):
-        events.append({"kind": "reconnecting", "effort": (tm0 or {}).get("effort") or ""})
+        events.append({"kind": "reconnecting", "effort": (tm0 or {}).get("effort") or "",
+                       "waits": (tm0 or {}).get("relaunchWaits") or ""})
     # Live API-RETRY indicator (the user 2026-07-08): while the CLI backs off + retries a rate-limited /
     # overloaded request the turn stalls in 'retrying' — which was visible ONLY as the amber tab border, with
     # NOTHING in the chat ("the border says retrying but the chat shows no sign"). Show an animated "API
@@ -43014,6 +43018,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # helper did, "" when the CLI signed in with the machine's own login instead, absent before an init
                   "authLoginLive": tm.get("authLoginLive"),
                   "authPending": bool(tm.get("authPending")),   # an /auth reconnect applying → badge dots
+                  "relaunchWaits": tm.get("relaunchWaits") or "",   # …and what that relaunch waits for (the Billing row's sub-line says it)
                   "modelPending": _model_pending_now(sid, tm),   # switching-dots on the model badge until the pick lands, from EITHER surface (the user 2026-07-03)
                   "effortPending": bool(tm.get("effortPending")),   # switching-dots on the effort badge while the /effort reconnect applies (SDK-only; the user 2026-07-06)
                   "ctx": str(tm["context"]) if tm["context"] is not None else "",

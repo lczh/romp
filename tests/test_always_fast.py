@@ -181,7 +181,8 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
     background task still running inside it. A switch's ask now stands until the session is QUIET (no turn in flight or
     queued, no live subagent, no background task) and is carried at the exact event that ends the last of it: the turn's
     result, a subagent's stop, a task's end — with the kernel's tick as the backstop. Never through request_reconnect's
-    deferred road, which is a user's own gesture on the session and accepts what it cuts."""
+    deferred road (cut=True), a Restart's or a rewind's, which accepts what it cuts; a pick's reconnect waits here too since
+    2026-10-01 (tests/test_reconnect_waits_for_work.py)."""
     def _armed(self, **state):
         be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
         s = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1")
@@ -232,7 +233,7 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
     def test_a_queued_turn_holds_it_and_a_reconnect_already_on_its_way_stands_it_down(self):
         be, s = self._armed(_pending=["hi"])
         self.assertEqual(s._asks, []); self.assertIn("a queued turn", [m for m in be._logs if "waiting" in m][-1])
-        s._reconnect_when_idle = True        # the user's own effort pick meanwhile: its reconnect carries the flag
+        s._reconnect_when_idle = True        # a Restart meanwhile: its reconnect carries the flag
         self.assertFalse(s._try_switch_reconnect())
         self.assertEqual((s._switch_wanted, s._asks), ("", []), "stood down to the reconnect on its way")
 

@@ -336,7 +336,8 @@ class _BusySession:
     def interrupt(self):
         self.interrupts += 1
 
-    def request_reconnect(self):
+    def request_reconnect(self, defer=True, cut=False, why=""):
+        assert cut, "a rewind takes the cut road: its edit is held until the rewound CLI is up"
         self.reconnects += 1
 
 

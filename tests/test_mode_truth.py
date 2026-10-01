@@ -129,7 +129,7 @@ class RefusedSwitchReverts(_Harness):
         self.s.perm_mode = "acceptEdits"
         calls = []
         self.s.set_mode_live = lambda mode, prev="default": calls.append(("live", mode))
-        self.s.request_reconnect = lambda: calls.append(("reconnect",))
+        self.s.request_reconnect = lambda *a, **k: calls.append(("reconnect",) + (("cut",) if k.get("cut") else ()))
         self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
         self.assertEqual(calls, [("reconnect",)], "bypass = reconnect, never the refused live call")
         self.assertEqual(self.s.perm_mode, "bypassPermissions")

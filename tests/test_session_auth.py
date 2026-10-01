@@ -888,10 +888,11 @@ class SetAuth(_Keyed):
         s = self._sess(9)
         s.sid = sid
         called = []
-        s.request_reconnect = lambda: called.append(True)
+        s.request_reconnect = lambda *a, **k: called.append(k)
         self.be.sessions[sid] = s
         self.assertTrue(self.be.set_auth(sid, "key"))
         self.assertTrue(called, "auth is connect-time — the reconnect is what applies it")
+        self.assertEqual(called, [{"why": "billing"}], "…on the road that waits for a quiet session, never the cut one (2026-10-01)")
         self.assertEqual(s.auth, "key")
         self.assertEqual(s._auth_pending, "key")
         chips = [a for a in self.be._live.get(sid, {}).values() if a.get("command") == "/auth"]
