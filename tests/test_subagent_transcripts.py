@@ -715,6 +715,35 @@ class OpenClose(World):
         finally:
             km._clients[:] = saved
 
+    def test_a_path_lookup_that_raises_at_the_close_is_counted_and_said(self):
+        """The close's release first looks up the agent's file (the parent's transcript, then the agent file beside it). A
+        lookup that raises leaves the memory as it stood and the close goes on, and it is counted under releaseFailed and said
+        on stderr like every failed release (fold round 2 of the review: the lookup's failure returned in silence, so nobody
+        could see a release that never ran)."""
+        rp = os.path.realpath(str(self.bg_file))
+
+        def entries():
+            with em._ASM_LOCK:
+                return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == SID]
+        c = _Client()
+        saved = list(km._clients)
+        km._clients[:] = [c]
+        try:
+            self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
+            before = entries()
+            self.assertTrue(before, "the premise: the viewer's frame parsed the agent's file into an assembly entry")
+            em._RELEASE_FAILED.discard(("viewer close", AID_BG))   # said once per (event, key) in a process: re-armed here
+            f0 = em._ASM_STATS.get("releaseFailed", 0)
+            err = io.StringIO()
+            with mock.patch.object(km, "_path_of", side_effect=OSError("permission denied")), redirect_stderr(err):
+                self._dispatch(c, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
+            self.assertNotIn((SID, AID_BG), c["subagents"], "the close took effect")
+            self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the release that never ran is counted")
+            self.assertEqual(err.getvalue().count("viewer close"), 1, "and said: %r" % err.getvalue())
+            self.assertEqual(entries(), before, "the memory as it stood")
+        finally:
+            km._clients[:] = saved
+
     def test_open_on_a_missing_file_pushes_the_error_frame(self):
         c = _Client()
         self.bg_file.unlink()

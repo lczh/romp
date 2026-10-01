@@ -9110,13 +9110,15 @@ def _release_retired_records(sid, prev, leaf):
     document at the guard bytes' cost (round one of the review: a pop with no write sent the scan back to the whole file,
     and the entry it re-read stayed). A file discover hands out as ANY session's current leaf stays (a fork child's first
     leaf is its parent's live transcript), so does a registered session's own file, as the episode scan keeps it
-    (_per_file_rewound), and so does a file a whole assembly entry still folds over (em.release_records)."""
+    (_per_file_rewound), and so does a file a whole assembly entry still folds over (em.release_records). A lineage that
+    cannot be read drops nothing, and the undone drop is counted and said (em.release_failed), never skipped in silence."""
     try:
         cands = _judge_candidates(sid, [leaf])
         links = em.resume_fork_links(em._load_states(str(STATESDIR / (sid + ".jsonl"))))
         keep = {str(f) for f in em._lineage_closure(Path(leaf), cands, links)}
-    except Exception:
-        return                                     # the lineage could not be read: nothing is dropped on a guess
+    except Exception as e:                         # noqa: BLE001 — the lineage could not be read: nothing is dropped on a guess
+        em.release_failed("leaf flip lineage", prev, e)
+        return
     with _LEAF_LOCK:
         keep.update(str(p) for p in _LEAF_SEEN.values())
     if str(prev) in keep or _sdk_owned(Path(prev).stem):

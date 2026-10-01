@@ -33998,13 +33998,15 @@ def _release_subagent_view(sid, agent_id):
     assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
     until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
     memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records. A release that
-    raises is noted once per file (em.release_failed) and the close goes on."""
+    raises, the agent file's path lookup included, is noted once per file (em.release_failed; once per agent id when the
+    lookup itself raised) and the close goes on."""
     if any((c.get("subagents") or {}).get((sid, agent_id)) for c in list(_clients)):
         return
     try:
         ppath = _path_of(sid)
         apath = _subagent_file(ppath, agent_id) if ppath else None
-    except Exception:
+    except Exception as e:                        # noqa: BLE001 — a trim never fails the viewer's close, nor goes unsaid
+        em.release_failed("viewer close", agent_id, e)
         return
     if apath is not None:
         try:

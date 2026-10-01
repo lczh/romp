@@ -529,6 +529,36 @@ class OneParseForBoth(unittest.TestCase):
         self.assertEqual((err.getvalue().count("leaf flip"), err.getvalue().count("retired parse")), (1, 1),
                          "said once per file and event: %r" % err.getvalue())
 
+    def test_a_lineage_that_cannot_be_read_at_the_flip_is_counted_and_said_and_drops_nothing(self):
+        """The flip's record drop reads the new leaf's lineage first (its candidates, the states log's resume links) to know
+        what a live session still reads. A read that raises leaves the retired leaf's records in place, since nothing is
+        dropped on a guess, and it is counted under releaseFailed and said on stderr like every failed release (fold round 2
+        of the review: it returned in silence, so a drop that could not run was invisible)."""
+        em = jd.em
+        _open_budget(self)                                 # the budget is no reason for the records to stay
+        C, L1, L2 = ("88888888-2222-4333-8444-00000000088c", "88888888-2222-4333-8444-00000000088d",
+                     "88888888-2222-4333-8444-00000000088e")
+        anchor = _transcript(self.d, C, n=3)
+        leaf1 = _transcript(self.d, L1, n=2, tag="l1")
+        leaf2 = _transcript(self.d, L2, n=1, tag="l2")
+        jd._note_leaf(C, anchor)
+        km._parse(anchor, C, self.now)
+        jd._note_leaf(C, leaf1)                            # the first /clear
+        km._parse(leaf1, C, self.now)                      # the first clear's file is read while it is the leaf
+        with em._JSONL_CACHE_LOCK:
+            rec0 = em._JSONL_CACHE.get(leaf1)
+        self.assertIsNotNone(rec0, "the premise: the first clear's file has a record entry")
+        f0 = em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(jd, "_judge_candidates", side_effect=OSError("permission denied")), \
+                contextlib.redirect_stderr(err):
+            jd._note_leaf(C, leaf2)                        # the second /clear: its lineage read raises
+        self.assertEqual(jd._LEAF_SEEN.get(C), leaf2, "the flip took effect")
+        self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the drop that could not run is counted")
+        self.assertEqual(err.getvalue().count("leaf flip lineage"), 1, "and said: %r" % err.getvalue())
+        with em._JSONL_CACHE_LOCK:
+            self.assertIs(em._JSONL_CACHE.get(leaf1), rec0, "nothing is dropped on a guess: the retired leaf's records stand")
+
     def test_a_second_clear_drops_the_first_clears_leaf_from_the_record_cache_and_keeps_the_anchor(self):
         """After a first /clear the retired leaf is the session's anchor, a candidate of the new leaf's parse: its records stay.
         After a second one the retired leaf is the first clear's file, which no live lineage reads: its record entry, whole
