@@ -384,6 +384,39 @@ class CreateIsIdempotent(unittest.TestCase):
                        "text": "Why jitter at all?", "name": ""}, self.client)
         self.assertIn("comment create repeated", buf.getvalue(), "a collapse is visible, never silent")
 
+    def test_every_answer_names_the_gesture_it_answers(self):
+        # 2026-10-01: the page held its creates by the anchor turn, so an ack for one comment adopted the new thread into
+        # a second comment's open box on the same session (the half-typed second comment was lost) and retired the
+        # second's hold. Every answer now echoes the gesture's createId: the page moves exactly that send's state.
+        def last(kind):
+            return [f for f in self.sent if f.get("type") == kind][-1]
+        self._create(create_id="g-created")
+        self.assertEqual(last("commentCreated")["createId"], "g-created", "a thread made")
+        self._create(create_id="g-created")
+        self.assertEqual(last("commentCreated")["createId"], "g-created", "a repeat answered with the same thread")
+        km._parked_creates.clear()
+        self._create(uuid="a9", create_id="g-parked")
+        self.assertEqual(last("commentCreateFailed")["createId"], "g-parked", "a lag-parked create's transient nack")
+        self._create(uuid="a9", create_id="g-parked")
+        self.assertEqual(last("commentCreateFailed")["createId"], "g-parked", "a repost of the parked one, refused at the door")
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "Add a jitter to the backoff.", "a9", parent="a1")) + "\n")
+        with km._clients_lock:
+            saved_clients = list(km._clients)
+            km._clients[:] = [self.client]
+        try:
+            km._retry_parked_creates()
+        finally:
+            with km._clients_lock:
+                km._clients[:] = saved_clients
+        self.assertEqual(last("commentCreated")["createId"], "g-parked", "the parked create's broadcast when it lands")
+        self._create(text="And the cap?", name="not a name", create_id="g-refused")   # a name the kernel refuses
+        self.assertEqual(last("commentCreateFailed")["createId"], "g-refused", "a refusal")
+        self.assertFalse(last("commentCreateFailed")["transient"])
+        self._create(text="An older client", create_id=None)
+        self.assertEqual(last("commentCreated")["createId"], "", "a frame with no id is answered with an empty one")
+
 
 if __name__ == "__main__":
     unittest.main()

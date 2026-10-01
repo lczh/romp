@@ -4198,6 +4198,11 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    from open until the thread's REAL render (its events) is ready; a backstop falls back so it can
    never trap. Reuses the page's .rl-* pieces, centered in the list. */
 .cmt-boot { display: flex; align-items: center; justify-content: center; min-height: 90px; }
+/* the create box's SENT view (2026-10-01): the same loader at its inline size (.rl-sm) and no floor, so the box grows by
+   a few lines, not by the thread view's 90px: a box opened under a passage near the window's foot is clamped upward by
+   whatever it grows, over the very passage it is about */
+.cmt-boot.cmt-boot-sent { min-height: 0; padding: 4px 0; }
+.cmt-pop:focus { outline: none; }   /* the sent view focuses the box itself (Escape): no ring around the whole card */
 .cmt-head .cmt-x, .cmt-head .cmt-max { cursor: pointer; }
 .cmt-title { font-weight: 600; user-select: none; }   /* a double-click here maximizes; it must select nothing */
 .cmt-x {
