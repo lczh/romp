@@ -973,8 +973,10 @@ def fold_steps_in_hand(cache, name, path, new=True):
     whole read, over an entry that holds records: the fold's cursor stands at that entry's generation inside its records (a
     hit, or an append), or the file's pending restore carries a complete state for the fold inside them (a tail restored from
     the document), or, with `new`, the entry is the whole file (a first fold over it reads nothing). False when the reader
-    holds no entry for the path, or an empty one. The spend guard asks before it folds an agent file it priced (2026-10-01),
-    so its fold never enters a file the reader let go nor pulls a restored tail whole."""
+    holds no entry for the path, or an empty one, and while a parse's assembly entry holds the entry's very records list
+    (the subagent viewer's, _asm_holds_records): a drop there frees nothing, and a stepping fold's drop would leave the
+    viewer's next rebuild a whole read. The spend guard asks before it folds an agent file it priced (2026-10-01), so its
+    fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds."""
     key = str(path)
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(key)
@@ -983,16 +985,18 @@ def fold_steps_in_hand(cache, name, path, new=True):
     base, total = ent[5], ent[5] + len(ent[4])
     cur = cache.get(key)
     if cur is not None and cur[1] == ent[6]:
-        return base <= cur[0] <= total
-    if new and base == 0:
-        return True
-    with _CKPT_LOCK:
-        pend = _CKPT_PENDING.get(key)
-        f = (pend.get("folds") or {}).get(name) if isinstance(pend, dict) and pend.get("gen") == ent[6] else None
-    try:
-        return isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
-    except (KeyError, TypeError, ValueError):
-        return False
+        ok = base <= cur[0] <= total
+    elif new and base == 0:
+        ok = True
+    else:
+        with _CKPT_LOCK:
+            pend = _CKPT_PENDING.get(key)
+            f = (pend.get("folds") or {}).get(name) if isinstance(pend, dict) and pend.get("gen") == ent[6] else None
+        try:
+            ok = isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
+        except (KeyError, TypeError, ValueError):
+            ok = False
+    return ok and not _asm_holds_records(key, ent[4])
 
 
 def name_fold_cache(cache, name):
@@ -2368,11 +2372,13 @@ def _document_at_witness(key, ent):
     at that count for every fold whose cursor sits at the entry's generation. The next fold over the file then restores
     from the document over a zero-byte tail, never a whole read. False with checkpoints off (no document), for a document
     behind the entry (a lagging fold's cut), and for a cursor of this generation that lags or is missing from the document
-    (an over-the-cap or cold fold included). A cursor of another generation does not hold the drop: its fold restores from
-    the document when the document carries it, else reads once, as after any drop. False too while a parse's assembly entry
-    holds this very records list (the subagent viewer's): the pop would free nothing, and the parse's next rebuild would read
-    the file whole and parse it in full. A reader that wants the whole file and holds no such entry pays one whole read after
-    each drop, so a reader of agent files that runs every cycle takes a tail (the folds' rule)."""
+    (an over-the-cap or cold fold included). A cursor of another generation is not checked here: when the document carries
+    its state at a count inside the entry's records, the cut sits at that count and the document is not at the witness;
+    when it does not, its fold reads the file once at its next run, as any fold does after a drop. False too while a
+    parse's assembly entry holds this very records list (the subagent viewer's): the pop would free nothing, and the
+    parse's next rebuild would read the file whole and parse it in full. A reader that wants the whole file and holds no
+    such entry pays one whole read after each drop, so a reader of agent files that runs every cycle takes a tail (the
+    folds' rule)."""
     try:
         recs = ent[4]
         if not recs:

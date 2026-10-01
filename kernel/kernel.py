@@ -48630,7 +48630,7 @@ def _spend_can_spend(tm):
     tm = tm or {}
     return tm.get("state") == "working" or bool(tm.get("subagents")) or bool(tm.get("bgTasks"))
 _SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
-_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd), ...], last use): the window rows, memoized on the stamp
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd, message id), ...], last use): the window rows, memoized on the stamp
 SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
 #                                     thousands of finished agent files, each a window row list nobody asks for again)
 SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
@@ -49020,8 +49020,12 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
     memo scanned from the WHOLE file is served on a stat while the reader holds no entry for the path, instead of the
     guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
     read whole once when its first stamped record is not older than the window's floor, since the records before the
-    document's cut may then be in the window (an agent that resumed after its drop, a fresh process restoring a file the
-    window still covers), and a window priced from the tail alone would read low."""
+    document's cut may then be in the window (a fresh process restoring a file the window still covers), and a window
+    priced from the tail alone would read low. Except where the memo ends exactly where the tail begins (its stamp's size
+    is the byte offset of the tail's first record) and reaches back to the window's start: an agent that resumed after its
+    drop, which a LIVE agent's silence of over two minutes is (a long tool call, a long response). Then only the tail is
+    priced and the memo's rows from its floor on are kept beside it, a response logged on both sides of the cut counted
+    once at its largest usage by its message id, so a resume costs the tail, not a whole read and decode of the file."""
     if agent:
         hit = _SPEND_ROWS_CACHE.get(f)
         if hit is not None and hit[0][2] == 0 and hit[1] <= since and f not in em._JSONL_CACHE:
@@ -49031,7 +49035,7 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
                 st = None
             if st is not None and (st.st_mtime, st.st_size) == hit[0][:2]:
                 _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
-                return [r for r in hit[2] if r[0] >= since]
+                return _spend_rows_since(hit[2], since)
     ent = em._read_jsonl_entry(f, tail_ok=True)
     if ent is None:
         _SPEND_ROWS_CACHE.pop(f, None)
@@ -49044,11 +49048,15 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
     hit = _SPEND_ROWS_CACHE.get(f)
     if hit is not None and hit[0][:2] == stamp[:2] and hit[0][2] <= stamp[2] and hit[1] <= since:
         _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
-        return [r for r in hit[2] if r[0] >= since]
+        return _spend_rows_since(hit[2], since)
     floor = since - SPEND_GUARD_MEMO_SLACK_S
+    prior = None
     if agent and ent[5] > 0 and not _spend_tail_covers(ent[4], floor):
-        ent = em._read_jsonl_entry(f) or ent             # the whole file, once (the tail upgraded in place, its generation kept)
-        stamp = (ent[0], ent[1], ent[5])
+        if hit is not None and hit[1] <= since and len(ent) > 7 and ent[7] and int(ent[7][0]) == hit[0][1]:
+            prior = hit                                  # the memo ends where the tail begins: the tail alone is priced
+        else:
+            ent = em._read_jsonl_entry(f) or ent         # the whole file, once (the tail upgraded in place, its generation kept)
+            stamp = (ent[0], ent[1], ent[5])
     best, rows = {}, []
     for o in reversed(ent[4]):
         if not isinstance(o, dict):
@@ -49076,11 +49084,22 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
             i = best.get(mid)
             if i is None:
                 best[mid] = len(rows)
-                rows.append((t, c))
+                rows.append((t, c, mid))
             elif c > rows[i][1]:
-                rows[i] = (rows[i][0], c)
+                rows[i] = (rows[i][0], c, mid)
         else:
-            rows.append((t, c))
+            rows.append((t, c, None))
+    if prior is not None:                                # the memo's rows from the later floor on join the tail's; a message id on
+        floor = max(floor, prior[1])                     #  both sides of the cut stays one row at its largest usage and the tail's
+        for r in prior[2]:                               #  time, as one scan of the whole file counts it
+            if r[0] < floor:
+                continue
+            i = best.get(r[2]) if r[2] else None
+            if i is None:
+                rows.append(r)
+            elif r[1] > rows[i][1]:
+                rows[i] = (rows[i][0], r[1], r[2])
+        stamp = (ent[0], ent[1], prior[0][2])            # the memo's base: the rows saw what it saw, the records before the cut
     _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
     if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
         # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
@@ -49090,7 +49109,12 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
         keep = SPEND_GUARD_ROWS_CACHE_MAX * 3 // 4
         for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - keep]:
             _SPEND_ROWS_CACHE.pop(k, None)
-    return [r for r in rows if r[0] >= since]
+    return _spend_rows_since(rows, since)
+
+
+def _spend_rows_since(rows, since):
+    """The (t, usd) pairs of memo rows (t, usd, message id) at or after `since`."""
+    return [(r[0], r[1]) for r in rows if r[0] >= since]
 
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
@@ -49115,12 +49139,14 @@ def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, sta
 def _spend_fold_agent(f):
     """The spend guard's folds over an agent file it priced (2026-10-01), so the records its read holds leave memory under the
     agent folds' rule (drop_after="returned"), each fold only where it steps the records the reader holds (em.fold_steps_in_hand:
-    never a file the reader let go, never a tail pulled whole). The launch-ids fold, the agent-file fold with the smallest
-    state, runs over a whole entry, its own cursor, or a restored tail whose document carries its state (a restart before the
-    exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the drop has a cursor and a
-    document to restore from. The card's steps fold runs only over its own cursor or document state: it catches up a card
-    whose chat stopped being built before the agent returned, whose cursor behind the entry would hold the drop for good, and
-    it never starts a steps state for a workflow agent. A fold that raises costs memory, never the guard's rate."""
+    never a file the reader let go, never a tail pulled whole, never while a viewer's parse holds the same records, where a
+    drop would free nothing and cost the viewer's next rebuild a whole read). The launch-ids fold, the agent-file fold with
+    the smallest state, runs over a whole entry, its own cursor, or a restored tail whose document carries its state (a
+    restart before the exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the
+    drop has a cursor and a document to restore from. The card's steps fold runs only over its own cursor or document
+    state: it catches up a card whose chat stopped being built before the agent returned, whose cursor behind the entry
+    would hold the drop for good, and it never starts a steps state for a workflow agent. A fold that raises costs memory,
+    never the guard's rate."""
     try:
         if em.fold_steps_in_hand(_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", f):
             _agent_launch_ids(f)
