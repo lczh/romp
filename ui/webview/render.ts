@@ -32,7 +32,8 @@ import { prependHead, mergeWindow, historyLabel, indexOfUuid, keyOf, olderReques
 import { SUBAGENT_OPEN_WAIT_MS, subagentStallText, subagentStalled } from "./subagent-wait";   // the viewer's wait bound and its stall (T355)
 import { placeholderKind, placeholderStands, fillPlaceholder } from "./pane-placeholder";   // the empty pane's placeholder, by kind (T355)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, applyTagEdit, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
-import { lensVisible, surfaceLens } from "./tag-lens";
+import { lensVisible, surfaceLens, lensAll } from "./tag-lens";
+import { openTagContextMenu, openTagRenamePrompt, planTagUnionEdit, tagRenameVerdict, deleteTagWords, TAG_NAME_MAX, type TagUnionEdit, type TagMenuAct } from "./tag-context-menu";   // the tag menu (the user 2026-10-01: right-click a tag to rename or delete it)
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip, TAG_BTN_BORDER_CSS } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { inInputEvent } from "./input-event";
@@ -59,6 +60,7 @@ import { onHostSocketUp } from "./skeleton-tabs";   // the relay's reopen forget
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { applyViewOrder, hearSharedOrder, readViewOrder, setViewOrderPublisher, writeViewOrder } from "./view-order";   // the read: a page with no federation manager arranges its own strip (applyTabOrder, frame-listener.ts paneArranges)
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
+         carrySectionToName, forgetSection, restoreSection,
          followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, revealedTabs, phoneStandIns, hearSharedFolds,
          setFoldsPublisher, TABGROUPS_KEY, TABGROUPS_SHARED_KEY, TABGROUPS_EVENT, type TabSection, type StripItem, type PaintItem } from "./tab-groups";
 import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow } from "./tab-snapshot";
@@ -960,6 +962,7 @@ function postViews(v: SessionViews, edited: string[] = []) {
   // no toast follows: nothing the user did was refused, and the ack's blob carries the newer tag
   if (vscodeApi) vscodeApi.postMessage({ type: "setTimelineViews", views: v, writeId, edited });
   renderTabs();
+  return writeId;
 }
 // a LENS or ORDER write — the whole blob, built from the STORE's blob (sessionViews, the last one
 // adopted) plus the fields set, never from the pending copy: a copy carrying targeted edits still
@@ -982,7 +985,7 @@ function postTagOrder(order: readonly string[]) { postLens({ tagOrder: order.sli
 // under `edit`: the federation router sends the message to the local kernel, and no top-level field
 // of it can read as a session's address. Answered by tagEditAck. `newId` is a create's optimistic
 // row id (the `pending-…` placeholder the ack's blob replaces).
-function postTagEdit(nv: SessionViews, edit: TagEditOp, newId?: string) {
+function postTagEdit(nv: SessionViews, edit: TagEditOp, newId?: string): string {
   // no `tagEdit` capability announced (a kernel from before it): the PRE-2026-09-05 path — the whole
   // blob, reconciled by the legacy exact-echo clear and three-frame yield in captureViews, since no
   // ack will come. The copy already carries the gesture, so nothing else changes — except a create's
@@ -994,13 +997,17 @@ function postTagEdit(nv: SessionViews, edit: TagEditOp, newId?: string) {
     const edited = [edit.tid, edit.tid_from, edit.tid_to].filter((t): t is string => !!t);
     const row = newId ? viewTags(nv).find((t) => t.id === newId) : undefined;
     if (row) { if (/^pending-/.test(row.id)) row.id = "g" + Date.now().toString(36); edited.push(row.id); }
-    postViews(nv, edited);
-    return;
+    return postViews(nv, edited);
   }
   const writeId = holdViews(nv, { edit, newId });
   if (vscodeApi) vscodeApi.postMessage({ type: "tagEdit", writeId, edit });
   renderTabs();
+  return writeId;
 }
+// What a REFUSED write puts back besides the copy, by writeId: the tag menu's Rename… and Delete tag… change the folds
+// at the gesture (the strip paints the optimistic copy in the same breath), and a refusal hands them back
+// (onViewsAck). Dropped unrun when the outcome cannot be known (a reconnect: onKernelCaps).
+const refusalUndo = new Map<string, () => void>();
 // the LOCAL kernel's capabilities, sent on every `ready` — the page's own at load, and the shim's
 // re-send on a reconnected socket. A reconnect is the one event that can lose an ack (the socket died
 // between the write and its answer), so writes still in flight when this frame arrives are unknowable:
@@ -1030,6 +1037,7 @@ function onKernelCaps(m: { caps?: unknown; viewsSeq?: unknown }) {
   if (viewsWrites.length) {
     viewsWrites = []; pendingSessionViews = null;
     warnToast("The connection to romp was re-established; a tag edit made just before it may not have landed. Check the tag.");
+    refusalUndo.clear();   // the outcomes are unknowable: whatever the tag menu moved at its gestures stays as it is
     syncNewTagInput();                     // a dropped create no longer gates the flyout's input
   } else if (!adopted) return;             // nothing in flight, nothing adopted: the caps changed, nothing shown did
   if (activeId) assertPeekFor(activeId);   // a views arrival like any other: re-derive the active session's peek
@@ -1062,6 +1070,9 @@ function onUnknownOp(m: { op?: unknown; writeId?: unknown }) {
 function onViewsAck(m: ViewsAck) {
   const out = ackOutcome(viewsWrites, m);
   viewsWrites = out.inflight;
+  const undo = typeof m.writeId === "string" ? refusalUndo.get(m.writeId) : undefined;
+  if (typeof m.writeId === "string") refusalUndo.delete(m.writeId);
+  if (undo && m.ok === false) undo();
   takeViews(m.views);   // the ack's blob is the base unless a newer frame already overtook it (the seq decides)
   if (out.clearPending) pendingSessionViews = null;
   else if (out.rederive) pendingSessionViews = rederivePending(sessionViews, viewsWrites);
@@ -6444,6 +6455,13 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
     // always presses: fold or open with the section in the pane (toggle-group), or the transcript back
     // (show-transcript). Any other header: the arrows bubble to the window's handler (they step the ACTIVE
     // tab, focus staying put) and Enter presses, as on any button.
+    // the menu key (or Shift+F10) opens the tag menu under the header, as the Sessions pane's rows do (2026-10-01)
+    if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+      e.preventDefault(); e.stopPropagation();
+      const r = head.getBoundingClientRect();
+      showTagMenu(r.left + 12, r.bottom, name, collapsed, true);
+      return;
+    }
     const aid = activeId;
     const standIn = holdsActive && !!aid && collapsedTabIds.has(aid) && sec.ids.includes(aid);
     if (aid && standIn && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
@@ -7253,7 +7271,7 @@ function renderTabs() {
     // state syncs in the same call, host or none
     const feed = (limit: number) => syncTagFilter(tagBtn, plan.sectioned ? null : tagChipsHost, surfaceLens(v, "chat"), unions, (l) => {   // sectioned: the headings carry the tags, no host; else the chips
       postLens({ actives: Object.assign({}, (v || {}).actives, { chat: l }) });
-    }, "inline", { limit, tagsOnly: true });
+    }, "inline", { limit, tagsOnly: true, onContext: (name, ev) => showTagMenu(ev.clientX, ev.clientY, name, null) });
     stripFit = () => fitStripChips(end, tagChipsHost, feed);
   }
   stripFit();
@@ -7286,7 +7304,7 @@ function renderTabs() {
     syncTagFilter(mslot.children[0] as HTMLElement, phoneLayout() ? (mslot.children[1] as HTMLElement) : null,   // the chips only where the mount shows (the T405 read): the button's state syncs either way
       surfaceLens(mv2, "chat"), viewTagUnion(mv2), (l) => {
         postLens({ actives: Object.assign({}, (mv2 || {}).actives, { chat: l }) });
-      });
+      }, "inline", { onContext: (name, ev) => showTagMenu(ev.clientX, ev.clientY, name, null) });
   }
   paintTabRowLines(bar);
   ensureTabRowObserver(bar);
@@ -7746,6 +7764,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     bodyEl.appendChild(sb);
     tagsItem.appendChild(bodyEl);
     const caret = el("span", "ctx-caret"); caret.textContent = "▸"; tagsItem.appendChild(caret);
+    // a right-click on a tag's row opens the tag menu for that tag (2026-10-01), in place of this one
+    const tagRowMenu = (row: HTMLElement, g: TagUnion) => {
+      if (g.pending) return;
+      row.addEventListener("contextmenu", (e2) => { e2.preventDefault(); e2.stopPropagation(); showTagMenu(e2.clientX, e2.clientY, g.name, null); });
+    };
     // what one union edit did to the copy: the TARGETED ops to post for the local store, and whether
     // a remote entry's mirror changed (presentation only — the remote's own next push is the truth)
     type UnionEdit = { ops: TagEditOp[]; mirrored: boolean };
@@ -7827,6 +7850,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           chip.classList.add("ctx-tag-chip");
           lb.appendChild(chip); bodyE.appendChild(lb);
           row.appendChild(bodyE);
+          tagRowMenu(row, g);
           if (g.pending) {
             // a create still in flight: the row shows, and takes no gesture until the ack names the
             // tag (a ✕ here posted the placeholder id and was refused as a tag that does not exist)
@@ -7861,6 +7885,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           const lb = el("span", "ctx-item-label");
           // the tag inside the sentence is the chip (T321): no swatch-and-name pair anywhere a tag shows
           const named = () => { const c = tagChip(g.name, g.color || null, { inheritSize: true }); c.classList.add("ctx-tag-chip"); return c; };
+          tagRowMenu(row, g);
           if (home) {
             lb.append("Move to ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
@@ -8261,6 +8286,132 @@ function startTabRename(id: string, copy?: string) {   // `copy`: which copy of 
   for (const ev of ["click", "mousedown", "dblclick", "contextmenu"]) input.addEventListener(ev, (e) => e.stopPropagation());
   input.focus();
   input.select();
+}
+
+// ── THE TAG MENU (the user 2026-10-01, who wanted to right-click a tag to rename it, delete it and so on) ──
+// Opened from a strip group header (the #tabs delegate; the phone picker's heading forwards its long press to the hidden
+// header, kernel.py _CHAT_MOBILE_JS), from a chip of the tab menu's Tags flyout, or from a filter chip of the flat strip.
+// The rows, the delete's words and the plan of what a gesture posts are tag-context-menu.ts; this page says what each row
+// does. Every pick resolves the tag by NAME when it runs, never a node captured at open time: the menu outlives the pushes
+// that rebuild the header it came from (the click-safety rule). `folded`: the header's rendered fold, null off a header.
+function showTagMenu(x: number, y: number, name: string, folded: boolean | null, viaKeyboard = false): void {
+  dismissTabMenu();
+  const g = unionNamed(name);
+  if (!g) return;   // gone, or a create still in flight: no id to address yet (the flyout's rule)
+  const lens = surfaceLens(effViews(), "chat");
+  const only = !lensAll(lens) && !lens.none && (lens.tags || []).length === 1 && (lens.tags || [])[0] === name;
+  ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true }, g.color || "", paletteColors,
+    { pick: (act) => tagMenuPick(act, name, folded !== null), recolor: (c) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { color: c }); } },
+    { viaKeyboard, onClose: onTabMenuClosed });
+}
+function unionNamed(name: string): TagUnion | undefined {
+  const g = viewTagUnion(effViews()).find((u) => u.name === name);
+  return g && !g.pending ? g : undefined;
+}
+// `fromHead`: the menu came from a group header, so its Rename… edits the name in that header; from a chip it asks in the
+// prompt, where the click was (the header may be rows away, or folded out of sight)
+function tagMenuPick(act: TagMenuAct, name: string, fromHead: boolean): void {
+  const g = unionNamed(name);
+  if (!g) { warnToast(`The tag “${name}” is gone: it was renamed or deleted elsewhere.`); return; }
+  if (act === "rename") {
+    if (!(fromHead && startTagRename(name)))
+      openTagRenamePrompt(name, (raw) => tagRenameVerdict(viewTagUnion(effViews()), name, raw),
+        (to) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { rename: to }); });
+  } else if (act === "fold" || act === "open") {
+    writeTabGroups(setSectionCollapsed(tabGroups(), name, act === "fold"));   // the header's fold, without the pane's view
+  } else if (act === "only") {
+    postLens({ actives: Object.assign({}, (effViews() || {}).actives, { chat: { tags: [name] } }) });
+  } else if (act === "configure") {
+    vscodeApi?.postMessage({ type: "openTagsDialog" });
+  } else if (act === "delete") {
+    const w = deleteTagWords(name, g.members.length);
+    showConfirm(w.title, w.detail, [{ label: w.confirm, value: "delete", danger: true }, { label: "Cancel", value: "" }], (v) => {
+      if (v !== "delete") return;
+      const u = unionNamed(name);
+      if (u) commitTagUnionEdit(u, { delete: true });
+    });
+  }
+}
+// One gesture on a tag, for every store holding a tag of its name (planTagUnionEdit): the editTag wire to each remote home,
+// the targeted op for the local tag on the one optimistic copy (postTagEdit). The copy paints under the new name in this
+// same breath, so the folds move at the gesture: a renamed group stays folded with its pins shown through
+// (carrySectionToName; the follow retires the old name's entries once the kernel's blob lands, followTagRenames), a
+// deleted one's fold and pins go with it (forgetSection); a refusal puts them back (refusalUndo). The section the pane is
+// showing stays shown under its new name. A kernel without `tagNameCarry` keeps the order and the filters only if the
+// page writes them: one lens write after the edit, the carried copy's (plan.lens).
+function commitTagUnionEdit(g: TagUnion, edit: TagUnionEdit): void {
+  const plan = planTagUnionEdit(effViews(), g, edit);
+  const sec = sectionRef(g);
+  const before = tabGroups();
+  let undo: (() => void) | null = null;
+  if ("rename" in edit) {
+    writeTabGroups(carrySectionToName(before, sec, edit.rename));
+    if (snapView === g.name) snapView = edit.rename;
+    const to = { name: edit.rename, localId: g.localId };
+    undo = () => writeTabGroups(restoreSection(tabGroups(), before, to));
+  } else if ("delete" in edit) {
+    writeTabGroups(forgetSection(before, sec));
+    undo = () => writeTabGroups(restoreSection(tabGroups(), before, sec));
+  }
+  for (const r of plan.remote) vscodeApi?.postMessage({ type: "editTag", edit: r });
+  let last: string | undefined;
+  for (const op of plan.ops) last = postTagEdit(plan.nv, op);
+  if (!plan.ops.length) { pendingSessionViews = plan.nv; renderTabs(); }   // only remote tags bear the name: the mirror shows until their homes' push
+  if (plan.lens && kernelCaps.has("tagEdit") && !kernelCaps.has("tagNameCarry")) postLens(plan.lens);
+  if (last && undo) refusalUndo.set(last, undo);
+}
+// THE INLINE RENAME on a group header: the chip becomes the name field in place, the tab rename's shape (startTabRename:
+// the strip's renders wait while it is open, so a push never destroys the field mid-typing). Enter or a click away commits,
+// Escape cancels. A name another tag already has keeps the field open with the reason on Enter, and cancels with a toast on
+// a click away. False when no header of the tag is on screen (the phone's hidden strip, a flat strip): the prompt then.
+function startTagRename(name: string): boolean {
+  if (phoneLayout()) return false;
+  const bar = document.getElementById("tabs");
+  const head = bar ? Array.from(bar.children).find((h): h is HTMLElement => h instanceof HTMLElement && h.classList.contains("tab-group-head") && h.dataset.group === name) : undefined;
+  const chip = head ? head.querySelector<HTMLElement>(".tab-group-chip") : null;
+  if (!head || !chip || !head.getClientRects().length) return false;
+  if (head.querySelector(".tag-rename")) return true;
+  const input = document.createElement("input");
+  input.className = "tab-rename tag-rename";
+  input.value = name;
+  input.maxLength = TAG_NAME_MAX;
+  input.spellcheck = false;
+  input.size = Math.max(name.length, 4);
+  input.setAttribute("aria-label", `New name for the tag ${name}`);
+  renameActive = true;
+  head.draggable = false;
+  chip.style.display = "none";
+  chip.after(input);
+  let finished = false;
+  const done = (commit: boolean, keyed: boolean) => {
+    if (finished) return;
+    const v = commit ? tagRenameVerdict(viewTagUnion(effViews()), name, input.value) : { cancel: true as const };
+    if ("error" in v && keyed) { input.classList.add("bad"); input.title = v.error; return; }   // fix the name, or Escape
+    finished = true;
+    input.remove();
+    chip.style.display = "";
+    head.draggable = !settings.tabsLocked;
+    renameActive = false;
+    if ("error" in v) warnToast(`Not renamed: ${v.error}.`);
+    if ("name" in v) { const g = unionNamed(name); if (g) commitTagUnionEdit(g, { rename: v.name }); }
+    if (renderPendingAfterRename) { renderPendingAfterRename = false; renderTabs(); }
+    if (keyed) {   // Enter or Escape: the focus goes back to the header, under the name it has now
+      const now = "name" in v ? v.name : name;
+      Array.from(document.querySelectorAll<HTMLElement>("#tabs .tab-group-head")).find((h) => h.dataset.group === now)?.focus();
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();   // the header's own keys (Enter and Space fold) are not the field's
+    if (e.key === "Enter") { e.preventDefault(); done(true, true); }
+    else if (e.key === "Escape") { e.preventDefault(); done(false, true); }
+  });
+  input.addEventListener("input", () => { input.classList.remove("bad"); input.removeAttribute("title"); });
+  input.addEventListener("blur", () => done(true, false));
+  // a press inside the field is the field's: never the header's fold, its drag or its menu
+  for (const ev of ["click", "mousedown", "pointerdown", "dblclick", "contextmenu", "dragstart"]) input.addEventListener(ev, (e) => e.stopPropagation());
+  input.focus();
+  input.select();
+  return true;
 }
 
 // Keyboard nav on a focused tab: ←/→ step prev/next; ↑/↓ jump to the nearest tab
@@ -23387,6 +23538,16 @@ setupSettings();
 (() => {
   const tabs = document.getElementById("tabs");
   if (!tabs) return;
+  // THE TAG MENU on a group header (the user 2026-10-01): delegated on the stable strip like the header's click, so a push
+  // that rebuilds the header under the pointer cannot lose it; the menu opens on the header's RENDERED fold. A tab's own
+  // right-click stops at the tab (showTabMenu), and the inline rename's field keeps its own.
+  tabs.addEventListener("contextmenu", (e) => {
+    const t = e.target as Element | null;
+    const h = t?.closest?.(".tab-group-head[data-group]") as HTMLElement | null;
+    if (!h || !tabs.contains(h) || t?.closest?.(".tag-rename")) return;
+    e.preventDefault(); e.stopPropagation();
+    showTagMenu(e.clientX, e.clientY, h.dataset.group || "", h.dataset.folded === "1");
+  });
   delegate(tabs, {
     // Clicking a tab leaves focus ON the tab (renderTabs rebuilds the tab during setActive, which dropped
     // focus to the body — so Enter afterward did nothing). Now focus the (rebuilt) active tab, so the model

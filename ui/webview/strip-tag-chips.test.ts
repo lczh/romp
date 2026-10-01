@@ -80,11 +80,11 @@ test("the strip: the chips host sits left of the button in the tag box, fed only
   assert.match(RENDER, /const tagChipsHost = el\("span", "tab-tagchips"\);/, "the host is built");
   assert.match(RENDER, /tagBox\.append\(tagChipsHost, tagBtn\);/, "and sits LEFT of the button in the tag box");
   assert.match(RENDER, /syncTagFilter\(tagBtn, plan\.sectioned \? null : tagChipsHost, surfaceLens\(v, "chat"\), unions, \(l\) => \{/, "sectioned (grouping on and a tag holding a visible tab, the plan's own reading): no host, the headings show the tags; otherwise the chips");
-  assert.match(RENDER, /\}, "inline", \{ limit, tagsOnly: true \}\);/, "the chip count is the fit's to set (three, then fewer on a short row); the none pick draws none");
+  assert.match(RENDER, /\}, "inline", \{ limit, tagsOnly: true, onContext: \(name, ev\) => showTagMenu\(ev\.clientX, ev\.clientY, name, null\) \}\);/, "the chip count is the fit's to set (three, then fewer on a short row); the none pick draws none; a right-click on a chip opens the tag menu (2026-10-01)");
   const iEnd = RENDER.indexOf("  bar.appendChild(end);\n"), iFeed = RENDER.indexOf("    stripFit = () => fitStripChips(end, tagChipsHost, feed);"), iFit = RENDER.indexOf("  stripFit();\n");
   assert.ok(iEnd > 0 && iFeed > iEnd && iFit > iFeed, "the fit runs once the right end is on the bar, through the closure the strip's observer re-runs");
   assert.match(MENU, /export function chipRun<T>\(items: T\[\], limit: number\): \{ shown: T\[\]; more: number \}/);
-  assert.match(MENU, /opts\?: \{ limit\?: number; tagsOnly\?: boolean \}/, "the sync's options");
+  assert.match(MENU, /opts\?: \{ limit\?: number; tagsOnly\?: boolean;[\s\S]{0,400}onContext\?: \(name: string, ev: MouseEvent\) => void \}/, "the sync's options");
   const box = CSS.match(/\n\.tab-tagchips \{[^}]*\}/)![0];
   assert.match(box, /display: inline-flex;/); assert.match(box, /min-width: 0;/); assert.match(box, /overflow: hidden;/); assert.match(box, /margin-right: 4px;/);
   assert.match(CSS, /\n\.tab-tagchips:empty \{ display: none; \}/, "an empty host takes no room");

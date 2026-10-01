@@ -8403,6 +8403,111 @@ def _default_tag_name(tags):
     return "tag %d" % n
 
 
+def _carry_tag_order(order, old, new=None, held=False):
+    """A NAME list after the tag `old` is renamed to `new`, or deleted (`new` None): the union display
+    order (tagOrder) and each lens's tags. A rename takes the old name's slot, so a group stays where the
+    user dragged it instead of falling to the end as a name the order lacks (the tag menu's Rename…, the
+    user 2026-10-01, who asked to right-click a tag to rename or delete it). `held`: another tag still
+    bears `old` (a same-named tag on an attached kernel, the name-keyed union's other half), so `old`
+    keeps its slot and `new` goes right behind it. A list without `old` comes back unchanged; a `new` it
+    already holds keeps its own slot. Returns a new list. The client's optimistic copy applies the same
+    rule (views-writes.ts carryTagOrder)."""
+    out = list(order or [])
+    if old not in out or new == old:
+        return out
+    if new is not None and new not in out:
+        out.insert(out.index(old) + 1, new)
+    if not held:
+        out.remove(old)
+    return out
+
+
+def _carry_tag_names(v, old, new=None, held=False):
+    """Carry a rename or a delete through every NAME-keyed field of the views blob `v`, in place: the
+    union order (`tagOrder`) and each surface's lens (`actives`, whose entries are names too: a tab filter
+    on the old name named a tag that no longer existed and showed nothing). A lens left empty by a delete
+    reads as All, the lens never stranding an empty selection. Tags themselves are the caller's to edit.
+    Returns whether anything changed."""
+    changed = False
+    if isinstance(v.get("tagOrder"), list) and old in v["tagOrder"]:
+        o = _carry_tag_order(v["tagOrder"], old, new, held)
+        if o != v["tagOrder"]:
+            changed = True
+            if o:
+                v["tagOrder"] = o
+            else:
+                v.pop("tagOrder", None)
+    acts = v.get("actives")
+    for lens in (acts.values() if isinstance(acts, dict) else ()):
+        if not isinstance(lens, dict) or not isinstance(lens.get("tags"), list) or old not in lens["tags"]:
+            continue
+        names = _carry_tag_order(lens["tags"], old, new, held)
+        if names == lens["tags"]:
+            continue
+        changed = True
+        if names:
+            lens["tags"] = names
+        else:
+            lens.pop("tags", None)
+            if not lens.get("none"):
+                lens.clear()
+                lens["all"] = True
+    return changed
+
+
+def _remote_tag_names(skip=None):
+    """The tag names the attached kernels' cached readings bear (the name basis, as _views_client renders
+    them), less `skip`, a (host, name) pair: the remote tag an edit just renamed or deleted, whose cached
+    reading may still show the old name. What a rename's or delete's `held` reads (_carry_tag_names)."""
+    with _remotes_lock:
+        cand = [(r.get("host"), r.get("views")) for r in _remotes.values() if isinstance(r.get("views"), dict)]
+    out = set()
+    for host, rv in cand:
+        for t in (rv.get("tags") or [])[:_VIEWS_MAX_TAGS]:
+            if not isinstance(t, dict):
+                continue
+            nm = _tag_name_basis(t.get("name")) or "tag"
+            if skip is None or (host, nm) != skip:
+                out.add(nm)
+    return out
+
+
+def _carry_local_tag_names(host, old, new=None):
+    """The carry for a tag homed on ANOTHER kernel (the editTag route and POST /tag with a host): the home
+    applies the rename or delete to its own store, whose _edit_tag carries ITS names; the order and the
+    lenses that rank and filter the tag for THIS kernel's viewer live in this store, so they are carried
+    here once the home has answered ok, as ONE lens write under _views_lock (the tags stand: the home owns
+    them). The renamed remote tag itself (`host`, `old`) does not hold the old name, whatever this kernel's
+    cached reading of the host still says. Faults raise like every views write. Returns whether the store
+    changed."""
+    old = _tag_name_basis(old)
+    new = _tag_name_basis(new) if new is not None else None
+    if not old or new == "":
+        return False
+    held_remote = _remote_tag_names(skip=(host, old))
+    with _views_lock:
+        v0 = _timeline_views_proved()
+        v = json.loads(json.dumps(v0))
+        if not _carry_tag_names(v, old, new, held=old in held_remote or any(t["name"] == old for t in v["tags"])):
+            return False
+        _set_timeline_views(_norm_timeline_views(v), base=v0, edited=[])   # a lens and order write: no tag changes
+    return True
+
+
+def _carry_after_forward(host, body):
+    """After a forwarded tag edit the home answered ok: a rename or a delete carries this store's names
+    (_carry_local_tag_names). Logged, never raised: the edit itself landed, and a store that cannot take
+    the carry costs the group its place, which the next drag restores."""
+    try:
+        rn = body.get("rename")
+        if body.get("delete"):
+            _carry_local_tag_names(host, body.get("name"), None)
+        elif isinstance(rn, str) and rn.strip():
+            _carry_local_tag_names(host, body.get("name"), rn)
+    except Exception as e:
+        sys.stderr.write("romp-kernel: tag order carry after the edit on %s: %s\n" % (host, e))
+
+
 def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=None, tid=None, exists=None):
     """Targeted edit of ONE tag in the views blob — the merge op behind POST /tag and, since
     2026-09-05, behind the dashboards' WS tagEdit op (_apply_tag_edit). The WS setTimelineViews op
@@ -8427,6 +8532,10 @@ def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=Non
     # the raw name would miss the stored tag and mint an unaddressable same-named duplicate on every
     # subsequent edit. A name that is empty after the strip is no name: a create takes the default.
     name = (str(name)[:_VIEWS_MAX_NAME].strip() or None) if name is not None else None
+    # the names the attached kernels' tags bear, read BEFORE the views lock (the remotes lock is never
+    # taken under it): a rename or delete keeps the old name's place in the order and the lenses while a
+    # remote tag still bears it (_carry_tag_names)
+    held_remote = _remote_tag_names() if (delete or rename is not None) else set()
     with _views_lock:   # the server is threaded; two unlocked merges would both copy the same pre-state
         v0 = _timeline_views_proved()   # PROVED: a read fault RAISES (_StateUnreadable; a failed publish
         #                                below, _StateUnwritable) to the door, which refuses -- never an
@@ -8449,7 +8558,11 @@ def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=Non
         if delete:
             if not hits:
                 return None, 'no tag named "%s"' % name
+            gone = hits[0]["name"]
             v["tags"] = [t for t in v["tags"] if t["id"] != hits[0]["id"]]
+            # the deleted name leaves the order and every lens in the SAME write (the tag menu's Delete tag…,
+            # the user 2026-10-01): a tab filter left naming it showed nothing at all
+            _carry_tag_names(v, gone, None, held=gone in held_remote or any(t2["name"] == gone for t2 in v["tags"]))
             _set_timeline_views(v, base=v0)   # an active pointing at it falls back to "all" (the All view) in the normalizer
             return None, None
         if hits:
@@ -8469,7 +8582,13 @@ def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=Non
                 return None, "the new name is empty"
             if any(t2["name"] == rn and t2["id"] != (hits[0]["id"] if hits else None) for t2 in v["tags"]):
                 return None, 'a tag named "%s" already exists' % rn   # names address edits — no twins
+            was = t["name"]
             t["name"] = rn
+            if rn != was:
+                # the group keeps its place and its filters in the SAME write (the tag menu's Rename…, the user
+                # 2026-10-01): the order and the lenses name tags, and the old name named nothing any more
+                _carry_tag_names(v, was, rn, held=was in held_remote
+                                 or any(t2["name"] == was and t2 is not t for t2 in v["tags"]))
         # add/remove arrive as viewer-relative id strings (the route's contract); the store is
         # canonical pairs — convert on the way in, match removals by pair (federation v0)
         addp = [m for m in (_member_pair(x) for x in add) if m]
@@ -55264,7 +55383,12 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
 #             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
 #             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+#   tagNameCarry — a rename or delete carries the tag's NAME-keyed fields in the same write (2026-10-01, the
+#             tag menu): the union order keeps the renamed group's place and each lens follows the name
+#             (_carry_tag_names), on this kernel's own tags and, after the home answers ok, on a tag homed on
+#             an attached kernel (_carry_after_forward). Without it the page writes the carried order itself,
+#             a lens write after the edit (render.ts commitTagUnionEdit).
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow", "tagNameCarry")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
@@ -65794,6 +65918,12 @@ list.addEventListener('pointerdown',function(){held=true;});
 // a heading is a button to the keyboard too: Enter and Space press it, through the same click
 list.addEventListener('keydown',function(e){var hd=e.target&&e.target.closest?e.target.closest('.mhead'):null;
 if(hd&&(e.key==='Enter'||e.key===' ')){e.preventDefault();hd.click();}});
+// a long press (or a right-click) on a HEADING opens the TAG MENU (2026-10-01, the user's right-click on a tag): it is
+// forwarded to the strip's own hidden header as the right-click the desktop header takes, at the finger's point, so the
+// one menu (render.ts showTagMenu) opens over the list; its rename asks in a prompt here, the header being hidden
+list.addEventListener('contextmenu',function(e){var hd=e.target&&e.target.closest?e.target.closest('.mhead'):null;if(!hd)return;
+e.preventDefault();e.stopPropagation();var rh=realHead(hd.getAttribute('data-group'));
+if(rh)rh.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:e.clientX,clientY:e.clientY}));});
 function release(){if(held){held=false;if(dirty){dirty=false;sync();}}}
 document.addEventListener('pointerup',release);
 document.addEventListener('pointercancel',release);
@@ -74550,6 +74680,8 @@ class Handler(BaseHTTPRequestHandler):
                             err += " — queued: it applies when %s reattaches" % th
                         return self._send(200, json.dumps({"ok": False, "error": err, "queued": "queued" in err}),
                                           "application/json")
+                    if (ans or {}).get("ok", False):
+                        _carry_after_forward(th, fbody)   # a rename or delete keeps the group's place on THIS viewer
                     _mark_views_dirty()
                     return self._send(200, json.dumps(ans), "application/json")
                 live = _live_names(_live_map())
@@ -75366,6 +75498,8 @@ class Handler(BaseHTTPRequestHandler):
                 if dele:
                     body["delete"] = True
                 ans, err = _forward_tag_edit(host, body)
+                if not err and (ans or {}).get("ok", False):
+                    _carry_after_forward(host, body)   # a rename or delete keeps the group's place on THIS viewer
                 if err or not (ans or {}).get("ok", False):
                     # v2: a TRANSPORT failure (err — down/unreachable/hiccup) journals the intent so
                     # it applies at reattach; a host that ANSWERED and refused (ok=False) is the

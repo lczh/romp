@@ -5535,6 +5535,40 @@ tags stays short. Folded groups that follow one another in the tag order share o
 only its header; an open group always starts a row of its own, and so do the untagged sessions, so a
 folded group between two open ones keeps its row too. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
 
+### The tag menu
+
+Right-click a tag to act on the tag itself. The menu opens on a group header in the strip, on a tag's row in a tab's
+**Tags** menu, and on the strip's filter chips; on a focused header the menu key (or Shift+F10) opens it from the keyboard,
+and on a phone a long press on a group heading in the session picker opens it over the list, where the browser reports a
+long press as a right-click (Android's does). The menu shows the tag's chip at the top, so it is clear which tag it acts on, then:
+
+- **Rename…**, and under it the session palette's swatches, the current colour ringed: a swatch recolours the tag.
+- **Fold group** or **Open group**, on a header only: the header's own fold, without the section view a header click
+  also opens. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
+  that tag). **Configure tags…** opens the tags dialog.
+- **Delete tag…**, whose sub-line counts the sessions that lose the tag.
+
+**Rename…** opened from a header turns the header's chip into a field holding the name: Enter or a click away renames,
+Escape cancels. Opened from a chip, or on a phone, where the header is hidden, it asks in a small dialog instead. A name
+another tag already has, here or on an attached kernel, is refused with the reason, since the two tags would make one
+group. A renamed tag keeps its id and its sessions. In the same write the kernel moves the new name into the old one's
+place in the tag order, so the group stays where you dragged it, and into every surface's filter that named the old one.
+Its fold and its tabs set to show when folded move with it on every device: the browser that renamed it moves them at
+once, so the group never flashes open, and every other browser follows when the renamed tag reaches it. A section the
+pane is showing at a glance goes on showing under the new name.
+
+**Delete tag…** asks first, saying how many sessions lose the tag; the sessions stay, with their other tags, and a
+session left with none moves to the ungrouped row. The kernel takes the name out of the tag order and the filters in the
+same write (a filter on that tag alone goes back to all tabs), and the group's fold and its show-when-folded tabs go with
+it, so a tag made later under the same name starts like any new one. A refused rename or delete puts the fold back.
+
+A tag is its name, so the menu acts on every tag of that name: the one on your kernel by its id, and each one kept by an
+attached kernel through that kernel, which applies it to its own store. Once it has answered yes, your kernel moves the
+name in its own order and filters too. A kernel from before this change applies the edit but not the move, and the page
+then writes the order and the filters itself, one write after the edit. Two limits: an edit for an attached kernel that
+is down is queued and lands when it comes back, without moving your order; and the feed keeps its own filter per browser
+tab, which still names the old tag after a rename until you change it.
+
 ### A tag section at a glance
 
 Clicking a tag section's header also shows the section in the transcript's place: one

@@ -321,7 +321,9 @@ export function syncTagFilter(btn: HTMLElement, chipsHost: HTMLElement | null,
                               lens: TagLens, unions: { name: string; color?: string | null; members: string[]; }[],
                               onApply: (l: TagLens) => void,
                               mode: "inline" | "class" = "inline",
-                              opts?: { limit?: number; tagsOnly?: boolean }): void {   // T413, the strip: the first `limit` chips then one "+N more"; tagsOnly draws no chip for the none pick
+                              opts?: { limit?: number; tagsOnly?: boolean;
+                                       /** a right-click on a TAG chip (the tag menu, tag-context-menu.ts; the user 2026-10-01): the mount's own handler, by name */
+                                       onContext?: (name: string, ev: MouseEvent) => void }): void {   // T413, the strip: the first `limit` chips then one "+N more"; tagsOnly draws no chip for the none pick
   const narrowed = !lensAll(lens);
   if (mode === "class") btn.classList.toggle("on", narrowed);
   else {
@@ -343,6 +345,11 @@ export function syncTagFilter(btn: HTMLElement, chipsHost: HTMLElement | null,
     x.title = "remove this from the filter";
     x.addEventListener("click", (e) => { e.stopPropagation(); onApply(toggleLens(lens, c.pick)); });
     chip.appendChild(x);
+    const pick = c.pick;
+    if (opts && opts.onContext && pick !== "none") {
+      const on = opts.onContext;
+      chip.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); on(pick.tag, e); });
+    }
     chipsHost.appendChild(chip);
   }
   if (run.more) {

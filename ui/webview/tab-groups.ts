@@ -560,9 +560,9 @@ function storeSeqs(unions: readonly TagUnion[], views: SessionViews | null | und
  *  same-named tags' pins are not this tag's to move. EVERY matching rename is followed, one entry per:
  *  the new name, with the tag's id when the tag is local — so the next rename finds it by id even from
  *  a client with no previous blob. Where a rename SPLITS the section — a same-named tag on the other
- *  side still holds the tab, so the tab shows under both halves, in tagOrder (the kernel leaves
- *  tagOrder alone on a rename, so an old name once dragged into place keeps it and the renamed tag
- *  falls behind) — the half the tab did not move to keeps its entry beside the new one, whichever
+ *  side still holds the tab, so the tab shows under both halves, in tagOrder (a rename's write keeps
+ *  the old name's slot while a same-named tag still bears it and puts the renamed half right behind it,
+ *  the kernel's _carry_tag_order, 2026-10-01) — the half the tab did not move to keeps its entry beside the new one, whichever
  *  side renamed: a local rename keeps the old-name half while the remote tag holds the
  *  tab, a remote rename adds its new-name half while the local tag holds the tab under the old. The
  *  tab is pinned in both halves, and the prune drops the half that stops holding it. `unions` are the
@@ -697,12 +697,66 @@ export function followTagRenames(st: TabGroupsState, renames: readonly TagRename
       if (rest) put(pinEntry(sectionRef(rest), p.sid));
     }
   }
+  // …and the FOLD follows each rename the pins do (the tag menu's Rename…, the user 2026-10-01: a folded group stays
+  // folded under its new name, on every device); the old name's entries stay while a union still bears it (a split)
+  let carried: TabGroupsState = { ...st, pinned: out };
+  for (const r of fresh) carried = followFold(carried, r.from, r.to, unions.some((u) => u.name === r.from));
   for (const r of fresh) {   // the frame's renames re-stamp the checked memory, at the tag's store's seq
     followed[r.id] = r.to;
     const s = storeSeq(r.id);
     if (s !== null && s > 0) seqs[r.id] = s; else delete seqs[r.id];
   }
-  return remembered({ ...st, pinned: out });
+  return remembered(carried);
+}
+
+/** A rename's FOLD, as followTagRenames carries it (2026-10-01): when `from` holds a fold state of its own (an entry
+ *  in `collapsed` or `expanded`, or a name folded by default), `to` takes that state; `from`'s entries go unless
+ *  `keep` (a union still bears `from`: the split). A `from` with no state of its own moves nothing, so a `to` the
+ *  user opened or folded since the gesture (carrySectionToName wrote it then) is theirs. */
+function followFold(st: TabGroupsState, from: string, to: string, keep: boolean): TabGroupsState {
+  const own = st.collapsed.includes(from) || st.expanded.includes(from) || DEFAULT_COLLAPSED.has(from);
+  let out = own ? setSectionCollapsed(st, to, isSectionCollapsed(st, from)) : st;
+  if (!keep && (out.collapsed.includes(from) || out.expanded.includes(from)))
+    out = { ...out, collapsed: out.collapsed.filter((n) => n !== from), expanded: out.expanded.filter((n) => n !== from) };
+  return out;
+}
+
+/** THE RENAMING PAGE's own carry, at the gesture (the tag menu's Rename…, 2026-10-01): the section `from` is about to
+ *  be called `to`, and the strip paints the optimistic copy under the new name in this same breath, so `to` folds as
+ *  `from` does now and the members pinned through `from`'s fold show through `to`'s — the group never flashes open
+ *  while the kernel's answer is on its way. `from`'s own entries STAY: another device still shows the old name until
+ *  the kernel's blob reaches it, and the follow (followTagRenames → followFold) retires them once the rename has
+ *  landed. Refused, the page puts `to` back (restoreSection). */
+export function carrySectionToName(st: TabGroupsState, from: SectionRef, to: string): TabGroupsState {
+  if (from.name === null || to === from.name) return st;
+  let out = setSectionCollapsed(st, to, isSectionCollapsed(st, from.name));
+  const add = st.pinned.filter((p) => pinNames(from, p)).map((p) => (from.localId ? { sid: p.sid, name: to, id: from.localId } : { sid: p.sid, name: to }));
+  const seen = new Set(out.pinned.map((p) => `${p.sid}\u0000${p.name}\u0000${p.id ?? ""}`));
+  const pinned = out.pinned.slice();
+  for (const p of add) { const k = `${p.sid}\u0000${p.name}\u0000${p.id ?? ""}`; if (!seen.has(k)) { seen.add(k); pinned.push(p); } }
+  if (pinned.length !== out.pinned.length) out = { ...out, pinned };
+  return out;
+}
+
+/** A DELETED section's state, gone with it (the tag menu's Delete tag…, 2026-10-01): its fold entries and every pin
+ *  naming it (by name, or by its local tag's id), so a tag created later under the same name starts as any new one
+ *  does. Returns `st` itself when nothing names it. */
+export function forgetSection(st: TabGroupsState, sec: SectionRef): TabGroupsState {
+  if (sec.name === null) return st;
+  const name = sec.name;
+  const collapsed = st.collapsed.filter((n) => n !== name), expanded = st.expanded.filter((n) => n !== name);
+  const pinned = st.pinned.filter((p) => !pinNames(sec, p));
+  if (collapsed.length === st.collapsed.length && expanded.length === st.expanded.length && pinned.length === st.pinned.length) return st;
+  return { ...st, collapsed, expanded, pinned };
+}
+
+/** Undo one of the two above for a REFUSED edit: the section's fold and its pins back to what `before` held for it,
+ *  everything else as it stands now (a fold made elsewhere meanwhile is kept). */
+export function restoreSection(st: TabGroupsState, before: TabGroupsState, sec: SectionRef): TabGroupsState {
+  if (sec.name === null) return st;
+  const out = setSectionCollapsed(st, sec.name, isSectionCollapsed(before, sec.name));
+  const pinned = out.pinned.filter((p) => !pinNames(sec, p)).concat(before.pinned.filter((p) => pinNames(sec, p)));
+  return { ...out, pinned };
 }
 
 /** Is the blob NEWER than the memory's evidence for some tag it names otherwise — a STAMPED memory entry
