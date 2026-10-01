@@ -20,7 +20,6 @@ Synthetic only: dev@example.com, Example Org, invented digests and record ids, h
 import json
 import os
 import socket
-import sys
 import tempfile
 import threading
 import time
@@ -29,6 +28,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from romp_load import load_source   # first: it brings in the tests package's temp-root hooks before the preamble mints one
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -39,8 +39,6 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # hermetic state before any 
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ.pop("ROMP_SUPERVISED", None)
 os.environ["CLAUDE_CONFIG_DIR"] = tempfile.mkdtemp()
-sys.path.insert(0, HERE)
-from romp_load import load_source   # noqa: E402
 
 km = load_source("romp_kernel_loginlink", os.path.join(BIN, "romp-kernel"))
 lg = km.lg
