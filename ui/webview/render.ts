@@ -126,7 +126,7 @@ import { RELOAD_COMMENT_KEY, reloadCommentRecord, takeReloadComment, type Reload
 import { keepResidentEvents } from "./frame-merge";
 import { activeTabToReannounce } from "./relay-active";
 import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from "./dir-complete";
-import { mediaSrc, kernelUrl } from "./media";
+import { mediaSrc, kernelUrl, swirlOSrc } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
 import { apiErrorReason } from "./api-error-reason";
@@ -9631,7 +9631,7 @@ function rompLoaderInner(caption: string, opts?: { wordmark?: boolean; cls?: str
   const inner = el("div", "rl-in" + (opts?.cls ? " " + opts.cls : ""));   // cls: a size modifier for an inline placement (rl-sm), scaling the font-size — never a new keyframe
   const word = el("div", "rl-word");
   const swirl = el("img", "rl-o") as HTMLImageElement;
-  swirl.src = mediaSrc("romp-swirl-o.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
+  swirl.src = swirlOSrc(); swirl.alt = ""; swirl.onerror = () => swirl.remove();
   if (opts?.wordmark === false) {
     word.appendChild(swirl);
   } else {

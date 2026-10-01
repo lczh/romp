@@ -65805,6 +65805,30 @@ sync();})();
 """
 
 
+def _svg_data_uri(path):
+    """A media SVG as a `data:image/svg+xml,` URI, the same bytes /media serves with runs of whitespace folded to
+    one space and the characters a CSS url("...") string or a URI cannot carry raw percent-encoded. esbuild.js
+    builds the webview bundles' copy (__ROMP_SWIRL_O__) by the same rule; tests/test_wordmark_first_paint_served.py and
+    ui/webview/media-base.test.ts pin that each decodes to the media file. An unreadable file falls back to the
+    /media URL, the fetch it replaces."""
+    try:
+        svg = path.read_text(encoding="utf-8")
+    except OSError:
+        return "/media/" + path.name
+    svg = re.sub(r"\s+", " ", re.sub(r">\s+<", "><", svg)).strip()
+    for ch, esc in (("%", "%25"), ("#", "%23"), ("<", "%3C"), (">", "%3E"), ('"', "%22")):
+        svg = svg.replace(ch, esc)
+    return "data:image/svg+xml," + svg
+
+
+# The wordmark's "o" rides INSIDE the page, never behind a fetch (the user 2026-10-01, who saw R, m and p paint
+# at once and the spinning o land a beat later). As an <img src=/media/romp-swirl-o.svg> it waited on its own
+# request, and /media is served no-cache, so even a cached copy cost a revalidation round trip on every load
+# while the letters painted from the HTML. Carried as a data URI in the loader's CSS, it paints in the same
+# frame as the letters. One copy per page (the CSS rule), not one per loader markup: the landing splices the
+# markup into its scripts twice more.
+_SWIRL_O_URI = _svg_data_uri(MEDIA / "romp-swirl-o.svg")
+
 # The shared romp LOADER (the user 2026-06-26): the romp WORDMARK — the swirl glyph spinning as the lowercase
 # "o", with R/m/p around it in the swirl's three arm colours (blue/green/teal, Anta typeface, mirroring the
 # README hero) — over three pulsing accent-blue dots. ONE look for every wait state (boot splash + each pane
@@ -65819,6 +65843,11 @@ _LOADER_CSS = (
     ".rl-word{font-family:'RompAnta','Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:38px;"
     "line-height:1;white-space:nowrap}"
     ".rl-o{width:.65em;height:.65em;vertical-align:middle;margin:0 -.0335em;animation:rl-spin 7s linear infinite}"
+    # span.rl-o, the kernel's own markup: an inline-block lays out exactly as the <img> it replaced did (no line
+    # box inside it, so vertical-align:middle centres the same box). Scoped to the span because a pane's
+    # webview loader is an <img class=rl-o> with the same picture as its src: a background under it would
+    # paint the swirl's glows twice.
+    "span.rl-o{display:inline-block;background:url(\"" + _SWIRL_O_URI + "\") center/contain no-repeat}"
     ".rl-dots{display:flex;gap:7px}"
     ".rl-dots i{width:7px;height:7px;border-radius:50%;background:#9cd2ff;animation:rl-bnc 1.1s ease-in-out infinite}"
     ".rl-dots i:nth-child(2){animation-delay:.16s}.rl-dots i:nth-child(3){animation-delay:.32s}"
@@ -65832,7 +65861,7 @@ def _loader_inner():
     """The loader's inner markup — the 'Romp' wordmark with the swirl spinning as the 'o', + dots below."""
     return ("<div class=rl-in><div class=rl-word>"
             "<span style='color:#1EA1EB'>R</span>"
-            "<img class=rl-o src=/media/romp-swirl-o.svg alt=o>"
+            "<span class=rl-o role=img aria-label=o></span>"
             "<span style='color:#54B204'>m</span><span style='color:#4EA8A9'>p</span>"
             "</div><div class=rl-dots><i></i><i></i><i></i></div></div>")
 
@@ -66450,10 +66479,13 @@ def _timeline_page():
             "<script>%s</script>"                               # the shared WS shim (connect/queue/watchdog)
             "<script src=/dist/federation.js?v=%d></script>"    # multi-kernel manager: after the shim, before the boot
             "<script>%s</script>"
-            "<script>var module={exports:{}};(function(module,exports){\n%s\n})(module,module.exports);"
+            # the wordmark's swirl-o for the view's loader, inline (see _SWIRL_O_URI): the global the view reads,
+            # which esbuild bakes in as a constant when it bundles the same file for VS Code
+            "<script>var __ROMP_SWIRL_O__=%s;var module={exports:{}};(function(module,exports){\n%s\n})(module,module.exports);"
             "var TimelinePanel=module.exports.TimelinePanel;"
             "window.__rompConnectTimeline(new TimelinePanel(document.getElementById('host')));"
-            "</script></body></html>") % (THEME_CSS, tl_css, _shim("timeline", v), v, _TIMELINE_BOOT, view_js))
+            "</script></body></html>") % (THEME_CSS, tl_css, _shim("timeline", v), v, _TIMELINE_BOOT,
+                                          json.dumps(_SWIRL_O_URI), view_js))
 
 
 def _chat_body():

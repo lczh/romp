@@ -9,6 +9,16 @@ export function mediaSrc(name: string): string {
   return `${base}/${name}`;
 }
 
+// The loader wordmark's swirl-o as a data URI, baked into the bundle by esbuild.js (define) from
+// media/romp-swirl-o.svg, so the "o" paints in the same frame as the R, m and p beside it. As a /media
+// URL it waited on a request of its own, which the kernel serves no-cache, so every load paid a round
+// trip before the "o" appeared (the user 2026-10-01). A bundle built without the define (none of ours)
+// gets the URL it always had.
+declare const __ROMP_SWIRL_O__: string | undefined;
+export function swirlOSrc(): string {
+  return typeof __ROMP_SWIRL_O__ === "string" ? __ROMP_SWIRL_O__ : mediaSrc("romp-swirl-o.svg");
+}
+
 // Kernel HTTP endpoints the bundles fetch directly (/models, /palette,
 // /commands, /followup-preview, /usage, ...). Same story as mediaSrc: the
 // browser is served BY the kernel ('' → same-origin), but the VS Code

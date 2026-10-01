@@ -9,7 +9,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { mediaSrc } from "./media";
+import { mediaSrc, swirlOSrc } from "./media";
 
 const ROOT = path.resolve(process.cwd(), "..");
 const read = (...p: string[]) => fs.readFileSync(path.join(ROOT, ...p), "utf8");
@@ -53,4 +53,34 @@ test("the extension host injects __rompMediaBase into all four webview surfaces"
   const injections = src.match(/mediaBaseTag\(webview, n\)/g) || [];
   assert.equal(injections.length, 4, "chat, feed, timeline, and fleet builders must all inject the base");
   assert.ok(src.includes("window.__rompMediaBase="), "the injected tag must set window.__rompMediaBase");
+});
+
+// The loader wordmark's "o" (the user 2026-10-01, who saw R, m and p paint at once and the swirl land a beat
+// later): baked into the bundle by esbuild.js as a data URI of media/romp-swirl-o.svg, so it paints in the same
+// frame as the letters. These run on the test bundle, which esbuild builds with the same define as the shipped
+// webview bundles.
+const SWIRL_PREFIX = "data:image/svg+xml,";
+const folded = (svg: string) => svg.replace(/>\s+</g, "><").replace(/\s+/g, " ").trim();
+
+test("swirlOSrc is the swirl-o's own bytes as a data URI, never a /media URL, whatever host base is set", () => {
+  for (const win of [undefined, { __rompMediaBase: "https://file.vscode-resource.test/ext/media" }]) {
+    if (win) (globalThis as any).window = win; else delete (globalThis as any).window;
+    try {
+      const src = swirlOSrc();
+      assert.ok(src.startsWith(SWIRL_PREFIX), `a data URI, not a fetch: ${src.slice(0, 60)}`);
+      assert.equal(decodeURIComponent(src.slice(SWIRL_PREFIX.length)),
+        folded(read("vscode-extension", "media", "romp-swirl-o.svg")), "the same picture /media serves, whitespace folded");
+      const body = src.slice(SWIRL_PREFIX.length);
+      assert.ok(!/["#<>\n]/.test(body) && !/%(?![0-9A-F]{2})/.test(body), "safe raw in a CSS url(\"...\") string and a URI");
+    } finally {
+      delete (globalThis as any).window;
+    }
+  }
+});
+
+test("every webview bundle and the test bundle carry the define; render.ts's loader reads it", () => {
+  const es = read("vscode-extension", "esbuild.js");
+  assert.match(es, /const SWIRL_O_DEFINE = \{ __ROMP_SWIRL_O__: JSON\.stringify\(svgDataUri\("romp-swirl-o\.svg"\)\) \};/);
+  assert.equal((es.match(/define: SWIRL_O_DEFINE/g) || []).length, 2, "the webview config (render.js, timeline.js, ...) and the tests");
+  assert.match(read("ui", "webview", "render.ts"), /swirl\.src = swirlOSrc\(\);/);
 });
