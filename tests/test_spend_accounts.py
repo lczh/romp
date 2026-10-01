@@ -18,11 +18,14 @@ Example Org, invented digests and record ids."""
 import json
 import os
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # hermetic state before any romp code loads
+os.environ.pop("ROMP_STATE_DIR", None)              # a live kernel's export outranks the XDG floor
 sys.path.insert(0, HERE)
 import test_spend_detail as _sd   # noqa: E402  the same synthetic world (the module, not its classes)
 
