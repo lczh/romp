@@ -13,10 +13,11 @@ Pinned here: the memory the memo holds matches the bytes it counts (measured wit
 extremes; an atom filled from the memo, by a miss or by a hit, shares its body rather than copying it, so while such an
 atom lives an eviction frees only the entry's own share, and once it is gone the eviction has freed what was counted; a
 Read result's duplicate text is not kept, nor an attachment's fields beside its prompt; the counter stays the sum of its
-entries' weights when a peer memoized the same record first; the memo's serves and evictions are counted; the default
-cap is max(256 MiB, MemTotal/64) of real memory. And the guards that keep every reader as it was: each atom kind fills
-from a memo hit exactly as it fills from its whole record, a hit reads nothing, and the by-offset record read the
-comment cut uses still returns the whole record after a hydration.
+entries' weights when a peer memoized the same record first; the memo's serves and evictions are counted, a body a peer
+put while this call waited on the file's read stripe among the serves; the default cap is max(256 MiB, MemTotal/48) of
+real memory. And the guards that keep every reader as it was: each atom kind fills from a memo hit exactly as it fills
+from its whole record, a hit reads nothing, a malformed attachment fails the fill as the whole record does, and the
+by-offset record read the comment cut uses still returns the whole record after a hydration.
 
 SYNTHETIC fixtures only: invented notes-api text, placeholder uuids."""
 import gc
@@ -304,10 +305,53 @@ class CounterAndCap(Base):
             self.assertEqual(delta(st0), {"hydratedAtoms": 6, "hydratedHits": 0, "hydratedEvicted": 6},
                              "the six again: read again, each pushed out as it lands")
 
-    def test_the_default_cap_is_a_quarter_gib_of_real_memory_or_a_64th_of_the_machine(self):
+    def test_a_body_a_peer_put_while_this_call_waited_counts_as_a_serve(self):
+        """Two hydrations of the same atoms (the judges' unit text and a chat build) both miss at hydrate's first check;
+        the second then waits on the file's read stripe, and by the time it holds it the first has put the body. That
+        re-check is a fill served without a read, a hit. An atom a peer FINISHED meanwhile (its body in place, its marker
+        not yet popped) is completed from the memo but not counted: the peer's own read or hit counted that body."""
+        rec = assistant(uid("wait", 0), None, 0, [{"type": "text", "text": "the retry budget is three"}])
+        path = self.td / (SID + ".jsonl")
+        at = write(path, [rec])[0]
+        entry = ({"message": rec["message"]}, 5000)
+
+        class PeerPutMeanwhile(dict):
+            """A memo that misses the record at this call's first check and holds it at the next: a peer's put lands
+            between the two."""
+            gets = 0
+
+            def get(self, k, default=None):
+                if k == rec["uuid"]:
+                    PeerPutMeanwhile.gets += 1
+                    if PeerPutMeanwhile.gets == 2:
+                        self[k] = entry
+                        em._HYDRATED_BYTES[0] += entry[1]
+                return super().get(k, default)
+
+        def run(atom):
+            PeerPutMeanwhile.gets = 0
+            st0 = em.asm_checkpoint_stats()
+            with mock.patch.object(em, "_HYDRATED", PeerPutMeanwhile()):
+                self.assertEqual(em.hydrate([atom], SID, by="test"), 1)
+            st = em.asm_checkpoint_stats()
+            self.assertEqual(PeerPutMeanwhile.gets, 2, "the peer's put landed between the first check and the second")
+            return {k: st[k] - st0[k] for k in ("hydratedAtoms", "hydratedHits", "hydratedEvicted")}
+
+        waited = lazy_atom(rec, path, at, "a")
+        self.assertEqual(run(waited), {"hydratedAtoms": 0, "hydratedHits": 1, "hydratedEvicted": 0},
+                         "the re-check under the read stripe: one fill served, no read")
+        self.assertEqual(waited["message"], em._norm_message(rec["message"]))
+        self.assertNotIn("lazy", waited)
+        finished = lazy_atom(rec, path, at, "a")
+        finished["message"] = em._norm_message(rec["message"])     # a peer's fill wrote the body; its marker pop is in flight
+        self.assertEqual(run(finished), {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
+                         "an atom a peer finished: completed from the memo, not counted")
+        self.assertNotIn("lazy", finished)
+
+    def test_the_default_cap_is_a_quarter_gib_of_real_memory_or_a_48th_of_the_machine(self):
         if os.environ.get("ROMP_HYDRATED_CAP_MB"):
             self.skipTest("ROMP_HYDRATED_CAP_MB sets the cap outright in this environment")
-        self.assertEqual(em._HYDRATED_CAP, max(256 * MIB, em._machine_memory_bytes() // 64))
+        self.assertEqual(em._HYDRATED_CAP, max(256 * MIB, em._machine_memory_bytes() // 48))
 
 
 class ReadersKeepTheirBehavior(Base):
@@ -357,6 +401,30 @@ class ReadersKeepTheirBehavior(Base):
             self.assertEqual(bodies(miss), bodies(want), "a miss fills as the whole record does (%s)" % kind)
             self.assertEqual(bodies(hit), bodies(want), "a hit fills as the whole record does (%s)" % kind)
             self.assertNotIn("lazy", hit)
+
+    def test_an_attachment_that_is_not_a_dict_fails_the_fill_as_the_whole_record_does(self):
+        """A malformed attachment (a string, a list) is kept as it is, so a miss and a hit fail the fill exactly as the
+        fill from the whole record does, rather than quietly filling an empty message."""
+        for i, bad in enumerate(("queued", ["also run the api tests"])):
+            with self.subTest(attachment=bad):
+                rec = _meta(uid("badatt", i), None, i, "attachment")
+                rec["attachment"] = bad
+                path = self.td / ("%s-%d.jsonl" % (SID, i))
+                at = write(path, [rec])[0]
+                with self.assertRaises(Exception) as ref:
+                    em._hydrate_one(lazy_atom(rec, path, at, "b"), json.loads(json.dumps(rec)))
+                miss, hit = lazy_atom(rec, path, at, "b"), lazy_atom(rec, path, at, "b")
+                with self.assertRaises(type(ref.exception)) as got:
+                    em.hydrate([miss], SID, by="test")
+                self.assertEqual(str(got.exception), str(ref.exception), "a miss fails as the whole record does")
+                self.assertIn(rec["uuid"], em._HYDRATED, "the read was memoized before the fill")
+                read0 = em._ASM_CKPT_STATS["hydratedBytes"]
+                with self.assertRaises(type(ref.exception)) as got:
+                    em.hydrate([hit], SID, by="test")
+                self.assertEqual(str(got.exception), str(ref.exception), "a hit fails as the whole record does")
+                self.assertEqual(em._ASM_CKPT_STATS["hydratedBytes"], read0, "the hit read nothing")
+                self.assertIn("lazy", miss)
+                self.assertIn("lazy", hit)
 
     def test_the_record_read_by_offset_is_the_whole_record_after_a_hydration(self):
         """The comment cut reads a pre-cut record back by offset and decides on its type, time and provenance, which the
