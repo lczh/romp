@@ -437,7 +437,8 @@ following to every connected machine's kernel):
   rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the model
   the session fell from or above it, or on the version you picked or above it, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
-  A pick of your own ends it too, as does turning the switch off. While a
+  A pick of your own ends it too, as does turning the switch off. A fallback to
+  a model at or above the version you picked is carded but arms no retry. While a
   fallback stands, the session's model picker, in the chat statusline and in the
   timeline's lane picker alike, marks the requested model with a yellow tick
   beside the blue tick on the model that answers; its tooltip says why
