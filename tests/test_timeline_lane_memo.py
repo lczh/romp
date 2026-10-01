@@ -273,6 +273,55 @@ class DeadLaneMemo(unittest.TestCase):
         finally:
             km._parse = real
 
+    def _three_turns(self):
+        recs = [_rec("user", T0, "u1", None, "run the long benchmark"), _rec("assistant", T0 + 10, "a1", "u1", "Launched it."),
+                _rec("user", T0 + 600, "u2", "a1", "and the cap?"), _rec("assistant", T0 + 610, "a2", "u2", "Raised to 4096."),
+                _rec("user", T0 + 1200, "u3", "a2", "ship it"), _rec("assistant", T0 + 1210, "a3", "u3", "Shipped.")]
+        self._write(recs)
+        getattr(km, "_dead_lane_released", {}).clear()
+        return str(self.tpath)
+
+    def _asm_keys(self, path):
+        with km.em._ASM_LOCK:
+            return [k for k in km.em._ASM_CACHE if k[0] == os.path.realpath(path) and k[1] == SID]
+
+    def test_a_dead_lane_whose_document_stands_releases_its_assembly_entry_and_records_once(self):
+        """Release on the events that end a file's use (2026-10-01): the lever dropped a dead lane's parse and left the
+        session's assembly entry (an adapter over every record, its atoms) and the leaf's record entry resident. When the
+        leaf's assembly document stands (so any later parse restores from it, never parses whole), the lever releases the
+        assembly entry and drops the records no live lane reads, once per transcript version: a miss after it (a keyed input
+        moved) derives the lane again through one restore and keeps what the restore rebuilt."""
+        p = self._three_turns()
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=bool(km._display_sdk_human(SID)), tree=tree),
+                        km.em.asm_checkpoint_stats()["skipped"])
+        km._parse_cache.pop(p, None)
+        self.assertTrue(self._asm_keys(p), "the session's assembly entry stands before the lane is built")
+        tl1 = self._build()
+        self.assertEqual(self._asm_keys(p), [], "the dead lane's assembly entry is released at the lever")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE, "no live lane reads the leaf: its records are dropped")
+        tl2 = self._build()
+        self.assertEqual(tl2["turns"][SID], tl1["turns"][SID], "served from the lane memo")
+        arch = Path(self.td.name) / "archive" / (SID + ".json")
+        arch.parent.mkdir(parents=True, exist_ok=True)
+        arch.write_text(json.dumps({"touched": 1}))                   # a keyed input moves: the lane is derived again
+        tl3 = self._build()
+        self.assertEqual(km._parse_mode.get(p), "restore", "the parse after the release restores from the document")
+        self.assertTrue(self._asm_keys(p), "one release per transcript version: what the restore rebuilt stays")
+        self.assertEqual(tl3["turns"][SID], tl1["turns"][SID], "and the lane it derives is the same")
+
+    def test_a_dead_lane_with_no_document_keeps_its_assembly_entry(self):
+        """With no document a parse after the release would be a whole parse: the lever leaves the entry as before."""
+        p = self._three_turns()
+        km._parse(p, SID, NOW)
+        km._parse_cache.pop(p, None)
+        self.assertFalse(km.em.asm_document_stands(p))
+        self._build()
+        self.assertTrue(self._asm_keys(p), "kept: nothing to restore from")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE)
+
 
 class HorizonFilterIsExact(unittest.TestCase):
     """The cached marks filtered on their stamped compare value are the marks a fresh derivation at that

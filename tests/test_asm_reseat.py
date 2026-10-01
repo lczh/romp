@@ -19,6 +19,7 @@ import os
 import random
 import shutil
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -532,6 +533,257 @@ class TheConvergePassReseatsToo(Episode):
         self.assertEqual((m, d.get("g:reseat"), d.get("restore:afterDemote")), ("restore", 1, 1), "re-seated on the converge "
                          "pass's document: %s" % d)
         self.assertColdEqual(out)
+
+
+def _aged(*paths):
+    """Stamp files an hour old, as a file whose writer finished long ago reads (the quiescence drop's test)."""
+    old = time.time() - 3600
+    for p in paths:
+        os.utime(p, (old, old))
+
+
+def _quiet_drop(path):
+    """The reader's drop as a quiet fold makes it: a fold that steps the file's records, drop_after="quiescent" (the kernel's
+    agent-launch fold over a parent leaf, the judges' walk over a dead episode's file). The drop's document write is off for
+    it (a cycle cap of 0), so the cycle's byte budget cannot defer the drop and the test reads the drop itself."""
+    saved = dict(em._CKPT_CYCLE)
+    em._CKPT_CYCLE["cap"] = 0
+    try:
+        em.fold_records({}, str(path), lambda: 0, lambda s, r: s + 1, drop_after="quiescent")
+    finally:
+        em._CKPT_CYCLE.update(saved)
+
+
+def _reader_entry(path):
+    with em._JSONL_CACHE_LOCK:
+        return em._JSONL_CACHE.get(str(path))
+
+
+def _chat(prefix, t0, n, parent=None):
+    """n settled turns, uuids under `prefix` (unique across this module's sessions: the hydrated memo is keyed by uuid)."""
+    recs = []
+    for k in range(n):
+        u, a = "%su%d" % (prefix, k), "%sa%d" % (prefix, k)
+        recs.append({"type": "user", "uuid": u, "parentUuid": parent, "timestamp": iso(t0 + 60 * k), "promptSource": "typed",
+                     "cwd": "/w/notes-api", "message": {"role": "user", "content": "%s: page the notes index, step %d" % (prefix, k)}})
+        recs.append({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": iso(t0 + 60 * k + 20), "cwd": "/w/notes-api",
+                     "message": {"id": "msg_%s%d" % (prefix, k), "role": "assistant", "stop_reason": "end_turn",
+                                 "content": [{"type": "text", "text": "%s: step %d of the notes index is paged" % (prefix, k)}]}})
+        parent = a
+    return recs
+
+
+class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
+    """Release on the events that end a file's use (2026-10-01), the record side. The reader drops a quiet file on a fold (the
+    quiescence drop, a deferred drop paid later), and when an assembly entry folds over that very entry (its generation), the
+    drop freed nothing, since the adapter holds the same records, made recordCache.bytes fall while the memory stayed, and
+    retired the generation: the entry's next visit demoted (g:rewrite) to a restore, or to a whole parse with no document,
+    and a whole reader in between decoded a second copy. The reader now keeps the entry from the lowest record any such
+    assembly entry read from, at the same generation: all of it under a whole assembly entry, the tail from the cut under a
+    restored one (the records before the cut, which a whole reader's upgrade decoded, are freed)."""
+
+    def test_a_quiet_drop_under_a_whole_entry_keeps_the_generation_and_the_next_parse_folds(self):
+        _aged(self.leaf)
+        out, mode = self.parse()
+        self.assertEqual(mode, "full")
+        ent0 = _reader_entry(self.leaf)
+        self.assertEqual(ent0[5], 0, "the whole parse read the leaf from record zero")
+        st0 = dict(em.record_cache_stats())
+        _quiet_drop(self.leaf)
+        ent1 = _reader_entry(self.leaf)
+        self.assertIsNotNone(ent1, "the drop would free nothing the whole entry does not hold: the reader keeps the entry")
+        self.assertEqual((ent1[6], ent1[5], len(ent1[4])), (ent0[6], 0, len(ent0[4])), "the same generation, whole")
+        st1 = em.record_cache_stats()
+        self.assertEqual(st1["pinnedKept"] - st0.get("pinnedKept", 0), 1, "counted as kept for the assembly entry")
+        self.assertEqual(st1["dropped"] - st0["dropped"], 0, "and not as a drop")
+        self.append_turn()
+        s0 = self.stats()
+        out, mode = self.parse()
+        self.assertEqual(mode, "fold", "the generation stands, so the appended turn folds; at the base the drop retired it and the "
+                         "parse went %s: %s" % (mode, self.moved(s0, self.stats())))
+        self.assertColdEqual(out)
+
+    def test_a_quiet_drop_under_a_restored_entry_trims_the_upgrade_to_the_cut_and_the_next_parse_folds(self):
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out), em.asm_checkpoint_stats()["skipped"])
+        self.fresh()
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        gen, base, count = self.entry()["recs"][self.leaf]
+        self.assertGreater(base, 0, "the restore read the leaf from the document's cut")
+        whole = em._read_jsonl_entry(self.leaf, tail_ok=False)        # a whole reader (a judge's walk) upgrades the entry
+        self.assertEqual((whole[6], whole[5]), (gen, 0), "the upgrade keeps the generation and holds every record")
+        w_whole = em._entry_weight(whole)
+        st0 = dict(em.record_cache_stats())
+        _quiet_drop(self.leaf)
+        ent = _reader_entry(self.leaf)
+        self.assertIsNotNone(ent, "kept, trimmed")
+        self.assertEqual((ent[6], ent[5], ent[5] + len(ent[4])), (gen, base, len(whole[4])),
+                         "the same generation, from the restored entry's base to the end")
+        self.assertIs(ent[4][0], whole[4][base], "the very records the assembly entry reads, not a second copy")
+        self.assertLess(em._entry_weight(ent), w_whole, "the records before the cut were let go")
+        st1 = em.record_cache_stats()
+        self.assertEqual(st1["pinnedFreedBytes"] - st0.get("pinnedFreedBytes", 0), w_whole - em._entry_weight(ent))
+        self.append_turn()
+        s0 = self.stats()
+        out, mode = self.parse()
+        self.assertEqual(mode, "fold", "the restored entry folds the appended turn: %s" % self.moved(s0, self.stats()))
+        self.assertColdEqual(out)
+
+    def test_a_quiet_drop_of_a_file_no_assembly_entry_folds_over_still_drops_it(self):
+        other = self.td / "frozen.jsonl"
+        other.write_text("".join(json.dumps(r) + "\n" for r in _chat("fz", NOW - 7200, 3)))
+        _aged(other, self.leaf)
+        self.parse()
+        em._read_jsonl_entry(str(other), tail_ok=False)
+        d0 = em.record_cache_stats()["dropped"]
+        _quiet_drop(other)
+        self.assertIsNone(_reader_entry(other), "nothing pins it: dropped as before")
+        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        gen = self.entry()["recs"][self.leaf][0]
+        em._read_jsonl_entry(self.leaf, tail_ok=False)
+        with em._JSONL_CACHE_LOCK:                                    # an entry at another generation does not pin it either
+            em._JSONL_CACHE[self.leaf] = em._JSONL_CACHE[self.leaf][:6] + (gen + 10 ** 6,) + em._JSONL_CACHE[self.leaf][7:]
+        _quiet_drop(self.leaf)
+        self.assertIsNone(_reader_entry(self.leaf), "an assembly entry at another generation keeps nothing")
+
+
+class ReleaseOnTheEndOfUse(Episode):
+    """The assembly side: em.release_assembly drops a leaf's assembly entries (one session's, when named), gives the lazy index
+    back and lets the hydrated bodies of the entry's pre-cut records go, leaving the record cache as it stands; and
+    em.release_records drops the files outside a live lineage that no assembly entry folds over."""
+
+    def test_a_release_drops_the_entry_and_its_hydrated_bodies_and_keeps_the_records_and_other_sessions(self):
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.fresh()
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        em.hydrate(out, SID)                                          # the consumers read the pre-cut bodies: the memo holds them
+        e = self.entry()
+        ix = e.get("index")
+        pre = {r[0] for r in ix.records} if ix is not None else {a.get("uuid") for a in e.get("prefix") or [] if a.get("uuid")}
+        with em._ASM_CKPT_LOCK:
+            held = set(em._HYDRATED) & pre
+            em._HYDRATED["peer-body-uuid"] = ({"uuid": "peer-body-uuid"}, 10); em._HYDRATED_BYTES[0] += 10
+        self.assertTrue(held, "the restored entry's bodies were memoized")
+        saved = em._CKPT_DIR_FN
+        em._CKPT_DIR_FN = None                                        # a whole parse: no restore under the other session's id
+        try:                                                          #  (it would refuse this session's document)
+            em.parse_session(self.leaf, rompuuid=PEER, name="api", dir="/w/notes-api", candidate_files=[self.leaf], states=None,
+                             postal_log=[], now=NOW)                  # the same file parsed for another session (a fork child)
+        finally:
+            em._CKPT_DIR_FN = saved
+        rec0 = _reader_entry(self.leaf)
+        r0 = em._ASM_STATS.get("released", 0)
+        self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
+        self.assertIsNone(self.entry(), "this session's entry is gone")
+        with em._ASM_LOCK:
+            self.assertIn((os.path.realpath(self.leaf), PEER, False), em._ASM_CACHE, "another session's entry of the same file stays")
+        self.assertIs(_reader_entry(self.leaf), rec0, "the record cache is not the release's to touch")
+        with em._ASM_CKPT_LOCK:
+            self.assertFalse(set(em._HYDRATED) & pre, "the entry's hydrated bodies went with it")
+            self.assertIn("peer-body-uuid", em._HYDRATED, "bodies of other records stay")
+            self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()), "the memo's byte count follows")
+        self.assertEqual(em._ASM_STATS.get("released", 0) - r0, 1, "counted")
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore", "the session parsed again restores from its document")
+        _, mode = self.parse()
+        self.assertEqual(mode, "serve", "and serves from the entry after")
+        self.assertColdEqual(out)
+
+    def test_release_records_drops_only_what_no_lineage_keeps_and_no_entry_folds_over(self):
+        frozen, kept = self.td / "frozen.jsonl", self.td / "kept.jsonl"
+        frozen.write_text("".join(json.dumps(r) + "\n" for r in _chat("fz", NOW - 7200, 3)))
+        kept.write_text("".join(json.dumps(r) + "\n" for r in _chat("kp", NOW - 7200, 3)))
+        self.parse()
+        for p in (frozen, kept):
+            em._read_jsonl_entry(str(p), tail_ok=False)
+        leaf0, kept0 = _reader_entry(self.leaf), _reader_entry(kept)
+        d0 = em.record_cache_stats()["dropped"]
+        self.assertEqual(em.release_records([self.leaf, str(frozen), str(kept)], keep={str(kept)}), 1)
+        self.assertIsNone(_reader_entry(frozen), "outside every lineage and pinned by nothing: dropped")
+        self.assertIs(_reader_entry(kept), kept0, "a live lineage's file stays")
+        self.assertIs(_reader_entry(self.leaf), leaf0, "a file an assembly entry folds over stays")
+        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        em.release_assembly(self.leaf)
+        self.assertEqual(em.release_records([self.leaf]), 1, "once its entry is released, the leaf goes too")
+        self.assertIsNone(_reader_entry(self.leaf))
+
+
+class ReleasesKeepTheJudgesVerdicts(Episode):
+    """Verdict parity: the judges' facts (chain membership, the per-file rewinds, the parsed tree) over a synthetic corpus are
+    the same after every release this change adds: a /clear's flip, the end of each session's use, a quiet drop over each
+    leaf, every record entry dropped, and the judges' own walk with its drop. The corpus: a long session with compactions, a
+    rewind and its document (restored); a session that cleared, its anchor carrying a rewind; a session resumed from another
+    file."""
+
+    def test_every_release_leaves_the_judges_facts_as_they_were(self):
+        last = self.last_uuid()
+        last_prompt = next(r for r in reversed(self.recs) if r.get("type") == "user" and r.get("promptSource") == "typed")
+        self.append(rewind(self.last_t() + 60, last_prompt["parentUuid"]) + [
+            {"type": "assistant", "uuid": "da1", "parentUuid": "du1", "timestamp": iso(self.last_t() + 80), "cwd": "/w/notes-api",
+             "message": {"id": "msg_da1", "role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "cursor paging it is"}]}}])
+        self.assertNotEqual(self.last_uuid(), last)
+        P, R = "5ea70924-2222-4333-8444-00000000a5f1", "5ea70924-2222-4333-8444-00000000a5f2"
+        p_anchor, p_leaf = str(self.td / (P + ".jsonl")), str(self.td / "5ea70924-2222-4333-8444-00000000a5f3.jsonl")
+        r_anchor, r_leaf = str(self.td / (R + ".jsonl")), str(self.td / "5ea70924-2222-4333-8444-00000000a5f4.jsonl")
+        pre = _chat("pc", NOW - 9000, 3)
+        pre += [{"type": "user", "uuid": "pcu9", "parentUuid": "pca0", "timestamp": iso(NOW - 8000), "promptSource": "typed",
+                 "cwd": "/w/notes-api", "message": {"role": "user", "content": "pc: no, page by cursor from step 0"}}]
+        Path(p_anchor).write_text("".join(json.dumps(r) + "\n" for r in pre))
+        Path(p_leaf).write_text("".join(json.dumps(r) + "\n" for r in _chat("pn", NOW - 7000, 3)))   # the /clear: a fresh root
+        Path(r_anchor).write_text("".join(json.dumps(r) + "\n" for r in _chat("ra", NOW - 9000, 2)))
+        Path(r_leaf).write_text("".join(json.dumps(r) + "\n" for r in _chat("rb", NOW - 6000, 2, parent="raa1")))   # resumed
+        _aged(self.leaf, p_anchor, p_leaf, r_anchor, r_leaf)
+        sessions = {"long": (self.leaf, [self.leaf], SID), "cleared": (p_leaf, [p_leaf, p_anchor], P),
+                    "resumed": (r_leaf, [r_leaf, r_anchor], R)}
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out), em.asm_checkpoint_stats()["skipped"])
+        self.fresh()
+
+        def facts():
+            got, roads = {}, {}
+            for name, (leaf, cands, rid) in sessions.items():
+                mode = []
+                tree = em.parse_session(leaf, rompuuid=rid, name=name, dir="/w/notes-api", candidate_files=cands, states=None,
+                                        postal_log=[], now=NOW, asm_mode_out=mode)
+                em.hydrate(tree, rid)
+                roads[name] = mode[-1] if mode else None
+                got[name] = {"chain": {k: sorted(v) for k, v in em.chain_membership(leaf, cands, rompuuid=rid).items()},
+                             "leafRewound": sorted(em.file_rewound(leaf, rompuuid=rid)),
+                             "otherRewound": {Path(fp).name: sorted(em.rewound_uuids(fp, drop=False)) for fp in cands if fp != leaf},
+                             "tree": _strip(tree)}
+            return got, roads
+
+        em.parse_session(p_anchor, rompuuid=P, name="cleared", dir="/w/notes-api", candidate_files=[p_anchor], states=None,
+                         postal_log=[], now=NOW)                      # the anchor was the cleared session's leaf before its /clear
+        before, roads0 = facts()
+        self.assertEqual(roads0["long"], "restore")
+        self.assertTrue(before["long"]["leafRewound"] and before["cleared"]["otherRewound"][Path(p_anchor).name],
+                        "the corpus carries rewinds for the walks to find: %s" % {k: v["leafRewound"] for k, v in before.items()})
+        em.release_assembly(p_anchor, rompuuid=P)                     # the /clear's flip
+        for leaf, _cands, _rid in sessions.values():
+            _quiet_drop(leaf)                                         # a quiet fold over each leaf: kept for its entry
+        for leaf, _cands, rid in sessions.values():
+            em.release_assembly(leaf, rompuuid=rid)                   # the end of each session's use
+        files = sorted({f for _l, cands, _r in sessions.values() for f in cands})
+        em.release_records(files)                                     # nothing live: every record entry goes
+        for _l, cands, _r in sessions.values():
+            for fp in cands[1:]:
+                em.rewound_uuids(fp, drop=True)                       # the judges' walk over a frozen file, with its drop
+        with em._JSONL_CACHE_LOCK:
+            self.assertFalse(set(em._JSONL_CACHE) & set(files) - {p_anchor, r_anchor},
+                             "the leaves left the record cache: the facts below are rebuilt from the files")
+        after, roads1 = facts()
+        self.assertEqual(roads1, {"long": "restore", "cleared": "full", "resumed": "full"},
+                         "each session pays one parse after the release: the restore where a document stands, else whole")
+        for name in sessions:
+            self.assertEqual(after[name], before[name], "%s: the judges' facts are unchanged by the releases" % name)
+        _, roads2 = facts()
+        self.assertEqual(roads2, {"long": "serve", "cleared": "serve", "resumed": "serve"}, "and served after")
 
 
 if __name__ == "__main__":

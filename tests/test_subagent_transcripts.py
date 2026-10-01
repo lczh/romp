@@ -634,6 +634,46 @@ class OpenClose(World):
         self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
         self.assertEqual(len(c.out), 4)
 
+    def test_the_last_viewer_closing_releases_the_agent_files_assembly_entry_and_a_reopen_rebuilds_it(self):
+        """Release on the events that end a file's use (2026-10-01): a closed viewer left the agent file's assembly entry (an
+        adapter over every record, its atoms) and its parse slot resident until the caches' count caps reached them. When
+        the LAST viewer of an agent closes, both are released; a viewer still open elsewhere keeps them, and the record
+        entry is left to the agent folds' own quiet drop. A reopen after the file moved parses the agent's file once
+        (a whole parse over the reader's records) and shows it as a fresh build does."""
+        rp = os.path.realpath(str(self.bg_file))
+
+        def entries():
+            with em._ASM_LOCK:
+                return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == SID]
+        c1, c2 = _Client(), _Client()
+        saved = list(km._clients)
+        km._clients[:] = [c1, c2]
+        try:
+            self._dispatch(c1, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
+            self._dispatch(c2, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
+            self.assertTrue(entries(), "the viewer's frame parsed the agent's file into an assembly entry")
+            self._dispatch(c1, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
+            self.assertTrue(entries(), "another viewer still has the agent open: kept")
+            self.assertIsNotNone(km._parse_cache.get(str(self.bg_file)))
+            self._dispatch(c2, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
+            self.assertEqual(entries(), [], "the last viewer closed: the agent file's assembly entry is released")
+            self.assertIsNone(km._parse_cache.get(str(self.bg_file)), "and its parse slot")
+            with em._JSONL_CACHE_LOCK:
+                self.assertIn(str(self.bg_file), em._JSONL_CACHE, "the record entry is the agent folds' to drop")
+            append_jsonl(self.bg_file, [dict(arec(T0 + 40, "%s-a9" % AID_BG, [{"type": "text", "text": "Nearly done."}],
+                                                  "%s-fin" % AID_BG), isSidechain=True, agentId=AID_BG)])
+            self._dispatch(c1, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
+            self.assertEqual(km._parse_mode.get(str(self.bg_file)), "full", "the reopen parses the agent's file once, whole")
+            reopened = c1.out[-1]
+            self.assertEqual(reopened["events"][-1]["md"], "Nearly done.")
+            km._SUBAGENT_FRAMES.clear(); km._parse_cache.clear()
+            fresh = km.build_subagent(SID, AID_BG, int(time.time()), self.tm)
+            self.assertEqual((reopened["events"], reopened["running"]), (fresh["events"], fresh["running"]),
+                             "the reopened frame shows what a fresh build does")
+            self.assertTrue(entries(), "and its entry stands again while the viewer is open")
+        finally:
+            km._clients[:] = saved
+
     def test_open_on_a_missing_file_pushes_the_error_frame(self):
         c = _Client()
         self.bg_file.unlink()

@@ -359,6 +359,52 @@ class OneParseForBoth(unittest.TestCase):
         jd.parsed_session(CH, [child_leaf], self.now)
         self.assertEqual(len([k for k in jd._PARSE_CACHE if k[0] == CH]), 1, "the child's own leaf stores")
 
+    def test_a_flip_releases_that_sessions_assembly_entry_of_the_retired_leaf_and_keeps_the_records(self):
+        """Release on the events that end a file's use (2026-10-01): the flip dropped the retired leaf's parse slots and left
+        its assembly entry (an adapter holding every record of the leaf, its atoms and maps) resident until the assembly
+        cache's count cap reached it. The flip now releases that session's assembly entry of the retired leaf. Another
+        session's entry of the same file (the parent's, when a fork child flips) stays, and so does the record cache: a
+        /clear's anchor is the new leaf's candidate, which its parse reads through the reader, not from disk again."""
+        em = jd.em
+        P, CH = A, "66666666-2222-4333-8444-000000000668"
+        parent_leaf = _transcript(self.d, P, n=2)
+        child_leaf = _transcript(self.d, CH, n=1)
+        jd._note_leaf(P, parent_leaf)
+        jd._note_leaf(CH, parent_leaf)                     # the child's registry still names the parent's file
+        km._parse(parent_leaf, P, self.now)
+        jd.parsed_session(CH, [parent_leaf], self.now)
+        rp = os.path.realpath(parent_leaf)
+
+        def owners(path_real):
+            with em._ASM_LOCK:
+                return sorted(k[1] for k in em._ASM_CACHE if k[0] == path_real)
+        self.assertEqual(owners(rp), sorted([P, CH]), "an entry per session that parsed the parent's file")
+        with em._JSONL_CACHE_LOCK:
+            rec0 = em._JSONL_CACHE.get(parent_leaf)
+        jd._note_leaf(CH, child_leaf)                      # the child's init flipped its lastSid
+        self.assertEqual(owners(rp), [P], "the child's entry of the parent's file is released; the parent's stays")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIs(em._JSONL_CACHE.get(parent_leaf), rec0, "the record cache is not the flip's to touch")
+        m0 = self._misses()
+        km._parse(parent_leaf, P, self.now)
+        self.assertEqual(self._misses() - m0, 0, "the parent's tree is still a store hit")
+        # a /clear: the anchor was the session's leaf, the new leaf takes it as a candidate
+        C = "77777777-2222-4333-8444-000000000777"
+        anchor = _transcript(self.d, C, n=3)
+        leaf1 = _transcript(self.d, "77777777-2222-4333-8444-000000000778", n=1)
+        jd._note_leaf(C, anchor)
+        km._parse(anchor, C, self.now)
+        self.assertEqual(owners(os.path.realpath(anchor)), [C])
+        jd._note_leaf(C, leaf1)                            # the /clear's flip
+        self.assertEqual(owners(os.path.realpath(anchor)), [], "the pre-clear leaf's entry is released at the flip")
+        with em._READ_BYTES_LOCK:
+            b0 = em._READ_BYTES.get(anchor, 0)
+        with em._JSONL_CACHE_LOCK:
+            self.assertIn(anchor, em._JSONL_CACHE, "the anchor's records stay for the new leaf's parse")
+        km._parse(leaf1, C, self.now)
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(anchor, 0), b0, "the new leaf's parse read the anchor from the reader, not the disk")
+
     def test_the_kernel_view_reads_the_store(self):
         p = _transcript(self.d, A)
         self.assertNotIn(p, km._parse_cache)
