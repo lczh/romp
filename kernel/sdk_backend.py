@@ -6947,7 +6947,9 @@ class SdkSession:
                     # name is the world before it, and an arm from it would end at its first reply with a false "back on".
                     # So is a pick put back that was itself still in flight when the refused pick was made: the revert
                     # gives it its dots back (_revert_model), the live name being the world before it too (round two of
-                    # that review).
+                    # that review). A pick that lands between this check and the arm (the arm reads the Retry upgrades
+                    # file twice first) is caught after it, under the session lock set_model holds for its own writes:
+                    # the arm just written is the world before that pick, and it stands down.
                     arm = self._retry_armed()
                     _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
                     if arm and _model_version(_plab) is not None and not _model_downgrade(_plab, arm.get("to")):
@@ -6955,8 +6957,14 @@ class SdkSession:
                         self.backend._log("retry upgrade (%s): the pick went back to %s, not above %s; that retry "
                                           "stands down" % (self.name, _plab, arm.get("to")))
                         arm = None
-                    if not arm and not getattr(self, "_model_pending", ""):
-                        self._arm_if_below_pick()
+                    if not arm and not getattr(self, "_model_pending", "") and self._arm_if_below_pick():
+                        with self._lock:
+                            newer = getattr(self, "_model_pending", "")
+                            if newer:
+                                self._upgrade_retry = None
+                        if newer:
+                            self.backend._log("retry upgrade (%s): a newer pick (%s) went in while the refusal was put "
+                                              "back; the retry just armed stands down" % (self.name, newer))
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
                                   "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
                                   problem=True)
@@ -7509,19 +7517,28 @@ class SdkSession:
         (a Latest click, the account default) keeps the end at the tier it fell from. The pick read is the one the
         reconnect asserts (chosen_model), not the one the arm recorded: a live pick clears the arm, so they differ only
         after a refusal put the accepted model back under a standing arm, and a turn served on the refused version is
-        then a fallback from the model the reconnect runs, never the way back."""
+        then a fallback from the model the reconnect runs, never the way back.
+
+        The arm and the pick are read as one world, under the session lock (the #33 follow-up's review, round two): a
+        pick lands on the kernel thread (set_model, which clears the arm and writes the pick in one hold of this
+        lock), and read apart, a pick between the two reads had the end judged against it, so a pick of the user's own
+        at or below the model served minted a "Model back on" card. Under the lock, an arm that is no longer the one
+        read was cleared by such a pick, and nothing ends. The log and the card come after the lock is released."""
         arm = self._retry_armed()
         if not arm:
             return
         if _model_rank(pm) is None:
             return
-        frm = arm.get("from")
-        lab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
-        back = _model_rank(frm) is not None and not _model_downgrade(frm, pm)
-        on_pick = _model_version(lab) is not None and not _model_downgrade(lab, pm)
-        if not (back or on_pick):
-            return
-        self._upgrade_retry = None
+        with self._lock:
+            if getattr(self, "_upgrade_retry", None) is not arm:
+                return
+            frm = arm.get("from")
+            lab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
+            back = _model_rank(frm) is not None and not _model_downgrade(frm, pm)
+            on_pick = _model_version(lab) is not None and not _model_downgrade(lab, pm)
+            if not (back or on_pick):
+                return
+            self._upgrade_retry = None
         self.backend._log("retry upgrade (%s): back on %s after %d attempt(s)" % (self.name, pm, arm.get("attempts", 0)))
         fb = getattr(type(self.backend), "on_model_restored", None)
         if fb:
