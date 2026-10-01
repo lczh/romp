@@ -17,8 +17,8 @@ test("Status carries the server-driven modelPending flag", () => {
 
 test("syncMetaControls renders dots for a pending model, driven by the server flag (+ local click heuristic)", () => {
   // model + effort both drive dots now (effort reconnects to apply); the model clause is still present
-  assert.match(MODULE, /const pending = \(kind === "model" && !!st\.modelPending\) \|\| \(kind === "effort" && !!st\.effortPending\)\s*\n\s*\|\| !!\(hooks\.pending && hooks\.pending\(kind, st\)\);/);   // the local heuristic is the chat's hook (T415 part two)
-  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort"\);/);   // billing moved to the tab menu (2026-08-09)
+  assert.match(MODULE, /const pending = \(kind === "model" && !!st\.modelPending\) \|\| \(kind === "effort" && !!st\.effortPending\)\s*\n\s*\|\| \(kind === "fast" && !!st\.fastPending\)\s*\n\s*\|\| !!\(hooks\.pending && hooks\.pending\(kind, st\)\);/);   // the local heuristic is the chat's hook (T415 part two); fast since 2026-10-01
+  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort" \|\| kind === "fast"\);/);   // billing moved to the tab menu (2026-08-09)
   assert.match(MODULE, /if \(!label\.querySelector\("\.meta-dots"\)\) label\.replaceChildren\(metaDots\(\)\);/);
 });
 

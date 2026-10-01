@@ -450,6 +450,16 @@ class HostProcess(unittest.TestCase):
                       % (len(journal), n, timeout, [r.get("type") for _, r in journal]))
         return journal
 
+    def test_the_hello_echoes_the_specs_launch_record(self):
+        """The kernel's launch record (the picks the spawn carried: effort, the billing pick, the fast flag, the mode, an env
+        digest; 2026-10-01) rides the spec as a host key and comes back in every hello as cli.launch, so a kernel attaching
+        to this CLI after a restart can tell whether a pick that was waiting for a relaunch reached it."""
+        rec = {"effort": "high", "auth": "login", "authLogin": "", "fast": False, "mode": "default", "env": "0123456789abcdef"}
+        host, sock, spec = self._start(launch=rec)
+        k, hello = self._attach(sock)
+        self.assertEqual(hello["cli"]["launch"], rec)
+        self.assertIn("launch", sh.SPEC_HOST_KEYS, "a host key, never an option field the CLI is launched from")
+
     def test_the_lease_and_the_hello_carry_the_clis_spawn_time_once_and_the_specs_login(self):
         """The host is the authority for when ITS CLI spawned: the lease's spawnedAt is stamped once at the spawn and stands
         across the beats (before 2026-09-14 every beat rewrote it with the beat's time, so a kernel copying it would have
@@ -461,6 +471,7 @@ class HostProcess(unittest.TestCase):
         k, hello = self._attach(sock)
         self.assertEqual((hello["cli"]["spawnedAt"], hello["cli"]["login"], hello["cli"]["pid"]),
                          (lease["spawnedAt"], "login-rec-1", lease["pid"]))
+        self.assertIsNone(hello["cli"]["launch"], "a spec written before the launch record: the hello says it has none")
         deadline = time.time() + 3 * sh.LEASE_HEARTBEAT_S
         while time.time() < deadline and self._lease().get("t") == lease["t"]:   # loop-ok: a bounded wait on the next beat
             time.sleep(0.1)
