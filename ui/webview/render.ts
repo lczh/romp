@@ -51,6 +51,7 @@ import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, listBreakdown,
 import { CHIP_LABEL, chipWords, statusChip, type ChipState } from "./status-chip";   // the session status chip: its words and its classes, the one builder the bar and the tag overview's rows share (T322b)
 import { isClearCmd, isNewCmd, openTopTitles, clearConfirmDetail, endConfirmDetail, RENAME_SUBLINE, END_SESSION_STANDING } from "./clear-confirm";
 import { addRestartRow, settleRestart } from "./restart-row";   // the one Restart session row, shared with the Sessions pane's menu
+import { applyNowOffered, applyNowSub, requestApplyNow, APPLY_NOW_LABEL, type WaitingPick } from "./apply-now";   // the Apply now row a waiting pick's control offers (2026-10-01)
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
 import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
@@ -375,7 +376,7 @@ interface ChatNotice { itemId: string; key: string; rev: number; title: string; 
                        warns?: BadgeItem["warns"]; failLog?: BadgeItem["failLog"]; doneConfirming?: boolean | null;
                        summaryAnchorUuid?: string | null; summaryAnchorQuote?: string | null; summaryAnchorsPara?: SectionItem["summaryAnchorsPara"];
                        blocked?: unknown; column?: string | null; judging?: boolean | null; working?: SpinFields["working"]; sessState?: string | null }
-interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; relaunchWaits?: string; fastPending?: boolean; }   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line and the effort change's chat line say it beside the pending dots   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; fastPending?: boolean; }   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line and the effort change's chat line say it beside the pending dots   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -1043,6 +1044,10 @@ function onUnknownOp(m: { op?: unknown; writeId?: unknown }) {
     // on the refusal rather than waiting for a reply that is never coming, and the toast says what to do
     for (const id of sessions.keys()) settleRestart(id);
     warnToast("This romp kernel is older than the dashboard and has no Restart session — end the session and revive it instead.");
+  }
+  if (m.op === "applyNow") {
+    // a kernel older than this page has no Apply now (it advertises applyNow in its caps): said, never a click that vanishes
+    warnToast("This romp kernel is older than the dashboard and has no Apply now — Restart session in the tab's menu applies a waiting change at once.");
   }
   if (typeof m.writeId === "string" && viewsWrites.some((w) => w.id === m.writeId))
     onViewsAck({ type: "unknownOp", writeId: m.writeId, ok: false,
@@ -7351,6 +7356,32 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
 // so this is a small themed floating menu; one open at a time, dismissed by any
 // outside click, Escape, scroll, or losing window focus.
 let ctxMenuEl: HTMLElement | null = null;   // the open tab or selection menu's card (the shared builder's), read by the composer's typing gates
+// Apply now (2026-10-01): the row a waiting pick's control offers (the Billing flyout, the effort and fast pickers) and its
+// click, one builder for both menu dresses: the tab menu's (a body with a label and a sub-line) and the statusline
+// pickers' (a head and a meta-item-sub, the mode rows' shape). The click resolves the session by id when it lands, never
+// off the status the menu was built from: the work the pick waited on may have ended in between, and then there is
+// nothing left to push and the click posts nothing (apply-now.ts says the rest).
+function applyNowRow(dress: "ctx" | "meta", st: Status, pick: () => void): HTMLElement {
+  const r = el("div", dress === "ctx" ? "ctx-item ctx-item-toggle ctx-item-apply" : "meta-item meta-apply");
+  r.tabIndex = 0;
+  const head = el(dress === "ctx" ? "span" : "div", dress === "ctx" ? "ctx-item-label" : "");
+  head.textContent = APPLY_NOW_LABEL;
+  const sub = el(dress === "ctx" ? "span" : "div", dress === "ctx" ? "ctx-item-sub" : "meta-item-sub");
+  sub.textContent = applyNowSub(st);
+  if (dress === "ctx") { const body = el("span", "ctx-item-body"); body.append(head, sub); r.appendChild(body); }
+  else r.append(head, sub);
+  r.addEventListener("click", (ev) => { ev.stopPropagation(); pick(); });
+  r.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); pick(); } });
+  return r;
+}
+function applyNowFor(sid: string, pick: WaitingPick): void {
+  const s = liveSession(sid);
+  const st = s ? s.status : null;
+  if (!st || !applyNowOffered(st, pick)) return;
+  requestApplyNow({ name: s?.name || sid, cuts: st.relaunchCuts || "",
+    confirm: (title, detail, buttons, cb) => showConfirm(title, detail, buttons, cb),
+    post: () => { vscodeApi?.postMessage({ type: "applyNow", id: sid }); } });
+}
 function dismissTabMenu() {
   closeContextMenu();   // the builder's teardown hands the focus back and runs onTabMenuClosed
 }
@@ -8054,6 +8085,15 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           if (!cur && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
         });
         sub.appendChild(opt);
+      }
+      // ── Apply now (2026-10-01) ── while the session's billing pick waits for it to go quiet, and something holds it: behind
+      // a rule, right under the picks it applies, ONE row saying what it ends (the kernel's relaunchCuts). Its click
+      // confirms first when it ends something, Restart session's dialog shape (apply-now.ts). The row's one sub-line is
+      // that cost, the reason the T387 no-sub-line rule for the billing entries does not reach it: they say what they
+      // are, and this row's label does not say what it costs.
+      if (applyNowOffered(st, "billing")) {
+        sub.appendChild(el("div", "ctx-sep"));
+        sub.appendChild(applyNowRow("ctx", st, () => { dismissTabMenu(); applyNowFor(id, "billing"); }));
       }
       // ── Set default billing (T387, the user 2026-09-12) ── below the picks, behind a rule, ONE entry opening a further
       // submenu with exactly the same entries, the machine's default check-marked. Both the rule and the entry only when
@@ -17690,6 +17730,14 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     });
     menu.appendChild(item);
   }
+  // Apply now (2026-10-01): an effort pick, or the first fast opt-in, waiting for the session to go quiet, and something
+  // holding it: behind a rule under the choices, ONE row saying what it ends (apply-now.ts). The thread popovers' status
+  // carries no pending marks, so their pickers never offer it.
+  const waitingPick: WaitingPick | null = kind === "effort" ? "effort" : kind === "fast" ? "fast" : null;
+  if (waitingPick && applyNowOffered(s.status, waitingPick)) {
+    menu.appendChild(el("div", "meta-sep"));
+    menu.appendChild(applyNowRow("meta", s.status, () => { closeMetaMenu(); applyNowFor(opSid, waitingPick); }));
+  }
   document.body.appendChild(menu);
   // anchored ABOVE the button (the statusline sits at the bottom of the panel)
   const r = btn.getBoundingClientRect();
@@ -21280,6 +21328,11 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "restartFailed" && m.id) {
     settleRestart(String(m.id));
     warnToast(`Couldn’t restart “${String(m.name || m.id)}” — ${String(m.text || "unknown error")}`);
+  }
+  // Apply now's refusal (2026-10-01), for the pane that asked: the dismissible toast, the restart failure's surface. Its
+  // success sends nothing: the pick's own pending marks clear when the relaunch carries it.
+  else if (m.type === "applyFailed" && m.id) {
+    warnToast(`Couldn’t apply the change to “${String(m.name || m.id)}” — ${String(m.text || "unknown error")}`);
   }
   else if (m.type === "moved" && m.id) moveLanded(String(m.id), String(m.name || m.id), String(m.cwd || ""));
   else if (m.type === "moveFailed" && m.id) {

@@ -30,6 +30,11 @@ What this pins, on both sides of the backend seam:
     on the installed client. The refusal says what does start a fresh one, a restart of the romp kernel, and
     touches nothing; an ended Codex row is pointed at Revive, as an ended Claude row is.
 
+  * Apply now (2026-10-01), the same road for a pick waiting on a quiet session: SdkBackend.apply_now relaunches
+    with the cut named "apply" (the session's notice says a settings change was applied now) while a pick waits, and
+    answers the no-op NOTHING_TO_APPLY when none does; _apply_now, the door behind the WS applyNow op, answers the
+    asking pane only when it refused.
+
 Every leg reds at the merge base on the behaviour, not on a missing name: the two doors do not exist there,
 so the tests say so through the AttributeError the getattr guards raise as an explicit failure. Synthetic
 fixtures only: a hermetic state root, private placeholder sids, the notes-api demo names.
@@ -113,8 +118,9 @@ class _Sess:
         self.calls, self.inflight, self.name, self.sid = calls, inflight, name, SID
         self._lock = threading.RLock()
 
-    def request_reconnect(self, defer=True, cut=False, why=""):
+    def request_reconnect(self, defer=True, cut=False, why="", cause=""):
         self.calls.append(("request_reconnect", "cut" if cut else defer))   # a Restart takes the cut road (2026-10-01: a pick waits)
+        self.causes = getattr(self, "causes", []) + [cause]                  # …naming itself for the notice (CUT_BY)
 
     def interrupt(self, climb=True):
         self.calls.append(("interrupt",) if climb else ("interrupt", "polite only"))
@@ -136,9 +142,10 @@ class RelaunchPrimitive(unittest.TestCase):
 
     def test_an_idle_session_reconnects_and_nothing_is_cut(self):
         _reg(self.d)
-        self.be.sessions[SID] = _Sess(self.calls)
+        self.be.sessions[SID] = s = _Sess(self.calls)
         self.assertEqual(self.relaunch(), "", "an idle running session relaunches")
         self.assertEqual(self.calls, [("request_reconnect", "cut")], "the reconnect road, and no interrupt")
+        self.assertEqual(s.causes, ["restart"], "named for the notice: the session hears it was restarted")
 
     def test_a_running_turn_is_cut_with_the_reconnect_armed_first(self):
         _reg(self.d)
@@ -195,6 +202,58 @@ class RelaunchPrimitive(unittest.TestCase):
         # inherit — so a backend never reads as relaunchable by omission
         self.assertIn("no way to relaunch", km._UNOWNED.relaunch(SID))
         self.assertIn("revive", km._UNOWNED.relaunch(SID))
+
+
+class ApplyNowPrimitive(unittest.TestCase):
+    """SdkBackend.apply_now (2026-10-01): Restart session's road for a pick waiting on a quiet session, named "apply",
+    and a no-op said as one when nothing waits."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.be = _backend(self.d)
+        self.calls = []
+
+    def apply(self, sid=SID):
+        fn = getattr(self.be, "apply_now", None)
+        self.assertIsNotNone(fn, "SdkBackend has no apply_now: a waiting pick has no way through")
+        return fn(sid)
+
+    def test_a_waiting_pick_takes_the_restart_road_named_apply(self):
+        _reg(self.d)
+        for mark in ("_switch_wanted", "_effort_pending", "_auth_pending", "_fast_pending"):
+            self.calls = []
+            s = _Sess(self.calls, inflight=1)
+            setattr(s, mark, "billing" if mark == "_switch_wanted" else "high")
+            self.be.sessions[SID] = s
+            self.assertEqual(self.apply(), "", mark)
+            self.assertEqual(self.calls, [("request_reconnect", "cut"), ("interrupt", "polite only")],
+                             mark + ": the cut road with the reconnect armed first, as a Restart's")
+            self.assertEqual(s.causes, ["apply"], mark + ": named for the notice")
+
+    def test_nothing_waiting_is_a_no_op_said_as_one(self):
+        _reg(self.d)
+        self.be.sessions[SID] = _Sess(self.calls)
+        self.assertEqual(self.apply(), sb.NOTHING_TO_APPLY)
+        self.assertEqual(self.calls, [], "nothing relaunched, nothing interrupted")
+        self.assertEqual(sb.NOTHING_TO_APPLY, km.sb.NOTHING_TO_APPLY, "one text, which the kernel's /apply route compares")
+
+    def test_a_dormant_row_with_a_recorded_waiting_pick_is_connected_and_one_without_is_left_alone(self):
+        _reg(self.d, relaunchWait={"why": "billing", "t": 1, "picks": {"billing": {"auth": "login", "authLogin": ""}}})
+        connects = []
+        self.be.connect = lambda sid: (connects.append(sid) or True)
+        self.assertEqual(self.apply(), "")
+        self.assertEqual(connects, [SID], "its connect is the relaunch, and carries the pick")
+        _reg(self.d)
+        self.assertEqual(self.apply(), sb.NOTHING_TO_APPLY)
+        self.assertEqual(connects, [SID], "no pick on record: nothing started")
+
+    def test_refusals_say_why_in_words(self):
+        self.assertIn("no record of this session", self.apply(OTHER))
+        _reg(self.d, alive=False, relaunchWait={"why": "effort", "t": 1, "picks": {"effort": {"effort": "max"}}})
+        self.assertIn("revive", self.apply())
+
+    def test_a_backend_with_no_relaunch_primitive_has_nothing_waiting(self):
+        self.assertEqual(km._UNOWNED.apply_now(SID), km.sb.NOTHING_TO_APPLY)
 
 
 class CodexRelaunch(unittest.TestCase):
@@ -443,6 +502,14 @@ class _Be:
 
     def __init__(self, answer="", entered=None, gate=None):
         self.answer, self.entered, self.gate, self.calls, self.threads = answer, entered, gate, [], []
+        self.applied = []
+
+    def apply_now(self, sid):
+        self.applied.append(sid)
+        self.threads.append(threading.current_thread())
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
 
     def relaunch(self, sid):
         self.calls.append(sid)
@@ -455,8 +522,8 @@ class _Be:
         return self.answer
 
 
-class RestartDoor(unittest.TestCase):
-    """_restart_session and the WS op behind it."""
+class _DoorLab(unittest.TestCase):
+    """The kernel around a door: the views it answers, the routing to a stand-in backend, the names it knows."""
 
     def patch(self, name, value):
         saved = getattr(km, name)
@@ -476,11 +543,18 @@ class RestartDoor(unittest.TestCase):
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
         self.addCleanup(setattr, km.Sessions, "backend_for", saved)
         self.client = {"app": "chat", "wid": "win-A"}
-        self.door = getattr(km, "_restart_session", None)
-        self.assertIsNotNone(self.door, "the kernel has no _restart_session door")
 
     def frames(self):
         return [(app, m["type"], m["id"], wid) for app, m, wid in self.sent]
+
+
+class RestartDoor(_DoorLab):
+    """_restart_session and the WS op behind it."""
+
+    def setUp(self):
+        super().setUp()
+        self.door = getattr(km, "_restart_session", None)
+        self.assertIsNotNone(self.door, "the kernel has no _restart_session door")
 
     def test_a_restart_relaunches_through_the_owning_backend_and_answers_the_asking_pane(self):
         self.door(SID, self.client)
@@ -617,6 +691,62 @@ class RestartDoor(unittest.TestCase):
         km.Handler._dispatch_ws(None, {"type": "restartSession"}, client)
         self.assertEqual(self.be.calls, [])
         self.assertEqual([m.get("type") for m in sent], ["unknownOp"])
+
+
+class ApplyNowDoor(_DoorLab):
+    """_apply_now and the WS applyNow op (2026-10-01): the owning backend's apply_now, answered to the asking pane only
+    when it refused; success says nothing (the pick's own marks clear on the next build) and never moves the focus."""
+
+    def setUp(self):
+        super().setUp()
+        self.pushes = []
+        self.patch("_push_soon", lambda: self.pushes.append(1))
+        self.door = getattr(km, "_apply_now", None)
+        self.assertIsNotNone(self.door, "the kernel has no _apply_now door")
+
+    def test_it_applies_through_the_owning_backend_and_says_nothing_on_success(self):
+        self.door(SID, self.client)
+        self.assertEqual((self.be.applied, self.be.calls), ([SID], []), "apply_now, never the plain relaunch")
+        self.assertEqual(self.sent, [], "a success is the pick's marks clearing, not a frame")
+        self.assertEqual(self.pushes, [1], "the next build carries the relaunch")
+        self.assertEqual(self.reveals, [])
+
+    def test_a_refusal_and_a_raced_no_op_reach_the_asker_as_applyFailed(self):
+        for answer in ("this session is not running — revive it to bring it back", sb.NOTHING_TO_APPLY):
+            self.sent.clear()
+            self.be.answer = answer
+            self.door(SID, self.client)
+            self.assertEqual(self.frames(), [("chat", "applyFailed", SID, "win-A")])
+            self.assertEqual((self.sent[0][1]["text"], self.sent[0][1]["name"]), (answer, "web"))
+
+    def test_a_backend_that_raises_or_has_no_apply_now_is_named_not_an_attribute_error(self):
+        self.be.answer = RuntimeError("the control channel is gone")
+        self.door(SID, self.client)
+        self.assertIn("the control channel is gone", self.sent[0][1]["text"])
+        self.sent.clear()
+        class DuckTyped:
+            pass
+        self.be = DuckTyped()
+        self.door(SID, self.client)
+        self.assertEqual(self.sent[0][1]["text"], km.sb.NOTHING_TO_APPLY, "the base no-op: it relaunches nothing")
+
+    def test_a_sid_this_kernel_does_not_have_is_refused_before_any_backend_is_asked(self):
+        self.door(OTHER, self.client)
+        self.assertEqual(self.be.applied, [])
+        self.assertEqual(self.frames(), [("chat", "applyFailed", OTHER, "win-A")])
+        self.assertIn("no session with id", self.sent[0][1]["text"])
+
+    def test_the_ws_op_answers_off_the_recv_loop_and_is_advertised(self):
+        self.be.answer = "a refusal, so the door answers"
+        client = dict(self.client, alive=True, send=lambda raw: None)
+        km.Handler._dispatch_ws(None, {"type": "applyNow", "id": SID}, client)
+        for _ in range(500):
+            if self.sent:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(self.frames(), [("chat", "applyFailed", SID, "win-A")])
+        self.assertIsNot(self.be.threads[0], threading.current_thread(), "…on a thread of its own")
+        self.assertIn("applyNow", km.KERNEL_WS_CAPS, "advertised: a page newer than its kernel meets unknownOp, not silence")
 
 
 class _AnsweringControl:

@@ -1975,6 +1975,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    tiebreak pinned, not just their existence. */
 .meta-item .meta-caret { position: absolute; right: 22px; top: 50%; transform: translateY(-50%); opacity: 0.55; }
 .meta-sub { z-index: 61; }
+/* the rule above a picker's Apply now row (2026-10-01: a pick waiting for a quiet session, pushed through on purpose), the
+   tab menu's .ctx-sep geometry and colour, so the two menus' rules read as one */
+.meta-sep { height: 1px; margin: 4px 6px; background: var(--box-border); }
 .meta-item.current::after {
   content: "✓"; position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   background: var(--check-bg); color: #fff; border-radius: 50%;
