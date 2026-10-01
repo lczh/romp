@@ -214,8 +214,18 @@ test("create adopts exactly the thread the kernel named — never a guess", () =
   assert.match(UI, /m\.type === "commentCreated"/);
   assert.match(UI, /function adoptCommentThread\(sid: string, tid: string\)/);
   assert.match(KERNEL, /"type": "commentCreated", "id": sid, "tid": tid/);
-  // the FRAME rides ahead of the ack, so adoption always finds the thread in the map
-  assert.match(KERNEL, /fr = _comments_frame\(sid\)\s*\n\s*if fr:\s*\n\s*client\["send"\]\(json\.dumps\(fr\)\)\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "commentCreated"/);
+  // the ACK carries the new thread's row, built as the frame builds it (2026-10-01: the kernel answers the moment the row
+  // exists and leaves the frame to its pusher), and the page lists that row before it adopts, so adoption finds the thread
+  // without waiting for the frame
+  assert.match(KERNEL, /entry = _comment_frame_entry\(row, _sdk\(\), int\(time\.time\(\)\)\)/);
+  assert.match(KERNEL, /ack\["thread"\] = entry/);
+  const ack = UI.split('else if (m.type === "commentCreated" && m.id && m.tid) {')[1].split("\n  }\n  // a reply the kernel refused")[0];
+  assert.match(ack, /if \(row && row\.tid === tid && !have\.some\(\(t\) => t\.tid === tid\)\) commentThreads\.set\(String\(m\.id\), \[\.\.\.have, row\]\);/);
+  assert.ok(ack.indexOf("commentThreads.set(String(m.id), [...have, row])") < ack.indexOf("dropSynthThread(held.sid, held.createId)"),
+            "the real row is listed before the optimistic mark goes, so the highlight never blinks out");
+  // …and a frame built before that row was saved never follows the answer: the pusher sends a frame only at the store
+  // generation it was built from, under the lock the answer takes
+  assert.match(KERNEL, /if _comments_gen\.get\(sid, 0\) != gen:/);
 });
 
 test("a refused reply hands the words back instead of thinking forever", () => {
@@ -244,7 +254,8 @@ test("the projection never reads the parent transcript pre-fork", () => {
 });
 
 test("a promoted thread whose session ended drops off the frame entirely", () => {
-  assert.match(KERNEL, /if status == "promoted" and not _thread_reg\(tsid\)\.get\("alive"\):\s*\n\s*continue/);
+  assert.match(KERNEL, /if status == "promoted" and not _thread_reg\(tsid\)\.get\("alive"\):\s*\n\s*return None/);
+  assert.match(KERNEL, /row = _comment_frame_entry\(th, be, now, live_map\)\s*\n\s*if row is not None:\s*\n\s*threads\.append\(row\)/);
 });
 
 test("promote latches the row before seeding; racing ops refuse through the CAS", () => {
@@ -319,7 +330,8 @@ test("kernel registers every comment drive op", () => {
 });
 
 test("the comments frame rides its own dedup slot, never the chat delta baseline", () => {
-  assert.match(KERNEL, /_send_client\(c, \("comments", s\["sid"\]\), fr\)/);
+  assert.match(KERNEL, /_send_comments_frame\(chat_clients, s\["sid"\], fr, gen\)/);
+  assert.match(KERNEL, /_send_client\(c, \("comments", sid\), fr\)/);
 });
 
 test("a thread fork withholds the names/ entry; promote seeds first, then registers", () => {
@@ -967,8 +979,11 @@ test("bubbles and reply drafts are pruned against every session's threads, never
 
 test("every create answer echoes the gesture's createId; a create a remote host never got is refused by type (source pins)", () => {
   assert.match(KERNEL, /cid = str\(msg\.get\("createId"\) or ""\)\s*\n\s*key = _create_key\(sid, msg\["uuid"\], msg\["exact"\], msg\["text"\], cid\)/);
-  assert.equal((KERNEL.match(/"createId": cid/g) || []).length, 4, "repeat, busy, refused and created answers at the door");
-  assert.match(KERNEL, /"uuid": pk\["uuid"\], "createId": pk\.get\("createId"\) or ""\}\)\)/, "and the parked create's broadcast");
+  assert.equal((KERNEL.match(/"createId": cid/g) || []).length, 3, "the busy and refused answers at the door, and the parked copy");
+  assert.match(KERNEL, /_comment_create_spawn\(_answer_comment_created, \(\[client\], sid, again, str\(msg\["uuid"\]\), cid\)\)/, "the repeat's");
+  assert.match(KERNEL, /_answer_comment_created\(\[client\], sid, tid, str\(msg\["uuid"\]\), cid\)/, "the created answer's");
+  assert.match(KERNEL, /"createId": create_id or ""/, "the one answer both carry it in");
+  assert.match(KERNEL, /_answer_comment_created\(targets, pk\["sid"\], tid, pk\["uuid"\], pk\.get\("createId"\) or ""\)/, "and the parked create's broadcast");
   const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
   assert.match(FED, /if \(msg && msg\.type === "commentCreate" && typeof msg\.id === "string" && msg\.uuid\)\s*\n\s*window\.dispatchEvent\(new MessageEvent\("message", \{ data: \{ type: "commentCreateFailed", id: prefixId\(host, msg\.id\),\s*\n\s*uuid: msg\.uuid, createId: msg\.createId \|\| "", transient: false \} \}\)\);/);
 });

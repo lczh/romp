@@ -128,6 +128,8 @@ CENSUS = {
     "_parked_clear_op": ("pure", "over a parked op and the owning backend's identity (the row's backend, fixed for the session's life): the drain's rule that a one-line Codex command op by a clear head is a clear, read by the clearing fold too (2026-09-19)"),
     "_op_paths": ("pure", "over a parked op (its attachment list, T373 fold)"),
     "_parse": ("sig", "transcript", "memoized on the transcript's (mtime, size), the pending cut (cut) and the states file (states)"),
+    "_thread_parse": ("sig", "transcript", "a comment thread's own records past its cut (thread_cut, _thread_events), memoized on the "
+                                           "transcript's version and the states file (states); else _parse"),
     "_parse_task_notification": ("pure", "over a reminder string"),
     "_patch_rows": ("pure", "over a structured patch"),
     "_path_links": ("sig", "pathlink", "a resolved token latches for the message's life; an unresolved one is retried, and the retry is the pathlink dep"),

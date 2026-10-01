@@ -18240,8 +18240,16 @@ def _load_comments_cached(sid):
     return copy.deepcopy(hit[1])
 
 
+# Each store's write generation (2026-10-01), bumped AFTER every save lands: the pusher reads it before it builds a comments
+# frame (which loads the store), and sends the frame only while that generation still stands (_send_comments_frame). A
+# create answers before the next frame (its answer carries the new row), so a frame built from the store as it stood
+# before the row was saved must never reach the page after that answer: the page would drop the thread it just adopted.
+_comments_gen = {}
+
+
 def _save_comments(sid, data):
     _atomic_write(_comments_path(sid), json.dumps(data))
+    _comments_gen[sid] = _comments_gen.get(sid, 0) + 1
 
 
 def _comment_thread(parent_sid, tid):
@@ -18444,68 +18452,132 @@ def _precompact_block(before, after, transcript, anchor_uuid):
     return "\n\n".join(parts)
 
 
-def _precompact_context(ad, path, anchor_uuid, newer):
-    """_precompact_block for a pre-compaction anchor on the stitched chain `ad`. `newer` is the active chain from the
-    leaf down to the record just after the anchor (leaf first), as the cut walk collected it. The passage's TURN is
-    the anchor's side (the person's message, or the agent's reply with its tool traffic); the excerpts are the
-    nearest thing the OTHER side said before it and after it."""
+def _precompact_context(g, path, anchor_uuid, newer):
+    """_precompact_block for a pre-compaction anchor on the stitched chain `g` (an em.TranscriptGraph: the display parse's
+    graph, or a fresh read's). `newer` is the active chain from the leaf down to the record just after the anchor (leaf
+    first), as the cut walk collected it. The passage's TURN is the anchor's side (the person's message, or the agent's
+    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it. Only a
+    user or assistant record can be something said (_comment_said), so the walks read no other record's body."""
     is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
-    said = _comment_said(ad.by_uuid.get(anchor_uuid) or {}, is_nudge)
+
+    def said_of(u):
+        return _comment_said(g.rec(u) or {}, is_nudge) if g.kind(u)[0] in ("user", "assistant") else None
+    said = said_of(anchor_uuid)
     side = "me" if said and said[0] == "me" else "you"
-    before, u, hops = None, ad.parent_of.get(anchor_uuid), 0
+    before, u, hops = None, g.parent(anchor_uuid), 0
     while u is not None and hops < 500000:
-        s = _comment_said(ad.by_uuid.get(u) or {}, is_nudge)
+        s = said_of(u)
         if s and s[0] != side:
             before = s
             break
-        u = ad.parent_of.get(u); hops += 1
+        u = g.parent(u); hops += 1
     after = None
     for u in reversed(newer):
-        s = _comment_said(ad.by_uuid.get(u) or {}, is_nudge)
+        s = said_of(u)
         if s and s[0] != side:
             after = s
             break
     # the file that holds the passage's record: after a restart seam, an older file of the lineage (_anchor_adapter
     # reads them all from the one projects directory)
-    fsid = ad.fsid_of.get(anchor_uuid) or os.path.splitext(os.path.basename(path))[0]
+    fsid = g.fsid(anchor_uuid) or os.path.splitext(os.path.basename(path))[0]
     transcript = os.path.abspath(os.path.join(os.path.dirname(path), fsid + ".jsonl"))
     return _precompact_block(before, after, transcript, anchor_uuid)
+
+
+# Where the cut walk found its graph (2026-10-01), read by the tests and the lab: the display parse's own assembly entry,
+# whole or restored ("whole" / "seeded"), or a fresh read of the stitched transcript ("read", the walk's only road
+# before). A read names its cause on stderr once per (session, cause): it is correct, only slow.
+_CUT_ROADS = {"whole": 0, "seeded": 0, "read": 0}
+_cut_read_said = set()
+
+
+def _comment_cut_from_parse(path, sid, anchor_uuid):
+    """_comment_cut_walk over the parent's DISPLAY parse (em.with_display_graph): the graph the chat's own parse already
+    holds, so a create reads none of the transcript the chat build has read, and on a restored entry only the few pre-cut
+    records the walk needs a body of. The entry must stand for this session's inputs and be current; when it is not, the
+    parse is brought current (_parse: a serve, a fold of the appended records, or a restore) and asked again. None when
+    neither ask is answered (no entry stands, or a pre-cut fact the restored entry cannot give: em.GraphMiss), and the
+    caller reads the transcript."""
+    states = str(jd.STATE / "states" / (sid + ".jsonl"))
+    cands = jd._judge_candidates(sid, [path])
+    human = _display_sdk_human(sid)
+
+    def walk(g):
+        return _comment_cut_walk(g, path, anchor_uuid)
+    why = "none"
+    for attempt in range(2):
+        try:
+            if attempt:
+                _parse(path, sid, int(time.time()))
+            how, got = em.with_display_graph(path, sid, human, cands, states, walk)
+        except em.GraphMiss as e:
+            why = "miss (%s)" % e
+            break
+        except Exception as e:                          # noqa: BLE001 — the read below is the walk's own road, and it is said
+            why = "error (%r)" % e
+            break
+        if how in ("whole", "seeded"):
+            _CUT_ROADS[how] += 1
+            return got
+        why = how
+    _CUT_ROADS["read"] += 1
+    key = (sid, why.split(" ")[0])
+    if key not in _cut_read_said:
+        if len(_cut_read_said) > 4096:
+            _cut_read_said.clear()
+        _cut_read_said.add(key)
+        sys.stderr.write("comment cut for %s read the transcript (the display parse could not answer: %s)\n"
+                         % (sid[:8], why[:200]))
+    return None
 
 
 def _comment_cut_resolve(path, sid, anchor_uuid):
     """(cut_uuid, cut_t, error, prior): _comment_cut_target's answer plus `prior`, the context block the opening
     message of a thread on a passage from before the last compaction carries (_precompact_block), "" for every
     other anchor. A pre-compaction anchor is a tip fork (cut "") stamped with its own record's time, like the
-    restart-seam case."""
-    ad = _anchor_adapter(path, sid)
-    if anchor_uuid not in ad.by_uuid:
+    restart-seam case. Walked over the parent's display parse when it can answer (_comment_cut_from_parse), else over
+    a fresh read of the stitched transcript (_anchor_adapter): the same walk, the same answer, the read only slower."""
+    got = _comment_cut_from_parse(path, sid, anchor_uuid)
+    if got is not None:
+        return got
+    return _comment_cut_walk(em.TranscriptGraph(_anchor_adapter(path, sid)), path, anchor_uuid)
+
+
+def _comment_cut_walk(g, path, anchor_uuid):
+    """The cut walk over transcript graph `g` (em.TranscriptGraph): the anchor must exist and sit on the active chain; a
+    compaction between it and the leaf makes the thread a tip fork carrying what surrounded the passage; else the nearest
+    prose record at or above it is the cut, unless that record lives behind a restart seam (a tip fork too). A record's
+    body is read only where its type alone cannot decide (g.kind first: only a user or assistant record is prose)."""
+    if not g.has(anchor_uuid):
         return None, 0, ANCHOR_LAG_ERR, ""
-    is_boundary = lambda r: r is not None and r.get("type") == "system" and r.get("subtype") == "compact_boundary"
-    u, hops, on_active, compacted, newer = ad.leaf_uuid, 0, False, False, []
+
+    def is_boundary(u):
+        return g.kind(u) == ("system", "compact_boundary")
+    u, hops, on_active, compacted, newer = g.leaf, 0, False, False, []
     while u is not None and hops < 500000:
         if u == anchor_uuid:
             on_active = True
             break
-        if is_boundary(ad.by_uuid.get(u)):
+        if is_boundary(u):
             compacted = True                 # the anchor predates a compaction: the CLI can't cut there (docstring)
         newer.append(u)
-        u = ad.parent_of.get(u); hops += 1
+        u = g.parent(u); hops += 1
     if not on_active:
         return None, 0, "that message is on a branch that was rewound away", ""
     cur_fsid = os.path.splitext(os.path.basename(path))[0]
     u, hops = anchor_uuid, 0
     while u is not None and hops < 500000:
-        r = ad.by_uuid.get(u)
-        if r is None or is_boundary(r):
+        if not g.has(u) or is_boundary(u):
             break
-        if _comment_prose_record(r):
+        r = g.rec(u) if g.kind(u)[0] in ("user", "assistant") else None
+        if r is not None and _comment_prose_record(r):
             cut_t = int(em.parse_z(r.get("timestamp")) or 0)
             if compacted:
-                return "", cut_t, None, _precompact_context(ad, path, anchor_uuid, newer)
-            if ad.fsid_of.get(u) != cur_fsid:
+                return "", cut_t, None, _precompact_context(g, path, anchor_uuid, newer)
+            if g.fsid(u) != cur_fsid:
                 return "", cut_t, None, ""   # behind a restart/clear seam → tip fork (see _comment_cut_target)
             return u, cut_t, None, ""
-        u = ad.parent_of.get(u); hops += 1
+        u = g.parent(u); hops += 1
     return None, 0, "that message can't anchor a thread; try a passage from the conversation itself", ""
 
 
@@ -18680,6 +18752,195 @@ def _thread_transcript_path(reg, tsid):
 
 
 _THREAD_TAIL_BYTES = 262144   # the tail window that usually holds the whole side conversation
+_THREAD_SCAN_BLOCK = 1 << 20  # the backward scan's largest read while it looks for where a thread's own records begin
+_THREAD_SCAN_FIRST = 1 << 16  # …and its first: the reads double from here, so a short exchange costs a short read
+
+# Where each thread's OWN records begin in its transcript (2026-10-01): tsid -> (path, inode, offset, guard, (cut, floor), the
+# (size, mtime) last verified), the offset None for a transcript scanned whole without the boundary. A thread's
+# transcript is the parent's history the fork copied in, then the thread's own exchange, and every projection of it
+# reads only the exchange: found once per thread by a scan back from the end (_thread_own_offset), it costs a guard read
+# per change after that, never the copied 40 to 130 MB. The guard is the bytes just before the offset and the first ones
+# at it, which an append never touches; a rewrite under it finds the offset afresh.
+_thread_own_offsets = {}
+_thread_own_memo = {}          # tsid -> (key, records): the records from the offset on, per transcript version
+_THREAD_OWN_GUARD = 256
+
+
+def _lines_backward(path, size, block=_THREAD_SCAN_BLOCK):
+    """(offset, line bytes) for each line of `path`'s first `size` bytes, the last line first; reads only as far back as the
+    caller iterates (from _THREAD_SCAN_FIRST bytes, doubling up to `block`), counted like every transcript read."""
+    with open(path, "rb") as fh:
+        pos, carry, step = size, b"", min(_THREAD_SCAN_FIRST, block)
+        while pos > 0:
+            n = min(step, pos)
+            step = min(step * 2, block)
+            pos -= n
+            fh.seek(pos)
+            chunk = fh.read(n)
+            em._count_read(path, len(chunk))
+            data = chunk + carry
+            parts = data.split(b"\n")
+            first = 0 if pos == 0 else 1             # parts[0] runs on into the bytes before pos: carried, not yet a line
+            off = pos + len(data)
+            for i in range(len(parts) - 1, first - 1, -1):
+                off -= len(parts[i])
+                yield off, parts[i]
+                off -= 1
+            carry = parts[0] if pos > 0 else b""
+
+
+def _own_guard(fh, off, size):
+    lo = max(0, off - _THREAD_OWN_GUARD)
+    fh.seek(lo)
+    return fh.read(min(size, off + _THREAD_OWN_GUARD) - lo)
+
+
+def _thread_own_offset(tsid, path, st, cut_uuid, floor_t):
+    """The byte offset where the thread's own part begins in its transcript `path` (stat `st`): the start of the CUT
+    record's line (the record is kept, so a projection slices after it as it slices a whole read), or for a tip fork (cut
+    "") the line after the last copied record, the newest record stamped before `floor_t` (the createdT floor
+    _thread_messages walks to). None when the transcript does not hold the boundary (the cut lives in an older file of a
+    resumed thread, a record nobody wrote): the caller reads the whole transcript, as before."""
+    hit = _thread_own_offsets.get(tsid)
+    if hit is not None and hit[0] == path and hit[1] == st.st_ino and hit[2] is None and hit[4] == (cut_uuid, floor_t) \
+            and hit[5][0] <= st.st_size:
+        return None                                  # scanned whole and not there: an append adds no copied history
+    if hit is not None and hit[0] == path and hit[1] == st.st_ino and hit[2] is not None and hit[2] <= st.st_size \
+            and hit[4] == (cut_uuid, floor_t):
+        if hit[5] == (st.st_size, st.st_mtime_ns):
+            return hit[2]                            # verified at this very version: no read at all
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(max(0, hit[2] - _THREAD_OWN_GUARD))
+                ok = fh.read(len(hit[3])) == hit[3]   # the bytes captured then: an append past them changes nothing
+            em._count_read(path, len(hit[3]))
+        except OSError:
+            ok = False
+        if ok:
+            _thread_own_offsets[tsid] = hit[:5] + ((st.st_size, st.st_mtime_ns),)
+            return hit[2]
+    off = None
+    try:
+        if cut_uuid:
+            needle = cut_uuid.encode()
+            for o, ln in _lines_backward(path, st.st_size):
+                if needle not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("uuid") == cut_uuid:
+                    off = o
+                    break
+        elif floor_t:
+            for o, ln in _lines_backward(path, st.st_size):
+                if not ln.strip():
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or not r.get("uuid"):
+                    continue
+                ts = em.parse_z(r.get("timestamp"))
+                if ts is not None and int(ts) < floor_t:
+                    off = o + len(ln) + 1
+                    break
+        if off is None:
+            if len(_thread_own_offsets) > 512:
+                _thread_own_offsets.pop(next(iter(_thread_own_offsets)))
+            _thread_own_offsets[tsid] = (path, st.st_ino, None, b"", (cut_uuid, floor_t), (st.st_size, st.st_mtime_ns))
+            return None                              # remembered: the next frame does not read the file back again
+        with open(path, "rb") as fh:
+            guard = _own_guard(fh, off, st.st_size)
+    except OSError:
+        return None
+    if len(_thread_own_offsets) > 512:
+        _thread_own_offsets.pop(next(iter(_thread_own_offsets)))
+    _thread_own_offsets[tsid] = (path, st.st_ino, off, guard, (cut_uuid, floor_t), (st.st_size, st.st_mtime_ns))
+    return off
+
+
+def _thread_own_records(tsid, path, cut_uuid, floor_t):
+    """The thread's records from where its own part begins (_thread_own_offset) to the end of the transcript, decoded, per
+    transcript version (memoized on the file's stat), or None when the boundary is not in the file. A last line still being
+    written is left for the next version, as the reader leaves it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    off = _thread_own_offset(tsid, path, st, cut_uuid, floor_t)
+    if off is None:
+        return None
+    key = (path, st.st_ino, st.st_size, st.st_mtime_ns, off)
+    hit = _thread_own_memo.get(tsid)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(off)
+            data = fh.read(st.st_size - off)
+    except OSError:
+        return None
+    em._count_read(path, len(data))
+    recs = []
+    for ln in data.split(b"\n"):
+        if not ln.strip():
+            continue
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(r, dict):
+            recs.append(r)
+    if len(_thread_own_memo) > 256:
+        _thread_own_memo.pop(next(iter(_thread_own_memo)))
+    _thread_own_memo[tsid] = (key, recs)
+    return recs
+
+
+_thread_tail_memo = {}         # tsid -> (key, session): the thread's own records parsed alone, per input version
+
+
+def _thread_tail_parse(tsid, path, cut_uuid, floor_t, now):
+    """The thread's OWN records (_thread_own_records) parsed ALONE, em.parse_session's tail road: the tree the popover's
+    projections read, with none of the history the fork copied in front of them, so a thread costs its own exchange
+    whatever the size of its parent (five threads of a 40 MB parent: 53 s cold through the whole parse). Keyed on the
+    transcript's version, the boundary, the thread's states log and the owner bit, so an unchanged thread is one stat and a
+    guard read. None when the boundary is not in the transcript; the caller parses the whole thread (_thread_parse)."""
+    recs = _thread_own_records(tsid, path, cut_uuid, floor_t)
+    if recs is None:
+        return None
+    states = jd.STATE / "states" / (tsid + ".jsonl")
+    try:
+        ss = os.stat(states)
+        skey = (ss.st_mtime_ns, ss.st_size, ss.st_ino)
+    except OSError:
+        skey = None
+    human = bool(_display_sdk_human(tsid))
+    own = _thread_own_memo.get(tsid)
+    key = ((own or (None,))[0], skey, human, cut_uuid, floor_t)
+    hit = _thread_tail_memo.get(tsid)
+    if hit is not None and hit[0] == key:
+        _parse_mode[path] = "tail"
+        return hit[1]
+    session = em.parse_session(path, rompuuid=tsid, candidate_files=[path], states=str(states),
+                               postal_log=str(jd.MESSAGES), now=now, sdk_human=human, tail_records=recs)
+    if len(_thread_tail_memo) > 256:
+        _thread_tail_memo.pop(next(iter(_thread_tail_memo)))
+    _thread_tail_memo[tsid] = (key, session)
+    _parse_mode[path] = "tail"                  # a new tree whenever the key moves: never a serve or a fold to the chat fold
+    return session
+
+
+def _thread_parse(tsid, path, cut_uuid, floor_t, now):
+    """The tree a comment thread's popover reads: its own records parsed alone (_thread_tail_parse), else, when the
+    transcript does not hold the boundary, the whole thread through the chat's parse (_parse), as before."""
+    got = _thread_tail_parse(tsid, path, cut_uuid, floor_t, now)
+    return got if got is not None else _parse(path, tsid, now)
+
+
 
 
 def _thread_messages(tsid, cut_uuid, floor_t=0):
@@ -18689,9 +18950,10 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     a settled thread costs one stat per push. [] before the fork lands: while the reg still carries
     forkOf (spent by the CLI init that pins the new fsid), lastSid points at the PARENT transcript,
     and reading it here would present the parent's post-anchor conversation as the thread's own.
-    The exchange sits strictly AFTER the copied history, so a streaming thread re-reads only the
-    file TAIL per push (the pusher must not reparse a whole copied conversation every 0.5s); the
-    full parse is the fallback when the window misses the cut.
+    The exchange sits strictly AFTER the copied history, so a streaming thread reads only its own
+    records per push (_thread_own_records, from the cut record's line on; the pusher must not
+    reparse a whole copied conversation every 0.5s); the full parse is the fallback when the
+    transcript does not hold the cut.
 
     A TIP-forked thread (cut_uuid "", the restart-seam fallback) has no cut record to stop at —
     `floor_t` (the thread's createdT) bounds it instead: copied records carry their ORIGINAL
@@ -18709,27 +18971,16 @@ def _thread_messages(tsid, cut_uuid, floor_t=0):
     if hit and hit[0] == path and hit[1] == mt and hit[2] == (cut_uuid, floor_t):
         return hit[3]
     by_uuid = parent_of = leaf = None
-    if cut_uuid and size > _THREAD_TAIL_BYTES:
-        try:
-            with open(path, "rb") as f:
-                f.seek(size - _THREAD_TAIL_BYTES)
-                lines = f.read().split(b"\n")[1:]    # drop the partial first line of the window
-        except OSError:
-            lines = []
-        tail = []
-        for ln in lines:
-            if not ln.strip():
-                continue
-            try:
-                tail.append(json.loads(ln))
-            except ValueError:
-                continue
-        if any(r.get("uuid") == cut_uuid for r in tail):
-            by_uuid = {r["uuid"]: r for r in tail if r.get("uuid")}
-            parent_of = {r["uuid"]: r.get("parentUuid") for r in tail if r.get("uuid")}
-            # the last uuid-bearing record IS the live leaf (the CLI appends the active branch —
-            # the same assumption sdk_backend.last_record_uuid rides for rewinds)
-            leaf = next((r["uuid"] for r in reversed(tail) if r.get("uuid")), None)
+    # the thread's own records alone (_thread_own_records: from the cut record's line, or a tip fork's first record past
+    # the copied history), whatever their size: the window this read before missed the cut once the exchange outgrew it,
+    # and a tip fork never had a cut to look for, so both read the whole copied transcript at every change
+    tail = _thread_own_records(tsid, path, cut_uuid, floor_t) if (cut_uuid or floor_t) else None
+    if tail is not None and (not cut_uuid or any(r.get("uuid") == cut_uuid for r in tail)):
+        by_uuid = {r["uuid"]: r for r in tail if r.get("uuid")}
+        parent_of = {r["uuid"]: r.get("parentUuid") for r in tail if r.get("uuid")}
+        # the last uuid-bearing record IS the live leaf (the CLI appends the active branch —
+        # the same assumption sdk_backend.last_record_uuid rides for rewinds)
+        leaf = next((r["uuid"] for r in reversed(tail) if r.get("uuid")), None)
     if by_uuid is None:
         ad = em.FileAdapter([path], path)
         by_uuid, parent_of, leaf = ad.by_uuid, ad.parent_of, ad.leaf_uuid
@@ -18842,67 +19093,73 @@ def _thread_events(tsid, cut_uuid, now, live_map):
     live_map = live_map if live_map is not None else {}
     _thread_fold_keep[1].add(tsid)              # this cycle's thread: _push keeps its fold prefix
     sess = _sdk_sess(tsid, now)
-    tm = live_map.get(tsid)
-    key = None
-    try:
-        sig = _chat_build_sig(sess, tm, now, live_map=live_map, deps=False)
-        _chat_sig_ok(tsid)                          # a signature that was taken ends its fault episode
-        if sig is not None:
-            # plus the thread's OWN state rows (review 2026-09-08): the backend writes states/<tsid>.jsonl under
-            # the romp sid, while the key above stats states/<fsid>.jsonl for the reg's lastSid (_sdk_sess hands
-            # over no anchor). The two are one file only until a resume mints a new fsid or a /clear moves
-            # lastSid; after that a states-only write (an interrupt settle's idle row, a retry marker, an
-            # orphan-reply salvage) changed the thread's events with no key change. None when absent.
-            try:
-                ss = os.stat(jd.STATESDIR / (tsid + ".jsonl"))
-                states = (ss.st_mtime_ns, ss.st_size, ss.st_ino)
-            except OSError:
-                states = None
-            key = sig + (states,)
-    except Exception as e:
-        _chat_sig_fault(sess, e)                # once per fault episode: stderr and a bell row, the chat loop's rule.
-        #                                         _chat_sig_faults is sid-keyed; the chat loop builds only a PROMOTED
-        #                                         thread and the frame never hands one here, so no entry is shared.
-        key = None                              # an input we cannot key → build, never cache
-    hit = _built_thread.get(tsid)
-    if key is not None and hit is not None and hit[0] == key and hit[1] == cut_uuid and not _dirty_since(hit[3]):
-        _PERF_STATS.build("thread", True)
-        return list(hit[2])
-    started = time.time()
-    _t0 = time.monotonic()
-    try:
-        m = build_session(tsid, now, live_map)
-    except Exception:
-        _chat_dep_scope.deps = None                  # a thread records no build dependencies (see _chat_build_deps)
-        return []
-    _chat_dep_scope.deps = None
-    _PERF_STATS.build("thread", False, time.monotonic() - _t0)
-    evs = (m or {}).get("events") or []
-    if cut_uuid:
-        at = next((i for i, e in enumerate(evs)
-                   if e.get("uuid") == cut_uuid or e.get("resultUuid") == cut_uuid), None)
-        if at is None:
-            evs = []                                 # the cut isn't in this transcript: never the copy
+    floor_t = 0 if cut_uuid else int(_comment_thread_row_created(tsid) or 0)
+    tpath = sess.get("path") if isinstance(sess, dict) else None
+    own = _thread_own_records(tsid, tpath, cut_uuid, floor_t) if tpath else None
+    # every fold the signature and the build make of the transcript (the session meta, the background tasks) reads the
+    # thread's own records too, never the copied history (2026-10-01): served on this thread for the build's duration
+    with em.serve_records({str(tpath): own} if own is not None else {}):
+        tm = live_map.get(tsid)
+        key = None
+        try:
+            sig = _chat_build_sig(sess, tm, now, live_map=live_map, deps=False)
+            _chat_sig_ok(tsid)                          # a signature that was taken ends its fault episode
+            if sig is not None:
+                # plus the thread's OWN state rows (review 2026-09-08): the backend writes states/<tsid>.jsonl under
+                # the romp sid, while the key above stats states/<fsid>.jsonl for the reg's lastSid (_sdk_sess hands
+                # over no anchor). The two are one file only until a resume mints a new fsid or a /clear moves
+                # lastSid; after that a states-only write (an interrupt settle's idle row, a retry marker, an
+                # orphan-reply salvage) changed the thread's events with no key change. None when absent.
+                try:
+                    ss = os.stat(jd.STATESDIR / (tsid + ".jsonl"))
+                    states = (ss.st_mtime_ns, ss.st_size, ss.st_ino)
+                except OSError:
+                    states = None
+                key = sig + (states,)
+        except Exception as e:
+            _chat_sig_fault(sess, e)                # once per fault episode: stderr and a bell row, the chat loop's rule.
+            #                                         _chat_sig_faults is sid-keyed; the chat loop builds only a PROMOTED
+            #                                         thread and the frame never hands one here, so no entry is shared.
+            key = None                              # an input we cannot key → build, never cache
+        hit = _built_thread.get(tsid)
+        if key is not None and hit is not None and hit[0] == key and hit[1] == cut_uuid and not _dirty_since(hit[3]):
+            _PERF_STATS.build("thread", True)
+            return list(hit[2])
+        started = time.time()
+        _t0 = time.monotonic()
+        try:
+            m = build_session(tsid, now, live_map, thread_cut=(cut_uuid, floor_t))
+        except Exception:
+            _chat_dep_scope.deps = None                  # a thread records no build dependencies (see _chat_build_deps)
+            return []
+        _chat_dep_scope.deps = None
+        _PERF_STATS.build("thread", False, time.monotonic() - _t0)
+        evs = (m or {}).get("events") or []
+        if cut_uuid:
+            at = next((i for i, e in enumerate(evs)
+                       if e.get("uuid") == cut_uuid or e.get("resultUuid") == cut_uuid), None)
+            if at is None:
+                evs = []                                 # the cut isn't in this transcript: never the copy
+            else:
+                evs = evs[at + 1:]                       # sliced to AFTER the branch point (the extension's source pin)
         else:
-            evs = evs[at + 1:]                       # sliced to AFTER the branch point (the extension's source pin)
-    else:
-        floor = int((_comment_thread_row_created(tsid) or 0))
-        # a TIP fork: the copied history keeps its original (older) stamps, under the floor. The build's head cards
-        # (the system card, a clear's card: its headCards) sit above that history, and a cut fork slices them off
-        # with it; the system card carries no stamp, so the floor kept it and a tip-forked thread (every one on a
-        # passage from before the last compaction) opened on "System context" above its own first message
-        heads = {c.get("uuid") for c in ((m or {}).get("headCards") or []) if isinstance(c, dict) and c.get("uuid")}
-        evs = [e for e in evs if e.get("uuid") not in heads
-               and (not e.get("ts") or int(em.parse_z(e.get("ts")) or 0) >= floor)]
-    evs = _thread_opener_shown(evs)
-    evs = evs[-80:]
-    # an EMPTY result for these inputs is as settled as a full one and is served the same way; only a
-    # build that RAISED (above) stays uncached, so a transient read fault retries on the next cycle
-    if key is not None:
-        if len(_built_thread) > 256:               # bounded by the thread count; evict oldest-inserted, never clear
-            _built_thread.pop(next(iter(_built_thread)))
-        _built_thread[tsid] = (key, cut_uuid, evs, started)
-    return list(evs)
+            floor = int((_comment_thread_row_created(tsid) or 0))
+            # a TIP fork: the copied history keeps its original (older) stamps, under the floor. The build's head cards
+            # (the system card, a clear's card: its headCards) sit above that history, and a cut fork slices them off
+            # with it; the system card carries no stamp, so the floor kept it and a tip-forked thread (every one on a
+            # passage from before the last compaction) opened on "System context" above its own first message
+            heads = {c.get("uuid") for c in ((m or {}).get("headCards") or []) if isinstance(c, dict) and c.get("uuid")}
+            evs = [e for e in evs if e.get("uuid") not in heads
+                   and (not e.get("ts") or int(em.parse_z(e.get("ts")) or 0) >= floor)]
+        evs = _thread_opener_shown(evs)
+        evs = evs[-80:]
+        # an EMPTY result for these inputs is as settled as a full one and is served the same way; only a
+        # build that RAISED (above) stays uncached, so a transient read fault retries on the next cycle
+        if key is not None:
+            if len(_built_thread) > 256:               # bounded by the thread count; evict oldest-inserted, never clear
+                _built_thread.pop(next(iter(_built_thread)))
+            _built_thread[tsid] = (key, cut_uuid, evs, started)
+        return list(evs)
 
 
 def _thread_opener_shown(evs):
@@ -18978,7 +19235,7 @@ def _turn_landed(turn, cut_t=0.0):
     return "landed" if last_sr in em.END_STOPS else "open"
 
 
-def _thread_turn_read(tsid, reg, state, queued=0):
+def _thread_turn_read(tsid, reg, state, queued=0, th=None):
     """(turn_open, interrupted, turns) for the thread — is its reply still being WORKED ON, did the user's
     interrupt close it, and what the transcript held (the parsed turns; [] when nothing could be read).
     The transcript decides: the newest turn that carries the exchange (compaction boundaries and
@@ -18990,13 +19247,20 @@ def _thread_turn_read(tsid, reg, state, queued=0):
     there is nothing to read yet (pre-fork, no turns): it flaps to ""/waiting between the records of one
     turn and lingers "working" for a push after the final record — neither is the landing event (T237,
     the user 2026-09-03: the mark went yellow while the thread had only started responding). "" is NOT a
-    flap: it is the backend saying no process exists (T237b B)."""
+    flap: it is the backend saying no process exists (T237b B). With the thread's row `th`, the read is
+    of the thread's own records alone (_thread_parse), the tree its popover renders."""
     if reg.get("forkOf"):
         return True, False, []                      # the fork hasn't landed: the first reply is ahead
     busy_state = state in ("working", "retrying", "compacting")
     try:
         path = _thread_transcript_path(reg, tsid)
-        session = _parse(path, tsid, int(time.time())) if path else None   # the real (mtime-cached) parse — _parse_cached never parses
+        if not path:
+            session = None
+        elif th is not None:
+            cut = str(th.get("cutUuid") or "")
+            session = _thread_parse(tsid, path, cut, 0 if cut else int(th.get("createdT") or 0), int(time.time()))
+        else:
+            session = _parse(path, tsid, int(time.time()))   # the real (mtime-cached) parse — _parse_cached never parses
     except Exception as e:                          # LOUD, then the backend's word: a silent fallback would re-create the very symptom
         key = (tsid, type(e).__name__)              # once per cause — repr() can carry an address and shout per push
         if key not in _thread_parse_warned:
@@ -19142,7 +19406,10 @@ def _comments_frame(sid, live_map=None):
 
     DELIVERY: this frame rides the full pusher cycle (_push's comment-threads loop) on its OWN per-sid ('comments', sid)
     slot; a page that connected before its listeners existed is re-served it by the ready reset (_client_reset_chat_base,
-    which clears that slot). The client joins it with the anchored turn to draw the mark (render.ts applyCommentMarks)."""
+    which clears that slot). The client joins it with the anchored turn to draw the mark (render.ts applyCommentMarks).
+    The pusher reads the store's write generation (_comments_gen) BEFORE calling this and sends the frame only while that
+    generation stands (_send_comments_frame), so a frame built before a create saved its row never follows that create's
+    answer onto the wire."""
     p = _comments_path(sid)
     if not p.exists():
         return None
@@ -19150,163 +19417,172 @@ def _comments_frame(sid, live_map=None):
     now = int(time.time())
     threads = []
     for th in _load_comments_cached(sid).get("threads") or []:
-        tsid = str(th.get("sid") or "")
-        status = th.get("status") or "open"
-        _comment_created_memo[tsid] = int(th.get("createdT") or 0)
-        if len(_comment_created_memo) > 512:
-            _comment_created_memo.clear()
-        # A promoted thread whose session was later ENDED is done, full stop (the user 2026-08-13,
-        # who found the highlight still claiming "now its own session" after closing that session):
-        # drop it from the frame entirely rather than point at a session that no longer runs. The
-        # client already unwraps any mark/badge for a tid absent from this list (applyCommentMarks),
-        # so omitting it here is the whole fix — no client-side special case needed. The row stays in
-        # the store (reviving the session from the Fleet would legitimately bring the thread back).
-        if status == "promoted" and not _thread_reg(tsid).get("alive"):
-            continue
-        state, err = "", ""
-        if be and status == "open":
-            try:
-                state = be.session_state(tsid)
-            except Exception:
-                state = ""
-            try:
-                le = be.launch_error(tsid) if hasattr(be, "launch_error") else None
-                err = str((le or {}).get("text") or "")[:300]   # a thread whose CLI can't start must
-                #                                                 say so, not pulse dots forever
-            except Exception:
-                err = ""
-        # the plain projection still computes UNREAD (cheap, mtime-cached); the DISPLAY is the
-        # chat's own events from the branch point on (the user 2026-08-17: same component, rail
-        # dots and all — tool folds, notice cards, markdown, exactly as the chat renders them)
-        msgs = [] if status == "promoted" else _thread_messages(
-            tsid, str(th.get("cutUuid") or ""), floor_t=(0 if th.get("cutUuid") else int(th.get("createdT") or 0)))
-        seen = int(th.get("lastSeenT") or 0)
-        # the backend's live echoes are read BEFORE the events projection is built (T237b A): build_session
-        # → _merge_live_atoms → prune_live retires echoes as their records land — reading after it could
-        # never see a send the prune had just retired against an EARLIER identical text
-        live = []
-        if be and status == "open" and hasattr(be, "live_atoms"):
-            try:
-                live = list(be.live_atoms(tsid) or [])
-            except Exception as e:
-                live = []
-                _thread_backend_shout(tsid, "live_atoms", e)
-        events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map)
-        reg = _thread_reg(tsid)
-        # the backend's queue (persisted for a dormant thread) is read BEFORE the turn read: a machine cut
-        # stays open only while something is still queued behind it or a process is on it (T237b C)
-        pending_n = 0
-        if be and status == "open" and hasattr(be, "pending_queued"):
-            try:
-                pending_n = len(be.pending_queued(tsid) or [])
-            except Exception as e:
-                pending_n = 0
-                _thread_backend_shout(tsid, "pending_queued", e)
-        turn_open, interrupted, turns = (_thread_turn_read(tsid, reg, state, pending_n) if status == "open"
-                                         else (False, False, []))
-        unread = (not turn_open) and _agent_landed_after(events, msgs, seen)
-        # sends the backend has taken but the transcript does not hold yet — owed, and in no projection.
-        # Two windows, one number: the backend's queue (a follow-up typed mid-turn waits there until the
-        # turn ends) and the fed-but-unwritten send (popped to the CLI, which writes its record at its next
-        # boundary). The backend's own INPUT ECHO atom spans both — it lives from the send until the record
-        # lands (prune_live) — so count echoes the way the chat's queued indicator does (build_session:
-        # not already in the transcript's user texts, not overtaken by a later human turn, never a slash
-        # command's echo, which is consumed without a reply) — the same fold, not a twin (round-3/4 review).
-        queued = pending_n
-        if be and status == "open":
-            if live:
-                # an echo has LANDED when a user record written at or after its own send carries its text —
-                # never any earlier record: a fork copies the parent's history, and "ok" / "go ahead" / a
-                # deliberate re-send repeat earlier texts, which read as "already in the transcript" and hid a
-                # send the CLI still held (round-5 review). A `dropped` echo (the backend adjudicated the send
-                # LOST — a reconnect with it in flight; the popover shows "never delivered") owes nothing.
-                user_atoms = _echo_landing_atoms(turns, live)          # (stamp, its texts) from the oldest echo's send up, built once
-                def _landed(e):
-                    keys = set(sb.echo_keys(e.get("_echo_text")))     # the plain key and, for a slash send, its words
-                    since = float(e.get("t") or 0)                     # the send's own stamp: the record the CLI writes for
-                    return any(t >= since and not keys.isdisjoint(texts) for t, texts in user_atoms)   # it is at or after it
-                floor = _human_turn_floor({"turns": turns}) if turns else 0
-                # `_landed` on the atom: the backend's boot/spawn scan read the landing off the transcript
-                # itself (sdk_backend._mark_dropped_echoes) — delivered, so nothing is held for it
-                held = [a for a in live if _echo_holdable(a) and not _landed(a) and not _echo_overtaken(a, floor)]
-                queued = max(queued, len(held))
-        # the newest record the projection shows (or the transcript holds): the client's "did the transcript
-        # move?" datum, independent of the 80-event / 40-message caps on the shipped projections
-        last_uuid = ((events[-1].get("uuid") if events else None)
-                     or next((a.get("uuid") for tr in reversed(turns) for a in reversed(tr.get("atoms") or []) if a.get("uuid")), None)
-                     or "")
-        owes_first = status == "open" and not msgs and _thread_owes_first_reply(tsid, reg, th, turns, state)
-        unreachable = status == "open" and not msgs and not owes_first and not reg.get("forkOf")
-        if unreachable and not err:
-            # the broken-thread verdict reaches the USER, not just the kernel log (T237b D): the popover's
-            # error note replaces the "opening the thread…" loader it would otherwise hold forever
-            err = ("This thread's conversation can't be found — its transcript is missing or the passage it was "
-                   "anchored to is gone. Start a new comment to continue.")
-        # owed: the turn is in progress, a send is held, the FRESH thread has no exchange yet, or the user's
-        # message is the newest — unless that newest "message" is the CLI's own interrupt record
-        # …and never when no process exists and nothing is queued: a dormant thread whose newest row is the
-        # user's (cut before any output) has no reply coming (scoped review)
-        reply_owed = status == "open" and (turn_open or queued > 0 or owes_first
-                                           or (bool(msgs) and msgs[-1]["who"] == "you" and not interrupted
-                                               and (state != "" or queued > 0)))
-        # (T102: the push-count settle — settledPushes — is RETIRED. The client's pulse is exchange-
-        # scoped now: latched at the send gesture, cleared by the reply RECORD arriving in msgs; the
-        # frame's msgs already carry that event, so no per-push counter rides here anymore.)
-        # sinceEpoch (MILLISECONDS, the client convention): when the thread's current state began —
-        # the popover's working chip counts from it, exactly as the chat's statusline does
-        since_ms = 0
-        if be and status == "open" and hasattr(be, "session_since"):
-            try:
-                since_ms = int(be.session_since(tsid)) * 1000
-            except Exception:
-                since_ms = 0
-        # mode + fast ride too (the user 2026-08-25): the popover's statusline shows the chat's FULL
-        # element set — Auto/mode and the fast badge included, fork the one documented exemption
-        meta = {}
-        if be and status == "open" and hasattr(be, "session_meta"):
-            try:
-                meta = be.session_meta(tsid) or {}
-            except Exception:
-                meta = {}
-        mail_why = _mail_off_why_k(tsid)
-        threads.append({"tid": th.get("tid"), "anchorUuid": th.get("anchorUuid"),
-                        "relayedT": th.get("relayedT") or 0,   # the persistent sent-back indicator's stamp (T145)
-                        "name": th.get("name") or "", "color": th.get("color") or "",
-                        "exact": str(th.get("exact") or "")[:500], "status": status,
-                        "createdT": th.get("createdT") or 0, "state": state, "error": err,
-                        "unread": unread, "replyOwed": reply_owed,   # yellow / green — see the docstring (T237)
-                        "queued": queued,                              # sends the backend holds or has fed, not yet in the transcript
-                        "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
-                        "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
-                        "promotedName": th.get("promotedName") or "",
-                        # what romp sent with the user's comment, verbatim (the popover's note, the user 2026-09-30): the
-                        # row's copy, or for a thread made before rows kept one, read back from its opening message
-                        **_thread_sent_fields(th, tsid, status),
-                        # the thread's mail state (T356): off by default until broken out. An open thread's popover does
-                        # not announce it (the user 2026-09-11; the tab hover and the Sessions pane carry the state) and
-                        # shows only how many messages wait in the box (they land within the bus's retry interval of a
-                        # break-out); the PROMOTED view says whether its mail is on, and why not when it is not, so the
-                        # reason rides beside the boolean (an unreadable record is no mailbox toggle's to clear)
-                        "mailOff": bool(mail_why),        # ONE derivation for both fields: a flags write between two reads could
-                        "mailOffWhy": mail_why,           # ship "on" beside "unreadable" (the review's low)
-                        "heldMail": _held_mail_count(tsid),
-                        "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
-                        "effort": (reg.get("effort") or "") if reg else "",
-                        "sinceEpoch": since_ms,
-                        "mode": str(meta.get("mode") or ""), "fast": str(meta.get("fast") or ""),
-                        "modelFallback": (meta.get("modelFallback") if meta.get("modelFallback") is not None
-                                          else (be.fallback_row_for_reg(reg) if (be is not None and reg and hasattr(be, "fallback_row_for_reg")) else None)),   # the popover picker's requested-model mark (2026-09-17)
-                        # the same rank tints the chat statusline's badges wear (the user 2026-08-25,
-                        # color rider: the popover's model/effort rendered plain gray — metaColor
-                        # reads these and the frame never carried them)
-                        "modelColor": _model_color((reg.get("liveModel") or reg.get("model") or "") if reg else "",
-                                                   cm.stops_for(_colormap())),
-                        "effortColor": _effort_color((reg.get("effort") or "") if reg else "",
-                                                     cm.stops_for(_colormap())),
-                        "modelTone": _model_tone((reg.get("liveModel") or reg.get("model") or "") if reg else ""),
-                        "effortTone": _effort_tone((reg.get("effort") or "") if reg else ""),
-                        "msgs": msgs, "events": events})
+        row = _comment_frame_entry(th, be, now, live_map)
+        if row is not None:
+            threads.append(row)
     return {"type": "comments", "id": sid, "threads": threads}
+
+
+def _comment_frame_entry(th, be, now, live_map=None):
+    """One thread row of the comments frame (_comments_frame's per-thread read, see its docstring for the two colour
+    bits), or None for a promoted thread whose session ended (dropped from the frame). The create's answer carries the
+    new thread's row built here (commentCreated `thread`), the same row the next frame lists."""
+    tsid = str(th.get("sid") or "")
+    status = th.get("status") or "open"
+    _comment_created_memo[tsid] = int(th.get("createdT") or 0)
+    if len(_comment_created_memo) > 512:
+        _comment_created_memo.clear()
+    # A promoted thread whose session was later ENDED is done, full stop (the user 2026-08-13,
+    # who found the highlight still claiming "now its own session" after closing that session):
+    # drop it from the frame entirely rather than point at a session that no longer runs. The
+    # client already unwraps any mark/badge for a tid absent from this list (applyCommentMarks),
+    # so omitting it here is the whole fix — no client-side special case needed. The row stays in
+    # the store (reviving the session would legitimately bring the thread back).
+    if status == "promoted" and not _thread_reg(tsid).get("alive"):
+        return None
+    state, err = "", ""
+    if be and status == "open":
+        try:
+            state = be.session_state(tsid)
+        except Exception:
+            state = ""
+        try:
+            le = be.launch_error(tsid) if hasattr(be, "launch_error") else None
+            err = str((le or {}).get("text") or "")[:300]   # a thread whose CLI can't start must
+            #                                                 say so, not pulse dots forever
+        except Exception:
+            err = ""
+    # the plain projection still computes UNREAD (cheap, mtime-cached); the DISPLAY is the
+    # chat's own events from the branch point on (the user 2026-08-17: same component, rail
+    # dots and all — tool folds, notice cards, markdown, exactly as the chat renders them)
+    msgs = [] if status == "promoted" else _thread_messages(
+        tsid, str(th.get("cutUuid") or ""), floor_t=(0 if th.get("cutUuid") else int(th.get("createdT") or 0)))
+    seen = int(th.get("lastSeenT") or 0)
+    # the backend's live echoes are read BEFORE the events projection is built (T237b A): build_session
+    # → _merge_live_atoms → prune_live retires echoes as their records land — reading after it could
+    # never see a send the prune had just retired against an EARLIER identical text
+    live = []
+    if be and status == "open" and hasattr(be, "live_atoms"):
+        try:
+            live = list(be.live_atoms(tsid) or [])
+        except Exception as e:
+            live = []
+            _thread_backend_shout(tsid, "live_atoms", e)
+    events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map)
+    reg = _thread_reg(tsid)
+    # the backend's queue (persisted for a dormant thread) is read BEFORE the turn read: a machine cut
+    # stays open only while something is still queued behind it or a process is on it (T237b C)
+    pending_n = 0
+    if be and status == "open" and hasattr(be, "pending_queued"):
+        try:
+            pending_n = len(be.pending_queued(tsid) or [])
+        except Exception as e:
+            pending_n = 0
+            _thread_backend_shout(tsid, "pending_queued", e)
+    turn_open, interrupted, turns = (_thread_turn_read(tsid, reg, state, pending_n, th=th) if status == "open"
+                                     else (False, False, []))
+    unread = (not turn_open) and _agent_landed_after(events, msgs, seen)
+    # sends the backend has taken but the transcript does not hold yet — owed, and in no projection.
+    # Two windows, one number: the backend's queue (a follow-up typed mid-turn waits there until the
+    # turn ends) and the fed-but-unwritten send (popped to the CLI, which writes its record at its next
+    # boundary). The backend's own INPUT ECHO atom spans both — it lives from the send until the record
+    # lands (prune_live) — so count echoes the way the chat's queued indicator does (build_session:
+    # not already in the transcript's user texts, not overtaken by a later human turn, never a slash
+    # command's echo, which is consumed without a reply) — the same fold, not a twin (round-3/4 review).
+    queued = pending_n
+    if be and status == "open":
+        if live:
+            # an echo has LANDED when a user record written at or after its own send carries its text —
+            # never any earlier record: a fork copies the parent's history, and "ok" / "go ahead" / a
+            # deliberate re-send repeat earlier texts, which read as "already in the transcript" and hid a
+            # send the CLI still held (round-5 review). A `dropped` echo (the backend adjudicated the send
+            # LOST — a reconnect with it in flight; the popover shows "never delivered") owes nothing.
+            user_atoms = _echo_landing_atoms(turns, live)          # (stamp, its texts) from the oldest echo's send up, built once
+            def _landed(e):
+                keys = set(sb.echo_keys(e.get("_echo_text")))     # the plain key and, for a slash send, its words
+                since = float(e.get("t") or 0)                     # the send's own stamp: the record the CLI writes for
+                return any(t >= since and not keys.isdisjoint(texts) for t, texts in user_atoms)   # it is at or after it
+            floor = _human_turn_floor({"turns": turns}) if turns else 0
+            # `_landed` on the atom: the backend's boot/spawn scan read the landing off the transcript
+            # itself (sdk_backend._mark_dropped_echoes) — delivered, so nothing is held for it
+            held = [a for a in live if _echo_holdable(a) and not _landed(a) and not _echo_overtaken(a, floor)]
+            queued = max(queued, len(held))
+    # the newest record the projection shows (or the transcript holds): the client's "did the transcript
+    # move?" datum, independent of the 80-event / 40-message caps on the shipped projections
+    last_uuid = ((events[-1].get("uuid") if events else None)
+                 or next((a.get("uuid") for tr in reversed(turns) for a in reversed(tr.get("atoms") or []) if a.get("uuid")), None)
+                 or "")
+    owes_first = status == "open" and not msgs and _thread_owes_first_reply(tsid, reg, th, turns, state)
+    unreachable = status == "open" and not msgs and not owes_first and not reg.get("forkOf")
+    if unreachable and not err:
+        # the broken-thread verdict reaches the USER, not just the kernel log (T237b D): the popover's
+        # error note replaces the "opening the thread…" loader it would otherwise hold forever
+        err = ("This thread's conversation can't be found — its transcript is missing or the passage it was "
+               "anchored to is gone. Start a new comment to continue.")
+    # owed: the turn is in progress, a send is held, the FRESH thread has no exchange yet, or the user's
+    # message is the newest — unless that newest "message" is the CLI's own interrupt record
+    # …and never when no process exists and nothing is queued: a dormant thread whose newest row is the
+    # user's (cut before any output) has no reply coming (scoped review)
+    reply_owed = status == "open" and (turn_open or queued > 0 or owes_first
+                                       or (bool(msgs) and msgs[-1]["who"] == "you" and not interrupted
+                                           and (state != "" or queued > 0)))
+    # (T102: the push-count settle — settledPushes — is RETIRED. The client's pulse is exchange-
+    # scoped now: latched at the send gesture, cleared by the reply RECORD arriving in msgs; the
+    # frame's msgs already carry that event, so no per-push counter rides here anymore.)
+    # sinceEpoch (MILLISECONDS, the client convention): when the thread's current state began —
+    # the popover's working chip counts from it, exactly as the chat's statusline does
+    since_ms = 0
+    if be and status == "open" and hasattr(be, "session_since"):
+        try:
+            since_ms = int(be.session_since(tsid)) * 1000
+        except Exception:
+            since_ms = 0
+    # mode + fast ride too (the user 2026-08-25): the popover's statusline shows the chat's FULL
+    # element set — Auto/mode and the fast badge included, fork the one documented exemption
+    meta = {}
+    if be and status == "open" and hasattr(be, "session_meta"):
+        try:
+            meta = be.session_meta(tsid) or {}
+        except Exception:
+            meta = {}
+    mail_why = _mail_off_why_k(tsid)
+    return {"tid": th.get("tid"), "anchorUuid": th.get("anchorUuid"),
+                    "relayedT": th.get("relayedT") or 0,   # the persistent sent-back indicator's stamp (T145)
+                    "name": th.get("name") or "", "color": th.get("color") or "",
+                    "exact": str(th.get("exact") or "")[:500], "status": status,
+                    "createdT": th.get("createdT") or 0, "state": state, "error": err,
+                    "unread": unread, "replyOwed": reply_owed,   # yellow / green — see the docstring (T237)
+                    "queued": queued,                              # sends the backend holds or has fed, not yet in the transcript
+                    "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
+                    "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
+                    "promotedName": th.get("promotedName") or "",
+                    # what romp sent with the user's comment, verbatim (the popover's note, the user 2026-09-30): the
+                    # row's copy, or for a thread made before rows kept one, read back from its opening message
+                    **_thread_sent_fields(th, tsid, status),
+                    # the thread's mail state (T356): off by default until broken out. An open thread's popover does
+                    # not announce it (the user 2026-09-11; the tab hover and the Sessions pane carry the state) and
+                    # shows only how many messages wait in the box (they land within the bus's retry interval of a
+                    # break-out); the PROMOTED view says whether its mail is on, and why not when it is not, so the
+                    # reason rides beside the boolean (an unreadable record is no mailbox toggle's to clear)
+                    "mailOff": bool(mail_why),        # ONE derivation for both fields: a flags write between two reads could
+                    "mailOffWhy": mail_why,           # ship "on" beside "unreadable" (the review's low)
+                    "heldMail": _held_mail_count(tsid),
+                    "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
+                    "effort": (reg.get("effort") or "") if reg else "",
+                    "sinceEpoch": since_ms,
+                    "mode": str(meta.get("mode") or ""), "fast": str(meta.get("fast") or ""),
+                    "modelFallback": (meta.get("modelFallback") if meta.get("modelFallback") is not None
+                                      else (be.fallback_row_for_reg(reg) if (be is not None and reg and hasattr(be, "fallback_row_for_reg")) else None)),   # the popover picker's requested-model mark (2026-09-17)
+                    # the same rank tints the chat statusline's badges wear (the user 2026-08-25,
+                    # color rider: the popover's model/effort rendered plain gray — metaColor
+                    # reads these and the frame never carried them)
+                    "modelColor": _model_color((reg.get("liveModel") or reg.get("model") or "") if reg else "",
+                                               cm.stops_for(_colormap())),
+                    "effortColor": _effort_color((reg.get("effort") or "") if reg else "",
+                                                 cm.stops_for(_colormap())),
+                    "modelTone": _model_tone((reg.get("liveModel") or reg.get("model") or "") if reg else ""),
+                    "effortTone": _effort_tone((reg.get("effort") or "") if reg else ""),
+                    "msgs": msgs, "events": events}
 
 
 def _comment_markers(sid):
@@ -19419,8 +19695,8 @@ def _release_create(key):
 
 def _retry_parked_creates():
     """One pusher cycle's pass over lag-parked comment creates: re-run each against the (now
-    possibly caught-up) transcript; success acks commentCreated + a fresh comments frame to every
-    chat client (the creating client's socket may be gone — the adopt keys on the uuid, and clients
+    possibly caught-up) transcript; success acks commentCreated, carrying the thread's row, to every
+    chat client (the creating client's socket may be gone — the adopt keys on the createId, and clients
     without a matching pending simply ignore it). Still lagging → keep, bounded; any OTHER error →
     drop (the client's own attempt cap surfaces the failure honestly)."""
     if not _parked_creates:
@@ -19450,17 +19726,110 @@ def _retry_parked_creates():
         finally:
             _release_create(key)
         if not err:
-            fr = _comments_frame(pk["sid"])
             with _clients_lock:
                 targets = [c for c in _clients if c.get("app") == "chat"]
-            for c in targets:
-                try:
-                    if fr:
-                        c["send"](json.dumps(fr))
-                    c["send"](json.dumps({"type": "commentCreated", "id": pk["sid"], "tid": tid,
-                                          "uuid": pk["uuid"], "createId": pk.get("createId") or ""}))
-                except Exception:
-                    pass
+            _answer_comment_created(targets, pk["sid"], tid, pk["uuid"], pk.get("createId") or "")
+
+
+_comments_send_lock = threading.RLock()   # a comments frame's check-and-send, and a create's answer: one at a time (2026-10-01)
+
+
+def _comment_create_spawn(target, args):
+    """Run a create's work (or a repeat's answer) on a thread of its own, off the socket thread that received it (the one
+    seam the door uses: a test that drives the door and reads its answers in order runs it inline)."""
+    threading.Thread(target=_stage_marked("comment.create")(target), args=args, name="comment-create", daemon=True).start()
+
+
+def _send_comments_frame(clients, sid, fr, gen):
+    """Send comments frame `fr`, built after store generation `gen` was read (_comments_gen), on each client's ('comments', sid)
+    slot, unless the store was written since: then the frame predates that write and is dropped, and the cycle the write
+    woke builds the next one. Under _comments_send_lock, which a create's answer takes as well, so every frame that reaches
+    a page after a create's answer was checked against a store holding the new row (the page drops a thread a frame does
+    not list). Returns whether it was sent."""
+    with _comments_send_lock:
+        if _comments_gen.get(sid, 0) != gen:
+            _push_soon()
+            return False
+        for c in clients:
+            _send_client(c, ("comments", sid), fr)
+    return True
+
+
+def _answer_comment_created(clients, sid, tid, anchor_uuid, create_id=""):
+    """A create's answer (commentCreated), sent the moment its thread row exists: the tid, the anchor, the createId it
+    answers, and `thread`, the new thread's row exactly as a comments frame lists it (_comment_frame_entry), so the page
+    adopts the thread without waiting for that frame (2026-10-01). The frame follows on the pusher's next cycle, as for any
+    change: building it on the create's road re-read every changed thread first (25 to 30 s on a session with ten threads)."""
+    row = _comment_thread(sid, tid)
+    entry = None
+    if row is not None:
+        try:
+            entry = _comment_frame_entry(row, _sdk(), int(time.time()))
+        except Exception:
+            sys.stderr.write("comment create (%s): the new thread's row could not be built for the answer; the next frame "
+                             "carries it\n%s" % (sid[:8], traceback.format_exc()))
+    ack = {"type": "commentCreated", "id": sid, "tid": tid, "uuid": anchor_uuid, "createId": create_id or ""}
+    if entry is not None:
+        ack["thread"] = entry
+    payload = json.dumps(ack)
+    with _comments_send_lock:
+        for c in clients:
+            try:
+                c["send"](payload)
+            except Exception:
+                pass
+    _push_soon()
+
+
+def _comment_create_job(sid, msg, key, client):
+    """The WS door's create, on a thread of its own (_drive hands it over with the identity `key` reserved): create, note,
+    release, then answer the creating page — the thread on success (_answer_comment_created), else the refusal, a lag
+    refusal parked for the pusher's retry exactly as before."""
+    cid = str(msg.get("createId") or "")
+    err = tid = None
+    try:
+        try:
+            err, tid = _comment_create(sid, str(msg["uuid"]), str(msg["exact"]), str(msg["text"]),
+                                       name=str(msg.get("name") or ""),
+                                       model=str(msg.get("model") or ""), effort=str(msg.get("effort") or ""),
+                                       fast=str(msg.get("fast") or ""),
+                                       color=str(msg.get("color") or ""))
+            if not err:
+                _note_create(key, tid)
+        finally:
+            _release_create(key)
+    except Exception as e:                       # the handler thread's own crash used to carry this; now it is said here
+        sys.stderr.write("comment create failed (%s): %s\n" % (sid[:8], traceback.format_exc()))
+        err, tid = "thread not created: %s" % e, None
+    if err:
+        # a TRANSIENT refusal (the live-streamed reply's file flush lagging) PARKS the create —
+        # the pusher retries it each cycle until the transcript catches up — and the typed nack
+        # keeps the client's optimistic mark alive; no toast for plumbing the retry makes moot.
+        # Every real refusal stays loud (fail loudly). Parked ONCE per create identity (T289): the
+        # client re-posts the same create on every frame while the nack stands.
+        try:
+            if err == ANCHOR_LAG_ERR:
+                with _create_lock:
+                    if not any(_parked_key(pk) == key for pk in _parked_creates):
+                        _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
+                                                "text": str(msg["text"]), "name": str(msg.get("name") or ""),
+                                                "model": str(msg.get("model") or ""),
+                                                "effort": str(msg.get("effort") or ""),
+                                                "fast": str(msg.get("fast") or ""),
+                                                "color": str(msg.get("color") or ""),
+                                                "createId": cid, "tries": 0})
+            else:
+                client["send"](json.dumps({"type": "warn", "text": err}))
+                # the kernel log carries the refusal too (T289): a name refused at this door showed only
+                # as a toast on the viewer, and the refusing kernel's log held no trace of what the user saw
+                sys.stderr.write("comment create refused (%s, name %r): %s\n" % (sid[:8], str(msg.get("name") or "")[:80], err))
+            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid,
+                                       "uuid": str(msg["uuid"]), "createId": cid, "transient": err == ANCHOR_LAG_ERR,
+                                       "text": err}))
+        except Exception:
+            pass                                 # a page gone meanwhile: nothing to tell it
+        return
+    _answer_comment_created([client], sid, tid, str(msg["uuid"]), cid)
 
 
 def _comment_default_model_effective():
@@ -21690,7 +22059,8 @@ def _drive(msg, client):
     elif t == "commentCreate" and msg.get("uuid") and msg.get("exact") and msg.get("text"):
         # Anchor a comment thread on a highlighted passage (the user 2026-08-13). LOUD on refusal; on
         # success a commentCreated ack names the new thread (the popover adopts exactly it — never a
-        # guess) and the fresh {type:"comments"} frame rides straight back, ahead of the pusher cycle.
+        # guess) and carries the thread's own frame row (_answer_comment_created), so the page holds the
+        # thread before the next {type:"comments"} frame, which the pusher builds and sends as for any change.
         # A REPEAT of a create this kernel already completed (a client re-post after a lost ack or a
         # parked copy that landed) is the same comment: answer with the same thread, never a twin (T289).
         # The repeat is known by the createId the popover minted at the send gesture, so a second comment
@@ -21703,11 +22073,7 @@ def _drive(msg, client):
         if state == "repeat":
             sys.stderr.write("comment create repeated (%s): the same comment again, answered with thread %s\n"
                              % (sid[:8], str(again)[:8]))   # a collapse is visible, never silent
-            fr = _comments_frame(sid)
-            if fr:
-                client["send"](json.dumps(fr))
-            client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": again, "uuid": str(msg["uuid"]),
-                                       "createId": cid}))
+            _comment_create_spawn(_answer_comment_created, ([client], sid, again, str(msg["uuid"]), cid))
             return True
         if state == "busy":
             # the other door holds this create (parked, or mid-create on the pusher): the typed transient
@@ -21715,49 +22081,10 @@ def _drive(msg, client):
             client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
                                        "createId": cid, "transient": True, "text": ANCHOR_LAG_ERR}))
             return True
-        try:
-            err, tid = _comment_create(sid, str(msg["uuid"]), str(msg["exact"]), str(msg["text"]),
-                                       name=str(msg.get("name") or ""),
-                                       model=str(msg.get("model") or ""), effort=str(msg.get("effort") or ""),
-                                       fast=str(msg.get("fast") or ""),
-                                       color=str(msg.get("color") or ""))
-            if not err:
-                _note_create(key, tid)
-        finally:
-            _release_create(key)
-        if err:
-            # a TRANSIENT refusal (the live-streamed reply's file flush lagging) PARKS the create —
-            # the pusher retries it each cycle until the transcript catches up — and the typed nack
-            # keeps the client's optimistic mark alive; no toast for plumbing the retry makes moot.
-            # Every real refusal stays loud (fail loudly). Parked ONCE per create identity (T289): the
-            # client re-posts the same create on every frame while the nack stands.
-            if err == ANCHOR_LAG_ERR:
-                with _create_lock:
-                    if not any(_parked_key(pk) == key for pk in _parked_creates):
-                        _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
-                                                "text": str(msg["text"]), "name": str(msg.get("name") or ""),
-                                                "model": str(msg.get("model") or ""),
-                                                "effort": str(msg.get("effort") or ""),
-                                                "fast": str(msg.get("fast") or ""),
-                                                "color": str(msg.get("color") or ""),
-                                                "createId": str(msg.get("createId") or ""), "tries": 0})
-            else:
-                client["send"](json.dumps({"type": "warn", "text": err}))
-                # the kernel log carries the refusal too (T289): a name refused at this door showed only
-                # as a toast on the viewer, and the refusing kernel's log held no trace of what the user saw
-                sys.stderr.write("comment create refused (%s, name %r): %s\n" % (sid[:8], str(msg.get("name") or "")[:80], err))
-            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid,
-                                       "uuid": str(msg["uuid"]), "createId": cid, "transient": err == ANCHOR_LAG_ERR,
-                                       "text": err}))
-        else:
-            # the FRAME rides ahead of the ack: the ack's handler adopts the new thread from the
-            # client's thread map, so the thread must be in it first (reversed, the popover looked
-            # up a thread it had never heard of and closed itself)
-            fr = _comments_frame(sid)
-            if fr:
-                client["send"](json.dumps(fr))
-            client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": tid,
-                                       "uuid": str(msg["uuid"]), "createId": cid}))
+        # the create runs OFF this socket's thread (2026-10-01): finding the cut, claiming the name and starting the fork
+        # took seconds on a large session, and this thread reads every other message the page sends meanwhile. The
+        # identity stays reserved until the job releases it, so a re-post in that window is answered busy, as before
+        _comment_create_spawn(_comment_create_job, (sid, dict(msg), key, client))
     elif t == "commentReply" and msg.get("tid") and msg.get("text"):
         err = _comment_reply(sid, str(msg["tid"]), str(msg["text"]))
         if err:
@@ -41633,7 +41960,8 @@ def _provisional_row(sid, name, light):
             "ledger": _provisional_ledger(sid), "provisional": True}
 
 
-def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None):
+def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None,
+                  thread_cut=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
     ChatEvent[], plus the TOC ledger (archiver headline + turn captions) and a status chip.
 
@@ -41657,7 +41985,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     live overlays) and returns {type: "chatPage", id, events, lo, hi, n}: the older history a proto-2 client
     asks for by uuid; a few turns past hi are stepped too, so a tool result or Skill payload that landed there
     fills the page's own card, and their own events are dropped. Equal, page by page, to the whole build's
-    slice (tests/test_chat_pages.py)."""
+    slice (tests/test_chat_pages.py).
+
+    thread_cut = (cut uuid, createdT floor) builds a comment THREAD's popover (_thread_events) over the thread's own
+    records alone (_thread_parse, 2026-10-01): its transcript opens with the parent history the fork copied in, which the
+    popover slices away after the build, and whose whole parse cost every thread its parent's size."""
     if live_map is None:
         live_map = _live_map()
     sess = next((s for s in _sessions(now) if s["sid"] == sid), None)
@@ -41707,7 +42039,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # parse's key is taken at its read, and the file only grows): the build holds each event in one store or the other.
     # Another builder's prune can no longer starve this one, whatever parse that builder read.
     _live_snap = None if path_override else be.live_atoms(sid)
-    parsed = _parse(sess["path"], sid, now)
+    parsed = _parse(sess["path"], sid, now) if thread_cut is None or path_override else \
+        _thread_parse(sid, sess["path"], thread_cut[0], thread_cut[1], now)   # a thread's popover: its own records alone
     tm0 = live_map.get(sid)
     compacting_now = (False if path_override else
                       _compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since")))
@@ -59505,14 +59838,14 @@ def _push(targets, connect=False, live_map=None):
             # per-sid dedup slot, never the chat delta baseline (the 2026-07-28 stranded-delta rule):
             # an unchanged frame costs nothing on the wire and the chatTail stream stays untouched.
             for s in (chat_list if chat_clients else []):
+                gen = _comments_gen.get(s["sid"], 0)   # BEFORE the build reads the store (_send_comments_frame)
                 try:
                     fr = _comments_frame(s["sid"], live_map)
                 except Exception:
                     sys.stderr.write("comments frame failed for %s: %s\n" % (s["sid"], traceback.format_exc()))
                     continue
                 if fr:
-                    for c in chat_clients:
-                        _send_client(c, ("comments", s["sid"]), fr)
+                    _send_comments_frame(chat_clients, s["sid"], fr, gen)   # dropped when the store moved meanwhile
             # THE GLOSSARY (T351 stage 2): one {type:"glossary"} frame per session whose group has a file, on its own
             # per-sid dedup slot like the comments frame: the file is stat'd here (the event), parsed once per mtime, and
             # an unchanged index costs nothing on the wire

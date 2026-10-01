@@ -1858,7 +1858,7 @@ class ReadersOverRestoredHydrateOnlyWhatTheyNeed(Harness):
             self.assertFalse(km._echo_holdable(bad), "%r" % bad)
         self.assertIn("_echo_holdable(", inspect.getsource(km._echo_floor))
         self.assertIn("_echo_floor(", inspect.getsource(km._echo_landing_atoms))
-        frame = inspect.getsource(km._comments_frame)
+        frame = inspect.getsource(km._comment_frame_entry)   # the frame's per-thread row
         self.assertIn("_echo_holdable(", frame)
         self.assertNotIn('not a.get("dropped") and not a.get("_landed")', frame, "the clauses live in the predicate alone")
 

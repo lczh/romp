@@ -90,7 +90,8 @@ class NameRefusalsAreLogged(unittest.TestCase):
         (jd.NAMES / PARENT).write_text("web\t%s\t\t\n" % cdir)   # the names row: the refusal names the parent by it
         self.be = FakeBackend()
         self._saved_fns = (km._sdk, km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for,
-                           km._push_session_now, km._live_map, km._kernel_knows)
+                           km._push_session_now, km._live_map, km._kernel_knows, km._comment_create_spawn)
+        km._comment_create_spawn = lambda target, args: target(*args)   # the door's create runs inline: its log line lands here
         km._sdk = lambda: None
         km._kernel_knows = lambda sid: sid == PARENT     # the dispatcher's ownership guard is not under test
         self._saved_km_names = km.NAMES
@@ -112,7 +113,7 @@ class NameRefusalsAreLogged(unittest.TestCase):
 
     def tearDown(self):
         (km._sdk, km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for,
-         km._push_session_now, km._live_map, km._kernel_knows) = self._saved_fns
+         km._push_session_now, km._live_map, km._kernel_knows, km._comment_create_spawn) = self._saved_fns
         km.NAMES = self._saved_km_names
         jd._rebind_state(self._saved)
         jd.PROJECTS = self._saved_proj

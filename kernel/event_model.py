@@ -2057,6 +2057,29 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     return ent
 
 
+_SERVED_RECORDS = threading.local()   # .by_path = {path: records} while a caller serves its own records (serve_records)
+
+
+class serve_records:
+    """`with serve_records({path: records}):` every fold_records over one of these paths ON THIS THREAD folds the given
+    records from a fresh state, touching no cursor, reader entry or checkpoint (2026-10-01). A comment thread's popover is
+    built over the thread's own records past its fork cut (the kernel's _thread_events), and every fold the chat build
+    makes of the transcript (the session meta, the background tasks) must read those, never the parent history the fork
+    copied in front of them: a whole read of 40 to 130 MB per new thread. Nested scopes stack."""
+
+    def __init__(self, by_path):
+        self.by_path = {str(k): list(v) for k, v in (by_path or {}).items()}
+
+    def __enter__(self):
+        self.prev = getattr(_SERVED_RECORDS, "by_path", None)
+        _SERVED_RECORDS.by_path = dict(self.prev or {}, **self.by_path)
+        return self
+
+    def __exit__(self, *exc):
+        _SERVED_RECORDS.by_path = self.prev
+        return False
+
+
 def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     """Fold a JSONL file's records into a carried state, APPEND-INCREMENTALLY (issue 903, 2026-09-03):
     the states/transcript readers re-read their whole file behind an (mtime,size) key that every append
@@ -2099,6 +2122,15 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
     key = str(path)
+    served = getattr(_SERVED_RECORDS, "by_path", None)
+    if served and key in served:                          # the caller's own records (serve_records): folded fresh, nothing kept
+        state = init()
+        for r in served[key]:
+            if isinstance(r, dict):
+                state = step(state, r)
+        if on is not None:
+            on("served")
+        return state
     with _READ_BYTES_LOCK:
         r0 = _READ_BYTES.get(key, 0)                      # what this call reads of the file shows under refolds (T377)
     if ckpt is None:
@@ -2717,7 +2749,11 @@ class FileAdapter:
     ancestors and drop out for free; `/clear` leaves no parent link so the walk
     stops there and pre-clear history drops out naturally."""
 
-    def __init__(self, candidate_files, leaf_path, leaf_override=None, resume_links=None, seed=None):
+    def __init__(self, candidate_files, leaf_path, leaf_override=None, resume_links=None, seed=None, records=None):
+        # records: {path: [record, ...]} for a file the CALLER read (a comment thread's own records past its fork cut,
+        # parse_session's tail_records): ingested as given, never through the reader's cache, so no reader entry is minted
+        # at an offset whose record count before it nobody counted. Its _src_keys row is ("private",): no fold gate or
+        # document writer ever sees an adapter built this way (parse_session returns before either)
         self.seed = seed         # the assembly checkpoint's pre-cut graph (T323 stage 4): uuids, verdicts, types, the kept
         #                          chain, the gate facts and the read-counter floor of every record before the cut, so the
         #                          walks and gates over the tail answer as the whole graph would; None for a whole read
@@ -2773,6 +2809,12 @@ class FileAdapter:
             self._last_ts = float(seed.get("last_ts") or 0)
         for fp in files:
             fsid = Path(fp).stem
+            if records is not None and str(fp) in records:
+                recs = list(records[str(fp)])
+                self._src[str(fp)] = recs
+                self._src_keys[str(fp)] = ("private",)
+                self._ingest(recs, fsid, fsid == leaf_stem)
+                continue
             cut = (seed or {}).get("cuts", {}).get(fsid)      # (offset, base, guard) for a file read from its cut, "skip" for
             if cut == "skip":                                   #  a file wholly before the cut (a fork's prior file, immutable)
                 self._src[str(fp)] = []
@@ -4827,6 +4869,254 @@ def _membership_of(adapter):
     return out
 
 
+# ═════════════════════ the display parse's graph, read in place (the comment cut) ═════════════════════
+# (2026-10-01.) A comment thread's cut is found on the parent's transcript graph: the anchor must exist and sit on the
+# active chain, a compaction between it and the leaf makes the thread a tip fork, and the cut is the nearest prose
+# record at or above it. That walk re-read the parent's whole stitched transcript at every create (1 to 3.6 s for a
+# 110 MB parent, on the page's own socket thread), while the chat's own parse already held the graph in its assembly
+# entry. with_display_graph hands the walk that entry, under its key lock, when it stands for the walk's inputs and has
+# folded everything its files hold now. A whole entry's maps are the graph the read would build; a RESTORED entry holds
+# the tail past its document's cut in full and the pre-cut part as the document's facts (each record's type, the active
+# spine root to cut) plus the atom rows' byte locations, so a pre-cut record is read back alone, by offset, only when
+# the walk needs its body. A fact the entry cannot give (a pre-cut record with no row to read it by, a walk leaving the
+# spine) raises GraphMiss, and the caller reads the transcript as before: never an answer from a guess.
+
+
+class GraphMiss(LookupError):
+    """A restored entry's pre-cut part cannot answer what the walk asked: read the transcript instead."""
+
+
+class TranscriptGraph:
+    """The read surface of a walk over one session's stitched transcript graph (the comment cut, kernel
+    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, and the leaf."""
+
+    def __init__(self, ad):
+        self._ad = ad
+        self.leaf = ad.leaf_uuid
+
+    def has(self, u):
+        return u in self._ad.by_uuid
+
+    def rec(self, u):
+        return self._ad.by_uuid.get(u)
+
+    def kind(self, u):
+        r = self._ad.by_uuid.get(u)
+        return (r.get("type"), r.get("subtype")) if r is not None else (None, None)
+
+    def parent(self, u):
+        return self._ad.parent_of.get(u)
+
+    def fsid(self, u):
+        return self._ad.fsid_of.get(u)
+
+
+def _read_record_at(path, at, uuid):
+    """The raw transcript record at `at` = (byte offset, byte length) in `path`, verified to be `uuid`'s; hydrate's own read
+    (one seek, one read, counted), served from the hydration memo when a reader already holds the record."""
+    with _ASM_CKPT_LOCK:
+        hit = _HYDRATED.get(uuid)
+    if hit is not None:
+        return hit[0]
+    off, ln = int(at[0]), int(at[1])
+    try:
+        with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
+            fh.seek(off)
+            raw = fh.read(ln)
+    except OSError as e:
+        raise GraphMiss("record %s: %s" % (uuid, e))
+    _count_read(path, len(raw))
+    try:
+        rec = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        rec = None
+    if not isinstance(rec, dict) or rec.get("uuid") != uuid:
+        raise GraphMiss("record %s: the line at its offset is another record" % uuid)
+    return rec
+
+
+def _precut_locations(entry, rompuuid):
+    """{uuid: [(at, fsid, path, kind, lazy header), ...]} for a restored entry's pre-cut atom rows that carry a record
+    location, built once per index (or per atoms-only prefix) and kept on it: what _SeededGraph reads a pre-cut record
+    back by. A turns-section entry's rows stay bytes in the LazyIndex; only the rows the walk asks for are decoded."""
+    index = entry.get("index")
+    if index is not None:
+        got = getattr(index, "_cut_rows", None)
+        if got is None:
+            got = {}
+            for pt in entry.get("preTurns") or []:
+                rows = getattr(pt.get("atoms"), "_rows", None) or []
+                for u, k in zip(pt.get("uuids") or [], rows):
+                    if u:
+                        got.setdefault(u, []).append(k)
+            index._cut_rows = got
+        return ("index", index, got)
+    prefix = entry.get("prefix") or []
+    got = entry.get("_cutPrefix")
+    if got is None:
+        got = {}
+        for a in prefix:
+            if isinstance(a, dict) and a.get("uuid"):
+                got.setdefault(a["uuid"], []).append(a)
+        entry["_cutPrefix"] = got
+    return ("prefix", rompuuid, got)
+
+
+class _SeededGraph(TranscriptGraph):
+    """TranscriptGraph over a RESTORED entry (its adapter seeded from the assembly document): the tail past the cut from the
+    adapter, the pre-cut part from the seed's facts (types, the active spine root to cut) and the atom rows' locations. A
+    pre-cut tool record (its row's lazy header lists tool calls or results) answers as a body-less record of its type, so a
+    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset."""
+
+    def __init__(self, entry, rompuuid):
+        super().__init__(entry["ad"])
+        seed = self._ad.seed
+        self._types = seed["types"]
+        sp = seed.get("_spineParent")
+        if sp is None:
+            spine = seed["spine"]
+            sp = seed["_spineParent"] = dict(zip(spine, [None] + list(spine[:-1])))
+        self._spine_parent = sp
+        self._locs = _precut_locations(entry, rompuuid)
+        self._recs = {}
+
+    def has(self, u):
+        return u in self._ad.by_uuid or u in self._types
+
+    def kind(self, u):
+        r = self._ad.by_uuid.get(u)
+        if r is not None:
+            return r.get("type"), r.get("subtype")
+        return self._types.get(u, (None, None))
+
+    def parent(self, u):
+        if u in self._ad.by_uuid:
+            return self._ad.parent_of.get(u)
+        if u in self._spine_parent:
+            return self._spine_parent[u]
+        if u in self._types:
+            raise GraphMiss("record %s is before the document's cut and off its active spine" % u)
+        return None
+
+    def _loc(self, u):
+        form, src, got = self._locs
+        for c in got.get(u) or ():
+            if form == "index":
+                try:
+                    row = src._row(c)
+                except LazyIndexError as e:
+                    raise GraphMiss(str(e))
+                if row.get("syn") or not row.get("at"):
+                    continue
+                sc, ri = row.get("s") or {}, row.get("r")
+                fsid = sc.get("fsid")
+                if fsid is None and ri is not None and 0 <= ri < len(src.records):
+                    k = src.records[ri][6]
+                    fsid = src.fsids[k] if 0 <= k < len(src.fsids) else None
+                path = (src.source_files or {}).get(fsid)
+                lz = row.get("lz") or {}
+            else:
+                lz = c.get("lazy") or {}
+                if not lz.get("at"):
+                    continue
+                fsid = c.get("fsid")
+                path = getattr(c.get("message"), "source_path", None)
+                if path is None or path is _UNBOUND_LAZY_SOURCE:
+                    path = (_LAZY_FILES.get(str(src)) or {}).get(fsid)
+            if path:
+                return {"at": tuple(lz.get("at") if form == "prefix" else row["at"]), "fsid": fsid, "path": path,
+                        "kind": lz.get("k"), "lz": lz}
+        return None
+
+    def fsid(self, u):
+        if u in self._ad.by_uuid:
+            return self._ad.fsid_of.get(u)
+        loc = self._loc(u)
+        if loc is None:
+            raise GraphMiss("record %s: no row names its file" % u)
+        return loc["fsid"]
+
+    def rec(self, u):
+        r = self._ad.by_uuid.get(u)
+        if r is not None or u not in self._types:
+            return r
+        if u in self._recs:
+            return self._recs[u]
+        t, sub = self._types[u]
+        if t not in ("user", "assistant"):
+            out = {"type": t, "subtype": sub, "uuid": u}        # a system or attachment record: its type is the walk's whole read
+        else:
+            loc = self._loc(u)
+            if loc is None:
+                raise GraphMiss("record %s: no row carries its location" % u)
+            if loc["kind"] in ("a", "u") and (loc["lz"].get("tu") or loc["lz"].get("tr")):
+                out = {"type": t, "uuid": u}                   # tool traffic: never a prose record, nothing to read
+            else:
+                out = _read_record_at(loc["path"], loc["at"], u)
+        self._recs[u] = out
+        return out
+
+
+def _files_witness(files):
+    """{path: (size, mtime_ns, inode)} for every file in `files`, None when one cannot be stat'd: the witness _assemble stamps on
+    the entry it leaves (entry["seen"], taken before its reads) and with_display_graph compares with the files now."""
+    out = {}
+    for f in files:
+        try:
+            st_ = os.stat(f)
+        except OSError:
+            return None
+        out[str(f)] = (st_.st_size, st_.st_mtime_ns, st_.st_ino)
+    return out
+
+
+def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, fn):
+    """Run fn(graph) over the display parse's own assembly entry for this leaf, under the entry's key lock (folds mutate the
+    adapter), when the entry stands for these inputs (the candidate set and resume links parse_session derives from them,
+    chain_membership's test) and has folded everything its files hold now: their stat equals the witness _assemble stamped
+    on the entry before it last read them (entry["seen"]). Stat alone, never the reader cache's generation: the reader drops
+    an idle file's records to save memory (the quiescence drop) while the entry keeps its graph, and a currency test keyed on
+    that generation read a parse that stood as stale, then read the file to find out (a 110 MB re-read per create in the lab,
+    2026-10-01). Returns (how, fn's value): how "whole" or "seeded" (a restored entry, _SeededGraph); ("none", None) when no
+    entry stands for the inputs, ("stale", None) when one stands but the files moved since it folded them (the caller
+    parses, then asks again). GraphMiss from the walk propagates."""
+    leaf_path = Path(leaf_path)
+    links = resume_fork_links(_load_states(states))
+    candidate_files = _lineage_closure(leaf_path, list(candidate_files), links)
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+
+    def walk(entry):
+        if entry is None or entry["cands"] != tuple(str(f) for f in candidate_files) or entry["links"] != dict(links or {}):
+            return "none", None
+        seen = entry.get("seen")
+        if seen is None or seen != _files_witness(candidate_files):
+            return "stale", None
+        if entry["ad"].seed is None:
+            return "whole", fn(TranscriptGraph(entry["ad"]))
+        return "seeded", fn(_SeededGraph(entry, rompuuid))
+
+    def cached():
+        with _ASM_LOCK:
+            return _ASM_CACHE.get(key)
+    lock = _asm_key_lock(key)
+    if not lock.acquire(blocking=False):
+        # held: when by a document write over this very entry (_DocWriterScope's mark), which reads the graph and changes
+        # none of it, walk beside the writer, and keep the answer only if its mark still stands after the walk (the writer
+        # held the lock throughout, so nothing folded meanwhile); any other holder (a fold, a parse) is waited out
+        entry = cached()
+        tok = entry.get("docWriter") if entry is not None else None
+        if tok is not None:
+            got = walk(entry)
+            if entry.get("docWriter") is tok:
+                return got
+        lock.acquire()
+    try:
+        return walk(cached())
+    finally:
+        lock.release()
+
+
+
 # ═════════════════════ assembly cache: fold appends, don't re-emit the world ═════════════════════
 # (2026-09-01.) _read_jsonl_incremental already amortizes bytes -> records; what still re-ran in full
 # on every append was everything ABOVE the records. Measured on the live corpus: the emit layer is
@@ -6368,6 +6658,33 @@ def _tree_key(tree):
     return (id(tree), len(turns), turns[-1].get("id") if turns else None)
 
 
+class _DocWriterScope:
+    """The settle's or the converge pass's document write over the leaf's OWN entry: the key lock for the write's whole
+    length, so no fold changes the entry while the writer reads it, and the entry marked `docWriter` meanwhile (set once the
+    lock is taken, cleared before it is released). The writer only reads the graph (its own flags aside), so a reader of the
+    graph that must not wait out a multi-second write (14 s at 110 MB in a lab: the comment cut, with_display_graph) reads
+    beside it while the mark it saw stands (2026-10-01)."""
+
+    def __init__(self, key):
+        self.key = key
+
+    def __enter__(self):
+        self.lock = _asm_key_lock(self.key)
+        self.lock.acquire()
+        with _ASM_LOCK:
+            self.entry = _ASM_CACHE.get(self.key)
+        self.tok = object()
+        if self.entry is not None:
+            self.entry["docWriter"] = self.tok
+        return self
+
+    def __exit__(self, *exc):
+        if self.entry is not None and self.entry.get("docWriter") is self.tok:
+            self.entry.pop("docWriter", None)
+        self.lock.release()
+        return False
+
+
 def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", from_entry=None):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a whole parse replaces the entry), no compaction boundary in
@@ -6386,8 +6703,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             reason_out.append(reason)
         return _asm_ckpt_skip(reason)
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
-    with (_asm_key_lock(key) if from_entry is None else _NO_LOCK):   # a private entry is nobody else's: the leaf's readers never
-        #                                                                wait on the refresh's write (they took the key lock for it)
+    with (_DocWriterScope(key) if from_entry is None else _NO_LOCK):   # a private entry is nobody else's: the leaf's readers never
+        #                                                                  wait on the refresh's write (they took the key lock for it)
         if from_entry is not None:
             entry = from_entry
         else:
@@ -7737,6 +8054,17 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
             cut_t = ad.ts_of.get(leaf_override)
         return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), cut_t, dict(getattr(ad, "skill_loads", None) or {}), []
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    seen = _files_witness(candidate_files)        # BEFORE any read: the entry this call leaves holds at least this content
+
+    def _stamped(served, ent=None):
+        """`served`, after stamping the entry this road leaves for the key with `seen` (with_display_graph's currency
+        test: the files have not moved since the entry folded them, whatever the reader cache dropped meanwhile)."""
+        if ent is None:
+            with _ASM_LOCK:
+                ent = _ASM_CACHE.get(key)
+        if ent is not None:
+            ent["seen"] = seen
+        return served
     try:
         with _asm_key_lock(key):
             with _ASM_LOCK:
@@ -7762,12 +8090,12 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     if not delta:
                         _asm_stat("serve")
                         _mode("serve")
-                        return _asm_serve(entry)
+                        return _stamped(_asm_serve(entry), entry)
                     served = _asm_fold(entry, delta, leaf_recs, str(leaf_path),
                                        Path(leaf_path).stem, rompuuid, postal_index)
                     if served is not None:
                         _mode("fold")
-                        return served
+                        return _stamped(served, entry)
                 with _ASM_LOCK:                   # gate/invariance demotion: the entry is stale
                     gone = _ASM_CACHE.pop(key, None)
                 _asm_release(gone)                # ...and its index's memo goes with it
@@ -7811,7 +8139,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                     if served is not None:
                         _asm_stat("restore"); _asm_stat("restore:afterDemote")
                         _mode("restore")
-                        return served
+                        return _stamped(served)
                     # a re-seat the restore did not serve is not tried again for the entry the whole parse builds, whatever the
                     # refusal (else every settle would write a document and every miss after it refuse it and parse whole); nor is
                     # any entry whose parse follows a refusal that left the document standing (the chain proof, a standing mark:
@@ -7822,7 +8150,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                 if served is not None:
                     _asm_stat("restore")
                     _mode("restore")
-                    return served
+                    return _stamped(served)
                 keep_whole = asm_document_stands(leaf_path)   # a boot's refusal that left the document standing: as above
             # A full parse names its road (T398): an entry the gates DEMOTED (the g:<reason> beside it: the leaf's record
             # entry replaced by a from-zero read, a lineage file moved), a leaf with NO document file, a document that
@@ -7840,8 +8168,8 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
                 why = "noDocument" if cp_ is None or not cp_.exists() else "refused"
             _asm_stat("full:" + why)
             _mode("full")
-            return _asm_full(key, leaf_path, candidate_files, links, rompuuid,
-                             postal_index, sdk_human, keep_whole=keep_whole)
+            return _stamped(_asm_full(key, leaf_path, candidate_files, links, rompuuid,
+                                      postal_index, sdk_human, keep_whole=keep_whole))
     except Exception as e:
         _asm_stat("fallback")
         _mode("fallback")
@@ -7861,7 +8189,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
 
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
                   candidate_files=None, states=None, postal_log=None, now=None, sdk_human=False,
-                  leaf_override=None, asm_mode_out=None, private_entry_out=None):
+                  leaf_override=None, asm_mode_out=None, private_entry_out=None, tail_records=None):
     """Build one session's Session -> Turn -> Atom tree from the on-disk transcript graph.
 
     leaf_path        the newest (leaf) transcript file; the walk's start pointer.
@@ -7881,6 +8209,11 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      never part of the returned tree.
     private_entry_out  a list, when given: a whole parse whose assembly entry is appended there and never
                      installed or offered to the writer here (_assemble's private road, the document refresh).
+    tail_records     a list, when given: the leaf's records from some point on, read by the caller, parsed ALONE
+                     (the "tail" road): no candidate file, lineage file or assembly entry is read, cached or written,
+                     and the walk ends where the tail's first record names a parent it does not hold. A comment
+                     thread's popover reads its own records past the fork cut this way (the kernel's
+                     _thread_tail_parse), never the parent's history the fork copied in front of them.
     """
     leaf_path = Path(leaf_path)
     if dir is None:
@@ -7898,13 +8231,24 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # the one states plumbing they already share; chain_membership shares the same helper. The
     # callers' cache keys — candidate files + the states file, whose mtime moves when a lineage
     # row lands — stay honest without knowing about these.
-    candidate_files = _lineage_closure(leaf_path, candidate_files, links)
-    # The assembly cache serves/folds/rebuilds as the gates decide — a streamed append folds only
-    # the new records through the shared emit code; everything else is a full parse. atoms/landed
-    # come back caller-owned (fresh top-level dicts), so the mutations below never reach the cache.
-    atoms, landed, cut_t, skill_loads, pre_turns = _assemble(leaf_path, candidate_files, links, rompuuid,
-                                                postal_index, sdk_human, leaf_override, mode_out=asm_mode_out,
-                                                private_out=private_entry_out)
+    if tail_records is not None:
+        # the tail road: the caller's records, one adapter, the whole parse's emit over them (FileAdapter.atoms), nothing
+        # installed anywhere. The pending cut is the live leaf's; a tail has none
+        ad = FileAdapter([str(leaf_path)], leaf_path, records={str(leaf_path): tail_records})
+        ad.sdk_human = sdk_human
+        atoms = ad.atoms(rompuuid, postal_index)
+        landed, cut_t, skill_loads, pre_turns = ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {}), []
+        _asm_stat("tail")
+        if asm_mode_out is not None:
+            asm_mode_out.append("tail")
+    else:
+        candidate_files = _lineage_closure(leaf_path, candidate_files, links)
+        # The assembly cache serves/folds/rebuilds as the gates decide — a streamed append folds only
+        # the new records through the shared emit code; everything else is a full parse. atoms/landed
+        # come back caller-owned (fresh top-level dicts), so the mutations below never reach the cache.
+        atoms, landed, cut_t, skill_loads, pre_turns = _assemble(leaf_path, candidate_files, links, rompuuid,
+                                                    postal_index, sdk_human, leaf_override, mode_out=asm_mode_out,
+                                                    private_out=private_entry_out)
     # a restored tree's pre-cut turns (T323 stage 4c) come whole from the document, their synthesized atoms included; the
     # tail alone is segmented and synthesized over below, and a span or a marker from before the tail's first atom is the
     # document's (or nothing: the whole parse put it in a pre-cut turn)
@@ -7960,7 +8304,7 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             "skillLoads": skill_loads}
     if cut_turn:
         out["cutTurn"] = cut_turn                   # a restored tree only (T323 stage 4b): where its lazy atoms ended
-    if private_entry_out is not None:
+    if private_entry_out is not None or tail_records is not None:
         return out                                  # a private parse read no document: a refusal flagged for the leaf is its own parse's
     _rk = os.path.realpath(str(leaf_path))
     with _ASM_CKPT_LOCK:

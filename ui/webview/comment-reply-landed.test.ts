@@ -25,7 +25,7 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kern
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("the kernel ships replyOwed beside unread, both from the thread's own turn-end", () => {
-  assert.match(KERNEL, /def _thread_turn_read\(tsid, reg, state, queued=0\):/, "the queue (persisted for a dormant thread) is read before the turn read (T237b C)");
+  assert.match(KERNEL, /def _thread_turn_read\(tsid, reg, state, queued=0, th=None\):/, "the queue (persisted for a dormant thread) is read before the turn read (T237b C); the row names the thread's own records (2026-10-01)");
   assert.match(KERNEL, /def _turn_landed\(turn, cut_t=0\.0\):/, "an interrupt at or before the backend's machineCut stamp is romp's cut, not the user's stop");
   assert.match(KERNEL, /def _turn_is_meta\(turn\):/, "compaction boundaries and command-only turns are not landings");
   assert.match(KERNEL, /if verdict in \("landed", "interrupted"\):\s*\n\s*return False, verdict == "interrupted", turns/, "the end_turn / interrupt record IS the landing");
@@ -36,7 +36,7 @@ test("the kernel ships replyOwed beside unread, both from the thread's own turn-
     "no process → an unlanded turn is dead unless a send is still queued (a resume in waiting) (T237b B)");
   assert.match(KERNEL, /print\("\[comments\] thread %s: transcript parse failed/, "a parse failure is shouted, never swallowed");
   assert.match(KERNEL, /def _agent_landed_after\(events, msgs, seen\):/);
-  assert.match(KERNEL, /turn_open, interrupted, turns = \(_thread_turn_read\(tsid, reg, state, pending_n\) if status == "open"\s*\n\s*else \(False, False, \[\]\)\)/);
+  assert.match(KERNEL, /turn_open, interrupted, turns = \(_thread_turn_read\(tsid, reg, state, pending_n, th=th\) if status == "open"\s*\n\s*else \(False, False, \[\]\)\)/);
   assert.match(KERNEL, /unread = \(not turn_open\) and _agent_landed_after\(events, msgs, seen\)/);
   assert.match(KERNEL, /owes_first = status == "open" and not msgs and _thread_owes_first_reply\(tsid, reg, th, turns, state\)/);
   assert.match(KERNEL, /or \(bool\(msgs\) and msgs\[-1\]\["who"\] == "you" and not interrupted\s*\n\s*and \(state != "" or queued > 0\)\)\)/,

@@ -21679,7 +21679,13 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       // the thread's boot view held the loader alone, so the words vanished for the fork's start, seconds at best
       if (!(commentPending.get(tid) || []).some((p) => p.text === held.text))
         commentPending.set(tid, [...(commentPending.get(tid) || []), { text: held.text, t: Date.now() / 1000 }]);
-      dropSynthThread(held.sid, held.createId);          // usually gone already: the frame ahead of this ack listed the thread
+      // the ack carries the new thread's row, the one the next comments frame lists (2026-10-01): the kernel answers
+      // the moment the row exists and leaves the frame to its pusher, so the row joins the list here, and the mark and
+      // the box take the real thread now instead of a gap until that frame
+      const row = (m as { thread?: CommentThread }).thread;
+      const have = commentThreads.get(String(m.id)) || [];
+      if (row && row.tid === tid && !have.some((t) => t.tid === tid)) commentThreads.set(String(m.id), [...have, row]);
+      dropSynthThread(held.sid, held.createId);
       if (pendingCommentAnchor?.sent?.createId === held.createId) {
         if ((commentThreads.get(String(m.id)) || []).some((t) => t.tid === tid)) adoptCommentThread(String(m.id), tid);
         else pendingAdopt = { tid, createId: held.createId };
