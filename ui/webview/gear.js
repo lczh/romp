@@ -222,8 +222,8 @@ var GEAR_HTML =
   "<div id=rs-chatscheme style='position:relative;margin-top:5px'></div>" +
   '</span></div>' +
   '<label class=rs-row><input type=checkbox id=rs-striprows checked>' +
-  '<span><b>One tag group per row in the tab strip</b>' +
-  '<span class=rs-sub>With the tabs grouped by tag, each group starts on its own row with its tag at the left edge. Off, the groups follow one another across the strip and wrap as they need, so many tags do not mean many rows.</span>' +
+  '<span><b>Keep tag groups together in the tab strip</b>' +
+  '<span class=rs-sub>With the tabs grouped by tag, groups share a row while they fit, and a group that does not fit moves to the next row whole instead of splitting across two. The untagged sessions keep a row of their own at the end. Off, the groups run on and wrap wherever a row fills, with the untagged sessions behind a thin divider.</span>' +
   '</span></label>' +
   // BOXES BELOW THE TRANSCRIPT (the user 2026-09-23, who looked for the switch and did not find it under Display): the Needs you box's
   // switch in a section of its own, named for where the box sits, so a scan of the section heads lands on it. plans/needs-you.md, phase

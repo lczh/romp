@@ -798,11 +798,11 @@ export function headWords(name: string, total: number, hidden: number, folded: b
 }
 
 /** One strip item: a section header (folded or open; `active` = it holds the active tab; `hidden` =
- *  the member ids a folded header stands in for — its members less the pinned ones, [] when open;
- *  `packed` = this folded header shares the row of the folded header right before it, see planStrip) or
+ *  the member ids a folded header stands in for — its members less the pinned ones, [] when open) or
  *  a tab. The same id may appear as a tab under several headers (T264b: a session under N tags has N
- *  copies); render.ts paints each copy as a full tab of the one session. */
-export type StripItem = { head: TabSection; folded: boolean; active: boolean; hidden: string[]; packed: boolean } | { id: string };
+ *  copies); render.ts paints each copy as a full tab of the one session. Which row a header sits on is
+ *  not the plan's: it depends on measured widths, so render.ts decides it after the paint (flowGroups). */
+export type StripItem = { head: TabSection; folded: boolean; active: boolean; hidden: string[] } | { id: string };
 export interface StripPlan {
   items: StripItem[];
   folded: Set<string>;   // the ids a folded header stands in for — keyboard cycling skips them
@@ -819,9 +819,10 @@ export interface StripPlan {
  *    on the reasoning that the picker is the phone's only switcher and a folded section would put its
  *    sessions out of reach; the user's ruling supersedes it, and the reach is kept another way: the
  *    picker's heading is now the fold control, one tap from the members, as the desktop header is. Every
- *    rule below holds on the phone as written (the pins, the active tab's stand-in), except `packed`,
- *    which is a strip layout and never set there: the picker lists each heading on a row of its own.
- *    render.ts adds the phone's one extra node for the folded-away active tab (phoneStandIns).
+ *    rule below holds on the phone as written (the pins, the active tab's stand-in); the rows the strip
+ *    packs its groups onto (flowGroups) are a strip layout and never apply there: the picker lists each
+ *    heading on a row of its own. render.ts adds the phone's one extra node for the folded-away active
+ *    tab (phoneStandIns).
  *  - `pending`: a provisional tab (a create in flight) with the tags the request named. It renders
  *    under every one of them from the first paint — the way the kernel's frame will place it — instead
  *    of landing in the untagged trail and jumping when the frame arrives.
@@ -839,15 +840,9 @@ export interface StripPlan {
  *    marked: the header that stands in for the tab. Nothing springs open (the active tab's section folds
  *    like any other, above). A tab joins the `folded` set only when EVERY copy is off the strip; one
  *    copy on screen keeps it in the keyboard order.
- *  - FOLDED NEIGHBOURS SHARE A ROW (the user 2026-09-16: a folded group is one small header, yet each
- *    took a whole row). Under the one-group-per-row layout every header opens a row, except a folded
- *    header whose item right before it in strip order is another folded header: that one is `packed`,
- *    and render.ts emits no row break ahead of it, so a run of bare folded headers reads as one row
- *    (wrapping like tabs when the run outgrows the strip). An open group keeps a row of its own, and so
- *    does the trail; a lone folded group between open ones has nothing to pack with and keeps its row.
- *    The item right before, not the section: a folded section with a member pinned through its fold
- *    ends in that member's tab, so the next folded header opens a row as it would after an open group.
- *    Never on the phone, whose picker lists every heading on its own row.
+ *  - The rows are not the plan's. Folded neighbours sharing a row (the user 2026-09-16) and open groups
+ *    sharing one with them (2026-10-01) both depend on how wide each group is, so render.ts flows the
+ *    painted groups onto rows from their measured widths (flowGroups, below).
  *
  *  WHAT TWO VIEWERS SHARE (measured 2026-09-23, after the user asked twice why their phone and their desktop
  *  disagree; tests/test_mobile_picker_order_browser.py prints the table). This function is the ONE ordered
@@ -868,7 +863,7 @@ export interface StripPlan {
  *      flat run in the arrangement's order, with no headings and no trail.
  *  So two viewers that are both grouped read alike: same sessions, same headings, same sequence, same folds. */
 export function planStrip(visibleIds: readonly string[], unions: readonly TagUnion[], st: TabGroupsState,
-                          activeId: string | null, phone: boolean,
+                          activeId: string | null, _phone: boolean,   // the plan is the same on both layouts since the rows left it (flowGroups)
                           pending?: { id: string; tags: readonly string[] } | null): StripPlan {
   let u = unions;
   if (pending && pending.tags.length && visibleIds.includes(pending.id)) {
@@ -897,17 +892,59 @@ export function planStrip(visibleIds: readonly string[], unions: readonly TagUni
     const active = activeId !== null && holders.includes(sec) && (shows(sec, activeId) || (!shownSomewhere && sec === holders[0]));
     const f = foldOf(sec);
     const hidden = f ? sec.ids.filter((id) => !isPinned(st, sec, id)) : [];
-    // packed: this header is folded and the item right before it is a folded header too (the trail's header
-    // is never folded, so a folded header never packs onto the trail, nor the trail onto anything)
-    const prev = items[items.length - 1];
-    const packed = !phone && f && prev !== undefined && "head" in prev && prev.folded;
-    items.push({ head: sec, folded: f, active, hidden, packed });
+    items.push({ head: sec, folded: f, active, hidden });
     for (const id of sec.ids) { if (hidden.includes(id)) folded.add(id); else items.push({ id }); }
   }
   // a session under several tags (T264b) has a copy in each: it is folded away — skipped by the
   // keyboard — only when EVERY copy is; one copy on screen keeps it in the order
   for (const it of items) if ("id" in it) folded.delete(it.id);
   return { items, folded, sectioned };
+}
+
+/** How a tag group joins the strip's flow from the item before it (flowGroups):
+ *  - `row`: it opens a new row, behind the zero-height row break render.ts puts ahead of its header;
+ *  - `gutter`: it stays on the row, behind a gutter (a short divider). Used whenever this group or the one
+ *    before it shows tabs, so the tabs that follow a header read as that header's up to the gutter;
+ *  - `flush`: it stays on the row with nothing between, a bare folded header after another, as two tabs sit
+ *    (the user 2026-09-16, whose folded groups each took a row: dozens of folded tags pack as tightly as tabs). */
+export type GroupJoin = "row" | "gutter" | "flush";
+
+/** Sub-pixel slack on the unit-fits test: the widths are fractional and the browser's line break works in its
+ *  own layout units, so a group that fits only to the last fraction of a pixel goes to the next row whole
+ *  instead of risking its last tab wrapping on its own. */
+const FLOW_SLACK = 1;
+
+/** THE STRIP'S ROWS (the user 2026-10-01: an open group always opened a row of its own, so two folded groups
+ *  and one open group of three tabs took three rows where one would hold them). The groups FLOW as units in
+ *  strip order, wrapping only when a row is full. A group's unit is its header and the tabs it shows: the
+ *  header alone when folded; the header, its tabs and their file tabs when open (or folded with members pinned
+ *  through the fold). A unit that fits the rest of the current row stays on it; one that does not opens the
+ *  next row whole, never leaving its header at the end of one row and its tabs on the next; one wider than a
+ *  whole row opens a row and wraps inside itself, as flex-wrap wraps tabs, and the next unit may then share
+ *  its last row. The untagged trail is not a unit: it keeps a row of its own after the groups (the drop target
+ *  that clears a session's tags), so render.ts stops at its boundary.
+ *
+ *  `units` are each unit's item widths in strip order (header first), as render.ts measures them; `rowW` the
+ *  strip's content width; `gapX` its column gap; `gutterW` the gutter's width. Returns one GroupJoin per unit;
+ *  the first is always `row` (it opens the strip). The simulation is flex-wrap's own rule: an item stays on a
+ *  line while the line's items, their gaps and it fit the width. Pure, so the packing executes in node tests. */
+export function flowGroups(units: readonly (readonly number[])[], rowW: number, gapX: number, gutterW: number): GroupJoin[] {
+  const out: GroupJoin[] = [];
+  let x = 0;   // the current row's fill: the right edge of its last item, 0 on an empty row
+  units.forEach((ws, i) => {
+    const w = ws.reduce((sum, v) => sum + v, 0) + gapX * Math.max(0, ws.length - 1);
+    const open = ws.length > 1 || (i > 0 && units[i - 1].length > 1);
+    const lead = open ? gutterW + gapX : 0;   // the gutter, and the gap after it
+    if (i > 0 && x > 0 && x + lead + gapX + w <= rowW - FLOW_SLACK) {
+      out.push(open ? "gutter" : "flush");
+      x += lead + gapX + w;
+      return;
+    }
+    out.push("row");
+    x = 0;
+    for (const v of ws) x = x > 0 && x + gapX + v <= rowW ? x + gapX + v : v;   // item by item: an over-wide unit wraps inside itself
+  });
+  return out;
 }
 
 /** A strip item as render.ts PAINTS it: the plan's, or on the phone the folded-away active tab's own node. */
