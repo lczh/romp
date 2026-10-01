@@ -6121,6 +6121,9 @@ def asm_index_stats():
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
+                   "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
+                   #                     entries its cap pushed out (2026-10-01): its gauge counts real bytes, so it no longer
+                   #                     equals hydratedBytes (line bytes read) while nothing is evicted; these two say it
                    "restoreMs": {"load": 0.0, "verify": 0.0, "index": 0.0, "seed": 0.0, "total": 0.0},   # the restore's parts since boot, ms
                    #                     (`total` is the whole of _asm_restore, entry to return, so the unnamed remainder, the tail's
                    #                     parse through the seeded adapter, is total minus the four named parts)
@@ -6171,17 +6174,26 @@ def _asm_doc_memo_put(key, mkey, doc):
                 break
             _asm_doc_memo_drop(k_)
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: fallback for legacy unbound descriptors; restored bodies own their source (2026-09-17)
-_HYDRATED = {}                     # uuid -> (the body fields a fill reads, their weight); dict order = LRU
+_HYDRATED = {}                     # uuid -> (the body fields a fill of any kind may read, their weight); dict order = LRU
 _HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
-_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 128), 1024 * 1024)
-#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 128, never under 256 MiB
-#                                    (944 MiB on a 118 GiB machine). It was max(1 GiB, MemTotal / 32) of LINE bytes over whole
-#                                    records, about 2.9 GiB decoded on a 31 GiB machine; the live kernel's memo held 66,752
-#                                    records after 8.8 hours (257 MiB of lines, an estimated 430 MiB as decoded body fields) and
-#                                    never evicted. 64 MB of line bytes (an estimated 110 to 180 MiB in these units) thrashed on
-#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358). A re-read past
-#                                    the cap shows in hydratedBytes and hydratedBy, which count disk reads only
-_HYDRATED_ENTRY_BYTES = sys.getsizeof((None, None)) + sys.getsizeof(1 << 20)   # an entry's own tuple and weight, beside its body
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 64), 1024 * 1024)
+#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 64, never under 256 MiB
+#                                    (about 496 MiB on a 31 GiB machine, 1.8 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
+#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
+#                                    kernel's memo held 66,752 records after 8.8 hours (257 MiB of lines, 4,042 bytes a line) and
+#                                    never evicted: an estimated 470 MiB as decoded body fields, a wide band, since the kept
+#                                    fields weigh 0.54 of their line for a Read result and up to 4.4 for a question's answers. So
+#                                    the cap sits just above that estimate, bounding the worst case while adding few re-reads at
+#                                    today's load: an LRU thrashes once the records read again and again outgrow it, and the
+#                                    size of that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here)
+#                                    thrashed on 2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
+#                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
+#                                    memo's serves and evictions
+_HYDRATED_ENTRY_BYTES = sys.getsizeof((None, None)) + sys.getsizeof(1 << 20) + sys.getsizeof("0" * 36) + 64
+#                                    an entry's own tuple and weight beside its body, its uuid key (the memo keeps it alive once
+#                                    the atom has gone), and its slot in the memo's table: a 16-byte entry and its index, 44 to 88
+#                                    bytes at the load CPython's growth rule allows, the deleted slots an LRU's moves leave included
 _LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
 
 
@@ -7884,11 +7896,13 @@ def _decoded_size(obj):
 
 def _hydrate_fields(rec, lz):
     """What the hydration memo keeps of a record read for a lazy atom, and what the atom is filled from (2026-10-01): the
-    fields _hydrate_one reads and nothing else, the record's own objects, never copies. The message; the top-level tool
-    result only when it is a dict the atom carries (lazy tur) or of a consumed shape (TUR_CONSUMED_KEYS, the emit's carry
-    rule), so every atom of the record finds it; an attachment's prompt alone. Left out: the record's metadata (ids, cwd,
-    version, branch, times) and a Read call's second copy of the file's text, which no atom carries. An attachment that is
-    not a dict is kept as it is, so the fill meets it as it did."""
+    fields a fill of any kind may read, the record's own objects, never copies. An entry serves every atom of its record,
+    whatever kind the atom's document gave it, so the choice never depends on this atom's kind: the message stays even for
+    a command atom, whose fill rebuilds it from the marker, and whole for a skill or a command's output, whose atom keeps
+    text derived from it. The top-level tool result only when it is a dict the atom carries (lazy tur) or of a consumed
+    shape (TUR_CONSUMED_KEYS, the emit's carry rule), so every atom of the record finds it; an attachment's prompt alone.
+    Left out: the record's metadata (ids, cwd, version, branch, times) and a Read call's second copy of the file's text,
+    which no atom carries. An attachment that is not a dict is kept as it is, so the fill meets it as it did."""
     out = {}
     if "message" in rec:
         out["message"] = rec["message"]
@@ -7993,6 +8007,7 @@ def hydrate(atoms, rompuuid=None, by=None):
             hit = _HYDRATED.get(u) if u else None
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
+                _ASM_CKPT_STATS["hydratedHits"] += 1
         if hit is not None:
             if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
                 _hydrate_one(a, hit[0])
@@ -8042,6 +8057,8 @@ def hydrate(atoms, rompuuid=None, by=None):
                 u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
+                    if hit is not None:
+                        _ASM_CKPT_STATS["hydratedHits"] += 1
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
@@ -8071,7 +8088,7 @@ def hydrate(atoms, rompuuid=None, by=None):
                         _HYDRATED[a["uuid"]] = (body, w); _HYDRATED_BYTES[0] += w
                         while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
                             _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
-                            _HYDRATED_BYTES[0] -= _old[1]
+                            _HYDRATED_BYTES[0] -= _old[1]; _ASM_CKPT_STATS["hydratedEvicted"] += 1
                 _hydrate_one(a, body); filled += 1
     return filled
 

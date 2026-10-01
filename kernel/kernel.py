@@ -244,7 +244,8 @@ def _heap_stats():
     asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the decoded size of the body
     fields the memo keeps, real bytes, what capBytes bounds (2026-10-01; it was the whole records' length on disk, which a
     decoded record can exceed several times or fall well short of); a body an atom also holds is counted there as well, the
-    memo and the atom sharing the one copy. builtChat.events counts
+    memo and the atom sharing the one copy, so while that atom lives an eviction frees less than the gauge drops
+    (asmCheckpoint.hydratedEvicted counts the evictions). builtChat.events counts
     the cached payloads' events, a count and not bytes, the occupancy measure of that cache; serializedBytes sums the cached
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.

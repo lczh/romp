@@ -2356,9 +2356,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
   lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
-  memory of the body fields kept, which `capBytes` bounds; the cap is a 128th
-  of physical memory, never under 256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it
-  outright),
+  memory of the body fields kept, which `capBytes` bounds; a body an atom
+  still holds counts there too, so while that atom lives an eviction frees
+  less than `bytes` drops; the cap is a 64th of physical memory, never under
+  256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it outright),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
   lazy indexes alive, a weak count), `materializedLruSlots` (the
@@ -2880,7 +2881,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   place at equal length plus an append passes the 64-byte guard, like a
   same-size same-mtime rewrite),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
-  a cut), `hydratedBy` (those bytes per calling function), `restoreMs`, the
+  a cut), `hydratedBy` (those bytes per calling function), `hydratedHits` and
+  `hydratedEvicted` (fills the hydrated-body memo served without a read, and
+  the entries its cap pushed out), `restoreMs`, the
   restore's parts since boot in milliseconds to three decimals, each added on the
   return it names (`load`: the document read, decompressed, decoded and its
   file checks; `verify`: the turns section's identity and coverage, or the
