@@ -4913,11 +4913,8 @@ class TranscriptGraph:
 
 def _read_record_at(path, at, uuid):
     """The raw transcript record at `at` = (byte offset, byte length) in `path`, verified to be `uuid`'s; hydrate's own read
-    (one seek, one read, counted), served from the hydration memo when a reader already holds the record."""
-    with _ASM_CKPT_LOCK:
-        hit = _HYDRATED.get(uuid)
-    if hit is not None:
-        return hit[0]
+    (one seek, one read, counted). Never the hydration memo: it keeps a record's body fields alone (2026-10-01), and the cut
+    walk decides on the record's type, time and provenance."""
     off, ln = int(at[0]), int(at[1])
     try:
         with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
@@ -6174,12 +6171,17 @@ def _asm_doc_memo_put(key, mkey, doc):
                 break
             _asm_doc_memo_drop(k_)
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: fallback for legacy unbound descriptors; restored bodies own their source (2026-09-17)
-_HYDRATED = {}                     # uuid -> the body fields read; dict order = LRU
-_HYDRATED_BYTES = [0]
-_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)
-#                                    the hydrated-body memo's byte cap: MemTotal / 32, never under 1 GiB (3.7 GiB on a 118 GiB
-#                                    machine; 64 MB hydrated 3.1 GB of bodies in 150 s on 2026-09-11) (a judge pass re-reading one large body every cycle
-#                                    shows in hydratedBytes; the memo keeps the common case at one read)
+_HYDRATED = {}                     # uuid -> (the body fields a fill reads, their weight); dict order = LRU
+_HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 128), 1024 * 1024)
+#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 128, never under 256 MiB
+#                                    (944 MiB on a 118 GiB machine). It was max(1 GiB, MemTotal / 32) of LINE bytes over whole
+#                                    records, about 2.9 GiB decoded on a 31 GiB machine; the live kernel's memo held 66,752
+#                                    records after 8.8 hours (257 MiB of lines, an estimated 430 MiB as decoded body fields) and
+#                                    never evicted. 64 MB of line bytes (an estimated 110 to 180 MiB in these units) thrashed on
+#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358). A re-read past
+#                                    the cap shows in hydratedBytes and hydratedBy, which count disk reads only
+_HYDRATED_ENTRY_BYTES = sys.getsizeof((None, None)) + sys.getsizeof(1 << 20)   # an entry's own tuple and weight, beside its body
 _LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
 
 
@@ -7853,6 +7855,55 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     return _asm_serve(entry)
 
 
+def _decoded_size(obj):
+    """The bytes a decoded JSON value occupies in this process: sys.getsizeof over every container and scalar reachable from
+    it, each object once (the decoder shares one key string across a record's dicts). None, True, False, the small ints and
+    the empty and one-character Latin-1 strings are the interpreter's shared singletons and weigh nothing here. The hydration
+    memo's weight (2026-10-01): a record's line on disk is no measure of it, since decoded text takes one to four bytes a
+    character against one to twelve on disk, and every small block costs a dict."""
+    seen, todo, n = set(), [obj], 0
+    while todo:
+        o = todo.pop()
+        if o is None or o is True or o is False:
+            continue
+        t = type(o)
+        if (t is int and -5 <= o <= 256) or (t is str and len(o) < 2 and (not o or ord(o) < 256)):
+            continue
+        i = id(o)
+        if i in seen:
+            continue
+        seen.add(i)
+        n += sys.getsizeof(o)
+        if t is dict:
+            todo.extend(o.keys())
+            todo.extend(o.values())
+        elif t is list or t is tuple:
+            todo.extend(o)
+    return n
+
+
+def _hydrate_fields(rec, lz):
+    """What the hydration memo keeps of a record read for a lazy atom, and what the atom is filled from (2026-10-01): the
+    fields _hydrate_one reads and nothing else, the record's own objects, never copies. The message; the top-level tool
+    result only when it is a dict the atom carries (lazy tur) or of a consumed shape (TUR_CONSUMED_KEYS, the emit's carry
+    rule), so every atom of the record finds it; an attachment's prompt alone. Left out: the record's metadata (ids, cwd,
+    version, branch, times) and a Read call's second copy of the file's text, which no atom carries. An attachment that is
+    not a dict is kept as it is, so the fill meets it as it did."""
+    out = {}
+    if "message" in rec:
+        out["message"] = rec["message"]
+    tur = rec.get("toolUseResult")
+    if isinstance(tur, dict) and ((lz or {}).get("tur") or not TUR_CONSUMED_KEYS.isdisjoint(tur)):
+        out["toolUseResult"] = tur
+    att = rec.get("attachment")
+    if isinstance(att, dict):
+        if "prompt" in att:
+            out["attachment"] = {"prompt": att["prompt"]}
+    elif att:
+        out["attachment"] = att
+    return out
+
+
 def _hydrate_one(a, rec):
     """Fill a lazy atom's body fields from its record, the way the emit built them. An atom another thread finished
     meanwhile (its marker gone) is left as it is (review find C)."""
@@ -8004,6 +8055,8 @@ def hydrate(atoms, rompuuid=None, by=None):
                 rec = json.loads(raw.decode("utf-8", "replace"))
                 if rec.get("uuid") != a.get("uuid"):
                     raise LazyBodyRead("atom %s: the record at its offset is %s" % (a.get("uuid"), rec.get("uuid")))
+                body = _hydrate_fields(rec, lz)           # the memo's entry and this fill's source alike: a hit then fills
+                w = _decoded_size(body) + _HYDRATED_ENTRY_BYTES if u else 0   # exactly as a miss does; weighed outside the lock
                 with _ASM_CKPT_LOCK:
                     _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
                     _THREAD_BYTES.hydrated = getattr(_THREAD_BYTES, "hydrated", 0) + ln   # this thread's share (T397)
@@ -8012,11 +8065,14 @@ def hydrate(atoms, rompuuid=None, by=None):
                     hk = "%s:%s" % (_read_stage() or "none", by)
                     hbs[hk] = hbs.get(hk, 0) + ln
                     if a.get("uuid"):
-                        _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
+                        _old = _HYDRATED.pop(a["uuid"], None)     # a peer that missed it too put it first: its weight leaves
+                        if _old is not None:                      #  with it, and the entry goes to the young end
+                            _HYDRATED_BYTES[0] -= _old[1]
+                        _HYDRATED[a["uuid"]] = (body, w); _HYDRATED_BYTES[0] += w
                         while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
                             _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
                             _HYDRATED_BYTES[0] -= _old[1]
-                _hydrate_one(a, rec); filled += 1
+                _hydrate_one(a, body); filled += 1
     return filled
 
 

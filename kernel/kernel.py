@@ -241,10 +241,10 @@ def _heap_stats():
     stats), so there is no lock order with the perf lock to get wrong. materializedLruSlots counts the LRU's SLOTS: a kernel
     whose LRU holds its atom lists weakly keeps a collected list's slots until they expire, so the number is an upper bound on
     the live materialized atoms; where the LRU holds the lists strongly the two are equal; it is the same read
-    asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the records' length on disk,
-    what capBytes bounds: a proxy for the memo's share that locates the holder without sizing it (decoded bodies usually
-    weigh more, but escaped text can make disk bytes exceed the decoded storage: a record of 10,000 escaped non-ASCII
-    characters is 60 KB on disk and 21 KB decoded, measured). builtChat.events counts
+    asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the decoded size of the body
+    fields the memo keeps, real bytes, what capBytes bounds (2026-10-01; it was the whole records' length on disk, which a
+    decoded record can exceed several times or fall well short of); a body an atom also holds is counted there as well, the
+    memo and the atom sharing the one copy. builtChat.events counts
     the cached payloads' events, a count and not bytes, the occupancy measure of that cache; serializedBytes sums the cached
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.

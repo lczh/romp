@@ -2355,10 +2355,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `thresholds` as lists, and `stats` (per generation: `collections`,
   `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
-  lazy bodies read on demand: `entries`, and `bytes`, the records' length on
-  disk, which `capBytes` bounds, a proxy that locates the holder without
-  sizing it: decoded bodies usually weigh more, but escaped text can make the
-  disk bytes exceed the decoded storage),
+  lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
+  memory of the body fields kept, which `capBytes` bounds; the cap is a 128th
+  of physical memory, never under 256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it
+  outright),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
   lazy indexes alive, a weak count), `materializedLruSlots` (the
