@@ -631,6 +631,37 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         self.assertEqual(mode, "fold", "the restored entry folds the appended turn: %s" % self.moved(s0, self.stats()))
         self.assertColdEqual(out)
 
+    def test_a_whole_entry_at_the_same_generation_floors_the_trim(self):
+        """A whole entry that wrote its document does not hold the drop back (its next visit restores anyway), but it reads the
+        records from zero: a restored entry beside it at the same generation keeps the reader's entry, untrimmed, so no whole
+        entry is left folding over a tail and nothing is trimmed that an adapter still holds."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.fresh()
+        _, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        gen, base, _count = self.entry()["recs"][self.leaf]
+        self.assertGreater(base, 0)
+        em._read_jsonl_entry(self.leaf, tail_ok=False)               # a whole reader upgrades the entry at the same generation
+        saved = em._CKPT_DIR_FN
+        em._CKPT_DIR_FN = None                                        # another session's whole parse over the upgraded entry
+        try:
+            em.parse_session(self.leaf, rompuuid=PEER, name="api", dir="/w/notes-api", candidate_files=[self.leaf], states=None,
+                             postal_log=[], now=NOW)
+        finally:
+            em._CKPT_DIR_FN = saved
+        with em._ASM_LOCK:
+            peer = em._ASM_CACHE[(os.path.realpath(self.leaf), PEER, False)]
+        self.assertEqual(peer["recs"][self.leaf][:2], (gen, 0), "the whole entry read the same generation from record zero")
+        peer["docWritten"] = True                                     # as the settle's write from it marks it
+        k0 = em.record_cache_stats()["pinnedKept"]
+        _quiet_drop(self.leaf)
+        ent = _reader_entry(self.leaf)
+        self.assertIsNotNone(ent, "the restored entry still folds over it: kept")
+        self.assertEqual((ent[6], ent[5]), (gen, 0), "and whole: the whole entry beside it reads from record zero")
+        self.assertEqual(em.record_cache_stats()["pinnedKept"] - k0, 1)
+
     def test_a_quiet_drop_of_a_file_no_assembly_entry_folds_over_still_drops_it(self):
         other = self.td / "frozen.jsonl"
         other.write_text("".join(json.dumps(r) + "\n" for r in _chat("fz", NOW - 7200, 3)))

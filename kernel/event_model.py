@@ -1306,26 +1306,25 @@ def _pop_owed_entry(key):
 
 
 def _asm_pinned_base(key, gen):
-    """The lowest record number an assembly entry that keeps folding needs of `key` at the reader's generation `gen` (its
-    recs row, the (gen, base, count) the fold's gate compares), or None when there is none. Two entries over that generation
-    do not count, since a drop sends their next visit to the restore road, which reads the tail from the document's cut: a
-    whole entry that wrote its own document (the settle's or the converge pass's write; one marked for re-seat restores at
-    its next visit anyway, and kept whole the reader entry would serve that restore as it stands, every record with it),
-    and a restored entry that read over a whole entry (base 0). Takes _ASM_LOCK for the snapshot alone, never under the
-    reader's lock."""
+    """(pinned, low) for `key`'s reader entry at generation `gen`: whether an assembly entry that keeps folding over that
+    generation needs it, and the lowest record number ANY assembly entry at that generation read from (its recs row, the
+    (gen, base, count) the fold's gate compares; None when there is none). Two entries over the generation do not pin it,
+    since a drop sends their next visit to the restore road, which reads the tail from the document's cut: a whole entry that
+    wrote its own document (the settle's or the converge pass's write; one marked for re-seat restores at its next visit
+    anyway), and a restored entry that read over a whole entry (base 0). They still floor `low`: their adapters hold the
+    records from there, so a trim above it would free nothing and would leave a whole entry folding over a tail. Takes
+    _ASM_LOCK for the snapshot alone, never under the reader's lock."""
     with _ASM_LOCK:
         entries = list(_ASM_CACHE.values())
-    low = None
+    pinned, low = False, None
     for e in entries:
-        if not e or e.get("docWritten"):
-            continue
-        row = (e.get("recs") or {}).get(key)
+        row = (e.get("recs") or {}).get(key) if e else None
         if row is None or len(row) != 3 or row[0] != gen:
             continue
-        if row[1] == 0 and getattr(e.get("ad"), "seed", None) is not None:
-            continue
         low = row[1] if low is None else min(low, row[1])
-    return low
+        if not e.get("docWritten") and not (row[1] == 0 and getattr(e.get("ad"), "seed", None) is not None):
+            pinned = True
+    return pinned, low
 
 
 def _drop_or_reseat(key, ent):
@@ -1334,15 +1333,16 @@ def _drop_or_reseat(key, ent):
     adapter holds the same records, so the drop freed nothing, made recordCache.bytes fall while the memory stayed, and
     retired the generation: the assembly entry's next visit demoted (g:rewrite, g:nonleaf) to a restore, or to a whole parse
     when no document stood, and a whole reader in between decoded a second copy. The entry is kept instead, from the lowest
-    record such an assembly entry read from, at the same generation and in its place in the LRU: under a whole assembly
-    entry all of it, so nothing changes; under restored ones the tail from their cut, which lets go of the records before
-    the cut a whole reader's upgrade decoded (the gate's base test still passes; a fold whose cursor sits before the cut
-    reads the file whole once, at the same generation). Returns ("dropped" | "kept" | None, the bytes let go)."""
-    low = _asm_pinned_base(key, ent[6])
+    record an assembly entry at its generation read from (_asm_pinned_base), at the same generation and in its place in the
+    LRU: under a whole assembly entry all of it, so nothing changes; under restored ones alone the tail from their cut, which
+    lets go of the records before the cut a whole reader's upgrade decoded (the gate's base test still passes; a fold whose
+    cursor sits before the cut reads the file whole once, at the same generation). Returns ("dropped" | "kept" | None, the
+    bytes let go)."""
+    pinned, low = _asm_pinned_base(key, ent[6])
     with _JSONL_CACHE_LOCK:
         if _JSONL_CACHE.get(key) is not ent:
             return None, 0
-        if low is None:
+        if not pinned:
             w = _cache_pop_locked(key)
             _RECORD_CACHE_STATS["dropped"] += 1
             _RECORD_CACHE_STATS["droppedBytes"] += w
