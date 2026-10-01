@@ -5646,7 +5646,7 @@ class LiveSubagentsRetire(unittest.TestCase):
         self._start(s, "a1"); self._start(s, "a2")
         s._on_task_event("task_progress", {"task_id": "w1", "workflow_progress": [self._wf(1, "a1", "start")]})
         self.assertEqual(s.snapshot()["state"], "working")
-        s._drop_live_work("reconnect")
+        s._drop_live_work("reconnect", cut_by="restart")   # the gesture that asked for the relaunch (a Restart here)
         self.assertEqual(s._subagents, {})
         self.assertEqual(s._wf_agents, {})
         self.assertEqual(s._wf_slots, {})
@@ -5656,12 +5656,13 @@ class LiveSubagentsRetire(unittest.TestCase):
         notes = [q for q in s.pending() if "background task" in q]
         self.assertEqual(len(notes), 1, "the session is told what it lost: %r" % s.pending())
         self.assertEqual(notes[0], sb.task_death_notice([{"desc": "review sweep"}, {"desc": "watch the build"}],
-                                                        cause=sb.SdkSession._RECONNECT_CAUSE),
-                         "the very copy the session reads, with the cause named truthfully")
-        self.assertIn("settings switch", notes[0])
-        self.assertNotIn("crash", notes[0], "a reconnect is neither a crash nor an unexplained restart")
+                                                        did=sb.CUT_BY["restart"]),
+                         "the very copy the session reads, opening on what the person did (2026-10-01)")
+        self.assertIn("I restarted Claude Code, which cut off 2 background tasks", notes[0])
+        self.assertNotIn("crash", notes[0], "a relaunch somebody asked for is neither a crash nor an unexplained restart")
+        self.assertNotIn("settings switch", notes[0], "a settings pick alone no longer cuts anything (#67)")
         self.assertEqual(sb.read_reg(s.backend.state_dir, self.SID).get("bgTasks"), [], "mirror cleared: reported once")
-        self.assertTrue(any("dropped 2 subagents and 2 background tasks on reconnect" in str(m) for m in self.logs), self.logs)
+        self.assertTrue(any("dropped 2 subagents and 2 background tasks on reconnect (restart)" in str(m) for m in self.logs), self.logs)
         self.logs.clear()
         s._drop_live_work("reconnect")
         self.assertFalse(self.logs, "an empty set drops silently — the first connect is not an event worth a line")
@@ -5677,7 +5678,7 @@ class LiveSubagentsRetire(unittest.TestCase):
     def test_g_the_reconnect_loop_top_calls_the_drop_before_reconciling(self):
         """Pin the wiring: the drop runs at the loop top, before _reconcile_stranded, every iteration."""
         src = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()
-        i = src.index('self._drop_live_work("reconnect")')
+        i = src.index('self._drop_live_work("reconnect", cut_by=cut_by)')   # with the gesture that asked for it (2026-10-01)
         j = src.index("self._reconcile_stranded()")
         self.assertLess(i, j, "the drop precedes the stranded-turn reconcile at the loop top")
         k = src.rfind("while not self.ended:", 0, i)
