@@ -32,7 +32,7 @@ const extension = {
 // after a /media request of its own (the user 2026-10-01). The same rule as the kernel's _svg_data_uri, which
 // carries the page-served copy: whitespace runs folded to one space, then the characters a CSS url("...")
 // string or a URI cannot hold raw percent-encoded. Each side's test pins that its URI decodes to the media file
-// (ui/webview/media-base.test.ts here, tests/test_wordmark_first_paint.py for the kernel's).
+// (ui/webview/media-base.test.ts here, tests/test_wordmark_first_paint_served.py for the kernel's).
 function svgDataUri(file) {
   let svg = fs.readFileSync(path.join(__dirname, "media", file), "utf8");
   svg = svg.replace(/>\s+</g, "><").replace(/\s+/g, " ").trim();

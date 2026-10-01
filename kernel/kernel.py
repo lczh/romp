@@ -65808,7 +65808,7 @@ sync();})();
 def _svg_data_uri(path):
     """A media SVG as a `data:image/svg+xml,` URI, the same bytes /media serves with runs of whitespace folded to
     one space and the characters a CSS url("...") string or a URI cannot carry raw percent-encoded. esbuild.js
-    builds the webview bundles' copy (__ROMP_SWIRL_O__) by the same rule; tests/test_wordmark_first_paint.py and
+    builds the webview bundles' copy (__ROMP_SWIRL_O__) by the same rule; tests/test_wordmark_first_paint_served.py and
     ui/webview/media-base.test.ts pin that each decodes to the media file. An unreadable file falls back to the
     /media URL, the fetch it replaces."""
     try:

@@ -29,7 +29,7 @@ class BootSplash(unittest.TestCase):
 
     def test_the_shell_paints_a_centered_romp_loader(self):
         self.assertIn("id=romp-boot", self.html, "a full-window boot overlay rides in the shell HTML")
-        self.assertIn(km._SWIRL_O_URI, self.html, "the centered o-glyph is the swirl, inline (test_wordmark_first_paint)")
+        self.assertIn(km._SWIRL_O_URI, self.html, "the centered o-glyph is the swirl, inline (test_wordmark_first_paint_served)")
         self.assertIn("class=rl-o", self.html, "the swirl spins as the lowercase 'o' in the wordmark")
         self.assertIn("Anta-Regular.ttf", self.html, "the wordmark is set in Anta, like the README hero")
         self.assertIn("#1EA1EB", self.html, "the R wears the swirl's blue arm colour")

@@ -194,10 +194,11 @@ class PaintsWithTheSwirlFileHeld(unittest.TestCase):
         driver = os.path.join(lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
+        token = km.TOKEN   # read out here: the node driver is the only process this starts, the kernel runs in-process
         with _Server() as s:
             p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=180,
                                env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"),
-                                        BASE="http://127.0.0.1:%d" % s.port, TOKEN=km.TOKEN))
+                                        BASE="http://127.0.0.1:%d" % s.port, TOKEN=token))
         if p.returncode == 3:
             raise unittest.SkipTest("no playwright browser on this machine: the first-paint check needs one (CI installs none)")
         if p.returncode != 0:
