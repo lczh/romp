@@ -284,8 +284,9 @@ class DropAfterQuiescentFold(unittest.TestCase):
 
     def test_the_kernel_drops_only_its_subagent_folds_and_reports_the_cache(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        for name in ("agentLaunchIds", "agentGist", "agentLaunches"):
-            self.assertIn('ckpt="%s", drop_after="quiescent")' % name, src, "the %s fold drops a returned agent's records" % name)
+        for name, policy in (("agentLaunchIds", "returned"), ("agentGist", "returned"), ("agentLaunches", "quiescent")):
+            self.assertIn('ckpt="%s", drop_after="%s")' % (name, policy), src, "the %s fold drops a returned agent's records" % name)
+        #   an agent's own file drops on a quiet fold too ("returned"); the launch fold reads PARENT leaves and keeps "quiescent"
         self.assertNotIn('ckpt="bgAll", drop_after', src, "a LEAF fold never drops: the live session's records stay warm")
         self.assertIn('"recordCache": em.record_cache_stats(),', src, "/perf carries the record cache")
         unit = open(os.path.join(BIN, "romp-service")).read()
