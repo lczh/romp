@@ -2852,9 +2852,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   quiescence drop, the files a dead timeline lane releases, and a leaf a second
   /clear retired), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
-  whole again: the drop would have freed nothing that entry does not hold, so the
-  bytes stay counted; a restored entry or one marked to re-seat on its document
-  never holds a drop back), `released` (every pop that removed an entry, whatever the
+  whole again: its leaf has no document a restore would take, or a restore here
+  refused it; the drop would have freed nothing that entry does not hold, so the
+  bytes stay counted; a restored entry, or a whole one whose leaf has a document a
+  restore would take, never holds a drop back), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,

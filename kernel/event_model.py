@@ -1307,22 +1307,22 @@ def _pop_owed_entry(key):
 def _asm_entry_pins(e, key):
     """Whether assembly entry `e`, which folds over `key`'s reader entry at its generation, holds a drop of that entry back:
     a WHOLE entry whose next visit after the drop would parse whole again (2026-10-01). Its adapter holds the very records
-    list (_src), so the drop frees nothing; it retires the generation, so that next visit demotes (g:rewrite, g:nonleaf) to a
-    whole parse, and a whole reader in between decodes a second copy. That is a whole entry with no document a restore would
-    take (none stands, or a refusal mark stands; a restore that refuses a document without marking it removes it), or one
-    whose own document would not keep it restored: written but not marked for re-seat (a restore refused the document and
-    the whole parse after it rewrote it, keepWhole; the tail past its cut at the churn bound's share; a postal author
-    waiting). Two kinds do not pin, since their next visit restores from a document anyway and the restore that replaces
-    them frees what they hold: a whole entry marked for re-seat (its own document stands, and the next visit re-seats on it
-    whatever the drop does), and a RESTORED entry (round one of the review: a reader entry kept, or trimmed to its cut,
+    list (_src), so the drop frees nothing; it retires the generation, so that next visit demotes (g:rewrite, g:nonleaf) to
+    the restore road, and with no document a restore would take it parses whole, while a whole reader in between decodes a
+    second copy. That is a whole entry whose leaf has no document a restore would take (none stands, or a refusal mark stands
+    at the leaf's stat; a restore that refuses a document without marking it removes it), or one kept whole because a
+    restore in this process refused its leaf's document (keepWhole: the document it then wrote is offered to the same
+    restore). Every other entry is popped as before, since its next visit restores from a document and the restore that
+    replaces it frees what it held: a RESTORED entry (round one of the review: a reader entry kept, or trimmed to its cut,
     under a restored entry held a whole reader's second decoding of the tail next to the restore's own until the entry next
-    demoted). The document asked about is the entry's LEAF's (`path`), whichever of its files `key` is: a lineage file's
-    drop demotes the entry under g:nonleaf, and that demotion restores from the leaf's document."""
-    if getattr(e.get("ad"), "seed", None) is not None or e.get("reseat"):
+    demoted), and a whole entry with a document a restore would take, whether marked to re-seat on it or not (the converge
+    pass writes an idle leaf's document from its whole entry and then pops, so that entry leaves memory at its next visit;
+    its tail past the cut may already meet the churn bound's share). The document asked about is the entry's LEAF's (`path`),
+    whichever of its files `key` is: a lineage file's drop demotes the entry under g:nonleaf, and that demotion restores from
+    the leaf's document."""
+    if getattr(e.get("ad"), "seed", None) is not None:
         return False
-    if e.get("docWritten"):
-        return True
-    return not _asm_document_would_restore(e.get("path") or key)
+    return bool(e.get("keepWhole")) or not _asm_document_would_restore(e.get("path") or key)
 
 
 def _asm_pins_gen(key, gen):

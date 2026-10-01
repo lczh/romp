@@ -579,10 +579,11 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
     the drop freed nothing, since the adapter holds the same records list, made recordCache.bytes fall while the memory
     stayed, and retired the generation: the entry's next visit demoted (g:rewrite) and, with no document a restore would take,
     parsed whole, while a whole reader in between decoded a second copy. Such a reader entry is now kept as it stands, at the
-    same generation. A RESTORED entry, or a whole one marked to re-seat on its own document, does not hold a drop back: its
-    next visit restores from the document anyway, and the restore that replaces it frees what it held (round one of the
-    review: keeping or trimming a reader entry under a restored entry held a whole reader's second decoding of the tail next
-    to the restore's own until the entry next demoted, and counted bytes as freed that the adapter still held)."""
+    same generation, when the whole entry's next visit would parse whole: its leaf has no document a restore would take, or a
+    restore here refused it. A RESTORED entry, or a whole one whose leaf has a document a restore would take, does not hold
+    a drop back: its next visit restores from the document, and the restore that replaces it frees what it held (round one
+    of the review: keeping or trimming a reader entry under a restored entry held a whole reader's second decoding of the
+    tail next to the restore's own until the entry next demoted, and counted bytes as freed that the adapter still held)."""
 
     def test_a_quiet_drop_under_a_whole_entry_keeps_the_generation_and_the_next_parse_folds(self):
         _aged(self.leaf)
@@ -608,19 +609,22 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
                          "parse went %s: %s" % (mode, self.moved(s0, self.stats())))
         self.assertColdEqual(out)
 
-    def test_a_whole_entry_kept_whole_after_a_refused_restore_holds_the_drop_back(self):
-        """A whole entry built after a restore refused the leaf's document (keepWhole) also wrote that document (the refusal's
-        own write), unmarked for re-seat: a drop would retire its generation and its next visit would be refused again and
-        parse whole. It pins, whatever the document it wrote."""
+    def test_a_whole_entry_kept_whole_after_a_refused_re_seat_holds_the_drop_back(self):
+        """A re-seat whose restore did not serve leaves the whole entry the next parse builds kept whole (keepWhole), and its
+        settle writes a fresh document from it. Popped, its next visit would offer that document to the restore that refused
+        it and parse whole again, so it pins although a document stands and no refusal mark does."""
         _aged(self.leaf)
         out, _ = self.parse()
         self.assertTrue(self.settle(out))
-        self.fresh()                                                  # a restart: the next parse offers the document to the restore
-        with mock.patch.object(em, "_tail_chains_onto_the_document", lambda *a, **k: False):
+        with mock.patch.object(em, "_asm_restore", _refused_with_its_document):
+            self.append_turn()
+            _aged(self.leaf)
             out, mode = self.parse()
+            self.assertEqual(mode, "full", "the re-seat's restore refused: a whole parse")
+            self.assertTrue(self.settle(out), "its settle writes the document again")
             e = self.entry()
-            self.assertEqual((mode, bool(e.get("keepWhole")), bool(e.get("docWritten")), bool(e.get("reseat"))),
-                             ("full", True, True, False), "the premise: a whole entry kept whole, its document written, no re-seat")
+            self.assertEqual((bool(e.get("keepWhole")), em.asm_document_stands(self.leaf), em._asm_refusal_stands(self.leaf)),
+                             (True, True, False), "the premise: kept whole, a document standing, no refusal mark")
             ent0 = _reader_entry(self.leaf)
             st0 = dict(em.record_cache_stats())
             _quiet_drop(self.leaf)
@@ -633,9 +637,25 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
             self.assertEqual(mode, "fold", "the appended turn folds: %s" % self.moved(s0, self.stats()))
         self.assertColdEqual(out)
 
-    def test_a_whole_entry_whose_document_meets_the_share_holds_the_drop_back(self):
+    def test_a_whole_entry_whose_leaf_document_carries_a_refusal_mark_holds_the_drop_back(self):
+        """A refusal mark at the leaf's current stat (the chain proof refused the standing document for the tail's shape) sends
+        every restore of that document to a whole parse while the leaf stands: a whole entry over it pins, even one its settle
+        marked for re-seat, so the whole parse its next visit pays reads the kept records rather than the file again."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.assertTrue(em._asm_mark_refused(self.leaf, "shape", rompuuid=SID))
+        ent0 = _reader_entry(self.leaf)
+        k0 = em.record_cache_stats().get("pinnedKept", 0)
+        _quiet_drop(self.leaf)
+        self.assertIs(_reader_entry(self.leaf), ent0, "kept: a restore would refuse the document and parse whole")
+        self.assertEqual(em.record_cache_stats().get("pinnedKept", 0) - k0, 1)
+
+    def test_a_whole_entry_whose_own_document_would_restore_does_not_hold_the_drop_back(self):
         """A whole entry that wrote its document but is not marked for re-seat (the tail past that cut already meets the churn
-        bound's share) pins too: popped, its next visit would restore and demote to a whole parse at the first fold."""
+        bound's share) does not pin either: its next visit restores from that document, and the restore replaces the entry and
+        what it held. This is the converge pass's shape (it writes an idle leaf's document from the whole entry and pops after
+        both writes, test_asm_checkpoint), so an idle session's whole entry leaves memory at its next visit."""
         recs = episode(NOW - 86400, turns=40, compact_every=1000)
         t = max(em.parse_z(r["timestamp"]) for r in recs) + 60
         recs.append({"type": "user", "uuid": "ou", "parentUuid": recs[-1]["uuid"], "timestamp": iso(t), "promptSource": "typed",
@@ -649,15 +669,13 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         e = self.entry()
         self.assertEqual((bool(e.get("docWritten")), bool(e.get("reseat")), bool(e.get("keepWhole"))), (True, False, False),
                          "the premise: a document written, the entry not marked for re-seat")
-        ent0 = _reader_entry(self.leaf)
-        k0 = em.record_cache_stats().get("pinnedKept", 0)
+        st0 = dict(em.record_cache_stats())
         _quiet_drop(self.leaf)
-        self.assertIs(_reader_entry(self.leaf), ent0, "kept as it stands")
-        self.assertEqual(em.record_cache_stats().get("pinnedKept", 0) - k0, 1)
-        self.append(tool_round(self.last_t() + 10, 6, self.last_uuid()))
-        s0 = self.stats()
+        self.assertIsNone(_reader_entry(self.leaf), "popped")
+        st1 = em.record_cache_stats()
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
         out, mode = self.parse()
-        self.assertEqual(mode, "fold", "the next call of the open turn folds: %s" % self.moved(s0, self.stats()))
+        self.assertEqual(mode, "restore", "the next visit restores from the document the entry wrote")
         self.assertColdEqual(out)
 
     def test_a_lineage_file_with_a_document_of_its_own_is_pinned_by_a_leaf_entry_that_has_none(self):
@@ -691,7 +709,7 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
 
     def test_a_whole_entry_marked_to_re_seat_on_its_document_does_not_hold_the_drop_back(self):
         """The settle's document marks the whole entry for re-seat: its next visit restores from that document whatever the drop
-        does, so the drop pops as before (the converge pass's drop right after its write pops too, test_asm_checkpoint)."""
+        does, so the drop pops as before."""
         _aged(self.leaf)
         out, _ = self.parse()
         self.assertTrue(self.settle(out))
