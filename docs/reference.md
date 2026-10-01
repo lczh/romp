@@ -677,6 +677,23 @@ a setup-token handed to Claude Code through an `apiKeyHelper` hangs the request
 fall back on, is accepted and billed to the subscription. A judge call billed
 to a stored login runs the same command the same way for its own child.
 
+Fast mode under a login that rides the environment (2026-10-01): Claude Code
+cannot ask the organisation's fast-mode setting for one. It gives an
+environment token inference-only scopes, and the endpoint it would ask refuses
+a setup-token anyway, so it guesses from a flag cached in its configuration
+directory; that guess refused fast mode, with the reason `preference`, to
+sessions on an enterprise seat that serves it. Every launch whose login rides
+the environment (a stored login, or a machine token in the manager's
+environment) therefore also carries `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1`,
+and the API decides: an organisation that has fast mode off refuses the fast
+request, which the CLI then reports as `preference` on the organisation's
+word, and romp treats that as the real refusal it is (the toast for a
+session's own pick, the kernel log for Always fast). A CLI launched before
+this, which romp only reattached to across a restart and which is still
+guessing, is relaunched once the session is quiet, with the user's pick left
+on; a `preference` remembered before the change no longer holds Always fast
+back. A judge call billed to such a login carries the same switch.
+
 The command runs the way the kernel runs the box's own key helper: under a
 whitelisted environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `LANG`,
 `LC_ALL`, `TERM`, `CLAUDE_CONFIG_DIR` and the `LC_*` and `XDG_*` names), never

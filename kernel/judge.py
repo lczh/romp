@@ -1721,6 +1721,19 @@ def _fast_org_env():
         return env
 
 
+def _token_fast_org_env(env):
+    """The sessions' rule for a fast call whose login rides the environment (sdk_backend.token_fast_org_env,
+    2026-10-01): the CLI cannot ask the organization's fast-mode setting for such a login and guesses "preference",
+    so the call carries the CLI's skip and the API's own answer decides. A pure function of the call's env, so
+    nothing is memoised; a load failure leaves the CLI's own check standing and says so."""
+    try:
+        sb = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+        return dict(sb.token_fast_org_env(env) or {})
+    except Exception as e:
+        sys.stderr.write("judges: fast-mode org check for a token login failed (%s); the CLI's own check stands\n" % e)
+        return {}
+
+
 _DEFAULT_AUTH_FN = None        # kernel wiring: fn(reg) -> 'login' | 'key', SdkBackend.default_auth: the ONE billing resolver
 _DEFAULT_LOGIN_FN = None       # kernel wiring beside it: fn(reg) -> a stored login's id or "", SdkBackend.default_login: WHICH login
 #                                an unpicked session bills when the machine's explicit default names a stored one (2026-09-14)
@@ -2427,6 +2440,8 @@ def _judge_run_impl(model, sys_prompt, user, effort=None, judge=None, tier="tria
             fast_asked = _tier_fast(tier, model)
             if fast_asked and not _is_login_auth(auth):
                 env = dict(env, **_fast_org_env())    # permission follows billing (the sessions' rule, T300)
+            elif fast_asked and env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+                env = dict(env, **_token_fast_org_env(env))   # a login riding the environment: the CLI would guess
             p = subprocess.run(_judge_cmd(model, sys_prompt, effort, auth=auth, tier=tier), input=user,
                                capture_output=True, text=True, cwd=JUDGE_SCRATCH, env=env,
                                timeout=CALL_ALARM_S + 5)

@@ -4830,6 +4830,7 @@ FLAG_SETTINGS_DIR = "sdk-flag-settings"   # per-session --settings payloads, one
 _FAST_REFUSALS = {
     "extra_usage_disabled": "the account has extra usage turned off, and fast mode bills through it "
                             "(claude.ai → Settings → Usage)",
+    "preference": "the account's organization has fast mode turned off",
 }
 
 
@@ -5278,8 +5279,8 @@ def key_fast_org_env(key: str, log) -> dict[str, str]:
         shows it. Retry is event-keyed on the next connect; there is no timer.
     Asked per connect (connects are rare and already network-bound; a fast toggle reconnects, so the
     check is fresh exactly when it matters), capped at 3s so a black-holed network cannot hang a
-    connect. Never injected for login sessions: there the CLI's probe already asks the account that
-    pays."""
+    connect. Never injected for login sessions: a login the CLI holds in its own credential store is
+    asked about by the CLI's probe, and a login riding the environment gets token_fast_org_env."""
     key_id = hashlib.sha256(key.encode("utf-8")).hexdigest()
     verdict = _fetch_key_fast_org(key)
     if verdict is None:
@@ -5299,6 +5300,29 @@ def key_fast_org_env(key: str, log) -> dict[str, str]:
     if verdict:
         return {"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": "1"}
     return {"CLAUDE_CODE_DISABLE_FAST_MODE": "1"}
+
+
+def token_fast_org_env(env) -> dict[str, str]:
+    """Env additions for a launch whose login rides the environment as CLAUDE_CODE_OAUTH_TOKEN: a stored login's
+    `claude setup-token` bearer (the environment road, docs/reference.md "Several Claude logins"), or a machine login
+    whose token the manager's environment carries. The CLI cannot ask the organization's fast-mode setting for such a
+    login, so it GUESSES, and its guess refused fast mode to sessions on an enterprise seat that serves it (2026-10-01;
+    reproduced in a lab with a synthetic sid and a scratch config dir on Claude Code 2.1.282):
+      * the CLI gives an environment token the scopes ["user:inference"] (CLAUDE_CODE_OAUTH_SCOPES aside) and asks
+        /api/claude_code_penguin_mode only for a login with user:profile, so it never asks for this one; and the
+        endpoint refuses a setup-token anyway (403 permission_error: the scope requirement is any_of
+        user:ccr_inference, user:profile);
+      * with no answer, the CLI guesses from penguinModeOrgEnabled cached in its config directory, and anything but
+        true reads as disabled with the reason "preference" ("Fast mode has been disabled by your organization"):
+        a launch with the fastMode opt-in reported fast_mode_state "off" with that reason and served
+        usage.speed "standard";
+      * the same launch with CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1 reported "on" and served usage.speed "fast".
+    So the skip is set, and the API stays the authority: it answers a fast request from an organization that has fast
+    mode off with a 400 ("Fast mode is not enabled"), which the CLI records as the SERVER's "preference", a state the
+    skip does not override, and it retries the request at standard speed (read in 2.1.282's source, not exercised
+    live). The refusal then reaches _adopt_fast_state as a real one, loudly. A launch with no token in its environment
+    gets nothing here: the CLI's own check stands."""
+    return {"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": "1"} if (env or {}).get("CLAUDE_CODE_OAUTH_TOKEN") else {}
 
 
 def helper_fast_org_env(log, cwd=None) -> dict:
@@ -5716,6 +5740,12 @@ class SdkSession:
         #   sdk_opt_in_required, which _adopt_fast_state blanks into fast_reason, and the switch would re-arm the flag
         #   at the connect after that (refuse → reconnect → refuse, stretched to two connects). Cleared by an explicit
         #   toggle of this session (set_fast: the user's gesture is new information) and by the CLI reporting fast on.
+        self.fast_refusal_checked = bool(reg.get("fastRefusalChecked"))   # a refusal reason was adopted from a CLI whose
+        #   fast-mode permission the organization or the API settled (2026-10-01). Absent on every reg written before
+        #   token_fast_org_env, when a login riding the environment left the CLI to GUESS "preference": fast_effective
+        #   lets such a "preference" stand down instead of holding the session at normal speed for good.
+        self._fast_token_login = False   # this connection's login rides the environment (_options); per connection
+        self._fast_guess_asked = False   # a relaunch was asked for this connection's guessed refusal (_adopt_fast_state)
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
         #   kernel's tick asks for the pick again every RETRY_UPGRADE_S (retry_model_upgrades → request_reconnect); cleared
@@ -6935,7 +6965,15 @@ class SdkSession:
         flag file and the per-connection snapshot cannot disagree."""
         if getattr(self, "fast_opt", False):
             return True
-        if getattr(self, "fast_off", False) or getattr(self, "fast_reason", "") or getattr(self, "fast_rule_refused", ""):
+        if getattr(self, "fast_off", False):
+            return False
+        # A refusal holds the switch back, except a "preference" no checked launch gave: a reg written before
+        # token_fast_org_env carries the CLI's guess for a login riding the environment (2026-10-01), and holding the
+        # session at normal speed on it would keep a misread forever. The next launch carries the skip and its answer
+        # is the org's or the API's; a real "preference" comes back from it and is remembered, checked, from then on.
+        checked = getattr(self, "fast_refusal_checked", False)
+        if any(r and (r != "preference" or checked)
+               for r in (getattr(self, "fast_reason", ""), getattr(self, "fast_rule_refused", ""))):
             return False
         if not always_fast_on(getattr(self.backend, "state_dir", None)):
             return False
@@ -7248,6 +7286,21 @@ class SdkSession:
         # to Opus and looked for the toggle). Blank it: the badge shows "Slow" and a
         # click cures the reason; every OTHER reason still hides the dead control.
         reason = "" if reason == "sdk_opt_in_required" else reason
+        # …and a "preference" from a CLI this kernel only ATTACHED to, under a login riding the environment, is that CLI's
+        # own GUESS when it was launched before token_fast_org_env (2026-10-01: such a CLI cannot ask the org about the
+        # login, and guessed "disabled" for an enterprise seat that serves fast mode). Not a refusal to remember, nor one to
+        # answer by clearing the user's pick: the cure is a launch that carries the skip, asked for below, whose answer is
+        # the org's or the API's. Every launch this kernel makes carries it, so only an attach can still be guessing; a
+        # "preference" already adopted from a checked launch (fast_refusal_checked) stands as the real one it is.
+        guessed = reason == "preference" and getattr(self, "_fast_token_login", False) \
+            and getattr(self, "_host_is_attach", False) and not getattr(self, "fast_refusal_checked", False)
+        if guessed:
+            reason = ""
+        # A reason that survives the two cures above is the CLI's real answer. Remembered as checked, which is what lets
+        # fast_effective tell it from a guess a reg written before token_fast_org_env may still carry.
+        newly_checked = bool(reason) and not getattr(self, "fast_refusal_checked", False)
+        if newly_checked:
+            self.fast_refusal_checked = True
         # A refusal that lands while the user's ask is ARMED (fast_opt — they picked On) is the CLI
         # ANSWERING that ask, not standing state to hide behind: adopting it silently made the toggle
         # the user had just clicked vanish without a word, with the ask left armed on disk forever
@@ -7265,7 +7318,7 @@ class SdkSession:
         # this session lifts it: the reason is gone.
         rule_refused = bool(reason) and not self.fast_opt and getattr(self, "_fast_unlocked", False) \
             and always_fast_on(getattr(self.backend, "state_dir", None)) \
-            and reason != getattr(self, "fast_rule_refused", "")
+            and (reason != getattr(self, "fast_rule_refused", "") or newly_checked)
         rule_lifted = fast == "on" and bool(getattr(self, "fast_rule_refused", ""))
         if refused_ask:
             self.fast_opt = False
@@ -7275,13 +7328,15 @@ class SdkSession:
             self.fast_rule_refused = ""
         changed = fast != self.fast or reason != self.fast_reason
         self.fast, self.fast_reason = fast, reason
-        if changed or refused_ask or rule_refused or rule_lifted:
+        if changed or refused_ask or rule_refused or rule_lifted or newly_checked:
             try:
                 kw = dict(liveFast=fast, liveFastReason=reason)
                 if refused_ask:
                     kw["fast"] = False
                 if rule_refused or rule_lifted:
                     kw["fastRuleRefused"] = self.fast_rule_refused
+                if newly_checked:
+                    kw["fastRefusalChecked"] = True
                 self.backend._update_reg(self.sid, **kw)
             except Exception as e:
                 self.backend._log("fast-state persist (%s): registry write failed: %s" % (self.name, e))
@@ -7299,6 +7354,14 @@ class SdkSession:
                 self.backend._log("fast mode (%s): could not tell the chat about the refusal: %s"
                                   % (self.name, e))
             self.request_reconnect()
+        if guessed and not getattr(self, "_fast_guess_asked", False) and self.fast_effective():
+            # once per connection (every init repeats the guess until the relaunch lands), on the quiet road: this is the
+            # kernel's reconnect, nobody's gesture on the session, so it cuts no turn, subagent or background task
+            self._fast_guess_asked = True
+            self.backend._log("fast mode (%s): the CLI reports 'preference', its own guess for a login it cannot ask the "
+                              "organization about; this CLI was launched without the check that settles it, so the "
+                              "session relaunches with it%s" % (self.name, "" if self.quiet() else " once it is quiet"))
+            self.want_switch_reconnect("fast mode")
         if relearn:
             self._after_model_change(self.model, self.model)   # the flag this connection lacks, asked for from the truth
         return changed or refused_ask
@@ -7665,6 +7728,7 @@ class SdkSession:
             self._fast_unlocked = self.fast_effective()   # the session's own ask, or the machine's Always fast switch
             self._fast_expect = ""   # a fresh connection's first init speaks for the flag, not for any
             #   toggle sent on the old one — never hold a pre-reconnect expectation against it
+            self._fast_guess_asked = False   # a guessed "preference" asks its relaunch once per connection
             connected = False
             try:
                 transport = None
@@ -14155,6 +14219,7 @@ class SdkBackend:
             # ANTHROPIC_API_KEY, which outranks a bearer too, cannot ride the child either: this overlay cannot unset an
             # inherited variable, and the kernel's own environment never carries the name (check_boot_environment).
             kw["env"] = dict(kw["env"], CLAUDE_CODE_OAUTH_TOKEN=login_token)
+            kw["env"].update(token_fast_org_env(kw["env"]))   # the CLI cannot ask the org about this login: it would guess
         elif login or (side != "key" and not keyed_box):
             # The login tokens claimed at boot ride every launch that bills the login: a login pick, and an
             # unpicked session on a box with no helper (its effective billing IS the login, and the judges'
@@ -14163,8 +14228,12 @@ class SdkBackend:
             # for unpicked sessions). A key-billed launch, picked or by the box's helper, gets no token: a
             # bearer would outrank the helper in the CLI's precedence.
             kw["env"] = dict(kw["env"], **startup_auth_env())
+            kw["env"].update(token_fast_org_env(kw["env"]))
         else:
             kw["env"] = dict(kw["env"], **helper_fast_org_env(self._log, sess.cwd))
+        # Whether this launch's login rides the environment, the one kind the CLI cannot ask the org about: read by
+        # _adopt_fast_state, where a CLI this kernel only ATTACHED to may predate token_fast_org_env and still be guessing.
+        sess._fast_token_login = bool(kw["env"].get("CLAUDE_CODE_OAUTH_TOKEN"))
         sess._launched_keyed = launch_keyed
         # What a launch from THESE options carries ("" = the machine's own). For a LAUNCH the stamp records it as the
         # launched login and resets the init evidence to none: a relaunch that stops carrying the helper (the login

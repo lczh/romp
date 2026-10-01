@@ -499,6 +499,41 @@ class RunEndToEnd(_Base):
         out, seen = self._run(fast, auth="key")
         self.assertNotIn("--settings", seen["cmd"])
 
+    def test_a_fast_call_billed_to_a_login_riding_the_environment_carries_the_skip(self):
+        """2026-10-01: the CLI cannot ask the organization's fast-mode setting for a login riding the environment (a
+        stored login's setup-token, or a machine token in the manager's environment) and guesses "preference"; the
+        call carries the sessions' rule (sdk_backend.token_fast_org_env), so the API's own answer decides. The real
+        rule rides the fake backend module here, and the token is assembled at run time."""
+        real_sb = load_source("romp_sdk_backend_judgefasttoken", os.path.join(BIN, "romp_sdk_backend.py"))
+        sys.modules["romp_sdk_backend"].token_fast_org_env = real_sb.token_fast_org_env
+        km._set_judge_fast("on")
+        fast = _fixture("claude-p-result-envelope-fast.json")
+        tok = "".join(["sk", "-ant-", "oat01-", "%024x" % 0xA11CE])
+
+        def run(login_env, model="opus"):
+            seen = {}
+            def fake_run(cmd, input=None, capture_output=None, text=None, cwd=None, env=None, timeout=None):
+                seen["cmd"], seen["env"] = list(cmd), dict(env or {})
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(fast), stderr="")
+            saved = jd.subprocess.run
+            jd.subprocess.run = fake_run
+            try:
+                with patch.object(jd, "_judge_engine", return_value="claude"), patch.object(jd, "_judge_auth", return_value="login"), \
+                     patch.object(jd, "_login_auth_env", return_value=login_env), contextlib.redirect_stderr(io.StringIO()):
+                    jd._judge_run(model, "SYS", "u", judge="planner", tier="triage")
+            finally:
+                jd.subprocess.run = saved
+            return seen
+
+        seen = run({"CLAUDE_CODE_OAUTH_TOKEN": tok})
+        self.assertEqual(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "1", "the CLI would only guess for this login")
+        self.assertEqual(seen["env"].get("CLAUDE_CODE_OAUTH_TOKEN"), tok)
+        self.assertEqual(self.asked, [], "no key account to ask: the login bills the call")
+        seen = run({})
+        self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"], "a login the CLI holds itself: its own check stands")
+        seen = run({"CLAUDE_CODE_OAUTH_TOKEN": tok}, model="sonnet")
+        self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"], "a call that asks no fast mode carries nothing")
+
     def test_an_error_envelope_keeps_its_readback_as_a_zero_cost_row_and_the_refusal_is_recorded(self):
         km._set_judge_fast("on")
         env = dict(_fixture("claude-p-result-envelope-standard.json"), is_error=True, subtype="error_during_execution",
