@@ -731,6 +731,34 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 self.assertIsNone(s._upgrade_retry, "%s: back on the model it fell from" % road)
                 self.assertEqual(h.restored, [(card[1], card[0])], road)
 
+    def test_a_retry_armed_under_a_pick_the_cli_then_refused_ends_only_on_the_model_its_reconnect_runs(self):
+        # the pick's end of the retry reads the pick the reconnect asserts, not the one the arm recorded: a live pick
+        # clears the arm, so the two differ only when a refusal puts the old model back under a standing arm (the #33
+        # follow-up's review, round one). Opus 4.8 picked on Opus 5.5 and still out, a reply on Opus 5.5 ends its
+        # dots, a real fallback to Sonnet 5 arms from Opus 5.5 with the pick on record, then the CLI refuses the pick:
+        # the reconnect runs Opus 5.5 again, and a turn served on Opus 4.8 is a fallback from it, not the way back
+        road = "Opus 4.8 picked on Opus 5.5, a fallback to Sonnet 5 armed, then the pick refused"
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._pick(be, s, "claude-opus-4-8")
+            self._served(s, "claude-opus-5-5")                       # a reply of the turn the pick was made in
+            self._served(s, "claude-sonnet-5")                       # a real fallback
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: the real fallback is armed" % road)
+            self.assertEqual((arm["from"], arm["to"], arm["pick"]), ("Opus 5.5", "Sonnet 5", "claude-opus-4-8"), road)
+            self._settle(s, ["claude-opus-5-5"], lost=Exception("Unknown model: claude-opus-4-8"))   # the CLI's refusal
+            self.assertEqual(s.chosen_model, "claude-opus-5-5", "%s: the refusal puts the accepted model back" % road)
+            self.assertIs(s._upgrade_retry, arm, "%s: the refusal leaves the arm standing" % road)
+            self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
+            self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-4-8")   # the attempt falls to the refused version
+            self.assertEqual(h.restored, [], "%s: a turn served on the refused pick, below the model the retry's reconnect "
+                                             "runs, said the session was back" % road)
+            self.assertIs(s._upgrade_retry, arm, "%s: that turn ended the retry" % road)
+            self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-5-5")   # a turn served on the model it runs
+            self.assertIsNone(s._upgrade_retry, "%s: a turn served on the model the reconnect runs left the retry "
+                                                "standing" % road)
+            self.assertEqual(h.restored, [("Sonnet 5", "Opus 5.5")], "%s: back on the model the reconnect runs" % road)
+
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
              ("default", "default", "claude-sonnet-5", ""),
