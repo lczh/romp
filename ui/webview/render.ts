@@ -40,7 +40,7 @@ import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
-import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
+import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
 import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
@@ -1474,7 +1474,7 @@ let landTrail: string[] = [];
 // every event object; a pass edited events in place without swapping them).
 interface PaintOut { pe: number | null; mark: number | null }
 interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (PaintOut | undefined)[] }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner)
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -11861,6 +11861,7 @@ function nearBottomForSend(c: HTMLElement): boolean {
 // view files nothing. The value written is applied exactly as before: this changes nothing about WHERE the view
 // lands, only that the landing is on the record.
 let lastScrollWriteAfter: number | null = null;
+let lastScrollWriter = "";   // the writer of the move lastScrollWriteAfter records: the echo names it (virtualizeToViewport's own-echo rule)
 let lastKnownSh = 0;   // the last scroll height the pane recorded (every write, every scroll event): the "before" a tail mutation row reports
 /** Reduce a MutationObserver batch on a tail container to the row's shape (scroll-write.ts summarizeTailMutations): each node
  *  as its class list, its unit's uuid (data-uuid) and the node itself, the identity a re-add is judged by. Reads only. */
@@ -11941,7 +11942,7 @@ function writeScroll(content: HTMLElement, top: number, writer: string, stick = 
   const before = from ?? content.scrollTop;
   content.scrollTop = top;
   const after = content.scrollTop;
-  if (after !== before) lastScrollWriteAfter = after;   // a write that moved the view owes exactly one scroll event, its echo; one that did not move owes none, and must not eat a later gesture landing near its target (verifier low, round two)
+  if (after !== before) { lastScrollWriteAfter = after; lastScrollWriter = writer; }   // a write that moved the view owes exactly one scroll event, its echo; one that did not move owes none, and must not eat a later gesture landing near its target (verifier low, round two)
   lastKnownSh = content.scrollHeight;
   if (after !== before) scrollDiagRow("scrollwrite", scrollWriteRow(activeId || "", writer, before, after, stick, content.scrollHeight, content.clientHeight));
   // a write of #content while a landing settles: a writer the census calls the READER's (landing-settle.ts WRITER_CLASS: a key or a
@@ -12817,7 +12818,7 @@ function tailDiff(v: View, s: Session, items: DisplayItem[], working: boolean, a
  *  a folded run's open state; a user bubble's edit affordance; a gap's span, px-per-turn and loading glyph. The "worked …" footer
  *  is not in it: it is patched on the node (patchWorkedFooters), so a prompt landing never repaints the reply above it. */
 function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null, mark: number | null, turns: number[] | null): string {
-  if (it.kind === "gap") return "gap|" + it.lo + "|" + it.hi + "|" + it.before + "|" + gapTurnPx(s.regions ?? [], v.pxPerTurn) + "|" + (gapHasAsk(s.id, it) ? "ask" : "");
+  if (it.kind === "gap") return "gap|" + it.lo + "|" + it.hi + "|" + it.before + "|" + gapTurnPx(s.regions ?? [], v.pxPerTurn, gapsMaxPx()) + "|" + (gapHasAsk(s.id, it) ? "ask" : "");
   const f0 = itemFirstEvent(it);
   let sig = it.kind + "|" + (prevEpoch ?? "") + "|" + (mark ?? "") + "|" + (turns && f0 < turns.length ? turns[f0] : "");
   if (it.kind === "toolgroup") sig += openFolds.has(toolGroupKey(s.events[f0])) ? "|open" : "|shut";
@@ -13121,10 +13122,30 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
   v.gapUnits = gapUnitsOf(items, v.pxPerTurn);
   sizeSpacers(v);
 }
+/** The tallest box this browser lays out, in CSS px, at the current scale and zoom (2026-10-01): a fixed-position probe asked for a
+ *  billion px reports the height the layout clamps it to (2^25 layout units divided by the device scale and the zoom in Chromium).
+ *  Fixed, so it adds no scrollable overflow; appended and removed in one task, so it never paints. Measured once and again after a
+ *  resize (a zoom change is one); a pane that lays nothing out (hidden) measures 0 and takes LAYOUT_LIMIT_FALLBACK, unremembered. */
+let layoutLimit: number | null = null;
+function layoutLimitPx(): number {
+  if (layoutLimit != null) return layoutLimit;
+  if (typeof document === "undefined" || !document.body) return LAYOUT_LIMIT_FALLBACK;
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:fixed;left:0;top:0;width:0;height:1000000000px;visibility:hidden;pointer-events:none";
+  document.body.appendChild(probe);
+  const h = probe.offsetHeight;
+  probe.remove();
+  if (!(h > 0)) return LAYOUT_LIMIT_FALLBACK;
+  layoutLimit = h;
+  return h;
+}
+if (typeof window !== "undefined") window.addEventListener("resize", () => { layoutLimit = null; });
+/** The most px the page's gaps may stand for together: their share of the measured layout limit (chat-regions.ts GAPS_SHARE). */
+function gapsMaxPx(): number { return layoutLimitPx() * GAPS_SHARE; }
 /** The gap units' heights, by unit: each its own estimate (turns x px-per-turn), not the average row (T386 stage 2). */
 function gapUnitsOf(items: DisplayItem[], pxPerTurn: number | undefined): Map<number, number> | undefined {
   const gu = new Map<number, number>();
-  const per = gapTurnPx(items, pxPerTurn);   // the gaps together stay under the browser's layout limit (chat-regions.ts GAPS_MAX_PX)
+  const per = gapTurnPx(items, pxPerTurn, gapsMaxPx());   // the gaps together stay under the browser's layout limit (chat-regions.ts GAPS_SHARE)
   for (let u = 0; u < items.length; u++) { const it = items[u]; if (it.kind === "gap") gu.set(u, gapHeight(it, per)); }   // per TURN, not per display unit (medium 2)
   return gu.size ? gu : undefined;
 }
@@ -13183,6 +13204,27 @@ function measureRows(v: View): void {
   }
 }
 
+/** The estimated top, in scroll space, of a unit hidden in a spacer (the same walk unitAtScroll maps a position by: each hidden unit its
+ *  own height, a gap's estimate else the average), or null when it is not hidden. */
+function hiddenUnitTop(v: View, content: HTMLElement, u: number): number | null {
+  const avg = v.avgTurnH ?? 60;
+  if (u < (v.winStart ?? 0)) {
+    const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
+    if (!top) return null;
+    let y = top.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+    for (let k = 0; k < u; k++) y += v.gapUnits?.get(k) ?? avg;
+    return y;
+  }
+  const end = v.winEnd ?? 0;
+  if (u >= end) {
+    const bot = v.el.querySelector(".tx-spacer-bot") as HTMLElement | null;
+    if (!bot) return null;
+    let y = bot.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+    for (let k = end; k < u; k++) y += v.gapUnits?.get(k) ?? avg;
+    return y;
+  }
+  return null;
+}
 // Estimate the UNIT index at the viewport top: a spacer maps by avg height; a rendered row by its data-unit.
 function unitAtScroll(v: View, content: HTMLElement): number {
   const avg = v.avgTurnH ?? 60;
@@ -13206,7 +13248,16 @@ function unitAtScroll(v: View, content: HTMLElement): number {
     if (st < t0 + c.offsetHeight) return lastUnit;
   }
   const bot = v.el.querySelector(".tx-spacer-bot") as HTMLElement | null;
-  if (bot) { const bTop = yOf(bot); if (st >= bTop) return (v.winEnd ?? 0) + Math.floor((st - bTop) / avg); }
+  if (bot) {
+    const bTop = yOf(bot);
+    if (st >= bTop) {   // in the bottom spacer: the same walk, a gap by its own estimate (a gap below a landed window is one unit too)
+      if (!v.gapUnits) return (v.winEnd ?? 0) + Math.floor((st - bTop) / avg);
+      const total = v.unitTotal ?? 0;
+      let y = bTop;
+      for (let u = v.winEnd ?? 0; u < total; u++) { y += v.gapUnits.get(u) ?? avg; if (st < y) return u; }
+      return Math.max(0, total - 1);
+    }
+  }
   return lastUnit;
 }
 
@@ -15172,6 +15223,8 @@ window.addEventListener("keydown", (e) => {
     lastScrollWriteAfter = null;   // one-shot: the first event after a write consumes its marker, echo or not (a gesture that lands within a pixel of an older write's target is a gesture)
     if (cls !== "write-echo") scrollDiagRow("scrollgesture", { sid: activeId || "", top: c.scrollTop, gesture: true, sh: c.scrollHeight, ch: c.clientHeight });
     lastKnownSh = c.scrollHeight;   // sh/ch: a clamp reads top == sh - ch after sh dropped (T262e)
+    if (gv) gv.echoOf = cls === "write-echo" ? lastScrollWriter : undefined;   // …and whose write this event echoes (the re-window skips its own)
+    if (cls === "gesture" && gv && activeId) askGapsInView(activeId, gv, c);   // a reader's move over a gap in view: the page under them (2026-10-01)
   }, { passive: true });
 }
 // The live-ask host (#live-ask) sits INSIDE #content after the threads: the picker card is the transcript's tail
@@ -15426,6 +15479,11 @@ function virtualizeToViewport(): void {
   const content = document.getElementById("content");
   const s = liveSession(activeId);
   if (!v || !content || !s) return;
+  // the echo of this function's own re-window write is no new information (2026-10-01): in a layout past the browser's limit the
+  // window it rendered cannot hold the viewport, the echo read "near an edge" again, and it re-rendered on its own write for as long
+  // as the tab stayed open (the reader crept up a few px per render). A gesture, another writer's move or a content change re-windows.
+  const ownEcho = v.echoOf === "rewindow";
+  v.echoOf = undefined;
   const total = v.unitTotal ?? 0;
   const moreOnServer = olderOnServer(s);   // older history not yet resident (wire tail-windowing; proto 2: the head not reached)
   if (total === 0 || ((v.winStart ?? 0) === 0 && (v.winEnd ?? total) >= total && !moreOnServer)) return; // everything rendered + resident
@@ -15455,7 +15513,7 @@ function virtualizeToViewport(): void {
   if (moreOnServer && (v.winStart ?? 0) === 0 && st < topH + edgePx && upward) { requestOlder(activeId, v, content); return; }
   const nearTopEdge = (v.winStart ?? 0) > 0 && st < topH + edgePx;
   const nearBotEdge = (v.winEnd ?? total) < total && st + vh > renderedBottom - edgePx;
-  if (!nearTopEdge && !nearBotEdge) return;   // window comfortably covers the viewport
+  if (ownEcho || (!nearTopEdge && !nearBotEdge)) return;   // window comfortably covers the viewport (or this is its own write's echo)
   revirtBusy = true;
   // Defer one frame so the pill paints before the (possibly heavy) render, then re-anchor on the focus unit.
   requestAnimationFrame(() => {
@@ -15467,10 +15525,12 @@ function virtualizeToViewport(): void {
       const working = s.status.state === "working" || s.status.state === "compacting";
       const items = displayItems(s);
       const c = Math.max(0, Math.min(idx, items.length - 1));
-      // where unit c sits relative to the viewport top NOW (so it doesn't jump); null ⇒ it's in a spacer
-      // (a jump) → land it at the viewport top.
+      // where unit c sits relative to the viewport top NOW (so it doesn't jump); a unit hidden in a spacer (a jump) keeps the reader's
+      // offset into it by its estimate (2026-10-01): a gap is ONE unit of up to millions of px, and landing its top at the viewport top
+      // sent a scrollbar jump into the middle of the history to the head of the thread
       const before = v.el.querySelector(`[data-unit="${c}"]`) as HTMLElement | null;
-      const beforeY = before ? before.getBoundingClientRect().top - content.getBoundingClientRect().top : 0;
+      const hiddenTop = before ? null : hiddenUnitTop(v, content, c);
+      const beforeY = before ? before.getBoundingClientRect().top - content.getBoundingClientRect().top : (hiddenTop != null ? hiddenTop - content.scrollTop : 0);
       renderWindowItems(v, s, items, Math.max(0, c - WINDOW_RADIUS), Math.min(items.length, c + WINDOW_RADIUS), working);
       const anchor = v.el.querySelector(`[data-unit="${c}"]`) as HTMLElement | null;
       if (anchor) {
@@ -19910,10 +19970,36 @@ function gapGlyph(): HTMLElement {
 function gapElement(s: Session, it: { lo: number; hi: number }, v: View): HTMLElement {
   const g = el("div", "tx-gap");
   g.dataset.lo = String(it.lo); g.dataset.hi = String(it.hi); g.dataset.sid = s.id;
-  g.style.height = gapHeight(it, gapTurnPx(s.regions ?? [], v.pxPerTurn)) + "px";   // per TURN, not per display unit (medium 2): the rendered gap element too, not only the spacer map
+  g.style.height = gapHeight(it, gapTurnPx(s.regions ?? [], v.pxPerTurn, gapsMaxPx())) + "px";   // per TURN, not per display unit (medium 2): the rendered gap element too, not only the spacer map
   if (gapHasAsk(s.id, it)) { g.classList.add("tx-gap-loading"); g.appendChild(gapGlyph()); }
+  if (fillBuilding) quietGaps.add(g);
   gapObserver?.observe(g);
   return g;
+}
+// A gap element a FILL built (2026-10-01): its first observation is the page's own rebuild, not the reader, so it asks nothing; the
+// fill's completion asks for a reader still parked in a gap (fillInPlace). Asking on it walked a gap that could not leave the viewport
+// (a layout past the browser's limit) one page per reply, for as long as pages came.
+const quietGaps = new WeakSet<Element>();
+let fillBuilding = false;
+/** Ask for the page a gap element in view stands for, by where the reader is against it: INSIDE it (both its edges off the viewport, a
+ *  scrollbar jump into history) the page holding the turn under the viewport top; else the page at the edge the reader met (its top
+ *  above the viewport: they met its bottom, scrolling up). */
+function askGapElement(g: HTMLElement, gr: { top: number; bottom: number; height: number }, rootTop: number, rootBottom: number): void {
+  const sid = g.dataset.sid || "", lo = Number(g.dataset.lo), hi = Number(g.dataset.hi);
+  if (!sid || !(hi > lo) || !g.isConnected) return;
+  if (gr.height > 0 && gr.top < rootTop - 0.5 && gr.bottom > rootBottom + 0.5) requestTurns(sid, { lo, hi }, "inside", lo + (hi - lo) * ((rootTop - gr.top) / gr.height));
+  else requestTurns(sid, { lo, hi }, gr.top < rootTop ? "bottom" : "top");
+}
+/** A reader's gesture over the gaps in view asks for their pages (2026-10-01): the observer speaks only when a gap enters or leaves the
+ *  viewport, so a reader moving inside a gap that covers it, or past one a fill left on screen, is met here. One ask per gap in flight. */
+function askGapsInView(sid: string, v: View, content: HTMLElement): void {
+  const s = sessions.get(sid);
+  if (!s || !s.regions || !s.regions.some((r) => r.kind === "gap")) return;
+  const cr = content.getBoundingClientRect();
+  for (const g of Array.from(v.el.querySelectorAll(".tx-gap")) as HTMLElement[]) {
+    const r = g.getBoundingClientRect();
+    if (r.height > 0 && r.bottom > cr.top && r.top < cr.bottom) askGapElement(g, r, cr.top, cr.bottom);
+  }
 }
 // ONE observer over the gap elements (an event, not a scroll poll): a gap entering the viewport asks for the page nearest the edge it
 // entered by (its top above the viewport's top: the reader met its bottom, scrolling up; else its top)
@@ -19923,20 +20009,20 @@ const gapObserver: IntersectionObserver | null = (() => {
   if (!root) return null;
   return new IntersectionObserver((entries) => {
     for (const en of entries) {
-      if (!en.isIntersecting) continue;
       const g = en.target as HTMLElement;
-      const sid = g.dataset.sid || "", lo = Number(g.dataset.lo), hi = Number(g.dataset.hi);
-      if (!sid || !(hi > lo) || !g.isConnected) continue;
-      const rootTop = en.rootBounds ? en.rootBounds.top : root.getBoundingClientRect().top;
-      requestTurns(sid, { lo, hi }, en.boundingClientRect.top < rootTop ? "bottom" : "top");
+      if (quietGaps.has(g)) { quietGaps.delete(g); continue; }   // a fill's rebuild: its completion asks for the reader, not this
+      if (!en.isIntersecting) continue;
+      const rb = en.rootBounds ?? root.getBoundingClientRect();
+      askGapElement(g, en.boundingClientRect, rb.top, rb.bottom);
     }
   }, { root, threshold: 0 });
 })();
-/** Ask for the page of a gap nearest the viewport's edge (chat-regions.ts pagesToAsk); one request per gap in flight. */
-function requestTurns(sid: string, gap: { lo: number; hi: number }, edge: "top" | "bottom"): void {
+/** Ask for the page of a gap nearest the viewport's edge (chat-regions.ts pagesToAsk), or, for a reader INSIDE it, the page holding
+ *  turn `at` (pageAt); one request per gap in flight. */
+function requestTurns(sid: string, gap: { lo: number; hi: number }, edge: "top" | "bottom" | "inside", at?: number): void {
   const s = sessions.get(sid);
   if (!s || s.proto !== 2 || !s.regions || gapHasAsk(sid, gap)) return;
-  const span = pagesToAsk(gap, edge, s.pageTurns ?? 16);
+  const span = edge === "inside" && at != null ? pageAt(gap, at, s.pageTurns ?? 16) : pagesToAsk(gap, edge === "top" ? "top" : "bottom", s.pageTurns ?? 16);
   if (!(span.hi > span.lo)) return;
   gapLoading.add(gapKey(sid, span.lo, span.hi));
   scrollDiagRow("regionask", { sid, lo: span.lo, hi: span.hi, edge, why: "gap-scroll", notice: landingNoticeSid === sid });
@@ -20014,7 +20100,7 @@ function turnUnderTop(v: View, s: Session, items: DisplayItem[], turns: number[]
   if (top < topH) {
     const avg = v.avgTurnH ?? 60; let y = 0;
     for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
-      const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn))) : avg;
+      const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
       if (top < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((top - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
       y += h;
     }
@@ -20034,7 +20120,7 @@ function yOfTurn(v: View, s: Session, items: DisplayItem[], turns: number[], con
   }
   const avg = v.avgTurnH ?? 60; let y = 0;
   for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
-    const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn))) : avg;
+    const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
     if (it.kind === "gap" && t >= it.lo && t < it.hi) return y + h * ((t - it.lo) / (it.hi - it.lo));
     if (it.kind !== "gap") { const f = itemFirstEvent(it); if (f >= 0 && f < turns.length && turns[f] === whole) return y; }
     y += h;
@@ -20070,8 +20156,11 @@ function fillInPlace(sid: string, v: View | undefined): void {
     if (u < 0) u = unitAtScroll(v, content);
   }
   v.stick = false;   // a fill never follows the tail: the reader is where they are
-  if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
-  else syncView(sid);
+  fillBuilding = true;   // the gap elements this rebuild makes are the page's own (quietGaps)
+  try {
+    if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
+    else syncView(sid);
+  } finally { fillBuilding = false; }
   // a visible row that survived the rebuild goes back to its exact offset; otherwise (no row on screen, or the anchor row gone: a turn
   // anchored on a resultUuid or a word key no event carries, round five medium A) the point under the viewport top is put back by its
   // turn; with no way to name the point, the reader keeps their scrollTop (the head stays at zero)
@@ -20088,11 +20177,18 @@ function fillInPlace(sid: string, v: View | undefined): void {
   if (pointBefore != null && !rowOnScreen(v, content)) {
     const u2 = unitOfTurn(items, turnsNow, Math.floor(pointBefore));
     if (u2 >= 0) {
-      renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
+      fillBuilding = true;
+      try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting"); }
+      finally { fillBuilding = false; }
       const y2 = yOfTurn(v, s, items, turnsNow, content, pointBefore);
       writeScroll(content, y2 != null ? y2 : topBefore, "gap-fill", false, topBefore);
     }
   }
+  // the fill's own completion meets a parked reader (2026-10-01): the turn under the viewport top before the fill is still in a gap (the
+  // page that landed was another's, or the reader's gap was busy with it) and the reader has not moved, so the page holding it is asked
+  // now. A fill that brought that turn asks nothing: the rebuilt gap's first observation is quiet, so a gap that cannot leave the view
+  // (a layout past the browser's limit) is not walked one page per reply.
+  if (pointBefore != null && s.regions) { const gp = gapAt(s.regions, Math.floor(pointBefore)); if (gp) requestTurns(sid, gp, "inside", pointBefore); }
   if (activeId) applyCommentMarks(activeId);
   scheduleRailSticky();
 }
