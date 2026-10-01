@@ -219,6 +219,8 @@ class ReturnedPolicy(Base):
         self.clock.t = T0 + 300
         self.fold(cache, p)
         self.assertIsNotNone(self.entry(p), "no document to restore from: a pop would make every later fold a whole read")
+        ent = self.entry(p)
+        self.assert_stands(cache, p, ent, "no document to restore from")
         self.assertEqual(em.record_cache_stats()["dropped"], 0)
 
     def test_a_sibling_cursor_behind_the_entry_holds_the_pop_until_it_steps(self):
@@ -231,6 +233,8 @@ class ReturnedPolicy(Base):
         self.clock.t = T0 + 300
         self.fold(a, p, name="synthA")                            # quiet, with b at the entry's generation 8 records behind
         self.assertIsNotNone(self.entry(p), "a pop now would leave b a whole read to resume from")
+        ent = self.entry(p)
+        self.assert_stands(a, p, ent, "b would read whole after a pop", name="synthA")
         kinds = []
         self.assertEqual(len(self.fold(b, p, name="synthB", kinds=kinds)), 20)
         self.assertEqual(kinds[-1], "append")
@@ -483,18 +487,20 @@ class Lab(Base):
 
     def snapshot(self, t, agents):
         """The record cache's agent entries at `t`, and the bound on those holding records: the agents written to in the two
-        minutes (and a cycle) before `t`, counted from the records written by then."""
+        minutes (and a cycle) before `t`, counted from the records written by then. `outside` counts the agents holding
+        records that are not among them (a finished agent held while a recent one was let go passes the count, not this)."""
         with em._JSONL_CACHE_LOCK:
             ents = {p: e for p, e in em._JSONL_CACHE.items() if p != self.leaf}
         wf = {a["path"] for a in agents if a["kind"] == "workflow"}
         card = {a["path"] for a in agents if a["kind"] == "task"}
+        recent = {a["path"] for a in agents if a["recs"] and t - a["recs"][-1][1] < 120 + self.CYCLE}
         return {"t": int(t - T0), "spawned": sum(1 for a in agents if a["start"] <= t),
                 "writing": sum(1 for a in agents if a["start"] <= t < a["end"]),
                 "rcEntries": len(ents), "withRecords": sum(1 for e in ents.values() if e[4]),
                 "cardWithRecords": sum(1 for p, e in ents.items() if p in card and e[4]),
                 "bytes": sum(em._entry_weight(e) for e in ents.values()),
                 "workflowEntries": sum(1 for p in ents if p in wf), "dropped": em._RECORD_CACHE_STATS["dropped"],
-                "bound": sum(1 for a in agents if a["recs"] and t - a["recs"][-1][1] < 120 + self.CYCLE)}
+                "bound": len(recent), "outside": len({p for p, e in ents.items() if e[4]} - recent)}
 
     def test_finished_agents_leave_the_record_cache(self):
         self.assert_drained(*self.run_lab("lockstep"))
@@ -515,7 +521,9 @@ class Lab(Base):
 
     def assert_drained(self, agents, series):
         final = series[-1]
-        for s in series:                                          # at most the agents written to in the two minutes before hold records
+        for s in series:                                          # only the agents written to in the two minutes before hold records
+            self.assertEqual(s["outside"], 0, "at +%d s an agent not written to in the two minutes and a cycle before holds records: %s"
+                             % (s["t"], s))
             self.assertLessEqual(s["withRecords"], s["bound"], "at +%d s: %s" % (s["t"], s))
         self.assertEqual((final["withRecords"], final["bytes"]), (0, 0), "every returned agent's records left memory: %s" % final)
         self.assertEqual(final["workflowEntries"], 0, "the agents only the guard reads leave no entry at all")
