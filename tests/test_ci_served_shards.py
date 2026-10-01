@@ -176,7 +176,7 @@ class Workflow(unittest.TestCase):
         self.assertIn("scripts/ci/shard_tests.py --shard ${{ matrix.shard }} --of ${{ strategy.job-total }} ", job,
                       "the shard count follows the matrix, so adding a shard is one edit")
         self.assertIn("python -m pytest $files ", job)
-        self.assertIn("--junitxml=served-junit.xml -o junit_family=xunit1", job, "the report the durations refresh reads")
+        self.assertIn("--junitxml=served-junit.xml", job, "the report the durations refresh reads")
 
     def test_the_typecheck_node_tests_and_build_run_once_not_per_shard(self):
         unit = self._job("vscode-extension-unit")

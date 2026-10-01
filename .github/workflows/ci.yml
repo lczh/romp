@@ -50,50 +50,41 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  python:
-    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+  # Each Python cell's required check is a verdict over two shards (2026-09-30). Once the served tests were sharded, the
+  # Python suite, 14 to 19 minutes in one pytest process per cell, set the whole run's wall time. Now:
+  #  - python-shard runs each cell's suite as two shards, each on its own runner, dealt by recorded per-file duration:
+  #    scripts/ci/shard_tests.py reads scripts/ci/python-durations.json, and its docstring says how to refresh that file
+  #    from a run's reports. A test file the durations do not list still runs, and its shard's log warns. A third shard
+  #    is one more matrix value and the --of beside it.
+  #  - python carries the names the ruleset requires, "Python 3.10 (ubuntu-latest)" through 3.13, and fails unless every
+  #    shard of ITS cell succeeded. A matrix job's needs result is one for all its legs, so when some shard did not
+  #    succeed the verdict reads its own cell's shards from the jobs API: a red 3.10 shard turns 3.10's check red and
+  #    leaves 3.13's green. It runs under always() for the reason the extension's verdict below does.
+  python-shard:
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }}) shard ${{ matrix.shard }}
     runs-on: ${{ matrix.os }}
-    # Every job is time-boxed. Without this a test that BLOCKS (waiting on a socket,
-    # a prompt that never comes) burns the 6h default before
-    # anyone finds out, and a required check that hangs blocks merges silently.
-    # T230b follow-up (the review's catch): the job cap must EXCEED the pytest phase plus the
-    # 600 s per-test timeout plus setup, or a stall that begins late in the run is killed by
-    # this cap first - the identical silence the per-test timeout exists to end. On 2026-09-03 the
-    # measured pytest phases ran 160-300 s, so 15 min left ~100 s of headroom and 25 min was
-    # 300 + 600 + setup with margin for a slow runner. The macOS cells (a manual dispatch or the
-    # weekly schedule) run the same suite on the image's slower runners, and the suite grows with
-    # every merge: 17 to 26 minutes on 2026-09-16 (the 3.10 cell cancelled at 25 min 27 s under a
-    # 25-minute cap), 33 to 35 minutes on the dispatch of 2026-09-24 03:48 UTC, and on the release
-    # dispatch five hours later (run 35976250043) the 3.13 cell finished green in 38 min 52 s while
-    # the 3.10 cell was cancelled at 40 min 20 s by the 40-minute cap with no failure in its log,
-    # having reached 90 percent 36 min 40 s into its pytest step. The tail to add is the 3.10 cell's
-    # own, not the 3.13 cell's: from its 90 percent mark to the end of its pytest step the 3.10 cell
-    # took 6 min 56 s and 9 min 46 s on runs 35952964334 and 35623182872, against 5 min 38 s and
-    # 4 min 51 s for 3.13 (the difference sits in one progress line after 90 percent, where the
-    # three StateIsolationOrder tests took 193 s and 279 s on 3.10), so the cut cell's suite sits
-    # near 43.5 to 46.5 minutes and the rule gives 54.5 to 57. macOS gets 60, the pin's ceiling
-    # (past an hour a hung cell eats the dispatch); that clears the rule by 3 to 5.5 minutes and
-    # leaves no room for another raise, so the next growth step for the 3.10 macOS cell is
-    # splitting or sharding it (a second cell over half the modules, or a matrix of shards, which
-    # changes the check list), not a higher cap. Linux gets 35 by the same rule: the 3.10 Linux
-    # cell took 19 min 34 s on the
-    # dispatch of 2026-09-24 03:48 UTC (run 35952964334) and the Linux cells 14 to 17 minutes on
-    # the release dispatch, so 25 left under six minutes where about 20 plus 10 plus setup is
-    # about 31.
-    timeout-minutes: ${{ matrix.os == 'macos-latest' && 60 || 35 }}
+    # Every job is time-boxed. Without this a test that BLOCKS (waiting on a socket, a prompt that never comes) burns the
+    # 6h default before anyone finds out, and a required check that hangs blocks merges silently. The cap must EXCEED a
+    # shard's pytest step plus the 600 s per-test timeout plus setup, or a stall that begins late in the step is killed by
+    # the cap first, nameless: the silence the per-test timeout exists to end (T230b). Unsharded, the pytest step took 14
+    # to 19 minutes on Linux (the 3.10 cell the slowest) and 40 to 52 on macOS (the 3.10 cell 51 min 40 s on the weekly
+    # run of 2026-09-28, under a 60-minute cap). A shard is about half: 10 minutes on Linux, 26 on macOS. Linux gets 30,
+    # macOS 50. When a shard nears its cap, add a shard rather than raise the cap.
+    timeout-minutes: ${{ matrix.os == 'macos-latest' && 50 || 30 }}
     strategy:
-      # One red cell must not hide the others: a 3.10-only break and a
+      # One red shard must not hide the others: a 3.10-only break and a
       # macOS-only break look identical if the matrix stops at the first.
       fail-fast: false
       matrix:
         # macOS is in the matrix ONLY on a manual run (workflow_dispatch) or the weekly
         # schedule; a normal push/PR gets Linux alone. See the billing note in the header.
         os: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
-        python-version: ['3.10', '3.13']
-        include:
-          - os: ubuntu-latest
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+        shard: [1, 2]
+        exclude:   # macOS runs the floor and the dev version only (the header)
+          - os: macos-latest
             python-version: '3.11'
-          - os: ubuntu-latest
+          - os: macos-latest
             python-version: '3.12'
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +106,57 @@ jobs:
         # (~122 s, leak-scaled) and the 300 s child timeout in test_session_move_live. Its timer
         # waits on an Event, so it can never itself consume a patched sleep. --durations names the
         # slowest tests on every run so a creeping one is visible before it stalls.
-        run: python -m pytest -q --durations=10 --timeout=600 --timeout-method=thread
+        run: |
+          # this shard's files, dealt by recorded duration from every test module (the comment above the job), run as the
+          # directory minus the other shards' files: pytest collects a long list of file arguments far more slowly
+          ignores=$(python scripts/ci/shard_tests.py --durations scripts/ci/python-durations.json --shard ${{ matrix.shard }} --of 2 --ignore-others tests/test_*.py)
+          # --junitxml: each test's time and module, which a durations refresh reads
+          python -m pytest tests $ignores -q --durations=10 --timeout=600 --timeout-method=thread --junitxml=python-junit.xml
+      - name: Upload the durations report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-junit-${{ matrix.python-version }}-${{ matrix.os }}-${{ matrix.shard }}
+          path: python-junit.xml
+          retention-days: 14
+
+  python:
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    needs: python-shard
+    # always(), not !cancelled(): a cancelled shard must turn its cell's check red too, never skip it into a success.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read   # the jobs API below
+    strategy:
+      fail-fast: false
+      matrix:   # python-shard's cells, without the shard
+        os: ${{ fromJSON((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+        exclude:
+          - os: macos-latest
+            python-version: '3.11'
+          - os: macos-latest
+            python-version: '3.12'
+    steps:
+      - name: Every shard of this cell passed
+        env:
+          RESULT: ${{ needs.python-shard.result }}
+          CELL: Python ${{ matrix.python-version }} (${{ matrix.os }})
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "python-shard: $RESULT"
+          if [ "$RESULT" = success ]; then exit 0; fi   # every shard of every cell passed
+          # Some shard did not: read this cell's own. The API is asked only here, so an outage can redden a check, never
+          # pass one.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | select(.name | startswith(env.CELL + " shard ")) | "\(.name): \(.conclusion)"' > shards
+          cat shards
+          if [ ! -s shards ] || grep -qv ': success$' shards; then
+            echo "::error::a shard of $CELL did not succeed (listed above), so this check fails with it"
+            exit 1
+          fi
 
   shell:
     name: Shell (bats, ${{ matrix.os }})
@@ -384,8 +425,8 @@ jobs:
           files=$(python scripts/ci/shard_tests.py --shard ${{ matrix.shard }} --of ${{ strategy.job-total }} tests/test_*_browser.py tests/test_*_served.py)
           # -rP: a PASSING lab's captured output reaches the job log too (its cost line: frames per second, the longest gap, the
           # layout counts), so a lab's figures can be read off a green run without re-running it locally (PR 1927, round two).
-          # --junitxml: each file's time, which a durations refresh reads (xunit1 names each case's file).
-          python -m pytest $files -q -rsP -p no:cacheprovider --durations=20 --timeout=600 --timeout-method=thread --junitxml=served-junit.xml -o junit_family=xunit1
+          # --junitxml: each test's time and module, which a durations refresh reads.
+          python -m pytest $files -q -rsP -p no:cacheprovider --durations=20 --timeout=600 --timeout-method=thread --junitxml=served-junit.xml
       - name: Upload the durations report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
