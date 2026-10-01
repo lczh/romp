@@ -17,6 +17,7 @@ import tempfile
 import threading as _real_threading
 import types
 import unittest
+from unittest import mock
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -128,15 +129,17 @@ class JudgeSettings(unittest.TestCase):
         (jd.STATE / "judge-effort").write_text("high")
         (jd.STATE / "index-effort").write_text("low")
         jd._state_cache.clear()
-        seen, saved_cmd = {}, jd._judge_cmd
-        jd._judge_cmd = lambda model, sysp, effort=None, **kw: (seen.__setitem__(model, effort) or ["true"])
-        saved_env, saved_paused = jd._judge_env, (jd.STATE / "retry-paused.json")
-        try:
+        seen = {}
+        # The effort plumbing is what is under test: the call's billing and its child environment are stubbed, so the
+        # result never rides whatever an earlier test in the process left wired into the judge. It did: a backend
+        # built over a Mock module left jd._LOGIN_AUTH_ENV_FN a Mock, _judge_env raised on it, and _judge_run
+        # returned before it built a command (2026-09-30, found when CI split the suite into shards).
+        with mock.patch.object(jd, "_judge_cmd", lambda model, sysp, effort=None, **kw: (seen.__setitem__(model, effort) or ["true"])), \
+             mock.patch.object(jd, "_judge_auth", lambda fsid: "login"), \
+             mock.patch.object(jd, "_judge_env", lambda *a, **k: dict(os.environ)):
             jd._judge_run("sonnet", "SYS", "u", tier="triage")
             jd._judge_run("haiku", "SYS", "u", tier="index")
             jd._judge_run("opus", "SYS", "u", effort="max", tier="triage")   # explicit wins
-        finally:
-            jd._judge_cmd = saved_cmd
         self.assertEqual(seen.get("sonnet"), "high", "triage tier effort applied")
         self.assertEqual(seen.get("haiku"), "low", "index tier effort applied")
         self.assertEqual(seen.get("opus"), "max", "explicit caller effort wins over the tier default")

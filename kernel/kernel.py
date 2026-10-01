@@ -2308,7 +2308,7 @@ def _version_info(authed=False):
             "autoNudge": _mv["autoNudge"],   # server-side toggle state → the gear checkbox reflects the kernel
             "compactSuggest": _mv["compactSuggest"],   # T208+: its gear checkbox rides the same read
             "conserveMemory": _conserve_on(),   # the T148 toggle: close idle tab-less claude processes
-            "login": _login_state(),         # the in-dashboard login flow's state/url/err (T157) — never a secret
+            "login": _login_state(),         # the in-dashboard login flow's state/url/err/n (T157) — never a secret
             "acctLabel": _claude_account_label(),   # which login this box holds ("" = none) — the gear's Billing row
             "fileEditing": _mv["fileEditing"],   # dashboard raw-mode editing opt-in → gates the viewer's Edit
             # per-install: SDK sessions ask for reasoning summaries (gear checkbox). Top-level only — not
@@ -6548,6 +6548,61 @@ def _write_view_folds(folds):
     return True
 
 
+# ── …and the viewer's FILE TABS, kept beside them the same way (the user 2026-09-30) ─────────────────────────────────
+# A file opened from the viewer as a tab of the chat strip (ui/webview/file-tabs.ts) sits beside a session tab, and the
+# user wants one arrangement on every device, so the list rides this store's frame and push too: the viewOrder frame
+# carries `files` beside `order` and `folds`, and view-files.json sits beside their files. Its own FILE, not entries in
+# the arrangement, so a page from before file tabs (which prunes the arrangement to the sessions it knows) can never drop
+# them, and its own frame half, so such a page ignores it. The same opaque-data contract as the folds: this kernel checks
+# that it is an object and that it is bounded, and reads nothing inside it (paths, session ids and host prefixes are the
+# viewer's). Last write wins.
+_VIEW_FILES_CAP = 256 * 1024             # bytes of JSON; refused whole over it, never cut (the folds' rule)
+_view_files_lkg = [None]                 # last known good, as _view_folds_lkg
+
+
+def _view_files_path():
+    return jd.STATE / "view-files.json"
+
+
+def _view_files_served():
+    """The file tabs to serve: the stored object, None when this kernel keeps NONE (absent file: a browser holding
+    tabs of its own publishes them against exactly that, file-tabs.ts hearSharedFileTabs), or _VIEW_FOLDS_UNKNOWN when
+    the file could not be read and nothing is known-good (the frame then carries no files half). _view_folds_served's
+    reasoning, for the same kind of store."""
+    p = _view_files_path()
+    try:
+        raw = _read_state_json(p, expect=dict)
+    except _StateUnreadable as e:
+        _note_state_fault(e)
+        lkg = _view_files_lkg[0]
+        return dict(lkg) if lkg is not None else _VIEW_FOLDS_UNKNOWN
+    _clear_state_fault(p)
+    if raw is None:
+        return None
+    _view_files_lkg[0] = dict(raw)
+    return raw
+
+
+def _write_view_files(files):
+    """Publish the viewer's file tabs. Raises _StateUnwritable on a failed publish and on an object over the cap
+    (refused whole), so the gesture is refused loudly. Returns whether anything CHANGED."""
+    if not isinstance(files, dict):
+        raise _StateUnwritable(_view_files_path(), "not an object")
+    text = json.dumps(files, sort_keys=True)
+    if len(text) > _VIEW_FILES_CAP:
+        raise _StateUnwritable(_view_files_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FILES_CAP))
+    with _view_order_lock:                           # one lock for the viewer's store, every file
+        try:
+            raw = _read_state_json(_view_files_path(), expect=dict)
+        except _StateUnreadable:
+            raw = _VIEW_ORDER_NO_PROOF               # cannot prove it unchanged -> publish (a whole replace)
+        if raw is not _VIEW_ORDER_NO_PROOF and raw == files:
+            return False
+        _write_state_json(_view_files_path(), text)
+        _view_files_lkg[0] = json.loads(text)
+    return True
+
+
 def _merge_session_order(incoming):
     """Splice a drag's order into the persisted one WITHOUT disturbing lanes the drag didn't touch. A drag
     publishes the order of the sids on ONE surface (chat tabs, or timeline lanes) — usually a SUBSET of all
@@ -8458,7 +8513,45 @@ def _move_tag_member(tid_from, tid_to, sids):
         return out, None
 
 
-_TAG_EDIT_OPS = ("create", "rename", "recolor", "addMember", "removeMember", "delete", "move")
+def _set_member_tags(tids, sids):
+    """A session's local tags SET to exactly `tids`, as ONE write under _views_lock (the user
+    2026-09-30, who dragged a tab into another group expecting it to take that tag and lose the rest,
+    and found it had only gained one): every local tag `tids` names holds the sessions afterwards and
+    every other local tag does not. All of it lands or none of it does, so no other device ever reads
+    a half-moved session (removals then an add, as separate ops, showed one in no group, or in both,
+    between two pushes). The tab strip's drag posts it: [the group's tag] for a drop into a group, []
+    for a drop on the ungrouped row. An unknown tid refuses the whole write, since a list naming a
+    deleted tag would leave the session in fewer groups than the gesture showed. Members arrive as the
+    viewer-relative id strings every client posts (_member_pair canonicalizes). Returns (tag-or-None,
+    error-or-None) like _edit_tag; the tag is the first listed tag's post-write row, None for []."""
+    with _views_lock:
+        v0 = _timeline_views_proved()                     # PROVED, like _edit_tag: a fault raises to the door
+        v = json.loads(json.dumps(v0))                    # the working copy; v0 stays the pristine base
+        by_id = {t["id"]: t for t in v["tags"]}
+        if any(x not in by_id for x in tids):
+            return None, "the tag to move into no longer exists — it may have been deleted from another dashboard"
+        keep = set(tids)
+        pairs, keys = [], set()
+        for m in (_member_pair(x) for x in sids):
+            if m and (m["host"], m["sid"]) not in keys:
+                keys.add((m["host"], m["sid"]))
+                pairs.append(m)
+        for t in v["tags"]:
+            if t["id"] in keep:
+                have = {(m["host"], m["sid"]) for m in t["members"]}
+                t["members"] = list(t["members"]) + [m for m in pairs if (m["host"], m["sid"]) not in have]
+            else:
+                t["members"] = [m for m in t["members"] if (m["host"], m["sid"]) not in keys]
+        v = _norm_timeline_views(v)
+        _set_timeline_views(v, base=v0)
+        if not tids:
+            return None, None
+        out = json.loads(json.dumps(next(t for t in v["tags"] if t["id"] == tids[0])))
+        out["members"] = [_member_str(m) for m in out["members"]]
+        return out, None
+
+
+_TAG_EDIT_OPS = ("create", "rename", "recolor", "addMember", "removeMember", "delete", "move", "setTags")
 
 
 def _apply_tag_edit(e):
@@ -8472,7 +8565,9 @@ def _apply_tag_edit(e):
     learns both from it). Every dashboard tag gesture posts this instead of the whole blob (the user
     2026-09-05: a create followed by typing the tag's name lost the name, because the second
     whole-blob post was judged stale against the first). Members arrive as the viewer-relative id
-    strings every client already posts; _member_pair canonicalizes them."""
+    strings every client already posts; _member_pair canonicalizes them. Two ops touch more than one
+    tag, each as ONE write: `move` ({tid_from, tid_to}) and `setTags` ({tids}, the sessions' local tags
+    set to exactly that list — the tab strip's drag into a group, or onto the ungrouped row)."""
     if not isinstance(e, dict):
         return False, "the edit is missing", None
     op = str(e.get("op") or "")
@@ -8496,6 +8591,17 @@ def _apply_tag_edit(e):
             return False, "the edit named no session", None
         t, err = _move_tag_member(tf, tt, sids)
         return err is None, err, ({"tid": t["id"], "name": t["name"]} if t else {"tid": tt})
+    elif op == "setTags":
+        # {tids: [...], sid|sids}: the sessions' local tags SET to exactly these, as ONE write (an empty
+        # list clears them all). The list is required, and every entry must be a tag id
+        tl = e.get("tids")
+        if not isinstance(tl, list) or not all(isinstance(x, str) and x for x in tl):
+            return False, "the edit named no tag list", None
+        if not sids:
+            return False, "the edit named no session", None
+        tl = list(dict.fromkeys(tl))
+        t, err = _set_member_tags(tl, sids)
+        return err is None, err, ({"tid": t["id"], "name": t["name"]} if t else ({"tid": tl[0]} if tl else None))
     elif tid is None:
         return False, "the edit named no tag", None
     elif op == "rename":
@@ -13394,6 +13500,11 @@ def _persist_checkpoints(now):
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
         #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
         #                                          atom); never a parse of its own (the settle reads no leaf whole)
+            elif settle_due:
+                _asm_refresh_maybe(leaf, sid)  # a RESTORED entry writes nothing above: at its settle, once the tail past its
+        #                                          document's cut has reached the churn bound's share, the document is refreshed
+        #                                          from a whole parse on a thread of its own (2026-10-01: a session restored at
+        #                                          every boot kept its first document, and every boot restored a growing tail)
         except Exception:
             sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
@@ -13402,6 +13513,27 @@ def _persist_checkpoints(now):
     if len(_CKPT_PERIODIC_SEEN) > 4096:
         _CKPT_PERIODIC_SEEN.clear()
     return written
+
+
+def _asm_refresh_maybe(leaf, sid):
+    """Start the leaf's assembly document refresh on a thread of its own when it is due (em.asm_refresh_claim: a restored entry
+    whose tail past its document's cut has reached the churn bound's share; one refresh at a time). The refresh is a whole
+    parse and a document write, seconds of work for a 100 MB leaf, so it never runs on the pusher: the claim is a dict read
+    and a stat here, and the thread leaves the leaf's restored entry and its readers alone (em.asm_refresh_document). Returns
+    whether a refresh was started."""
+    human = _display_sdk_human(sid)
+    if not em.asm_refresh_claim(leaf, sid, human):
+        return False
+
+    def _run():
+        _set_stage("asm.refresh")             # its reads count under their own stage on /perf (recordCache.wholeReadsByStage)
+        try:
+            jd.asm_refresh(sid, leaf, int(time.time()), sdk_human=human)
+        except Exception:                     # asm_refresh_document releases the claim itself; this is a raise before it ran
+            em.asm_refresh_release(leaf, sid, human)
+            sys.stderr.write("assembly checkpoint refresh: %s\n" % traceback.format_exc())
+    threading.Thread(target=_run, name="asm-refresh", daemon=True).start()
+    return True
 
 
 def _interrupt_block_tick(now, live_map):
@@ -22373,6 +22505,7 @@ class Sessions:
                                 "ctxTokens": st.get("ctxTokens"),   # raw totalTokens (SDK only) — the
                                 #   compaction-suggestion thresholds key on true tokens (2026-08-30)
                                 "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
+                                "fastPending": bool(st.get("fastPending")),   # a fast opt-in waiting for its relaunch → the badge's dots
                                 "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
                                 "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
                                 "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
@@ -22389,6 +22522,7 @@ class Sessions:
                                 # fell to the other side, the Billing menu says so (2026-09-08)
                                 "authPickUnavailable": st.get("authPickUnavailable", ""),
                                 "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
+                                "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
                                 "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
                                 "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
                                 # live BACKGROUND TASKS (the CLI's task lifecycle stream) — the awaiting
@@ -27650,6 +27784,47 @@ def _maybe_auto_push(r):
 
 
 _P2P_REF = "romp-p2p-sync"   # scratch branch the local kernel force-pushes its HEAD to on the remote
+_P2P_APPLIED_REF = "romp-applied"   # branch the remote's apply leaves on the commit it applied: the next push's base
+
+
+def _p2p_ref_on(push_url, env):
+    """The full sha the scratch ref names on the peer right now, read with `git ls-remote` over the push's
+    own ssh; "" when it names nothing or the read fails (the caller then reports the push's failure as is).
+    Read only after a push failed, to tell a push another sender beat to the same commit from a real one."""
+    want_ref = "refs/heads/" + _P2P_REF
+    try:
+        r = subprocess.run(["git", "-C", str(ROOT), "ls-remote", push_url, want_ref],
+                           capture_output=True, text=True, timeout=30, env=env)
+    except Exception:
+        return ""
+    if r.returncode != 0:
+        return ""
+    for ln in (r.stdout or "").splitlines():
+        sha, _, ref = ln.partition("\t")
+        if ref.strip() == want_ref and re.fullmatch(r"[0-9a-f]{40}", sha.strip()):
+            return sha.strip()
+    return ""
+
+
+_ANSI_SGR_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# the lines of a failed push's output that say WHY: git's and ssh's errors, a rejected ref, the pre-push hook's
+# own refusal. "failed to push some refs" is git's summary of any of them, kept only when nothing says more.
+_PUSH_VERDICT_RE = re.compile(r"^(?:remote: +)?(?:error|fatal)\b|^ssh\b|\[(?:remote )?rejected\]|^romp pre-push: BLOCKED"
+                              r"|Permission denied|Connection (?:closed|refused|reset|timed out)"
+                              r"|Could not resolve hostname|Host key verification failed|Timeout, server", re.I)
+_PUSH_SUMMARY_RE = re.compile(r"^error: failed to push some refs", re.I)
+
+
+def _git_push_reason(stderr, stdout=""):
+    """What a failed `git push` said about why, for the row's detail and the Log. Its stderr LEADS with
+    whatever the local pre-push hook printed, and this repo's hook runs a secret scanner whose coloured
+    progress lines filled the whole 160-character detail on 2026-09-30, so a push the peer had rejected read
+    as three lines of a scan that found nothing. Keeps the lines that carry the verdict (_PUSH_VERDICT_RE),
+    in order, colour codes stripped; the last three lines when none match."""
+    text = _ANSI_SGR_RE.sub("", _ssh_err(stderr) or (stdout or ""))
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    hits = [ln for ln in lines if _PUSH_VERDICT_RE.search(ln)]
+    return "; ".join([ln for ln in hits if not _PUSH_SUMMARY_RE.search(ln)] or hits or lines[-3:])
 
 
 def _discover_remote_clone(host):
@@ -27760,8 +27935,17 @@ def _update_remote(host, head=None):
                            capture_output=True, text=True, timeout=120, env=env)
     except Exception as e:
         return False, "git push to %s failed: %s" % (host, str(e)[:160])
-    if p.returncode != 0:
-        return False, "git push to %s failed: %s" % (host, (_ssh_err(p.stderr) or p.stdout or "").strip()[:160])
+    # A push that ANOTHER push of the same commit beat to the scratch ref has done its job. git's ref update
+    # is a compare-and-swap against the value the peer advertised when the push began, --force or not, so a
+    # sender that lands in between gets ours rejected ("cannot lock ref ... reference already exists") while
+    # the ref now names exactly the commit we pushed. The usual such sender is this machine's previous
+    # kernel: a deploy moves HEAD and restarts the kernel seconds later, the kernel being restarted has
+    # already started pushing the new HEAD, and its `git push` child outlives it and lands while the apply,
+    # its next step, never runs. Refusing there left the peer on its old build through two deploys in a row
+    # (2026-09-30). The apply below binds to WANT itself, so the peer's ref naming lfull, whoever put it
+    # there, is all this step owes it; any other value is a real failure, reported in git's own words.
+    if p.returncode != 0 and _p2p_ref_on(push_url, env) != lfull:
+        return False, "git push to %s failed: %s" % (host, _git_push_reason(p.stderr, p.stdout)[:160])
     # (3) bind to the advertised sha, verify no divergence, re-check the tree, reset the remote to that sha,
     #     clean up, restart
     apply_cmd = (
@@ -27788,6 +27972,14 @@ def _update_remote(host, head=None):
         'if [ -n "$AS" ]; then '
         'git -C "$R" update-ref -d refs/heads/%s "$WANT" 2>/dev/null || K=":REFKEPT"; echo "DIRTYNOW$K"; exit 0; fi; '
         'git -C "$R" reset --hard "$WANT" >/dev/null 2>&1 || { git -C "$R" update-ref -d refs/heads/%s "$WANT" 2>/dev/null || K=":REFKEPT"; echo "RESETFAIL$K"; exit 0; }; '
+        # The applied commit keeps a branch of its own there (_P2P_APPLIED_REF), moved on every apply, so the
+        # NEXT push sends only what is new. A push's pack is everything the pushed commit reaches minus what the
+        # peer's ADVERTISED refs reach, and receive-pack advertises branches and tags, never HEAD: this reset
+        # leaves the checkout detached on WANT and deletes the scratch ref just below, so nothing advertised
+        # named any applied build, and every push re-sent the history since the peer's newest branch (about
+        # 45 MB and 70 s a push on 2026-09-30, from a remote-tracking ref three weeks old). Best effort: a
+        # failed update costs the next push its size, never this apply its outcome.
+        'git -C "$R" update-ref refs/heads/%s "$WANT" 2>/dev/null || true; '
         'git -C "$R" update-ref -d refs/heads/%s "$WANT" 2>/dev/null || K=":REFKEPT"; '
         'NEW="$(git -C "$R" rev-parse --short HEAD)"; '
         # RESTART the kernel THROUGH THE MANAGER (the user 2026-07-04: the manager is romp's durable supervisor —
@@ -27855,7 +28047,7 @@ def _update_remote(host, head=None):
         'UP=0; for i in 1 2 3 4 5 6 7 8; do sleep 1; if bash -c "exec 3<>/dev/tcp/127.0.0.1/%d" 2>/dev/null; then UP=1; break; fi; done; '
         'if [ "$UP" = 0 ]; then nohup "$R/bin/romp-serve" >>"$LOGDIR/kernel.log" 2>&1 </dev/null &  sleep 1; fi; '
         'echo "SYNCED:$NEW:FALLBACK$K"'
-    ) % (shlex.quote(rdir), lfull, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF,
+    ) % (shlex.quote(rdir), lfull, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_REF, _P2P_APPLIED_REF, _P2P_REF,
          _local_machine_label(), lfull[:8], kport,
          _local_machine_label(), lfull[:8], kport)
     # The apply KILLS the running kernel before booting its replacement, so it must be immune to the
@@ -42200,6 +42392,14 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         anchors = seg_anchors.get(seg)
         is_prompt = ev.get("kind") in ("user", "teammate") or (ev.get("kind") == "postal-service" and ev.get("direction") == "in")
         ev["tlId"] = ((anchors[0] if is_prompt else anchors[1]) or seg) if anchors else seg
+        # `turn` = the turn of this build's turn list the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01): the
+        # numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a peer's message or a
+        # nudge opened counts as one, as here; counting the typed rows alone read about half the turns on a session that
+        # takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the raw
+        # event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries none.
+        _tn = _raw_turn.get(id(ev), _raw_turn.get(ev.get("uuid")))
+        if _tn is not None:
+            ev["turn"] = _tn
         if ev.get("askAnswer") and not ev.get("askAnswerFilled"):
             # AskUserQuestion whose record carried NO structured answers map (an old transcript) →
             # the lossy output-string scrape is all there is. The attach loop's authoritative fill
@@ -42398,8 +42598,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # leaves NO record in the chat. While that reconnect is pending, show an animated "Reloading session…"
     # element (mirrors the compacting one) so the user sees the "rereading transcript" step the TUI narrates;
     # it clears the instant the new client connects (effortPending drops). Appended before the queued bubble.
+    # Since 2026-10-01 the reconnect waits for a quiet session (no turn, subagent or background task it would cut), so the
+    # element carries what it waits for (relaunchWaits) and says so instead of reading as a reload that never finishes.
     if (tm0 or {}).get("effortPending"):
-        events.append({"kind": "reconnecting", "effort": (tm0 or {}).get("effort") or ""})
+        events.append({"kind": "reconnecting", "effort": (tm0 or {}).get("effort") or "",
+                       "waits": (tm0 or {}).get("relaunchWaits") or ""})
     # Live API-RETRY indicator (the user 2026-07-08): while the CLI backs off + retries a rate-limited /
     # overloaded request the turn stalls in 'retrying' — which was visible ONLY as the amber tab border, with
     # NOTHING in the chat ("the border says retrying but the chat shows no sign"). Show an animated "API
@@ -42819,6 +43022,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # no badge — a row without the field stays ""). A non-empty
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
                   "fast": "" if tm.get("fastReason") else tm.get("fast", ""),
+                  "fastPending": bool(tm.get("fastPending")),   # the opt-in waits for its relaunch: dots on the fast badge (2026-10-01)
                   "modelFallback": tm.get("modelFallback"),   # the picker's yellow tick beside the requested model, with why and the retry cadence (2026-09-17)
                   # which account this session bills ('login'|'key') — ALWAYS reported when the backend
                   # knows it (the user 2026-08-09: the tab hover says Billing even on a one-auth
@@ -42850,6 +43054,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # helper did, "" when the CLI signed in with the machine's own login instead, absent before an init
                   "authLoginLive": tm.get("authLoginLive"),
                   "authPending": bool(tm.get("authPending")),   # an /auth reconnect applying → badge dots
+                  "relaunchWaits": tm.get("relaunchWaits") or "",   # …and what that relaunch waits for (the Billing row's sub-line says it)
                   "modelPending": _model_pending_now(sid, tm),   # switching-dots on the model badge until the pick lands, from EITHER surface (the user 2026-07-03)
                   "effortPending": bool(tm.get("effortPending")),   # switching-dots on the effort badge while the /effort reconnect applies (SDK-only; the user 2026-07-06)
                   "ctx": str(tm["context"]) if tm["context"] is not None else "",
@@ -47230,35 +47435,52 @@ _KIND_CACHE = {"mtime": -1.0, "kind": ""}
 # ── in-dashboard LOGIN (T157, the user 2026-08-28: today an expired login means dropping to a
 # terminal for /login — unreachable from the phone over Tailscale, so everything stalls until they
 # are physically back. The dashboard IS on the phone, so it becomes the login surface.) ──────────
-# The CLI's login is PTY-driven: a spawned REPL + /login + the subscription option prints an OAuth
-# URL with code=true and platform.claude.com's OWN code-display callback (probed on 2.1.221 — no
-# localhost anywhere, so ANY device's browser completes it and shows a code), then waits at "Paste
-# code here". The kernel drives exactly that: spawn → gates (trust dialog, method picker) → parse
-# the URL out of its OSC-8 wrapping → stream it to the dashboard as a link → pass the user's code
-# STRAIGHT THROUGH to the PTY. The code and the resulting tokens exist nowhere but the PTY write
-# and the CLI's own credential store: never logged, never echoed into a transcript, never in a
-# payload. One flow at a time per kernel (each box logs in its own store); a stuck flow self-reaps.
+# The kernel runs Claude Code's own login subcommand, `claude auth login --claudeai`, over plain pipes
+# (verified on 2.1.263 and 2.1.282, 2026-09-30). It prints the code=true sign-in URL on stdout, whose
+# redirect is platform.claude.com's OWN code-display page (no localhost, so ANY device's browser
+# completes it and shows a code), then `Paste code here if prompted > `. It reads the pasted code as
+# one line on stdin, and it EXITS with the verdict: 0 after `Login successful.`, 1 after `Login
+# failed: <why>` on stderr. The exit status is the verdict the kernel reports; the CLI's own stderr
+# sentence is what the dashboard shows when it fails. The one complaint that does not end the process
+# is a code without its `#state` half (`Invalid code. Please make sure the full code was copied.`):
+# the CLI keeps reading lines, so the flow returns to the paste step with that sentence.
+# The code and the resulting tokens exist nowhere but the stdin write and the CLI's own credential
+# store: never logged, never echoed into a transcript, never in a payload. One flow at a time per
+# kernel (each box logs in its own store); a stuck flow self-reaps.
+# Until 2026-09-30 the kernel drove the interactive REPL's /login in a PTY instead (trust dialog, REPL
+# hints, a method picker, a paste box, a verdict matched by words on the screen), and CLI 2.1.282 broke
+# it three ways: the trust dialog now focuses "No, exit", so the Enter that answered it quit the CLI on
+# a fresh scratch dir; a rejected code reads "OAuth error: …", a phrase the matcher never knew; and the
+# renderer repaints only the cells that changed, so even "Invalid code" arrived as "Invalid ode". A
+# rejected code sat at "checking the code…" until the ten-minute timeout. The subcommand has no
+# screen to read, no gates, and prints its link in about half a second, where the REPL took three.
 LOGIN_FLOW_TIMEOUT_S = 600
+LOGIN_LIVE_STATES = ("starting", "url", "verifying")
 _login_lock = threading.Lock()
-_login_flow = {"state": "", "url": "", "err": "", "t": 0.0, "pid": 0, "fd": -1}
+# `n` counts the starts this kernel life has seen: the dashboard's dialog reads a state carrying the number from before its
+# own start as the previous flow's, never as its outcome (a finished state is kept until the next start, so a read in
+# flight across the click returned the last flow's "done", and the dialog would have announced a sign-in that had not
+# happened yet)
+_login_flow = {"state": "", "url": "", "err": "", "t": 0.0, "pid": 0, "fd": -1, "n": 0}
 
 
 def _login_state():
-    """The payload-safe view: state/url/err only — nothing secret ever sits in the dict."""
+    """The payload-safe view: state/url/err and the flow's number only — nothing secret ever sits in the dict. Only a
+    LIVE flow ages out: a finished one ("done", "error") keeps its outcome until the next start, rather than turning
+    into a timeout ten minutes after the code (a success read "timed out", a refusal lost its reason)."""
     with _login_lock:
-        if _login_flow["state"] and time.time() - _login_flow["t"] > LOGIN_FLOW_TIMEOUT_S:
+        if _login_flow["state"] in LOGIN_LIVE_STATES and time.time() - _login_flow["t"] > LOGIN_FLOW_TIMEOUT_S:
             _login_abort_locked("the login flow timed out — start it again when ready")
-        return {"state": _login_flow["state"], "url": _login_flow["url"], "err": _login_flow["err"]}
+        return {"state": _login_flow["state"], "url": _login_flow["url"], "err": _login_flow["err"], "n": _login_flow["n"]}
 
 
 def _login_abort_locked(err=""):
-    """End the flow: clear the record and SIGTERM the CLI. The PTY master fd is NOT closed here — the
-    reader thread owns it and closes it when it exits (within one 0.5 s select timeout once the pid
-    check fails). Closing it from here while the reader was parked in select on that fd number let the
-    next _login_start reuse the same number for ITS master, and the old thread's os.read then swallowed
-    the new flow's first output — the trust prompt never seen, the new flow hung until its timeout
-    (review find on #931, 2026-09-07; the PR's own flow tests tripped it: tearDown cancels, the next
-    test starts)."""
+    """End the flow: clear the record and SIGTERM the CLI. The CLI's pipes are NOT closed here: the reader
+    thread owns them and closes them when it exits (within one 0.5 s select timeout once the pid check
+    fails). Closing a PTY master from here while the reader was parked in select on that fd number let the
+    next _login_start reuse the number, and the old thread's os.read swallowed the new flow's first output
+    (review find on #931, 2026-09-07); the same ownership keeps a pipe's number from being reused under a
+    live reader or under _login_code's write."""
     pid = _login_flow["pid"]
     _login_flow.update(state=("error" if err else ""), url="", err=err, pid=0, fd=-1)
     if pid:
@@ -47275,8 +47497,8 @@ def _login_cancel():
 
 
 def _login_code(code):
-    """Pass the user's code STRAIGHT to the PTY — a pure pass-through (T157 house rule: the code is
-    never logged, stored, or echoed anywhere; this function's only trace is the write itself)."""
+    """Pass the user's code STRAIGHT to the CLI's stdin as one line — a pure pass-through (T157 house rule:
+    the code is never logged, stored, or echoed anywhere; this function's only trace is the write itself)."""
     code = str(code or "").strip()
     if not code:
         return "empty code"
@@ -47284,9 +47506,8 @@ def _login_code(code):
         if _login_flow["state"] != "url" or _login_flow["fd"] < 0:
             return "no login flow is waiting for a code"
         try:
-            os.write(_login_flow["fd"], code.encode() + b"\r")
-            _login_flow["state"] = "verifying"
-            _login_flow["t"] = time.time()
+            os.write(_login_flow["fd"], code.encode() + b"\n")
+            _login_flow.update(state="verifying", err="", t=time.time())
         except Exception as e:
             _login_abort_locked("the code never reached the login flow (%s) — start again" % type(e).__name__)
             return "the login flow died taking the code — start again"
@@ -47295,13 +47516,12 @@ def _login_code(code):
 
 
 def _login_start():
-    """Spawn the PTY login flow; the reader thread drives the gates and parses the URL."""
-    import fcntl, struct, termios
-    import pty as _pty
+    """Spawn `claude auth login --claudeai`; the reader thread parses the URL and waits for the exit."""
     with _login_lock:
-        if _login_flow["state"] in ("starting", "url", "verifying"):
+        if _login_flow["state"] in LOGIN_LIVE_STATES:
             return "a login flow is already running — finish or cancel it first"
-        scratch = jd.STATE / "login-scratch"
+        _login_flow["n"] += 1                       # a new flow, whatever it comes to (a spawn failure below included)
+        scratch = jd.STATE / "login-scratch"         # a neutral cwd: no project's .claude settings reach the login
         try:
             scratch.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -47309,20 +47529,17 @@ def _login_start():
         env = dict(os.environ)
         env.pop("ANTHROPIC_API_KEY", None)          # the login flow, never key auth
         env.pop("CLAUDE_CODE_CHILD_SESSION", None)  # a plain top-level CLI
+        env.pop("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", None)   # set, it turns `auth login` into a silent refresh-token login
         try:
-            m, s = _pty.openpty()
-            # There is no visible terminal. Give the CLI room to print its OAuth URL intact
-            # instead of hard-wrapping it at the default 80 columns (including inside OSC-8).
-            fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 4096, 0, 0))
-            proc = subprocess.Popen([_claude_bin()], stdin=s, stdout=s, stderr=s,
+            proc = subprocess.Popen([_claude_bin(), "auth", "login", "--claudeai"], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     env=env, cwd=str(scratch), close_fds=True)
-            os.close(s)
         except Exception as e:
             _login_flow.update(state="error", url="",
                                err="could not start the login flow: %s" % e, pid=0, fd=-1)
             return _login_flow["err"]
-        _login_flow.update(state="starting", url="", err="", t=time.time(), pid=proc.pid, fd=m)
-    threading.Thread(target=_login_reader, args=(m, proc), daemon=True).start()
+        _login_flow.update(state="starting", url="", err="", t=time.time(), pid=proc.pid, fd=proc.stdin.fileno())
+    threading.Thread(target=_login_reader, args=(proc,), daemon=True).start()
     _push_soon()
     return ""
 
@@ -47333,7 +47550,7 @@ _LOGIN_OSC_RE = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)
 
 
 def _login_url(buf):
-    """Return a complete CLI-issued URL, never the first line or an unfinished PTY read.
+    """Return a complete CLI-issued URL, never the first line or an unfinished read.
 
     OSC-8's terminator bounds the actual link even when its visible label is wrapped. Some
     CLI versions also wrap the target: remove only its layout whitespace, preserving all OAuth
@@ -47363,79 +47580,72 @@ def _login_url(buf):
     return ""
 
 
-def trust_gate_passed(low0):
-    """The REPL is up and past its gates (the composer hints render) — space-free matching, since
-    PTY cursor codes concatenate words (probed: 'Tipsforgetting')."""
-    return "tipsforgetting" in low0 or "try\"" in low0 or "welcomeback" in low0
+def _login_said(line):
+    """A line of the CLI's stderr made fit for the dashboard: escapes and control characters out, spacing
+    collapsed, capped, and any long unbroken run of token alphabet replaced by an ellipsis. The CLI's
+    complaints name the problem, never the code, and this keeps it that way on the payload even if a
+    future message quoted one (the login state rides /version)."""
+    s = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?<>=]*[A-Za-z~]", "", str(line or ""))
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s)
+    s = re.sub(r"[A-Za-z0-9_\-]{24,}", "…", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:300]
 
 
-def _login_reader(fd, proc):
-    """Drive the spawned CLI to the URL and through the result. Output is parsed for STATES only —
-    nothing from this stream is ever logged verbatim (the paste prompt window can contain the code
-    echo), and the buffer dies with the thread."""
+def _login_reader(proc):
+    """Drive the spawned CLI to the URL and through its verdict. Output is parsed for STATES only —
+    nothing from these streams is ever logged verbatim, and the buffers die with the thread."""
     import select as _select
     try:
-        _login_reader_loop(fd, proc, _select)
+        _login_reader_loop(proc, _select)
     finally:
-        try:
-            os.close(fd)                         # the reader is the fd's sole owner (see _login_abort_locked)
-        except OSError:
-            pass
+        with _login_lock:                           # a reader that dies mid-flow says so, never leaves it hanging
+            if _login_flow["pid"] == proc.pid and _login_flow["state"] in LOGIN_LIVE_STATES:
+                _login_abort_locked("the login flow stopped unexpectedly — start it again")
+        for f in (proc.stdin, proc.stdout, proc.stderr):
+            try:
+                f.close()                            # the reader is the pipes' sole owner (see _login_abort_locked)
+            except Exception:
+                pass
+        _push_soon()
 
 
-def _login_reader_loop(fd, proc, _select):
-    buf = ""
-    sent_login = sent_pick = trust_answered = False
+def _login_reader_loop(proc, _select):
+    out, err_part, said = "", "", ""                 # stdout so far; stderr's unfinished line; its last whole line
+    streams = {proc.stdout.fileno(): "out", proc.stderr.fileno(): "err"}
     t0 = time.time()
-    while time.time() - t0 < LOGIN_FLOW_TIMEOUT_S:
+    while streams and time.time() - t0 < LOGIN_FLOW_TIMEOUT_S:
         with _login_lock:
             if _login_flow["pid"] != proc.pid:      # cancelled/superseded
-                break
+                return
         try:
-            r, _, _ = _select.select([fd], [], [], 0.5)
-        except (OSError, ValueError):               # Cancel can close the PTY during select.
-            break
-        if r:
+            ready, _, _ = _select.select(list(streams), [], [], 0.5)
+        except (OSError, ValueError):
+            return                                   # the finally reports a live flow as stopped
+        for fd in ready:
             try:
                 chunk = os.read(fd, 8192).decode("utf-8", "replace")
             except OSError:
-                break
-            buf = (buf + chunk)[-20000:]
-        plain = re.sub(r"\x1b\][^\x07\x1b]*(\x07|\x1b\\)", "", buf)
-        plain = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", plain)
-        low0 = plain.lower().replace(" ", "")
-        if not trust_answered and "trustthisfolder" in low0:
-            os.write(fd, b"\r")                     # the kernel's own scratch dir — trusted
-            trust_answered = True
-            buf = ""
-            continue
-        if not sent_login and trust_gate_passed(low0):
-            time.sleep(0.8)                          # the REPL settles, then the command
-            os.write(fd, b"/login\r")
-            sent_login = True
-            buf = ""
-            continue
-        if sent_login and not sent_pick and "selectloginmethod" in plain.lower().replace(" ", ""):
-            # PTY cursor-move codes mangle spacing (probed: 'Selectloginmethod:') — match space-free
-            os.write(fd, b"\r")                     # option 1: Claude account with subscription
-            sent_pick = True
-            buf = ""
-            continue
-        url = _login_url(buf)
+                chunk = ""
+            if not chunk:
+                streams.pop(fd, None)                # EOF: the CLI closed it, so it is exiting
+            elif streams[fd] == "out":
+                out = (out + chunk)[-20000:]
+            else:
+                lines = (err_part + chunk).split("\n")
+                err_part = lines.pop()[-4000:]
+                for line in lines:
+                    line = _login_said(line)
+                    if line:
+                        said = line
+                        _login_complaint(proc, said)
+        url = _login_url(out)
         if url:
             with _login_lock:
-                if _login_flow["pid"] == proc.pid and _login_flow["state"] in ("starting",):
+                if _login_flow["pid"] == proc.pid and _login_flow["state"] == "starting":
                     _login_flow.update(state="url", url=url, t=time.time())
-            _push_soon()
-        low = plain.lower()
-        # the VERDICT WINDOW is anchored on the paste prompt itself, not a buffer clear (a clear
-        # raced an instant verdict and wiped it): verdict phrases count only AFTER the last
-        # "Paste code here", which by construction precedes any verdict and follows every REPL
-        # hint ('how do I log an error?' false-fired the old loose match)
-        low0all = low.replace(" ", "")
-        pidx = low0all.rfind("pastecodehere")
-        low0v = low0all[pidx:] if pidx >= 0 else ""
-        if pidx >= 0 and not url:
+                    _push_soon()
+        elif "pastecodehere" in out.lower().replace(" ", ""):
             # The CLI is already asking for the code, so it HAS printed its sign-in link — and _login_url
             # found none it will stand behind (the allowlist rejected it, or the shape moved). Waiting on
             # would only report a timeout ten minutes later; the event is here, so say what happened now
@@ -47443,35 +47653,46 @@ def _login_reader_loop(fd, proc, _select):
             with _login_lock:
                 if _login_flow["pid"] == proc.pid and _login_flow["state"] == "starting":
                     _login_abort_locked("the sign-in link the CLI printed could not be read — log in from a "
-                                        "terminal with `claude /login`, or update the CLI")
-                    _push_soon()
-                    return
-        if "loggedinas" in low0v or "loginsuccessful" in low0v:
-            with _login_lock:
-                if _login_flow["pid"] == proc.pid:
-                    _login_abort_locked()            # done: reap the CLI; state clears to ""
-                    _login_flow["state"] = "done"
-            _ACCT_CACHE["mtime"] = -2.0   # bust the account cache: the Billing rows flip on the next read
-            _push_soon()
+                                        "terminal with `claude auth login`, or update the CLI")
             return
-        if "invalidcode" in low0v or "loginerror" in low0v or "loginfailed" in low0v:
-            # tight FAILURE phrases, and only in the post-code window — a loose error/login word
-            # match false-fired on the REPL's own hints (found by the mocked-PTY test)
-            # loud honest failure — the copy names the retry, never the code
-            with _login_lock:
-                if _login_flow["pid"] == proc.pid and _login_flow["state"] == "verifying":
-                    _login_abort_locked("the login code was not accepted — start the flow again")
-            _push_soon()
-            return
-        if proc.poll() is not None:
-            with _login_lock:
-                if _login_flow["pid"] == proc.pid and _login_flow["state"] not in ("done", "error"):
-                    _login_abort_locked("the login flow ended before completing — start it again")
-            _push_soon()
-            return
+    if streams:                                      # the clock ran out with the CLI still talking
+        with _login_lock:
+            if _login_flow["pid"] == proc.pid and _login_flow["state"] in LOGIN_LIVE_STATES:
+                _login_abort_locked("the login flow timed out — start it again when ready")
+        return
+    # Both streams closed: the CLI is exiting, and its exit status is the verdict. Cancel SIGTERMs it, so
+    # the wait cannot outlive a Cancel; the bound is the flow's own clock.
+    try:
+        rc = proc.wait(timeout=max(1.0, LOGIN_FLOW_TIMEOUT_S - (time.time() - t0)))
+    except subprocess.TimeoutExpired:
+        return                                       # the finally reports it as stopped
+    said = _login_said(err_part) or said
     with _login_lock:
-        if _login_flow["pid"] == proc.pid and _login_flow["state"] not in ("done", ""):
-            _login_abort_locked("the login flow timed out — start it again when ready")
+        if _login_flow["pid"] != proc.pid:
+            return
+        _login_flow["pid"] = 0                       # reaped by the wait: its number may be reused, so no SIGTERM
+        if rc == 0:
+            _login_abort_locked()                    # done: the CLI has exited; state clears to ""
+            _login_flow["state"] = "done"
+        elif said:
+            _login_abort_locked("%s — start the login again" % said)   # the CLI's own words: "Login failed: <why>"
+        else:
+            _login_abort_locked("the login flow ended before completing (exit %s) — start it again" % rc)
+    if rc == 0:
+        _ACCT_CACHE["mtime"] = -2.0   # bust the account cache: the Billing rows flip on the next read
+
+
+def _login_complaint(proc, said):
+    """One whole stderr line from a live CLI. The incomplete-code sentence means the CLI is reading lines
+    again, so the flow returns to the paste step carrying it; any other line while the code is being
+    checked is shown as it stands (the exit, when it comes, still decides)."""
+    with _login_lock:
+        if _login_flow["pid"] != proc.pid or _login_flow["state"] != "verifying":
+            return
+        if "invalidcode" in said.lower().replace(" ", ""):
+            _login_flow.update(state="url", err=said, t=time.time())
+        else:
+            _login_flow["err"] = said
     _push_soon()
 
 
@@ -47631,6 +47852,19 @@ def _login_rows():
                      "hasCmd": bool(rec.get("hasCmd")), "refused": str(rec.get("refused") or ""),
                      "why": lg.why_unavailable(rec)})
     return rows
+
+
+def _logins_view():
+    """GET /logins' body: the stored logins (_login_rows) and the machine's own login as the Billing surfaces name it,
+    with how that login stands beside the key for the gear's Account row (2026-09-30): keyHelper, whether an apiKeyHelper
+    is configured here, which a session bills unless its Billing is a login; loginUsable, whether a session can bill the
+    machine's login at all (a managed helper outranks every per-session pick), with loginWhy saying why not. Both are
+    _auth_avail's reading, the one the new-session picker's Billing row trusts, so the row's line and the picker agree."""
+    a = _auth_avail()
+    return {"ok": True, "logins": _login_rows(),
+            "machine": {"label": _claude_login_display(), "acct": _claude_account_label(), "state": _claude_account_state(),
+                        "keyHelper": bool(a.get("key")), "loginUsable": bool(a.get("login")),
+                        "loginWhy": str(a.get("loginWhy") or "")}}
 
 
 def _judge_err_status(msg):
@@ -54289,9 +54523,17 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagEdit — the targeted `tagEdit` op (create / rename / recolor / addMember / removeMember /
 #             delete / move, by tag id), the `tagEditAck` / `viewsAck` answers on the poster's socket,
 #             and the write sequence (`seq`) on every views blob.
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+#   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
+#             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
+#             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
-#                                              viewFolds: …and its folded groups, on the same frame (2026-09-23)
+#                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
+#                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
+#   chatTurn — every chat event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
+#             2026-10-01), the numbering the history spans, tailLo and the gaps count in. The page counts turns off it (the
+#             px per turn a gap is drawn at, the turn a row names); an older page ignores the field, and a page on an older
+#             kernel counts its typed rows as before and files a turnCountTyped client-diag row saying so.
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05
@@ -54343,18 +54585,25 @@ def _view_order_frame():
     same slot, so the folds converge on the same event the arrangement does (a setViewFolds that CHANGES
     the store).
 
+    `files` rides beside them too (2026-09-30): the viewer's file tabs (_view_files_served), an object, or null when
+    this kernel keeps none (file-tabs.ts hearSharedFileTabs publishes a browser's own against that), on the same
+    event (a setViewFiles that CHANGES the store).
+
     Each half is left OUT when its store could not be read and nothing is known-good, and the page keeps
     what it is showing for that half rather than adopting a guess (federation.ts reads a half only when it
-    is present); None, no frame at all, when neither half can be said."""
+    is present); None, no frame at all, when no half can be said."""
     served = _view_order_served()
     folds = _view_folds_served()
-    if served is None and folds is _VIEW_FOLDS_UNKNOWN:
+    files = _view_files_served()
+    if served is None and folds is _VIEW_FOLDS_UNKNOWN and files is _VIEW_FOLDS_UNKNOWN:
         return None
     fr = {"type": "viewOrder"}
     if served is not None:
         fr["order"], fr["stored"] = served
     if folds is not _VIEW_FOLDS_UNKNOWN:
         fr["folds"] = folds
+    if files is not _VIEW_FOLDS_UNKNOWN:
+        fr["files"] = files
     return fr
 
 
@@ -64589,6 +64838,9 @@ _CHAT_MOBILE_CSS = (
     ".mrow .workdot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--st-working-bg,#e0b020)}"
     ".mrow .workdot.await{background:var(--st-awaitbg-bg,#54B204)}"   # green: idle-waiting-on-bg-work
     ".mrow .nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dddddd}"
+    # a FILE TAB's row (2026-09-30): the file beside its session, set in under it at the text's own weight, so it reads as
+    # the session's file and never as a session; the glyph the strip's tab wears rides the cloned label
+    ".mrow.file{padding-left:28px}.mrow.file .nm{font-weight:400}.mrow.file .tab-file-glyph{margin-right:6px}"
     # per-row end-session x (the mobile picker's only way to end a session — desktop has the tab x)
     ".mrow .mclose{flex:0 0 auto;order:1;margin-left:8px;padding:0 6px;color:#8a8a8a;font-size:20px;line-height:1}"   # order:1 keeps the x right of the Needs-you pill
     ".mrow .mclose:active{color:#e5484d}"
@@ -64677,7 +64929,7 @@ var lab=t.querySelector('.tab-label'),id=t.getAttribute('data-id'),copy=t.getAtt
 out.push({key:'t:'+id+'/'+(copy===null?'':copy),id:id,copy:copy,name:(lab?lab.textContent:id),lab:lab,
 bg:t.style.getPropertyValue('--chip-bg').trim(),fg:t.style.getPropertyValue('--chip-fg').trim(),
 working:t.classList.contains('tab-working'),awaitbg:!!t.querySelector('.tab-dot.await'),retrying:!!t.querySelector('.tab-dot.retrying'),ask:t.classList.contains('ring-waiting-on-you'),badgeNeeds:!!t.querySelector('.tab-badge'),needsCount:(function(){var b=t.querySelector('.tab-badge');return b?b.textContent:'';})(),needsLabel:(function(){var b=t.querySelector('.tab-badge');return b?(b.getAttribute('aria-label')||''):'';})(),active:t.classList.contains('active'),
-ph:t.classList.contains('tab-placeholder'),away:t.classList.contains('tab-away')});});return out;}
+ph:t.classList.contains('tab-placeholder'),away:t.classList.contains('tab-away'),file:t.classList.contains('tab-file')});});return out;}
 // A name is filled from the desktop label's own CHILD NODES, cloned — not from its flattened text. A
 // federated session's name carries a <span class="host-prefix"> that renders the "host:" as quiet
 // metadata (host-prefix.ts: dim, italic, never bold, a step smaller), and textContent threw that span
@@ -64696,6 +64948,7 @@ function rowUpdate(row,s){row.classList.toggle('active',!!s.active);
 // who tapped a remote session on the phone and nothing happened)
 row.classList.toggle('ph',!!s.ph&&pendingId!==s.id);
 row.classList.toggle('pending',pendingId===s.id);
+row.classList.toggle('file',!!s.file);   // a file tab's row (2026-09-30)
 row.classList.toggle('ask',!!s.ask);   // RING mode: the desktop tab's magenta ring (ring-waiting-on-you, a widget with a switch; switched off it puts no class on the tab, so the phone follows): a card of this session's needs you
 var mb=row.querySelector('.m-badge');   // BADGE mode: the desktop tab wears a .tab-badge dot with a count instead of the ring; the phone shows the same dot in the row's flow, before the close (plans/tab-state-badge.md)
 if(s.badgeNeeds){if(!mb){mb=document.createElement('span');mb.className='m-badge';mb.setAttribute('role','img');row.appendChild(mb);}mb.textContent=s.needsCount||'';mb.setAttribute('aria-label',s.needsLabel||'needs you');}
@@ -64711,7 +64964,7 @@ var lbl=row.querySelector('.nm');fillName(lbl,s);lbl.style.color=s.bg||'';
 if(s.copy!==null)row.setAttribute('data-copy',s.copy);else row.removeAttribute('data-copy');}
 function rowMake(s){var row=document.createElement('div');row.className='mrow';row.setAttribute('data-id',s.id);row.setAttribute('data-key',s.key);
 var lbl=document.createElement('span');lbl.className='nm';row.appendChild(lbl);
-var x=document.createElement('span');x.className='mclose';x.textContent='\u00d7';x.title='End session';
+var x=document.createElement('span');x.className='mclose';x.textContent='\u00d7';x.title=s.file?'Close tab':'End session';   // a file tab's row (2026-09-30) closes the tab
 row.appendChild(x);rowUpdate(row,s);return row;}
 // a GROUP HEADING: the header's own chip (tag-menu.ts tagChip, cloned — the one tag treatment, T251), the caret,
 // the count (folded: the members the fold hides, as the header counts them) and, folded, the header's member-state
@@ -67424,6 +67677,14 @@ else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
     try{window.__rompPaneToggle&&window.__rompPaneToggle('feed',true);}catch(e){}}
   try{window.__rompMobileTab&&window.__rompMobileTab('feed');}catch(e){}   // phone: one pane at a time
   try{bf&&bf.contentWindow&&bf.contentWindow.postMessage({romp:'browseFiles',path:m.path,sid:m.sid},'*');}catch(e){}}
+// A file POPPED OUT of a viewer hosted by a pane with no tab strip (the feed's file browser, the Files pane: file-view.ts
+// popOutTarget, 2026-09-30) posts up as openFileTab; the shell forwards it to the chat column that shows that session (the
+// one last used when none does), bringing a toggled-off chat pane forward and, on a phone, the chat tab, so the tab that
+// opens is on screen. The chat opens it beside the session it came from (render.ts openFileAsTab).
+if(m.romp==='openFileTab'&&typeof m.path==='string'&&m.path){var ft=(window.__rompChatTarget&&window.__rompChatTarget(m.sid))||(window.__rompFocusedChatId&&document.getElementById(window.__rompFocusedChatId()))||document.getElementById('f-chat');
+  if(!document.body.classList.contains('po-chat')){try{window.__rompPaneToggle&&window.__rompPaneToggle('chat',true);}catch(e){}}
+  try{if(window.__rompMobileOn&&window.__rompMobileOn())window.__rompMobileTab&&window.__rompMobileTab('chat');}catch(e){}
+  try{ft&&ft.contentWindow&&ft.contentWindow.postMessage({romp:'openFileTab',path:m.path,sid:m.sid||null},'*');}catch(e){}}
 // A passage selected in a viewer hosted by a pane with NO composer (the feed) posts up in the
 // editorSelection shape the chat already handles (file-view.ts composerWindow); the shell forwards it
 // whole into the chat pane, whose composer seeds the labeled quote chip for the session the file was
@@ -71869,14 +72130,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(f), "application/json", cache="no-cache")
             if p == "/logins":
                 # The stored Claude logins (T346): labels, organisations, dates and states for the gear's
-                # Billing block and `romp login list`, plus the machine's own login as the surfaces name it.
-                # AUTHED like /api-health (the plain _authorize): the rows name accounts. No token ever rides
-                # here (a row's hasCmd says a token command is recorded; the command itself never rides either).
-                return self._send(200, json.dumps({"ok": True, "logins": _login_rows(),
-                                                   "machine": {"label": _claude_login_display(),
-                                                               "acct": _claude_account_label(),
-                                                               "state": _claude_account_state()}}),
-                                  "application/json", cache="no-cache")
+                # Billing block and `romp login list`, plus the machine's own login as the surfaces name it and
+                # how it stands beside the key (_logins_view). AUTHED like /api-health (the plain _authorize): the
+                # rows name accounts. No token ever rides here (a row's hasCmd says a token command is recorded; the
+                # command itself never rides either).
+                return self._send(200, json.dumps(_logins_view()), "application/json", cache="no-cache")
             if p == "/api-health":
                 # The API-health signal (docs/reference.md): per-(auth label, model family) attempt /
                 # response / give-up counts over rolling windows and a thrash/degraded/recovering state
@@ -74243,12 +74501,12 @@ class Handler(BaseHTTPRequestHandler):
             if _set_session_color(str(msg["id"]), str(msg["bg"])):
                 _mark_views_dirty()
         elif msg and msg.get("type") == "loginStart":
-            # the in-dashboard login (T157): spawn the PTY flow; the gear polls /version for state
+            # the in-dashboard login (T157): spawn `claude auth login`; the gear polls /version for state
             err = _login_start()
             if err:
                 client["send"](json.dumps({"type": "warn", "text": err}))
         elif msg and msg.get("type") == "loginCode":
-            # PASS-THROUGH ONLY (T157 house rule): the code goes straight to the PTY — this handler
+            # PASS-THROUGH ONLY (T157 house rule): the code goes straight to the CLI's stdin — this handler
             # must never log, store, or echo it anywhere
             err = _login_code(msg.get("code"))
             if err:
@@ -74625,6 +74883,19 @@ class Handler(BaseHTTPRequestHandler):
                 # the next reload, and no other device would ever hear of it
                 sys.stderr.write("romp-kernel: setViewFolds refused: %s\n" % e)
                 _reply(client, {"type": "warn", "text": "Couldn't save the folded groups: %s" % e})
+            else:
+                if changed:                          # the change is the event; an unchanged republish pushes nothing
+                    _broadcast_view_order()
+        elif msg and msg.get("type") == "setViewFiles" and isinstance(msg.get("files"), dict):
+            # A file opened as a tab, closed, or dragged, on ANY viewer of this kernel (the user 2026-09-30, who wanted
+            # the files open beside their sessions to follow them like the tab order does). Kept WHOLE and OPAQUE beside
+            # the arrangement, pushed on the same frame. Last write wins.
+            try:
+                changed = _write_view_files(msg["files"])
+            except (_StateUnreadable, _StateUnwritable) as e:
+                # refused out loud: the tab sits on this page and would silently vanish on the next reload
+                sys.stderr.write("romp-kernel: setViewFiles refused: %s\n" % e)
+                _reply(client, {"type": "warn", "text": "Couldn't save your file tabs: %s" % e})
             else:
                 if changed:                          # the change is the event; an unchanged republish pushes nothing
                     _broadcast_view_order()

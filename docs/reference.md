@@ -205,7 +205,9 @@ session waiting on your answer to a prompt, it also says that the question goes
 away with the turn. The
 turn is interrupted and the relaunch follows at that turn's end, so the program
 is never torn down from under a live turn. Work the old process was running,
-its subagents and its background tasks, ends with it. A message you had queued
+its subagents and its background tasks, ends with it, and the session is told
+which background tasks were cut off; a billing or effort change still waiting
+for the session to go quiet applies with the restart. A message you had queued
 survives. One the session has already taken runs in the old process, and the
 relaunch follows the first turn to end with every message the old process has
 taken already in the conversation. Before that the old process keeps taking your
@@ -325,8 +327,10 @@ chat shows the CLI's own reply.
 
 A Claude Code session switches model live but reloads to apply a new effort:
 the chat shows "Reloading session…" and the effort badge shows switching-dots
-until the reload completes, and a session that is mid-turn reloads when the
-turn ends.
+until the reload completes. The reload waits until it would cut nothing (no
+turn running or queued, no subagent, no background task), and while it waits
+the chat line says on what, as in "Applying high effort after 2 background
+tasks…". Restart session applies a waiting change at once, ending that work.
 
 ### What a session needs from you
 
@@ -368,7 +372,9 @@ mode. Turning it on while the session is on a non-Opus model makes the CLI
 switch to a fast-capable one, which the chat shows as the command's own
 confirmation. If the CLI refuses the toggle (for example, the account has
 extra usage turned off), a toast says why and the pick reverts to off;
-the control never silently disappears.
+the control never silently disappears. The first time a session is turned on,
+the flag rides a relaunch of its CLI, which waits for a quiet session; until
+then the badge shows switching-dots rather than **Fast**.
 
 ### Always fast, and retrying an upgrade after a downgrade
 
@@ -515,7 +521,9 @@ and the machine's default beside it. The flyout opens on hover over the
 Billing row, as the Tags flyout does (one gesture: a short hover opens, a
 click opens at once, leaving both the row and the flyout closes it), and on
 click. Switching reconnects the session to apply, with the same switching-dots
-the effort badge wears.
+the effort badge wears, and waits the same way for a quiet session: until then
+the row's sub-line reads "applying…", or "applies after 2 background tasks"
+when work the reconnect would end is still running.
 
 Below the session's choices, behind a rule, the flyout carries one entry,
 **Set default billing**, which opens a submenu holding exactly the same
@@ -700,6 +708,23 @@ a setup-token handed to Claude Code through an `apiKeyHelper` hangs the request
 `CLAUDE_CODE_OAUTH_TOKEN`, under a scratch configuration with no other login to
 fall back on, is accepted and billed to the subscription. A judge call billed
 to a stored login runs the same command the same way for its own child.
+
+Fast mode under a login that rides the environment (2026-10-01): Claude Code
+cannot ask the organisation's fast-mode setting for one. It gives an
+environment token inference-only scopes, and the endpoint it would ask refuses
+a setup-token anyway, so it guesses from a flag cached in its configuration
+directory; that guess refused fast mode, with the reason `preference`, to
+sessions on an enterprise seat that serves it. Every launch whose login rides
+the environment (a stored login, or a machine token in the manager's
+environment) therefore also carries `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1`,
+and the API decides: an organisation that has fast mode off refuses the fast
+request, which the CLI then reports as `preference` on the organisation's
+word, and romp treats that as the real refusal it is (the toast for a
+session's own pick, the kernel log for Always fast). A CLI launched before
+this, which romp only reattached to across a restart and which is still
+guessing, is relaunched once the session is quiet, with the user's pick left
+on; a `preference` remembered before the change no longer holds Always fast
+back. A judge call billed to such a login carries the same switch.
 
 The command runs the way the kernel runs the box's own key helper: under a
 whitelisted environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `LANG`,
@@ -1400,6 +1425,30 @@ so its shells are re-parented and may keep running. A kernel restart has never
 touched work a session deliberately detached: a tmux server it started itself,
 `setsid` children and other processes that outlive their shell.
 
+A session's own CLI is also relaunched, with no kernel restart, to apply a
+setting it reads only at launch: billing, effort, the first fast-mode opt-in,
+bypass mode, the per-session environment, and the corrections after a refused
+fast mode or a login that landed on another credential. The subagents, timers
+and monitors inside that CLI would end with it, so the relaunch waits until the
+session is quiet: no turn running or queued, no subagent, no background task and
+no question waiting on you. It happens at the event that ends the last of that
+work, never on a timer, and the setting's pending mark stays up meanwhile,
+saying what it waits for. Restart session and editing or deleting an earlier
+message relaunch without waiting, and a setting still waiting to apply rides
+that relaunch; the session is then told which background tasks were cut off,
+with a request to check whether each is still running before relaunching it.
+
+A setting still waiting for its relaunch survives a kernel restart. The kernel
+records which settings wait, and every launch records the settings it carried,
+which the session host keeps and reports back when a kernel attaches. A kernel
+attaching to a CLI launched before the setting keeps its pending mark and its
+wait for a quiet session; one attaching to a CLI that already carries it marks
+it applied. A host too old to report its launch cannot vouch for anything, so
+the setting is applied at the next quiet moment. The attaching kernel also
+reads the background tasks the surviving CLI runs from the registry, so the
+wait holds for them; a re-attach to the same CLI inside one kernel's life (a
+host re-exec, a retried attach) keeps them as they were.
+
 The dashboard page stays on screen across a restart. Its panes reconnect as they
 do after a dropped socket (the watched tab rebuilt whole, the other tabs as
 skeletons that fill on demand), and a restart onto the same build is invisible
@@ -1650,6 +1699,22 @@ deliberately: the restore that serves it carries no bound, as every restore
 did before, so its cut waits for the next whole parse (a compaction once the
 tail has reached the share is one); held to the share, an entry kept whole for
 an open turn's tail would parse the history whole again at every descent.
+An entry restored at a boot, from a document with a `turns` section, is not
+held to the share by the gate either, so a session restored at every boot
+kept the document it first got (2026-10-01: a 133 MB session restored a
+36 MB tail five days on, and every first chat build rendered all of it).
+Its settle refreshes the document instead, once the tail past the cut has
+reached the share: a whole parse on a thread of its own that installs
+nothing and takes no lock a reader of the leaf waits on, then the writer
+over it. The entry in hand stays as it is for the process, the next boot
+restores from the new document, and the next refresh is due only once the
+leaf has grown past the point the last one started from by the share again,
+so a cut that cannot move (one long open turn) costs a logarithm of the
+growth. A salvaged reply (an `orphanReply` marker) is a synthesized row in
+the `turns` section whatever uuid it carries: a local command's streamed
+output is kept in the transcript under the same uuid as a `local_command`
+row, and looked up by that uuid it once refused the document as `turnRows`
+at every write, so that leaf was read whole at every boot.
 A compaction after the document restores from it, the tail read from the cut
 taking the compaction in, while the tail past the cut is under an eighth of
 the pre-cut bytes and nothing else in the same write parses whole for its own
@@ -2734,7 +2799,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `session`, `inputs`, `lineage`, `shrunk`,
   `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason
   (`noEntry`, `restored`, `written`, `noCut`, `reuse`, `closure`, `unsplittable`,
-  `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`;
+  `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`, `turnRows`;
   `offsets` is no reader entry at all, a tail entry (one read from a
   checkpoint's offset, its base above zero), or an entry holding fewer records
   than the tree read, or more for a lineage file or under another generation
@@ -2760,10 +2825,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   strings, not dicts, and the index takes each row's bytes with no re-encode
   (the deploy boot of that version refuses every standing document as
   `version` and the settle rewrites it: that boot is the migration, the boot
-  after is the read), and `converge`: the
+  after is the read), `converge`: the
   pass's writes of idle leaves' documents from the boot's own parse
   (`candidates`, `writes`, `bytes`, `deferred`, `skipped` per the writer's
-  reason).
+  reason), and `refresh`: the document refreshes a restored entry's settle
+  started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
+  time); the refresh's own parse counts under `parse` as `private`.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
   come from: `materialized` atoms built from the document's rows since boot,
   `materializedBy` (per consumer), `materializedByStage` (the same builds
@@ -3479,15 +3546,36 @@ announces `chatProto2` in its `caps`:
   lets a gap met again on the healed socket ask anew; a gap is sized by its
   TURN count times the rendered run's measured pixels per turn (a turn is a
   user row plus its reply and any tool rows; a per-display-unit average drew
-  gaps half true); a fill anchors on the first row that intersects the
-  viewport, whatever the sign of its top; with no row on screen (or that row
-  gone from the rebuild) it names the point under the viewport top as a TURN
-  and a fraction into its gap and puts that turn back after the rebuild, so
-  the point moves by less than a turn (the head stays at zero); every row
-  carries its own turn, stamped when it is painted, so the point is named by
-  the row's position and never by looking its uuid up (a row anchored on an
-  answer's tool_result uuid has no event of its own), and a fill that leaves
-  no row on screen re-windows once around the named point;
+  gaps half true), the turns counted the way the kernel numbers them: every
+  event carries `turn`, the index of the kernel turn it belongs to (the kernel
+  announces `chatTurn` in its `caps`), so a turn a peer session's message or a
+  nudge opened counts once (counted by typed rows alone, a session that takes
+  much mail read half its turns and drew its gaps twice their height; a page on
+  a kernel without the field still counts typed rows, and files one
+  `turnCountTyped` client-diag row per session saying why), lowered when the
+  gaps together would stand taller than a quarter of the browser's layout
+  limit: no box is laid out past a fixed height
+  (2^25 px in Chromium divided by the device scale and the zoom, so 16,777,216
+  px in Chrome on a 2x display), which the page measures with a hidden probe
+  and measures again after a resize, and a long session's head gap at the
+  measured figure passed it, which put the newest rows out of reach and kept
+  the gap asking for pages while the reader sat at the end; a gap the reader
+  stands inside (a scrollbar jump into history) asks for the page holding the
+  turn under the viewport top, and a re-window keeps the reader's offset into
+  a hidden unit, so the jump stays where it was dropped; where the end is still
+  out of reach (rows taller than the limit) the page settles: a re-window never
+  runs again on the echo of its own write, a gap element a fill rebuilt asks
+  nothing on its first observation, and the fill itself asks for the page under
+  a reader still parked in a gap; a fill anchors on the
+  first row that intersects the viewport, whatever the sign of its top; with
+  no row on screen (or that row gone from the rebuild) it names the point
+  under the viewport top as a TURN and a fraction into its gap and puts that
+  turn back after the rebuild, so the point moves by less than a turn (the
+  head stays at zero); every row carries its own turn, stamped when it is
+  painted, so the point is named by the row's position and never by looking
+  its uuid up (a row anchored on an answer's tool_result uuid has no event of
+  its own), and a fill that leaves no row on screen re-windows once around
+  the named point;
 - the kernel's per-client base is TAIL-ONLY: a reply moves the base's first edge
   only when its span reaches the tail run, so the tail's deltas keep flowing to a
   reader in older history; a reconnect's `ready` starts a fresh base. The base's
@@ -4582,8 +4670,13 @@ sweep summary of every boot that had a session to reconcile: `sessions`, `resume
 `restored`, `notified`, `reaped`, `scopesStopped`, `toStart`, `durationS`),
 `reconcile.orphan-reaped` (`cliPid`, `fsid`, `scope`, `signaled`, `forced`,
 `tree`), `reconcile.scope-stopped` (`unit`, `sid8`, `cliPid`),
-`reconcile.duplicate-cli` (two Claude Code processes holding one conversation
-as the boot's process listing stood: `fsid`, `pids`, `n`), `crash.heal` and
+`reconcile.duplicate-cli` (two Claude Code processes serving one session as
+the boot's process listing stood: `sid`, `fsid`, `pids`, `n`; a process's
+session is the `ROMP_SID` in its environment, not the conversation id on its
+command line, which a comment thread shares with its parent, and rows written
+before that change are keyed by `fsid`), `reconcile.duplicate-unchecked`
+(processes on this kernel's conversations whose session could not be read, so
+the check skipped them: `pids`, `n`), `crash.heal` and
 `crash.loop` (`attempt`), `drain.unjoined` (a session the drain's bound left
 closing: `inflight`, `reaped`), and the lease work's `lease.*` kinds. Every kind
 but the boot summary carries `text` and is also a kernel-log line of the form
@@ -4740,7 +4833,17 @@ process's resident memory and CPU at its exits. The live
 block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
 Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
 CPU, resident size and the pusher's idle-cycle share, and lists any
-conversation two Claude Code processes hold right now. Windows are days or
+session two Claude Code processes serve right now. A process's session is the
+`ROMP_SID` the kernel set in its environment at launch, never the conversation
+id on its command line: a comment thread is launched as a fork of its parent's
+conversation, so its command line names the parent's id while it is a session
+of its own, and grouping by that id once reported a parent and its threads as
+duplicates. The threads get their own line instead, per parent session: how
+many are running and their memory, recognised by the `threadOf` field of their
+registry rows (a deliberate fork has none and counts as a session). A process
+whose `ROMP_SID` cannot be read, or names no registry row, is listed by pid as
+not checked, and a scope matching no registry row is counted as unmatched;
+neither is guessed at. Windows are days or
 weeks (`--window`), weeks anchored on `--anchor` (default the first restart's
 day in range), bounded by `--since` and `--until`, in the machine's local time
 unless `--tz` names a zone; weeks are counted in local dates, so a clock change
@@ -4750,7 +4853,8 @@ missing ledger is named at the top, never a silent zero. `--json` prints the who
 (each cut row joined to the boot that followed it), `quietWindows` (each
 joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
 metric above per window, with capped latency samples for the distribution
-figure), `sources`, and `live`.
+figure), `sources`, and `live` (with `duplicateClis`, `threads`,
+`unidentifiedClis`, `unmatchedScopes` and `errors`).
 
 `scripts/restart_metrics_report.py` draws the before-versus-after figures from
 two or more of those JSON documents with cleanplots, which is not a romp
@@ -5007,15 +5111,22 @@ dashboard, a file is refused (the cursor says so) rather than opened in place of
 
 ### Quoting a passage into the composer
 
-Select any passage in the file viewer and it lands in the
-composer as a quote chip, labeled with the file and the line the passage lives on. Type
-what should change and press **⌘⏎** to set the note aside; keep reading, select the next
-passage, and repeat: each staged note remembers its quote and its place. The list above
-the composer shows about four staged notes and scrolls for the rest; its caret collapses
-it to the count. **⏎** sends everything you staged along with whatever is in the box as
-one message, so the session applies the lot in one pass, and you never copy a line out of
-the document by hand. The line in each label is checked against the file at the moment
-you select, so numbers that moved under you are caught rather than quietly carried. When
+The file viewer, over the chat and as a file tab, has a message bar at its foot addressed
+to the session the file was opened from ("to web"). Select a passage and it becomes a quote
+chip in that bar, labelled with the file and, in the code view or a markdown file's Raw
+view, the lines it spans (`src/app.py:12-18`); a passage of a rendered document has no
+lines. Selecting again replaces the chip; holding ⌘ (Ctrl elsewhere) while you select adds
+one. Type what should change and press **⌘⏎** to stage it onto that session's staged
+list, the same list the chat's message box keeps, so the chat shows it above the box and
+quotes from the chat and from files go out together. **⏎** sends everything staged for the
+session, then what is in the bar, as one message. Each quote reaches the session under a
+line naming where it is from: `Replying to this part of src/app.py (lines 12–18):`, or
+`Replying to this part of docs/guide.md:` for a rendered document. The bar hides while the
+file is being edited, keeps what you typed while you look elsewhere, and leaves slash
+commands to the session's own box. A viewer opened in the feed's file browser or the Files
+pane has no bar; a passage selected there lands in the chat's message box as a quote chip,
+labelled with the file and the line it lives on, checked against the file at the moment
+you select. When
 several sessions work in the same repository, or in worktrees of it, the viewer's title
 bar says which one you opened the file from: a chip with the session's name, in the same
 color as its tab. The title bar's **GitHub ↗** button opens the file on GitHub. While the
@@ -5060,20 +5171,26 @@ copy of it.
 
 Select a passage in a message and right-click it: **Comment** opens a box on the passage for the
 first message of a side conversation about it, and **Quote** puts the passage in the message box
-instead. **Ctrl+Alt+M** (**⌘⌥M** on a Mac, the key Google Docs uses for a comment) opens the same
+instead. **Ctrl+/** (**⌘/** on a Mac, the key code editors use to toggle a comment) opens the same
 box from the keyboard, just under the selection, from anywhere in the chat including the message
-box; the right-click menu shows the key under **Comment**. The command palette's **Comment on
+box, where it types no "/" and opens no slash-command menu; the right-click menu shows the key
+under **Comment**. The key is the "/" character, however your layout types it: on a German
+keyboard, where "/" is Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on
 selection** does the same for the passage that was selected when you opened the palette. With
 nothing selected in a message, or in a session that has not finished starting or loading, it says
 so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
-there; on a keyboard where Ctrl+Alt+M types a character (AltGr+M on a German layout), the
-character wins.
+there.
 
-On a phone or tablet a long-press selection opens no menu, so a **Comment** button appears just
-below the selection instead (above it when the message box leaves no room), and tapping it opens
-the same box. It steps aside while you drag the selection's handles or scroll with your finger and
-comes back on the selection once you lift it; it goes when the selection is cleared or scrolled out
-of view, and when the box opens.
+Selecting a passage also puts it in a quote chip above the message box, and the chip's row carries
+a **Comment** button before **Stage**, on every device. It opens the same box on the chip's passage,
+just under the passage, even once the selection itself is gone, which is how a phone starts a
+comment: a long-press selection there opens no menu, and the system's own menu covers the text
+around it. With several chips stacked, Comment opens on the newest one. It shows only while a chip
+holds a passage of a message in a session that can take a comment.
+
+On a touch screen each control in the chip row and the staged strip (Comment, Stage, a chip's x,
+Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
+pixels each way, with none of them touching, while keeping its compact look.
 
 ### Stepping through your messages and comments
 
@@ -5288,17 +5405,26 @@ focus lands on it, and the left and right arrows step from there. The `archived`
 folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
-adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
-**+** adds the tag without moving the tab. Dragging does it too, and the place you drop says where the
-tab should appear now: drop it inside a group's row, or on the group's header, and the session takes
-that group's tag and lands at the slot you dropped it in, keeping every other tag it carries — so a
-session under several tags goes on showing under each of them. The group about to take it wears the
-accent while you hold the tab over it, and a drop inside the group it already belongs to just reorders
-it. Drop a tab on the ungrouped row and it loses **every** tag instead: that row is not a group but the
-sessions carrying no tags, so nothing short of clearing them would put it there. The tags going are
-named under the tab before you let go, since dragging it back into one group restores that one tag and
-not the others; there is no undo beyond dragging. Dragging a **header** still reorders the groups, as
-above — which of the two gestures you get depends on what you picked up, never on where you dropped it. **Group tabs by tag**, at the foot of the tag
+makes the same move as dragging the tab there (below), so the session takes that tag and loses every other
+tag it carries, whichever of its copies you right-clicked. The row's **+** adds the tag and keeps the rest,
+like a drag with Option held (below). Dragging a tab moves it as well, and the place you drop says
+where the tab should appear now, and only there: drop it inside another group's row, or on that group's
+header, and the session **moves** there, taking that group's tag, losing every other tag it carries, and
+landing at the slot you dropped it in. That holds for a session under several tags too: drag its copy from
+one group to another and it ends under the new group alone, so its copies leave the other groups. Hold
+**Option** (**Alt** on Windows and Linux) as you let go to **add** the group's tag instead and keep the
+rest, the key a file manager copies on: a small **+** sits on the dragged tab's corner while the key is
+down, and the session goes on showing under each of its tags. The group about to take it wears the accent
+while you hold the tab over it, the tags a move would take off are named under the tab, and a drop inside
+the group the tab was already in just reorders it. Drop a tab on the ungrouped row and it loses **every**
+tag instead, with or without the key: that row is not a group but the sessions carrying no tags, so nothing
+short of clearing them would put it there. The tags going are named under the tab before you let go, since
+dragging it back into one group restores that one tag and not the others; there is no undo beyond
+dragging. A move or a clear is one write on your kernel, so another device never sees the session
+half-moved; a kernel from before that write gets the same tags through its older edits, one after another,
+and a tag kept by another kernel is changed there, in a write of its own. Dragging a **header** still
+reorders the groups, as above — which of the two gestures you get depends on what you picked up, never on
+where you dropped it. **Group tabs by tag**, at the foot of the tag
 button's menu, turns the sections off for this browser. On a phone the session picker, which stands in
 for the strip, lists the sessions the same way: each under its tag's heading, in the same order (its tag
 menu has the same switch). The folds follow you: your kernel keeps which groups are folded, which of the
@@ -5449,11 +5575,55 @@ of the **System context** card and **Browse files** on a tab's right-click menu
 open a listing of that folder by the same rule: in this pane while it is open,
 otherwise over the chat. Pick a file in the
 listing and it opens where the listing is. Selecting a passage in the viewer
-puts the quote in the chat's composer, as it does from the viewer over the
-chat. When no file is open, the pane lists the files most recently opened in
+puts the quote in the chat's message box (the viewer over the chat has a message bar of
+its own instead). When no file is open, the pane lists the files most recently opened in
 it; click one to open it again. The gear's **Files** row (Settings, General,
 Panes) adds a Files toggle to the bottom bar (on a phone, a Files tab like the
 others), and that toggle turns the pane on.
+
+## File tabs
+
+The file viewer's pop-out button (the window with an arrow, beside Copy path;
+also the palette's **Open this file as a tab** while a viewer is up) closes the
+viewer and opens the file as a tab of the chat strip. The tab goes right after
+the session the file was opened from, inside that session's tag group, and
+shows a file glyph in the session's colour and the file's name. When two open
+files share a name, the part of their folders that tells them apart shows
+beside it; a file on another machine wears that machine's `host:` prefix. The
+tooltip gives the full path and the session. The same file on the same machine
+has one tab: opening it again selects that tab. A relative path is the session's
+own (the kernel resolves it against that session's folder), so the same relative
+path from two sessions is two tabs.
+
+Picking a file tab puts the file in the pane in the transcript's place, with the
+viewer's own bar, a Reload button added and the close cross closing the tab. The
+message box, the jump column and the transcript's rail and marks leave while it
+shows; picking any session brings them back, with the transcript where you left
+it. The file is read again each time its tab is picked. With unsaved edits in the
+file, switching away or closing the tab asks first. A file opened from the file
+browser in the feed or from the Files pane pops out the same way: the pane hands
+it to the chat column that shows its session.
+
+A file tab behaves like a tab: the strip's arrows, the window's arrows and the
+session pair (Ctrl+Alt+Left and Right) step onto and off it, the phone's session
+picker lists it under its session, and the session switcher (Cmd/Ctrl+O) lists
+the open files after the sessions. Its right-click menu has **Close tab**, **Copy
+path** and **Show in Files** (the file browser at its folder); a middle click or
+its cross closes it. Dragging moves it beside another session, into that
+session's group; a file tab carries no tags of its own, so a drag never writes
+one. It moves with its session when the session is dragged, and follows the
+session into every group the session is tagged with. If that session leaves the
+strip, the tab goes back beside the session it was opened from, and if that one
+is gone too it trails the strip in the first column.
+
+The open tabs are kept by the kernel beside the tab order and the folded groups
+(`view-files.json`, the `files` half of the `viewOrder` frame, the `viewFiles`
+capability), so every device shows the same ones, and a reload brings the pane
+back to the file tab it was showing. A page or a kernel from before file tabs
+ignores them; a kernel without the capability leaves them in the browser that
+opened them. The editor extension's chat does not show file tabs, since its
+webview cannot read files through the kernel. In a split, a file tab sits in the
+column that holds its session; there is no dragging it to another column.
 
 ## The Artifacts pane (experimental)
 

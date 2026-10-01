@@ -111,9 +111,12 @@ test("wiring: every click on a PDF carries its gesture; modified → the tab, pl
   // no click site bypasses the gesture reader: the chat and the browser never call openFileView themselves
   assert.equal((RENDER.match(/openFileView\(/g) || []).length, 0, "render.ts opens files through openFileClick only");
   assert.equal((BROWSE.match(/openFileView\(/g) || []).length, 0, "file-browse.ts opens files through openFileClick only");
-  const view = VIEW.slice(VIEW.indexOf("export function openFileView("));
+  // openFileView hands the open to the viewer's builder (buildFileView, the modal's and a file tab's alike, 2026-09-30)
+  const open = VIEW.slice(VIEW.indexOf("export function openFileView("));
+  assert.doesNotMatch(open.slice(0, open.indexOf("\n}\n")), /openPdfTab/, "openFileView itself opens in-app, whatever the path");
+  const view = VIEW.slice(VIEW.indexOf("function buildFileView("));
   const body = view.slice(0, view.indexOf("\n}\n"));
-  assert.doesNotMatch(body, /openPdfTab/, "openFileView itself opens in-app, whatever the path");
+  assert.doesNotMatch(body, /openPdfTab/, "…and so does the builder");
   // the ONE gesture read inside openFileView is its links' listener (a Cmd/Ctrl- or middle-click on a link inside the shown file takes
   // its own tab, file-view-links.test.ts); the open of the viewer's own file reads none
   const linksAt = body.indexOf("const openLink = (x: HTMLElement, ev: MouseEvent) => {");

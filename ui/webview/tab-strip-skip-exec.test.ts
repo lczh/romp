@@ -165,6 +165,9 @@ function lift(): (hooks: Hooks) => Api {
     }
     const onTabKey = () => {}; const dragImageBlank = () => el("div"); const hideTabTip = () => {}; const syncComposerPh = () => {}; const hideFilePreview = () => {}; const snapshotDragGeometry = () => {}; const inRompShell = () => false;   // inRompShell: postTabDrag (lifted with wireTabDrag, the chat split 2026-09-11) tells no shell here; syncComposerPh: the rebuild re-syncs the composer's name overlay (T335), inert here
     const flipTabs = (f) => f(); const applyCompactSweep = () => {};
+    // the FILE tabs (2026-09-30), none in these worlds: the paint is the plan's, and no file tab is up
+    let fileTabOpen = null; const fileStripPaint = (paint) => ({ items: paint, sig: null }); const isFileTabId = () => false;
+    const quietly = (f) => f();   // a restore's setActive, recorded like any other here
     const hostNameNodes = (name) => [document.createTextNode(name)]; const fadedColor = (h) => h;
     const tabCtxGauge = () => el("span", "tab-ctx"); const pickTone = (a, b) => b ?? a;
     const fedMissing = false;   // the page has its federation manager (render.ts fedMissing, 2026-09-10): tabs drag as before

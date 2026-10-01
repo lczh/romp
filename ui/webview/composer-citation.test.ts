@@ -112,7 +112,7 @@ test("a sub-goal click cites ITSELF, not the card's top goal (the user 2026-07-0
 
 test("highlighting transcript text seeds a QUOTE chip — the same chip, reply-context flavored (the user 2026-07-13)", () => {
   // two flavors on one Citation: a goal chip (itemId) or a quote chip (quote [+ the turn's uuid])
-  assert.match(RENDER, /interface Citation \{ itemId\?: string; title: string; quote\?: string; uuid\?: string \| null; src\?: string \}/);
+  assert.match(RENDER, /interface Citation \{ itemId\?: string; title: string; quote\?: string; uuid\?: string \| null; src\?: string;[^\n]*\n\s*kind\?: "file"; path\?: string; lines\?: \[number, number\] \| null \}/);   // + a file viewer's quote (2026-09-30)
   // event-based on selectionchange; BOTH endpoints must sit inside transcript turns, so composer/tab
   // selections never seed; a collapse never clears (clicking into the composer must not eat the chip).
   // The qualification lives in transcriptSelection(), shared with the Enter-to-reply shortcut so the
@@ -272,7 +272,7 @@ test("a VS Code EDITOR highlight seeds the same chip, labeled + wrapped with its
   assert.match(RENDER, /const i = list\.findIndex\(\(c\) => !!c\.src\);\s*\n\s*if \(i >= 0\) list\[i\] = chip; else list\.push\(chip\);/);
   // the chip title leads with the origin; the wrap lead-in points at the code, not the conversation
   assert.match(RENDER, /const title = \(src \? src \+ " — " \+ snip : snip\)\.slice\(0, 140\);/);
-  assert.match(STAGED, /const lead = c\.src \? "Replying to this highlighted code \(" \+ c\.src \+ "\):" : "Replying to this part of the conversation:";/);
+  assert.match(STAGED, /return c\.src \? "Replying to this highlighted code \(" \+ c\.src \+ "\):" : "Replying to this part of the conversation:";/);   // quoteLeadIn, beside a file viewer's lead (2026-09-30)
 });
 
 test("deselecting in the editor (editorSelectionCleared) drops the editor chip, scoped + focus-safe (the user 2026-07-14)", () => {

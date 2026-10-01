@@ -124,7 +124,7 @@ test("a viewer whose document has no composer seeds THROUGH the shell: the feed 
   // unchanged message into the chat pane. No composer and no shell (VS Code's cross-origin parent, a
   // standalone pane) still stands the gesture down before the fresh read (the no-sink gating).
   assert.match(VIEW, /function composerWindow\(\): Window \| null \{\n\s*if \(document\.getElementById\("composer-input"\)\) return window;\n\s*try \{ if \(window\.parent !== window && window\.parent\.document\.getElementById\("chat-pane"\)\) return window\.parent; \}\n\s*catch \{[^}]*\}\n\s*return null;\n\}/);
-  assert.match(VIEW, /const seedTarget = composerWindow\(\);\n\s*if \(!seedTarget\) return;/);
+  assert.match(VIEW, /const seedTarget = compose \? window : composerWindow\(\);\n\s*if \(!seedTarget\) return;/);   // a viewer with the chat's message bar seeds its own chip (2026-09-30)
   // the shell's arm: the SAME message, forwarded whole into the chat frame — sid intact, so the chip
   // lands in the session the file was opened for (the 2026-08-19 routing rule holds across documents)
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
@@ -170,13 +170,13 @@ test("composerWindow, executed: own composer → the same-origin shell's chat pa
 // rebuilds the root and no report follows a paint), a repeated width no write, one watch at a time, and no watch at all
 // without ResizeObserver.
 test("watchBodyWidth, executed: --fv-body-w lands on each top-level table after a report and, through the stamp, on a fresh root's tables; a nested table and the prose get nothing; a repeated width writes nothing; the next watch and the drop disconnect; no ResizeObserver, no writes", () => {
-  const head = "function watchBodyWidth(body: HTMLElement): () => void {";
+  const head = "function watchBodyWidth(body: HTMLElement, reg: ViewerReg = modalReg): () => void {";   // the viewer's registration: the modal's by default, a file tab's (2026-09-30)
   const at = VIEW.indexOf("let dropWidthWatch: () => void = ");
   const end = VIEW.indexOf("\n}\n", VIEW.indexOf(head, at)) + 3;
   assert.ok(at >= 0 && VIEW.indexOf(head, at) > at && end > at, "watchBodyWidth and its module-level drop found, the drop first");
   const js = VIEW.slice(at, end)
     .replace(/: \(\) => void/g, "")                                    // the let's type and the function's return type
-    .replace("(body: HTMLElement)", "(body)")
+    .replace("(body: HTMLElement, reg: ViewerReg = modalReg)", "(body, reg = modalReg)")
     .replace("const stamp = (): void =>", "const stamp = () =>")
     .replace(/ as HTMLElement\)/g, ")");
   assert.doesNotMatch(js, /HTMLElement|: void/, "every annotation the lift knows is gone (a new one needs its strip here)");
@@ -197,7 +197,9 @@ test("watchBodyWidth, executed: --fv-body-w lands on each top-level table after 
     disconnect(): void { this.rec.live = false; }
   }
   const report = (entries: Array<{ contentRect: { width: number } }>) => { const live = observers.filter((o) => o.live); assert.equal(live.length, 1, "one live observer"); live[0].cb(entries); };
-  const run = new Function("ResizeObserver", js + "\nreturn { watchBodyWidth, drop: () => dropWidthWatch() };") as (ro: unknown) => { watchBodyWidth: (body: Node) => () => void; drop: () => void };
+  // the modal's registration, as file-view.ts's modalReg: a view onto the module-level drop the lift carries
+  const reg = "\nconst modalReg = { get dropWidth() { return dropWidthWatch; }, set dropWidth(f) { dropWidthWatch = f; } };";
+  const run = new Function("ResizeObserver", js + reg + "\nreturn { watchBodyWidth, drop: () => dropWidthWatch() };") as (ro: unknown) => { watchBodyWidth: (body: Node) => () => void; drop: () => void };
   /** A rendered root as mdBlock leaves it: prose, a table inside a paragraph (as inside a quote or a list item), two top-level tables. */
   const fresh = () => { const nested = node("TABLE"); const p = node("P", "", [nested]); const t1 = node("TABLE"); const t2 = node("TABLE"); return { md: node("DIV", "fileview-md", [p, t1, t2]), p, nested, t1, t2 }; };
   const w = (n: Node) => n.style.getPropertyValue("--fv-body-w");
@@ -245,8 +247,8 @@ test("watchBodyWidth, executed: --fv-body-w lands on each top-level table after 
 });
 
 test("the width watch is wired: each viewer opens one on the body it builds, each rendered paint stamps the fresh root's tables, and the close drops it", () => {
-  const opens = VIEW.match(/const body = el\("div", "fileview-body"\);\n\s*const stampBodyWidth = watchBodyWidth\(body\);/g) || [];
-  assert.equal(opens.length, 2, "openFileView and openUrlView each watch their body as they build it");
+  const opens = VIEW.match(/const body = el\("div", "fileview-body"\);\n\s*const stampBodyWidth = watchBodyWidth\(body(, reg)?\);/g) || [];
+  assert.equal(opens.length, 2, "the viewer's builder (the modal's and a file tab's, on its own registration: 2026-09-30) and openUrlView each watch their body as they build it");
   assert.match(VIEW, /body\.replaceChildren\(rendered \? mdBlock\(text, \{ kind: "file", path, sid: sid \|\| null \}\) : codeBlock\(text, path, true\)\);\n\s*if \(rendered\) stampBodyWidth\(\);/, "openFileView: a rendered paint stamps its fresh tables (mdBlock rebuilt the root; no report follows a paint)");
   assert.match(VIEW, /landFragment\(\);[^\n]*\n\s*if \(fmt\.md === "rendered"\) stampBodyWidth\(\);/, "openUrlView: the same, after the fragment lands");
   const closeAt = VIEW.indexOf("export function closeFileView(): void {");
@@ -261,8 +263,10 @@ test("it waits with the romp loader and fails with the kernel's own words, never
   // it. The status rides along since 2026-08-09, so the catch can decide whether to offer the download.
   assert.match(VIEW, /if \(!r\.ok\) return r\.text\(\)\.then\(\(t\) => \{\s*\n\s*throw Object\.assign\(new Error\(t \|\| \("HTTP " \+ r\.status\)\), \{ status: r\.status \}\);\s*\n\s*\}\);/);
   assert.match(VIEW, /const why = el\("div", "fileview-err"\);/);
-  // a reply that lands after the user closed the viewer paints nothing
-  assert.match(VIEW, /if \(!document\.getElementById\("romp-fileview"\)\) return;/);
+  // a reply that lands after the user closed the viewer paints nothing: the modal while its overlay stands, a file tab's
+  // view while it is in the page (2026-09-30)
+  assert.match(VIEW, /const up = \(\): boolean => \(tab \? wrap\.isConnected : !!document\.getElementById\("romp-fileview"\)\);/);
+  assert.equal((VIEW.match(/if \(!up\(\)\) return;/g) || []).length, 2, "the fetch's text and its failure alike");
 });
 
 test("it reuses fileUrl, so a REMOTE session's file is relayed from the host that owns it", () => {
@@ -454,7 +458,7 @@ test("long lines ALWAYS soft-wrap — the dedicated toggle button is gone (the u
 test("a file opened FROM the listing offers the way back — close only the viewer, listing intact beneath", () => {
   // the one-directional stack: the browser sits beneath, so closing just the viewer IS the back;
   // presence-gated on the browser's DOM id (import-free), absent for path-link opens
-  assert.match(VIEW, /if \(document\.getElementById\("romp-filebrowse"\)\) \{/);
+  assert.match(VIEW, /if \(!tab && document\.getElementById\("romp-filebrowse"\)\) \{/, "the modal's alone: a file tab has no listing under it (2026-09-30)");
   assert.match(VIEW, /back\.textContent = "‹ Files"; back\.title = "Back to the file listing";/);
   assert.match(VIEW, /back\.addEventListener\("click", \(\) => closeFileView\(\)\);/);
 });
@@ -568,7 +572,7 @@ test("a 200 image renders ONE <img> at an object URL; the quote gesture stays of
   const openFn = VIEW.split("export function openFileView")[1].split("function offersDownload")[0];
   // the blob becomes an object URL only AFTER the still-open/still-this-viewer checks — a viewer
   // closed or replaced mid-flight creates nothing to leak
-  assert.ok(openFn.indexOf('if (!document.getElementById("romp-fileview")) return;')
+  assert.ok(openFn.indexOf("if (!up()) return;") > 0 && openFn.indexOf("if (!up()) return;")
             < openFn.indexOf("URL.createObjectURL"),
     "no URL is minted for a viewer that is already gone");
   assert.match(openFn, /if \(!wrap\.isConnected\) return;/);
@@ -692,7 +696,9 @@ test("the object URL is revoked on close AND on replace-open — none leaks, one
   assert.match(openFn, /dropMediaUrl\(\);/, "the replace path revokes (the conflict Reload re-opens through here)");
   assert.ok(openFn.indexOf("dropMediaUrl();") < openFn.indexOf('document.getElementById("romp-fileview")?.remove();'),
     "…before the old viewer is torn down, beside the other module-level drops");
-  assert.match(openFn, /mediaUrlLive = objUrl;/, "the minted URL is exactly what the teardowns revoke");
+  assert.match(openFn, /reg\.media = objUrl;/, "the minted URL is exactly what the teardowns revoke");
+  assert.match(VIEW, /get media\(\) \{ return mediaUrlLive; \}, set media\(u\) \{ mediaUrlLive = u; \},/, "the modal's reg IS mediaUrlLive (a file tab's is its own, released by releaseTabReg)");
+  assert.match(VIEW, /if \(tabReg\.media\) \{ try \{ URL\.revokeObjectURL\(tabReg\.media\); \}/, "…and a file tab's is revoked when it goes");
 });
 
 test("an oversize image lands on the kernel's words + Download — a 413 never reaches the media branch", () => {
@@ -914,5 +920,5 @@ test("openFileView answers false when the dirty-edit guard keeps the previous vi
   assert.equal(none.asked, 0);
   assert.deepEqual(run(true, null).out, { through: true, guard: null }, "a viewer with no guard (nothing edited) is replaced");
   // and the other end of the function: a completed open answers true
-  assert.match(VIEW, /body\.replaceChildren\(why\);\n\s*\}\);\n\s*return true;\n\}/, "openFileView ends by answering true");
+  assert.match(VIEW, /document\.getElementById\("romp-fileview"\)\?\.remove\(\);\n\s*buildFileView\(path, sid, opts, null\);\n\s*return true;\n\}/, "openFileView ends by answering true, once the viewer is built"); 
 });

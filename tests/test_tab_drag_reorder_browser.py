@@ -45,12 +45,14 @@ a header dragged across the shared row still reorders the groups; and with one o
 one keeps a row of its own between the open group's row and the trail's. Then the same packed layout under the
 classic theme (gap 0).
 
-DRAGGING A TAB INTO AND OUT OF A GROUP (the user 2026-09-23): the place a tab is dropped states where it should
-appear now. A group IS a tag, so a drop inside a group's row puts the session in it (that tag added, at the slot
-the cursor named) and leaves its other tags alone; the ungrouped row is NOT a group but the sessions carrying no
-tags, so a drop there clears EVERY tag. That asymmetry is the rule. The last phase drives the whole chain on the
-real page: an untagged tab into an open group, a tab already in the group (position moves, nothing is written),
-on into a second group (it renders under both), the two-tag session cleared by a drop on the ungrouped row,
+DRAGGING A TAB INTO AND OUT OF A GROUP (the user 2026-09-23; the move, 2026-09-30): the place a tab is dropped states
+where it should appear now. A group IS a tag, so a drop inside another group's row MOVES the session there (that tag
+and no other, at the slot the cursor named), Option / Alt held at the release ADDS the tag and leaves the others
+alone, and the ungrouped row is NOT a group but the sessions carrying no tags, so a drop there clears EVERY tag. The
+move of a multi-tagged session, and a second client watching it, are test_tab_drag_move_served.py's. The last phase
+here drives the whole chain on the real page: an untagged tab into an open group, a tab already in the group
+(position moves, nothing is written), on into a second group with Alt held (it renders under both), the two-tag
+session cleared by a drop on the ungrouped row,
 dragged back into ONE group (which restores that tag alone — reversibility is one tag, not the set), cleared
 again, the ungrouped row to itself, a group's tab released ahead of the first header (the strip's head: nothing
 is cleared), and a drop on a folded group's bare header. Tags are read from the KERNEL'S OWN views store, never
@@ -285,7 +287,8 @@ const settleAt = async (x, y) => {
 // moves across the strip, a rest over the target, the release — plus the DRAG CUE sampled while the hand rests
 // (the drag into / out of a group change, 2026-09-23: the group about to be joined wears the accent ring, a tag
 // about to come off says so in the floating line), and, when the gesture writes a tag, the wait for the kernel's
-// store to answer. `opts.tagWrite` = this gesture is expected to write a tag, so wait for the store to change.
+// store to answer. `opts.tagWrite` = this gesture is expected to write a tag, so wait for the store to change;
+// `opts.alt` = Option / Alt held from just after the drag starts through the release (the copy-drag: an add, 2026-09-30).
 async function runDrag(label, pre, src, tgt, frac, opts) {
   const o = opts || {};
   const sx = pre.bar.left + src.left + src.w / 2, sy = pre.bar.top + src.top + src.h / 2;
@@ -295,6 +298,7 @@ async function runDrag(label, pre, src, tgt, frac, opts) {
   await page.mouse.move(sx, sy);
   await page.mouse.down();
   await page.mouse.move(sx + 4, sy + 1, { steps: 2 });   // the drag starts on the first moves after the press
+  if (o.alt) await page.keyboard.down("Alt");            // the modifier, pressed once the drag is under way
   await page.mouse.move(tx, ty, { steps: 16 });          // a run of dragover ticks across the strip
   // THE RELEASE POINT'S OWN HIT-TEST, MADE CERTAIN: park at the grab point until the strip has really re-slotted
   // there, then come to the release point and rest until it re-slots again (settleAt). Two things conspire without
@@ -316,11 +320,14 @@ async function runDrag(label, pre, src, tgt, frac, opts) {
   // the cue as the hand sees it, mid-gesture: the ringed header(s), and the leave line's words when it is up
   const cue = await page.evaluate(() => {
     const c = document.querySelector(".tab-drag-cue");
+    const p = document.querySelector(".tab-drag-add");
     return { ring: Array.from(document.querySelectorAll("#tabs .tab-group-head.join-target")).map((h) => h.dataset.group),
              leave: c && c.style.display !== "none" ? c.textContent.replace(/\s+/g, " ").trim() : "",
-             cueBox: c && c.style.display !== "none" ? (() => { const r = c.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; })() : null };
+             cueBox: c && c.style.display !== "none" ? (() => { const r = c.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; })() : null,
+             plus: !!p && p.style.display !== "none" };   // the copy-drag's + badge (2026-09-30)
   });
   await page.mouse.up();
+  if (o.alt) await page.keyboard.up("Alt");
   const wrote = o.tagWrite ? await waitTags(src.id, before) : null;
   await page.waitForTimeout(500);
   await page.mouse.move(900, 700);                        // off the strip: no hover tip in the next measurement
@@ -562,9 +569,10 @@ await dragToHead("classic packed: trail, 3rd tab to the slot BETWEEN the two fol
 // 6. DRAGGING A TAB INTO AND OUT OF A GROUP (the user 2026-09-23). Last, so nothing above depends on the
 //    membership these gestures rewrite. Both groups open; every drag names its tab by SESSION and COPY, since a
 //    tag write reshapes the rows under it. The place a tab is dropped states where it should appear: a group is a
-//    tag, so a drop in its row ADDS that tag and leaves the others alone; the ungrouped row is not a group but the
-//    sessions with NO tags, so a drop there CLEARS every tag. 6d…6f is the round trip that asymmetry allows:
-//    cleared, dragged back into ONE group (which restores that tag alone), cleared again.
+//    tag, so a drop in another group's row MOVES the session there (2026-09-30), and with Option / Alt held ADDS
+//    that tag and leaves the others alone; the ungrouped row is not a group but the sessions with NO tags, so a drop
+//    there CLEARS every tag. 6d…6f is the round trip: cleared, dragged back into ONE group (which restores that tag
+//    alone), cleared again.
 for (const g of L.items.filter((i) => i.group).map((h) => h.group)) await foldGroup(g, false);
 L = await layout();
 const open0 = L.items.filter((i) => i.group).map((h) => h.group);   // [first, second] in tagOrder
@@ -581,11 +589,12 @@ await dragCopy("join: an untagged tab into the first group, past its 2nd member"
 // 6b. a tab ALREADY in the group, dragged within its row: the position moves, nothing is written, nothing lights up
 await dragCopy("join: a tab that already carries the tag, dragged within its group", firstMembers[0], open0[0],
                { name: firstMembers[2], copy: open0[0] }, 0.75);
-// 6c. …and the same session dragged on into the SECOND group: it gains that tag too and renders under BOTH
+// 6c. …and the same session dragged on into the SECOND group with Option / Alt held (the copy-drag, 2026-09-30:
+//     a plain drop there MOVES it, test_tab_drag_move_served.py): it gains that tag too and renders under BOTH
 L = await layout();
 const secondMembers = L.tabs.filter((t) => t.copy === open0[1]).map((t) => t.name);
-await dragCopy("join: a tab that carries another tag joins a second group and renders under both", joiner, open0[0],
-               { name: secondMembers[0], copy: open0[1] }, 0.75, { tagWrite: true });
+await dragCopy("join: a tab that carries another tag, dragged with Alt held, joins a second group and renders under both", joiner, open0[0],
+               { name: secondMembers[0], copy: open0[1] }, 0.75, { tagWrite: true, alt: true });
 // 6d. the LEAVE half: one of its two copies dragged onto the ungrouped row. EVERY tag comes off — that row is the
 //     sessions carrying none — so the session renders once, there, at the drop index, under no group
 await dragCopy("leave: a two-tag session dragged to the ungrouped row is cleared of both", joiner, open0[1],
@@ -1041,16 +1050,18 @@ class ServedTabDragReorder(unittest.TestCase):
         self.assertEqual(c["cue"]["ring"], [], "nothing may flash on a drag that only reorders inside one group" + table)
         self.assertEqual(c["cue"]["leave"], "", "…and no tag is coming off either" + table)
 
-    def test_a_tab_that_carries_another_tag_joins_a_second_group_and_renders_under_both(self):
-        c = self._case("join: a tab that carries another tag joins a second group")
+    def test_a_tab_that_carries_another_tag_dragged_with_alt_joins_a_second_group_and_renders_under_both(self):
+        c = self._case("join: a tab that carries another tag, dragged with Alt held, joins a second group")
         table = self._table(c)
         st = self._joins()
         self.assertTrue(c["wrote"], "the kernel's store answered the write" + table)
         self.assertEqual(c["tags"]["after"], sorted(st["groups"]),
-                         "a group is a tag: 'appear here' adds this one and leaves the other alone" + table)
+                         "Option / Alt is the copy-drag: it adds this tag and leaves the other alone" + table)
         self.assertEqual(sorted(c["copies"]), sorted(st["groups"]),
                          "…and the strip draws a copy under EACH, which is what makes the second tag evident" + table)
         self.assertEqual(c["cue"]["ring"], [st["groups"][1]], "only the group about to be joined is marked" + table)
+        self.assertTrue(c["cue"]["plus"], "…and the + badge said the release adds" + table)
+        self.assertEqual(c["cue"]["leave"], "", "nothing comes off, so the leave line stays down" + table)
 
     def test_a_multi_tag_session_dropped_on_the_ungrouped_row_is_cleared_of_every_tag(self):
         # the ungrouped row is not a group — it is the sessions carrying no tags — so "appear here" can only be

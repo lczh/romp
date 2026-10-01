@@ -15,12 +15,15 @@ import type { SessionTag, SessionViews } from "./session-views";
  *  follow-up addressed by name could land on whichever OTHER tag already had it. The message nests
  *  this under `edit`, so no top-level `name` can read as a session address to the federation router. */
 export interface TagEditOp {
-  op: "create" | "rename" | "recolor" | "addMember" | "removeMember" | "delete" | "move";
-  /** the tag's stored id — every op but create and move */
+  op: "create" | "rename" | "recolor" | "addMember" | "removeMember" | "delete" | "move" | "setTags";
+  /** the tag's stored id — every op but create, move and setTags */
   tid?: string;
   /** move only: off `tid_from`, onto `tid_to`, as ONE write on the kernel — both halves or neither */
   tid_from?: string;
   tid_to?: string;
+  /** setTags only (the kernel's `tagSet` cap): the sessions' local tags set to EXACTLY these, off every
+   *  other, as ONE write on the kernel — all of it or none of it; empty clears them all */
+  tids?: string[];
   /** create only: the typed name, or none for the kernel's default ("tag N", minted unique there) */
   name?: string;
   newName?: string;
@@ -257,6 +260,12 @@ export function applyTagEdit(v: SessionViews, edit: TagEditOp, newId?: string): 
       const from = byId(edit.tid_from), to = byId(edit.tid_to);
       if (from) from.members = (from.members || []).filter((m) => !sids.includes(m));
       if (to) to.members = Array.from(new Set((to.members || []).concat(sids)));
+      break;
+    }
+    case "setTags": {
+      const keep = edit.tids || [];
+      for (const t of tags) t.members = keep.includes(t.id) ? Array.from(new Set((t.members || []).concat(sids)))
+                                                            : (t.members || []).filter((m) => !sids.includes(m));
       break;
     }
   }

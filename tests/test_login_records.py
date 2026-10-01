@@ -829,7 +829,7 @@ class StoredLoginPick(_Backend):
             s = self._sess(9, auth="login", authLogin=rec["id"])
             self._launch_options(s)
             self.assertEqual(s._launched_login, rec["id"])
-            s.request_reconnect = lambda defer=True: recon.append(1)
+            s.request_reconnect = lambda *a, **k: recon.append(1)
             self.be._note_auth_source(s, word)
             self.assertEqual(s.auth_login_live, "", word)
             self.assertEqual(s._launched_login, "", "this process does not bill the stored login (spend and the ring say so)")
@@ -846,7 +846,7 @@ class StoredLoginPick(_Backend):
         self.be.login_ok = lambda: False
         s = self._sess(3, auth="login", authLogin=rec["id"])
         self._launch_options(s)
-        s.request_reconnect = lambda defer=True: recon.append(1)
+        s.request_reconnect = lambda *a, **k: recon.append(1)
         self.be._note_auth_source(s, "apiKeyHelper")     # a key word: the wrong landing
         self.assertEqual(self.be.pick_fall("login", rec["id"]), "", "the probe: nothing to fall to")
         self.assertEqual(recon, [], "an identical relaunch is never asked for")
@@ -861,7 +861,7 @@ class StoredLoginPick(_Backend):
         self.be.login_ok = lambda: True
         s2 = self._sess(4, auth="login", authLogin=rec["id"])
         self._launch_options(s2)
-        s2.request_reconnect = lambda defer=True: recon.append(2)
+        s2.request_reconnect = lambda *a, **k: recon.append(2)
         self.be._note_auth_source(s2, "apiKeyHelper")
         self.assertEqual(recon, [2])
         self.assertTrue(any("reconnecting onto the fallback side (login)" in m for m, p in logs), logs)
@@ -884,7 +884,7 @@ class StoredLoginPick(_Backend):
         # the CLI took a key instead: the key's bucket, never the pick's
         s = self._sess(6, auth="login", authLogin=rec["id"])
         self._launch_options(s)
-        s.request_reconnect = lambda defer=True: None
+        s.request_reconnect = lambda *a, **k: None
         self.be._note_auth_source(s, "apiKeyHelper")
         self.assertTrue(s.auth_label.startswith("key"), s.auth_label)
         self.assertNotEqual(s.auth_label, picked)
@@ -929,7 +929,7 @@ class StoredLoginPick(_Backend):
         # a wrong landing's evidence is persisted too ("" = another credential answered)
         lg.clear_refused(self.be.state_dir, rec["id"])
         self._launch_options(s)
-        s.request_reconnect = lambda defer=True: None
+        s.request_reconnect = lambda *a, **k: None
         self.be._note_auth_source(s, "apiKeyHelper")
         self.assertEqual(sb.read_reg(self.be.state_dir, sid).get("authLoginLive"), "")
         self.assertEqual(sb.read_reg(self.be.state_dir, sid).get("launchedLogin"), "")
@@ -993,7 +993,7 @@ class StoredLoginPick(_Backend):
         sid = self.be.spawn("n", "/tmp", auth="login:" + rec["id"])
         s = sb.SdkSession(self.be, sb.read_reg(self.be.state_dir, sid))
         self.be.sessions[sid] = s
-        s.request_reconnect = lambda defer=True: recon.append(1)
+        s.request_reconnect = lambda *a, **k: recon.append(1)
         self._launch_options(s)
         self.be._note_auth_source(s, "apiKeyHelper")  # the wrong landing (a key word): the one reconnect
         self.assertTrue(s._wrong_landing_reconnected)

@@ -981,16 +981,24 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
   box-shadow: var(--shadow-toast); font-size: 0.86em; line-height: 1.45;
   max-width: min(440px, 92vw);
 }
-/* THE TAB DRAG's leave cue (the user 2026-09-23; render.ts paintDragCue): while a group's tab hovers the
-   ungrouped row, the line under it names the tag the release would take off and the groups the session
-   STAYS in — a session that keeps another tag never appears in the trail, so the drop would otherwise
-   look like it did nothing. It wears the shared tooltip dress above (a floating annotation IS a tip, so
+/* THE TAB DRAG's leave cue (the user 2026-09-23; render.ts paintDragCue): while a tab hovers the ungrouped
+   row, or another group it would MOVE to (2026-09-30), the line under it names the tags the release would
+   take off — the tab's move alone does not say which of its other copies leave the strip. It wears the shared tooltip dress above (a floating annotation IS a tip, so
    it cannot drift from the others) plus the bits a drag cue needs: the tags as their chips on one line,
    never a pointer target (it must not eat the drag's own events), and position:fixed from .romp-tip, so
    it takes no space and the strip cannot shift. Shown and hidden by the gesture alone — no timer, no
    toast. The join half wears the accent ring on the target header instead (.tab-group-head.join-target). */
 .tab-drag-cue { display: none; align-items: center; gap: 5px; white-space: nowrap; pointer-events: none;
   padding: 4px 8px; color: var(--dim); }
+/* THE TAB DRAG's copy badge (the user 2026-09-30; render.ts paintDragCue): with Option (Alt) held over a
+   group, the release ADDS that group's tag instead of moving the session there, and a small "+" sits over
+   the dragged tab's top-right corner, where the desktop puts its copy badge on the pointer (the native drag
+   image is blanked, so the dragged tab stands in for it). The accent disc with its ink, tokens only, so it
+   reads in every theme; fixed and pointer-events none, so it takes no space and eats none of the drag's
+   events. Shown and hidden by the gesture alone, like the leave line above. */
+.tab-drag-add { position: fixed; z-index: 210; display: none; align-items: center; justify-content: center;
+  width: 13px; height: 13px; border-radius: 50%; background: var(--accent); color: var(--accent-fg);
+  font-family: var(--sans); font-size: 11px; font-weight: 600; line-height: 1; pointer-events: none; }
 .tab-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.12); }
 .tab-add { color: var(--dim); font-size: 1.1em; padding: 6px 10px; border-radius: 6px; line-height: 18px; }
 /* the tag controls reserve the + tab's EXACT vertical box — 18px line + 12px padding + 1px border
@@ -1327,6 +1335,52 @@ body.snap-mode #tabs .tab.active:not(.tab-blocked):hover { color: var(--fg); bac
 body.snap-mode:not(.chat-theme-yatharth) #tabs .tab.active:not(.tab-blocked):not(.tab-add) { border-color: rgba(255, 255, 255, 0.06); }
 body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked) { background: color-mix(in srgb, var(--chip-bg) 9%, transparent); border-color: transparent; }
 body.chat-theme-yatharth #tabs.snap-mode .tab.active.colored:not(.tab-blocked):hover { background: color-mix(in srgb, var(--chip-bg) 15%, transparent); }
+/* A FILE TAB IS A MODE TOO (the user 2026-09-30; render.ts setFileMode, file-tabs.ts): while a file opened as a tab shows,
+   the pane holds the file (#filetab-host, the shared viewer mounted in it: file-view.ts mountFileTabView) and nothing of
+   the session under it — its transcript, the goals strip above it, the boxes below it, the footer (there is no session to
+   send to), the jump column, the comment rail and the transcript's time stamps and scroll marks. The boxes show themselves with an empty inline display, which this
+   rule outranks; the host is the pane's flex child in the transcript's place. */
+body.filetab-mode #content, body.filetab-mode #ledger, body.filetab-mode #notices, body.filetab-mode #bg-tasks,
+body.filetab-mode #footer, body.filetab-mode #jump-cluster, body.filetab-mode #jump-bottom, body.filetab-mode #cmt-rail,
+body.filetab-mode .rail-day, body.filetab-mode .rail-sticky, body.filetab-mode .scroll-marks { display: none; }
+#filetab-host { display: none; }
+body.filetab-mode #filetab-host { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+/* the viewer as the tab's view: the modal's card filling the area, no backdrop, no inset, no corners or shadow (the Files
+   pane's variant, files-pane.css, for the same card) */
+.fileview-inline { display: flex; flex: 1 1 auto; min-height: 0; }
+.fileview-inline .fileview { width: 100%; height: 100%; border: 0; border-radius: 0; box-shadow: none; }
+/* the tab itself: a tab of the strip in every metric (padding, the rest outline, the active fill), its text neutral, the
+   file glyph first in the colour of the session it came from (--ftab-tint), which is the link to that session; under the
+   Yatharth theme a quiet flat wash of that colour too, about half a session's own (identity washes live under that theme
+   alone: tab-theme.test.ts). "host:" is the strip's own quiet prefix; the parent path, when two open files share a name,
+   is dim beside it. */
+.tab-file .tab-label { display: inline-flex; align-items: center; min-width: 0; }
+.tab-file-glyph { display: inline-flex; flex: 0 0 auto; margin-right: 5px; color: var(--ftab-tint, var(--dim)); opacity: 0.9; }
+.tab-file-glyph svg { width: 12px; height: 12px; }
+.tab-file-hint { margin-left: 5px; color: var(--dim); font-size: 0.82em; }
+body.chat-theme-yatharth .tab.tab-file { background: color-mix(in srgb, var(--ftab-tint, transparent) 5%, transparent); }
+body.chat-theme-yatharth .tab.tab-file:hover { background: color-mix(in srgb, var(--ftab-tint, var(--fg)) 10%, transparent); }
+body.chat-theme-yatharth .tab.tab-file.active { background: color-mix(in srgb, var(--ftab-tint, var(--fg)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ftab-tint, var(--fg)) 30%, transparent); }
+/* THE VIEWER'S MESSAGE BAR (render.ts mountViewerBar, file-view.ts; the user 2026-09-30): the foot of the file viewer, the
+   modal's and a file tab's, a compact twin of the message box. The quote chips are the composer's own (.composer-chip);
+   "to <session>" names where it goes, the session in the strip's label ink; the box and the send wear the composer's
+   input and send dress at the chips' size; the line under it counts what is staged for that session. */
+.fileview-compose { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; padding: 7px 10px 8px;
+  border-top: 1px solid var(--box-border); }
+.fileview-compose[hidden], .fv-compose-chips[hidden], .fv-compose-note[hidden] { display: none; }
+.fv-compose-chips { display: flex; flex-flow: row wrap; align-items: center; gap: 6px; }
+.fv-compose-chips .composer-chip { max-width: 100%; }
+.fv-compose-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.fv-compose-to { flex: 0 0 auto; align-self: center; font-size: 12px; color: var(--dim); white-space: nowrap; }
+.fv-compose-input { flex: 1 1 auto; min-width: 0; resize: none; box-sizing: border-box; min-height: calc(1.4em + 14px);
+  padding: 6px 10px; font: inherit; font-size: 12px; line-height: 1.4; color: var(--fg);
+  background: var(--vscode-input-background, var(--overlay-05)); border: 1px solid var(--box-border); border-radius: 8px; }
+.fv-compose-input:focus { outline: none; border-color: var(--accent); }
+.fv-compose-send { flex: 0 0 auto; width: 30px; height: 30px; padding: 0; border: none; border-radius: 8px; background: transparent;
+  color: var(--accent); opacity: 0.85; font-size: 14px; line-height: 1; cursor: pointer; }
+.fv-compose-send:hover { opacity: 1; background: var(--menu-hover); }
+.fv-compose-note { font-size: 12px; color: var(--dim); }
 #footer {
   position: relative;   /* anchors #composer-resize on the top-edge divider */
   flex: 0 0 auto;
@@ -1417,6 +1471,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .composer-chip-mark { color: var(--accent); font-weight: 600; }
 /* the EDIT pill has no Stage beside it — it may use the full row before ellipsizing */
 .composer-chip-edit { max-width: 100%; }
+/* …and while Comment rides beside Stage (render.ts, the user 2026-09-30) every chip cedes the two buttons' footprint */
+#composer-chips:has(.composer-comment-btn) .composer-chip { max-width: calc(100% - 140px); }
 .composer-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch; }
 /* STAGED messages (the user 2026-08-15): held in the composer until the next send — deliberately NOT
    the queued idiom (queued = sent, awaiting injection; these are unsent by choice). Same chip anatomy
@@ -1457,16 +1513,16 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    right-justified it floated detached. Exists exactly while context is held (the strip renders it,
    and the strip hides with the chips). NEUTRAL at rest (the under-bubble button family's dress): an
    accent outline next to the accent-blue chips read as already-pressed — accent is for
-   hover/selected, never rest chrome */
-.composer-stage-btn { background: transparent;   /* T141: the feed word-buttons' rest — dark ground, hairline, no wash */
+   hover/selected, never rest chrome. Comment (render.ts, the user 2026-09-30) sits just before it in the same dress. */
+.composer-comment-btn, .composer-stage-btn { background: transparent;   /* T141: the feed word-buttons' rest — dark ground, hairline, no wash */
   border: 1px solid var(--card-border); color: var(--dim); border-radius: 5px; font-size: 0.82em;
   padding: 1px 8px; cursor: pointer;
   transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease; }
-.composer-stage-btn:active { transform: scale(0.96); }
+.composer-comment-btn:active, .composer-stage-btn:active { transform: scale(0.96); }
 /* hover = the FEED's word-button treatment exactly (the user 2026-08-25: text + outline light up
    blue, like Clear/Undo — never a background fill; the wash values are the feed's .ftree-act-btn
    family, referenced not re-derived) */
-.composer-stage-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+.composer-comment-btn:hover, .composer-stage-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
 .staged-chip { display: flex; flex-direction: column; gap: 2px; border: 1px dashed rgba(156, 210, 255, 0.45);
   border-left: 2px solid var(--accent); border-radius: 6px; padding: 2px 6px; font-size: 12px; color: var(--fg);
   cursor: pointer; }
@@ -1490,6 +1546,29 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 }
 .composer-chip:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
 .composer-chip-x:hover { color: var(--fg); background: color-mix(in srgb, var(--accent) 28%, transparent); }
+/* TOUCH (the user 2026-09-30: on a phone the row's buttons had to be hit quite exactly). Every control in the chip row
+   and the staged strip owns a tap area at least 44px each way, Apple's minimum, and no two areas meet, so a tap beside
+   Stage never lands on Comment or the chip's x. The controls keep their compact look: the area is an invisible ::before
+   (a tap on it is a tap on its control), and the rows make room for it. In the chip row the area is 44px tall and at least
+   44px wide, centred on its button; the chip's x takes the last 44px of its chip, so it never reaches past the chip's
+   edge; the row's lines stand 44px apart and its padding holds the areas above and below its first and last lines clear
+   of the staged strip and the message box. The staged head is 44px tall with the caret's and Send now's areas inside it,
+   and each staged item is at least 44px tall with its x a full-height 44px column at its right, clear of the quote pill
+   beside it. tests/test_comment_chip_served.py measures each area and each pair; a fine pointer keeps today's sizes. */
+@media (pointer: coarse) {
+  #composer-chips { row-gap: 22px; column-gap: 8px; padding-top: 11px; padding-bottom: 11px; }
+  #composer-chips .composer-comment-btn, #composer-chips .composer-stage-btn, #composer-chips .composer-chip-x,
+  .staged-head .staged-caret, .staged-head .staged-go { position: relative; }
+  #composer-chips .composer-comment-btn::before, #composer-chips .composer-stage-btn::before,
+  .staged-head .staged-caret::before, .staged-head .staged-go::before {
+    content: ""; position: absolute; left: 50%; top: 50%; width: max(100% + 2px, 44px); height: 44px; transform: translate(-50%, -50%);
+  }
+  #composer-chips .composer-chip-x::before { content: ""; position: absolute; right: -5px; top: 50%; width: 44px; height: 44px; transform: translateY(-50%); }
+  .staged-head { min-height: 44px; }
+  .staged-chip { position: relative; min-height: 44px; justify-content: center; padding-right: 44px; }
+  .staged-chip .composer-chip-x { position: absolute; top: -1px; right: -1px; bottom: -1px; width: 44px; border-radius: 0; }
+  .staged-chip .composer-chip-x:hover { background: none; }   /* a touch leaves a sticky hover: no square wash over the item's round corner */
+}
 
 /* ── citation audit popover (the user 2026-07-01) ── click the chip to see the EXACT prompt romp will send
    the model (the kernel's /followup-preview). A scrollable monospace box floating above the chip. */
@@ -4146,21 +4225,6 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
 .cmt-pop.dragging { cursor: grabbing; }
-/* The touch "Comment" pill (render.ts commentPillEl, the user 2026-09-30): a phone's long-press selection opens no menu, so
-   this pill under the selection is the way in there. An action in the accent, the flat way: the one accent wash over the
-   raised surface (opaque: it floats over the transcript's text), the accent ink, no outline, the menus' lift; 40px tall
-   for a thumb; nothing on it selects or calls up the system's own callout. Only ever shown on a coarse pointer. */
-#cmt-pill {
-  position: fixed; z-index: 110; display: inline-flex; align-items: center; gap: 6px;
-  height: 40px; padding: 0 16px; border: none; border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--accent) 12%, var(--surface-raised)); color: var(--accent);
-  box-shadow: var(--shadow-menu); font-family: var(--sans); font-size: 14px; font-weight: 600; cursor: pointer;
-  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; touch-action: manipulation;
-  -webkit-tap-highlight-color: transparent;
-}
-#cmt-pill[hidden] { display: none; }
-#cmt-pill svg { width: 16px; height: 16px; flex: 0 0 auto; }
-#cmt-pill:active { transform: scale(0.96); }
 .cmt-pop .cmt-quote, .cmt-pop .cmt-msgs, .cmt-pop .cmt-input, .cmt-pop .cmt-name { cursor: auto; }
 .cmt-pop button, .cmt-pop .meta-btn { cursor: pointer; }
 /* the thread's own statusline (the user 2026-08-25: the popover should carry the chat's components —

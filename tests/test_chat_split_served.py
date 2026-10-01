@@ -169,6 +169,39 @@ await page.routeWebSocket((u) => /[?&]col=2(?:&|$)/.test(u.href), (ws) => {
 let heldOnceResolve = null, heldOnce = Promise.resolve();   // armed with the hold (below): resolves on the first frame held at the wire
 const armHeldOnce = () => { heldOnce = new Promise((r) => { heldOnceResolve = r; }); };
 const releaseCol2 = () => { holdCol2 = false; const held = col2Held.splice(0); for (const m of held) { try { col2Wire.send(m); } catch (e) { /* the column closed under the hold */ } } return held.length; };
+// The composer's focus a column takes on the shell's post (the column cycle and a session's hot key focus the column's window
+// and post focusComposer): HELD at each column's window while the hold is armed, and released in the order the posts were
+// sent, so a chord pressed before the previous chord's post is handled is a step of its own, never a race (the gap step
+// below). The hold is a capture listener the top document adds to each column's window (same origin; at the target, capture
+// listeners run ahead of the pane's own). Beside it, each column's window focus is recorded while __ringSeq is armed: the
+// shell's focus ring follows a column window's focus event, so a column that takes the focus back shows there.
+await page.addInitScript(() => {
+  if (window !== window.top) return;
+  window.__fcHold = false; window.__fcHeld = []; window.__ringSeq = null; window.__fcSeen = [];
+  const hold = function (id, e) {
+    const d = e.data;
+    if (!d || d.type !== "focusComposer") return;
+    const held = !this.__fcPass && window.__fcHold;
+    window.__fcSeen.push([id, held ? "held" : (this.__fcPass ? "released" : "passed")]);
+    if (held) { e.stopImmediatePropagation(); window.__fcHeld.push([this, d, id]); }
+  };
+  window.__armFocusComposerHold = (ids) => {
+    for (const id of ids) {
+      const w = document.getElementById(id).contentWindow;
+      if (w.__fcHooked) continue;
+      w.__fcHooked = true;
+      w.addEventListener("message", hold.bind(w, id), true);
+      w.addEventListener("focus", () => { if (window.__ringSeq) window.__ringSeq.push(id); });
+    }
+    window.__fcHold = true;
+  };
+  window.__releaseFocusComposer = () => {
+    window.__fcHold = false;
+    const held = window.__fcHeld.splice(0);
+    for (const [w, data] of held) { try { w.__fcPass = true; w.dispatchEvent(new MessageEvent("message", { data })); } catch (e) { /* the column closed under the hold */ } finally { try { w.__fcPass = false; } catch (e) { /* gone */ } } }
+    return held.length;
+  };
+});
 // The shell's log (the top document: every column's posts land there, and the store's writes are the shell's own): the
 // split's colEmpty traffic with its source frame, and every write of romp-chat-cols, stamped. And the lab's knob: the
 // close backstop (render.ts CLOSE_ACK_MS, read from localStorage at a page's boot) at 1.5 s, so step 11's wait past it
@@ -384,6 +417,23 @@ out.hk.cycle3 = [];
 for (const [key, fid] of [["Alt+Shift+J", "f-chat-2"], ["Alt+Shift+J", "f-chat-3"], ["Alt+Shift+J", "f-chat"], ["Alt+Shift+H", "f-chat-3"]]) {
   await page.keyboard.press(key); await waitFocused(fid); out.hk.cycle3.push(await page.evaluate(() => window.__rompFocusedChatId()));
 }
+// the gap (CI 2026-09-25 to 2026-09-30): the shell moves its focus ring with the window's focus at once, and the composer's
+// focus follows on the post a task later. The last press's post is handled first (its composer holds the focus), then the posts
+// are held and the cycle pressed twice, to the first column and on to the second; released in order, the first column's post
+// is stale. It used to pull the focus and the ring back to that column, and the next press cycled from there
+const composerFocused = (fid) => waitFn((fid) => { const d = document.getElementById(fid).contentDocument; return !!d && !!d.activeElement && d.activeElement.id === "composer-input"; }, fid, fid + "'s composer never took the focus");
+await composerFocused("f-chat-3");
+await page.evaluate(() => window.__armFocusComposerHold(["f-chat", "f-chat-2", "f-chat-3"]));
+await page.keyboard.press("Alt+Shift+J"); await waitFocused("f-chat");
+await page.keyboard.press("Alt+Shift+J"); await waitFocused("f-chat-2");
+// the ring moves at each press, the posts land later (on a busy runner after this step's release, when the hold let them
+// through and there was nothing stale to hold: CI 2026-09-30, both seen as passed): the release waits for both at the hold
+await waitFn(() => { const h = window.__fcHeld.map((x) => x[2]); return h.includes("f-chat") && h.includes("f-chat-2"); }, null, "the two presses' composer posts never reached their columns");
+out.hk.gap = await page.evaluate(() => { const held = window.__fcHeld.map((h) => h[2]); const hooked = ["f-chat", "f-chat-2", "f-chat-3"].map((id) => !!document.getElementById(id).contentWindow.__fcHooked); window.__ringSeq = []; return { held, hooked, released: window.__releaseFocusComposer() }; });
+await composerFocused("f-chat-2");
+out.hk.gap.ring = await page.evaluate(() => { const r = window.__ringSeq; window.__ringSeq = null; return r; });
+out.hk.gap.focused = await page.evaluate(() => window.__rompFocusedChatId());
+out.hk.gap.seen = await page.evaluate(() => window.__fcSeen.slice());
 await page.evaluate((sidC) => window.__rompMoveTab(sidC, 2), cfg.sidC);
 await waitGone("chat-pane-3"); await waitTabs("f-chat-2", [cfg.sidB, cfg.sidC]);
 await clickTab("f-chat-2", cfg.sidB); await waitActive("f-chat-2", cfg.sidB);
@@ -1180,6 +1230,10 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(h["afterKey"]["col2"], SID_B); self.assertEqual(h["afterKey"]["col1"], SID_A, "…and column 1 keeps its own tab")
         self.assertEqual(h["afterCycle1"], "f-chat"); self.assertEqual(h["afterCycle2"], "f-chat-2")
         self.assertEqual(h["cycle3"], ["f-chat-2", "f-chat-3", "f-chat", "f-chat-3"], "three columns: next, next, next wraps; previous wraps back: %r" % h["cycle3"])
+        g = h["gap"]
+        self.assertIn("f-chat", g["held"], "the first press's post was held past the second press, so it lands stale: %r" % g)
+        self.assertEqual(g["ring"], [], "the first column's post, handled after the second press, took no column's focus back: %r" % g)
+        self.assertEqual(g["focused"], "f-chat-2", "…on the second column, whose composer took the focus: %r" % g)
         self.assertIn("Hot key…", h["menu"], "the tab menu offers it: %r" % h["menu"])
         r = h["recorder"]
         self.assertEqual(r["heading"], "Hot key for “web”", "the pane's ask carries the session's name")

@@ -179,6 +179,8 @@ function lift(): (H: Hooks) => Api {
     const showActive = () => { H.calls.push("showActive"); };
     const focusComposerOrAsk = () => { H.calls.push("focusComposerOrAsk"); return !H.composer.disabled; };
     const tabInAdjacentRow = () => null;
+    // no FILE tab up (2026-09-30): a step is the session walk's, a pick a session's, and leaving one is a no-op
+    let fileTabOpen = null; const fileStep = () => false; const selectStripTab = (id) => setActive(id); const leaveFileTab = () => true;
     const visibleOrder = () => order.filter((id) => !collapsedTabIds.has(id));
     const isTypingTarget = (t) => !!t && t.typing === true;
     const agehms = (s) => Math.floor(s) + "s";

@@ -118,6 +118,12 @@ function applyTagEditOp(v, edit, newId) {
       if (to) to.members = Array.from(new Set((to.members || []).concat(sids)));
       break;
     }
+    case 'setTags': {
+      const keep = edit.tids || [];
+      for (const x of tags) x.members = keep.indexOf(x.id) >= 0 ? Array.from(new Set((x.members || []).concat(sids)))
+                                                                 : (x.members || []).filter((m) => sids.indexOf(m) < 0);
+      break;
+    }
   }
   nv.tags = tags;
   return nv;

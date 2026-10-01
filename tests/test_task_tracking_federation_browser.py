@@ -4,16 +4,18 @@ hermetic kernel with one local session) two stand-in remote kernels check in as 
 hermetic federated dashboard's harness): HOSTON and HOSTOFF each serve a feed frame with one card carrying a warn chip and a
 sub-goal. The real feed page in a real browser merges the three hosts' frames. Stage A, every host on: both remote cards
 show, their warn chips ring the shell's bell and the mirror stores a mark per card naming its host, and a real click on each
-card's Sub-goals button writes the card's disclosure state (romp:feedview). Two stale marks are then seeded into the store
-(a HOSTON card and a local card that are in no frame). Stage B, HOSTOFF flips off (it pushes the switch's stand-in frame:
-off, empty lists) and HOSTON pushes a frame with a NEW card carrying a warn: the merged frame names HOSTOFF off, the view
-state is byte-identical (the gate: no writer prunes while a host's cards are unknown), HOSTOFF's mark is kept, the two
-stale marks are pruned (the on hosts' absent marks prune as ever: the store's bound), and the new card's notice rings with
-its mark written. Stage B2 (round eight, the medium): the page RELOADS while HOSTOFF is off; the first merged frame names both
-remotes pending with no host off, and the marks and the view state survive it intact (a pending host's cards are not in hand
-either). Stage C: HOSTOFF flips back on WITH its card and nothing re-rings (its mark was kept). Stage C2: HOSTOFF pushes a frame
-with no cards: the merged frame names no host, pruning resumes, HOSTOFF's disclosure entry and mark leave while HOSTON's stand.
-Stage D: a plain reload with every host on: no warn re-rings. Round nine: each reload's first /tunnels answer is held for 1.5 s so
+card's Sub-goals button writes the card's disclosure state (romp:feedview); one more frame with every host in hand follows,
+as the local kernel's own late pushes do on a slow runner. Three stale marks (a HOSTON card and a local card that are in no
+frame, and one in the shape before round seven) go into the store at the flip, ahead of the pane's handler. Stage B, HOSTOFF
+flips off (it pushes the switch's stand-in frame: off, empty lists) and HOSTON pushes a frame with a NEW card carrying a
+warn: the merged frame names HOSTOFF off, the view state is byte-identical (the gate: no writer prunes while a host's cards
+are unknown), HOSTOFF's mark and the old-shape one are kept, the two other stale marks are pruned (the on hosts' absent marks
+prune as ever: the store's bound), and the new card's notice rings with its mark written. Stage B2 (round eight, the medium):
+the page RELOADS while HOSTOFF is off; the first merged frame names both remotes pending with no host off, and the marks and
+the view state survive it intact (a pending host's cards are not in hand either). Stage C: HOSTOFF flips back on WITH its
+card and nothing re-rings (its mark was kept). Stage C2: HOSTOFF pushes a frame with no cards: the merged frame names no
+host, pruning resumes, HOSTOFF's disclosure entry and mark leave while HOSTON's stand. Stage D: a plain reload with every
+host on: no warn re-rings. Round nine: each reload's first /tunnels answer is held for 1.5 s so
 the local kernel's push surely lands first, the frame hook is an init script that trap-registers on the federation manager's
 handle, and the first merged frame of each reload is asserted: no host known, the frame saying its host list is unread, and the
 store unmoved across it. Skips LOUDLY without the extension deps or a browser (a failure under ROMP_SERVED_TESTS_REQUIRE=1).
@@ -258,7 +260,14 @@ await page.addInitScript(() => {
   if (!location.pathname.startsWith("/feed")) return;
   const w = window; w.__ttFrames = [];
   const before = () => { try { return { marks: JSON.parse(localStorage.getItem("romp:cardNotified") || "[]").length, sec: Object.keys(JSON.parse(localStorage.getItem("romp:feedview") || "{}").sec || {}).length }; } catch { return { marks: -1, sec: -1 }; } };
+  // the stale marks go into the store AT the flip: the driver arms __ttSeed, and the first frame naming its host off appends them
+  // here, ahead of the pane's handler, so they are in the store when that frame is applied and no frame with every host in hand
+  // (which prunes them, as it should) can land between the seed and the flip (the local kernel's own late pushes did on a slow
+  // runner: CI 2026-09-29 and 2026-09-30, the stage B red on the old-shape mark)
+  const seedAtFlip = (m) => { const s = w.__ttSeed; if (!s || !m || m.type !== "feed" || !Array.isArray(m.offHosts) || !m.offHosts.includes(s.host)) return;
+    w.__ttSeed = null; try { const cur = JSON.parse(localStorage.getItem("romp:cardNotified") || "[]"); localStorage.setItem("romp:cardNotified", JSON.stringify(cur.concat(s.marks))); w.__ttSeeded = { had: cur.length, added: s.marks.length }; } catch {} };
   const note = (m, via) => { if (m && m.type === "feed" && !w.__ttFirstSeen) { w.__ttFirstSeen = true; try { const fn = window.__ttFirstFeedFrame; if (fn) fn(); } catch (e) {} }
+    seedAtFlip(m);
     if (m && m.type === "feed") w.__ttFrames.push({ via, off: m.off === true, hostsUnread: m.hostsUnread === true, offHosts: Array.isArray(m.offHosts) ? m.offHosts.slice() : null, pendingHosts: Array.isArray(m.pendingHosts) ? m.pendingHosts.slice() : null, askIds: Array.isArray(m.asks) ? m.asks.map((a) => a.itemId) : [], before: before() }); };
   window.addEventListener("message", (e) => note(e.data, "window"));
   let fed;
@@ -307,19 +316,25 @@ await page.mouse.move(3, 3);   // the pointer off every card: a hovered card que
 out.ctlRepush = await ctl(cfg.hostOnCtl, "on");
 await feedF.waitForFunction((ids) => { try { const v = JSON.parse(localStorage.getItem("romp:feedview") || "{}"); return ids.every((id) => v.sec && v.sec[id] === "subgoals"); } catch { return false; } }, [cfg.offCard, cfg.onCard0], { timeout: 15000 }).catch(() => { errors.push("timeout: the two Sub-goals choices persisted"); });
 await feedF.waitForFunction((ids) => { const m = JSON.parse(localStorage.getItem("romp:cardNotified") || "[]"); return ids.every((id) => m.some((s) => s.startsWith("w|" + id + "|"))); }, [cfg.offCard, cfg.onCard0], { timeout: 15000 }).catch(() => { errors.push("timeout: both cards' marks stored"); });
-// three stale marks that no frame carries: an on host's card and a local card that left (the reporting hosts' absent marks are
-// what the mixed frame must still prune, the store's bound, while the off host's are kept), and one in the OLD shape with no host
-// segment (stored before round seven): kept while any host is not in hand, pruned once every host is (round eight, low 1)
-await feedF.evaluate((stale) => { const m = JSON.parse(localStorage.getItem("romp:cardNotified") || "[]"); localStorage.setItem("romp:cardNotified", JSON.stringify(m.concat(stale))); }, [cfg.staleOnMark, cfg.staleLocalMark, cfg.staleOldMark]);
 out.a = { frame: await lastFrame(), store: await store(), notes: await notes() };
 out.frames = await frames();
+// one more frame with every host in hand after stage A's reads, as the local kernel's own pushes land on a slow runner: the stage
+// B claims must hold with it, so the lab sends one every run (stale marks seeded before it are pruned by it, as they should be)
+const nLate = (await frames()).length;
+out.ctlLate = await ctl(cfg.hostOnCtl, "on");
+await feedF.waitForFunction((n) => window.__ttFrames.length > n, nLate, { timeout: 30000 }).catch(() => { errors.push("timeout: the late frame with every host in hand"); });
+// three stale marks that no frame carries: an on host's card and a local card that left (the reporting hosts' absent marks are
+// what the mixed frame must still prune, the store's bound, while the off host's are kept), and one in the OLD shape with no host
+// segment (stored before round seven): kept while any host is not in hand, pruned once every host is (round eight, low 1). Armed
+// here, written at the flip by the frame hook above
+await feedF.evaluate((seed) => { window.__ttSeed = seed; }, { host: CFG_HOST_OFF, marks: [cfg.staleOnMark, cfg.staleLocalMark, cfg.staleOldMark] });
 // ── stage B: HOSTOFF flips off (its stand-in frame), HOSTON pushes a frame with a NEW card carrying a warn ──
 out.ctlOff = await ctl(cfg.hostOffCtl, "off");
 await waitFrame((f) => f.offHosts && f.offHosts.includes(CFG_HOST_OFF), "a merged frame naming HOSTOFF off");
 out.ctlOn2 = await ctl(cfg.hostOnCtl, "on2");
 await waitFrame((f) => f.askIds.includes(CFG_ON_CARD2) && f.offHosts && f.offHosts.includes(CFG_HOST_OFF), "the mixed frame carrying the new card");
 await page.waitForTimeout(800);   // the render's tail persists the view state; the mirror writes on the frame
-out.b = { frame: await lastFrame(), store: await store(), notes: await notes(), frames: (await frames()).length };
+out.b = { frame: await lastFrame(), store: await store(), notes: await notes(), frames: (await frames()).length, seeded: await feedF.evaluate(() => window.__ttSeeded || null) };
 // ── stage B2 (round eight, the medium): a RELOAD while HOSTOFF is off. The first merged frame names both remotes pending and no
 // host off; before this round the pane read their cards as gone, pruned every remote mark and re-rang every remote warn ──
 await reload();
@@ -439,6 +454,7 @@ class ServedTaskTrackingFederation(QueuedLab):
     def test_stage_b_the_medium_a_host_off_leaves_the_view_state_byte_identical_keeps_its_marks_prunes_the_on_hosts_absent_marks_and_the_new_card_still_rings(self):
         r = self._result(); a, b = r["a"], r["b"]; c = r["cfg"]; table = "\n  a: " + json.dumps(a["store"])[:1200] + "\n  b: " + json.dumps(b)[:2500] + "\n  errors: " + json.dumps(r["errors"])
         self.assertEqual([e for e in r["errors"] if e.startswith("timeout")], [], "every wait held" + table)
+        self.assertEqual((b["seeded"] or {}).get("added"), 3, "the three stale marks went into the store at the flip" + table)
         self.assertEqual(b["frame"]["offHosts"], ["HOSTOFF"], "the merged frame names the off host, and no other" + table)
         self.assertFalse(b["frame"]["off"], "the frame's own off is the local kernel's word: on" + table)
         self.assertIn(c["onCard2"], b["frame"]["askIds"], "the new card rode the mixed frame" + table)

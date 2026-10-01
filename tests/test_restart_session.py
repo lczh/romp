@@ -113,8 +113,8 @@ class _Sess:
         self.calls, self.inflight, self.name, self.sid = calls, inflight, name, SID
         self._lock = threading.RLock()
 
-    def request_reconnect(self, defer=True):
-        self.calls.append(("request_reconnect", defer))
+    def request_reconnect(self, defer=True, cut=False, why=""):
+        self.calls.append(("request_reconnect", "cut" if cut else defer))   # a Restart takes the cut road (2026-10-01: a pick waits)
 
     def interrupt(self, climb=True):
         self.calls.append(("interrupt",) if climb else ("interrupt", "polite only"))
@@ -138,13 +138,13 @@ class RelaunchPrimitive(unittest.TestCase):
         _reg(self.d)
         self.be.sessions[SID] = _Sess(self.calls)
         self.assertEqual(self.relaunch(), "", "an idle running session relaunches")
-        self.assertEqual(self.calls, [("request_reconnect", True)], "the reconnect road, and no interrupt")
+        self.assertEqual(self.calls, [("request_reconnect", "cut")], "the reconnect road, and no interrupt")
 
     def test_a_running_turn_is_cut_with_the_reconnect_armed_first(self):
         _reg(self.d)
         self.be.sessions[SID] = _Sess(self.calls, inflight=1)
         self.assertEqual(self.relaunch(), "")
-        self.assertEqual(self.calls, [("request_reconnect", True), ("interrupt", "polite only")],
+        self.assertEqual(self.calls, [("request_reconnect", "cut"), ("interrupt", "polite only")],
                          "armed before the cut: the interrupted turn's result must find the arm standing")
 
     def test_a_queued_turn_with_nothing_running_is_not_interrupted(self):
@@ -155,7 +155,7 @@ class RelaunchPrimitive(unittest.TestCase):
         s._pending = ["please pick the search work back up"]
         self.be.sessions[SID] = s
         self.assertEqual(self.relaunch(), "")
-        self.assertEqual(self.calls, [("request_reconnect", True)])
+        self.assertEqual(self.calls, [("request_reconnect", "cut")])
 
     def test_the_session_is_never_marked_dead_and_no_death_is_recorded(self):
         # the whole point: End + Revive reached the same place by killing the session first, and every
@@ -246,7 +246,7 @@ class RelaunchNeverClimbsTheStopLadder(unittest.TestCase):
         s.loop, s.client = _Loop(), object()
         self.signals = []
         s._signal_cli = lambda sig, action: self.signals.append(action)
-        s.request_reconnect = lambda defer=True: None      # the arm; RelaunchPrimitive pins its order
+        s.request_reconnect = lambda *a, **k: None         # the arm; RelaunchPrimitive pins its order
 
     def test_repeated_restarts_send_one_polite_request_and_no_signal(self):
         for _ in range(3):
@@ -355,7 +355,7 @@ class ARestartWhoseRequestFailsSendsNoSignal(unittest.TestCase):
         s.inflight = 1
         self.signals = []
         s._signal_cli = lambda sig, action: self.signals.append(action)
-        s.request_reconnect = lambda defer=True: None      # the arm; RelaunchPrimitive pins its order
+        s.request_reconnect = lambda *a, **k: None         # the arm; RelaunchPrimitive pins its order
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, name="restart-test-loop", daemon=True)
         self.thread.start()
@@ -654,7 +654,7 @@ class RelaunchLogsWhatItsAskDid(unittest.TestCase):
         s.inflight = 1
         self.signals = []
         s._signal_cli = lambda sig, action: self.signals.append(action)
-        s.request_reconnect = lambda defer=True: None      # the arm; RelaunchPrimitive pins its order
+        s.request_reconnect = lambda *a, **k: None         # the arm; RelaunchPrimitive pins its order
         s.client = _AnsweringControl()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, name="restart-log-test-loop", daemon=True)

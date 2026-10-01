@@ -90,9 +90,10 @@ test("follow mode and the chip read atBottom at every site", () => {
     /if \(c && v\) v\.stick = atBottom\(c\); \}/,                                                             // a deep-link landing ends follow mode unless it put the reader at the bottom (T386)
     /if \(navCursor && atBottom\(content\)\) \{/,                                                          // the jump cluster: a landing the scroll clamped at the bottom (2026-09-24)
     /const bottom = !cur && atBottom\(content\);/,                                                         // …and its reading line at the bottom
+    /stick: hadSnap \? v\.stick : atBottom\(content\) \}/,                                                 // a file tab's held place for the way back (2026-09-30)
   ];
   for (const re of follow) assert.match(RENDER, re, String(re));
-  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 18, "seventeen call sites plus the definition (the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24)");
+  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 19, "eighteen call sites plus the definition (the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30)");
 });
 
 test("only the user's own send reveal keeps the 80 px band", () => {

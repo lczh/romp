@@ -168,7 +168,10 @@ class ChildRoad(_Child):
         self.jd.run_index = lambda now=None: called.append("index")
         self.jd.run_triage = lambda now=None: called.append("triage")
         gen0 = km._judge_gen[0]
-        cpu0 = km._PERF_STATS.judge["cpu_ms_sum"]
+        # The baseline comes through the same read as the figure below: /perf's cpu_ms_sum adds the judge module's pool-worker
+        # CPU, which is cumulative for the process, so a raw baseline counted every earlier judge test's workers as this
+        # pass's (7.03 != 7.0 once CI split the suite into shards, 2026-09-30, and the tests that had masked it ran elsewhere).
+        cpu0 = self._judge()["cpu_ms_sum"]
         try:
             self._pass()
         finally:
@@ -187,7 +190,9 @@ class ChildRoad(_Child):
         j = self._judge()
         self.assertEqual((j["passes"], j["tierStarts"], j.get("passesLost"), j.get("childRestarts")), (1, 2, 0, 0))
         self.assertEqual(j.get("cpu_ms_child_workers"), 4.0)
-        self.assertEqual(j["cpu_ms_sum"] - cpu0, 7.0, "tier plus workers, as the in-process figure counts")
+        # almost-equal: both reads carry every earlier pass's CPU, so the difference has a float's rounding in it (6.999999999999998
+        # on a shard, 2026-09-30); nine places still catch any real extra contribution, a microsecond of CPU and up
+        self.assertAlmostEqual(j["cpu_ms_sum"] - cpu0, 7.0, places=9, msg="tier plus workers, as the in-process figure counts")
         self.assertEqual((j.get("child") or {}).get("seq"), 1)
         self.assertEqual((j.get("child") or {}).get("pid"), getattr(getattr(km, "_JUDGE_CHILD", None), "pid", None))
         self.assertEqual((j.get("child") or {}).get("recordCache"), {"entries": 1})
