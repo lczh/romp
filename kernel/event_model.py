@@ -6123,7 +6123,9 @@ _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counte
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
                    #                     entries its cap pushed out (2026-10-01): its gauge counts real bytes, so it no longer
-                   #                     equals hydratedBytes (line bytes read) while nothing is evicted; these two say it
+                   #                     equals hydratedBytes (line bytes read) while nothing is evicted; these two say it. A
+                   #                     fill completing an atom a peer finished meanwhile is not a hit: the peer's own read
+                   #                     or hit counted that body
                    "restoreMs": {"load": 0.0, "verify": 0.0, "index": 0.0, "seed": 0.0, "total": 0.0},   # the restore's parts since boot, ms
                    #                     (`total` is the whole of _asm_restore, entry to return, so the unnamed remainder, the tail's
                    #                     parse through the seeded adapter, is total minus the four named parts)
@@ -6176,17 +6178,18 @@ def _asm_doc_memo_put(key, mkey, doc):
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: fallback for legacy unbound descriptors; restored bodies own their source (2026-09-17)
 _HYDRATED = {}                     # uuid -> (the body fields a fill of any kind may read, their weight); dict order = LRU
 _HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
-_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 64), 1024 * 1024)
-#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 64, never under 256 MiB
-#                                    (about 496 MiB on a 31 GiB machine, 1.8 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 48), 1024 * 1024)
+#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 48, never under 256 MiB
+#                                    (about 661 MiB on a 31 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
 #                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
-#                                    kernel's memo held 66,752 records after 8.8 hours (257 MiB of lines, 4,042 bytes a line) and
-#                                    never evicted: an estimated 470 MiB as decoded body fields, a wide band, since the kept
-#                                    fields weigh 0.54 of their line for a Read result and up to 4.4 for a question's answers. So
-#                                    the cap sits just above that estimate, bounding the worst case while adding few re-reads at
-#                                    today's load: an LRU thrashes once the records read again and again outgrow it, and the
-#                                    size of that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here)
-#                                    thrashed on 2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    kernel's memo held 66,752 records from 2.7 to 8.8 hours, then grew again: 77,144 records and
+#                                    302 MiB of lines (4,107 bytes a line) at 11.7 hours, nothing evicted. As decoded body fields
+#                                    that is an estimated 550 to 615 MiB, a wide band, since the kept fields weigh 0.54 of their
+#                                    line for a Read result and up to 4.4 for a question's answers. This cap holds that set by the
+#                                    estimate and binds as it grows; a 64th would bind within the first day to save at most 165
+#                                    MiB more. An LRU thrashes once the records read again and again outgrow it, and the size of
+#                                    that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here) thrashed on
+#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
 #                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
 #                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
 #                                    memo's serves and evictions

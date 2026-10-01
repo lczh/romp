@@ -2358,7 +2358,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
   memory of the body fields kept, which `capBytes` bounds; a body an atom
   still holds counts there too, so while that atom lives an eviction frees
-  less than `bytes` drops; the cap is a 64th of physical memory, never under
+  less than `bytes` drops; the cap is a 48th of physical memory, never under
   256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it outright),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
@@ -2883,7 +2883,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
   a cut), `hydratedBy` (those bytes per calling function), `hydratedHits` and
   `hydratedEvicted` (fills the hydrated-body memo served without a read, and
-  the entries its cap pushed out), `restoreMs`, the
+  the entries its cap pushed out; a fill that completes an atom another
+  thread finished meanwhile is not counted, since that thread's own read or
+  hit counted the body), `restoreMs`, the
   restore's parts since boot in milliseconds to three decimals, each added on the
   return it names (`load`: the document read, decompressed, decoded and its
   file checks; `verify`: the turns section's identity and coverage, or the
