@@ -40,7 +40,7 @@ import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
-import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
+import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
 import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
@@ -13028,7 +13028,10 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
   // AskUserQuestion) or a word key can never satisfy; turn numbers are the kernel's and do not move when a gap fills
   const f0 = it.kind === "gap" ? -1 : itemFirstEvent(it);
   const turnOf = turns && f0 >= 0 && f0 < turns.length ? String(turns[f0]) : null;
-  const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); if (turnOf != null) node.dataset.turn = turnOf; nodes.push(node); return node; };
+  // …and, beside it, the KERNEL's turn when the unit's event carries one (chatTurn, 2026-10-01): what the px-per-turn measure counts
+  // (measureRows), so a row the page injected or a page on an older kernel is told apart from a turn the kernel numbered
+  const kt = f0 >= 0 && f0 < s.events.length ? kernelTurnOf(s.events[f0]) : null;
+  const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); if (turnOf != null) node.dataset.turn = turnOf; if (kt != null) node.dataset.kturn = String(kt); nodes.push(node); return node; };
   const adv = (i: number) => { const ep = eventEpoch(s.events[i]); if (ep != null) prevEpoch = ep; };
   // A new day opens with its divider, above whatever unit starts that day (tagged with the same
   // data-unit so the scroll↔unit map still resolves every node it walks). The unit is placed and timed by its ANCHOR
@@ -13188,15 +13191,31 @@ function measureRows(v: View): void {
     }
     if (h > 0 && n > 0) v.avgTurnH = h / n;
   }
-  if (v.pxPerTurn == null) {   // px per TURN (a gap counts turns, not display units): total rendered height over the rendered turns (a user row starts each)
-    let h = 0, turns = 0;
+  if (v.pxPerTurn == null) {   // px per TURN (a gap counts the kernel's turns, not display units): total rendered height over the turns the rows cover
+    const rows: MeasuredRow[] = [];
     for (const c of Array.from(v.el.children) as HTMLElement[]) {
-      if (c.classList.contains("tx-spacer") || c.classList.contains("tx-gap") || !c.classList.contains("turn")) continue;   // only turn rows: cards and dividers are not turn content (round five)
-      h += c.offsetHeight;   // the whole row, action strip included: a gap stands for rows as they will render, and every user row carries the strip (the regions lab's sizing road: without it the gap ran 16 percent short)
-      if (c.classList.contains("turn-user")) turns++;
+      if (c.classList.contains("tx-gap")) { rows.push({ h: 0, user: false, kturn: null, gap: true }); continue; }   // a gap's own estimate is no row; it splits the runs on either side (chat-regions.ts measureTurnPx)
+      if (c.classList.contains("tx-spacer") || !c.classList.contains("turn")) continue;   // only turn rows: cards and dividers are not turn content (round five)
+      const k = c.dataset.kturn;   // the kernel's turn, stamped at the paint when the event carries it (appendItem, chatTurn)
+      rows.push({ h: c.offsetHeight, user: c.classList.contains("turn-user"), kturn: k != null && k !== "" ? Number(k) : null });   // the whole row, action strip included: a gap stands for rows as they will render, and every user row carries the strip (the regions lab's sizing road: without it the gap ran 16 percent short)
     }
-    if (h > 0 && turns > 0) v.pxPerTurn = h / turns;
+    const m = measureTurnPx(rows);
+    if (m.px != null) { v.pxPerTurn = m.px; if (m.road === "typed") noteTypedTurns(v, m.turns, rows.length); }
   }
+}
+/** The sessions this page counted by typed rows (turnCountTyped), one client-diag row each per page load. */
+const typedTurnsSaid = new Set<string>();
+/** The px per turn was measured off TYPED rows (2026-10-01): none of the rows carried the kernel's turn (`turn`, caps chatTurn), so the
+ *  gaps are drawn from the page's own count, which misses every turn a peer's message opened. Said once per session, in client-diag, with
+ *  why: a remote host the page holds no caps for, an older local kernel (no chatTurn), or a local kernel that announced chatTurn and sent
+ *  rows without it (a bug, or a view holding only rows the page injected). */
+function noteTypedTurns(v: View, typed: number, rows: number): void {
+  let sid = "";
+  for (const [id, w] of views) if (w === v) { sid = id; break; }
+  if (!sid || typedTurnsSaid.has(sid)) return;
+  typedTurnsSaid.add(sid);
+  const cause = hostOf(sid) !== "" ? "remote" : kernelCaps.has("chatTurn") ? "unstamped" : "olderKernel";
+  chatDiagRow("turnCountTyped", { sid, cause, typed, rows });
 }
 
 /** The estimated top, in scroll space, of a unit hidden in a spacer (the same walk unitAtScroll maps a position by: each hidden unit its
@@ -20057,8 +20076,11 @@ function chatTurns(msg: any): void {
  *  chosen around the row the reader was looking at and that row is written back to its offset, ONE attributed write (gap-fill),
  *  with the scrollTop read before the rebuild as the write's origin (the browser's own anchoring, kept on for #content, may have
  *  moved it already; the row still names the move as the pane's). */
-/** The turn of every event: a run's events in order, a user row starting each turn from the run's lo; rows before the run's first user
- *  row (head cards) sit on lo. The regions' own numbering, so a point in the thread can be named as a turn and a fraction (T386). */
+/** The turn of every event: the kernel's own where the event carries it (`turn`, caps chatTurn, 2026-10-01), else a run's events in
+ *  order, a user row starting each turn from the run's lo (an older kernel, a row the page injected); rows before the run's first user
+ *  row (head cards) sit on lo. The regions' own numbering, so a point in the thread can be named as a turn and a fraction (T386). Counted
+ *  by user rows alone, a turn a peer's message opened was no turn, and on a session that takes much mail a row named a turn about half
+ *  its own. */
 function turnOfEvents(s: Session): number[] {
   const out: number[] = new Array(s.events.length).fill(0);
   if (!s.regions) return out;
@@ -20071,7 +20093,8 @@ function turnOfEvents(s: Session): number[] {
     let t = (first && first.kind === "user") || r.lo === 0 ? r.lo - 1 : r.lo;
     for (let k = 0; k < r.events.length && i < s.events.length; k++, i++) {
       const e = s.events[i] as { kind?: string };
-      if (e && e.kind === "user") t++;
+      const kt = kernelTurnOf(e);
+      if (kt != null) t = kt; else if (e && e.kind === "user") t++;
       out[i] = Math.max(r.lo, t);
     }
   }
