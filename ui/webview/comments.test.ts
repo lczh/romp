@@ -6,7 +6,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findExact, findAnchorRange, sliceRanges, prunePending, markSkipsParent,
-         newCommentCreate, commentCreateFrame, holdAnswered, holdForPassage, synthSuperseded,
+         newCommentCreate, commentCreateFrame, holdAnswered, holdForPassage, synthSuperseded, samePassage, existingThreadFor,
+         threadTakesReplies,
          type CommentThread, type CommentCreate } from "./comments";
 import { compactDisplay } from "./compact";
 
@@ -886,10 +887,13 @@ test("an answer names its send by the echoed createId; an older kernel's (turn o
   assert.equal(holdAnswered(holds, "bbbbbbbb-1111-2222-3333-444444444444", "a2", undefined), null, "the session counts too");
 });
 
-test("a second Comment on a passage whose send is still unanswered finds that send, whitespace aside", () => {
+test("a second Comment on the same passage finds the send still unanswered there: same turn, overlapping text", () => {
   const a = newCommentCreate({ sid: SID, uuid: "a1", exact: "exponential backoff with jitter" }, "why?", "");
-  assert.equal(holdForPassage([a], SID, "a1", "exponential  backoff\nwith jitter"), a);
-  assert.equal(holdForPassage([a], SID, "a1", "exponential backoff"), null, "a different passage is a different comment");
+  assert.equal(holdForPassage([a], SID, "a1", "exponential  backoff\nwith jitter"), a, "whitespace aside");
+  assert.equal(holdForPassage([a], SID, "a1", "exponential backoff"), a, "a passage inside the sent one is the same passage");
+  const prose = "Use exponential backoff with jitter of ten percent, and cap the delay at two minutes.";
+  assert.equal(holdForPassage([a], SID, "a1", "jitter of ten percent", prose), a, "overlapping in the turn's prose");
+  assert.equal(holdForPassage([a], SID, "a1", "cap the delay", prose), null, "another passage of the same reply is another comment");
   assert.equal(holdForPassage([a], SID, "a2", "exponential backoff with jitter"), null, "same words in another reply");
 });
 
@@ -925,16 +929,18 @@ test("the send is one per gesture, and the box shows it at once (source pins)", 
   const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
   const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
   assert.match(popBody, /const status = th \? th\.status : sent \? "sent" : "";/, "the send flips the refresh key: a full rebuild");
-  assert.match(popBody, /if \(sent\) \{[\s\S]{0,1400}rompLoaderInner\("opening the thread…", \{ wordmark: false, cls: "rl-sm" \}\)\);\s*\n\s*list\.append\(boot, cmtPendingQueued\(\[\{ text: sent\.text, t: Date\.now\(\) \/ 1000 \}\]\)\);/,
-               "the loader first (ui/CLAUDE.md), the words as the chat's own pending bubble");
-  assert.match(popBody, /if \(!sent\) pop\.appendChild\(crow\);/, "nothing to type or send in the sent view");
+  assert.match(popBody, /if \(sent\) \{[\s\S]{0,1400}rompLoaderInner\("opening the thread…", \{ wordmark: false \}\)\);[^\n]*\n\s*list\.append\(boot, cmtPendingQueued\(\[\{ text: sent\.text, t: Date\.now\(\) \/ 1000 \}\]\)\);/,
+               "the loader first (ui/CLAUDE.md), the thread boot's own, and the words as the chat's own pending bubble");
+  // nothing to type or send in the sent view: the composer row stays where the thread's will be, read-only and disarmed
+  assert.match(popBody, /box\.readOnly = !!sent;\s*\n\s*box\.value = sent \? "" : \(commentDrafts\.get\(dk\) \|\| ""\);/);
+  assert.match(popBody, /if \(sent\) \{ send\.disabled = true; send\.classList\.add\("busy"\); attach\.disabled = true; \}/);
   assert.match(popBody, /if \(create && !sent\) \{/, "the picks went with the send");
 });
 
 test("a second Comment on a passage whose send is unanswered re-opens on that send (source pin)", () => {
   const open = UI.slice(UI.indexOf("function openCommentComposer("));
   const body = open.slice(0, open.indexOf("\nfunction ", 10));
-  assert.match(body, /const held = holdForPassage\(cmtCreateInFlight\.values\(\), sid, uuid, exact\);/);
+  assert.match(body, /const held = holdForPassage\(cmtCreateInFlight\.values\(\), sid, uuid, exact, prose\);/);
   assert.match(body, /const live = !!held && \(commentThreads\.get\(sid\) \|\| \[\]\)\.some\(\(t\) => t\.tid === "pending:" \+ held\.createId\);/,
                "only while its mark is still the optimistic one: once its thread is listed the passage opens a fresh box (no trap on a lost ack)");
   assert.match(body, /sent: \{ createId: held\.createId, text: held\.text,/);
@@ -973,4 +979,61 @@ test("a pending group with no turn before it draws no rail stub (source pin)", (
   const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
   assert.match(CSS, /\.cmt-msgs > \.turn-queued:not\(\.turn ~ \.turn-queued\)::before \{ display: none; \}/);
   assert.match(CSS, /\.cmt-msgs \.turn \+ \.turn::before \{ top: -6px; \}/, "after a turn it keeps its segment, continuous");
+});
+
+// ── a passage that already has a thread opens it (the user 2026-10-01) ─────────────────────────────────────────────
+// "The same passage", at the anchor level: the same turn, and texts that OVERLAP in that turn's rendered prose, each found
+// the way its highlight is drawn. Synthetic text only.
+const PROSE = "Keep the retry cap at two minutes on every sync path. Longer caps only delay the error the user will see anyway.";
+
+test("the same passage: overlapping in the turn's prose; touching or apart is two passages", () => {
+  assert.equal(samePassage(PROSE, "retry cap at two minutes", "two minutes on every sync path"), true, "a shared run of text");
+  assert.equal(samePassage(PROSE, "Keep the retry cap at two minutes on every sync path", "on every sync"), true, "one inside the other");
+  assert.equal(samePassage(PROSE, "Keep the retry cap at two minutes", " on every sync path"), false, "touching, not overlapping");
+  assert.equal(samePassage(PROSE, "Keep the retry cap", "Longer caps only delay the error"), false, "two sentences apart");
+  assert.equal(samePassage(PROSE, "retry  cap at\ntwo minutes", "two minutes on"), true, "whitespace as the highlight reads it");
+});
+
+test("without the turn's prose (scrolled out), the same passage is containment of the normalized texts", () => {
+  assert.equal(samePassage(null, "retry cap at two minutes", "cap at two"), true);
+  assert.equal(samePassage(null, "retry cap at two minutes", "two minutes on every sync path"), false, "an overlap it cannot see is never claimed");
+  assert.equal(samePassage("", "Keep the retry cap", "retry   cap"), true);
+  assert.equal(samePassage(PROSE, "a passage not in this turn", "a passage not in this turn at all"), true, "unfound in the prose: containment");
+});
+
+test("the thread a Comment opens instead: same turn, overlapping, talkable, the newest of several", () => {
+  const thr = (over: Partial<CommentThread>): CommentThread => ({ tid: "t", anchorUuid: "a2", exact: "", status: "open",
+    createdT: 0, state: "", unread: false, promotedName: "", msgs: [], ...over });
+  const old = thr({ tid: "t-old", exact: "Keep the retry cap at two minutes", createdT: 10 });
+  const newer = thr({ tid: "t-new", exact: "retry cap", createdT: 20 });
+  const elsewhere = thr({ tid: "t-else", exact: "Longer caps only delay the error", createdT: 30 });
+  const otherTurn = thr({ tid: "t-turn", anchorUuid: "a1", exact: "Keep the retry cap at two minutes", createdT: 40 });
+  assert.equal(existingThreadFor([old, elsewhere, otherTurn], "a2", "cap at two minutes on every", PROSE)?.tid, "t-old");
+  assert.equal(existingThreadFor([old, newer, elsewhere], "a2", "the retry cap", PROSE)?.tid, "t-new", "the newest overlapping one");
+  assert.equal(existingThreadFor([old, elsewhere], "a2", "on every sync path", PROSE), null, "no overlap: a new thread");
+  assert.equal(existingThreadFor([otherTurn], "a2", "Keep the retry cap", PROSE), null, "another reply's thread is not this passage's");
+  for (const status of ["resolved", "promoted", "promoting"] as const)
+    assert.equal(existingThreadFor([thr({ tid: "t-x", exact: "Keep the retry cap", status })], "a2", "retry cap", PROSE), null,
+                 status + " takes no reply: a new comment starts a new thread");
+  for (const status of ["open", "merged", "merging"] as const) assert.equal(threadTakesReplies(status), true, status);
+  assert.equal(existingThreadFor([thr({ tid: "pending:abc", exact: "Keep the retry cap" })], "a2", "retry cap", PROSE), null,
+               "an optimistic mark is the in-flight send's, which re-opens its own sent view");
+});
+
+test("a Comment on a passage with a thread opens it, and its box offers New thread instead (source pins)", () => {
+  const open = UI.slice(UI.indexOf("function openCommentComposer("));
+  const body = open.slice(0, open.indexOf("\nfunction ", 10));
+  assert.match(body, /const existing = !live && !fresh \? existingThreadFor\(commentThreads\.get\(sid\) \|\| \[\], uuid, exact, prose\) : null;/);
+  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y \}\);/);
+  const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
+  const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
+  assert.match(popBody, /if \(th && cmtRedirect && cmtRedirect\.tid === th\.tid\) \{[\s\S]{0,700}nb\.textContent = "New thread instead";[\s\S]{0,200}nb\.dataset\.act = "cmtnewthread";/);
+  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, true\); \},/,
+               "delegated on the body (click-safe), onto exactly the selection the gesture had");
+  assert.match(UI, /cmtRedirect = redirect && redirect\.tid === tid \? redirect : null;/, "a mark click or a rail jump offers no such action");
+});
+
+test("the thread layout honours only the user's own spot: a selection point places a new comment box alone (source pins)", () => {
+  assert.match(UI, /commentPopPos = \{ x, y \};\s*\n\s*cmtPopPosMine = false;/, "a Comment gesture's selection point is not the user's placement");
+  assert.equal((UI.match(/cmtPopPosMine = true;/g) || []).length, 5, "a drag, an edge pull, a grip resize, the maximize toggle and a reload's restore");
 });

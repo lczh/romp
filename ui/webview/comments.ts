@@ -284,13 +284,50 @@ export function holdAnswered(holds: Iterable<CommentCreate>, sid: string, uuid: 
   return all.find((c) => c.sid === sid && c.uuid === uuid) || null;
 }
 
-/** The create already in flight on this exact passage (same session, same turn, the same text up to whitespace), or
- *  null. A second Comment on a passage whose first send has not been answered yet is the same comment, not a new one:
- *  the box re-opens on that send instead of opening empty-handed with the words already sent, which is how a click
- *  outside the box, a re-select and an Enter made a second thread in the same words (2026-10-01). */
-export function holdForPassage(holds: Iterable<CommentCreate>, sid: string, uuid: string, exact: string): CommentCreate | null {
-  const want = normalize(exact).norm;
-  return Array.from(holds).find((c) => c.sid === sid && c.uuid === uuid && normalize(c.exact).norm === want) || null;
+/** THE SAME PASSAGE, at the anchor level (2026-10-01, the user's call: a Comment on a passage that already has a thread
+ *  opens that thread). Two selections are the same passage when they anchor to the same turn (the caller compares the
+ *  anchor uuids) and their texts OVERLAP in that turn's rendered prose: each is located the way its highlight is drawn
+ *  (findAnchorRange, the full text or its longest word-prefix in the turn, first occurrence) and the two [start, end)
+ *  ranges share at least one character. Touching ranges ("…two minutes" / " on every…") are two passages. When the
+ *  turn's prose is not at hand (the turn is scrolled out of the window) or either text cannot be found in it, the
+ *  fallback is containment of the whitespace-normalized texts: one passage holding the other is the same passage, which
+ *  never claims an overlap it cannot see. */
+export function samePassage(prose: string | null | undefined, a: string, b: string): boolean {
+  if (prose) {
+    const ra = findAnchorRange(prose, a), rb = findAnchorRange(prose, b);
+    if (ra && rb) return ra.start < rb.end && rb.start < ra.end;
+  }
+  const na = normalize(a).norm, nb = normalize(b).norm;
+  return !!na && !!nb && (na.includes(nb) || nb.includes(na));
+}
+
+/** The create already in flight on the same passage (same session, same turn, overlapping text: samePassage), or null.
+ *  A second Comment on a passage whose first send has not been answered yet is the same comment, not a new one: the box
+ *  re-opens on that send instead of opening empty-handed with the words already sent, which is how a click outside the
+ *  box, a re-select and an Enter made a second thread in the same words (2026-10-01). */
+export function holdForPassage(holds: Iterable<CommentCreate>, sid: string, uuid: string, exact: string,
+                               prose?: string | null): CommentCreate | null {
+  return Array.from(holds).find((c) => c.sid === sid && c.uuid === uuid && samePassage(prose, c.exact, exact)) || null;
+}
+
+/** A thread that can still take a reply: open, or relayed (merged, and merging on its way there; T145 keeps a relayed
+ *  thread talkable). A resolved thread is closed for good and a promoted one is its own session now: a new comment on
+ *  their passage starts a new thread. */
+export function threadTakesReplies(status: CommentThread["status"]): boolean {
+  return status === "open" || status === "merged" || status === "merging";
+}
+
+/** The thread a new Comment on this passage should open instead of a new one (the user 2026-10-01: one passage never
+ *  silently grows a second thread): a talkable thread anchored to the same turn whose passage overlaps the selection
+ *  (samePassage). The newest such thread when there are several (two marks nest on one passage). Null when none. */
+export function existingThreadFor(threads: CommentThread[], uuid: string, exact: string, prose?: string | null): CommentThread | null {
+  let best: CommentThread | null = null;
+  for (const t of threads) {
+    if (t.tid.startsWith("pending:") || t.anchorUuid !== uuid || !threadTakesReplies(t.status)) continue;
+    if (!samePassage(prose, t.exact, exact)) continue;
+    if (!best || (t.createdT || 0) >= (best.createdT || 0)) best = t;
+  }
+  return best;
 }
 
 /** Has this frame got the thread a held create made? A thread on the same anchor turn with the same passage that the

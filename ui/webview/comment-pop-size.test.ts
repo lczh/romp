@@ -99,8 +99,8 @@ test("the module restates the CSS mins/caps and wireEdgeResize's floor verbatim 
 test("a stored size is applied in BOTH modes, before the thread default — which stays verbatim, so nothing stored opens as before", () => {
   const body = RENDER.split("function renderCommentPopover(")[1].split("\nfunction ")[0];
   const pref = body.indexOf("const pref = readCmtPopSize();");
-  const thW = body.indexOf('if (th && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }');
-  const thH = body.indexOf('if (th && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }');
+  const thW = body.indexOf('if (threadLayout && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }');
+  const thH = body.indexOf('if (threadLayout && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }');
   const applied = body.indexOf("cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours");
   const rect = body.indexOf("const r = pop.getBoundingClientRect();");
   const sync = body.indexOf("syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading");
@@ -124,7 +124,7 @@ test("every user resize is remembered through the ONE observer both grips fire �
   assert.match(ro, /pop\.classList\.add\("sized"\)/, "the existing .sized arming stays");
   assert.match(ro, /if \(!pop\.isConnected \|\| !pop\.offsetWidth \|\| !pop\.offsetHeight\) return;/, "a 0×0 box is a close, never a preference");
   assert.match(ro, /if \(a && Math\.abs\(pop\.offsetWidth - a\.w\) <= 1 && Math\.abs\(pop\.offsetHeight - a\.h\) <= 1\) return;/, "the size WE applied is skipped");
-  assert.match(ro, /cmtPopApplied = \{ w: pop\.offsetWidth, h: pop\.offsetHeight \};\s*\n\s*saveCmtPopSize\(pop\);\s*\n\s*syncCmtMaxState\(pop\);/,
+  assert.match(ro, /cmtPopApplied = \{ w: pop\.offsetWidth, h: pop\.offsetHeight \};\s*\n\s*saveCmtPopSize\(pop\);[\s\S]{0,400}?commentPopPos = \{ x: pop\.offsetLeft, y: pop\.offsetTop \};\s*\n\s*cmtPopPosMine = true;\s*\n\s*syncCmtMaxState\(pop\);/,
     "then every observation writes the fraction and repaints the toggle");
   assert.ok(!/setTimeout|debounce|Date\.now/.test(ro), "event-based: no timer between the pull and the write");
   // the WINDOW moving the box through the vw/vh caps is re-baselined, not written back (the tab strip's rule)
@@ -182,7 +182,7 @@ test("toggle: maximize = cap + centered + remembered + sized; restore = the pre-
   assert.match(fn, /const cap = cmtPopCapPx\(W, H\);\s*\n\s*sizeCommentPop\(pop, cap\.w, cap\.h\);\s*\n\s*saveCmtPopSize\(pop\);\s*\n\s*pop\.classList\.add\("sized"\);/);
   // restore
   assert.match(fn, /if \(cmtPopPreMax\) \{\s*\n\s*const px = clampCmtPopPx\(cmtPopPreMax, W, H\);\s*\n\s*sizeCommentPop\(pop, px\.w, px\.h\);\s*\n\s*saveCmtPopSize\(pop\);/);
-  assert.match(fn, /else if \(pop\.dataset\.mode === "thread"\) \{\s*\n\s*sizeCommentPop\(pop, Math\.round\(W \* CMT_POP_THREAD_DEFAULT\.w\), Math\.round\(H \* CMT_POP_THREAD_DEFAULT\.h\)\);/,
+  assert.match(fn, /else if \(pop\.dataset\.mode === "thread" \|\| pop\.dataset\.status === "sent"\) \{[^\n]*\n\s*sizeCommentPop\(pop, Math\.round\(W \* CMT_POP_THREAD_DEFAULT\.w\), Math\.round\(H \* CMT_POP_THREAD_DEFAULT\.h\)\);/,
     "the thread's default is today's 70%/60%");
   assert.deepEqual(CMT_POP_THREAD_DEFAULT, { w: 0.7, h: 0.6 });
   assert.match(fn, /pop\.style\.removeProperty\("width"\);\s*\n\s*pop\.style\.removeProperty\("height"\);[\s\S]*?pop\.classList\.remove\("sized"\);[\s\S]*?localStorage\.removeItem\(CMT_POP_SIZE_KEY\)/,

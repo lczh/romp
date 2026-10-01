@@ -180,9 +180,12 @@ test("the thread popover opens 70% wide right-aligned, 60% tall — and NEVER gr
   // fills within (.cmt-msgs flexes + scrolls; comments.test.ts pins that rule), the box never
   // reflows on a content event. Verified headless: 840×480 at 1200×800, right gap 8, zero rect
   // change across three streaming appends. The CREATE composer keeps its selection-point gesture.
-  assert.match(RENDER, /if \(th && !pop\.style\.width\) \{ pop\.style\.width = Math\.round\(window\.innerWidth \* 0\.7\) \+ "px"; \}/);
-  assert.match(RENDER, /if \(th && !pop\.style\.height\) \{ pop\.style\.height = Math\.round\(window\.innerHeight \* 0\.6\) \+ "px"; \}/);
-  assert.match(RENDER, /const defaultX = th \? \(window\.innerWidth - r\.width - 8\) : \(window\.innerWidth - r\.width\) \/ 2;/);
+  assert.match(RENDER, /if \(threadLayout && !pop\.style\.width\) \{ pop\.style\.width = Math\.round\(window\.innerWidth \* 0\.7\) \+ "px"; \}/);
+  assert.match(RENDER, /if \(threadLayout && !pop\.style\.height\) \{ pop\.style\.height = Math\.round\(window\.innerHeight \* 0\.6\) \+ "px"; \}/);
+  assert.match(RENDER, /const defaultX = threadLayout \? \(window\.innerWidth - r\.width - 8\) : \(window\.innerWidth - r\.width\) \/ 2;/);
+  // the thread layout is a thread's AND a sent comment's from its Enter (2026-10-01), placed by the user's spot alone
+  assert.match(RENDER, /const threadLayout = !!th \|\| !!sent;/);
+  assert.match(RENDER, /const pos = threadLayout && !cmtPopPosMine \? null : commentPopPos;/);
   // a thread open ignores click coords — only a real drag parks the box elsewhere
   const opener = RENDER.split("function openCommentPopover(")[1].split("\nfunction ")[0];
   assert.ok(!opener.includes("commentPopPos = { x, y }"), "no click-coord seeding on thread open");
@@ -192,7 +195,7 @@ test("the thread popover opens 70% wide right-aligned, 60% tall — and NEVER gr
   // inline size when a preference exists — so with nothing stored the two lines above still decide, byte
   // for byte, and the create dialog still writes no inline size at all
   const body = RENDER.split("function renderCommentPopover(")[1].split("\nfunction ")[0];
-  assert.ok(body.indexOf("const pref = readCmtPopSize();") < body.indexOf("if (th && !pop.style.width)"));
+  assert.ok(body.indexOf("const pref = readCmtPopSize();") < body.indexOf("if (threadLayout && !pop.style.width)"));
   assert.match(body, /if \(pref\) \{[\s\S]*?pop\.style\.width = sz\.w \+ "px";[\s\S]*?\}\s*\n\s*\/\/ OPEN GEOMETRY/, "the preference branch, then the default");
 });
 
