@@ -341,8 +341,8 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
     click until a report naming its family; a context refresh the CLI answered before it had the pick answers nothing for
     it; a session revived with a pick in flight starts from the pick's name, unless the pick is above the name it had; and
     a move onto a versioned pick's own model is that pick landing. A real fallback after the pick lands is still carded
-    and armed. Every road drives the real backend: set_model, _do_set_model and _do_refresh_context against a fake
-    client, and the learn."""
+    and armed, unless it lands at or above a versioned pick, where there is nothing to retry. Every road drives the real
+    backend: set_model, _do_set_model and _do_refresh_context against a fake client, and the learn."""
 
     LIVE = {"name": "web", "model": "claude-opus-5-5", "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5"}
     ON48 = {"model": "claude-opus-4-8", "liveModel": "Opus 4.8", "liveModelId": "claude-opus-4-8"}
@@ -758,6 +758,79 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self.assertIsNone(s._upgrade_retry, "%s: a turn served on the model the reconnect runs left the retry "
                                                 "standing" % road)
             self.assertEqual(h.restored, [("Sonnet 5", "Opus 5.5")], "%s: back on the model the reconnect runs" % road)
+
+    def test_a_real_fallback_at_or_above_a_versioned_pick_arms_no_retry(self):
+        # the learn arms from the live name, and after a versioned pick below the live model a reply from before the pick
+        # can move that name back above the pick; a real fallback that then lands at or above the pick is carded, but
+        # the session is already served on what was picked, so there is nothing to retry (the requested-model mark and
+        # the switch flip's re-arm make the same comparison). Armed, the retry's end at the pick fired at the next reply
+        # on the very model the session fell to: no attempt made, the log saying it was back after 0 attempts and a
+        # "Model back on" card naming that model twice (the #33 follow-up's review, round one, third gate)
+        for road, reg, pick, landed, before, low, card in (
+                ("Sonnet 5 picked on Opus 5.5, the pick lands, a reply of a turn already running on Opus 5.5 moves the "
+                 "name back, then a real fallback to Opus 4.8, above the pick", {}, "claude-sonnet-5", ["claude-sonnet-5"],
+                 "claude-opus-5-5", "claude-opus-4-8", ("Opus 5.5", "Opus 4.8")),
+                ("Opus 4.8 picked on Fable 5, the pick lands, a reply of a turn already running on Fable 5 moves the "
+                 "name back, then a real fallback to Opus 5.5, above the pick",
+                 {"model": "claude-fable-5", "liveModel": "Fable 5", "liveModelId": "claude-fable-5"},
+                 "claude-opus-4-8", ["claude-opus-4-8"], "claude-fable-5", "claude-opus-5-5", ("Fable 5", "Opus 5.5")),
+                ("Opus 4.8 picked on Opus 5.5, the init of a turn begun before the CLI took the pick ends its dots on "
+                 "Opus 5.5, then a real fallback to Opus 5, between the two", {}, "claude-opus-4-8", None,
+                 "claude-opus-5-5", "claude-opus-5", ("Opus 5.5", "Opus 5"))):
+            with self.subTest(road=road), _Hooks() as h:
+                be, s = self._world(**reg)
+                self._pick(be, s, pick)
+                if landed is not None:
+                    self._settle(s, landed)
+                    self._served(s, before)
+                else:
+                    self._init(s, before)
+                    self._settle(s, [RuntimeError(self.DOWN)])
+                self._served(s, low)                                     # the real fallback
+                armed = s._upgrade_retry
+                self.assertEqual(h.fallbacks, [card], "%s: the real fallback is still carded" % road)
+                self._served(s, low)                                     # the same turn's next reply, still on it
+                self.assertEqual(h.restored, [], "%s: a 'Model back on' card for the very model the session fell to, "
+                                                 "with no attempt made" % road)
+                self.assertIsNone(armed, "%s: a fallback at or above the pick armed a retry" % road)
+                self.assertIsNone(s._upgrade_retry, road)
+                self.assertEqual([m for m in be._logs if m.startswith("retry upgrade")], [],
+                                 "%s: the retry was logged" % road)
+                self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 0,
+                                 "%s: the tick reconnected the session" % road)
+                self.assertEqual(s._asks, [], "%s: a reconnect was asked for" % road)
+
+    def test_a_real_fallback_below_a_versioned_pick_still_arms_and_ends_on_the_pick(self):
+        # the control for the test above: the same roads, with the real fallback landing below the pick, arm from the live
+        # name; an attempt that falls back to the same model leaves the arm standing, and the next turn served on the
+        # pick ends it with the "back on" card
+        for road, reg, pick, before, low, picked, card in (
+                ("Sonnet 5 picked on Opus 5.5, a reply on Opus 5.5 moves the name back, then a real fallback to Haiku 4.5",
+                 {}, "claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5", "claude-sonnet-5", ("Opus 5.5", "Haiku 4.5")),
+                ("Opus 4.8 picked on Fable 5, a reply on Fable 5 moves the name back, then a real fallback to Opus 4.5, "
+                 "an older version of the picked family",
+                 {"model": "claude-fable-5", "liveModel": "Fable 5", "liveModelId": "claude-fable-5"},
+                 "claude-opus-4-8", "claude-fable-5", "claude-opus-4-5", "claude-opus-4-8", ("Fable 5", "Opus 4.5"))):
+            with self.subTest(road=road), _Hooks() as h:
+                be, s = self._world(**reg)
+                self._pick(be, s, pick)
+                self._settle(s, [picked])
+                self._served(s, before)
+                self._served(s, low)                                     # the real fallback
+                self.assertEqual(h.fallbacks, [card], "%s: carded" % road)
+                arm = s._upgrade_retry
+                self.assertIsNotNone(arm, "%s: a fallback below the pick armed no retry" % road)
+                self.assertEqual((arm["from"], arm["to"], arm["pick"]), card + (pick,), road)
+                now = time.time()
+                self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
+                self._init(s, picked); self._served(s, low)              # the attempt falls back to the same model
+                self.assertEqual(h.restored, [], "%s: a turn on the model it fell to said the session was back" % road)
+                self.assertIs(s._upgrade_retry, arm, "%s: a turn served below the pick ended the retry" % road)
+                self._init(s, picked); self._served(s, picked)           # a turn served on the pick
+                self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick left the retry standing" % road)
+                self.assertEqual(h.restored, [(card[1], sb.pretty_model(picked))], "%s: back on the pick" % road)
+                self.assertEqual(be.retry_model_upgrades(now + 3 * sb.RETRY_UPGRADE_S), 0, "%s: no attempt after it" % road)
+                self.assertEqual(len(s._asks), 1, road)
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
