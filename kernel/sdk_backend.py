@@ -6953,13 +6953,16 @@ class SdkSession:
                     # gives it its dots back (_revert_model), the live name being the world before it too (round two of
                     # that review). A pick that lands between this check and the arm (the arm reads the Retry upgrades
                     # file twice first) is caught after it, under the session lock set_model holds for its own writes:
-                    # the arm just written is the world before that pick, and it stands down.
+                    # the arm just written is the world before that pick, and it stands down. Every line the retry logs
+                    # here says problem=False (as _arm_upgrade_retry's and _retry_armed's do): inside this except block a
+                    # line that says nothing is classed as the refusal's report (SdkBackend._log), and one refused pick
+                    # put up to three of the retry's lines in the error center beside its own, labeled as failures.
                     arm = self._retry_armed()
                     _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
                     if arm and _model_version(_plab) is not None and not _model_downgrade(_plab, arm.get("to")):
                         self._upgrade_retry = None
                         self.backend._log("retry upgrade (%s): the pick went back to %s, not above %s; that retry "
-                                          "stands down" % (self.name, _plab, arm.get("to")))
+                                          "stands down" % (self.name, _plab, arm.get("to")), problem=False)
                         arm = None
                     if not arm and not getattr(self, "_model_pending", "") and self._arm_if_below_pick():
                         with self._lock:
@@ -6968,7 +6971,7 @@ class SdkSession:
                                 self._upgrade_retry = None
                         if newer:
                             self.backend._log("retry upgrade (%s): a newer pick (%s) went in while the refusal was put "
-                                              "back; the retry just armed stands down" % (self.name, newer))
+                                              "back; the retry just armed stands down" % (self.name, newer), problem=False)
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
                                   "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
                                   problem=True)
@@ -7499,7 +7502,8 @@ class SdkSession:
         self._upgrade_retry = {"from": frm, "to": to, "pick": getattr(self, "chosen_model", "") or "",
                                "since": now, "next": now + RETRY_UPGRADE_S, "attempts": 0}
         self.backend._log("retry upgrade (%s): %s fell back to %s — the picked model is asked for again every %d min, "
-                          "when the session is quiet, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)))
+                          "when the session is quiet, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)),
+                          problem=False)   # never a failure, whoever calls: a refused pick arms from inside its except block
 
     def _retry_armed(self):
         """The standing retry, or None — and None as well once the switch is off (review 2026-09-17: an arm that outlived
@@ -7508,7 +7512,8 @@ class SdkSession:
         arm = getattr(self, "_upgrade_retry", None)
         if arm and not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             self._upgrade_retry = None
-            self.backend._log("retry upgrade (%s): the switch is off — standing down" % self.name)
+            self.backend._log("retry upgrade (%s): the switch is off — standing down" % self.name,
+                              problem=False)   # never a failure: a refused pick reads the arm from inside its except block
             return None
         return arm
 
