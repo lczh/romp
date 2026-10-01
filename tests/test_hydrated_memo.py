@@ -400,8 +400,10 @@ class CounterAndCap(Base):
 
         class PeerPutMeanwhile(dict):
             """A memo that misses the record at this call's first check and holds it at the next: a peer's put lands
-            between the two."""
+            between the two, and with `fills` set the peer's fill of that atom's body lands too, its marker pop still in
+            flight."""
             gets = 0
+            fills = None
 
             def get(self, k, default=None):
                 if k == rec["uuid"]:
@@ -409,6 +411,8 @@ class CounterAndCap(Base):
                     if PeerPutMeanwhile.gets == 2:
                         self[k] = entry
                         em._HYDRATED_BYTES[0] += entry[1]
+                        if PeerPutMeanwhile.fills is not None:
+                            PeerPutMeanwhile.fills["message"] = em._norm_message(rec["message"])
                 return super().get(k, default)
 
         class PeerFinishes(dict):
@@ -430,8 +434,9 @@ class CounterAndCap(Base):
             st = em.asm_checkpoint_stats()
             return {k: st[k] - st0[k] for k in ("hydratedAtoms", "hydratedHits", "hydratedEvicted")}
 
-        def meanwhile(atom):
+        def meanwhile(atom, fills=False):
             PeerPutMeanwhile.gets = 0
+            PeerPutMeanwhile.fills = atom if fills else None
             got = run(atom, PeerPutMeanwhile())
             self.assertEqual(PeerPutMeanwhile.gets, 2, "the peer's put landed between the first check and the second")
             return got
@@ -441,6 +446,11 @@ class CounterAndCap(Base):
                          "the re-check under the read stripe: one fill served, no read")
         self.assertEqual(waited["message"], em._norm_message(rec["message"]))
         self.assertNotIn("lazy", waited)
+        raced = lazy_atom(rec, path, at, "a")
+        self.assertEqual(meanwhile(raced, fills=True), {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
+                         "the peer's put and its fill both landed while this call waited: completed, not counted")
+        self.assertEqual(raced["message"], em._norm_message(rec["message"]))
+        self.assertNotIn("lazy", raced)
         finished = lazy_atom(rec, path, at, "a")
         finished["message"] = em._norm_message(rec["message"])     # a peer's fill wrote the body; its marker pop is in flight
         self.assertEqual(meanwhile(finished), {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
