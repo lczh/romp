@@ -6945,6 +6945,9 @@ class SdkSession:
                     # still in flight is left alone, as the switch flip leaves it: set_model runs on the kernel thread,
                     # so a newer pick can land during the revert, whose compare-and-swap leaves it standing; the live
                     # name is the world before it, and an arm from it would end at its first reply with a false "back on".
+                    # So is a pick put back that was itself still in flight when the refused pick was made: the revert
+                    # gives it its dots back (_revert_model), the live name being the world before it too (round two of
+                    # that review).
                     arm = self._retry_armed()
                     _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
                     if arm and _model_version(_plab) is not None and not _model_downgrade(_plab, arm.get("to")):
@@ -16726,6 +16729,8 @@ class SdkBackend:
                 # aside for it (_do_refresh_context).
                 s._pick_seq = getattr(s, "_pick_seq", 0) + 1
                 seq = s._pick_seq
+                held = getattr(s, "_model_pending", "")   # the pick before this one, while it is still in flight: a refusal
+                #                                           of this one puts it back with its dots (_revert_model)
                 s._model_pending = value or "default"   # "" goes out as set_model(None), as "default" does
                 pending = True
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
@@ -16734,8 +16739,9 @@ class SdkBackend:
                 s._served_model = ""
             # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
             tok = self._seed_write_pending(sid, value)
-            prev = {"picked": value, "tok": tok, "seq": seq}   # what the layers hold until the CLI rules — the revert's CAS
-            #                                                    keys — and which pick the CLI's answer is to (_pick_answered)
+            prev = {"picked": value, "tok": tok, "seq": seq, "held": held}   # what the layers hold until the CLI rules
+            #                                                    (the revert's CAS keys), which pick the CLI's answer is
+            #                                                    to (_pick_answered) and the marker the pick replaced
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
             self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
@@ -16768,13 +16774,23 @@ class SdkBackend:
         (this session's next pick; another session's pick in the SHARED defaults store) must not roll
         that pick back: a writer whose evidence predates the diary stands down. The compare and the
         assign of chosen_model sit in one hold of the session lock — set_model assigns it from the kernel
-        thread under the same lock, so the swap cannot tear."""
+        thread under the same lock, so the swap cannot tear.
+
+        The pending marker goes back too: to the marker the refused pick replaced (`prev["held"]`) when that
+        names the model put back, so a pick put back while it was itself still in flight keeps its dots
+        until its own first report, and to none otherwise (the #33 follow-up's review, round two). Cleared
+        outright, the model from before that pick read as the model served now: the refusal's re-arm
+        (_do_set_model) armed the pick put back as a fallback nobody had (a "fell back" log line, a
+        reconnect ten minutes later and a false "Model back on" card at its first reply) after a second
+        pick refused before the first had reported."""
         picked = prev.get("picked")
+        held = prev.get("held") or ""
         with sess._lock:
             back_model = sess._model_accepted
+            keep = held if held == (back_model or "default") else ""   # set_model's marker for the pick put back
             if sess.chosen_model == picked:
                 sess.chosen_model = back_model or ""
-                sess._model_pending = ""
+                sess._model_pending = keep
         with self._reg_lock:
             reg = read_reg(self.state_dir, sess.sid) or {"sid": sess.sid}
             if reg.get("model") == picked:
@@ -16782,7 +16798,7 @@ class SdkBackend:
                     reg.pop("model", None)
                 else:
                     reg["model"] = back_model
-                reg["modelPending"] = False
+                reg["modelPending"] = bool(keep)
                 write_reg(self.state_dir, sess.sid, reg)
         self._seed_write_refused(prev.get("tok"))
         return back_model or ""
