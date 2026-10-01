@@ -15,6 +15,39 @@ export type Region = Run | Gap;
 
 export const DEFAULT_TURN_PX = 120;   // the per-TURN estimate the spacers use until a run is measured (a turn is ~two rows; render.ts sizeSpacers measures px-per-turn)
 
+/** The kernel's turn an event carries (`turn`, the kernel's caps `chatTurn`, 2026-10-01): the index of the turn the kernel built it in,
+ *  the numbering every span, tailLo and gap counts in. Null when it carries none: an older kernel, a row the page injected (an optimistic
+ *  echo, the queued group), a head card above turn 0. */
+export function kernelTurnOf(e: unknown): number | null {
+  const t = e && typeof e === "object" ? (e as { turn?: unknown }).turn : undefined;
+  return typeof t === "number" && Number.isInteger(t) && t >= 0 ? t : null;
+}
+
+/** One rendered child of the thread as the px-per-turn measure reads it: a row's height, whether it is a typed row (`turn-user`), and
+ *  the kernel turn its unit's event carries (null when it carries none); or a gap's element (`gap`), which only splits the rows. */
+export interface MeasuredRow { h: number; user: boolean; kturn: number | null; gap?: boolean; }
+export interface TurnMeasure { px: number | null; turns: number; road: "kernel" | "typed"; }
+
+/** The px per turn a gap is drawn at, off the rows a view holds (2026-10-01): their height over the turns they cover. The turns are the
+ *  KERNEL's wherever the rows carry its index: in each stretch of rows between two gap elements, its last turn minus its first plus one,
+ *  so a turn that a peer's message or a nudge opened counts once and a turn that renders no row counts too, the way a gap counts its
+ *  span. Rows that carry no index at all (a page on an older kernel) count their typed rows instead, the count the page kept before the
+ *  index rode the wire: it misses every turn a peer's message opened, about half of them on a session that takes much mail, and drew the
+ *  gaps about twice their height. The caller files that road (render.ts turnCountTyped). */
+export function measureTurnPx(rows: Iterable<MeasuredRow>): TurnMeasure {
+  let h = 0, typed = 0, kernel = 0, lo = Infinity, hi = -Infinity;
+  const close = () => { if (hi >= lo) kernel += hi - lo + 1; lo = Infinity; hi = -Infinity; };
+  for (const r of rows) {
+    if (r.gap) { close(); continue; }
+    h += r.h;
+    if (r.user) typed++;
+    if (r.kturn != null) { lo = Math.min(lo, r.kturn); hi = Math.max(hi, r.kturn); }
+  }
+  close();
+  if (kernel > 0) return { px: h > 0 ? h / kernel : null, turns: kernel, road: "kernel" };
+  return { px: h > 0 && typed > 0 ? h / typed : null, turns: typed, road: "typed" };
+}
+
 /** The regions a set of runs implies: the runs in turn order with a gap between each pair that does not touch, and a head gap
  *  [0, first.lo) when the first run does not start at the head. Runs must not overlap (insertRun keeps that). */
 export function regionsFromRuns(runs: readonly Run[]): Region[] {

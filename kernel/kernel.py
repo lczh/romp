@@ -42392,6 +42392,14 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         anchors = seg_anchors.get(seg)
         is_prompt = ev.get("kind") in ("user", "teammate") or (ev.get("kind") == "postal-service" and ev.get("direction") == "in")
         ev["tlId"] = ((anchors[0] if is_prompt else anchors[1]) or seg) if anchors else seg
+        # `turn` = the turn of this build's turn list the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01): the
+        # numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a peer's message or a
+        # nudge opened counts as one, as here; counting the typed rows alone read about half the turns on a session that
+        # takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the raw
+        # event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries none.
+        _tn = _raw_turn.get(id(ev), _raw_turn.get(ev.get("uuid")))
+        if _tn is not None:
+            ev["turn"] = _tn
         if ev.get("askAnswer") and not ev.get("askAnswerFilled"):
             # AskUserQuestion whose record carried NO structured answers map (an old transcript) →
             # the lossy output-string scrape is all there is. The attach loop's authoritative fill
@@ -54518,10 +54526,14 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
 #             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
 #             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
+#   chatTurn — every chat event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
+#             2026-10-01), the numbering the history spans, tailLo and the gaps count in. The page counts turns off it (the
+#             px per turn a gap is drawn at, the turn a row names); an older page ignores the field, and a page on an older
+#             kernel counts its typed rows as before and files a turnCountTyped client-diag row saying so.
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05

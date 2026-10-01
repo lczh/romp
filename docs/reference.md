@@ -3522,8 +3522,15 @@ announces `chatProto2` in its `caps`:
   lets a gap met again on the healed socket ask anew; a gap is sized by its
   TURN count times the rendered run's measured pixels per turn (a turn is a
   user row plus its reply and any tool rows; a per-display-unit average drew
-  gaps half true), lowered when the gaps together would stand taller than a
-  quarter of the browser's layout limit: no box is laid out past a fixed height
+  gaps half true), the turns counted the way the kernel numbers them: every
+  event carries `turn`, the index of the kernel turn it belongs to (the kernel
+  announces `chatTurn` in its `caps`), so a turn a peer session's message or a
+  nudge opened counts once (counted by typed rows alone, a session that takes
+  much mail read half its turns and drew its gaps twice their height; a page on
+  a kernel without the field still counts typed rows, and files one
+  `turnCountTyped` client-diag row per session saying why), lowered when the
+  gaps together would stand taller than a quarter of the browser's layout
+  limit: no box is laid out past a fixed height
   (2^25 px in Chromium divided by the device scale and the zoom, so 16,777,216
   px in Chrome on a 2x display), which the page measures with a hidden probe
   and measures again after a resize, and a long session's head gap at the
