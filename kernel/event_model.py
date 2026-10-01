@@ -968,6 +968,33 @@ def fold_cursor_appendable(cache, path):
     return ent is not None and cur is not None and cur[1] == ent[6]
 
 
+def fold_steps_in_hand(cache, name, path, new=True):
+    """Whether fold `name` (its cursor dict `cache`) over `path` would step only records the reader already holds, never a
+    whole read, over an entry that holds records: the fold's cursor stands at that entry's generation inside its records (a
+    hit, or an append), or the file's pending restore carries a complete state for the fold inside them (a tail restored from
+    the document), or, with `new`, the entry is the whole file (a first fold over it reads nothing). False when the reader
+    holds no entry for the path, or an empty one. The spend guard asks before it folds an agent file it priced (2026-10-01),
+    so its fold never enters a file the reader let go nor pulls a restored tail whole."""
+    key = str(path)
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(key)
+    if ent is None or not ent[4]:
+        return False
+    base, total = ent[5], ent[5] + len(ent[4])
+    cur = cache.get(key)
+    if cur is not None and cur[1] == ent[6]:
+        return base <= cur[0] <= total
+    if new and base == 0:
+        return True
+    with _CKPT_LOCK:
+        pend = _CKPT_PENDING.get(key)
+        f = (pend.get("folds") or {}).get(name) if isinstance(pend, dict) and pend.get("gen") == ent[6] else None
+    try:
+        return isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def name_fold_cache(cache, name):
     """Give a fold's cursor dict its checkpoint name once, so every fold_records call over it is resumable without
     a `ckpt` argument at the call (a caller whose call shape other code stubs, such as the judge's background-task
@@ -2342,7 +2369,10 @@ def _document_at_witness(key, ent):
     from the document over a zero-byte tail, never a whole read. False with checkpoints off (no document), for a document
     behind the entry (a lagging fold's cut), and for a cursor of this generation that lags or is missing from the document
     (an over-the-cap or cold fold included). A cursor of another generation does not hold the drop: its fold restores from
-    the document when the document carries it, else reads once, as after any drop."""
+    the document when the document carries it, else reads once, as after any drop. False too while a parse's assembly entry
+    holds this very records list (the subagent viewer's): the pop would free nothing, and the parse's next rebuild would read
+    the file whole and parse it in full. A reader that wants the whole file and holds no such entry pays one whole read after
+    each drop, so a reader of agent files that runs every cycle takes a tail (the folds' rule)."""
     try:
         recs = ent[4]
         if not recs:
@@ -2365,9 +2395,21 @@ def _document_at_witness(key, ent):
             f = folds.get(name)
             if cur[0] != total or not (isinstance(f, dict) and "state" in f and int(f.get("count", -1)) == total):
                 return False
-        return True
+        return not _asm_holds_records(key, recs)
     except Exception:
         return False
+
+
+def _asm_holds_records(key, recs):
+    """Whether an assembly entry's adapter holds `recs`, this very list, as `key`'s records (the subagent viewer's parse of an
+    agent file). One identity test per entry, on a snapshot taken under _ASM_LOCK alone."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    for e in entries:
+        src = getattr(e.get("ad"), "_src", None) if isinstance(e, dict) else None
+        if isinstance(src, dict) and src.get(key) is recs:
+            return True
+    return False
 
 
 _UNPINNED = object()

@@ -1634,10 +1634,12 @@ fold cold for want of a state counts for the pass, which heals it, and not
 here, where it would only be written cold again), before the entry is popped,
 and on a hit or a restore at the witness the entry stays as it always has,
 except over a subagent's own transcript (its card's folds, and the spend
-guard's agent reads, which go through one of them): there a fold that finds
-nothing new also pops an entry holding records once the file's document stands
-at the entry's witness with every current fold's state, so a returned agent
-whose last record was folded while its file was fresh leaves memory too. The
+guard's agent reads, which go through them and catch up a card's cursor that
+stopped short of the file's end): there a fold that finds nothing new also pops
+an entry holding records once the file's document stands at the entry's witness
+with every current fold's state and no parse holds the same records, so a
+returned agent whose last record was folded while its file was fresh leaves
+memory too. The
 write is charged to the pusher cycle's byte budget, which the kernel begins at
 each cycle's start and the pass shares near its end; over the budget the write
 and the drop wait with the entry held (`converge.dropDeferred`), the drop then

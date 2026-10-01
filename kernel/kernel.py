@@ -33723,12 +33723,20 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since, _gist_of) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="returned")
+        st = _agent_gist_fold(agent_path)
     except Exception:
         return None
     if not st["since"]:
         return None
     return st
+
+
+def _agent_gist_fold(agent_path):
+    """The card's steps fold over one agent's own file, with no chat-build bookkeeping: _agent_steps folds through it, and so
+    does the spend guard (2026-10-01), to catch up a card's cursor that stopped short of the file's end when the chat stopped
+    being built before the agent returned (a closed tab, a sleeping laptop); a cursor behind the entry holds the returned
+    agent's drop, and nothing else would ever move it."""
+    return em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="returned")
 
 
 def _stamp_steps(ev, st):
@@ -49087,11 +49095,10 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
     """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
-    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh). Every agent file whose
-    WHOLE entry the reader holds is then folded through _agent_launch_ids (2026-10-01): the guard's read of a workflow
-    agent, which has no card, was the only one, and with no fold over it a returned agent's records stayed in the record
-    cache for the kernel's life; the launch-ids fold (the agent-file fold with the smallest state) drops a returned file
-    under the cards' own rule, and leaves it a document to restore from. The leaf, the first file, is never folded here."""
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh). Every agent file is
+    then folded (_spend_fold_agent, 2026-10-01): the guard's read of a workflow agent, which has no card, was the only one,
+    and with no fold over it a returned agent's records stayed in the record cache for the kernel's life. The leaf, the first
+    file, is never folded here."""
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
@@ -49100,9 +49107,27 @@ def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, sta
     for i, f in enumerate(_spend_window_files(leaf, since, now, stat=stat)):
         for _t, c in _spend_file_rows(f, since, prices, dearest, agent=i > 0):
             total += c
-        if i > 0 and em.entry_whole_resident(f):
-            _agent_launch_ids(f)
+        if i > 0:
+            _spend_fold_agent(f)
     return total
+
+
+def _spend_fold_agent(f):
+    """The spend guard's folds over an agent file it priced (2026-10-01), so the records its read holds leave memory under the
+    agent folds' rule (drop_after="returned"), each fold only where it steps the records the reader holds (em.fold_steps_in_hand:
+    never a file the reader let go, never a tail pulled whole). The launch-ids fold, the agent-file fold with the smallest
+    state, runs over a whole entry, its own cursor, or a restored tail whose document carries its state (a restart before the
+    exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the drop has a cursor and a
+    document to restore from. The card's steps fold runs only over its own cursor or document state: it catches up a card
+    whose chat stopped being built before the agent returned, whose cursor behind the entry would hold the drop for good, and
+    it never starts a steps state for a workflow agent. A fold that raises costs memory, never the guard's rate."""
+    try:
+        if em.fold_steps_in_hand(_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", f):
+            _agent_launch_ids(f)
+        if em.fold_steps_in_hand(_AGENT_GIST_CACHE, "agentGist", f, new=False):
+            _agent_gist_fold(f)
+    except Exception:
+        pass
 
 
 def _spend_guard_seed():
