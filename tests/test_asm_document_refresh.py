@@ -19,6 +19,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from romp_load import load_source   # above every state preamble (tests/test_state_isolation_order.py)
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
@@ -155,7 +156,6 @@ os.environ["XDG_STATE_HOME"] = _STATE_ROOT                # hermetic state BEFOR
 os.environ.pop("ROMP_STATE_DIR", None)
 os.makedirs(os.path.join(_STATE_ROOT, "romp"), exist_ok=True)
 Path(_STATE_ROOT, "romp", "session-hosts").write_text("off\n")   # this test's own root: no per-session host (CLAUDE.md, 2026-09-11)
-from romp_load import load_source   # noqa: E402
 km = load_source("romp_kernel_asm_refresh", os.path.join(os.path.dirname(HERE), "bin", "romp-kernel"))
 SETTLE_SID = "a5a5a5a5-1111-4222-8333-444444444444"     # a private synthetic sid (no goal store is minted here)
 
