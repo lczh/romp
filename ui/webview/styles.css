@@ -4257,6 +4257,10 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    (pending bubbles, dots, notes) come after the turns, so the + combinator never misses a pair;
    keep the -6px paired with .cmt-msgs' gap above. */
 .cmt-msgs .turn + .turn::before { top: -6px; }
+/* a pending group with NO turn before it (the create box's sent view, the thread's boot view, the plain msgs fallback) has
+   no rail to join: its segment drew as the last turn's 16px stub, alone, a stray caret-like line left of "sending…"
+   (2026-10-01). It keeps its segment once it follows a turn (.turn + .turn above). */
+.cmt-msgs > .turn-queued:not(.turn ~ .turn-queued)::before { display: none; }
 /* the day divider between two turns (fillCommentMsgs, T339): its segment spans only its own margins (16px above, 6px
    below), and this flex column adds its 6px gap on both sides of it, which the rule above does not bridge (the turn after
    a divider is not `.turn + .turn`); stretch the segment over margin plus gap each side, so the rail runs through here too */

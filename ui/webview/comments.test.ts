@@ -966,3 +966,11 @@ test("every create answer echoes the gesture's createId; a create a remote host 
   const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
   assert.match(FED, /if \(msg && msg\.type === "commentCreate" && typeof msg\.id === "string" && msg\.uuid\)\s*\n\s*window\.dispatchEvent\(new MessageEvent\("message", \{ data: \{ type: "commentCreateFailed", id: prefixId\(host, msg\.id\),\s*\n\s*uuid: msg\.uuid, createId: msg\.createId \|\| "", transient: false \} \}\)\);/);
 });
+
+test("a pending group with no turn before it draws no rail stub (source pin)", () => {
+  // the sent view and the thread's boot view hold the pending bubble with nothing above it on the rail: the chat's last-turn
+  // stub (.turn:not(:has(~ .turn))::before, 16px) drew alone left of "sending…", a stray caret-like line (2026-10-01)
+  const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+  assert.match(CSS, /\.cmt-msgs > \.turn-queued:not\(\.turn ~ \.turn-queued\)::before \{ display: none; \}/);
+  assert.match(CSS, /\.cmt-msgs \.turn \+ \.turn::before \{ top: -6px; \}/, "after a turn it keeps its segment, continuous");
+});

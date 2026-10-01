@@ -157,7 +157,9 @@ const pop = () => page.evaluate(() => {
   const p = document.getElementById("cmt-pop");
   if (!p) return null;
   const box = p.querySelector(".cmt-input");
+  const q = p.querySelector(".cmt-msgs > .turn-queued");
   return { mode: p.dataset.mode, sentView: !!p.querySelector(".cmt-boot-sent"), box: box ? box.value : null,
+           railStub: q ? getComputedStyle(q, "::before").display !== "none" : null,
            bubble: ((p.querySelector(".cmt-msgs") || {}).textContent || ""), sendDisabled: (p.querySelector(".cmt-send") || {}).disabled ?? null };
 });
 // is there an optimistic mark (a create in flight) / a thread's mark on this passage?
@@ -396,6 +398,7 @@ class ServedCommentCreate(unittest.TestCase):
         self.assertTrue(d["afterFirst"]["sentView"], d)
         self.assertIsNone(d["afterFirst"]["box"], "nothing left to type or send: %r" % d)
         self.assertIn("Why two minutes?", d["afterFirst"]["bubble"], "the words as the pending bubble")
+        self.assertIs(d["afterFirst"]["railStub"], False, "no orphan rail stub beside the bubble: %r" % d)
         self.assertEqual((d["posts"], d["postsAfter"]), (1, 1), "the second Enter sent nothing: %r" % d)
         self.assertTrue(d["adopted"], "the kernel's answer adopts the thread into the box")
         self.assertEqual(len(on("double")), 1, threads)
