@@ -2881,11 +2881,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   place at equal length plus an append passes the 64-byte guard, like a
   same-size same-mtime rewrite),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
-  a cut), `hydratedBy` (those bytes per calling function), `hydratedHits` and
-  `hydratedEvicted` (fills the hydrated-body memo served without a read, and
-  the entries its cap pushed out; a fill that completes an atom another
-  thread finished meanwhile is not counted, since that thread's own read or
-  hit counted the body), `restoreMs`, the
+  a cut), `hydratedBy` (those bytes per calling function), `restoreMs`, the
   restore's parts since boot in milliseconds to three decimals, each added on the
   return it names (`load`: the document read, decompressed, decoded and its
   file checks; `verify`: the turns section's identity and coverage, or the
@@ -2904,6 +2900,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reason), and `refresh`: the document refreshes a restored entry's settle
   started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
   time); the refresh's own parse counts under `parse` as `private`.
+  Two more count what the hydrated-body memo does: `hydratedHits`, the
+  fills it served without a read, and `hydratedEvicted`, the entries its
+  cap pushed out. A memo hit for an atom whose body another thread had
+  already written when this call looked is not counted, since that
+  thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
   come from: `materialized` atoms built from the document's rows since boot,
   `materializedBy` (per consumer), `materializedByStage` (the same builds
