@@ -3455,15 +3455,20 @@ announces `chatProto2` in its `caps`:
   lets a gap met again on the healed socket ask anew; a gap is sized by its
   TURN count times the rendered run's measured pixels per turn (a turn is a
   user row plus its reply and any tool rows; a per-display-unit average drew
-  gaps half true); a fill anchors on the first row that intersects the
-  viewport, whatever the sign of its top; with no row on screen (or that row
-  gone from the rebuild) it names the point under the viewport top as a TURN
-  and a fraction into its gap and puts that turn back after the rebuild, so
-  the point moves by less than a turn (the head stays at zero); every row
-  carries its own turn, stamped when it is painted, so the point is named by
-  the row's position and never by looking its uuid up (a row anchored on an
-  answer's tool_result uuid has no event of its own), and a fill that leaves
-  no row on screen re-windows once around the named point;
+  gaps half true), lowered when the gaps together would stand taller than four
+  million pixels: a browser lays out no box past a fixed height (16,777,216 px
+  in Chrome on a 2x display), and a long session's head gap at the measured
+  figure passed it, which put the newest rows out of reach and kept the gap
+  asking for pages while the reader sat at the end; a fill anchors on the
+  first row that intersects the viewport, whatever the sign of its top; with
+  no row on screen (or that row gone from the rebuild) it names the point
+  under the viewport top as a TURN and a fraction into its gap and puts that
+  turn back after the rebuild, so the point moves by less than a turn (the
+  head stays at zero); every row carries its own turn, stamped when it is
+  painted, so the point is named by the row's position and never by looking
+  its uuid up (a row anchored on an answer's tool_result uuid has no event of
+  its own), and a fill that leaves no row on screen re-windows once around
+  the named point;
 - the kernel's per-client base is TAIL-ONLY: a reply moves the base's first edge
   only when its span reaches the tail run, so the tail's deltas keep flowing to a
   reader in older history; a reconnect's `ready` starts a fresh base. The base's
