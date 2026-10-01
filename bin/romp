@@ -89,6 +89,7 @@ EOF
     _romp_cmd "romp send <session> [--tag <label>] <text>" - "Hand a session a message; scripts/cron SHOULD pass --tag so it renders machine-sent, not as your typed words"
     _romp_cmd "romp compact <session> [--wait]" -       "Compact a session's context in place (Claude's /compact; on a Codex session, Codex's own compaction, no summary text), queued safely if a turn is open; --wait blocks until it finishes (--timeout <s>, default 600) and exits 1 with the end's words when a Codex compaction ended loudly instead (the wait reads the compaction's end record on the session row: an end new since the read before the request; for a queued compaction, new since the first sample after the request that reads not compacting); a failed Claude /compact leaves no notice on the row, so it reads as a clean end, never as a failure"
     _romp_cmd "romp interrupt <session>"   -            "Interrupt a session's current turn"
+    _romp_cmd "romp apply <session>"       -            "Apply now: a billing, effort, fast, bypass or env change waiting for the session to go quiet relaunches its CLI at once, ending the work it waited on (the session is told which background tasks ended); with nothing waiting it changes nothing and exits 0"
     _romp_cmd "romp end <session>"         -            "End a session"
     _romp_cmd "romp checkin <host>"        -            "Publish this machine to an attached hub (romp checkout withdraws)"
     _romp_cmd "romp engine claude|codex"   -            "One switch: which vendor runs the judges + what new sessions default to"
@@ -2220,6 +2221,52 @@ print(n if isinstance(n, int) and n > 0 else "")' "$_resp" 2>/dev/null || true)"
     _r_err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
     echo "romp $_verb: refused — $_r_err" >&2
     exit 1
+fi
+
+# `romp apply <session>` — Apply now, headless (2026-10-01). A billing, effort, fast, bypass-mode or per-session env
+# change relaunches the session's CLI, and since that day the relaunch waits until nothing would be cut; a session whose
+# monitors never let it go quiet kept its change waiting for hours. This pushes it through at once (the kernel's /apply,
+# the dashboard's Apply now): the CLI relaunches, the work the change waited on ends, and the session is told which
+# background tasks ended. A session with nothing waiting is left alone, and that is exit 0, so a script can run this over
+# every session. Exit codes as `romp send`'s: 1 for a refusal or a kernel nobody answers on, 3 for a kernel that took
+# the request and answered late (it may already have relaunched the session).
+if [[ "${1:-}" == "apply" ]]; then
+    shift
+    _who="${1:-}"
+    if [[ -z "$_who" || $# -gt 1 ]]; then echo "usage: romp apply <session>" >&2; exit 2; fi
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _payload="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$_who")"
+    _cap="${ROMP_KERNEL_HTTP_TIMEOUT_S:-10}"
+    _crc=0
+    _resp="$(_romp_token_cfg | curl -sf -m "$_cap" --config - -X POST "http://127.0.0.1:$_kport/apply" \
+                  -H 'Content-Type: application/json' -d "$_payload")" || _crc=$?   # `|| ...`: survives set -e
+    if [[ $_crc -ne 0 ]]; then
+        case $_crc in
+            28) echo "romp apply: the kernel on :$_kport took the request but did not answer within ${_cap}s" \
+                     "(mid-restart or under load) — it may already have relaunched $_who; do not retry blindly" >&2; exit 3 ;;
+            22) echo "romp apply: the kernel refused the request (HTTP error) — nothing was applied" >&2; exit 1 ;;
+            *)  echo "romp apply: kernel not reachable on :$_kport (is romp running?) [curl exit $_crc]" >&2; exit 1 ;;
+        esac
+    fi
+    _a_out="$(python3 -c 'import json,sys
+try:
+    r = json.loads(sys.argv[1])
+except Exception:
+    r = None
+if not isinstance(r, dict):
+    print("refused\t" + sys.argv[1])
+elif r.get("ok") and r.get("applied") is False:
+    print("nothing\t" + str(r.get("why") or "nothing is waiting to apply on this session"))
+elif r.get("ok"):
+    print("applied\t")
+else:
+    print("refused\t" + str(r.get("error") or sys.argv[1]))' "$_resp" 2>/dev/null || printf 'refused\t%s' "$_resp")"
+    _a_kind="${_a_out%%$'\t'*}"; _a_text="${_a_out#*$'\t'}"
+    case "$_a_kind" in
+        applied) echo "romp apply: applying now ($_who) — its CLI relaunches, and it is told which background tasks ended"; exit 0 ;;
+        nothing) echo "romp apply: nothing to apply ($_who) — $_a_text"; exit 0 ;;
+        *)       echo "romp apply: refused — $_a_text" >&2; exit 1 ;;
+    esac
 fi
 
 # `romp default-dir [PATH]` — the default working directory for NEW sessions (what the picker prefills).

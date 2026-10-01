@@ -10,6 +10,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { applyNowOffered, applyNowSub, APPLY_NOW_LABEL } from "./apply-now";
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -55,18 +56,20 @@ function lines(e: El): string[] { return e.children.map((c) => has(c, "ctx-sep")
 function subLines(e: El): number { return e.querySelectorAll(".ctx-item-sub").length; }
 
 type Avail = { login?: boolean; key?: boolean; loginWhy?: string; keyWhy?: string; default?: string; defaultExplicit?: boolean };
-function lift(avail: Avail, auth = "", acct = "") {
+function lift(avail: Avail, auth = "", acct = "", extra: Record<string, unknown> = {}) {
   const a = RENDER.indexOf("    const openBillingFly = (): HTMLElement | null => {");
   const b = RENDER.indexOf('    wireFlyout(menu, item, ".ctx-sub-billing"', a);
   assert.ok(a > 0 && b > a, "openBillingFly: anchors not found; re-anchor");
-  const helpers = ["function billingChoices(", "function authLoginChoices(", "function authChoiceCurrent(", "function placeFlyBeside(", "function wireFlyout("].map((anchor) => {   // the two login helpers the merged slice calls (T346)
+  const helpers = ["function billingChoices(", "function authLoginChoices(", "function authChoiceCurrent(", "function placeFlyBeside(", "function wireFlyout(",
+                   "function applyNowRow("].map((anchor) => {   // the two login helpers the merged slice calls (T346); the Apply now row's builder (2026-10-01)
     const h = RENDER.indexOf(anchor); if (h < 0) return "";
     return RENDER.slice(h, RENDER.indexOf("\n}\n", h) + 2);
   }).join("\n");
   const code = ts(helpers + "\nconst HOVER_INTENT_MS = 120;\n" + RENDER.slice(a, b) + "\nreturn openBillingFly;");
-  const posted: unknown[] = []; const dismissed: number[] = [];
+  const posted: unknown[] = []; const dismissed: number[] = []; const applied: unknown[] = [];
   const menu = mkEl("div", "ctx-menu"); const item = mkEl("div", "ctx-item ctx-item-toggle ctx-item-billing"); menu.appendChild(item);
-  const H = { st: { auth, authAcct: acct }, avail, id: "11111111-2222-3333-4444-555555555555", posted, dismissed };
+  const H = { st: { auth, authAcct: acct, ...extra }, avail, id: "11111111-2222-3333-4444-555555555555", posted, dismissed, applied,
+              applyNowOffered, applyNowSub, APPLY_NOW_LABEL };
   const prelude = `
     const el = (tag, cls) => mkEl(tag, cls || "");
     const st = H.st, avail = H.avail, id = H.id;
@@ -75,11 +78,13 @@ function lift(avail: Avail, auth = "", acct = "") {
     const vscodeApi = { postMessage: (m) => { H.posted.push(m); } };
     const window = { innerWidth: 1100, innerHeight: 700, setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {} };
     const clearTimeout = window.clearTimeout;
+    const applyNowOffered = H.applyNowOffered, applyNowSub = H.applyNowSub, APPLY_NOW_LABEL = H.APPLY_NOW_LABEL;
+    const applyNowFor = (sid, pick) => { H.applied.push([sid, pick]); };
   `;
   const open = (new Function("H", "mkEl", "menu", "item", prelude + code) as (h: unknown, m: typeof mkEl, me: El, it: El) => () => El | null)(H, mkEl, menu, item);
   const sub = open();
   assert.ok(sub, "the flyout opened");
-  return { sub: sub!, menu, item, posted, dismissed };
+  return { sub: sub!, menu, item, posted, dismissed, applied };
 }
 const BOTH = { login: true, key: true, default: "key", defaultExplicit: false };
 
@@ -92,6 +97,24 @@ test("both billings pickable, no explicit default: the picks, a rule, ONE Set de
   assert.equal(entry.querySelector(".ctx-caret")?.textContent, "▸", "the entry opens a further submenu: the caret says so");
   assert.equal(sub.querySelectorAll(".ctx-radio").length, 0, "the radio group is gone");
   assert.equal(sub.querySelectorAll(".ctx-sub-head").length, 0, "…and its head with the note");
+});
+
+test("a billing pick waiting for a quiet session: Apply now behind a rule under the picks, saying what it ends, above Set default billing; the click closes the menu and applies (2026-10-01)", () => {
+  const waiting = { authPending: true, relaunchWaits: "1 subagent and 2 background tasks", relaunchCuts: "1 subagent and 2 background tasks" };
+  const { sub, posted, dismissed, applied } = lift(BOTH, "key", "user@example.com", waiting);
+  assert.deepEqual(lines(sub), ["Login (user@example.com)", "API key", "---", "Apply now", "---", "Set default billing"]);
+  const row = sub.children[3];
+  assert.ok(has(row, "ctx-item-apply") && has(row, "ctx-item"), row.className);
+  assert.equal(row.querySelector(".ctx-item-sub")?.textContent, "ends 1 subagent and 2 background tasks", "the cost, in the kernel's words");
+  assert.equal(subLines(sub), 1, "the one sub-line in the flyout is that cost: the picks still carry none");
+  row.fire("click");
+  assert.equal(dismissed.length, 1, "the menu goes first: the confirm is not layered over an open card");
+  assert.deepEqual(applied, [["11111111-2222-3333-4444-555555555555", "billing"]], "resolved by id at the click");
+  assert.deepEqual(posted, [], "no billing pick posted");
+  // nothing holds it (the relaunch is under way), or an older kernel sends no relaunchWaits: no row
+  for (const st of [{ authPending: true, relaunchWaits: "" }, { authPending: true }, { relaunchWaits: "2 background tasks" }]) {
+    assert.deepEqual(lines(lift(BOTH, "key", "user@example.com", st).sub), ["Login (user@example.com)", "API key", "---", "Set default billing"], JSON.stringify(st));
+  }
 });
 
 test("the Set default billing entry opens a nested submenu INSIDE the flyout holding exactly the list's entries, none marked before an explicit default", () => {

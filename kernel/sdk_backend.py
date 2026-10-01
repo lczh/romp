@@ -128,6 +128,7 @@ _keys = (sys.modules.get("romp_session_backend")
          or load_source("romp_session_backend_keys", _HERE / "session_backend.py"))
 echo_text_key = _keys.echo_text_key
 command_text_key = _keys.command_text_key
+NOTHING_TO_APPLY = _keys.NOTHING_TO_APPLY   # Apply now's no-op answer (SdkBackend.apply_now), one text the kernel compares
 # The event model's AUTHOR rule (author_of, is_interrupt_record), for the boot scan that asks whether a
 # LATER human turn went through after a send (_input_landed_after, 2026-09-11): a transcript record is read
 # there exactly the way the kernel's parse authors its atom, so "a genuine-human turn" means one thing on
@@ -3904,38 +3905,57 @@ def is_launch_limit(text: str) -> bool:
     return bool(text and _LAUNCH_LIMIT_RE.search(text))
 
 
-def task_death_notice(tasks: list, cause: str = "a restart or crash") -> str:
+# What the person did that cut a session's background work, said to the session in their own voice: the lead of
+# task_death_notice when a relaunch with work running was somebody's gesture (`did`), keyed by the cause the gesture
+# hands request_reconnect(cut=True, cause=…). Since 2026-10-01 a settings pick waits for a quiet session, so these three
+# are the only gestures left that relaunch a CLI with work still running: Restart session, a rewind (an edited or deleted
+# earlier message), and Apply now, which pushes a waiting pick through. Each names Claude Code rather than "it", which
+# would read as the task in the one-task sentence, and none says "session" (the recipient is "you").
+CUT_BY = {
+    "restart": "I restarted Claude Code",
+    "rewind": "I rewound the conversation and restarted Claude Code",
+    "apply": "I restarted Claude Code to apply a settings change now",
+}
+
+
+def task_death_notice(tasks: list, cause: str = "a restart or crash", did: str = "") -> str:
     """The visible romp notice for BACKGROUND TASKS a session lost when its claude process ended. Bg
     tasks are the CLI's children, so a kernel restart or CLI crash cuts a session off from its
     timers/watchers — and a session idle-waiting on one would wait FOREVER for a completion
     notification that can never arrive (nimbus's dead campaign watcher, the user 2026-07-11). The
     notice names what was lost (the task descriptions from the lifecycle stream) so the session can
     relaunch exactly what still matters. Enqueued by _on_session_gone (CLI died, kernel alive), the
-    boot reconcile (kernel died; read from the reg's bgTasks mirror), and _drop_live_work (a settings
-    switch reconnected the CLI; `cause` names that, so the session is told why its work was cut off).
+    boot reconcile (kernel died; read from the reg's bgTasks mirror), and _drop_live_work (a relaunch
+    replaced the CLI; when a person's gesture asked for it, `did` says what they did, from CUT_BY).
 
     It says "cut off", not "died" (2026-09-05): under the per-session scopes (cli_scope_supported) a
     task's tool shell can outlive the CLI — the process may well still be running, and the session
     that relaunches it without checking runs two. So the ask is to check first. The voice is the person
     the session works for, addressing it as "you" (so the sentence names the session once, not twice,
     and "the claude process that started them" says whose process ended — review, 2026-09-06); the only
-    romp noun is the sanctioned [romp] prefix (test_injected_voice). `cause` is read after "ended" in
-    parentheses, so it must stand on its own there (_RECONNECT_CAUSE does)."""
+    romp noun is the sanctioned [romp] prefix (test_injected_voice). Two leads: with `did`, the sentence
+    opens on what the person did ("I restarted Claude Code, which cut off …"), so a deliberate cut never
+    reads as a crash (2026-10-01: the cause had read "a settings switch or a rewind restarted it" for every
+    reconnect, after a settings switch had stopped cutting anything); without it, `cause` is read after
+    "ended" in parentheses and must stand on its own there."""
     n = len(tasks)
     descs = "; ".join(d for d in ((t.get("desc") or "").strip() for t in tasks[:4]) if d)
     one = n == 1
     # the gist marker rides in the LEADING marker run here (this notice's voice test wants every marker ahead of
     # the prose, one line after it); the restart constants above append theirs — the lift reads either position
-    return ("<!-- romp-injected --><!-- romp-system --><!-- romp-gist: %d background task%s cut off when the process ended -->"
-            % (n, "" if one else "s")
-            + "[romp] %d background task%s you had running %s "
+    head = ("<!-- romp-injected --><!-- romp-system --><!-- romp-gist: %d background task%s cut off when the process ended -->"
+            % (n, "" if one else "s"))
+    tail = ("%s completion notification%s will never arrive. Check whether %s still running before relaunching it; "
+            "if %s needed, carry on."
+            % ("Its" if one else "Their", "" if one else "s", "it is" if one else "each is",
+               "it isn't" if one else "they aren't"))
+    if did:
+        return (head + "[romp] %s, which cut off %d background task%s you had running%s. "
+                % (did, n, "" if one else "s", (": " + descs) if descs else "") + tail)
+    return (head + "[romp] %d background task%s you had running %s "
             "cut off when the claude process that started %s ended (%s)%s. "
-            "%s completion notification%s will never arrive. Check whether %s still running before "
-            "relaunching %s; if %s needed, carry on."
             % (n, "" if one else "s", "was" if one else "were", "it" if one else "them", cause,
-               (": " + descs) if descs else "",
-               "Its" if one else "Their", "" if one else "s", "it is" if one else "each is",
-               "it", "it isn't" if one else "they aren't"))
+               (": " + descs) if descs else "") + tail)
 
 # The marker only SDK-driven claude CLIs carry (the kernel drives them over stdin); a tmux session's
 # interactive `claude --resume` never has it, so the orphan reap can never touch a tmux CLI.
@@ -5904,6 +5924,8 @@ class SdkSession:
         #   the sessions it was applied to (2026-10-01). Nothing that waits here is cut.
         self._switch_wait_said = ""  # the ask the 'waiting for quiet' line was said for, once per ask
         self._switch_ask_pending = ""  # the switch ask handed to request_reconnect(defer=False) and not yet armed or dropped
+        self._cut_cause = ""           # the gesture behind a cut relaunch not yet torn down (CUT_BY's key: restart, rewind,
+        #                                apply), handed by request_reconnect(cut=True, cause=…); the teardown takes it
         self._reconnect_switch_why = ""  # the armed reconnect carries a standing ask (its why): the waker's last look reads it
         self._fallback_cause = str(reg.get("fallbackCause") or "")   # "safeguards" once the CLI's refusal frame named the standing fallback (model_fallback_row)
         self._served_model = str(reg.get("servedModel") or reg.get("liveModel") or "")   # the model the API last SERVED a parent reply on (the picker's mark)
@@ -6446,7 +6468,7 @@ class SdkSession:
         if self._wake is not None:
             self._wake.set()
 
-    def request_reconnect(self, defer=True, cut=False, why=""):
+    def request_reconnect(self, defer=True, cut=False, why="", cause=""):
         """Apply a connect-time change (effort, billing, fast mode's opt-in, bypass mode, per-session env, the
         correction after a refusal or a wrong landing) by relaunching the CLI — resume continues the same
         conversation. No-op if the session is shutting down or not yet connected (the new value is in the
@@ -6466,7 +6488,9 @@ class SdkSession:
         Restart (relaunch: the dashboard's confirm names what the click interrupts) and a rewind (the edited
         message is held until a rewound CLI is up, and the leaf it targets must not move under a later turn).
         Now when idle, else at the end of the current turn; the old CLI's work is retired at the teardown and
-        the session told which background tasks it lost (_drop_live_work → task_death_notice).
+        the session told which background tasks it lost (_drop_live_work → task_death_notice). `cause` names the
+        gesture for that notice (CUT_BY: "restart", "rewind", "apply" — Apply now, a waiting pick pushed through on
+        purpose, 2026-10-01), so the session hears what the person did instead of a guess at the family.
 
         `defer=False` (the immediate-only form, 2026-09-04): reconnect ONLY if the session is still quiet when
         the loop gets to it — nothing in flight, nothing queued, no live subagent or background task. The
@@ -6479,6 +6503,8 @@ class SdkSession:
         if defer and not cut:
             self.want_switch_reconnect(why or "a settings change")
             return
+        if cut and cause:
+            self._cut_cause = cause      # before the arm: the teardown it leads to reads it
         self.loop.call_soon_threadsafe(self._do_request_reconnect, defer)
 
     def _do_request_reconnect(self, defer=True):
@@ -7196,16 +7222,30 @@ class SdkSession:
         the effort change's line in the chat, instead of reading as stuck while a long monitor runs. A Task agent's own
         lifecycle task carries its agent id (_on_task_event), so a task that IS a live subagent is counted once, as the
         subagent."""
+        return self._relaunch_words(cut=False)
+
+    def relaunch_cuts(self) -> str:
+        """What pushing the standing relaunch ask through NOW would end, in the user's words (Apply now, 2026-10-01): the
+        same reading as relaunch_waits, less what a cut relaunch leaves alone. A queued message is not ended (the queue
+        survives the relaunch and the fresh CLI takes it), and neither is a fed text the CLI has not taken yet (the
+        relaunch waits for that turn's end); a running turn is (the relaunch interrupts it, or tears down a turn the
+        CLI opened itself), and so is a question waiting on the user, which goes with it. The snapshot carries it
+        (relaunchCuts) for the Apply now row's sub-line and its confirm; "" when no ask stands or nothing would end."""
+        return self._relaunch_words(cut=True)
+
+    def _relaunch_words(self, cut: bool) -> str:
         if not getattr(self, "_switch_wanted", "") or getattr(self, "ended", False):
             return ""
         parts = []
-        if getattr(self, "inflight", 0) or getattr(self, "_cli_working", False) or getattr(self, "_untaken", None) is not None:
+        if getattr(self, "inflight", 0) or getattr(self, "_cli_working", False):
             parts.append("the running turn")
-        elif getattr(self, "_pending", None):
+        elif not cut and getattr(self, "_untaken", None) is not None:
+            parts.append("the running turn")
+        elif not cut and getattr(self, "_pending", None):
             n = len(self._pending)
             parts.append("%d queued message%s" % (n, "" if n == 1 else "s"))
         if self._ask_parked():
-            parts.append("your answer to its question")
+            parts.append("its question to you" if cut else "your answer to its question")
         lock = getattr(self, "_sub_lock", None)
         if lock is not None:
             with lock:
@@ -7899,7 +7939,10 @@ class SdkSession:
             # an empty set, so a relaunch waiting for quiet cut them for real (2026-10-01)
             keeps, self._reattach_keeps_cli = getattr(self, "_reattach_keeps_cli", False), False
             if not keeps:
-                self._drop_live_work("reconnect")
+                # the gesture that asked for this relaunch (a Restart, a rewind, an Apply now) names the cut in the
+                # notice; taken here, at the teardown it caused, so the next relaunch starts with none
+                cut_by, self._cut_cause = getattr(self, "_cut_cause", ""), ""
+                self._drop_live_work("reconnect", cut_by=cut_by)
             self._hello_launch = self._hello_spawned_at = None   # the next hello says what ITS CLI launched with
             # settle + recover anything the abandoned client stranded — see _reconcile_stranded
             self._reconcile_stranded()
@@ -10456,15 +10499,19 @@ class SdkSession:
         with self._sub_lock:
             return sorted(({**v, "agentId": k} for k, v in self._subagents.items()), key=lambda d: d.get("since") or 0)
 
-    def _drop_live_work(self, reason: str):
-        """The CLI process is gone — a reconnect (an effort/fast/auth switch) abandons the old client — so
-        the live work INSIDE it is gone too: forget every subagent (and every run's roster and slots), and
-        retire every lifecycle background task, telling the session which ones it lost the way
-        _on_session_gone does when a CLI dies under a live kernel (their completion notifications can
-        never arrive on the new connection; a session idle-waiting on one would wait forever) — with the
-        cause named truthfully. Event-based on the teardown itself, not on age. Left alone on purpose:
-        the launch ledger (reg bgLedger), which the next Stop hook reconciles as before. Logged when it
-        actually dropped something, so a stale count that healed here stays visible."""
+    def _drop_live_work(self, reason: str, cut_by: str = ""):
+        """The CLI process is gone — a reconnect abandons the old client — so the live work INSIDE it is gone
+        too: forget every subagent (and every run's roster and slots), and retire every lifecycle background
+        task, telling the session which ones it lost the way _on_session_gone does when a CLI dies under a
+        live kernel (their completion notifications can never arrive on the new connection; a session
+        idle-waiting on one would wait forever) — with the cause named truthfully. `cut_by` is the gesture
+        that asked for this relaunch (CUT_BY: a Restart, a rewind, an Apply now; the cause it handed
+        request_reconnect), and the notice opens on what the person did; a teardown no gesture asked for
+        (a reattach that reached a fresh CLI, a standing ask's relaunch that met work registered in the
+        instant after its last look) keeps the plain "a restart or crash". Event-based on the teardown
+        itself, not on age. Left alone on purpose: the launch ledger (reg bgLedger), which the next Stop hook
+        reconciles as before. Logged when it actually dropped something, so a stale count that healed here
+        stays visible."""
         with self._sub_lock:
             n = len(self._subagents)
             self._subagents.clear()
@@ -10473,7 +10520,7 @@ class SdkSession:
             died = sorted((dict(v) for v in self._bg_tasks.values()), key=lambda d: d.get("since") or 0)
             self._bg_tasks.clear()
         if died:
-            note = task_death_notice(died, cause=self._RECONNECT_CAUSE)
+            note = task_death_notice(died, did=CUT_BY.get(cut_by, ""))
             with self._lock:
                 if note not in self._pending:      # a flapping reconnect must not stack the same notice
                     self._q_append(note)
@@ -10485,12 +10532,9 @@ class SdkSession:
         if n or died:
             self.backend._log("live work (%s): dropped %d subagent%s and %d background task%s on %s — they ran "
                               "inside the abandoned CLI" % (self.name, n, "" if n == 1 else "s",
-                                                            len(died), "" if len(died) == 1 else "s", reason))
+                                                            len(died), "" if len(died) == 1 else "s",
+                                                            reason + (" (%s)" % cut_by if cut_by else "")))
             self.backend._poke()
-
-    _RECONNECT_CAUSE = "a settings switch or a rewind restarted it"   # the death notice's cause on
-    #   a reconnect: every trigger of the reconnect loop (effort/fast/auth/mode switches, edit-message rewinds and
-    #   rollbacks) is named truthfully — the loop cannot tell them apart here, so the notice names the family
 
     _WF_AGENT_ENDED = frozenset(("done", "error"))
     _WF_AGENT_STATES = frozenset(("start", "progress", "done", "error"))   # the vocabulary the probe recorded
@@ -10810,6 +10854,9 @@ class SdkSession:
                 # what a standing relaunch ask waits for ("2 background tasks"; "" when none stands): the pending marks
                 # above say a pick is waiting, this says on what (relaunch_waits)
                 "relaunchWaits": self.relaunch_waits(),
+                # …and what pushing it through now would end ("2 background tasks"): the Apply now row's sub-line and
+                # confirm (relaunch_cuts)
+                "relaunchCuts": self.relaunch_cuts(),
                 "mode": self.perm_mode, "ctx": self._ctx_pct(), "ctxTokens": self._ctx_tokens,
                 "ctxOver": self._ctx_over,   # the % above is CLAMPED — true when the CLI reported 100+
                 #   (tokens exceed the current model's window, e.g. right after a 1M→200k switch)
@@ -15689,7 +15736,7 @@ class SdkBackend:
         s._rewind_bare = bare
         if not bare:
             s.enqueue(text)
-        s.request_reconnect(cut=True)   # idle → reconnects now; a fresh thread's FIRST connect applies the flag. The cut road:
+        s.request_reconnect(cut=True, cause="rewind")   # idle → reconnects now; a fresh thread's FIRST connect applies the flag. The cut road:
         #   the edit is held until a rewound CLI is up, and a turn the CLI opened meanwhile would move the leaf it targets
         self._poke()
         return True, ""
@@ -15751,7 +15798,7 @@ class SdkBackend:
             return _restore("no conversation on disk at the turn's end")
         self._update_reg(sid, rewindTo=s._rewind_to, rewindLeaf=leaf, rewindBare=True, rewindWait=False)
         s._rewind_leaf = leaf
-        s.request_reconnect(cut=True)
+        s.request_reconnect(cut=True, cause="rewind")
         self._poke()
 
     def rewind_flags(self, sid: str) -> "tuple[str, str, bool]":
@@ -16355,6 +16402,37 @@ class SdkBackend:
         return ""
 
     def relaunch(self, sid: str) -> str:
+        """Restart session: the CLI relaunched in place, cutting what it runs (_relaunch, cause "restart")."""
+        return self._relaunch(sid, "restart")
+
+    def apply_now(self, sid: str) -> str:
+        """Apply now (see SessionBackend.apply_now; 2026-10-01): push a pick that waits for a quiet session through at
+        once, ending the work it waits on. A billing, effort, fast, bypass-mode or per-session env pick relaunches the
+        CLI and waits until nothing would be cut (request_reconnect), and a session whose long-running monitors never
+        let it go quiet kept its pick waiting for hours. This is the explicit way through: Restart session's road
+        exactly (_relaunch, cut=True: a running turn is interrupted with the reconnect armed first, and any pick
+        still waiting rides the relaunch), with its own cause, so the session hears that a settings change was
+        applied now (CUT_BY["apply"]) rather than that it was restarted. "" on success; NOTHING_TO_APPLY, a no-op
+        and not a failure, when no pick waits (a gesture that raced the pick's own relaunch, or `romp apply` run
+        over every session); any other string is the reason, verbatim for the user.
+
+        A pick waits while a standing relaunch ask is up (_switch_wanted, the Model switch's asks included, since any
+        relaunch carries them), while a pending mark is (effortPending, authPending, the fast opt-in), or, for a
+        session with no live object, while the registry records a waiting pick (relaunchWait; its connect is the
+        relaunch, and carries it)."""
+        reg = read_reg(self.state_dir, sid)
+        if not reg:
+            return "romp has no record of this session"
+        with self._lock:
+            s = self.sessions.get(sid)
+        live = s is not None and any(getattr(s, a, "") for a in ("_switch_wanted", "_effort_pending", "_auth_pending",
+                                                                  "_fast_pending"))
+        wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
+        if not live and not (s is None and wait.get("picks")):
+            return NOTHING_TO_APPLY
+        return self._relaunch(sid, "apply")
+
+    def _relaunch(self, sid: str, cause: str) -> str:
         """Relaunch this session's CLI process in place (see SessionBackend.relaunch; the user 2026-09-23,
         who wanted one action for what End + Revive was doing in two — a session that has been up since
         before a CLI upgrade cannot reach a model only the new binary knows). "" on success, else the
@@ -16393,7 +16471,8 @@ class SdkBackend:
             return "" if self.connect(sid) else "the session's CLI did not start (see the kernel log)"
         with s._lock:
             running = s.inflight > 0          # a turn in flight NOW (busy() also counts a queued one: nothing to cut there)
-        s.request_reconnect(cut=True)         # armed first — see the docstring's order; the cut road, which a Restart is
+        # armed first — see the docstring's order; the cut road, which a Restart and an Apply now are, named for the notice
+        s.request_reconnect(cut=True, cause=cause)
         # the polite rung only, never Stop's ladder: a click again while the CLI ignores the request must not
         # signal it (SdkSession.interrupt's climb=False; the post-merge review of #2059, 2026-09-24). The line
         # says what this ask did and no more: a sent request has not been answered yet, and one that fails logs
@@ -16404,8 +16483,8 @@ class SdkBackend:
         # episode is reset when the kernel connects again (_reconcile_stranded), so a Stop's request from before a
         # reattach to a session host leaves no record here (the post-merge review of #2138, 2026-09-24)
         asked = self._restart_ask(s, sid) if running else ""
-        self._log("relaunch (%s): %s; its CLI is replaced by a fresh one resuming the same conversation"
-                  % (s.name, "idle, reconnecting now" if not running else
+        self._log("%s (%s): %s; its CLI is replaced by a fresh one resuming the same conversation"
+                  % ("apply now" if cause == "apply" else "relaunch", s.name, "idle, reconnecting now" if not running else
                      "asked the running turn to stop, and the fresh CLI comes up when it ends" if asked == "sent" else
                      "sent the running turn nothing, since an earlier stop already tried to end it, and the fresh "
                      "CLI comes up when it ends" if asked == "spent" else

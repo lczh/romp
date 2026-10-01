@@ -14,6 +14,10 @@ launched. The pick's pending marks stay up meanwhile, and the snapshot says what
 Restart (relaunch) and a rewind keep the road that accepts what it cuts (cut=True), and a Restart tells the session
 which background tasks it lost with the existing notice (task_death_notice).
 
+Apply now (the same day, later): a session whose monitors never let it go quiet kept its pick waiting for hours, so the
+pick's control offers a way through, the Restart road with a cause of its own. The notice opens on what the person did
+(CUT_BY: a Restart, a rewind, an Apply now), and the snapshot says what pushing the pick through would end (relaunchCuts).
+
 The REAL _amain runs here against a stand-in SDK module whose client records what it was fed (the harness of
 tests/test_queued_sends_not_fused.py, trimmed to what these cases need). Every id is synthetic, every text invented.
 """
@@ -294,9 +298,10 @@ class ARestartCutsAndSaysWhatItCut(_Harness):
         self._end_turn(c1)
         self.assertEqual(self.be.relaunch(SID), "")
         c2 = self._relaunched()
-        note = sb.task_death_notice([{"desc": "watch the spend"}], cause=sb.SdkSession._RECONNECT_CAUSE)
+        note = sb.task_death_notice([{"desc": "watch the spend"}], did=sb.CUT_BY["restart"])
         self._wait(lambda: c2.writes == [note], "the existing what-was-cut notice, fed to the fresh CLI")
-        self.assertIn("watch the spend", note)
+        self.assertIn("[romp] I restarted Claude Code, which cut off 1 background task you had running: watch the spend.", note,
+                      "it says what the person did, never a settings switch: a pick alone no longer cuts anything")
         self.assertIn("Check whether it is still running before relaunching it", note)
 
     def test_a_waiting_pick_rides_a_restart_and_is_not_applied_a_second_time(self):
@@ -315,6 +320,64 @@ class ARestartCutsAndSaysWhatItCut(_Harness):
         self._end_turn(c2)
         self._settle()
         self.assertEqual(len(self._Client.instances), 2, "no second relaunch for a pick already applied")
+
+
+class ApplyNowPushesAWaitingPickThrough(_Harness):
+    """Apply now (2026-10-01): a session whose monitors never let it go quiet kept a billing pick waiting for hours. The
+    explicit way through is Restart session's road with a cause of its own: the CLI relaunches at once, the work the pick
+    waited on ends, and the session is told so in the person's words, as a settings change applied now."""
+
+    def test_a_waiting_billing_pick_is_applied_at_once_and_the_session_hears_why_its_task_ended(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_task(c1)
+        self._end_turn(c1)
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "the pick waits for the background task")
+        snap = s.snapshot()
+        self.assertEqual((snap["authPending"], snap["relaunchWaits"], snap["relaunchCuts"]),
+                         (True, "1 background task", "1 background task"), "the row's words: what pushing it through ends")
+        self.assertEqual(self.be.apply_now(SID), "")
+        c2 = self._relaunched()
+        self.assertTrue(c1.torn_down, "the CLI the task ran in is gone: Apply now does not wait")
+        note = sb.task_death_notice([{"desc": "watch the spend"}], did=sb.CUT_BY["apply"])
+        self._wait(lambda: c2.writes == [note], "the what-was-cut notice, with Apply now's cause, fed to the fresh CLI")
+        self.assertIn("[romp] I restarted Claude Code to apply a settings change now, which cut off 1 background task you "
+                      "had running: watch the spend.", note)
+        self._wait(lambda: not s.snapshot()["authPending"], "the pick applied at the connect")
+        self.assertEqual((s.snapshot()["relaunchWaits"], s.snapshot()["relaunchCuts"]), ("", ""))
+        self.assertTrue(any(l.startswith("apply now (web): idle, reconnecting now") for l in self.lines), self.lines)
+        self.assertTrue(any("dropped 0 subagents and 1 background task on reconnect (apply)" in l for l in self.lines), self.lines)
+
+    def test_with_nothing_waiting_it_changes_nothing(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_task(c1)
+        self._end_turn(c1)
+        self.assertEqual(self.be.apply_now(SID), sb.NOTHING_TO_APPLY, "a no-op, said as one")
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "no relaunch")
+        self.assertFalse(c1.torn_down, "the task's CLI runs on")
+        self.assertEqual(s.live_work()[1], 1)
+
+    def test_a_rewind_names_itself_and_a_relaunch_no_gesture_asked_for_keeps_the_plain_cause(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_task(c1)
+        self._end_turn(c1)
+        s.request_reconnect(cut=True, cause="rewind")
+        c2 = self._relaunched()
+        rewound = sb.task_death_notice([{"desc": "watch the spend"}], did=sb.CUT_BY["rewind"])
+        self._wait(lambda: c2.writes == [rewound], "the rewind's notice")
+        self.assertIn("[romp] I rewound the conversation and restarted Claude Code, which cut off 1 background task", rewound)
+        # the gesture was taken at its teardown: a later relaunch no gesture names is not reported as the rewind
+        self._init(c2)
+        self._with_a_background_task(c2, desc="tail the build log")
+        self._end_turn(c2)                       # the fed notice's turn ends; the task it started runs on
+        s.request_reconnect(cut=True)
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the second relaunch")
+        c3 = self._Client.instances[2]
+        plain = sb.task_death_notice([{"desc": "tail the build log"}])
+        self._wait(lambda: c3.writes == [plain], "the plain notice")
+        self.assertIn("ended (a restart or crash): tail the build log.", plain)
 
 
 class WhatTheRelaunchWaitsFor(unittest.TestCase):
@@ -351,6 +414,24 @@ class WhatTheRelaunchWaitsFor(unittest.TestCase):
         s.inflight = 1
         s.backend._pending_ask[SID] = {"kind": "permission"}
         self.assertEqual(s.relaunch_waits(), "the running turn, your answer to its question, 1 subagent and 2 background tasks")
+
+    def test_what_applying_now_would_end_leaves_out_what_a_relaunch_keeps(self):
+        s = self._sess()
+        self.assertEqual(s.relaunch_cuts(), "", "no ask stands: nothing to push through")
+        s._switch_wanted = "effort"
+        s._pending = ["one", "two"]
+        self.assertEqual(s.relaunch_waits(), "2 queued messages")
+        self.assertEqual(s.relaunch_cuts(), "", "a queued message survives the relaunch: the fresh CLI takes it")
+        s._untaken = {"text": "fed, not taken yet"}
+        self.assertEqual(s.relaunch_waits(), "the running turn")
+        self.assertEqual(s.relaunch_cuts(), "", "a fed text the CLI has not taken: the relaunch waits for that turn's end")
+        s._untaken = None
+        with s._sub_lock:
+            s._bg_tasks["t-1"] = {"desc": "watch", "type": "local_bash", "since": 1}
+        s.inflight = 1
+        s.backend._pending_ask[SID] = {"kind": "picker"}
+        self.assertEqual(s.relaunch_cuts(), "the running turn, its question to you and 1 background task")
+        self.assertEqual(s.snapshot()["relaunchCuts"], "the running turn, its question to you and 1 background task")
 
 
 if __name__ == "__main__":

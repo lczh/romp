@@ -55,6 +55,13 @@ class EffortReconnect(unittest.TestCase):
         self.assertIn('"waits": (tm0 or {}).get("relaunchWaits") or ""', src)
         self.assertIn('"relaunchWaits": self.relaunch_waits(),', BACKEND_SRC)
 
+    def test_what_applying_now_would_end_reaches_the_status(self):
+        # 2026-10-01, Apply now: the row a waiting pick's control offers says what pushing it through ends, and its confirm
+        # names it; the backend's snapshot → the live row → the tab's status, beside relaunchWaits
+        self.assertIn('"relaunchCuts": st.get("relaunchCuts") or "",', inspect.getsource(km.Sessions.live))
+        self.assertIn('"relaunchCuts": tm.get("relaunchCuts") or "",', inspect.getsource(km.build_session))
+        self.assertIn('"relaunchCuts": self.relaunch_cuts(),', BACKEND_SRC)
+
     def test_backend_set_effort_arms_the_pending_flag_and_reconnects(self):
         self.assertIn('s._effort_pending = value', BACKEND_SRC)
         self.assertIn('self._update_reg(sid, effort=value, effortPending=True)', BACKEND_SRC)

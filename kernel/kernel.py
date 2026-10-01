@@ -22201,6 +22201,44 @@ def _restart_session(sid, client=None):
     _push_soon()   # the fresh CLI's state (spawning → connected) reaches the board on the next build
 
 
+def _apply_now_detail(sid):
+    """What the owning backend's apply_now answered for `sid` ("" on success, sb.NOTHING_TO_APPLY when no setting waits,
+    else the reason), the kernel-knows check and the backend routing of the restart door before it; never raises. Shared
+    by the WS op's door (_apply_now) and the /apply route `romp apply` posts to."""
+    if not _kernel_knows(sid):
+        return ("this romp kernel has no session with id %s — on a board showing more than one machine, "
+                "that means the pane addressed the wrong kernel" % sid)
+    try:
+        be = Sessions.backend_for(sid)
+        # a backend with no apply_now (a duck-typed one, the unowned route's copy of the base) answers the base no-op:
+        # it relaunches nothing, so no setting of its sessions waits for a relaunch
+        return be.apply_now(sid) if hasattr(be, "apply_now") else sb.SessionBackend.apply_now(be, sid)
+    except Exception as e:
+        return str(e)[:200]
+
+
+@_stage_marked("restart")
+def _apply_now(sid, client=None):
+    """The Apply now door (the WS applyNow op, on its own thread; 2026-10-01): a billing, effort, fast, bypass-mode or env
+    pick waits for the session to go quiet before its relaunch, and a session whose monitors never let it go quiet kept
+    its pick waiting for hours. This pushes it through, ending the work it waits on, by the owning backend's apply_now
+    (Restart session's road, so the dashboard confirms first, naming what it ends). Loud and aimed like the restart
+    door: an applyFailed carrying the reason goes to the pane that asked (a raced no-op included: the row is drawn only
+    while a pick waits, so a no-op means it applied meanwhile, and the toast says so). Success sends nothing: the
+    pick's own pending marks clear when the relaunch carries it, on the next build. Never moves the focus."""
+    sid = str(sid)
+    name = _name_of(sid) or sid
+    wid = (client or {}).get("wid") or ""
+    detail = _apply_now_detail(sid)
+    if detail:
+        sys.stderr.write("apply now '%s' (%s): refused — %s\n" % (name, sid, detail))
+        for app in _restart_reply_views(client):
+            _send_to_view(app, {"type": "applyFailed", "id": sid, "name": name, "text": detail}, wid)
+        return
+    sys.stderr.write("apply now: %s via applyNow WS op\n" % sid)
+    _push_soon()
+
+
 # ───────────────────── the unowned route: what answers for a sid no backend owns ─────────────────────
 # Sessions.backend_for used to fall through to the tmux backend for every sid neither the SDK nor the Codex
 # backend owned, and tmux's send "accepted" anything (a missing session was reported only on stderr, in its
@@ -22527,6 +22565,7 @@ class Sessions:
                                 "authPickUnavailable": st.get("authPickUnavailable", ""),
                                 "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
                                 "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
+                                "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
                                 "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
                                 "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
                                 # live BACKGROUND TASKS (the CLI's task lifecycle stream) — the awaiting
@@ -43059,6 +43098,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   "authLoginLive": tm.get("authLoginLive"),
                   "authPending": bool(tm.get("authPending")),   # an /auth reconnect applying → badge dots
                   "relaunchWaits": tm.get("relaunchWaits") or "",   # …and what that relaunch waits for (the Billing row's sub-line says it)
+                  "relaunchCuts": tm.get("relaunchCuts") or "",   # …and what Apply now would end to push it through (its row and confirm)
                   "modelPending": _model_pending_now(sid, tm),   # switching-dots on the model badge until the pick lands, from EITHER surface (the user 2026-07-03)
                   "effortPending": bool(tm.get("effortPending")),   # switching-dots on the effort badge while the /effort reconnect applies (SDK-only; the user 2026-07-06)
                   "ctx": str(tm["context"]) if tm["context"] is not None else "",
@@ -54751,7 +54791,7 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
 #             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
 #             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
@@ -54761,6 +54801,8 @@ KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSes
 #             kernel counts its typed rows as before and files a turnCountTyped client-diag row saying so.
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
+#   applyNow: Apply now (2026-10-01), a pick waiting for a quiet session pushed through from its control — a page that
+#   draws the row and a kernel that does not know the op answers unknownOp, which the page says in a toast
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05
 # review) is the write seq of the views blob the READY HANDLER'S OWN connect push served this client — the
 # tabOrder frame's for a chat page, the timeline skeleton's (`data.views`), the feed frame's — read from
@@ -73268,6 +73310,39 @@ class Handler(BaseHTTPRequestHandler):
                 res = _compact_request(who)
                 status = res.pop("_status", 200)
                 return self._send(status, json.dumps(res), "application/json")
+            if u.path == "/apply":
+                # `romp apply <session>` (2026-10-01): the Apply now gesture headless, so a script can push the picks
+                # waiting on many sessions through (sessions whose monitors never let them go quiet kept a billing pick
+                # waiting for hours). The WS applyNow door's work (_apply_now_detail), answered here: {"ok": true} when it
+                # relaunched; {"ok": true, "applied": false, "why"} when nothing waits on the session, a no-op the CLI
+                # reports and exits 0 on, so a loop over every session is safe; {"ok": false, "error"} otherwise. Body:
+                # {"id"|"name": <session>}; a remote session forwards over its tunnel like /interrupt, its answer verbatim.
+                try:
+                    b = json.loads(raw_body or b"{}")
+                    who = str(b.get("id") or b.get("name") or "") if isinstance(b, dict) else ""
+                except Exception:
+                    who = ""
+                if not who:
+                    return self._send(400, json.dumps({"ok": False, "error": "id or name required"}), "application/json")
+                sid = _sid_of(who)
+                r = _host_for_sid(sid)
+                if r is not None:
+                    res = _remote_forward(r, "/apply", {"id": sid})
+                    if res is None:
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the remote kernel for this session (%s) isn't answering — nothing was applied"
+                            % r.get("host", "?")}), "application/json")
+                    return self._send(200, json.dumps(res), "application/json")
+                detail = _apply_now_detail(sid)
+                if detail == sb.NOTHING_TO_APPLY:
+                    return self._send(200, json.dumps({"ok": True, "applied": False, "why": detail}), "application/json")
+                if detail:
+                    if detail.startswith("this romp kernel has no session with id "):
+                        detail = "no session named %s on this romp kernel" % who
+                    return self._send(200, json.dumps({"ok": False, "error": detail}), "application/json")
+                sys.stderr.write("apply now: %s via /apply route\n" % sid)
+                _push_soon()
+                return self._send(200, json.dumps({"ok": True, "applied": True}), "application/json")
             if u.path in ("/interrupt", "/end"):
                 # Headless session control (2026-07-05): interrupt/end existed ONLY as WS drive ops, so
                 # a session could be FED without a browser (POST /send, postal) but never STOPPED — a
@@ -75372,6 +75447,11 @@ class Handler(BaseHTTPRequestHandler):
             # interrupt and the reconnect take as long as they take. Advertised in KERNEL_WS_CAPS, so a
             # page newer than its kernel meets the unknownOp refusal instead of a click that vanishes.
             threading.Thread(target=_restart_session, args=(msg["id"], client), daemon=True).start()
+        elif msg and msg.get("type") == "applyNow" and msg.get("id"):
+            # Apply now (2026-10-01): a pick waiting for a quiet session, pushed through at once from the Billing flyout or
+            # the effort or fast picker. Restart session's road with its own cause, off the recv loop for the same reason;
+            # advertised in KERNEL_WS_CAPS, so a page newer than its kernel meets the unknownOp refusal and says so.
+            threading.Thread(target=_apply_now, args=(msg["id"], client), daemon=True).start()
         elif msg and msg.get("type") == "viewReadOnly" and msg.get("id"):
             _kept_open.add(msg["id"])            # confirmRevive → "View read-only": this dead session
             #                                      gets a (struck) read-only tab now, without resuming it

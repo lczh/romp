@@ -346,6 +346,41 @@ class HeadlessRoutes(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertFalse(resp.get("ok"))
 
+    def test_apply_route_pushes_a_waiting_pick_through_and_reads_nothing_waiting_as_a_no_op(self):
+        # `romp apply <session>` (2026-10-01): the dashboard's Apply now, headless, so a script can push the picks waiting
+        # on many sessions through. Nothing waiting is an ok the CLI exits 0 on (applied: false), never a refusal, so a
+        # loop over every session is safe; a refusal is the backend's own words.
+        fake = mock.Mock()
+        with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)), \
+             mock.patch.object(km, "_kernel_knows", lambda sid: True), \
+             mock.patch.object(km, "_host_for_sid", lambda sid: None):
+            fake.apply_now.return_value = ""
+            self.assertEqual(self._post("/apply", {"name": "web"}), (200, {"ok": True, "applied": True}))
+            fake.apply_now.return_value = km.sb.NOTHING_TO_APPLY
+            self.assertEqual(self._post("/apply", {"name": "web"}),
+                             (200, {"ok": True, "applied": False, "why": km.sb.NOTHING_TO_APPLY}))
+            fake.apply_now.return_value = "this session is not running — revive it to bring it back"
+            self.assertEqual(self._post("/apply", {"name": "web"}),
+                             (200, {"ok": False, "error": "this session is not running — revive it to bring it back"}))
+        self.assertEqual(fake.apply_now.call_count, 3)
+        with mock.patch.object(km, "_kernel_knows", lambda sid: False), mock.patch.object(km, "_host_for_sid", lambda sid: None):
+            self.assertEqual(self._post("/apply", {"name": "ghost"}),
+                             (200, {"ok": False, "error": "no session named ghost on this romp kernel"}))
+        self.assertEqual(self._post("/apply", {})[0], 400)
+
+    def test_apply_route_forwards_a_remote_session_and_says_when_its_kernel_is_silent(self):
+        seen = []
+        with mock.patch.object(km, "_host_for_sid", lambda sid: {"host": "TESTHOST"}), \
+             mock.patch.object(km, "_remote_forward", lambda r, path, body: seen.append((path, body)) or {"ok": True, "applied": False, "why": "far"}):
+            self.assertEqual(self._post("/apply", {"id": "sid-r"}), (200, {"ok": True, "applied": False, "why": "far"}))
+        self.assertEqual(seen, [("/apply", {"id": "sid-r"})], "the far kernel's answer, verbatim")
+        with mock.patch.object(km, "_host_for_sid", lambda sid: {"host": "TESTHOST"}), \
+             mock.patch.object(km, "_remote_forward", lambda r, path, body: None):
+            code, resp = self._post("/apply", {"id": "sid-r"})
+        self.assertEqual(code, 200)
+        self.assertFalse(resp["ok"])
+        self.assertIn("isn't answering — nothing was applied", resp["error"])
+
 
 class CodexRuntimeSelection(unittest.TestCase):
     # The kernel loads codex_backend.py through load_source (kernel/loadsource.py): patch that.

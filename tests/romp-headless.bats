@@ -197,6 +197,49 @@ PY
     [[ "$output" == *"usage: romp send"* ]]
 }
 
+# ── romp apply (2026-10-01) ──
+# Apply now, headless: a billing, effort, fast, bypass or env change waiting for the session to go quiet is pushed
+# through at once. Nothing waiting is the kernel's ok with applied:false, a no-op the CLI exits 0 on, so a loop over every
+# session is safe; a refusal is loud.
+
+@test "romp apply <name> POSTs /apply and says it is applying now" {
+    start_fake_kernel '{"ok": true, "applied": true}'
+    run "$ROMP_SCRIPT" apply web
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp apply: applying now (web)"* ]]
+    [[ "$output" == *"told which background tasks ended"* ]]
+    grep -q "^/apply$" <(head -1 "$TEST_DIR/req")
+    grep -q '"name": "web"' "$TEST_DIR/req"
+}
+
+@test "romp apply with nothing waiting exits 0 and says so in the kernel's words" {
+    start_fake_kernel '{"ok": true, "applied": false, "why": "nothing is waiting to apply on this session"}'
+    run "$ROMP_SCRIPT" apply api
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp apply: nothing to apply (api) — nothing is waiting to apply on this session"* ]]
+}
+
+@test "romp apply refusals are loud: the kernel's words, an unreachable kernel, usage" {
+    start_fake_kernel '{"ok": false, "error": "this session is not running — revive it to bring it back"}'
+    run "$ROMP_SCRIPT" apply ghost
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp apply: refused — this session is not running"* ]]
+    ROMP_KERNEL_PORT=1 run "$ROMP_SCRIPT" apply anyone
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"kernel not reachable"* ]]
+    run "$ROMP_SCRIPT" apply
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp apply <session>"* ]]
+    run "$ROMP_SCRIPT" apply web api
+    [ "$status" -eq 2 ]
+}
+
+@test "romp help lists apply beside the other session verbs" {
+    run "$ROMP_SCRIPT" help
+    [[ "$output" == *"romp apply <session>"* ]]
+    [[ "$output" == *"with nothing waiting it changes nothing and exits 0"* ]]
+}
+
 # ── romp compact (2026-08-30, the user via the dashboard team) ──
 # First-class in-place compaction: POSTs /compact, tells the caller which arm ran (now vs queued),
 # refuses honestly. The one-shot fake kernel captures the request like the send/interrupt tests.
