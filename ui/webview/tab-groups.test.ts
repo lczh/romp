@@ -952,8 +952,8 @@ test("executed: SHARED — a member a local tag and a same-named remote tag both
   assert.deepEqual(st2.pinned, [{ sid: "web", name: "ops", id: "g7" }, { sid: "web", name: "infra" }], "the rewritten entry, and the old-name half");
   assert.equal(followTagRenames(st2, renames, ru), st2, "idempotent: a second pane adopting the same frame after the first has written finds nothing to change — the same object, no second write");
   assert.deepEqual(strip(vis, ru, st2, "loose"), [["#ops(folded)", "web", "#infra(folded)", "web", "#null", "loose"], ["api"]], "web shows under ops AND infra (every-tag rule, T264b), pinned in both");
-  // the user had dragged infra into place before the rename: the kernel leaves tagOrder alone, so infra
-  // keeps its slot and ops falls behind — web homes in the remote-only infra, and the kept half matches
+  // the user had dragged infra into place before the rename: the remote infra still bears the name, so the rename's
+  // write keeps infra's slot and puts ops right behind it — web homes in the remote-only infra, and the kept half matches
   const infraFirst = viewTagUnion({ ...renamedV, tagOrder: ["infra"] });
   assert.deepEqual(infraFirst.map((u) => u.name), ["infra", "ops"]);
   assert.deepEqual(strip(vis, infraFirst, st2, "loose"), [["#infra(folded)", "web", "#ops(folded)", "web", "#null", "loose"], ["api"]], "web pinned under infra; api under ops");
@@ -1241,7 +1241,8 @@ test("executed: the follow's memory is checked against EVERY adopted blob — a 
   const again = followTagRenames(repin, tagRenames(V4, V5), viewTagUnion(V5));
   assert.deepEqual([again.pinned, again.followed], [[{ sid: "TESTHOST-A:m1", name: "api" }], { "TESTHOST-A:t1": "api", g8: "y" }]);
   assert.deepEqual(strip(vis, viewTagUnion(V5), again, "loose"), [["#api(folded)", "TESTHOST-A:m1", "#y(folded)", "#null", "loose"], ["tests"]]);
-  const kept = followTagRenames({ ...repin, followed: away.followed }, tagRenames(V4, V5), viewTagUnion(V5));
+  // (the counterfactual's api is folded by hand: the fold follows a rename too since 2026-10-01, so `back` carried it to web)
+  const kept = followTagRenames({ ...repin, collapsed: repin.collapsed.concat("api"), followed: away.followed }, tagRenames(V4, V5), viewTagUnion(V5));
   assert.deepEqual(kept.pinned, repin.pinned, "(had the memory survived the reattach frame unchecked, the rename read as already followed …");
   assert.deepEqual(strip(vis, viewTagUnion(V5), kept, "loose"), [["#api(folded)", "#y(folded)", "#null", "loose"], ["TESTHOST-A:m1", "tests"]], "… and the tab folded away with no gesture on it)");
   // no detach at all — the PAGE was closed while A renamed t1 back to web (the same class, wider): the reopened
@@ -1870,7 +1871,7 @@ test("the toggle is a row in the tab menu's Tags flyout beside the Move-to rows:
   assert.match(RENDER, /function tabGroups\(\) \{ return readTabGroups\(viewTagUnion\(effViews\(\)\)\); \}/);
   assert.match(RENDER, /const unions = viewTagUnion\(effViews\(\)\);\s*\n\s*const plan = planStrip\(visibleIds, unions, readTabGroups\(unions\), activeId, phoneLayout\(\),/);
   assert.match(RENDER, /toggle: \(\) => \{ const st = tabGroups\(\); writeTabGroups\(\{ \.\.\.st, on: !st\.on \}\); \}/);
-  assert.equal((RENDER.match(/writeTabGroups\(setSectionCollapsed\(tabGroups\(\)/g) || []).length, 2, "the fold writes: the header's click (toggle-group) and the pick of a folded-away tab (unfoldSectionOf), which opens its holder");
+  assert.equal((RENDER.match(/writeTabGroups\(setSectionCollapsed\(tabGroups\(\)/g) || []).length, 3, "the fold writes: the header's click (toggle-group), the pick of a folded-away tab (unfoldSectionOf), which opens its holder, and the tag menu's Fold group / Open group (2026-10-01)");
   assert.equal((RENDER.match(/readTabGroups\(/g) || []).length, 5, "five reads in all…");
   assert.equal((RENDER.match(/readTabGroups\(unions\)/g) || []).length, 2, "…the adoption's and the plan's, with the unions in hand…");
   assert.equal((RENDER.match(/readTabGroups\(viewTagUnion\(effViews\(\)\)\)/g) || []).length, 1, "…tabGroups() for every write path…");

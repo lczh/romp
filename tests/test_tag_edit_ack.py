@@ -427,6 +427,138 @@ class TargetedTagEdits(_Wire):
         self.assertEqual((err, t["color"]), (None, "#DD42FF"))
 
 
+class RenameAndDeleteCarryTheNames(_Wire):
+    """A rename or a delete carries the tag's NAME-keyed fields in the same write (the user 2026-10-01, who
+    asked to right-click a tag to rename or delete it). The union order (`tagOrder`) and each surface's lens
+    (`actives`) name tags; before this a renamed group fell to the end of the order and a tab filter on the
+    old name filtered to nothing, and a deleted name stayed in both. The tag's id, its members and the
+    viewer's own stores (the arrangement, view-order.json, and the folds, view-folds.json) are untouched:
+    the folds are the page's, opaque here, and the page carries them (tab-groups.ts). A name a remote tag
+    still bears keeps its slot. Synthetic notes-api names, host TESTHOST."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(km._remotes.pop, "TESTHOST", None)
+
+    def edit(self, write_id, edit):
+        return self.post({"type": "tagEdit", "writeId": write_id, "edit": edit})
+
+    def seed_three(self):
+        """web (SID1), api (SID2), docs (SID3), dragged into the order docs, web, api; the chat filtered to web,
+        the outline to web and api."""
+        tags = [dict(WEB), {"id": "gB", "name": "api", "color": "#54B204", "members": [SID2]},
+                {"id": "gC", "name": "docs", "color": "#DD42FF", "members": [SID3]}]
+        ack = self.post({"type": "setTimelineViews", "writeId": "w0",
+                         "views": {"active": "all", "tags": tags, "tagOrder": ["docs", "web", "api"],
+                                   "actives": {"chat": {"tags": ["web"]}, "outline": {"tags": ["web", "api"]},
+                                               "timeline": {"all": True}}}})
+        self.assertTrue(ack["ok"], ack)
+
+    def stored(self):
+        return km._timeline_views()
+
+    def test_a_rename_keeps_the_groups_place_its_filters_its_id_and_its_members(self):
+        self.seed_three()
+        folds = {"collapsed": ["web"], "expanded": [], "pinned": [{"sid": SID1, "name": "web", "id": "gA"}]}
+        self.post({"type": "setViewFolds", "folds": folds})
+        self.post({"type": "setViewOrder", "order": [SID3, SID1, SID2]})
+        order_before = km._view_order_path().read_text()
+        folds_before = km._view_folds_path().read_text()
+        a = self.edit("w1", {"op": "rename", "tid": "gA", "newName": "infra"})
+        self.assertEqual((a["ok"], a["tid"], a["name"]), (True, "gA", "infra"))
+        v = self.stored()
+        self.assertEqual(v["tagOrder"], ["docs", "infra", "api"], "the renamed group keeps the old name's slot")
+        self.assertEqual(v["actives"]["chat"], {"tags": ["infra"]}, "the tab filter follows the name")
+        self.assertEqual(v["actives"]["outline"], {"tags": ["infra", "api"]})
+        self.assertEqual(v["actives"]["timeline"], {"all": True})
+        t = store_tag("infra")
+        self.assertEqual((t["id"], [m["sid"] for m in t["members"]]), ("gA", [SID1]), "same tag, same members")
+        self.assertEqual(a["views"]["tagOrder"], ["docs", "infra", "api"], "the ack's blob, the poster's new base, carries it")
+        self.assertEqual(km._view_order_path().read_text(), order_before, "the shared tab order is untouched")
+        self.assertEqual(km._view_folds_path().read_text(), folds_before,
+                         "the folds are the page's to carry (opaque here): untouched by the rename")
+        self.assertEqual(self.notices, [])
+
+    def test_the_tag_route_carries_a_rename_by_name_too(self):
+        """`romp tag web --rename infra` and a forwarded edit from another viewer reach _edit_tag by name."""
+        self.seed_three()
+        t, err = km._edit_tag("web", rename="infra")
+        self.assertIsNone(err)
+        self.assertEqual(self.stored()["tagOrder"], ["docs", "infra", "api"])
+
+    def test_a_delete_drops_the_name_from_the_order_and_every_lens_and_untags_its_sessions_only(self):
+        self.seed_three()
+        a = self.edit("w1", {"op": "delete", "tid": "gA"})
+        self.assertTrue(a["ok"])
+        v = self.stored()
+        self.assertEqual(sorted(t["name"] for t in v["tags"]), ["api", "docs"])
+        self.assertEqual(v["tagOrder"], ["docs", "api"], "the deleted name leaves the order")
+        self.assertEqual(v["actives"]["chat"], {"all": True}, "a filter on it alone goes back to All, never to nothing")
+        self.assertEqual(v["actives"]["outline"], {"tags": ["api"]})
+        self.assertEqual([m["sid"] for m in store_tag("api")["members"]], [SID2], "the other tags keep their sessions")
+
+    def test_a_name_a_remote_tag_still_bears_keeps_its_slot(self):
+        """The union is name-keyed: with an attached kernel's tag also named web, renaming the local one leaves
+        web where it was (the remote half still makes that group) and puts the new name right behind it."""
+        self.seed_three()
+        km._remotes["TESTHOST"] = {"host": "TESTHOST", "status": "up",
+                                   "views": {"tags": [{"id": "t1", "name": "web", "color": "", "members": []}]}}
+        self.assertTrue(self.edit("w1", {"op": "rename", "tid": "gA", "newName": "infra"})["ok"])
+        v = self.stored()
+        self.assertEqual(v["tagOrder"], ["docs", "web", "infra", "api"])
+        self.assertEqual(v["actives"]["chat"], {"tags": ["web", "infra"]}, "the filter keeps both halves of what it showed")
+        self.assertTrue(self.edit("w2", {"op": "delete", "tid": "gB"})["ok"])
+        self.assertEqual(self.stored()["tagOrder"], ["docs", "web", "infra"])
+
+    def test_a_forwarded_rename_or_delete_carries_this_viewers_order_once_the_home_answers_ok(self):
+        """A tag homed on an attached kernel: the editTag route forwards the edit, the home carries its own
+        store, and THIS store's order and lenses (the viewer's) follow once the home answered ok, even while
+        the cached reading of the host still shows the old name. A refused or unreachable home carries nothing."""
+        tags = [dict(WEB)]
+        self.assertTrue(self.post({"type": "setTimelineViews", "writeId": "w0",
+                                   "views": {"active": "all", "tags": tags, "tagOrder": ["qa", "web"],
+                                             "actives": {"chat": {"tags": ["qa"]}}}})["ok"])
+        km._remotes["TESTHOST"] = {"host": "TESTHOST", "status": "up",
+                                   "views": {"tags": [{"id": "t1", "name": "qa", "color": "", "members": []}]}}
+        sent, real_fwd, real_send = [], km._forward_tag_edit, km._send_to_view
+        answer = [({"ok": False, "error": "a tag named \"web\" already exists"}, None)]
+        km._forward_tag_edit = lambda host, body: (sent.append((host, dict(body))), answer[0])[1]
+        km._send_to_view = lambda *a, **k: None
+        try:
+            self.post({"type": "editTag", "edit": {"host": "TESTHOST", "name": "qa", "rename": "web"}})
+            self.assertEqual(self.stored()["tagOrder"], ["qa", "web"], "refused by the home: nothing carried")
+            answer[0] = (None, "the edit never landed")
+            self.post({"type": "editTag", "edit": {"host": "TESTHOST", "name": "qa", "rename": "review"}})
+            self.assertEqual(self.stored()["tagOrder"], ["qa", "web"], "unreachable: nothing carried")
+            answer[0] = ({"ok": True, "tag": {"name": "review"}}, None)
+            self.post({"type": "editTag", "edit": {"host": "TESTHOST", "name": "qa", "rename": "review"}})
+            v = self.stored()
+            self.assertEqual(v["tagOrder"], ["review", "web"], "the home answered ok: the group keeps its place here")
+            self.assertEqual(v["actives"]["chat"], {"tags": ["review"]})
+            self.assertEqual([t["name"] for t in v["tags"]], ["web"], "this store's tags stand: the home owns that tag")
+            self.post({"type": "editTag", "edit": {"host": "TESTHOST", "name": "review", "delete": True}})
+            v = self.stored()
+            self.assertEqual((v.get("tagOrder"), v["actives"]["chat"]), (["web"], {"all": True}))
+        finally:
+            km._forward_tag_edit, km._send_to_view = real_fwd, real_send
+        self.assertEqual([b.get("rename") or ("delete" if b.get("delete") else None) for _h, b in sent],
+                         ["web", "review", "review", "delete"])
+
+    def test_the_kernel_advertises_the_carry(self):
+        """The `tagNameCarry` cap: a page on a kernel without it writes the carried order itself, after the edit."""
+        self.assertIn("tagNameCarry", km.KERNEL_WS_CAPS)
+
+    def test_the_order_rule(self):
+        c = km._carry_tag_order
+        self.assertEqual(c(["a", "web", "b"], "web", "infra"), ["a", "infra", "b"])
+        self.assertEqual(c(["a", "web", "b"], "web", "infra", held=True), ["a", "web", "infra", "b"])
+        self.assertEqual(c(["a", "web", "b"], "web", "b"), ["a", "b"], "a name the order already holds keeps its own slot")
+        self.assertEqual(c(["a", "b"], "web", "infra"), ["a", "b"], "a name the order lacks has no slot to keep")
+        self.assertEqual(c(["a", "web", "b"], "web"), ["a", "b"])
+        self.assertEqual(c(["a", "web", "b"], "web", None, held=True), ["a", "web", "b"])
+        self.assertEqual(c(["a", "web"], "web", "web"), ["a", "web"])
+
+
 class WholeBlobAcks(_Wire):
 
     def test_a_clean_whole_blob_write_acks_ok_with_no_refusals(self):
