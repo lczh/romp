@@ -19458,7 +19458,7 @@ def _retry_parked_creates():
                     if fr:
                         c["send"](json.dumps(fr))
                     c["send"](json.dumps({"type": "commentCreated", "id": pk["sid"], "tid": tid,
-                                          "uuid": pk["uuid"]}))
+                                          "uuid": pk["uuid"], "createId": pk.get("createId") or ""}))
                 except Exception:
                     pass
 
@@ -21695,7 +21695,10 @@ def _drive(msg, client):
         # parked copy that landed) is the same comment: answer with the same thread, never a twin (T289).
         # The repeat is known by the createId the popover minted at the send gesture, so a second comment
         # in the same words on the same passage, a new id, is a new thread (review, 2026-09-09).
-        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"], msg.get("createId") or "")
+        # Every answer echoes the createId (2026-10-01): it names the ONE send it answers, so the page moves only that send's
+        # state; keyed on the anchor turn, an answer for one comment adopted into another comment's open box.
+        cid = str(msg.get("createId") or "")
+        key = _create_key(sid, msg["uuid"], msg["exact"], msg["text"], cid)
         state, again = _reserve_create(key)
         if state == "repeat":
             sys.stderr.write("comment create repeated (%s): the same comment again, answered with thread %s\n"
@@ -21703,13 +21706,14 @@ def _drive(msg, client):
             fr = _comments_frame(sid)
             if fr:
                 client["send"](json.dumps(fr))
-            client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": again, "uuid": str(msg["uuid"])}))
+            client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": again, "uuid": str(msg["uuid"]),
+                                       "createId": cid}))
             return True
         if state == "busy":
             # the other door holds this create (parked, or mid-create on the pusher): the typed transient
             # nack keeps the popover's mark alive, and the pusher's success acks every chat client
             client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
-                                       "transient": True, "text": ANCHOR_LAG_ERR}))
+                                       "createId": cid, "transient": True, "text": ANCHOR_LAG_ERR}))
             return True
         try:
             err, tid = _comment_create(sid, str(msg["uuid"]), str(msg["exact"]), str(msg["text"]),
@@ -21743,7 +21747,7 @@ def _drive(msg, client):
                 # as a toast on the viewer, and the refusing kernel's log held no trace of what the user saw
                 sys.stderr.write("comment create refused (%s, name %r): %s\n" % (sid[:8], str(msg.get("name") or "")[:80], err))
             client["send"](json.dumps({"type": "commentCreateFailed", "id": sid,
-                                       "uuid": str(msg["uuid"]), "transient": err == ANCHOR_LAG_ERR,
+                                       "uuid": str(msg["uuid"]), "createId": cid, "transient": err == ANCHOR_LAG_ERR,
                                        "text": err}))
         else:
             # the FRAME rides ahead of the ack: the ack's handler adopts the new thread from the
@@ -21753,7 +21757,7 @@ def _drive(msg, client):
             if fr:
                 client["send"](json.dumps(fr))
             client["send"](json.dumps({"type": "commentCreated", "id": sid, "tid": tid,
-                                       "uuid": str(msg["uuid"])}))
+                                       "uuid": str(msg["uuid"]), "createId": cid}))
     elif t == "commentReply" and msg.get("tid") and msg.get("text"):
         err = _comment_reply(sid, str(msg["tid"]), str(msg["text"]))
         if err:

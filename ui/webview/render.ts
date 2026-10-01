@@ -134,7 +134,8 @@ import { setTip, pruneTip } from "./tip";
 import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as syncMetaControlsWith, ctxBar as buildCtxBar, setCtxBar as setCtxBarWith,
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
-         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR } from "./comments";
+         pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR,
+         holdAnswered, holdForPassage, synthSuperseded } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
@@ -9922,19 +9923,19 @@ function cmtLatchReleased(t: CommentThread, base: CmtLatch): boolean {
 // send; a TRANSIENT nack keeps the optimistic mark + latch alive and the create RE-POSTS when the
 // next session frame for the sid arrives (frames are built from the kernel's parse — a new frame IS
 // the parse catching up). Bounded by attempts, not time; a real refusal or the ack drops the hold.
-// Keyed by the anchor: one create at a time per passage on this viewer. The held create carries the id
-// the send gesture minted, and every re-post sends it again (commentCreateFrame): the kernel answers a
-// repeat of a create it completed with the same thread, and tells a repeat from a fresh comment in the
-// same words by that id.
+// Keyed by the send gesture's createId (2026-10-01; it was the anchor turn, so two comments on one reply
+// shared a slot and the first answer retired the second's hold). The held create carries the id the send
+// gesture minted, and every re-post sends it again (commentCreateFrame): the kernel answers a repeat of a
+// create it completed with the same thread, tells a repeat from a fresh comment in the same words by that
+// id, and echoes it on every answer (holdAnswered), so an answer names exactly one send.
 const cmtCreateInFlight = new Map<string, CommentCreate>();
 const CMT_CREATE_MAX_TRIES = 12;
 
 function retryCmtCreates(sid: string): void {
-  for (const [u, c] of Array.from(cmtCreateInFlight.entries())) {
+  for (const c of Array.from(cmtCreateInFlight.values())) {
     if (c.sid !== sid || c.tries < 1) continue;            // tries starts counting after the first transient nack
     if (c.tries > CMT_CREATE_MAX_TRIES) {                  // the can't-trap bound: give up honestly
-      cmtCreateInFlight.delete(u);
-      dropSynthThread(c.sid, u);
+      refuseCmtCreate(c);
       warnToast("couldn't anchor the comment — the message never appeared in the kernel's transcript.");
       continue;
     }
@@ -9943,13 +9944,29 @@ function retryCmtCreates(sid: string): void {
   }
 }
 
-/** Drop a refused create's optimistic synth thread + latch + mark — the honest retreat. */
-function dropSynthThread(sid: string, uuid: string): void {
-  const tid = "pending:" + uuid;
+/** Drop a create's optimistic synth thread + latch + mark — the honest retreat. */
+function dropSynthThread(sid: string, createId: string): void {
+  const tid = "pending:" + createId;
   const cur = commentThreads.get(sid) || [];
   if (cur.some((t) => t.tid === tid)) commentThreads.set(sid, cur.filter((t) => t.tid !== tid));
   cmtAwaitBase.delete(tid);
   applyCommentMarks(sid);
+}
+
+/** A create the kernel refused for good (its typed nack; the warn beside it says why), or one the retry bound gave up
+ *  on: the hold and its mark go, and the words come back. They left the draft at the send (the hold carried them, so a
+ *  box re-opened meanwhile never offered them to send twice), so they return to it here, and a box still showing that
+ *  send turns back into the composer holding them, editable again. */
+function refuseCmtCreate(c: CommentCreate): void {
+  cmtCreateInFlight.delete(c.createId);
+  dropSynthThread(c.sid, c.createId);
+  const dk = "new:" + c.uuid;
+  if (!(commentDrafts.get(dk) || "").trim()) commentDrafts.set(dk, c.text);
+  if (pendingCommentAnchor && pendingCommentAnchor.sent?.createId === c.createId) {
+    pendingCommentAnchor.sent = undefined;
+    document.getElementById("cmt-pop")?.remove();
+    renderCommentPopover();                                // FULL rebuild: the sent box has no editable composer to refresh in place
+  }
 }
 // the one busy answer for the mark + rail tick: an in-flight EXCHANGE (the gesture latch above), or
 // — after a reload lost the client latch — the exchange's own records still saying a reply is owed
@@ -9988,9 +10005,15 @@ function cmtBootHolds(tid: string): boolean {
   return Date.now() - t0 < CMT_BOOT_BACKSTOP_MS;
 }
 let openCommentKey: { sid: string; tid: string } | null = null;     // the open thread popover
+// create mode (+ the thread's own picks). `sent` is the create this box SENT (2026-10-01): from the send gesture the box
+// shows that send, the words as a pending bubble under the thread's loader, with nothing left to send, until the kernel
+// answers it (the ack adopts the thread into the box; a refusal hands the words back). Before, the box kept the words
+// in an editable composer with a dimmed arrow for the whole kernel round-trip, seconds on a long session, and a second
+// Enter sent the same comment again as a second thread.
 let pendingCommentAnchor: { sid: string; uuid: string; exact: string;
-  model?: string; effort?: string; fast?: string; color?: string } | null = null; // create mode (+ the thread's own picks)
-let pendingAdoptTid: string | null = null;                          // commentCreated ack that beat its frame
+  model?: string; effort?: string; fast?: string; color?: string;
+  sent?: { createId: string; text: string; name: string } } | null = null;
+let pendingAdopt: { tid: string; createId: string } | null = null;  // commentCreated ack that beat its frame
 let commentPopPos: { x: number; y: number } | null = null;
 // the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
 // ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
@@ -10449,7 +10472,15 @@ function pickThreadColor(sid: string): string {
 }
 
 function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number): void {
-  pendingCommentAnchor = { sid, uuid, exact, color: pickThreadColor(sid) };
+  // the passage's own send still unanswered (its mark still the optimistic one): the box re-opens ON that send, never as a
+  // fresh composer, so a click outside and a second Comment on the passage cannot send the same words twice (2026-10-01)
+  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact);
+  const live = !!held && (commentThreads.get(sid) || []).some((t) => t.tid === "pending:" + held.createId);
+  pendingCommentAnchor = held && live
+    ? { sid, uuid, exact: held.exact, model: held.model, effort: held.effort, fast: held.fast, color: held.color,
+        sent: { createId: held.createId, text: held.text,
+                name: (commentThreads.get(sid) || []).find((t) => t.tid === "pending:" + held.createId)?.name || "" } }
+    : { sid, uuid, exact, color: pickThreadColor(sid) };
   openCommentKey = null;
   commentPopPos = { x, y };
   renderCommentPopover();
@@ -10469,19 +10500,17 @@ function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number):
 }
 
 /** commentCreated's adoption: swap the create popover for the named thread's (never a guess — the
- *  kernel sends the frame first, then the ack naming the tid). When the frame hasn't landed yet
- *  (a dropped/reordered leg), the tid parks in pendingAdoptTid and the next frame adopts it. */
+ *  kernel sends the frame first, then the ack naming the tid). Called only for the box that SENT the
+ *  create the ack answers (the ack handler checks it). When the frame hasn't landed yet (a
+ *  dropped/reordered leg), the tid parks in pendingAdopt and the next frame adopts it. The create's
+ *  gesture latch moved onto the real thread at the ack, whether or not a box adopts it. */
 function adoptCommentThread(sid: string, tid: string): void {
-  // the create's gesture latch carries onto the real thread (the synth tid retires with the anchor)
-  for (const k of Array.from(cmtAwaitBase.keys())) {
-    if (k.startsWith("pending:")) { cmtAwaitBase.set(tid, cmtAwaitBase.get(k)!); cmtAwaitBase.delete(k); }
-  }
   if (pendingCommentAnchor && pendingCommentAnchor.sid === sid) {
     commentDrafts.delete("new:" + pendingCommentAnchor.uuid);
     commentDrafts.delete("newname:" + pendingCommentAnchor.uuid);
     pendingCommentAnchor = null;
   }
-  pendingAdoptTid = null;
+  pendingAdopt = null;
   openCommentKey = { sid, tid };
   vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
   renderCommentPopover();
@@ -10940,29 +10969,42 @@ function commentSendFromPop(pop: HTMLElement): void {
   if (!box || !text || !vscodeApi) return;
   const create = pendingCommentAnchor;
   if (create) {
+    // ONE send per gesture (2026-10-01): a box that has sent shows that send and has nothing left to send. A second Enter
+    // here, or Enter then a click, minted a second create id for the same words, and the kernel rightly made two threads
+    if (create.sent) return;
     const nameBox = pop.querySelector(".cmt-name") as HTMLInputElement | null;
     // an UNTOUCHED prefill is sent as "" — the kernel picks its own default (bare name, next free number);
     // only a name the user typed is theirs (T289: the prefill, sent as a chosen name, collided with the
     // thread the same prefill had named before, and the owning kernel refused the create)
     const nm = nameToSend(nameBox?.value || "", nameBox?.dataset.prefill || "");
     if (nm && !/^[A-Za-z0-9._-]+$/.test(nm)) { nameBox?.classList.add("bad"); nameBox?.focus(); return; }
-    if (send) { send.disabled = true; send.classList.add("busy"); }   // ack before the round-trip (the ➤
-    //                                       dims); the draft survives until commentCreated adopts the thread
+    if (send) { send.disabled = true; send.classList.add("busy"); }   // ack before the round-trip; the box turns into the sent view below
+    // the gesture is stamped once, here; the hold re-posts the same frame while a transient nack stands
+    const held = newCommentCreate(create, text, nm);
+    held.prior = (commentThreads.get(create.sid) || []).map((t) => t.tid);   // what the page knew: the thread NOT among them is this one's
     // the ants start on the GESTURE (the user 2026-08-17: the cue lagged the kernel round-trip):
-    // a synthetic working thread marks the passage NOW; the kernel's frame replaces the whole list,
-    // so its never-listed tid unwraps through the standard sweep the moment the real thread lands
-    const synth: CommentThread = { tid: "pending:" + create.uuid, anchorUuid: create.uuid,
+    // a synthetic working thread marks the passage NOW, and stays through every frame until the
+    // frame that lists the thread this create made (synthSuperseded) or a refusal drops it
+    const synth: CommentThread = { tid: "pending:" + held.createId, anchorUuid: create.uuid,
       exact: create.exact, status: "open", createdT: Date.now() / 1000, state: "working",
       unread: false, replyOwed: true, promotedName: "", msgs: [],
       name: nm || nameBox?.dataset.prefill || "comment", color: create.color || "" };   // the hint, until the kernel's frame names it
     const cur0 = commentThreads.get(create.sid) || [];
-    commentThreads.set(create.sid, [...cur0.filter((t) => t.tid !== synth.tid), synth]);
+    commentThreads.set(create.sid, [...cur0, synth]);
     cmtAwaitBase.set(synth.tid, { ...CMT_LATCH_ZERO });   // the SEND gesture latches the pulse — before any kernel round-trip (T102); released once a frame acknowledges the send (T237)
+    cmtCreateInFlight.set(held.createId, held);
+    // the words leave the draft for the hold: a box re-opened on this passage before the answer shows the send, and a
+    // refusal hands them back (refuseCmtCreate)
+    commentDrafts.delete("new:" + create.uuid);
+    create.sent = { createId: held.createId, text, name: synth.name || "" };   // the name as it went (the hint counts the synth now)
     applyCommentMarks(create.sid);
-    // the gesture is stamped once, here; the hold re-posts the same frame while a transient nack stands
-    const held = newCommentCreate(create, text, nm);
+    // the sent view NOW, before the round-trip: the words as the pending bubble under the thread's loader (ui/CLAUDE.md:
+    // the loader first). A full rebuild, as a pick does; the in-place refresh never touches the composer
+    document.getElementById("cmt-pop")?.remove();
+    renderCommentPopover();
+    // posted LAST: a refusal can come back synchronously (a remote host's dropped gesture), and its hand-back must land
+    // on the sent view, not be painted over by it
     vscodeApi.postMessage(commentCreateFrame(held));
-    cmtCreateInFlight.set(create.uuid, held);
     return;
   }
   const cur = openCommentThread();
@@ -10997,7 +11039,8 @@ function renderCommentPopover(): void {
   const th = key ? (commentThreads.get(sid) || []).find((t) => t.tid === key.tid) : null;
   if (key && !th) { closeCommentPop(); return; }
   const mode = create ? "create" : "thread";
-  const status = th ? th.status : "";
+  const sent = create?.sent || null;                 // the box has sent its create and waits on the kernel's answer
+  const status = th ? th.status : sent ? "sent" : "";   // the send flips the key, so the sent view is a full rebuild
   if (prev && prev.dataset.mode === mode && prev.dataset.tid === (th ? th.tid : create!.uuid)
       && prev.dataset.status === status) {
     // in-place refresh: conversation, title, and the live model/effort labels
@@ -11040,8 +11083,9 @@ function renderCommentPopover(): void {
     const sess0 = sessions.get(sid);
     const prefill = defaultCommentName(sess0?.name, sid, (commentThreads.get(sid) || []).length);
     nameBox.dataset.prefill = prefill;
-    nameBox.value = commentDrafts.get(nk) || prefill;
+    nameBox.value = sent ? (sent.name || prefill) : (commentDrafts.get(nk) || prefill);
     nameBox.title = "Suggested name; type to choose your own";
+    if (sent) nameBox.readOnly = true;                       // the name went with the send
     if (create.color) nameBox.style.color = create.color;   // its identity color, distinct from the parent's
     const nb = nameBox;
     nb.addEventListener("input", () => { nb.classList.remove("bad"); commentDrafts.set(nk, nb.value); });
@@ -11118,8 +11162,21 @@ function renderCommentPopover(): void {
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
   }
+  if (sent) {
+    // THE SENT VIEW (2026-10-01): the moment Enter is pressed, the box shows what happened, in the thread's own boot
+    // dress: the loader with the thread popover's opening words, and the comment as the pending bubble the chat's queued
+    // idiom draws (the one an unconfirmed reply wears). The kernel's answer follows in seconds on a long session (it
+    // reads the whole transcript to find the cut); until then this box has nothing left to send, so a second Enter
+    // cannot make a second thread. The ack swaps in the thread, whose boot view looks the same and keeps the bubble
+    // until the opening message lands; a refusal hands the words back to the composer.
+    const list = el("div", "cmt-msgs");
+    const boot = el("div", "cmt-boot cmt-boot-sent");
+    boot.appendChild(rompLoaderInner("opening the thread…", { wordmark: false, cls: "rl-sm" }));
+    list.append(boot, cmtPendingQueued([{ text: sent.text, t: Date.now() / 1000 }]));
+    pop.appendChild(list);
+  }
   let metaRowPending: HTMLElement | null = null;   // appended under the composer row — the statusline position
-  if (create) {
+  if (create && !sent) {
     // the thread's OWN model + effort + fast (the user 2026-08-17; fast and the kernel-side
     // defaults the user 2026-08-29): the same /models-fed choices the chat's statusline selectors
     // use. Each chip shows the EFFECTIVE default — the dialog's own pick, else the kernel's
@@ -11269,7 +11326,9 @@ function renderCommentPopover(): void {
     send.setAttribute("aria-label", create ? "Comment" : "Send");
     send.dataset.act = "cmtsend";
     crow.append(attach, box, send);
-    pop.appendChild(crow);
+    // the SENT view has nothing to type or send yet: its bubble and loader stand where this row was, so the box keeps
+    // about the composer's height (a taller box opened under a passage near the window's foot is clamped up over it)
+    if (!sent) pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
     if (th && th.mailOff && (th.heldMail || 0) > 0) {
       // T356: a thread's mail is off until it is broken out, but the comment box does not SAY so (the user
@@ -11427,6 +11486,12 @@ function renderCommentPopover(): void {
   // for this popover on this page-load, so a reader who started typing in the composer the instant the transcript
   // landed must not have the caret pulled out from under them (the user 2026-09-23)
   if (!restoringCommentPop && (create || hadFocus || !th || !th.msgs.length)) (pop.querySelector(".cmt-input") as HTMLTextAreaElement | null)?.focus();
+  if (sent && !restoringCommentPop) {
+    // the sent view has no composer to hold the caret: the box takes it, so Escape still closes it (the create carries on)
+    pop.tabIndex = -1;
+    pop.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); closeCommentPop(); } });
+    pop.focus();
+  }
 }
 
 // BREAK OUT (the user 2026-08-13: "a button that breaks it out into its own session") — the fork
@@ -21409,13 +21474,18 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "comments" && m.id) {
     const sid = String(m.id);
     const threads = (m.threads || []) as CommentThread[];
-    // an OPTIMISTIC synth thread (a create still in flight) survives the frame rebuild until its
-    // real thread supersedes it (same anchor) or its create fails — the frame used to wipe it, so
+    // an OPTIMISTIC synth thread (a create still in flight) survives the frame rebuild until the
+    // frame lists the thread that create made, or its create fails — the frame used to wipe it, so
     // every create's mark BLINKED between the gesture and the thread's first frame, and a
-    // parse-lag refusal erased the comment entirely (the T106 lab's first catch, 2026-08-26)
-    const synths = (commentThreads.get(sid) || []).filter((t) =>
-      t.tid.startsWith("pending:") && cmtCreateInFlight.has(t.tid.slice("pending:".length))
-      && !threads.some((r) => r.anchorUuid === t.anchorUuid));
+    // parse-lag refusal erased the comment entirely (the T106 lab's first catch, 2026-08-26). "The
+    // thread it made" is a NEW thread on the same passage (synthSuperseded), never any thread on the
+    // same reply: that rule dropped a second comment's highlight on a reply that already had one at
+    // the next frame, for as long as the kernel took to answer (2026-10-01)
+    const synths = (commentThreads.get(sid) || []).filter((t) => {
+      if (!t.tid.startsWith("pending:")) return false;
+      const held = cmtCreateInFlight.get(t.tid.slice("pending:".length));
+      return !!held && !synthSuperseded(threads, held);
+    });
     commentThreads.set(sid, synths.length ? [...threads, ...synths] : threads);
     // THE REPLY-COMPLETED EVENT (T102, sharpened by T112): a frame whose msgs hold MORE agent
     // records than the send's base AND whose thread reads settled — the turn that produced the
@@ -21438,10 +21508,18 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     commentThreads.forEach((list) => list.forEach((t) => knownTids.add(t.tid)));
     for (const k of Array.from(cmtAwaitBase.keys()))
       if (!k.startsWith("pending:") && !knownTids.has(k)) cmtAwaitBase.delete(k);
-    const live = new Set(threads.filter((t) => t.status !== "promoted").map((t) => t.tid));
+    // …and the same rule for the optimistic bubbles and the reply drafts (2026-10-01): pruned against THIS frame's list
+    // alone, a frame for one session wiped every other session's unsent reply and pending bubble, the opening comment's
+    // included while its thread was still starting; and the create box's typed name (newname:) went with every frame
+    const live = new Set<string>();
+    commentThreads.forEach((list) => list.forEach((t) => { if (t.status !== "promoted") live.add(t.tid); }));
     for (const k of Array.from(commentPending.keys())) if (!live.has(k)) commentPending.delete(k);
-    for (const k of Array.from(commentDrafts.keys())) if (!k.startsWith("new:") && !live.has(k)) commentDrafts.delete(k);
-    if (pendingAdoptTid && threads.some((t) => t.tid === pendingAdoptTid)) adoptCommentThread(sid, pendingAdoptTid);
+    for (const k of Array.from(commentDrafts.keys()))
+      if (!k.startsWith("new:") && !k.startsWith("newname:") && !live.has(k)) commentDrafts.delete(k);
+    if (pendingAdopt && threads.some((t) => t.tid === pendingAdopt!.tid)) {
+      if (pendingCommentAnchor?.sent?.createId === pendingAdopt.createId) adoptCommentThread(sid, pendingAdopt.tid);
+      else pendingAdopt = null;                    // the box that sent it closed or moved on: nothing to adopt into
+    }
     if (openCommentKey && openCommentKey.sid === sid) {
       // reading IS seeing: a reply that lands while its popover is open must not dot the mark — the
       // watermark advances BEFORE the marks paint (T237), so it never wears yellow for it, not even one tick
@@ -21462,23 +21540,40 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // the typed nack (T106): a TRANSIENT refusal (the kernel's parse hasn't caught the anchor
     // record up yet) keeps the optimistic mark + latch and arms the frame-keyed retry — the next
     // session frame for the sid IS the parse catching up (retryCmtCreates). A real refusal drops
-    // the synth honestly; the kernel's warn already said why.
-    const held = cmtCreateInFlight.get(String(m.uuid));
+    // the synth honestly and hands the words back; the kernel's warn already said why. It names its
+    // create by the echoed createId (holdAnswered; an older kernel, by the anchor turn).
+    const held = holdAnswered(cmtCreateInFlight.values(), String(m.id), String(m.uuid), m.createId);
     if (held) {
       if (m.transient) { if (held.tries === 0) held.tries = 1; }
-      else { cmtCreateInFlight.delete(String(m.uuid)); dropSynthThread(held.sid, held.uuid); }
+      else refuseCmtCreate(held);
     }
   }
   else if (m.type === "commentCreated" && m.id && m.tid) {
-    if (m.uuid) cmtCreateInFlight.delete(String(m.uuid));   // the ack retires the retry hold
-    if (m.uuid) commentDrafts.delete("new:" + String(m.uuid));
-    if (m.uuid) commentDrafts.delete("newname:" + String(m.uuid));   // a typed name dies with its ack even when the
-    //                                                                  popover closed first — else it resurfaces as a
-    //                                                                  TAKEN name on the next comment here (T289 review)
-    if (pendingCommentAnchor && pendingCommentAnchor.sid === m.id) {
-      const tid = String(m.tid);
-      if ((commentThreads.get(String(m.id)) || []).some((t) => t.tid === tid)) adoptCommentThread(String(m.id), tid);
-      else pendingAdoptTid = tid;
+    // the ack names the thread a create made and, by the echoed createId, WHICH create (holdAnswered). Only that send's
+    // state moves: its hold retires, its latch and its words pass to the thread, and only the box that sent it adopts
+    // it (2026-10-01: any open create box on the session adopted any ack, so a comment sent, clicked away from and
+    // followed by a second one on another passage swapped the second box, its typing included, for the first thread).
+    // An ack for a create this page did not send (another page's, a parked create's broadcast) touches nothing here.
+    const held = holdAnswered(cmtCreateInFlight.values(), String(m.id), String(m.uuid || ""), m.createId);
+    const tid = String(m.tid);
+    if (held) {
+      cmtCreateInFlight.delete(held.createId);           // the ack retires the retry hold
+      commentDrafts.delete("newname:" + held.uuid);      // a typed name dies with its ack even when the
+      //                                                    popover closed first — else it resurfaces as a
+      //                                                    TAKEN name on the next comment here (T289 review)
+      // the create's gesture latch carries onto the real thread (its synth retires with the create)
+      const synthTid = "pending:" + held.createId;
+      const base = cmtAwaitBase.get(synthTid);
+      if (base !== undefined) { cmtAwaitBase.set(tid, base); cmtAwaitBase.delete(synthTid); }
+      // the comment stays on screen as the thread's pending send until its record lands (prunePending retires it then):
+      // the thread's boot view held the loader alone, so the words vanished for the fork's start, seconds at best
+      if (!(commentPending.get(tid) || []).some((p) => p.text === held.text))
+        commentPending.set(tid, [...(commentPending.get(tid) || []), { text: held.text, t: Date.now() / 1000 }]);
+      dropSynthThread(held.sid, held.createId);          // usually gone already: the frame ahead of this ack listed the thread
+      if (pendingCommentAnchor?.sent?.createId === held.createId) {
+        if ((commentThreads.get(String(m.id)) || []).some((t) => t.tid === tid)) adoptCommentThread(String(m.id), tid);
+        else pendingAdopt = { tid, createId: held.createId };
+      }
     }
   }
   // a reply the kernel refused: drop its optimistic bubble (it must not read as 'still thinking'
@@ -21501,17 +21596,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // any payload that rebuilt transcript DOM must get its highlights re-applied (marks live IN that DOM)
   if (m && m.id && (m.type === "session" || m.type === "chatTail" || m.type === "chatHead" || m.type === "chatWindow" || m.type === "chatTurns" || m.type === "chatEpisode"))
     applyCommentMarks(String(m.id));
-  // a refused create (warn) must hand the popover back — the draft is intact, the button un-sticks.
-  // FULL rebuild: the in-place refresh path deliberately never touches the composer, so it would
-  // leave the disabled "Starting…" button stuck (the user 2026-08-15, screenshot of exactly that)
-  if (m && m.type === "warn" && pendingCommentAnchor) {
-    // the synthetic working mark must die with the refusal, or it marches forever
-    const pa = pendingCommentAnchor;
-    commentThreads.set(pa.sid, (commentThreads.get(pa.sid) || []).filter((t) => t.tid !== "pending:" + pa.uuid));
-    applyCommentMarks(pa.sid);
-    document.getElementById("cmt-pop")?.remove();
-    renderCommentPopover();
-  }
+  // (A refused create hands the box back on its typed nack, commentCreateFailed, which the kernel sends after the warn
+  // for every refusal: refuseCmtCreate. Any `warn` used to do it, so an unrelated warning — another session's, a
+  // remote host's — rebuilt an open create box under the user's caret, and, after a send, dropped the mark and
+  // re-armed the arrow while the create was still running, so the next press made a second thread; 2026-10-01.)
 }), vscodeApi);
 
 // Tick the working timer (the chip color-pulse is pure CSS) and keep the model/ctx

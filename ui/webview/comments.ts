@@ -252,7 +252,10 @@ export function prunePending(pending: { text: string; t: number }[], msgs: Comme
  *  two comments, and a memo keyed on the words alone answered the second with the first thread and
  *  wrote its name nowhere (review, 2026-09-09). */
 export type CommentCreate = { sid: string; uuid: string; exact: string; text: string; name: string;
-  model: string; effort: string; fast: string; color: string; createId: string; tries: number };
+  model: string; effort: string; fast: string; color: string; createId: string; tries: number;
+  /** the thread ids the page knew on the session at the send: a thread on this passage that is NOT among them is
+   *  the one this create made (synthSuperseded) */
+  prior?: string[] };
 
 /** One id per send gesture: the moment and a random tail, in the same shape as a provisional tab's id.
  *  Random, not a counter: a reloaded viewer starts its counters over, and the kernel's memo outlives it. */
@@ -268,6 +271,38 @@ export function newCommentCreate(anchor: { sid: string; uuid: string; exact: str
   return { sid: anchor.sid, uuid: anchor.uuid, exact: anchor.exact, text, name, model: anchor.model || "",
            effort: anchor.effort || "", fast: anchor.fast || "", color: anchor.color || "",
            createId: mintCreateId(), tries: 0 };
+}
+
+/** The held create an ack or a refusal answers. The kernel echoes the gesture's createId, so the answer names exactly
+ *  one send; an older kernel echoes only the anchor turn, and then the oldest create held on that session and turn is
+ *  the one (the order the kernel's door handles them in). Keyed by the createId and not the turn (2026-10-01): two
+ *  comments on two passages of one reply used to share a slot, so the first ack retired the second create's hold and
+ *  adopted the first thread into whichever box was open on the session, the user's half-typed second comment included. */
+export function holdAnswered(holds: Iterable<CommentCreate>, sid: string, uuid: string, createId?: unknown): CommentCreate | null {
+  const all = Array.from(holds);
+  if (typeof createId === "string" && createId) return all.find((c) => c.createId === createId) || null;
+  return all.find((c) => c.sid === sid && c.uuid === uuid) || null;
+}
+
+/** The create already in flight on this exact passage (same session, same turn, the same text up to whitespace), or
+ *  null. A second Comment on a passage whose first send has not been answered yet is the same comment, not a new one:
+ *  the box re-opens on that send instead of opening empty-handed with the words already sent, which is how a click
+ *  outside the box, a re-select and an Enter made a second thread in the same words (2026-10-01). */
+export function holdForPassage(holds: Iterable<CommentCreate>, sid: string, uuid: string, exact: string): CommentCreate | null {
+  const want = normalize(exact).norm;
+  return Array.from(holds).find((c) => c.sid === sid && c.uuid === uuid && normalize(c.exact).norm === want) || null;
+}
+
+/** Has this frame got the thread a held create made? A thread on the same anchor turn with the same passage that the
+ *  page did not know when the create was sent (its `prior`). Until then the create's optimistic mark stays: an earlier
+ *  thread elsewhere in the same reply is NOT it (2026-10-01: the old rule retired the mark on any thread anchored to
+ *  the turn, so a second comment on a reply that already had one lost its highlight on the next frame and kept it off
+ *  until the kernel answered). The kernel caps a stored passage at 2000 characters, so a row holding that cap of the
+ *  sent passage is the same passage. */
+export function synthSuperseded(threads: CommentThread[], held: CommentCreate): boolean {
+  const prior = new Set(held.prior || []);
+  return threads.some((t) => t.anchorUuid === held.uuid && !prior.has(t.tid)
+    && (t.exact === held.exact || (t.exact.length >= 1990 && held.exact.startsWith(t.exact))));
 }
 
 /** The commentCreate frame for a held create: the send and every re-post of it build the same one, so

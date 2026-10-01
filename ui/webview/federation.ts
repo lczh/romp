@@ -1793,6 +1793,11 @@ export class FederationManager {
   private dropWarn(host: string, msg: any): void {
     window.dispatchEvent(new MessageEvent("message", { data: { type: "warn",
       text: `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
+    // a comment create also gets the typed refusal its own kernel would have sent (2026-10-01): the comment box waits on
+    // that, not on any warn, to hand the words back, and a create that never left this page is refused for good
+    if (msg && msg.type === "commentCreate" && typeof msg.id === "string" && msg.uuid)
+      window.dispatchEvent(new MessageEvent("message", { data: { type: "commentCreateFailed", id: prefixId(host, msg.id),
+        uuid: msg.uuid, createId: msg.createId || "", transient: false } }));
   }
 
   private ensureHost(h: string): void {

@@ -79,8 +79,8 @@ test("latches are pruned only against EVERY session's known threads — never on
   assert.match(RENDER, /if \(!k\.startsWith\("pending:"\) && !knownTids\.has\(k\)\) cmtAwaitBase\.delete\(k\);/);
   assert.doesNotMatch(RENDER, /!threads\.some\(\(t\) => t\.tid === k\)\) cmtAwaitBase\.delete\(k\)/,
     "the one-frame prune that dropped other sessions' latches is gone");
-  // the "pending:" → real tid carry on adoption stays
-  assert.match(RENDER, /if \(k\.startsWith\("pending:"\)\) \{ cmtAwaitBase\.set\(tid, cmtAwaitBase\.get\(k\)!\); cmtAwaitBase\.delete\(k\); \}/);
+  // the "pending:" → real tid carry at the create's ack stays
+  assert.match(RENDER, /const synthTid = "pending:" \+ held\.createId;\s*\n\s*const base = cmtAwaitBase\.get\(synthTid\);\s*\n\s*if \(base !== undefined\) \{ cmtAwaitBase\.set\(tid, base\); cmtAwaitBase\.delete\(synthTid\); \}/);
 });
 
 test("a reply landing while its popover is open advances the watermark BEFORE the marks paint", () => {
