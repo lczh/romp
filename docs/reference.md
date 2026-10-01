@@ -2356,7 +2356,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
   lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
-  memory of the body fields kept, which `capBytes` bounds; a body an atom
+  memory of the body fields kept plus an estimate of each entry's own
+  overhead (its tuple, key and table slot), which `capBytes` bounds; a body an atom
   still holds counts there too, so while that atom lives an eviction frees
   less than `bytes` drops; the cap is a 48th of physical memory, never under
   256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it outright),
