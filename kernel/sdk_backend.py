@@ -5772,6 +5772,9 @@ class SdkSession:
         #   Cleared the instant _learn_model / _do_refresh_context reports a model matching the alias (event-based).
         self._held_chain = ()                        # the markers still standing before the latest live pick, the nearest
         #   first (SdkBackend.set_model): that pick's refusal puts back the pick among them with its dots (_revert_model)
+        self._pick_unlanded = ""                     # a versioned pick whose dots a report of its family on ANOTHER version
+        #   ended, until a report lands on its version (_resolve_model_pending): a refusal that puts it back skips the
+        #   re-arm, the live name being the world before it (_do_set_model)
         self.effort = reg.get("effort") or DEFAULT_EFFORT   # connect-time --effort; tracked since the init msg doesn't echo it
         self.env_vars = dict(reg.get("env") or {})   # per-session env vars (the reg's `env`, the user 2026-08-17):
         #   _options folds them into the per-sid flag-settings file at EVERY connect, so two sessions in the
@@ -6951,12 +6954,16 @@ class SdkSession:
                     # name is the world before it, and an arm from it would end at its first reply with a false "back on".
                     # So is a pick put back that was itself still in flight when the refused pick was made: the revert
                     # gives it its dots back (_revert_model), the live name being the world before it too (round two of
-                    # that review). A pick that lands between this check and the arm (the arm reads the Retry upgrades
-                    # file twice first) is caught after it, under the session lock set_model holds for its own writes:
-                    # the arm just written is the world before that pick, and it stands down. Every line the retry logs
-                    # here says problem=False (as _arm_upgrade_retry's and _retry_armed's do): inside this except block a
-                    # line that says nothing is classed as the refusal's report (SdkBackend._log), and one refused pick
-                    # put up to three of the retry's lines in the error center beside its own, labeled as failures.
+                    # that review). So is a versioned pick put back whose dots a report of another version in its family
+                    # ended before it had reported (_pick_unlanded: Opus 4.8, a reply of a turn the CLI opened itself,
+                    # after Opus 5.5 was picked), the live name being the world before it as well; its dots stay ended
+                    # (a later check on that round). A pick that lands between this check and the arm (the arm reads the
+                    # Retry upgrades file twice first) is caught after it, under the session lock set_model holds for its
+                    # own writes: the arm just written is the world before that pick, and it stands down. Every line the
+                    # retry logs here says problem=False (as _arm_upgrade_retry's and _retry_armed's do): inside this
+                    # except block a line that says nothing is classed as the refusal's report (SdkBackend._log), and one
+                    # refused pick put up to three of the retry's lines in the error center beside its own, labeled as
+                    # failures.
                     arm = self._retry_armed()
                     _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
                     if arm and _model_version(_plab) is not None and not _model_downgrade(_plab, arm.get("to")):
@@ -6964,7 +6971,10 @@ class SdkSession:
                         self.backend._log("retry upgrade (%s): the pick went back to %s, not above %s; that retry "
                                           "stands down" % (self.name, _plab, arm.get("to")), problem=False)
                         arm = None
-                    if not arm and not getattr(self, "_model_pending", "") and self._arm_if_below_pick():
+                    unlanded = getattr(self, "_pick_unlanded", "")
+                    if not arm and not getattr(self, "_model_pending", "") \
+                            and not (unlanded and unlanded == getattr(self, "chosen_model", "")) \
+                            and self._arm_if_below_pick():
                         with self._lock:
                             newer = getattr(self, "_model_pending", "")
                             if newer:
@@ -7477,7 +7487,7 @@ class SdkSession:
         and an attach to a CLI that survived the restart replays no init and serves no new fallback, so a standing
         fallback lost its retry — and the picker's tooltip promised a cadence nothing was running), and a pick the CLI
         refuses (_do_set_model: the pick it puts back is judged afresh, 2026-10-01). The flip and the refusal skip a
-        pick still in flight. Off: the switch going off ends any arm (_retry_armed). Returns True when it armed."""
+        pick still in flight, and the refusal a versioned pick put back that has not landed (_pick_unlanded). Off: the switch going off ends any arm (_retry_armed). Returns True when it armed."""
         pick = getattr(self, "chosen_model", "") or ""
         if not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             self._retry_armed()
@@ -8462,9 +8472,23 @@ class SdkSession:
 
     def _resolve_model_pending(self, pm) -> bool:
         """If a /model switch is pending and the observed live name `pm` now reflects the chosen alias,
-        clear the pending marker (badge stops showing dots) and persist it. Returns True if it cleared."""
-        if not self._model_pending or not _model_reflects_alias(pm, self._model_pending):
+        clear the pending marker (badge stops showing dots) and persist it. Returns True if it cleared.
+
+        A versioned pick's dots end at a report of its family, so a report of ANOTHER version can end them before the
+        pick has reported: Opus 4.8 for claude-opus-5-5, a reply of a turn the CLI opened itself, still on the model
+        before the pick. That pick is remembered (_pick_unlanded) until a report lands on its version (_lands_on_pick),
+        and a refusal that puts it back skips the re-arm (_do_set_model): the live name is then the world before it, and
+        an arm from it was a fallback nobody had, with a "fell back" log line, a reconnect ten minutes later and a false
+        "Model back on" card at its first reply (a later check on the #33 follow-up's review, round two). Every marker
+        that clears replaces the memory: the pick it names is the newer one."""
+        unlanded = getattr(self, "_pick_unlanded", "")   # getattr: __new__-built test doubles skip __init__
+        if unlanded and _lands_on_pick(pm, unlanded):
+            self._pick_unlanded = ""
+        marker = self._model_pending
+        if not marker or not _model_reflects_alias(pm, marker):
             return False
+        versioned = _model_version(_alias_label(marker)) is not None
+        self._pick_unlanded = marker if versioned and not _lands_on_pick(pm, marker) else ""
         self._model_pending = ""
         try:
             self.backend._update_reg(self.sid, modelPending=False)
