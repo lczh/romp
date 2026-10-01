@@ -5374,8 +5374,9 @@ focus lands on it, and the left and right arrows step from there. The `archived`
 folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
-adds that tag and drops the tag of the group you right-clicked it in, leaving its other tags alone. The row's
-**+** adds the tag without moving the tab. Dragging a tab moves it as well, and the place you drop says
+makes the same move as dragging the tab there (below), so the session takes that tag and loses every other
+tag it carries, whichever of its copies you right-clicked. The row's **+** adds the tag and keeps the rest,
+like a drag with Option held (below). Dragging a tab moves it as well, and the place you drop says
 where the tab should appear now, and only there: drop it inside another group's row, or on that group's
 header, and the session **moves** there, taking that group's tag, losing every other tag it carries, and
 landing at the slot you dropped it in. That holds for a session under several tags too: drag its copy from

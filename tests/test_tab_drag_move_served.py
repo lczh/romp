@@ -5,8 +5,8 @@ new one). Held Option (Alt elsewhere) at the release is the desktop's copy-drag 
 
 This lab drives the real /chat page of a hermetic kernel with REAL mouse drags (page.mouse down, a run of moves, up
 over the target) and a SECOND client, another browser context on the same kernel, watching. The fixture is the
-notes-api demo world: three tags, `infra` and `release` holding the same four sessions (so each has a copy in both
-groups), `qa` holding two, two sessions in no tag. Each case drags one session's `infra` copy into the `qa` group's
+notes-api demo world: three tags, `infra` and `release` holding the same five sessions (so each has a copy in both
+groups), `qa` holding two, one session in no tag. Each case drags one session's `infra` copy into the `qa` group's
 row:
   - plain: the session ends tagged exactly [qa] in the KERNEL'S OWN views store, both pages draw its one copy under
     qa and nowhere else, and the page posted ONE tagEdit, a `setTags` naming qa alone (the atomic write: a second
@@ -17,6 +17,11 @@ row:
 Both cases run under the dark theme and the light one (the `theme` key of the romp:settings store, set the way the
 user sets it), each on its own session, and the second client's qa row reads the same order as the first's (the
 shared arrangement the kernel keeps, the viewOrder frame) with the same folds (none).
+
+The tab menu's "Move to <tag>" makes the same move (the user 2026-10-01, who wanted the menu to do what the drag does):
+a fifth session under infra and release is right-clicked on its infra copy, and "Move to qa" under Tags leaves it
+tagged exactly [qa] in the kernel's store, through ONE `setTags` naming qa alone, with both pages drawing its one copy
+under qa. The row's "+" (the menu's add, the Option-drag's twin) keeps its title.
 
 Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures only (notes-api names, host
 TESTHOST, placeholder sids). TAG_MOVE_SHOTS=<dir> writes the drop indicator's screenshots, mid-gesture, plain and with
@@ -47,7 +52,7 @@ import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environm
 NAMES = ["web", "api", "auth", "cache", "tests", "docs", "deploy", "search"]
 SIDS = {n: "%s-1111-2222-3333-444444444444" % (chr(ord("a") + i) * 8) for i, n in enumerate(NAMES)}
 PALETTE = [("#9cd2ff", "#0c1a2e"), ("#1EA1EB", "#ffffff"), ("#54B204", "#ffffff"), ("#c98cff", "#1a0c2e")]
-BOTH = ["web", "api", "auth", "cache"]   # in infra AND release: a copy under each
+BOTH = ["web", "api", "auth", "cache", "search"]   # in infra AND release: a copy under each
 QA = ["tests", "docs"]
 TAGS = [{"id": "tag-infra", "name": "infra", "color": "#4EC9B0", "members": [SIDS[n] for n in BOTH]},
         {"id": "tag-qa", "name": "qa", "color": "#c98cff", "members": [SIDS[n] for n in QA]},
@@ -55,6 +60,7 @@ TAGS = [{"id": "tag-infra", "name": "infra", "color": "#4EC9B0", "members": [SID
 # the cases: (label, theme, session dragged, Alt held)
 CASES = [("dark, plain", "yatharth", "web", False), ("dark, alt", "yatharth", "api", True),
          ("light, plain", "yatharth-light", "auth", False), ("light, alt", "yatharth-light", "cache", True)]
+MENU_WHO = "search"   # the session the tab menu's Move to case moves (no drag case touches it)
 TAB_COUNT = len(BOTH) * 2 + len(QA) + (len(NAMES) - len(BOTH) - len(QA))
 
 
@@ -185,6 +191,52 @@ for (const [label, th, who, alt] of cfg.cases) {
   Object.assign(c, { copiesA: copiesOf(A, sid), copiesB: copiesOf(B, sid), rowA, rowB: rowOf(B, "qa"), headsA: A.heads, headsB: B.heads,
                      tagEdits: (await page.evaluate(() => window.__sent)).filter((m) => m && (m.type === "tagEdit" || m.type === "setTimelineViews" || m.type === "editTag")) });
 }
+// THE TAB MENU'S "Move to <tag>": right-click the session's infra copy, open Tags, click "Move to qa" (on the last pair of
+// clients, the drags done)
+{
+  const { page } = pair.a, watcher = pair.b.page;
+  const sid = cfg.sids[cfg.menuWho];
+  const m = { who: cfg.menuWho, before: tagsFor(sid) };
+  out.menu = m;
+  await page.evaluate(() => { window.__sent = []; });
+  const readRows = () => page.evaluate(() => Array.from(document.querySelectorAll(".ctx-sub-tags > .ctx-item")).map((r) => {
+    const p = r.querySelector(".ctx-tag-plus");
+    return { label: (r.querySelector(".ctx-item-label") || r).textContent.replace(/\s+/g, " ").trim(), plus: p ? p.title : null };
+  }));
+  const tab = await page.$(`#tabs .tab[data-id="${sid}"][data-copy="infra"]`);
+  if (!tab) m.skipped = "no infra copy of " + cfg.menuWho;
+  else {
+    await tab.click({ button: "right" });
+    await page.waitForSelector(".ctx-menu .ctx-item-tags", { timeout: 5000 });
+    const item = await page.$(".ctx-menu .ctx-item-tags");
+    const ib = await item.boundingBox();
+    await page.mouse.move(ib.x + ib.width / 2, ib.y + ib.height / 2);   // hover-intent opens the flyout; a click folds an open one
+    let byHover = true;
+    try { await page.waitForSelector(".ctx-sub-tags", { timeout: 1500 }); } catch (e) { byHover = false; }
+    if (!byHover) { await item.click(); await page.waitForSelector(".ctx-sub-tags", { timeout: 5000 }); }
+    m.rows = await readRows();
+    const label = await page.evaluateHandle(() => Array.from(document.querySelectorAll(".ctx-sub-tags > .ctx-item .ctx-item-label"))
+      .find((l) => l.textContent.replace(/\s+/g, " ").trim() === "Move to qa") || null);
+    const el = label.asElement();
+    if (!el) m.skipped = "no Move to qa row: " + JSON.stringify(m.rows);
+    else {
+      await el.click();
+      m.wrote = false;
+      for (let i = 0; i < 60; i++) { if (JSON.stringify(tagsFor(sid)) !== JSON.stringify(m.before)) { m.wrote = true; break; } await page.waitForTimeout(100); }
+      m.after = tagsFor(sid);
+      m.rowsAfter = await readRows();
+      const want = JSON.stringify(m.after);
+      const shows = (p) => p.waitForFunction(([s, w]) => JSON.stringify(Array.from(document.querySelectorAll(`#tabs .tab[data-id="${s}"]`)).map((t) => t.dataset.copy).sort()) === w,
+        [sid, want], { timeout: 15000 }).then(() => true).catch(() => false);
+      m.pageShows = await shows(page);
+      m.watcherShows = await shows(watcher);
+      m.copiesA = copiesOf(await strip(page), sid);
+      m.copiesB = copiesOf(await strip(watcher), sid);
+      m.tagEdits = (await page.evaluate(() => window.__sent)).filter((x) => x && (x.type === "tagEdit" || x.type === "setTimelineViews" || x.type === "editTag"));
+    }
+    await page.keyboard.press("Escape");
+  }
+}
 fs.writeFileSync(cfg.out, JSON.stringify(out));
 fs.writeSync(1, "RESULT:" + cfg.out + "\n");
 await browser.close();
@@ -290,7 +342,8 @@ class ServedTabDragMove(unittest.TestCase):
             os.makedirs(shots, exist_ok=True)
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "count": TAB_COUNT, "out": out,
-                       "views": os.path.join(cls.state, "timeline-views.json"), "sids": SIDS, "cases": CASES, "shots": shots}, f)
+                       "views": os.path.join(cls.state, "timeline-views.json"), "sids": SIDS, "cases": CASES, "shots": shots,
+                       "menuWho": MENU_WHO}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -359,6 +412,29 @@ class ServedTabDragMove(unittest.TestCase):
         self.assertEqual(c["rowA"][-1], c["who"], "dropped on the right part of qa's last member, it lands last in qa" + detail)
         self.assertEqual(c["headsB"], c["headsA"], "the same groups, folded the same, on both clients" + detail)
         self.assertFalse(any(h["folded"] for h in c["headsA"]), "a move folds nothing" + detail)
+
+    def test_the_tab_menus_move_to_makes_the_drags_move(self):
+        m = self._run().get("menu")
+        self.assertIsNotNone(m, "the driver ran the menu case")
+        detail = "\n  %s" % json.dumps(m, indent=1)[:4000]
+        if m.get("skipped"):
+            self.fail("menu: %s%s" % (m["skipped"], detail))
+        self.assertEqual(m["before"], ["infra", "release"], "the right-clicked session carried two tags" + detail)
+        move_rows = [r for r in m["rows"] if r["label"].startswith("Move to")]
+        self.assertEqual([r["label"] for r in move_rows], ["Move to qa"], "one Move to row, for the one tag it does not carry" + detail)
+        self.assertEqual(move_rows[0]["plus"], "add this tag too (the session keeps its other tags)",
+                         "the row's + is the add, and says so" + detail)
+        self.assertTrue(m["wrote"], "the kernel's store answered the click" + detail)
+        self.assertEqual(m["after"], ["qa"], "it holds exactly the tag it was moved to, in the kernel's own store: release came off too" + detail)
+        self.assertEqual(m["copiesA"], ["qa"], "the page draws its one copy under qa" + detail)
+        self.assertTrue(m["watcherShows"], "the second client converged on the move" + detail)
+        self.assertEqual(m["copiesB"], ["qa"], "…and draws it the same" + detail)
+        tag_edits = [x for x in m["tagEdits"] if x.get("type") == "tagEdit"]
+        self.assertEqual([x["edit"] for x in tag_edits], [{"op": "setTags", "tids": ["tag-qa"], "sids": [SIDS[MENU_WHO]]}],
+                         "ONE setTags naming qa alone: the drag's own write" + detail)
+        self.assertEqual([x for x in m["tagEdits"] if x.get("type") != "tagEdit"], [], "and no whole-blob or remote write" + detail)
+        self.assertEqual([r["label"] for r in m["rowsAfter"] if r["label"].startswith("Move to")], ["Move to infra", "Move to release"],
+                         "the flyout redraws on the moved session: qa held, the two it left offered back" + detail)
 
     def test_dark_a_drop_into_another_group_moves_the_session_there(self):
         self._moved("dark, plain", "dark")
