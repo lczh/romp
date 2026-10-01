@@ -1254,6 +1254,35 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             asyncio.run(s._do_set_model(*s._sent[1]))               # Fable 5 refused: Sonnet 5 owns every layer
             asyncio.run(s._do_set_model(*s._sent[2]))               # Sonnet 5 refused: Opus 5.5 goes back
             quiet(be, s, h, road)
+        # A newer pick whose own dots end the same way can be the one refused (a later check on that fix). Opus 5.5 is
+        # picked on Opus 4.8, a reply of a turn the CLI opened itself, served on Opus 4.8, ends its dots, and Opus 5.5 is
+        # taken but has not reported (its refresh failing, or the answer to it lost). Then Opus 5 is picked, or a Latest
+        # click (opus), the same turn's next reply on Opus 4.8 ends that pick's dots too, and the CLI refuses it. Kept in one
+        # slot, the memory then named Opus 5, or nothing for the Latest click, so Opus 5.5 went back unremembered, with no
+        # dots and no pick in flight, and the re-arm armed it from Opus 4.8 as a fallback nobody had: a "fell back" log line,
+        # a reconnect ten minutes later and a false "Model back on" card at its first reply. The memory keeps one entry per
+        # pick, and a pick that clears its dots adds its own entry without replacing another's
+        for road, first, second in (
+                ("Opus 5.5 picked on Opus 4.8, a reply of a turn the CLI opened itself served on Opus 4.8, the pick taken and "
+                 "its refresh failing, then Opus 5 picked, the same turn's next reply served on Opus 4.8, and Opus 5 refused",
+                 dict(ctx=[down]), "claude-opus-5"),
+                ("Opus 5.5 picked on Opus 4.8, a reply of a turn the CLI opened itself served on Opus 4.8, the CLI's answer "
+                 "to the pick lost, then Opus 5 picked, the same turn's next reply served on Opus 4.8, and Opus 5 refused",
+                 dict(ctx=["claude-opus-4-8"], lost=lost), "claude-opus-5"),
+                ("Opus 5.5 picked on Opus 4.8, a reply of a turn the CLI opened itself served on Opus 4.8, the pick taken and "
+                 "its refresh failing, then a Latest click (opus), the same turn's next reply served on Opus 4.8, and the "
+                 "click refused", dict(ctx=[down]), "opus")):
+            with self.subTest(road=road), _Hooks() as h:
+                be, s = self._world(**self.ON48)
+                self._pick(be, s, "claude-opus-5-5")
+                self._served(s, "claude-opus-4-8")                   # ends Opus 5.5's dots by its family word
+                self._settle(s, **first)
+                self._pick(be, s, second)
+                self._served(s, "claude-opus-4-8")                   # ends the second pick's dots by the same word
+                self.assertEqual((s.chosen_model, s._model_pending, h.fallbacks), (second, "", []),
+                                 "%s: the premise: no dots stand when the second pick is refused" % road)
+                self._settle(s, ["claude-opus-5-5"], lost=Exception("Unknown model: %s" % second))   # the CLI's refusal
+                quiet(be, s, h, road)
         # the controls for those roads: the memory ends when a report lands on the pick's version, and a pick whose first
         # report lands on it is never remembered (Opus 5.5 landed by its refresh, after that reply or with none, a real
         # fallback to Opus 4.8 armed, then Fable 5 refused with nothing served between, is armed again at the refusal);
