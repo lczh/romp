@@ -9,21 +9,26 @@ length on disk, and capped it at max(1 GiB, MemTotal/32) of those line bytes. A 
 about 2.85 times its line across the live transcripts, under one times for escaped non-ASCII text, several times for a
 body of many small blocks.
 
-Pinned here: the memory the memo holds matches the bytes it counts (measured with tracemalloc) at both of those
-extremes; an atom filled from the memo, by a miss or by a hit, shares its body rather than copying it, so while such an
-atom lives an eviction frees only the entry's own share, and once it is gone the eviction has freed what was counted; a
-Read result's duplicate text is not kept, nor an attachment's fields beside its prompt; the counter stays the sum of its
-entries' weights when a peer memoized the same record first; the memo's serves and evictions are counted, a body a peer
-put while this call waited on the file's read stripe among the serves; the default cap is max(256 MiB, MemTotal/48) of
-real memory. And the guards that keep every reader as it was: each atom kind fills from a memo hit exactly as it fills
-from its whole record, a hit reads nothing, a malformed attachment fails the fill as the whole record does, and the
-by-offset record read the comment cut uses still returns the whole record after a hydration.
+Pinned here: the memory the memo holds matches the bytes it counts (measured with tracemalloc) for non-ASCII text as
+the CLI writes it, for the synthetic extreme of the same text escaped, and for bodies of many small blocks; small
+records carry their entry's own overhead in their weight; the size walk counts each object once and skips the shared
+singletons, exactly; an atom filled from the memo, by a miss or by a hit, shares its body rather than copying it, so
+while such an atom lives an eviction frees only the entry's own share, and once it is gone the eviction has freed what
+was counted; a Read result's duplicate text is not kept, nor an attachment's fields beside its prompt; the counter
+stays the sum of its entries' weights when a peer memoized the same record first; the memo's serves and evictions are
+counted, a body a peer put while this call waited on the file's read stripe among the serves, an atom whose body a peer
+had already written not; the default cap is max(256 MiB, MemTotal/48) of real memory. And the guards that keep every
+reader as it was: each atom kind fills from a memo hit exactly as it fills from its whole record, a hit reads nothing,
+a consumed tool result reaches every atom of its record whichever atom read it, a malformed attachment fails the fill as
+the whole record does, and the by-offset record read the comment cut uses still returns the whole record after a
+hydration.
 
 SYNTHETIC fixtures only: invented notes-api text, placeholder uuids."""
 import gc
 import json
 import os
 import shutil
+import sys
 import tempfile
 import tracemalloc
 import unittest
@@ -75,21 +80,26 @@ def user(u, parent, i, content, tur=None):
     return r
 
 
-def write(path, recs):
-    """The records as the CLI writes them, one JSON line each; returns each record's (byte offset, byte length)."""
+def write(path, recs, escaped=False):
+    """The records as the CLI writes them, one JSON line each, non-ASCII text as raw UTF-8 (JSON.stringify escapes none
+    of it); returns each record's (byte offset, byte length). escaped=True writes that text as \\u escapes instead, as
+    Python's json does by default: a synthetic extreme, not the CLI's format."""
     offs, off = [], 0
     with open(path, "wb") as fh:
         for r in recs:
-            b = json.dumps(r).encode("utf-8")
+            b = json.dumps(r, ensure_ascii=escaped).encode("utf-8")
             fh.write(b + b"\n")
             offs.append((off, len(b)))
             off += len(b) + 1
     return offs
 
 
-def lazy_atom(rec, path, at, kind, **lz):
-    """A pre-cut atom as a restore builds it: identity scalars, the record's location under `lazy`, a sentinel body."""
-    return {"type": KIND_TYPE[kind], "uuid": rec["uuid"], "session_id": SID, "t": 0, "fsid": Path(path).stem,
+def lazy_atom(rec, path, at, kind, own_uuid=False, **lz):
+    """A pre-cut atom as a restore builds it: identity scalars, the record's location under `lazy`, a sentinel body.
+    own_uuid gives the atom a uuid string object of its own, as an atom built from a document row has, so the memo's key
+    outlives the atom only in the memo."""
+    u = (rec["uuid"] + " ")[:-1] if own_uuid else rec["uuid"]
+    return {"type": KIND_TYPE[kind], "uuid": u, "session_id": SID, "t": 0, "fsid": Path(path).stem,
             "parentUuid": rec.get("parentUuid"), "lazy": dict({"k": kind, "at": tuple(at)}, **lz),
             "message": em._LazyBody(rec["uuid"], str(path))}
 
@@ -123,20 +133,24 @@ class RealUnits(Base):
     that memory back only once no such atom holds them: while one does, the eviction frees the entry's own share alone,
     and /perf's hydrated bytes overstate what a cap frees by the bodies live atoms hold."""
 
-    def measure(self, recs, kind="a"):
+    def measure(self, recs, kind="a", escaped=False):
         """The memory figures for `recs` hydrated through lazy atoms of `kind`, a dict of:
         counted     the bytes the memo counts for them; lines, their line bytes on disk;
         alive       what the misses allocated, the memo's entries and the first atoms' bodies together;
         hits        what filling a second set of fresh atoms from the memo allocated: they share its bodies;
         held        what the memo holds once both sets have dropped their bodies;
         freedAlive  what an eviction frees while a third set, filled from the memo, still holds its bodies;
-        freed       what that eviction has freed once the third set drops its bodies too.
+        freed       what that eviction has freed once the third set drops its bodies too. That includes what those
+                    atoms owned and the memo never did: each fill's own message dict around the shared content, and for
+                    a body whose content is a string (a typed prompt) the block list the fill builds around it. On the
+                    shapes measured here those parts are small beside the body; on a short prompt they are not, which is
+                    why the small-record weight is measured with the atoms deleted whole instead.
         The atoms' own parts that predate the measurement (the lazy markers, the sentinel bodies) are kept alive, so only
         what the hydration allocated moves the numbers. The eviction is the reader's own: a cap of one byte and one more
         read."""
         tiny = assistant(uid("tiny", 0), None, 0, [{"type": "text", "text": "noted"}])
         path = self.td / (SID + ".jsonl")
-        offs = write(path, list(recs) + [tiny])
+        offs = write(path, list(recs) + [tiny], escaped=escaped)
         sets = [[lazy_atom(r, path, at, kind) for r, at in zip(recs, offs)] for _ in range(3)]
         last = lazy_atom(tiny, path, offs[-1], "a")
         keep = [(a["lazy"], a["message"]) for s in sets + [[last]] for a in s]
@@ -179,8 +193,8 @@ class RealUnits(Base):
         return {"counted": counted, "lines": lines, "alive": alive, "hits": hits, "held": held, "freedAlive": freed_alive,
                 "freed": freed}
 
-    def check(self, recs, kind="a"):
-        m = self.measure(recs, kind)
+    def check(self, recs, kind="a", escaped=False):
+        m = self.measure(recs, kind, escaped)
         said = ", ".join("%s %d" % kv for kv in m.items())
         counted = m["counted"]
         self.assertGreater(counted, 0, said)
@@ -195,11 +209,20 @@ class RealUnits(Base):
                         "counted: " + said)
         return m
 
+    def test_non_ascii_text_counts_its_decoded_size_not_its_line(self):
+        """Non-ASCII text as the CLI writes it, raw UTF-8, is three bytes a character on disk for a dash or an ellipsis and
+        two decoded: the line overstates it."""
+        text = "—…" * 2500
+        recs = [assistant(uid("utf", i), None, i, [{"type": "text", "text": "%d %s" % (i, text)}]) for i in range(120)]
+        m = self.check(recs)
+        self.assertLess(m["counted"], 0.9 * m["lines"], "decoded, the bodies weigh under their lines")
+
     def test_escaped_text_counts_its_decoded_size_not_its_line(self):
-        """Non-ASCII text written escaped is six bytes a character on disk and two decoded: the line overstates it."""
+        """The synthetic extreme of the same text, written as \\u escapes (Python's json default, not the CLI's format):
+        six bytes a character on disk and two decoded, so the line overstates it about three times."""
         text = "—…" * 2500
         recs = [assistant(uid("esc", i), None, i, [{"type": "text", "text": "%d %s" % (i, text)}]) for i in range(120)]
-        m = self.check(recs)
+        m = self.check(recs, escaped=True)
         self.assertLess(m["counted"], 0.6 * m["lines"], "decoded, the bodies weigh well under their lines")
 
     def test_many_small_blocks_count_their_decoded_size_not_their_line(self):
@@ -239,6 +262,64 @@ class RealUnits(Base):
         self.assertEqual(body, {"attachment": {"prompt": "also run the api tests"}})
         self.assertLess(weight, 2000, "weighed without the rest of the attachment")
         self.assertEqual(atom["message"], {"role": "user", "content": [{"type": "text", "text": "also run the api tests"}]})
+
+    def test_small_records_carry_their_entry_overhead_in_their_weight(self):
+        """On a small record the entry's own parts (its tuple, its weight, its uuid key and its slot in the memo's table:
+        _HYDRATED_ENTRY_BYTES) are a large share of the weight, about a quarter of a typed prompt's. With the atoms
+        deleted whole, so the memo alone holds the uuid keys, what the memo holds is within 0.85 to 1.1 of what it
+        counts. The constant is an estimate that overcounts here (a freshly grown table has no deleted slots, and a tuple
+        from the interpreter's free list allocates nothing); the upper bound is the one that matters, since an
+        undercount lets the memo hold more than its cap."""
+        shapes = {
+            "prompt": ([user(uid("sp", i), None, i, "please close out the retry ticket %d and update the notes" % i)
+                        for i in range(1500)], "u"),
+            "tool-call": ([assistant(uid("st", i), None, i,
+                                     [{"type": "text", "text": "Running the retry tests."},
+                                      {"type": "tool_use", "id": "toolu_%06d" % i, "name": "Bash",
+                                       "input": {"command": "pytest -q tests/test_api.py -k retry_%d" % i}}])
+                           for i in range(1500)], "a"),
+        }
+        for name, (recs, kind) in shapes.items():
+            with self.subTest(shape=name):
+                self.fresh()
+                path = self.td / ("%s-%s.jsonl" % (SID, name))
+                offs = write(path, recs)
+                was = tracemalloc.is_tracing()
+                if not was:
+                    tracemalloc.start()
+                try:
+                    m0 = traced()
+                    atoms = [lazy_atom(r, path, at, kind, own_uuid=True) for r, at in zip(recs, offs)]
+                    self.assertEqual(em.hydrate(atoms, SID, by="test"), len(recs))
+                    counted = em._HYDRATED_BYTES[0]
+                    del atoms
+                    held = traced() - m0
+                finally:
+                    if not was:
+                        tracemalloc.stop()
+                said = "%s: counted %d, held %d, per entry %.0f against %.0f" % (name, counted, held, counted / len(recs),
+                                                                                  held / len(recs))
+                self.assertEqual(len(em._HYDRATED), len(recs), said)
+                self.assertTrue(0.85 <= held / counted <= 1.1, "the weight carries the entry's own parts: " + said)
+
+    def test_the_size_walk_counts_each_object_once_and_skips_the_shared_singletons(self):
+        """The weight's walk, exactly: every dict, list, key and value by sys.getsizeof; a key string two dicts share (the
+        decoder shares a record's keys) and a container met twice, each once; None, the booleans, the small ints and the
+        empty and one-character Latin-1 strings not at all, being the interpreter's shared objects; a one-character
+        string outside Latin-1 is no such singleton and counts."""
+        key = "".join(["tool", "_use_id"])                     # one key object, in both dicts
+        text = "".join(["the retry ", "budget is three"])
+        first = {key: "toolu_0001", "count": 1000}
+        second = {key: "toolu_0002"}
+        blocks = [first, second, second, None, True, False, 7, -5, 256, "", "a", "é", "—"]
+        value = {"blocks": blocks, "text": text}
+        size = sys.getsizeof
+        want = (size(value) + size("blocks") + size("text") + size(text) + size(blocks)
+                + size(first) + size(second) + size(key) + size("toolu_0001") + size("toolu_0002")
+                + size("count") + size(1000) + size("—"))
+        self.assertEqual(em._decoded_size(value), want)
+        self.assertEqual(em._decoded_size(None), 0)
+        self.assertEqual(em._decoded_size({}), size({}))
 
 
 class CounterAndCap(Base):
@@ -308,8 +389,10 @@ class CounterAndCap(Base):
     def test_a_body_a_peer_put_while_this_call_waited_counts_as_a_serve(self):
         """Two hydrations of the same atoms (the judges' unit text and a chat build) both miss at hydrate's first check;
         the second then waits on the file's read stripe, and by the time it holds it the first has put the body. That
-        re-check is a fill served without a read, a hit. An atom a peer FINISHED meanwhile (its body in place, its marker
-        not yet popped) is completed from the memo but not counted: the peer's own read or hit counted that body."""
+        re-check is a fill served without a read, a hit. A memo hit for an atom whose body a peer had already written
+        when this call looked is not counted, on either check: the peer's own read or hit counted that body. That covers
+        a body in place with its marker pop still in flight, completed from the memo, and an atom the peer finished
+        whole between hydrate's filter and its first check, which this call does not touch."""
         rec = assistant(uid("wait", 0), None, 0, [{"type": "text", "text": "the retry budget is three"}])
         path = self.td / (SID + ".jsonl")
         at = write(path, [rec])[0]
@@ -328,25 +411,54 @@ class CounterAndCap(Base):
                         em._HYDRATED_BYTES[0] += entry[1]
                 return super().get(k, default)
 
-        def run(atom):
-            PeerPutMeanwhile.gets = 0
+        class PeerFinishes(dict):
+            """A memo holding the entry, whose first get for the record is the instant a peer's fill finishes the atom:
+            its body written and its marker popped, after hydrate's filter."""
+            atom = None
+
+            def get(self, k, default=None):
+                a = PeerFinishes.atom
+                if k == rec["uuid"] and a is not None and "lazy" in a:
+                    a["message"] = em._norm_message(rec["message"])
+                    a.pop("lazy")
+                return super().get(k, default)
+
+        def run(atom, memo):
             st0 = em.asm_checkpoint_stats()
-            with mock.patch.object(em, "_HYDRATED", PeerPutMeanwhile()):
+            with mock.patch.object(em, "_HYDRATED", memo):
                 self.assertEqual(em.hydrate([atom], SID, by="test"), 1)
             st = em.asm_checkpoint_stats()
-            self.assertEqual(PeerPutMeanwhile.gets, 2, "the peer's put landed between the first check and the second")
             return {k: st[k] - st0[k] for k in ("hydratedAtoms", "hydratedHits", "hydratedEvicted")}
 
+        def meanwhile(atom):
+            PeerPutMeanwhile.gets = 0
+            got = run(atom, PeerPutMeanwhile())
+            self.assertEqual(PeerPutMeanwhile.gets, 2, "the peer's put landed between the first check and the second")
+            return got
+
         waited = lazy_atom(rec, path, at, "a")
-        self.assertEqual(run(waited), {"hydratedAtoms": 0, "hydratedHits": 1, "hydratedEvicted": 0},
+        self.assertEqual(meanwhile(waited), {"hydratedAtoms": 0, "hydratedHits": 1, "hydratedEvicted": 0},
                          "the re-check under the read stripe: one fill served, no read")
         self.assertEqual(waited["message"], em._norm_message(rec["message"]))
         self.assertNotIn("lazy", waited)
         finished = lazy_atom(rec, path, at, "a")
         finished["message"] = em._norm_message(rec["message"])     # a peer's fill wrote the body; its marker pop is in flight
-        self.assertEqual(run(finished), {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
-                         "an atom a peer finished: completed from the memo, not counted")
+        self.assertEqual(meanwhile(finished), {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
+                         "an atom a peer finished, met at the re-check: completed from the memo, not counted")
         self.assertNotIn("lazy", finished)
+        in_place = lazy_atom(rec, path, at, "a")
+        in_place["message"] = em._norm_message(rec["message"])     # the same, met at the first check of a warm memo
+        self.assertEqual(run(in_place, dict({rec["uuid"]: entry})),
+                         {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
+                         "an atom a peer finished, met at the first check: completed from the memo, not counted")
+        self.assertNotIn("lazy", in_place)
+        whole = lazy_atom(rec, path, at, "a")
+        PeerFinishes.atom = whole
+        self.assertEqual(run(whole, PeerFinishes({rec["uuid"]: entry})),
+                         {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
+                         "an atom a peer finished whole after the filter: nothing for this call to fill, not counted")
+        self.assertEqual(whole["message"], em._norm_message(rec["message"]))
+        self.assertNotIn("lazy", whole)
 
     def test_the_default_cap_is_a_quarter_gib_of_real_memory_or_a_48th_of_the_machine(self):
         if os.environ.get("ROMP_HYDRATED_CAP_MB"):
@@ -401,6 +513,28 @@ class ReadersKeepTheirBehavior(Base):
             self.assertEqual(bodies(miss), bodies(want), "a miss fills as the whole record does (%s)" % kind)
             self.assertEqual(bodies(hit), bodies(want), "a hit fills as the whole record does (%s)" % kind)
             self.assertNotIn("lazy", hit)
+
+    def test_a_consumed_tool_result_reaches_every_atom_of_its_record_whichever_atom_read_it(self):
+        """One entry serves every atom of its record, so a tool result of a consumed shape (a question's answers) is
+        kept whatever the marker of the atom whose read filled the memo says. Read first through an atom whose marker
+        does not carry it, the record then fills an atom whose marker does (lazy tur) from a hit, tool result and all, as
+        the whole record would."""
+        tur = {"answers": {"Which store?": "the first"}, "questions": [{"question": "Which store?"}]}
+        rec = user(uid("tur", 0), None, 0, [{"type": "tool_result", "tool_use_id": "toolu_0009", "content": "answered"}],
+                   tur=tur)
+        path = self.td / (SID + ".jsonl")
+        at = write(path, [rec])[0]
+        plain = lazy_atom(rec, path, at, "u")
+        self.assertEqual(em.hydrate([plain], SID, by="test"), 1)
+        self.assertNotIn("toolUseResult", plain, "this atom's marker does not carry it")
+        want = lazy_atom(rec, path, at, "u", tur=True)
+        em._hydrate_one(want, json.loads(json.dumps(rec)))
+        carried = lazy_atom(rec, path, at, "u", tur=True)
+        read0 = em._ASM_CKPT_STATS["hydratedBytes"]
+        self.assertEqual(em.hydrate([carried], SID, by="test"), 1)
+        self.assertEqual(em._ASM_CKPT_STATS["hydratedBytes"], read0, "filled from the memo: no bytes read")
+        self.assertEqual(carried.get("toolUseResult"), tur, "the hit carries the record's tool result")
+        self.assertEqual(bodies(carried), bodies(want), "a hit fills as the whole record does")
 
     def test_an_attachment_that_is_not_a_dict_fails_the_fill_as_the_whole_record_does(self):
         """A malformed attachment (a string, a list) is kept as it is, so a miss and a hit fail the fill exactly as the
