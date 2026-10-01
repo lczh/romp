@@ -5770,6 +5770,8 @@ class SdkSession:
         #   animated dots until the LIVE model actually reflects the pick (the user 2026-07-03: a switch stamped the
         #   chosen alias but left liveModel stale, and model_label PREFERS liveModel → the badge kept the OLD name).
         #   Cleared the instant _learn_model / _do_refresh_context reports a model matching the alias (event-based).
+        self._held_chain = ()                        # the markers still standing before the latest live pick, the nearest
+        #   first (SdkBackend.set_model): that pick's refusal puts back the pick among them with its dots (_revert_model)
         self.effort = reg.get("effort") or DEFAULT_EFFORT   # connect-time --effort; tracked since the init msg doesn't echo it
         self.env_vars = dict(reg.get("env") or {})   # per-session env vars (the reg's `env`, the user 2026-08-17):
         #   _options folds them into the per-sid flag-settings file at EVERY connect, so two sessions in the
@@ -16751,8 +16753,12 @@ class SdkBackend:
                 # aside for it (_do_refresh_context).
                 s._pick_seq = getattr(s, "_pick_seq", 0) + 1
                 seq = s._pick_seq
-                held = getattr(s, "_model_pending", "")   # the pick before this one, while it is still in flight: a refusal
-                #                                           of this one puts it back with its dots (_revert_model)
+                # every pick still in flight before this one, the nearest first: a refusal of this one puts back the pick
+                # it names with its dots (_revert_model). The marker alone names only the nearest, and two picks refused
+                # together put back a pick made before both of them, which may not have reported either
+                held = getattr(s, "_model_pending", "")
+                chain = ((held,) + tuple(getattr(s, "_held_chain", ()))) if held else ()
+                s._held_chain = chain
                 s._model_pending = value or "default"   # "" goes out as set_model(None), as "default" does
                 pending = True
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
@@ -16761,9 +16767,9 @@ class SdkBackend:
                 s._served_model = ""
             # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
             tok = self._seed_write_pending(sid, value)
-            prev = {"picked": value, "tok": tok, "seq": seq, "held": held}   # what the layers hold until the CLI rules
+            prev = {"picked": value, "tok": tok, "seq": seq, "chain": chain}   # what the layers hold until the CLI rules
             #                                                    (the revert's CAS keys), which pick the CLI's answer is
-            #                                                    to (_pick_answered) and the marker the pick replaced
+            #                                                    to (_pick_answered) and the picks in flight before it
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
             self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
@@ -16798,18 +16804,24 @@ class SdkBackend:
         assign of chosen_model sit in one hold of the session lock — set_model assigns it from the kernel
         thread under the same lock, so the swap cannot tear.
 
-        The pending marker goes back too: to the marker the refused pick replaced (`prev["held"]`) when that
-        names the model put back, so a pick put back while it was itself still in flight keeps its dots
-        until its own first report, and to none otherwise (the #33 follow-up's review, round two). Cleared
-        outright, the model from before that pick read as the model served now: the refusal's re-arm
-        (_do_set_model) armed the pick put back as a fallback nobody had (a "fell back" log line, a
-        reconnect ten minutes later and a false "Model back on" card at its first reply) after a second
-        pick refused before the first had reported."""
+        The pending marker goes back too: to the model put back when it is among the picks still in flight
+        when the refused pick was made (`prev["chain"]`, set_model's markers, the nearest first), so a pick
+        put back while it was itself still in flight keeps its dots until its own first report, and to none
+        otherwise (the #33 follow-up's review, round two). Cleared outright, the model from before that pick
+        read as the model served now: the refusal's re-arm (_do_set_model) armed the pick put back as a
+        fallback nobody had (a "fell back" log line, a reconnect ten minutes later and a false "Model back
+        on" card at its first reply) after a second pick refused before the first had reported. The whole
+        chain, not only the marker the refused pick replaced: two picks refused together (the second
+        written before the first's answer) put back a pick made before both, and the first one's refusal,
+        superseded, puts back nothing. A pick in the chain whose name landed after a later pick replaced its
+        marker gets its dots back too, until the next report naming it, as the nearest one does; the
+        refusal's own refresh is such a report."""
         picked = prev.get("picked")
-        held = prev.get("held") or ""
+        chain = prev.get("chain") or ()
         with sess._lock:
             back_model = sess._model_accepted
-            keep = held if held == (back_model or "default") else ""   # set_model's marker for the pick put back
+            want = back_model or "default"
+            keep = want if want in chain else ""   # set_model's marker for the pick put back, while it is in flight
             if sess.chosen_model == picked:
                 sess.chosen_model = back_model or ""
                 sess._model_pending = keep
