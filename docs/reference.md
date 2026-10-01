@@ -3491,11 +3491,20 @@ announces `chatProto2` in its `caps`:
   lets a gap met again on the healed socket ask anew; a gap is sized by its
   TURN count times the rendered run's measured pixels per turn (a turn is a
   user row plus its reply and any tool rows; a per-display-unit average drew
-  gaps half true), lowered when the gaps together would stand taller than four
-  million pixels: a browser lays out no box past a fixed height (16,777,216 px
-  in Chrome on a 2x display), and a long session's head gap at the measured
-  figure passed it, which put the newest rows out of reach and kept the gap
-  asking for pages while the reader sat at the end; a fill anchors on the
+  gaps half true), lowered when the gaps together would stand taller than a
+  quarter of the browser's layout limit: no box is laid out past a fixed height
+  (2^25 px in Chromium divided by the device scale and the zoom, so 16,777,216
+  px in Chrome on a 2x display), which the page measures with a hidden probe
+  and measures again after a resize, and a long session's head gap at the
+  measured figure passed it, which put the newest rows out of reach and kept
+  the gap asking for pages while the reader sat at the end; a gap the reader
+  stands inside (a scrollbar jump into history) asks for the page holding the
+  turn under the viewport top, and a re-window keeps the reader's offset into
+  a hidden unit, so the jump stays where it was dropped; where the end is still
+  out of reach (rows taller than the limit) the page settles: a re-window never
+  runs again on the echo of its own write, a gap element a fill rebuilt asks
+  nothing on its first observation, and the fill itself asks for the page under
+  a reader still parked in a gap; a fill anchors on the
   first row that intersects the viewport, whatever the sign of its top; with
   no row on screen (or that row gone from the rebuild) it names the point
   under the viewport top as a TURN and a fraction into its gap and puts that

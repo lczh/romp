@@ -120,22 +120,36 @@ export function gapHeight(gap: { lo: number; hi: number }, perTurnPx: number | n
   return Math.max(Math.round(per), Math.round((gap.hi - gap.lo) * per));
 }
 
-/** The most px the page's gaps may stand for TOGETHER (2026-10-01). A browser lays out no box taller than a fixed limit: 33,554,432 px
- *  in Chromium at a 1x scale, 16,777,216 in Chrome on a 2x display (its layout units carry the device scale), about 17.9 million in
- *  Firefox. A long session's head gap went past it (1,441 turns at a measured 14,800 px a turn: 21 million px), so everything below the
- *  limit, the newest rows included, was laid out AT it, out of reach; the bottom of the scroll range sat inside the gap, which stayed in
- *  the viewport and asked for page after page while the reader waited at the end. Four million is a quarter of the smallest limit,
- *  leaving the rest to the rows and spacers of the runs the page holds. */
-export const GAPS_MAX_PX = 4_000_000;
+/** The share of the browser's layout limit the page's gaps may stand for TOGETHER (2026-10-01). A browser lays out no box taller than a
+ *  fixed limit: 33,554,432 px in Chromium at a 1x scale, divided by the device scale and the zoom (16,777,216 in Chrome on a 2x display,
+ *  8,388,608 at 2x with the page zoomed to 200 percent), about 17.9 million in Firefox. A long session's head gap went past it (1,441
+ *  turns at a measured 14,800 px a turn: 21 million px), so everything below the limit, the newest rows included, was laid out AT it,
+ *  out of reach; the bottom of the scroll range sat inside the gap, which stayed in the viewport and asked for page after page while
+ *  the reader waited at the end. A quarter leaves the rest to the rows and spacers of the runs the page holds. The limit is MEASURED
+ *  (render.ts layoutLimitPx), since a fixed figure fits one scale and zoom only; LAYOUT_LIMIT_FALLBACK stands in while nothing can be
+ *  measured (a hidden pane). */
+export const GAPS_SHARE = 0.25;
+export const LAYOUT_LIMIT_FALLBACK = 16_777_216;   // Chrome's limit on a 2x display, the smallest the reports have shown
+export const GAPS_MAX_PX = LAYOUT_LIMIT_FALLBACK * GAPS_SHARE;
 
 /** The px per turn the gaps among `units` (regions, or display units: those of kind "gap" are counted) are drawn at: the measured
- *  figure (the default until measured), lowered when the gaps at that figure would stand taller together than GAPS_MAX_PX. A gap's
- *  height is an estimate either way; past the bound it is a smaller one, and a page that fills it brings its rows' real height. */
-export function gapTurnPx(units: Iterable<{ kind: string; lo?: number; hi?: number | null }>, perTurnPx: number | null | undefined): number {
+ *  figure (the default until measured), lowered when the gaps at that figure would stand taller together than `maxPx` (a share of the
+ *  layout limit). A gap's height is an estimate either way; past the bound it is a smaller one, and a page that fills it brings its
+ *  rows' real height. */
+export function gapTurnPx(units: Iterable<{ kind: string; lo?: number; hi?: number | null }>, perTurnPx: number | null | undefined, maxPx = GAPS_MAX_PX): number {
   const per = perTurnPx ?? DEFAULT_TURN_PX;
   let turns = 0;
   for (const u of units) if (u.kind === "gap" && typeof u.lo === "number" && typeof u.hi === "number") turns += Math.max(0, u.hi - u.lo);
-  return turns * per > GAPS_MAX_PX ? GAPS_MAX_PX / turns : per;
+  return turns * per > maxPx ? maxPx / turns : per;
+}
+
+/** The page-aligned span holding turn `t`, clipped to the gap: what a gap asks for when the reader stands INSIDE it (the viewport between
+ *  its edges, a scrollbar jump into history) and met neither edge, so the page they look at comes first (2026-10-01). */
+export function pageAt(gap: { lo: number; hi: number }, t: number, pageTurns: number): { lo: number; hi: number } {
+  const P = Math.max(1, pageTurns | 0);
+  const turn = Math.max(gap.lo, Math.min(gap.hi - 1, Math.floor(t)));
+  const lo = Math.max(gap.lo, Math.floor(turn / P) * P);
+  return { lo, hi: Math.min(gap.hi, Math.floor(turn / P) * P + P) };
 }
 
 /** The page-aligned span to ask for when a gap enters the viewport: the page nearest the viewport's edge first. Scrolling UP

@@ -62,7 +62,7 @@ test("scroll re-windows around the viewport (steady scroll OR jump) when near a 
   // CHEAP px pre-check on every scroll; the precise unit walk only runs when near a rendered edge
   assert.match(RENDER, /const nearTopEdge = \(v\.winStart \?\? 0\) > 0 && st < topH \+ edgePx;/);
   assert.match(RENDER, /const nearBotEdge = \(v\.winEnd \?\? total\) < total && st \+ vh > renderedBottom - edgePx;/);
-  assert.match(RENDER, /if \(!nearTopEdge && !nearBotEdge\) return;/);
+  assert.match(RENDER, /if \(ownEcho \|\| \(!nearTopEdge && !nearBotEdge\)\) return;/);   // …and never on its own write's echo (2026-10-01, chat-regions.test.ts)
   assert.match(RENDER, /const idx = unitAtScroll\(v, content\);/);
   assert.match(RENDER, /renderWindowItems\(v, s, items, Math\.max\(0, c - WINDOW_RADIUS\), Math\.min\(items\.length, c \+ WINDOW_RADIUS\), working\);/);
   // it re-anchors the focus unit so it doesn't jump, coalesced to one frame; a re-window of resident content shows no cue (T402, T386 stage 2)
