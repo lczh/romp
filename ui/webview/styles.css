@@ -4201,11 +4201,6 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    from open until the thread's REAL render (its events) is ready; a backstop falls back so it can
    never trap. Reuses the page's .rl-* pieces, centered in the list. */
 .cmt-boot { display: flex; align-items: center; justify-content: center; min-height: 90px; }
-/* the create box's SENT view (2026-10-01): the same loader at its inline size (.rl-sm) and no floor, so the box grows by
-   a few lines, not by the thread view's 90px: a box opened under a passage near the window's foot is clamped upward by
-   whatever it grows, over the very passage it is about */
-.cmt-boot.cmt-boot-sent { min-height: 0; padding: 4px 0; }
-.cmt-pop:focus { outline: none; }   /* the sent view focuses the box itself (Escape): no ring around the whole card */
 .cmt-head .cmt-x, .cmt-head .cmt-max { cursor: pointer; }
 .cmt-title { font-weight: 600; user-select: none; }   /* a double-click here maximizes; it must select nothing */
 .cmt-x {
@@ -4306,6 +4301,10 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-act:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }   /* the feed word-button hover (2026-08-25): Break out / Merge / Delete light up like Clear/Undo */
 .cmt-act.cmt-del.armed { border-color: var(--st-blocked-bg, #c94f4f); color: var(--st-blocked-bg, #c94f4f); }
 .cmt-note.cmt-err { color: var(--st-blocked-bg, #c94f4f); opacity: 0.9; }
+/* a Comment redirected to the thread already on its passage (2026-10-01): one line, its words in the note's quiet dress,
+   the action the house word-button; the row itself is a flat font context so the button keeps its 0.82em */
+.cmt-note.cmt-existing { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; opacity: 1; font-size: inherit; }
+.cmt-existing-say { font-size: 0.92em; opacity: 0.7; }
 /* the thread's mail state (T356): one quiet line under the composer */
 .cmt-note.cmt-mail { opacity: 0.6; font-size: 0.86em; }
 .fl-mail-off { flex: 0 0 auto; font-size: 0.72em; opacity: 0.6; padding: 0 5px; border: 1px solid currentColor; border-radius: 8px; margin-left: 4px; }

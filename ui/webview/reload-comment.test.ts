@@ -95,7 +95,7 @@ test("the marks pass reopens it once, through openCommentPopover, and only for a
   assert.match(body, /if \(!th \|\| th\.status !== "open"\) return;/, "resolved away, promoted or deleted: nothing reopens, no trace");
   assert.match(body, /if \(!v\.el\.querySelector\(`mark\.cmt-hl\[data-tid="\$\{cssEscape\(rec\.tid\)\}"\]`\)\) return;/,
                "the marks must be rendered — a windowed-out passage reopens nothing");
-  assert.match(body, /if \(rec\.pos\) commentPopPos = \{ x: rec\.pos\.x, y: rec\.pos\.y \};/);
+  assert.match(body, /if \(rec\.pos\) \{ commentPopPos = \{ x: rec\.pos\.x, y: rec\.pos\.y \}; cmtPopPosMine = true; \}/, "where they left it is THEIR spot (the thread layout honours it)");
   assert.match(body, /restoringCommentPop = true;[^\n]*\n\s*try \{ openCommentPopover\(sid, rec\.tid\); \} finally \{ restoringCommentPop = false; \}/,
                "the ordinary opener, with the focus steal suppressed");
   // hung off the marks pass, which runs after every transcript sync AND after every comments frame

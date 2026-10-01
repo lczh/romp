@@ -136,7 +136,7 @@ import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR,
-         holdAnswered, holdForPassage, synthSuperseded } from "./comments";
+         holdAnswered, holdForPassage, synthSuperseded, existingThreadFor } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
@@ -10055,6 +10055,14 @@ let pendingCommentAnchor: { sid: string; uuid: string; exact: string;
   sent?: { createId: string; text: string; name: string } } | null = null;
 let pendingAdopt: { tid: string; createId: string } | null = null;  // commentCreated ack that beat its frame
 let commentPopPos: { x: number; y: number } | null = null;
+// whose spot commentPopPos is (2026-10-01): the user's (a drag, an edge pull, a grip resize, the maximize toggle, a reload
+// putting their popover back) or only the selection point a new comment box opened at. The THREAD layout (a thread, and a
+// create box from its send on) honours only the user's: before, a thread opened at whatever selection point the last
+// comment box had used, and a sent comment's box jumped there seconds later when the thread arrived
+let cmtPopPosMine = false;
+// the selection a Comment gesture was redirected from to the thread already on its passage (the user 2026-10-01): the
+// thread's box offers "New thread instead", which opens the comment box on exactly this selection
+let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number } | null = null;
 // the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
 // ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
 let cmtPopApplied: { w: number; h: number } | null = null;
@@ -10080,6 +10088,7 @@ function closeCommentPop(): void {
   document.getElementById("cmt-pop")?.remove();
   openCommentKey = null;
   pendingCommentAnchor = null;
+  cmtRedirect = null;
 }
 
 // close on any press outside the popover (drafts persist in commentDrafts; reopening restores them).
@@ -10154,7 +10163,7 @@ function reopenCommentForReload(sid: string): void {
   const th = (commentThreads.get(sid) || []).find((t) => t.tid === rec.tid);
   if (!th || th.status !== "open") return;      // resolved, promoted, merged or deleted → no trace of it reopens
   if (!v.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(rec.tid)}"]`)) return;   // its passage is not rendered
-  if (rec.pos) commentPopPos = { x: rec.pos.x, y: rec.pos.y };   // back where they left it, not at the default
+  if (rec.pos) { commentPopPos = { x: rec.pos.x, y: rec.pos.y }; cmtPopPosMine = true; }   // back where they left it, not at the default
   restoringCommentPop = true;                  // …and without taking the caret from anyone typing (renderCommentPopover)
   try { openCommentPopover(sid, rec.tid); } finally { restoringCommentPop = false; }
 }
@@ -10511,24 +10520,49 @@ function pickThreadColor(sid: string): string {
   return free || paletteColors.find((c) => c.toLowerCase() !== parent) || "#e8b220";
 }
 
-function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number): void {
+/** The rendered prose of a turn in a session's view: its .md body's text nodes joined, the text a highlight is placed in
+ *  (ensureCommentMark), or null when the turn is not rendered. */
+function turnProse(sid: string, uuid: string): string | null {
+  const body = views.get(sid)?.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"] .md`);
+  if (!body) return null;
+  let text = "";
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) text += (n as Text).data;
+  return text;
+}
+
+/** Comment on a passage. `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. */
+function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number, fresh = false): void {
+  const prose = turnProse(sid, uuid);
   // the passage's own send still unanswered (its mark still the optimistic one): the box re-opens ON that send, never as a
-  // fresh composer, so a click outside and a second Comment on the passage cannot send the same words twice (2026-10-01)
-  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact);
+  // fresh composer, so a click outside and a second Comment on the passage cannot send the same words twice (2026-10-01).
+  // "The passage" is the same turn with overlapping text (samePassage)
+  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact, prose);
   const live = !!held && (commentThreads.get(sid) || []).some((t) => t.tid === "pending:" + held.createId);
+  // …and a passage that already HAS a thread opens that thread (the user 2026-10-01: one passage never silently grows a
+  // second thread), with "New thread instead" in its box for the time a second one is meant
+  const existing = !live && !fresh ? existingThreadFor(commentThreads.get(sid) || [], uuid, exact, prose) : null;
+  commentPopPos = { x, y };
+  cmtPopPosMine = false;                       // a selection point, not the user's placement (the thread layout ignores it)
+  if (existing) {
+    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y });
+    return;
+  }
+  cmtRedirect = null;
   pendingCommentAnchor = held && live
     ? { sid, uuid, exact: held.exact, model: held.model, effort: held.effort, fast: held.fast, color: held.color,
         sent: { createId: held.createId, text: held.text,
                 name: (commentThreads.get(sid) || []).find((t) => t.tid === "pending:" + held.createId)?.name || "" } }
     : { sid, uuid, exact, color: pickThreadColor(sid) };
   openCommentKey = null;
-  commentPopPos = { x, y };
   renderCommentPopover();
 }
 
-function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number): void {
+function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
+                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number }): void {
   openCommentKey = { sid, tid };
   pendingCommentAnchor = null;
+  cmtRedirect = redirect && redirect.tid === tid ? redirect : null;   // only a Comment gesture's redirect offers "New thread instead"
   // click coords no longer seed the position (the user 2026-08-25): a THREAD popover opens at the
   // fixed right-aligned geometry below; only a real drag (commentPopPos) parks it elsewhere. The
   // CREATE composer (openCommentComposer) still opens at the selection point — a different gesture.
@@ -10906,6 +10940,7 @@ function wireEdgeResize(pop: HTMLElement): void {
       pop.style.left = left + "px";
       pop.style.top = top + "px";
       commentPopPos = { x: left, y: top };           // the drag's own persistence, kept in step
+      cmtPopPosMine = true;
     };
     const up = () => {
       pop.removeEventListener("pointermove", move);
@@ -10965,7 +11000,7 @@ function toggleCommentPopMax(): void {
       const px = clampCmtPopPx(cmtPopPreMax, W, H);
       sizeCommentPop(pop, px.w, px.h);
       saveCmtPopSize(pop);
-    } else if (pop.dataset.mode === "thread") {
+    } else if (pop.dataset.mode === "thread" || pop.dataset.status === "sent") {   // the sent view wears the thread layout
       sizeCommentPop(pop, Math.round(W * CMT_POP_THREAD_DEFAULT.w), Math.round(H * CMT_POP_THREAD_DEFAULT.h));
       saveCmtPopSize(pop);
     } else {
@@ -10987,6 +11022,7 @@ function toggleCommentPopMax(): void {
   pop.style.left = c.left + "px";
   pop.style.top = c.top + "px";
   commentPopPos = { x: c.left, y: c.top };             // a later rebuild reopens where the toggle put it, like a drag
+  cmtPopPosMine = true;
   syncCmtMaxState(pop);
 }
 
@@ -11175,6 +11211,7 @@ function renderCommentPopover(): void {
       pop.style.left = x + "px";
       pop.style.top = y + "px";
       commentPopPos = { x, y };
+      cmtPopPosMine = true;
     };
     const up = () => {
       pop.classList.remove("dragging");
@@ -11188,6 +11225,20 @@ function renderCommentPopover(): void {
   });
   pop.appendChild(head);
   wireEdgeResize(pop);
+  if (th && cmtRedirect && cmtRedirect.tid === th.tid) {
+    // a Comment on a passage that already has this thread opened it (the user 2026-10-01); one line says so, and one click
+    // starts the separate thread instead, on exactly the passage selected (delegated on the body: click-safe)
+    const note = el("div", "cmt-note cmt-existing");
+    const say = el("span", "cmt-existing-say");
+    say.textContent = "This passage already has a thread.";
+    const nb = el("button", "cmt-act cmt-newthread") as HTMLButtonElement;
+    nb.type = "button";
+    nb.textContent = "New thread instead";
+    nb.title = "Start a separate thread on the passage you selected";
+    nb.dataset.act = "cmtnewthread";
+    note.append(say, nb);
+    pop.appendChild(note);
+  }
   if (create || !(th!.events || []).length) {
     // the chat-parity view opens ON the quoting message, so a second quote block would say it twice
     const quote = el("div", "cmt-quote");
@@ -11211,7 +11262,7 @@ function renderCommentPopover(): void {
     // until the opening message lands; a refusal hands the words back to the composer.
     const list = el("div", "cmt-msgs");
     const boot = el("div", "cmt-boot cmt-boot-sent");
-    boot.appendChild(rompLoaderInner("opening the thread…", { wordmark: false, cls: "rl-sm" }));
+    boot.appendChild(rompLoaderInner("opening the thread…", { wordmark: false }));   // the thread boot's own loader: the swap at the answer changes nothing here
     list.append(boot, cmtPendingQueued([{ text: sent.text, t: Date.now() / 1000 }]));
     pop.appendChild(list);
   }
@@ -11341,11 +11392,14 @@ function renderCommentPopover(): void {
     const box = document.createElement("textarea");
     box.className = "cmt-input";
     box.rows = 2;
-    box.placeholder = create ? "Comment on this passage…"
+    box.placeholder = sent ? "You can reply once the thread opens"
+      : create ? "Comment on this passage…"
       : th!.status === "merged" ? "Reply to continue — the discussion so far was relayed to the session…"
       : th!.status === "resolved" ? "Reply to reopen…" : "Reply…";
-    box.value = commentDrafts.get(dk) || "";
-    box.addEventListener("input", () => commentDrafts.set(dk, box.value));
+    // the sent view keeps the composer row where the thread's will be, read-only: the words are the bubble above
+    box.readOnly = !!sent;
+    box.value = sent ? "" : (commentDrafts.get(dk) || "");
+    box.addEventListener("input", () => { if (!sent) commentDrafts.set(dk, box.value); });
     box.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); commentSendFromPop(pop); }
       else if (ev.key === "Escape") { ev.stopPropagation(); closeCommentPop(); }
@@ -11365,10 +11419,9 @@ function renderCommentPopover(): void {
     send.title = create ? "Comment (Enter)" : "Send (Enter)";
     send.setAttribute("aria-label", create ? "Comment" : "Send");
     send.dataset.act = "cmtsend";
+    if (sent) { send.disabled = true; send.classList.add("busy"); attach.disabled = true; }   // nothing to send or attach yet
     crow.append(attach, box, send);
-    // the SENT view has nothing to type or send yet: its bubble and loader stand where this row was, so the box keeps
-    // about the composer's height (a taller box opened under a passage near the window's foot is clamped up over it)
-    if (!sent) pop.appendChild(crow);
+    pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
     if (th && th.mailOff && (th.heldMail || 0) > 0) {
       // T356: a thread's mail is off until it is broken out, but the comment box does not SAY so (the user
@@ -11484,6 +11537,10 @@ function renderCommentPopover(): void {
       if (a && Math.abs(pop.offsetWidth - a.w) <= 1 && Math.abs(pop.offsetHeight - a.h) <= 1) return;
       cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };
       saveCmtPopSize(pop);
+      // a box the user shaped stays where it is too: its spot becomes theirs, so the send's switch to the thread layout
+      // (and the thread that follows) keeps both the size they gave it and the place it has (2026-10-01)
+      commentPopPos = { x: pop.offsetLeft, y: pop.offsetTop };
+      cmtPopPosMine = true;
       syncCmtMaxState(pop);                          // a pull onto or off the cap flips the toggle's label with it
     });
     ro.observe(pop);
@@ -11510,13 +11567,19 @@ function renderCommentPopover(): void {
   // events — the auto-expand was the jarring part). Manual resize (resize: both) still hands the
   // user control, and a dragged position (commentPopPos) still wins over the default placement.
   // The CREATE composer keeps its natural size at the selection point — a different gesture.
-  if (th && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
-  if (th && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
+  // THE SEND SWITCHES TO THIS LAYOUT (2026-10-01): a sent comment's box takes the thread's geometry the moment Enter is
+  // pressed, so the size and place change follows the gesture; before, the small box at the selection jumped to the
+  // thread's seconds later, when the kernel answered. The user's own size (the remembered fraction above, a maximize)
+  // and spot (cmtPopPosMine) win over the defaults, as for any thread.
+  const threadLayout = !!th || !!sent;
+  if (threadLayout && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
+  if (threadLayout && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
   cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours, the content size included
   const r = pop.getBoundingClientRect();
-  const defaultX = th ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
-  const px = Math.max(8, Math.min(commentPopPos?.x ?? defaultX, window.innerWidth - r.width - 8));
-  const py = Math.max(8, Math.min(commentPopPos?.y ?? 120, window.innerHeight - r.height - 8));
+  const pos = threadLayout && !cmtPopPosMine ? null : commentPopPos;   // a selection point places only a new comment box
+  const defaultX = threadLayout ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
+  const px = Math.max(8, Math.min(pos?.x ?? defaultX, window.innerWidth - r.width - 8));
+  const py = Math.max(8, Math.min(pos?.y ?? 120, window.innerHeight - r.height - 8));
   pop.style.left = px + "px";
   pop.style.top = py + "px";
   syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
@@ -11526,12 +11589,6 @@ function renderCommentPopover(): void {
   // for this popover on this page-load, so a reader who started typing in the composer the instant the transcript
   // landed must not have the caret pulled out from under them (the user 2026-09-23)
   if (!restoringCommentPop && (create || hadFocus || !th || !th.msgs.length)) (pop.querySelector(".cmt-input") as HTMLTextAreaElement | null)?.focus();
-  if (sent && !restoringCommentPop) {
-    // the sent view has no composer to hold the caret: the box takes it, so Escape still closes it (the create carries on)
-    pop.tabIndex = -1;
-    pop.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { ev.stopPropagation(); closeCommentPop(); } });
-    pop.focus();
-  }
 }
 
 // BREAK OUT (the user 2026-08-13: "a button that breaks it out into its own session") — the fork
@@ -23159,6 +23216,8 @@ setupSettings();
       openCommentPopover(activeId, tid, Math.min(r.left, window.innerWidth - 380), r.bottom + 6);
     },
     cmtclose: () => closeCommentPop(),
+    // "New thread instead" in a thread a Comment gesture was redirected to: the comment box, on the selection the gesture had
+    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, true); },
     cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture

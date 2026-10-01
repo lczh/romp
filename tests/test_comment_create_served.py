@@ -158,7 +158,7 @@ const pop = () => page.evaluate(() => {
   if (!p) return null;
   const box = p.querySelector(".cmt-input");
   const q = p.querySelector(".cmt-msgs > .turn-queued");
-  return { mode: p.dataset.mode, sentView: !!p.querySelector(".cmt-boot-sent"), box: box ? box.value : null,
+  return { mode: p.dataset.mode, sentView: !!p.querySelector(".cmt-boot-sent"), box: box && !box.readOnly ? box.value : null,   // an EDITABLE composer's words
            railStub: q ? getComputedStyle(q, "::before").display !== "none" : null,
            bubble: ((p.querySelector(".cmt-msgs") || {}).textContent || ""), sendDisabled: (p.querySelector(".cmt-send") || {}).disabled ?? null };
 });
