@@ -889,6 +889,42 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-5-5")   # a turn served on the pick put back
             self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick put back left the retry standing" % road)
             self.assertEqual(h.restored, [("Opus 5", "Opus 5.5")], "%s: back on the pick put back" % road)
+        # a retry the refusal clears falls through to the re-arm, which reads the model served now: a second hop while the
+        # retry stood can leave the session below the pick put back though the model the retry fell to is not (the #33
+        # follow-up's review, round one, fifth gate). Cleared and not re-armed, the session sat below its pick with the
+        # requested-model mark showing and nothing asked for the pick until the next reply on the model it fell to
+        road = ("Sonnet 5 picked on Opus 5.5 and landed, a reply on Opus 5.5 moves the name back, Opus 4.8 picked and its "
+                "dots ended on Opus 5.5, a real fallback to Opus 4.5 armed below it, a second hop to Haiku 4.5, then the "
+                "CLI refuses Opus 4.8")
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._pick(be, s, "claude-sonnet-5")
+            self._settle(s, ["claude-sonnet-5"])
+            self._served(s, "claude-opus-5-5")                       # a reply of a turn already running
+            self._pick(be, s, "claude-opus-4-8")
+            self._served(s, "claude-opus-5-5")                       # ends the second pick's dots
+            self._served(s, "claude-opus-4-5")                       # a real fallback, below Opus 4.8
+            self._served(s, "claude-haiku-4-5")                      # a second hop, below Sonnet 5 as well
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.5"), ("Opus 4.5", "Haiku 4.5")], "%s: both hops are "
+                                                                                             "carded" % road)
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: the first hop is armed" % road)
+            self.assertEqual((arm["from"], arm["to"]), ("Opus 5.5", "Opus 4.5"), "%s: the arm stays the first hop's" % road)
+            self._settle(s, ["claude-sonnet-5"], lost=refused)       # the CLI's refusal
+            self.assertEqual(s.chosen_model, "claude-sonnet-5", "%s: the refusal puts the accepted model back" % road)
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: the session sits below the pick put back and nothing retries it" % road)
+            self.assertEqual((arm["from"], arm["to"], arm["pick"]), ("Sonnet 5", "Haiku 4.5", "claude-sonnet-5"), road)
+            mark = sb.model_fallback_row(s.chosen_model, s._served_model, "", arm, True)
+            self.assertTrue(mark and mark["retry"]["armed"], "%s: the requested-model mark says a retry is armed" % road)
+            self.assertEqual([m for m in be._logs if "nothing to retry" in m], [],
+                             "%s: the log said nothing was left to retry, and the session was armed right after" % road)
+            now = time.time()
+            self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
+            self.assertEqual(len(s._asks), 1, road)
+            self._init(s, "claude-sonnet-5"); self._served(s, "claude-sonnet-5")   # a turn served on the pick put back
+            self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick put back left the retry standing" % road)
+            self.assertEqual(h.restored, [("Haiku 4.5", "Sonnet 5")], "%s: back on the pick put back" % road)
         # the control: a pick put back that names no version (a Latest click) keeps a standing retry, which still ends
         # at the model it fell from
         road = ("a Latest click answered by Opus 5.5, Opus 4.8 picked and its dots ended on Opus 5.5, a real fallback to "
@@ -910,6 +946,35 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-5-5")   # a turn served on the model it fell from
             self.assertIsNone(s._upgrade_retry, "%s: a turn served on the model it fell from left the retry standing" % road)
             self.assertEqual(h.restored, [("Opus 4.5", "Opus 5.5")], "%s: back on the model it fell from" % road)
+
+    def test_a_refusal_arms_nothing_for_a_newer_pick_still_in_flight(self):
+        # the refusal's re-arm stands aside for a pick still in flight, as the switch flip's does. set_model runs on the
+        # kernel thread, so a newer pick can land while the refusal puts the old one back, and the revert's
+        # compare-and-swap then leaves the newer pick standing with its dots. Armed there, from the newer pick's name
+        # against the model from before it, the retry ended at that pick's first served reply with a "Model back on"
+        # card for a pick of the user's own (the #33 follow-up's review, round one, fifth gate)
+        refused = Exception("Unknown model: claude-opus-4-8")
+        road = ("Opus 4.8 picked on Opus 5.5 and its dots ended on Opus 5.5, then Fable 5 picked while the refusal of "
+                "Opus 4.8 is being put back")
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._pick(be, s, "claude-opus-4-8")
+            self._served(s, "claude-opus-5-5")                       # ends the pick's dots
+            self.assertIsNone(s._upgrade_retry, "%s: nothing armed before the refusal" % road)
+            revert = be._revert_model
+
+            def racing(sess, prev):
+                be.set_model(SID, "claude-fable-5")                 # the kernel thread's pick, landing during the revert
+                return revert(sess, prev)
+            be._revert_model = racing
+            self._settle(s, ["claude-opus-5-5"], lost=refused)       # the CLI's refusal of Opus 4.8
+            self.assertEqual((s.chosen_model, s._model_pending), ("claude-fable-5", "claude-fable-5"),
+                             "%s: the newer pick stands, still in flight" % road)
+            self.assertIsNone(s._upgrade_retry, "%s: the refusal armed a retry from a pick still in flight" % road)
+            self.assertEqual([m for m in be._logs if m.startswith("retry upgrade")], [], "%s: the retry was logged" % road)
+            self._served(s, "claude-fable-5")                        # the newer pick's first served reply
+            self.assertEqual(h.restored, [], "%s: a 'Model back on' card for a pick of the user's own" % road)
+            self.assertEqual(h.fallbacks, [], "%s: a pick of the user's own was carded" % road)
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
