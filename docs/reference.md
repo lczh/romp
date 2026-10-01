@@ -640,6 +640,34 @@ key-billed dollars come from the sessions whose CLI reported a key source at ini
 against the declaration; a login turn's computed cost is dollars nobody pays
 and is left out.
 
+Beside the totals, the spend detail's **By account** summary says who billed
+the spend in the chart's range: one row per Claude account, then the API key,
+then whatever romp cannot name. A row names the account by its kind
+(`Enterprise seat`, `Personal plan`) and, in quieter words beside it, the
+routes that reached it: a machine's own sign-in (`laptop sign-in`) or a stored
+login's token (`token on server`), so one seat reached both ways is one row.
+Two routes are one account only when their identities say so: the account
+digest when both carry one (a machine's sign-in always does, read from Claude
+Code's own `~/.claude.json`; a stored login when its record holds one), else
+the organisation together with the kind word. Nothing else counts, the label
+and the email included: a stored login whose record holds neither is a row of
+its own under its label, noted `account not recorded`, and a login added with
+`romp login add` holds only its label and command, so it reads that way. Two
+accounts that would share a name are told apart by organisation, else by
+route. The email is in the hover over the account's name, never on the row. A
+machine's sign-in is named by the account signed in now, since the ledger does
+not stamp which account each turn billed; a machine signed out now reads as
+Unknown, as does spend from before the ledger tracked billing, and a machine
+on an older build is named under the summary with its dollars left out.
+
+Dollars billed to a subscription seat, through a sign-in or a stored login,
+are Claude Code's own cost for those turns at API prices. A seat is not billed
+per token, so these figures are estimates: they wear `≈`, the hover and a line
+under the summary say so, and a session row whose dollars include such turns
+wears the mark too. Key-billed dollars are what the key was billed and stay
+plain. A session billed to a stored login reads `bills <account>` beside its
+name, with the login's full label in the hover.
+
 The token count beside the dollars is every kind together: fresh input,
 output, cache writes, and cache reads. Cache reads are most of it: every API
 call within a turn (one per tool step) re-reads the whole context from the
@@ -5765,11 +5793,11 @@ percentage of the session tokens, with the combined figure. Judge cost is what
 was logged; session cost is tokens priced from a table.
 
 **What the API is costing.** The bottom bar's spend readout opens **API
-spend**, which the palette reaches as **Token usage** too: **Totals**, **Spend
-over time** and **By session**, over one day by hour, seven days by hour (the
-default) or ninety days by day, measured in dollars or tokens, ordered by
-spend or in your own order, and optionally merged by tag. The panel's choices
-are kept in this browser.
+spend**, which the palette reaches as **Token usage** too: **Totals** with
+**By account** beside them, **Spend over time** and **By session**, over one
+day by hour, seven days by hour (the default) or ninety days by day, measured
+in dollars or tokens, ordered by spend or in your own order, and optionally
+merged by tag. The panel's choices are kept in this browser.
 
 ## When a session's tab disappears
 
