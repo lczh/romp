@@ -249,6 +249,7 @@ class AccountWithoutWindows(unittest.TestCase):
         self.d = tempfile.mkdtemp()
         self.saved = (km.jd.STATE, km._claude_account, km._kind_read, km._auth_key_present)
         km.jd.STATE = __import__("pathlib").Path(self.d)
+        (km.jd.STATE / "session-hosts").write_text("off")   # its own state root: no per-session host (T348)
         km._claude_account = lambda: ACCT_A
         km._kind_read = lambda: "enterprise"
         km._auth_key_present = lambda: True
@@ -286,6 +287,71 @@ class AccountWithoutWindows(unittest.TestCase):
         self.assertEqual(km._usage()["acctName"], "Personal plan")
         km._kind_read = lambda: ""
         self.assertEqual(km._usage()["acctName"], "Claude account", "a kind that cannot be read is still no email")
+
+
+class SeatMonthlyAllowance(AccountWithoutWindows):
+    """The seat's monthly allowance (2026-10-01): an account with no windows whose answer carried its monthly spend limit
+    (the snapshot writer's `monthly`, the documented extra_usage fields as answered) is served as the hover's one bar,
+    the percent used and the date it resets; a reading from before that reset is served stale, with no figure; an answer
+    with no limit to measure against serves nothing. The answer carries no reset date: it is the first of the month
+    after the reading, the date Claude Code's own /usage screen shows. Synthetic figures only."""
+    test_it_is_said_named_by_kind_and_the_key_spend_rides_beside_it = None
+    test_an_answer_from_another_login_is_not_this_ones = None
+    test_the_windows_arm_names_the_account_by_kind_too = None
+
+    EU = {"is_enabled": True, "monthly_limit": 50000, "used_credits": 11500, "utilization": 23.0, "currency": "USD"}
+
+    def _monthly_file(self, t, **eu):
+        (km.jd.STATE / "usage.json").write_text(json.dumps(
+            {"t": t, "acct": ACCT_A, "five_hour": None, "seven_day": None, "fable": None, "noWindows": True,
+             "monthly": dict(self.EU, **eu)}))
+
+    @staticmethod
+    def _at(y, mo, d, h=12):
+        return km.time.mktime((y, mo, d, h, 0, 0, 0, 0, -1))   # local time, as the reading's month is read
+
+    def test_it_is_served_with_its_percent_and_reset(self):
+        now = km.time.time()
+        self._monthly_file(int(now))
+        u = km._usage()
+        mo = u["monthly"]
+        lt = km.time.localtime(now)
+        nxt = "%04d-%02d-01" % (lt.tm_year + (lt.tm_mon == 12), lt.tm_mon % 12 + 1)
+        self.assertEqual((mo["pct"], mo["resetsOn"]), (23, nxt))
+        self.assertEqual(len(mo["color"]), 3, "the windows' fill colours, for the same bar")
+        self.assertNotIn("stale", mo)
+        self.assertTrue(u["noWindows"])
+        self.assertEqual(u["acctName"], "Enterprise seat")
+
+    def test_the_reset_is_the_first_of_the_next_month_and_a_reading_from_before_it_is_stale(self):
+        o = {"t": self._at(2026, 7, 15), "monthly": dict(self.EU)}
+        self.assertEqual(km._monthly_allowance(o, now=self._at(2026, 7, 31, 23)), {"pct": 23, "resetsOn": "2026-08-01"})
+        self.assertEqual(km._monthly_allowance(o, now=self._at(2026, 8, 1, 0)), {"stale": True, "resetsOn": "2026-08-01"})
+        dec = self._at(2026, 12, 20)
+        self.assertEqual(km._monthly_allowance(dict(o, t=dec), now=dec)["resetsOn"], "2027-01-01")
+        no_util = {"t": o["t"], "monthly": dict(self.EU, utilization=None)}
+        self.assertEqual(km._monthly_allowance(no_util, now=o["t"])["pct"], 23, "used over limit where no utilization")
+
+    def test_a_reading_from_before_the_reset_is_served_with_no_figure(self):
+        self._monthly_file(int(km.time.time()) - 40 * 86400)
+        mo = km._usage()["monthly"]
+        self.assertTrue(mo["stale"])
+        self.assertNotIn("pct", mo)
+        self.assertNotIn("color", mo)
+
+    def test_nothing_is_served_without_a_limit_to_measure_against(self):
+        self._file(ACCT_A)
+        self.assertNotIn("monthly", km._usage(), "no extra_usage in the answer")
+        for eu in ({"monthly_limit": None}, {"monthly_limit": 0}, {"used_credits": None, "utilization": None}):
+            self._monthly_file(int(km.time.time()), **eu)
+            u = km._usage()
+            self.assertTrue(u["noWindows"], eu)
+            self.assertNotIn("monthly", u, eu)
+
+    def test_another_logins_allowance_is_not_this_ones(self):
+        self._monthly_file(int(km.time.time()))
+        km._claude_account = lambda: ACCT_B
+        self.assertIsNone(km._usage())
 
 
 class RailByAccount(unittest.TestCase):

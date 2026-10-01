@@ -48642,6 +48642,11 @@ def _usage():
         if o.get("noWindows") and o.get("acct") and o.get("acct") == _claude_account():
             out = {"noWindows": True, "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
                    "acct": _claude_account(), "acctName": _acct_name()}
+            mo = _monthly_allowance(o)        # the seat's monthly allowance, the one bar such an account has (2026-10-01)
+            if mo:
+                if "pct" in mo:
+                    mo.update({k: v for k, v in seg(mo).items() if k in ("color", "tone")})
+                out["monthly"] = mo
             _attach_key_spend(out)
             return _with_rail_routes(out)
         return None
@@ -48692,6 +48697,30 @@ def _attach_key_spend(out):
             sa = _spend_recorded_at()
             if sa:
                 out["spendAt"] = sa               # same own-freshness stamp as the key-only arm
+
+
+def _monthly_allowance(o, now=None):
+    """The seat's monthly allowance from a no-windows reading's `monthly` (the get_usage answer's documented extra_usage
+    fields, kept as answered by the snapshot writer, sdk_backend _record_usage_snapshot), for the usage hover's one bar:
+    {"pct", "resetsOn"} while the reading is from the current month, {"stale": True, "resetsOn"} once that reset has
+    passed (the bar would show last month's spend as this month's), None when the answer carried no limit to measure
+    against (no extra_usage, an unlimited one, no figures). The percent is the answer's utilization, or used over
+    limit where it has none, the way Claude Code's /usage screen reads the same fields. The answer carries no reset
+    date: resetsOn is the first of the month after the reading (local time), the date that screen shows for it."""
+    m = o.get("monthly") if isinstance(o, dict) else None
+    if not isinstance(m, dict):
+        return None
+
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    lim, used, ut, t = m.get("monthly_limit"), m.get("used_credits"), m.get("utilization"), o.get("t")
+    if not (num(lim) and lim > 0 and (num(ut) or num(used)) and num(t)):
+        return None
+    read = time.localtime(t)
+    resets_on = "%04d-%02d-01" % (read.tm_year + (read.tm_mon == 12), read.tm_mon % 12 + 1)
+    if time.strftime("%Y-%m-%d", time.localtime(time.time() if now is None else now)) >= resets_on:
+        return {"stale": True, "resetsOn": resets_on}
+    return {"pct": max(0, min(100, round(ut if num(ut) else used / lim * 100))), "resetsOn": resets_on}
 
 
 def _acct_name():
@@ -67387,18 +67416,27 @@ if(u.spendSeries&&u.spendSeries.usd)det._spendSeries=u.spendSeries;}   // $/hour
 // One payload's WINDOW detail for the hover (used/elapsed/reset per window). Detail only, no markup:
 // the rail no longer draws each account's own bars (they aggregate, below), but the tip still tells
 // each host's story from this.
+// a reading's fill colour
+function segCol(seg,pct){var nc=document.body.classList.contains('chat-theme-yatharth');   // dual palette (PR #763): the yatharth themes take seg.tone, classic keeps seg.color verbatim
+var csrc=(nc&&seg.tone&&seg.tone.length===3)?seg.tone:seg.color;
+return (csrc&&csrc.length===3)?('rgb('+csrc.join(',')+')'):(nc?(pct>=88?'#c0392b':(pct>=70?'#d7a23a':'#5196B8')):'#54B204');}   // classic fallback = main's flat green; yatharth = the unified pair (ctx-color.ts)
+// a calendar date the kernel serves as YYYY-MM-DD, read as 'Nov 1'
+function fmtDay(s){var p=String(s||'').split('-');return p.length===3?['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+p[1]-1]+' '+(+p[2]):'';}
 function winDet(u,det){var nowS=Math.floor(Date.now()/1000);
 if(u.acctName)det._acct=u.acctName;   // WHICH login the windows belong to (the user 2026-08-09) — hover-only, by its kind since 2026-10-01
 if(u.noWindows)det._noWin=true;      // the account answered that it has no usage windows (an enterprise seat meters a monthly spend limit)
+// …and that spend limit, its monthly allowance (2026-10-01): one bar the hover draws in place of the windows; a reading from
+// before its reset arrives as stale, a date and no figure
+var mo=u.noWindows&&u.monthly;
+if(mo)det._monthly=mo.stale?{stale:true,reset:fmtDay(mo.resetsOn)}
+:{pct:Math.max(0,Math.min(100,mo.pct||0)),col:segCol(mo,mo.pct||0),tp:null,unk:false,reset:fmtDay(mo.resetsOn)};
 WINS.forEach(function(w){var seg=u[w[0]];if(!seg)return;
 // A ROLLED window (its reset passed since the last report) is UNKNOWN, not 0 (the user 2026-07-31: a
 // remote whose kernel had no live session to ask sat on a days-old snapshot, and the rail drew a
 // confident 0% beside a live account's real bars). The last-known number renders in the hover,
 // labelled as such; the rail's aggregate never counts an unknown as a value.
 var rolled=!!(seg.resetsAt&&nowS>seg.resetsAt),pct=Math.max(0,Math.min(100,seg.pct||0));
-var nc=document.body.classList.contains('chat-theme-yatharth');   // dual palette (PR #763): the yatharth themes take seg.tone, classic keeps seg.color verbatim
-var csrc=(nc&&seg.tone&&seg.tone.length===3)?seg.tone:seg.color;
-var col=(csrc&&csrc.length===3)?('rgb('+csrc.join(',')+')'):(nc?(pct>=88?'#c0392b':(pct>=70?'#d7a23a':'#5196B8')):'#54B204');   // classic fallback = main's flat green; yatharth = the unified pair (ctx-color.ts)
+var col=segCol(seg,pct);
 var tp=(!rolled&&seg.resetsAt&&w[1])?Math.max(0,Math.min(100,Math.round((nowS-(seg.resetsAt-w[1]))/w[1]*100))):null;
 det[w[0]]={name:w[2],pct:pct,col:col,tp:tp,unk:rolled,ago:(rolled?fmtAgo(seg.resetsAt):null),reset:(!rolled&&seg.resetsAt)?fmtR(seg.resetsAt):null};});}
 // ONE aggregated set of bars for every account at once (the user 2026-08-08: never repeat the windows
@@ -67482,7 +67520,7 @@ g.forEach(function(r){if(r===best)return;var v={},u=r.usage,b=best.usage,k;
 r.lag=!b.noWindows&&['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];
 return JSON.stringify(x?[x.pct,x.resetsAt]:null)!==JSON.stringify(y?[y.pct,y.resetsAt]:null);});
 for(k in u)v[k]=u[k];
-['fiveHour','sevenDay','fable','t','limited','acctName','noWindows'].forEach(function(w){
+['fiveHour','sevenDay','fable','t','limited','acctName','noWindows','monthly'].forEach(function(w){
 if(b[w]!==undefined)v[w]=b[w];else delete v[w];});
 r.usage=v;});});}
 var RAIL_HOME=(function(){var c=document.getElementById('rail-api');return c?c.parentNode:null;})();   // where the dot lives with no readout
@@ -67584,6 +67622,12 @@ return keys.map(function(k){var v=d[k];
 return '<div class=ru-tip-win><div class=ru-tip-name><span>'+esc(v.name)+'</span>'
 +(v.unk?'<span class=ru-tip-reset>window reset '+esc(v.ago)+'; no reading since</span>'
 :(v.reset?'<span class=ru-tip-reset>resets in '+esc(v.reset)+'</span>':''))+'</div>'+barRows(v)+'</div>';}).join('');}
+// THE SEAT'S MONTHLY ALLOWANCE (2026-10-01): an enterprise seat has no 5-hour or weekly window; it is metered by a monthly
+// spend limit, drawn as the windows are (the percent used, the date it resets). A reading from before that reset is not
+// this month's figure: no bar, the reset and that nothing has been read since.
+function monthlyHTML(d){var m=d._monthly;if(!m)return '';
+return '<div class=ru-tip-win><div class=ru-tip-name><span>Monthly allowance</span><span class=ru-tip-reset>'
++(m.stale?'reset '+esc(m.reset)+'; no reading since':'resets '+esc(m.reset))+'</span></div>'+(m.stale?'':barRows(m))+'</div>';}
 function machineHTML(name){return '<span class="ru-tip-machine host-prefix">'+esc(name)+'</span>';}
 function acctBlocksHTML(sets,manyMachines){var groups=[],by={};
 sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;
@@ -67591,8 +67635,9 @@ var a=e.acct||('host:'+e.host);var g=by[a];if(!g){g={members:[]};by[a]=g;groups.
 return groups.map(function(g){var d=g.members[0].det,h='<div class=ru-tip-block>';
 if(d._acct)h+='<div class=ru-tip-acct>'+esc(d._acct)+'</div>';
 var wh=winsHTML(d);
-// an account with no windows says so in one line, in place of bars it does not have, and carries no age: nothing is read
-h+=wh||'<div class=ru-tip-nowin>no 5-hour or weekly limits on this account</div>';
+// an account with no windows shows its monthly allowance in their place, or says it has none in one line; neither carries
+// the age line (the allowance dates itself by its reset)
+h+=wh||monthlyHTML(d)||'<div class=ru-tip-nowin>no 5-hour or weekly limits on this account</div>';
 if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){return machineHTML(e.host)
 +(e.lag?'<span class=ru-tip-lag> lagging'+(e.ownT?', updated '+fmtAgo(e.ownT):'')+'</span>':'');}).join(', ')+'</div>';
 var ts=g.members.map(function(e){return e.ownT;}).filter(function(t){return typeof t==='number';});
@@ -71930,7 +71975,8 @@ def _landing():
             "body.theme-light .ru-tip-gy{color:#6b6560}body.theme-light .ru-tip-gx{color:#6b6560}"
             "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
             "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
-            "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"
+            # the hover's tracks too (2026-10-01): their dark wash vanished on the white card, leaving a bar with no scale
+            "body.theme-light .ru-track,body.theme-light .ru-tip-track{background:rgba(0,0,0,0.10)}"
             "body.theme-light #mtabs{background:#E7DED2;border-top-color:#DCD2C4}"
             "body.theme-light #mtabs button{color:#5D574E}"
             "body.theme-light #mtabs button.on{color:#C2410C}"
