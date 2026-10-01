@@ -140,7 +140,7 @@ import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeB
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
 import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
-import { resolveTabDrop, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type TabDrop, type LeaveWords, type DropZone } from "./drag-join";
+import { resolveTabDrop, moveToTag, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type TabDrop, type LeaveWords, type DropZone } from "./drag-join";
 import { perfFrameHandler } from "./perf-telemetry";
 import { windowSender, noteForeign } from "./window-sender";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
@@ -6168,7 +6168,8 @@ function clearDragCue(): void {
 // once and the kernel's tagEditAck settles it), plus the `editTag` wire for every tag homed on another
 // kernel, whose mirror shows until that kernel's next push carries the truth (the lifetime the flyout's
 // remote half has). Every op rides ONE optimistic blob, so this page never shows a half-moved session.
-// Returns whether anything was written.
+// The tab menu's "Move to <tag>" rows post through here too (moveToTag), so the menu's move and the
+// drag's are one write. Returns whether anything was written.
 function postTabDropTag(d: TabDrop, id: string): boolean {
   if (!writesTag(d)) return false;
   const ops = dropLocalOps(d, id, kernelCaps.has("tagEdit") && kernelCaps.has("tagSet"));
@@ -7727,8 +7728,8 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
       const nv = JSON.parse(JSON.stringify(effViews() || {})) as SessionViews;
       postUnionEdits(nv, applyUnionEdit(nv, g, edit));
     };
-    // the edit itself, applied to a blob the caller posts — so a MOVE between groups (below) is two
-    // edits on ONE blob, shown once
+    // the edit itself, applied to a blob the caller posts (a move between groups is not one of these:
+    // the Move to rows below post the drag's move, postTabDropTag)
     const applyUnionEdit = (nv: SessionViews, g: TagUnion, edit: { add?: string[]; remove?: string[] }): UnionEdit => {
       const ops: TagEditOp[] = [];
       let mirrored = false;
@@ -7775,20 +7776,6 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
       if (ops.length) { for (const op of ops) postTagEdit(nv, op); }
       else if (edits.some((e) => e.mirrored)) { pendingSessionViews = nv; renderTabs(); }
     };
-    // a MOVE between groups (tab groups, the user 2026-09-04): add the target tag, drop the HOME
-    // tag, leave every other tag alone — one blob, so the strip never shows the half-moved state.
-    // With both tags local it is ONE `move` op the kernel applies under its lock, both halves or
-    // neither (as two ops, a refused second half left the session in no group). A half with no
-    // local home rides its own wire (editTag) as before.
-    const moveUnion = (from: TagUnion, to: TagUnion) => {
-      const nv = JSON.parse(JSON.stringify(effViews() || {})) as SessionViews;
-      const a = applyUnionEdit(nv, to, { add: [id] });
-      const r = applyUnionEdit(nv, from, { remove: [id] });
-      const add = a.ops.find((o) => o.op === "addMember"), rem = r.ops.find((o) => o.op === "removeMember");
-      if (add && rem && a.ops.length === 1 && r.ops.length === 1)
-        postUnionEdits(nv, { ops: [{ op: "move", tid_from: rem.tid, tid_to: add.tid, sid: id }], mirrored: a.mirrored || r.mirrored });
-      else postUnionEdits(nv, a, r);
-    };
     // HOVER-INTENT open (T163, the user 2026-08-28: hovering down to Tags should open the submenu
     // without another click), the one flyout gesture every tab-menu flyout wears since T380 (Billing
     // too): wireFlyout below the menu builder holds the definition. Click still opens instantly (and
@@ -7825,14 +7812,15 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         const others = unionFor().filter((g) => !g.members.includes(id) && !g.pending);   // a tag being created is not joinable yet
         if (holding().length && others.length) sub.appendChild(el("div", "ctx-sep"));
         // ONE-CLICK MOVE (tab groups on tags, the user 2026-09-04): while the strip is sectioned, each
-        // other tag's row reads "Move to <name>": one click adds that tag and drops THE GROUP THIS COPY
-        // SITS IN (T264b: a session under several tags has a copy in each group, and the menu opened
-        // from a copy speaks for that copy's group — the copy the user right-clicked is the one that
-        // moves; its other tags are left alone). No copy named (an older caller): the first holder in
-        // tagOrder. The row's "+" adds without moving. With no tag, "+ <name>" IS the move. A tag
-        // whose create is still in flight cannot be moved out of (no id to address); the rows read
-        // "+ <name>" until the ack. Whether "move" between equivalent tags is the right verb at all is
-        // the user's call (flagged with T264b); the mechanics are unchanged here.
+        // other tag's row reads "Move to <name>", and one click is the DRAG'S MOVE (the user 2026-10-01,
+        // who wanted the menu to do what dragging the tab into that group does): the session's tags
+        // become exactly that one, whichever copy was right-clicked, through the drop's own decision and
+        // writer (moveToTag, postTabDropTag): ONE `setTags` on a kernel with the `tagSet` cap, the
+        // fewest older ops on one without, the `editTag` wire for a tag homed on another kernel. The
+        // row's "+" adds without moving, the menu's Option-drag. With no tag, "+ <name>" IS the move.
+        // `home` (the group THIS COPY sits in, T264b; no copy named, the first holder in tagOrder) gates
+        // the rows and names the Show-when-folded row below: a tag whose create is still in flight
+        // cannot be moved out of (no id to address), so the rows read "+ <name>" until the ack.
         const home0 = readTabGroups().on ? ((copy !== undefined ? holding().find((g) => g.name === copy) : undefined) ?? holding()[0]) : undefined;
         const home = home0 && !home0.pending ? home0 : undefined;
         for (const g of others) {
@@ -7852,7 +7840,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
             plus.title = "add this tag too (the session keeps its other tags)" + (settings.tabsLocked ? ": adding is not a move, so the lock does not hold it" : "");
             plus.addEventListener("click", (e2) => { e2.stopPropagation(); editUnion(g, { add: [id] }); build(); sb.textContent = subText(); });
             row.appendChild(plus);
-            row.addEventListener("click", (e2) => { e2.stopPropagation(); if (settings.tabsLocked) return; moveUnion(home, g); build(); sb.textContent = subText(); });
+            row.addEventListener("click", (e2) => { e2.stopPropagation(); if (settings.tabsLocked) return; postTabDropTag(moveToTag(unionFor(), g.name, id), id); build(); sb.textContent = subText(); });
           } else {
             lb.append("+ ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);

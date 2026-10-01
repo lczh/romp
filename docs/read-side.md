@@ -459,8 +459,8 @@ jobs:
   one: a header per tag in `tagOrder`, each tab under every tag it carries (a
   session under two tags appears under both), the untagged on a line of their
   own. Sections fold per browser; dragging a header reorders `tagOrder` for every
-  surface; **Move to <tag>** in a tab's menu adds the target tag and drops the
-  tag of the group that copy sits in, in one click. Groups are tags: there is no
+  surface; **Move to <tag>** in a tab's menu sets the session's tags to exactly
+  the target, in one click, the same move as a drag into that group. Groups are tags: there is no
   second store and no per-session group field.
 - **Inheritance.** A session spawned from another joins the parent's tags at the
   creation event: a fork, a promoted comment thread, and `romp new` run inside a
@@ -488,8 +488,8 @@ never refuses it. Every op but create names the tag by its stored id, never by
 name; a create takes an optional name, and the kernel mints the id and, given no
 name, the lowest free "tag N". A move (off one tag, onto another) is one write:
 both halves land or neither does. So is setTags, `{tids, sids}`, which sets the
-sessions' local tags to exactly that list (the tab strip's drag into a group, or
-onto the ungrouped row with an empty list). The kernel answers `tagEditAck` with `ok`, the
+sessions' local tags to exactly that list (the tab strip's drag into a group and
+the tab menu's Move to, or a drag onto the ungrouped row with an empty list). The kernel answers `tagEditAck` with `ok`, the
 post-write client blob, the tag's `tid` and `name`, or a plain refusal. A lens or
 order change still posts the whole blob (`setTimelineViews`) together with
 `edited`, the tag ids the write changed (none for a lens or order write).
@@ -683,8 +683,8 @@ in reply to every `ready` (a pane's bundle posts one per page life; the shell
 page's own socket posts one at every open) and lists the caps on `/version`;
 `tagEdit` covers the targeted op, the acks and the `seq`, and `tagSet` its
 setTags op. A client uses the targeted op only when the cap is present and posts
-the whole blob otherwise; without `tagSet`, the strip's drag reaches the same
-tags through the older ops (a one-to-one move, else adds and removals in turn). A
+the whole blob otherwise; without `tagSet`, the strip's drag and the tab menu's
+Move to reach the same tags through the older ops (a one-to-one move, else adds and removals in turn). A
 message no handler takes is answered `{type: "unknownOp", op, writeId}`, which
 the client treats as a refusal of that write and as withdrawing the cap. The
 `ready` handler sends the caps frame after its own connect push, and the pane

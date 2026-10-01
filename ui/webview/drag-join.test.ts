@@ -11,7 +11,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveTabDrop, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type DropZone, type DropHow, type TabDrop } from "./drag-join";
+import { resolveTabDrop, moveToTag, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type DropZone, type DropHow, type TabDrop } from "./drag-join";
 import { viewTagUnion, type SessionViews } from "./session-views";
 import { applyTagEdit } from "./views-writes";
 
@@ -75,6 +75,28 @@ test("…and dragged into a group it ALREADY carries, from another of its groups
   assert.deepEqual(d, { kind: "move", add: null, remove: [{ tag: "infra", tid: "tag-infra", hosts: [] }], keep: ["tag-qa"], why: "" });
   assert.deepEqual(dropLocalOps(d, WEB, false), [{ op: "removeMember", tid: "tag-infra", sids: [WEB] }]);
   assert.deepEqual(both(VIEWS, d, WEB), ["qa"]);
+});
+
+test("the tab menu's Move to <tag> is the drag's move: a session tagged infra and qa ends [release], in ONE setTags", () => {
+  // the user 2026-10-01: the menu's "Move to" took off only the right-clicked copy's group and added the target, so a
+  // session under several tags kept the rest; it now makes the drag's move, through the drag's decision and writer
+  const d = moveToTag(U(), "release", WEB);
+  assert.equal(d.kind, "move");
+  assert.deepEqual(d, resolveTabDrop(U(), inGroup("release"), WEB, from("infra")), "the plain drop of its infra copy into release");
+  assert.deepEqual(d, resolveTabDrop(U(), inGroup("release"), WEB, from("qa")), "…and of its qa copy: whichever copy was right-clicked");
+  assert.deepEqual(dropLocalOps(d, WEB, true), [{ op: "setTags", tids: ["tag-release"], sids: [WEB] }],
+    "a kernel with the tagSet cap: one op, the full list");
+  assert.deepEqual(holds(applyOps(VIEWS, d, WEB, true), WEB), ["release"], "it holds exactly the tag it was moved to");
+  assert.deepEqual(dropRemoteEdits(d, WEB), [], "every tag here is local: no editTag wire");
+});
+
+test("…and on an older kernel (no tagSet cap) the menu's Move to reaches the same [release] through the older ops", () => {
+  const d = moveToTag(U(), "release", WEB);
+  assert.deepEqual(dropLocalOps(d, WEB, false),
+    [{ op: "move", tid_from: "tag-infra", tid_to: "tag-release", sids: [WEB] }, { op: "removeMember", tid: "tag-qa", sids: [WEB] }],
+    "the atomic move for the first pair, then the rest removed in turn");
+  assert.deepEqual(holds(applyOps(VIEWS, d, WEB, false), WEB), ["release"]);
+  assert.deepEqual(both(VIEWS, d, WEB), ["release"]);
 });
 
 test("the MODIFIER (Option / Alt) adds the group's tag and keeps the rest: the old join", () => {
@@ -201,7 +223,7 @@ test("the shared applier's setTags is the kernel's: listed tags gain the session
 
 test("render.ts wires the rule into the strip's drag: one decision, the cue and the drop off the same zone", () => {
   const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
-  assert.match(RENDER, /import \{ resolveTabDrop, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type TabDrop, type LeaveWords, type DropZone \} from "\.\/drag-join";/);
+  assert.match(RENDER, /import \{ resolveTabDrop, moveToTag, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type TabDrop, type LeaveWords, type DropZone \} from "\.\/drag-join";/);
   // the zone comes from the PROVISIONAL TAB's place in the strip (dropZoneOf), so the cue and the drop
   // cannot disagree — and sectionHeadOf, the group drag's own reader, is the same walk; the copy's origin
   // is its data-copy, which the live reorder never touches
@@ -256,4 +278,9 @@ test("the docs state the move, the modifier's add and the clear, in the user's t
     + "that row is not a group but the sessions carrying no tags, so nothing short of clearing them would put it there."));
   assert.match(REF, prose("A move or a clear is one write on your kernel, so another device never sees the session half-moved"));
   assert.match(REF, prose("which of the two gestures you get depends on what you picked up, never on where you dropped it"));
+  assert.match(REF, prose("pick **Move to <tag>** under **Tags**: one click makes the same move as dragging the tab there (below), so "
+    + "the session takes that tag and loses every other tag it carries, whichever of its copies you right-clicked. The row's "
+    + "**+** adds the tag and keeps the rest, like a drag with Option held (below)."), "the tab menu's Move to is the drag's move");
+  assert.doesNotMatch(REF, prose("drops the tag of the group you right-clicked it in, leaving its other tags alone"),
+    "the menu's old one-tag swap is gone from the docs");
 });

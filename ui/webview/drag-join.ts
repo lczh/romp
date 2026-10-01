@@ -8,7 +8,8 @@
 // drop landed, where the dragged copy came from and whether the copy modifier is held, what the drop
 // does to that session's tags, and the ops that carry it. Pure and DOM-free (the tab-order.ts /
 // dragslot.ts pattern), so the rule executes in node (drag-join.test.ts); render.ts's #tabs
-// dragover/drop handlers paint and post it.
+// dragover/drop handlers paint and post it, and the tab menu's "Move to <tag>" rows post the same move
+// (moveToTag) through the same writer.
 //
 // THE RULE, in the user's terms: the place a tab is dropped states WHERE THEY WANT IT TO APPEAR NOW, and
 // only there.
@@ -149,6 +150,15 @@ export function resolveTabDrop(unions: readonly TagUnion[], zone: DropZone, sid:
   if (!holders.length) return REORDER("untagged");
   const remove = holders.map((g) => removalRoute(g, sid)).filter((r): r is TagRoute => r !== null);
   return remove.length ? { kind: "leave", add: null, remove, keep: [], why: "" } : REORDER("unknown");
+}
+
+/** THE TAB MENU'S "Move to <tag>" (the user 2026-10-01, who wanted the menu's move to do what the drag's does):
+ *  the plain drop into that group, without the geometry, so the menu and the drag are one rule and one write
+ *  (render.ts posts it through postTabDropTag, the drop's own writer). The session's tags become exactly
+ *  [tag], whichever copy was right-clicked. The row's "+" is the menu's Option-drag, an add, and does not come
+ *  through here. */
+export function moveToTag(unions: readonly TagUnion[], tag: string, sid: string): TabDrop {
+  return resolveTabDrop(unions, { section: tag, trail: false }, sid);
 }
 
 /** Does this drop write a tag — the one bit the dragover's cue needs (the group about to take the
