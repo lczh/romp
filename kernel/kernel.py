@@ -33993,6 +33993,23 @@ def _push_subagents(clients, now, live_map):
             _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
 
 
+def _release_subagent_view(sid, agent_id):
+    """closeSubagent (2026-10-01): when no client still views this agent, its file's parse slot for this session and its
+    assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
+    until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
+    memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records."""
+    if any((c.get("subagents") or {}).get((sid, agent_id)) for c in list(_clients)):
+        return
+    try:
+        ppath = _path_of(sid)
+        apath = _subagent_file(ppath, agent_id) if ppath else None
+    except Exception:
+        return
+    if apath is not None:
+        jd.parse_cache_drop_leaf(str(apath), sid)
+        em.release_assembly(str(apath), rompuuid=sid)
+
+
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
 # limit · raise it at claude.ai/settings/usage") — distinct from a 5h/7d RATE window (which _usage()
 # reports, _auto_pause_on_limit already pauses, and which resets on a KNOWN clock the card counts down
@@ -51510,6 +51527,32 @@ def _dead_lane_key(sid, path, branch):
             tuple(_downtime))
 
 
+_dead_lane_released = {}  # sid -> the transcript stat key its dead lane last released at (_release_dead_lane), bounded like the memo
+
+
+def _release_dead_lane(sid, path, tk, alive, live_map):
+    """The rest of the RSS lever (2026-10-01): when a dead lane is cached, its session's assembly entry (an adapter over every
+    record of the leaf, its atoms and maps) and the record entries of its leaf and anchor were left resident while the
+    parse slot went. They go too, under two rules that keep the release from costing more than it frees. Only while the
+    leaf's assembly document stands: a later parse (the session revived, its chat opened, a keyed input moving the lane)
+    then restores from the document and reads the tail from its cut, never the whole transcript. And once per transcript
+    version (`tk`, the transcript's stat key): the lane is derived again whenever a keyed input moves (a caption, a goals
+    write, any session's flags), and a release at every such miss would trade every serve of the entry for a restore; what
+    the first restore after the release rebuilds stays. The record entries that go are the leaf's and its anchor's, less
+    every live lane's leaf and anchor in this build; a file an assembly entry still folds over stays (em.release_records)."""
+    if _dead_lane_released.get(sid) == tk or not em.asm_document_stands(path):
+        return
+    if len(_dead_lane_released) > _DEAD_LANE_MEMO_MAX:
+        _dead_lane_released.pop(next(iter(_dead_lane_released)))
+    _dead_lane_released[sid] = tk
+    em.release_assembly(path, rompuuid=sid)
+    keep = set()
+    for o in alive:
+        if live_map.get(o["sid"]) is not None:
+            keep.update((str(o["path"]), os.path.join(os.path.dirname(str(o["path"])), o["sid"] + ".jsonl")))
+    em.release_records({str(path), os.path.join(os.path.dirname(str(path)), sid + ".jsonl")}, keep=keep)
+
+
 def _dead_lane_marks(marks, t0):
     """The cached marks a build at horizon `t0` would have derived: filtered on the stamped compare value
     and handed out without it, as fresh dicts (the frame is serialized and the memo's are shared)."""
@@ -52857,6 +52900,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
                 _parse_cache.pop(s["path"], None)
                 with _LANES_LOCK:
                     _lanes_memo.pop(sid, None)
+                _release_dead_lane(sid, s["path"], lane_key[0], alive, live_map)   # and its assembly entry and records (2026-10-01)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
         # chip), keyed on the DERIVED chip `state` computed above, not the raw row state. The old form read
         # the row's vocabulary and counted "waiting" as active — but "waiting" IS the post-turn idle state, so
@@ -75133,6 +75177,7 @@ class Handler(BaseHTTPRequestHandler):
                 client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
             if msg["type"] == "closeSubagent":
                 (client.get("subagents") or {}).pop((sid, aid), None)
+                _release_subagent_view(sid, aid)          # the last viewer closed: the agent file's parse goes (2026-10-01)
                 return
             client.setdefault("subagents", {})[(sid, aid)] = True
             try:

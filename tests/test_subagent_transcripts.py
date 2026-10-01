@@ -645,6 +645,13 @@ class OpenClose(World):
         def entries():
             with em._ASM_LOCK:
                 return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == SID]
+
+        def slots():
+            return [p for p in km._parse_cache if os.path.realpath(p) == rp]
+
+        def records():
+            with em._JSONL_CACHE_LOCK:
+                return [k for k in em._JSONL_CACHE if os.path.realpath(k) == rp]
         c1, c2 = _Client(), _Client()
         saved = list(km._clients)
         km._clients[:] = [c1, c2]
@@ -654,16 +661,16 @@ class OpenClose(World):
             self.assertTrue(entries(), "the viewer's frame parsed the agent's file into an assembly entry")
             self._dispatch(c1, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
             self.assertTrue(entries(), "another viewer still has the agent open: kept")
-            self.assertIsNotNone(km._parse_cache.get(str(self.bg_file)))
+            self.assertTrue(slots())
             self._dispatch(c2, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
             self.assertEqual(entries(), [], "the last viewer closed: the agent file's assembly entry is released")
-            self.assertIsNone(km._parse_cache.get(str(self.bg_file)), "and its parse slot")
-            with em._JSONL_CACHE_LOCK:
-                self.assertIn(str(self.bg_file), em._JSONL_CACHE, "the record entry is the agent folds' to drop")
+            self.assertEqual(slots(), [], "and its parse slot")
+            self.assertTrue(records(), "the record entry is the agent folds' to drop")
             append_jsonl(self.bg_file, [dict(arec(T0 + 40, "%s-a9" % AID_BG, [{"type": "text", "text": "Nearly done."}],
                                                   "%s-fin" % AID_BG), isSidechain=True, agentId=AID_BG)])
             self._dispatch(c1, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
-            self.assertEqual(km._parse_mode.get(str(self.bg_file)), "full", "the reopen parses the agent's file once, whole")
+            self.assertEqual([m for p, m in km._parse_mode.items() if os.path.realpath(p) == rp], ["full"],
+                             "the reopen parses the agent's file once, whole")
             reopened = c1.out[-1]
             self.assertEqual(reopened["events"][-1]["md"], "Nearly done.")
             km._SUBAGENT_FRAMES.clear(); km._parse_cache.clear()

@@ -682,6 +682,8 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
                        #                   whether frozen or not, so an unfreeze reclaim on a pop would collect nothing (the
                        #                   2026-09-21 review's correction)
+                       "pinnedKept": 0, "pinnedFreedBytes": 0,   # drops that kept an entry an assembly entry folds over
+                       #                   (_drop_or_reseat), and the bytes of the records before a restored entry's cut they let go
                        "wholeReads": {}}   # "kind<-caller" -> {"count", "bytes"}: every read that pulled a file WHOLE (from zero, or a
 #                                          tail entry upgraded to the whole file), named by the reader's kind and the first frame
 #                                          outside this module (T384: the way hydratedBy named the planner; the 0.8 GB of whole
@@ -1288,12 +1290,91 @@ def checkpoint_drop_writes_on():
 
 
 def _pop_owed_entry(key):
-    """Release `key`'s cached entry unwritten (an owed drop paid by the pop alone), under the reader's lock only."""
+    """Release `key`'s cached entry unwritten (an owed drop paid by the pop alone), under the reader's lock only. A file still
+    on disk goes through _drop_or_reseat, so an entry an assembly entry folds over stays (2026-10-01); a file that is gone
+    is popped."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(key)
+    if ent is not None and os.path.exists(key):
+        _drop_or_reseat(key, ent)
+        return
     with _JSONL_CACHE_LOCK:
         w = _cache_pop_locked(key)
         if w:
             _RECORD_CACHE_STATS["dropped"] += 1
             _RECORD_CACHE_STATS["droppedBytes"] += w
+
+
+def _asm_pinned_base(key, gen):
+    """The lowest record number an assembly entry that keeps folding needs of `key` at the reader's generation `gen` (its
+    recs row, the (gen, base, count) the fold's gate compares), or None when there is none. Two entries over that generation
+    do not count, since a drop sends their next visit to the restore road, which reads the tail from the document's cut: a
+    whole entry that wrote its own document (the settle's or the converge pass's write; one marked for re-seat restores at
+    its next visit anyway, and kept whole the reader entry would serve that restore as it stands, every record with it),
+    and a restored entry that read over a whole entry (base 0). Takes _ASM_LOCK for the snapshot alone, never under the
+    reader's lock."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    low = None
+    for e in entries:
+        if not e or e.get("docWritten"):
+            continue
+        row = (e.get("recs") or {}).get(key)
+        if row is None or len(row) != 3 or row[0] != gen:
+            continue
+        if row[1] == 0 and getattr(e.get("ad"), "seed", None) is not None:
+            continue
+        low = row[1] if low is None else min(low, row[1])
+    return low
+
+
+def _drop_or_reseat(key, ent):
+    """Let `key`'s reader entry `ent` go (that very entry, never a newer one another thread stored), the way every drop of
+    the record cache does: popped, unless an assembly entry still folds over its generation (2026-10-01). Such an entry's
+    adapter holds the same records, so the drop freed nothing, made recordCache.bytes fall while the memory stayed, and
+    retired the generation: the assembly entry's next visit demoted (g:rewrite, g:nonleaf) to a restore, or to a whole parse
+    when no document stood, and a whole reader in between decoded a second copy. The entry is kept instead, from the lowest
+    record such an assembly entry read from, at the same generation and in its place in the LRU: under a whole assembly
+    entry all of it, so nothing changes; under restored ones the tail from their cut, which lets go of the records before
+    the cut a whole reader's upgrade decoded (the gate's base test still passes; a fold whose cursor sits before the cut
+    reads the file whole once, at the same generation). Returns ("dropped" | "kept" | None, the bytes let go)."""
+    low = _asm_pinned_base(key, ent[6])
+    with _JSONL_CACHE_LOCK:
+        if _JSONL_CACHE.get(key) is not ent:
+            return None, 0
+        if low is None:
+            w = _cache_pop_locked(key)
+            _RECORD_CACHE_STATS["dropped"] += 1
+            _RECORD_CACHE_STATS["droppedBytes"] += w
+            return "dropped", w
+        _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
+        cut = low - ent[5]
+        offs = ent[7] if len(ent) > 7 else None
+        if cut <= 0 or cut > len(ent[4]) or offs is None or len(offs) < 2 * len(ent[4]):
+            return "kept", 0
+        new = (ent[0], ent[1], ent[2], ent[3], ent[4][cut:], low, ent[6], array.array("q", offs[2 * cut:]))
+        w0, w1 = _entry_weight(ent), _entry_weight(new)
+        _JSONL_CACHE[key] = new                          # a new value under the same key: the LRU position stands
+        _JSONL_CACHE_BYTES[0] = max(0, _JSONL_CACHE_BYTES[0] - w0 + w1)
+        _RECORD_CACHE_STATS["pinnedFreedBytes"] = _RECORD_CACHE_STATS.get("pinnedFreedBytes", 0) + (w0 - w1)
+        return "kept", w0 - w1
+
+
+def release_records(paths, keep=()):
+    """The record side of the events that end a file's use (2026-10-01): each of `paths` outside `keep` (the files a live
+    session still reads) leaves the reader's cache through _drop_or_reseat, so a file an assembly entry still folds over
+    stays. Counted under dropped and droppedBytes. Returns how many entries were dropped."""
+    keep = {str(p) for p in keep}
+    n = 0
+    for p in paths:
+        key = str(p)
+        if key in keep:
+            continue
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(key)
+        if ent is not None and _drop_or_reseat(key, ent)[0] == "dropped":
+            n += 1
+    return n
 
 
 class hold_quiescent_drops:
@@ -2315,11 +2396,7 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 _CKPT_STATS["converge"]["dropWrites"] += 1
     if not pop:
         return wrote
-    with _JSONL_CACHE_LOCK:
-        if _JSONL_CACHE.get(key) is ent:
-            w = _cache_pop_locked(key)
-            _RECORD_CACHE_STATS["dropped"] += 1
-            _RECORD_CACHE_STATS["droppedBytes"] += w
+    _drop_or_reseat(key, ent)                             # kept from its base while an assembly entry folds over it (2026-10-01)
     return wrote
 
 
@@ -5330,6 +5407,41 @@ def evict_document(leaf_path):
                 _cache_pop_locked(f)
                 dropped += 1
     return len(popped), dropped
+
+
+def release_assembly(leaf_path, rompuuid=None):
+    """Drop a leaf's assembly entries at an event that ends its use (2026-10-01): a /clear or a resume fork retiring the
+    leaf (the judges' _note_leaf), a dead timeline lane, the last viewer of a subagent closing. Before, nothing left at
+    those events: the entry (an adapter holding every record it read, its atoms and maps, a restored entry's lazy index)
+    stayed until the cache's count cap reached it. Only the assembly cache and the hydrated-body memo are touched: the
+    record cache is the reader's (a /clear's anchor is still the new leaf's candidate; a caller drops the files no live
+    session reads with release_records), and evict_document, which pops every candidate's record entry, is the scripts'.
+    With `rompuuid`, only that session's entries go (a fork child's flip leaves the parent's entry of the same file). Each
+    popped entry's lazy index gives its memo back outside _ASM_LOCK (_asm_release), and the hydrated bodies of its pre-cut
+    records leave the memo: nothing serves that entry's atoms again, and the session parsed again restores and hydrates
+    afresh, as after an eviction. Returns how many entries went, counted `released` among the parse's road counters."""
+    rp = os.path.realpath(str(leaf_path))
+    with _ASM_LOCK:
+        keys = [k for k in _ASM_CACHE if k[0] == rp and (rompuuid is None or k[1] == str(rompuuid))]
+        popped = [e for e in (_ASM_CACHE.pop(k, None) for k in keys) if e is not None]
+    uuids = set()
+    for e in popped:
+        _asm_release(e)                              # OUTSIDE _ASM_LOCK: release takes _MAT_LOCK, never nested with it
+        ix = e.get("index")
+        if ix is not None:
+            uuids.update(r[0] for r in (ix.records or ()) if r)
+        pre = e.get("prefix")
+        if isinstance(pre, list):                    # the atoms-only form's lazy atoms, read without materializing any
+            uuids.update(a.get("uuid") for a in list.__iter__(pre) if isinstance(a, dict) and a.get("uuid"))
+    if uuids:
+        with _ASM_CKPT_LOCK:
+            for u in uuids:
+                hit = _HYDRATED.pop(u, None)
+                if hit is not None:
+                    _HYDRATED_BYTES[0] -= hit[1]
+    if popped:
+        _asm_stat("released", len(popped))
+    return len(popped)
 
 
 def _asm_gates(entry, leaf_path, candidate_files, links):

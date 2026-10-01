@@ -9082,6 +9082,9 @@ def _note_leaf(sid, path_str):
             retired.add(prev)
     if prev is not None and prev != path_str:
         parse_cache_drop_leaf(prev, sid)
+        em.release_assembly(prev, rompuuid=sid)   # and this sid's assembly entry of it (2026-10-01), which held every record of the
+        #                                           retired leaf until the cache's count cap; the record cache is left alone (the
+        #                                           anchor is the new leaf's candidate, read through it)
 
 
 def _leaf_retired(sid, leaf):
