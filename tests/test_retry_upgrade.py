@@ -341,7 +341,8 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
     click until a report naming its family; a context refresh the CLI answered before it had the pick answers nothing for
     it; a session revived with a pick in flight starts from the pick's name, unless the pick is above the name it had; and
     a move onto a versioned pick's own model is that pick landing. A real fallback after the pick lands is still carded
-    and armed, unless it lands at or above a versioned pick, where there is nothing to retry. Every road drives the real
+    and armed, unless it lands at or above a versioned pick, where there is nothing to retry, and a pick the CLI refuses
+    judges the retry again against the model it puts back. Every road drives the real
     backend: set_model, _do_set_model and _do_refresh_context against a fake client, and the learn."""
 
     LIVE = {"name": "web", "model": "claude-opus-5-5", "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5"}
@@ -762,10 +763,10 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
     def test_a_real_fallback_at_or_above_a_versioned_pick_arms_no_retry(self):
         # the learn arms from the live name, and after a versioned pick below the live model a reply from before the pick
         # can move that name back above the pick; a real fallback that then lands at or above the pick is carded, but
-        # the session is already served on what was picked, so there is nothing to retry (the requested-model mark and
-        # the switch flip's re-arm make the same comparison). Armed, the retry's end at the pick fired at the next reply
-        # on the very model the session fell to: no attempt made, the log saying it was back after 0 attempts and a
-        # "Model back on" card naming that model twice (the #33 follow-up's review, round one, third gate)
+        # the session is already served at or above what was picked, so there is nothing to retry (the requested-model
+        # mark and the switch flip's re-arm make the same comparison). Armed, the retry's end at the pick fired at the
+        # next reply on the very model the session fell to: no attempt made, the log saying it was back after 0 attempts
+        # and a "Model back on" card naming that model twice (the #33 follow-up's review, round one, third gate)
         for road, reg, pick, landed, before, low, card in (
                 ("Sonnet 5 picked on Opus 5.5, the pick lands, a reply of a turn already running on Opus 5.5 moves the "
                  "name back, then a real fallback to Opus 4.8, above the pick", {}, "claude-sonnet-5", ["claude-sonnet-5"],
@@ -831,6 +832,63 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 self.assertEqual(h.restored, [(card[1], sb.pretty_model(picked))], "%s: back on the pick" % road)
                 self.assertEqual(be.retry_model_upgrades(now + 3 * sb.RETRY_UPGRADE_S), 0, "%s: no attempt after it" % road)
                 self.assertEqual(len(s._asks), 1, road)
+
+    def test_a_pick_the_cli_refuses_judges_the_retry_again_against_the_model_it_puts_back(self):
+        # the learn judges a carded fallback's arm against the pick standing when it lands, and a live pick is what
+        # otherwise clears or re-judges an arm; a refusal makes none, it puts back the model the session had. The arm
+        # and the pick put back can then disagree both ways (the #33 follow-up's review, round one, fourth gate): a retry
+        # standing at or above a versioned pick put back ended at the next reply on the very model the session fell to,
+        # with a "Model back on" card and no attempt made, and a session left below the pick put back had the
+        # requested-model mark promise a retry that nothing ran until the next turn's reply
+        refused = Exception("Unknown model: claude-opus-4-8")
+        road = ("Sonnet 5 picked on Opus 5.5 and landed, a reply on Opus 5.5 moves the name back, Opus 4.8 picked and its "
+                "dots ended on Opus 5.5, a real fallback to Opus 4.5 below it, then the CLI refuses Opus 4.8")
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._pick(be, s, "claude-sonnet-5")
+            self._settle(s, ["claude-sonnet-5"])
+            self._served(s, "claude-opus-5-5")                       # a reply of a turn already running
+            self._pick(be, s, "claude-opus-4-8")
+            self._served(s, "claude-opus-5-5")                       # ends the second pick's dots
+            self._served(s, "claude-opus-4-5")                       # a real fallback, below Opus 4.8
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.5")], "%s: the real fallback is carded" % road)
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: and armed, below the pick" % road)
+            self.assertEqual((arm["from"], arm["to"], arm["pick"]), ("Opus 5.5", "Opus 4.5", "claude-opus-4-8"), road)
+            self._settle(s, ["claude-sonnet-5"], lost=refused)       # the CLI's refusal
+            self.assertEqual(s.chosen_model, "claude-sonnet-5", "%s: the refusal puts the accepted model back" % road)
+            after_refusal = s._upgrade_retry
+            self._init(s, "claude-sonnet-5"); self._served(s, "claude-opus-4-5")   # the next reply, still on Opus 4.5
+            self.assertEqual(h.restored, [], "%s: a 'Model back on' card for the very model the session fell to, with "
+                                             "no attempt made" % road)
+            self.assertIsNone(after_refusal, "%s: the arm stood under a pick put back that the session is served "
+                                             "above" % road)
+            self.assertEqual([m for m in be._logs if "back on" in m], [], "%s: the retry was logged as ending" % road)
+            self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 0,
+                             "%s: the tick reconnected the session" % road)
+            self.assertEqual(s._asks, [], "%s: a reconnect was asked for" % road)
+        road = ("Opus 4.8 picked on Opus 5.5 and its dots ended on Opus 5.5, a real fallback to Opus 5 above it, then the "
+                "CLI refuses Opus 4.8")
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._pick(be, s, "claude-opus-4-8")
+            self._served(s, "claude-opus-5-5")                       # a reply of the turn the pick was made in
+            self._served(s, "claude-opus-5")                         # a real fallback, above Opus 4.8
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 5")], "%s: the real fallback is carded" % road)
+            self.assertIsNone(s._upgrade_retry, "%s: at or above the pick, nothing to retry yet" % road)
+            self._settle(s, ["claude-opus-5-5"], lost=refused)       # the CLI's refusal
+            self.assertEqual(s.chosen_model, "claude-opus-5-5", "%s: the refusal puts the accepted model back" % road)
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: the session sits below the pick put back and nothing retries it" % road)
+            self.assertEqual((arm["from"], arm["to"], arm["pick"]), ("Opus 5.5", "Opus 5", "claude-opus-5-5"), road)
+            mark = sb.model_fallback_row(s.chosen_model, s._served_model, "", arm, True)
+            self.assertTrue(mark and mark["retry"]["armed"], "%s: the requested-model mark says a retry is armed" % road)
+            now = time.time()
+            self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
+            self.assertEqual(len(s._asks), 1, road)
+            self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-5-5")   # a turn served on the pick put back
+            self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick left the retry standing" % road)
+            self.assertEqual(h.restored, [("Opus 5", "Opus 5.5")], "%s: back on the pick put back" % road)
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
