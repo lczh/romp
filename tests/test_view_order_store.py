@@ -622,6 +622,59 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, largest n=12 taken at %d"
                                        % (self.B[:8], km._BOOT_ID, seq9["n"], seq12["n"])])
 
+    # The test above pins the rule in one shape; these three run the same sequence with one more publish or with a count
+    # that proves nothing (the third review round). In each, pane A's n is not under the kept n (11 over Y's 10, or equal
+    # to Y's second 11), so it is judged against the largest, 12, and nothing else can drop it first.
+    def tab_y_ten(self):
+        """The sequence above up to tab Y's publish: B:9, B:12 (api and web) on 9's count, and Y's B:10 (api, web and
+        tests) on 12's count. Returns the counts 9 and 12 were taken at, as frames serve them."""
+        self.dispatch(self.publish(self.NONE, {"browser": self.B, "n": 9}))
+        seq9 = km._view_order_frame()["foldsSeq"]
+        [b12] = self.dispatch(self.publish(dict(self.NONE, collapsed=["api", "web"]), {"browser": self.B, "n": 12, "received": seq9}))
+        seq12 = b12[0][2]["foldsSeq"]
+        [y10] = self.dispatch(self.publish(dict(self.NONE, collapsed=["api", "web", "tests"]),
+                                           {"browser": self.B, "n": 10, "received": seq12}))
+        self.assertEqual([m[0] for m in y10], ["phone", "desktop"], "premise: Y's 10, on 12's count, taken and pushed")
+        return seq9, seq12
+
+    def test_tab_y_publishing_again_before_the_slow_publish_lands_leaves_the_largest_at_12(self):
+        # Y's second publish, B:11 on 12's count, folding docs too: under 12, on 12's count, so taken; it removes Y's 10 (at
+        # or under its own n) and leaves 12 on 12's count. Pane A's B:11 on 9's count is then judged against 12 and dropped.
+        # A take compared against the kept n instead of each pair's (here: one at or above the kept n clearing the list)
+        # takes A's publish and ends at api alone
+        seq9, seq12 = self.tab_y_ten()
+        four = dict(self.NONE, collapsed=["api", "web", "tests", "docs"])
+        [y11, a11] = self.dispatch(self.publish(four, {"browser": self.B, "n": 11, "received": seq12}),
+                                   self.publish(dict(self.NONE, collapsed=["api"]), {"browser": self.B, "n": 11, "received": seq9}))
+        self.assertEqual([m[0] for m in y11], ["phone", "desktop"], "premise: Y's 11 taken and pushed")
+        entry = km._view_folds_seen[self.B]
+        self.assertEqual((entry["top"], entry["top_at"], entry["pairs"]), (12, seq12["n"], [[12, seq12["n"]], [11, seq12["n"] + 2]]),
+                         "the largest stays 12 on 12's count, and Y's 11 replaced Y's 10")
+        self.assertEqual(self.stored_folds(), four, "all four folds stand")
+        self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
+        self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, largest n=12 taken at %d"
+                                       % (self.B[:8], km._BOOT_ID, seq9["n"], seq12["n"])])
+
+    def test_under_the_largest_a_count_of_an_earlier_kernel_life_proves_nothing(self):
+        # a pane's send queued across a kernel restart and replayed with the earlier life's count, numbered between the kept
+        # n and the largest; a count above 12's, so only the life check drops it
+        seq9, seq12 = self.tab_y_ten()
+        earlier = {"boot": "an earlier life", "n": seq12["n"] + 5}
+        [a11] = self.dispatch(self.publish(dict(self.NONE, collapsed=["api"]), {"browser": self.B, "n": 11, "received": earlier}))
+        self.assertEqual(self.stored_folds(), dict(self.NONE, collapsed=["api", "web", "tests"]), "all three folds stand")
+        self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
+        self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, largest n=12 taken at %d"
+                                       % (self.B[:8], "an earlier life", seq12["n"] + 5, seq12["n"])])
+
+    def test_under_the_largest_a_publish_with_no_count_proves_nothing(self):
+        # such a publish from a page bundle that predates the count
+        seq9, seq12 = self.tab_y_ten()
+        [a11] = self.dispatch(self.publish(dict(self.NONE, collapsed=["api"]), {"browser": self.B, "n": 11}))
+        self.assertEqual(self.stored_folds(), dict(self.NONE, collapsed=["api", "web", "tests"]), "all three folds stand")
+        self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
+        self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=none, largest n=12 taken at %d"
+                                       % (self.B[:8], seq12["n"])])
+
     def test_a_record_that_came_back_older_still_lands_every_publish_even_in_quick_succession(self):
         # the browser was killed before its storage was written: the kernel keeps its 5, and its record says 1. Each publish
         # it makes from then on carries the count of its connect push, built after 5 was taken: the first is taken under
