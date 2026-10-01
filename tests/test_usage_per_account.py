@@ -73,8 +73,10 @@ class AccountIdentity(unittest.TestCase):
     def test_the_usage_payload_carries_it(self):
         self.assertIn('"acct": _claude_account(),', inspect.getsource(km._usage))
         # …and, since 2026-08-09, the login's NAME beside it — display for the hover only (the
-        # rail's cross-host dedup stays on the digest, which carries nothing)
-        self.assertIn('"acctLabel": _claude_account_label(),', inspect.getsource(km._usage))
+        # rail's cross-host dedup stays on the digest, which carries nothing). Named by its kind since
+        # 2026-10-01, the spend detail's words: the email no longer rides the usage payload at all.
+        self.assertIn('"acctName": _acct_name(),', inspect.getsource(km._usage))
+        self.assertNotIn("_claude_account_label", inspect.getsource(km._usage))
 
 
 class FleetRollup(unittest.TestCase):
@@ -234,6 +236,106 @@ class RailRendering(unittest.TestCase):
         self.assertIn("_remotes.values()", src)
         for net in ("HTTPConnection", "_poll_remote_usage", "subprocess"):
             self.assertNotIn(net, src, "the route must answer from the cache")
+
+
+
+class AccountWithoutWindows(unittest.TestCase):
+    """An account that ANSWERED it has no usage windows (the snapshot writer's noWindows, stamped with the login that
+    answered: an enterprise seat meters a monthly spend limit instead) is said, named by its kind, with the key's spend
+    beside it (the user 2026-10-01, whose hover showed a 26-day-old reading as that account's allowance, its email as
+    the head). Before, a signed-in machine with no windows on file answered None, dropping its key spend with it."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved = (km.jd.STATE, km._claude_account, km._kind_read, km._auth_key_present)
+        km.jd.STATE = __import__("pathlib").Path(self.d)
+        km._claude_account = lambda: ACCT_A
+        km._kind_read = lambda: "enterprise"
+        km._auth_key_present = lambda: True
+        day, hour = km.time.strftime("%Y-%m-%d"), km.time.strftime("%Y-%m-%dT%H")
+        b = {"usd": 9.0, "turns": 3, "tokIn": 90, "tokOut": 0, "tokCacheR": 0, "tokCacheW": 0,
+             "key": {"usd": 4.0, "turns": 1, "tok": 40, "tokIn": 40, "tokOut": 0, "tokCacheR": 0, "tokCacheW": 0},
+             "bySid": {"11111111-2222-3333-4444-555555555555": {"usd": 9.0, "turns": 3, "tok": 90}}}
+        (km.jd.STATE / "spend.json").write_text(json.dumps({"days": {day: b}, "hours": {hour: b}}))
+
+    def tearDown(self):
+        km.jd.STATE, km._claude_account, km._kind_read, km._auth_key_present = self.saved
+
+    def _file(self, acct):
+        (km.jd.STATE / "usage.json").write_text(json.dumps(
+            {"t": 1000, "acct": acct, "five_hour": None, "seven_day": None, "fable": None, "noWindows": True}))
+
+    def test_it_is_said_named_by_kind_and_the_key_spend_rides_beside_it(self):
+        self._file(ACCT_A)
+        u = km._usage()
+        self.assertIsNotNone(u, "a known answer, never dropped as nothing known")
+        self.assertTrue(u["noWindows"])
+        self.assertEqual(u["acctName"], "Enterprise seat", "the spend detail's name for the account")
+        self.assertEqual(u["spend"]["day"]["usd"], 4.0, "the key's dollars, as on the windows arm")
+        self.assertNotIn("fiveHour", u)
+        self.assertNotIn("acctLabel", u, "no email on the rail")
+
+    def test_an_answer_from_another_login_is_not_this_ones(self):
+        self._file(ACCT_B)
+        self.assertIsNone(km._usage())
+
+    def test_the_windows_arm_names_the_account_by_kind_too(self):
+        (km.jd.STATE / "usage.json").write_text(json.dumps(
+            {"t": 1000, "acct": ACCT_A, "five_hour": {"pct": 30, "resets_at": None}, "seven_day": None, "fable": None}))
+        km._kind_read = lambda: "personal"
+        self.assertEqual(km._usage()["acctName"], "Personal plan")
+        km._kind_read = lambda: ""
+        self.assertEqual(km._usage()["acctName"], "Claude account", "a kind that cannot be read is still no email")
+
+
+class RailByAccount(unittest.TestCase):
+    """The usage hover's by-account line (the user 2026-10-01, who read seat dollars summed unmarked into the hover's
+    figures): each host's payload carries its week by billing route with the routes' identities, no email
+    (_rail_routes), and /usage/fleet folds every host's by the spend detail's own rule (_rail_accounts), so one seat
+    reached by one machine's sign-in and another's stored token is one entry, its dollars an estimate."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved = (km.jd.STATE, km._self_host, km._machine_identity)
+        km.jd.STATE = __import__("pathlib").Path(self.d)
+        km._self_host = lambda: "TESTHOSTA"
+
+    def tearDown(self):
+        km.jd.STATE, km._self_host, km._machine_identity = self.saved
+
+    def test_the_payload_carries_the_week_by_route_and_no_email(self):
+        km._machine_identity = lambda: {"state": "ok", "acct": ACCT_A, "org": "Example Org", "orgDigest": "o1",
+                                        "kind": "enterprise", "email": "user@example.test"}
+        hour = km.time.strftime("%Y-%m-%dT%H")
+        old = km.time.strftime("%Y-%m-%dT%H", km.time.localtime(km.time.time() - 9 * 86400))
+        b = {"usd": 10.0, "turns": 4, "key": {"usd": 3.0, "turns": 1, "tok": 1},
+             "byLogin": {"aaaa1111": {"usd": 5.0, "turns": 2, "tok": 2}}, "bySid": {}}
+        (km.jd.STATE / "spend.json").write_text(json.dumps({"days": {}, "hours": {hour: b, old: dict(b, usd=99.0)}}))
+        rr = km._rail_routes()
+        self.assertEqual(rr["week"], {"key": [3.0, 1], "login:aaaa1111": [5.0, 2], "machine": [2.0, 1]},
+                         "the week's buckets only, split as the spend detail splits them")
+        machine = [m for m in rr["billing"] if m["route"] == "machine"][0]
+        self.assertEqual(machine["acct"], ACCT_A)
+        self.assertNotIn("user@example.test", json.dumps(rr), "the email never rides the rail")
+
+    def test_one_seat_two_routes_is_one_entry_and_an_older_build_is_named(self):
+        seat = {"acct": ACCT_A, "kind": "enterprise", "org": "Example Org"}
+        rows = [{"host": "", "usage": {"spend": {}, "spendRoutes": {
+                    "week": {"key": [10.0, 2], "machine": [3.0, 1]},
+                    "billing": [{"route": "key"}, dict(seat, route="machine", state="ok")]}}},
+                {"host": "TESTHOSTB", "usage": {"spend": {}, "spendRoutes": {
+                    "week": {"key": [5.0, 1], "login:aaaa1111": [7.0, 3]},
+                    "billing": [{"route": "key"}, dict(seat, route="login:aaaa1111", label="work")]}}},
+                {"host": "TESTHOSTC", "usage": {"spend": {"week": {"usd": 1.0}}}}]
+        accts, missing = km._rail_accounts(rows)
+        self.assertEqual(accts, [{"name": "Enterprise seat", "kind": "seat", "usd": 10.0, "est": True},
+                                 {"name": "API key", "kind": "key", "usd": 15.0, "est": False}])
+        self.assertEqual(missing, ["TESTHOSTC"], "spend on the rail that the line cannot fold is counted out by name")
+
+    def test_the_route_ships_the_fold(self):
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn('accts, accts_missing = _rail_accounts(rows)', src)
+        self.assertIn('"accounts": accts, "accountsMissing": accts_missing', src)
 
 
 if __name__ == "__main__":

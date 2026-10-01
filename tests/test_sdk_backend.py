@@ -2995,8 +2995,9 @@ class SpendRecord(unittest.TestCase):
             ksrc = f.read()
         self.assertIn('if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):',
                       ksrc, "_usage serves spend on the legacy marker OR a login-less machine with recorded spend")
-        self.assertIn('"spend": _spend_windows()', ksrc)
-        self.assertIn("def _spend_windows(keyed_only=False):", ksrc)   # keyed_only: the mixed-host API sum (test_session_auth)
+        # less a stored login's turns since 2026-10-01: those spent a seat, not the key (test_session_auth)
+        self.assertIn('"spend": _spend_windows(login_split=True)', ksrc)
+        self.assertIn("def _spend_windows(keyed_only=False, login_split=False):", ksrc)   # keyed_only: the mixed-host API sum (test_session_auth)
 
     def _spend_session(self, sid="11111111-2222-3333-4444-bbbbbbbbbbbb", name="n", **reg):
         import asyncio
@@ -4689,6 +4690,56 @@ class RateLimitUsageStaleness(unittest.TestCase):
         self.be._record_usage_snapshot({"rate_limits": {"limits": [
             {"kind": "session", "percent": 12, "resets_at": now + 3600}]}})
         self.assertEqual(self._usage()["t"], now - 999, "an identical snapshot must not refresh t")
+
+    def test_get_usage_snapshot_reads_the_documented_window_fields(self):
+        # the reply's documented fields (the CLI's get_usage schema): five_hour / seven_day as {utilization, resets_at}
+        # and the per-model weekly windows as model_scoped[]; a body with no limits[] row was dropped whole before
+        self.be._record_usage_snapshot({"rate_limits": {
+            "five_hour": {"utilization": 41.6, "resets_at": "2026-07-03T00:59:59+00:00"},
+            "seven_day": {"utilization": 12.0, "resets_at": "2026-07-06T18:59:59+00:00"},
+            "model_scoped": [{"display_name": "Fable", "utilization": 30.2, "resets_at": "2026-07-06T18:59:59+00:00"}]}})
+        out = self._usage()
+        self.assertEqual((out["five_hour"]["pct"], out["seven_day"]["pct"], out["fable"]["pct"]), (42, 12, 30))
+        self.assertIsInstance(out["five_hour"]["resets_at"], int)
+        self.assertNotIn("noWindows", out)
+
+    def test_an_account_that_answers_it_has_no_windows_replaces_the_old_reading(self):
+        # the user 2026-10-01: an enterprise seat answers get_usage with five_hour and seven_day null (it meters a
+        # monthly spend limit instead) and no limits[]; every such answer was dropped, so a weeks-old unstamped
+        # reading stayed on the rail as that account's allowance. The answer is recorded, stamped, as noWindows.
+        now = int(time.time())
+        self._write_usage({"t": now - 30 * 86400, "acct": "", "five_hour": {"pct": 71, "resets_at": now - 26 * 86400},
+                           "seven_day": {"pct": 16, "resets_at": now - 24 * 86400}, "fable": None})
+        sb.acct_digest, real = (lambda: "a1" * 6), sb.acct_digest
+        try:
+            answer = {"rate_limits": {"five_hour": None, "seven_day": None, "seven_day_opus": None,
+                                      "extra_usage": {"is_enabled": True, "monthly_limit": 1000, "used_credits": 50,
+                                                      "utilization": 5.0, "currency": "USD"}}}
+            self.be._record_usage_snapshot(answer)
+            out = self._usage()
+            self.assertTrue(out.get("noWindows"), "the account's answer is recorded")
+            self.assertEqual((out["five_hour"], out["seven_day"], out["fable"]), (None, None, None), "the old reading is gone")
+            self.assertEqual(out["acct"], "a1" * 6, "stamped with the login that answered")
+            t1 = out["t"]
+            self._write_usage(dict(out, t=t1 - 100))
+            self.be._record_usage_snapshot(answer)
+            self.assertEqual(self._usage()["t"], t1 - 100, "the same answer again is no change: t stays")
+            self.be._record_usage_snapshot({"rate_limits": {"five_hour": {"utilization": 10, "resets_at": now + 3600},
+                                                            "seven_day": None}})
+            out = self._usage()
+            self.assertEqual(out["five_hour"]["pct"], 10)
+            self.assertNotIn("noWindows", out, "a window read again clears the mark")
+        finally:
+            sb.acct_digest = real
+
+    def test_an_unavailable_endpoint_says_nothing_about_the_account(self):
+        # rate_limits null is the usage endpoint unavailable (a token without the scope, a failed fetch): no write
+        now = int(time.time())
+        before = {"t": now - 999, "acct": "", "five_hour": {"pct": 20, "resets_at": now + 3600}, "seven_day": None, "fable": None}
+        self._write_usage(before)
+        self.be._record_usage_snapshot({"rate_limits": None, "subscription_type": "enterprise"})
+        self.be._record_usage_snapshot({"rate_limits": {"extra_usage": None}})
+        self.assertEqual(self._usage(), before)
 
     def test_turn_end_schedules_the_usage_refresh(self):
         import inspect

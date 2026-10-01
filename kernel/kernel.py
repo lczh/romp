@@ -48486,15 +48486,21 @@ def _usage():
         # and the guard is what keeps unstamped fixtures/CI (temp STATE, no credential file, no spend)
         # reading None instead of coupling to the runner's real login (the deliberate decoupling the
         # acct-stamp comment above records). A window-less file on a LOGGED-IN machine stays None —
-        # nothing known, draw nothing (never a confident zero).
+        # nothing known, draw nothing (never a confident zero) — unless the account itself answered that
+        # it has no windows (the noWindows arm below).
         if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):
             # The spend WINDOWS mirror the subscription bars (5h / 7d / month) so the two auth modes
             # read identically; _spend_windows always returns all three, zero-filled on a fresh kernel
             # (an empty slot reads as broken — the user 2026-08-04, post-restart). TOTAL sums, not the
-            # keyed split: on a no-login machine every turn bills the key, and legacy files predate
-            # the split. The rail's label is the constant 'API' — no fragment of the key travels
+            # keyed split: on a no-login machine every turn bills the key, and legacy files predate the
+            # split — EXCEPT a turn a stored login (T346) billed: a session here can bill a subscription
+            # seat through a login's token, an estimate at API prices that this cell, labelled API, showed
+            # as key dollars (the user 2026-10-01, who saw the seat's figure in the usage hover after
+            # linking the login; the spend detail's By account summary shows it as the seat's). A bucket
+            # holding such turns reads its key sub-count (login_split); every other bucket, its total.
+            # The rail's label is the constant 'API' — no fragment of the key travels
             # (the user 2026-08-08; hosts are told apart by name in the hover, not by key).
-            out = {"apiKey": True, "spend": _spend_windows(),
+            out = {"apiKey": True, "spend": _spend_windows(login_split=True),
                    "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
                    "acct": _claude_account()}
             # (The telemetryUnavailable flag + its "rate-limit telemetry unavailable under API-key
@@ -48502,14 +48508,23 @@ def _usage():
             # key-only and want the spend without a notice about rate limits that don't apply.
             # Absence of windows on a keyed host is the designed state and now simply looks like
             # what it is: no windows.)
-            ss = _spend_series()          # TOTAL, like the windows above: everything here bills the key
+            ss = _spend_series(login_split=True)   # the key's turns, like the windows above
             if ss:
                 out["spendSeries"] = ss   # the hover's money-rate graph (the user 2026-08-13)
             sa = _spend_recorded_at()
             if sa:
                 out["spendAt"] = sa       # the spend's OWN freshness (the user 2026-08-24: the windows'
                                           # stale "updated 9h ago" sat over the spend and read as its age)
-            return out
+            return _with_rail_routes(out)
+        # The account ANSWERED that it has no usage windows (the snapshot writer's `noWindows`: an enterprise seat
+        # metered by a monthly spend limit instead), stamped by the login signed in now: that is known, so it is
+        # said, the account named, and the key's spend rides beside it as on the windows arm (the user 2026-10-01,
+        # whose hover showed a 26-day-old reading as that account's allowance).
+        if o.get("noWindows") and o.get("acct") and o.get("acct") == _claude_account():
+            out = {"noWindows": True, "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
+                   "acct": _claude_account(), "acctName": _acct_name()}
+            _attach_key_spend(out)
+            return _with_rail_routes(out)
         return None
     # LIMIT REACHED (the user 2026-07-01): a window at 100% whose reset is still in the future = the account is
     # rate-limited on it now. Drives the top banner + the auto retry-pause. A window past its resetsAt has rolled
@@ -48527,8 +48542,10 @@ def _usage():
            "acct": _claude_account(),
            # …and its NAME, for the hover (the user 2026-08-09, who wanted the usage tip to say which
            # account the windows belong to, the way the tab hover does). The dedup stays on the digest;
-           # this is display only, "" when no login.
-           "acctLabel": _claude_account_label(),
+           # this is display only, "" when no login. Named by its kind, the spend detail's own words, since
+           # 2026-10-01 (the user, who could not tell which account an email in the spend display was): the
+           # email stays off the rail.
+           "acctName": _acct_name(),
            "limited": limited if any(limited.values()) else None}
     # API-KEY spend BESIDE the bars — the KEYED split only (turns whose session billed the key; a login
     # turn's computed cost is dollars nobody pays), attached only when key turns actually exist, so a
@@ -48536,6 +48553,16 @@ def _usage():
     # never carry spend (the user 2026-08-08, morning): that held for a machine whose sessions all
     # share one auth; per-session auth (same day, evening) makes one host BOTH, and the key's real
     # dollars belong on the rail next to the login's real %.
+    _attach_key_spend(out)
+    # (the winSeries per-window utilization series is gone — the user 2026-08-14, who wanted the one
+    # fleet $/h graph and nothing per window. usage-history.json keeps recording — sdk_backend
+    # _record_usage_history — so a future graph starts with history instead of a blank.)
+    return _with_rail_routes(out)
+
+
+def _attach_key_spend(out):
+    """The API key's spend beside a signed-in machine's account (_usage's windows arm and its no-windows arm): the
+    keyed split's windows, series and own-freshness stamp, attached only when the box has a key and key turns exist."""
     if _auth_key_present():
         ksp = _spend_windows(keyed_only=True)
         if any((ksp.get(k) or {}).get("turns") for k in ("day", "week", "month")):
@@ -48546,10 +48573,85 @@ def _usage():
             sa = _spend_recorded_at()
             if sa:
                 out["spendAt"] = sa               # same own-freshness stamp as the key-only arm
-    # (the winSeries per-window utilization series is gone — the user 2026-08-14, who wanted the one
-    # fleet $/h graph and nothing per window. usage-history.json keeps recording — sdk_backend
-    # _record_usage_history — so a future graph starts with history instead of a blank.)
+
+
+def _acct_name():
+    """The machine's sign-in named the way the spend detail's By account summary names an account: by its kind
+    ("Enterprise seat", "Personal plan"), "Claude account" when the kind cannot be read, "" when no account is
+    signed in. The rail's usage hover heads the account's block with it; the email stays off the rail."""
+    if not _claude_account():
+        return ""
+    return _SEAT_NAMES.get(_kind_read()) or "Claude account"
+
+
+# what folding routes into accounts reads of a route's identity (_spend_billing): never its email or display label
+_RAIL_BILLING_KEYS = ("route", "state", "acct", "org", "orgDigest", "kind", "label", "missing", "linked")
+
+
+def _rail_routes(now=None):
+    """This host's spend over the rail's week (the hour keys _spend_windows' rolling week reads) split by billing route
+    (_bucket_routes), each route's identity (_spend_billing) beside it, stripped to what folding accounts reads:
+    {"week": {route: [usd, turns]}, "billing": [...]}, or None when the week holds no spend. /usage/fleet folds every
+    host's into the usage hover's by-account line (_rail_accounts)."""
+    try:
+        d = json.loads((jd.STATE / "spend.json").read_text())
+    except Exception:
+        return None
+    hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
+    now = time.time() if now is None else now
+    keys = {time.strftime("%Y-%m-%dT%H", time.localtime(now - i * 3600)) for i in range(7 * 24 + 1)}
+    week = {}
+    for k, e in hours.items():
+        if k not in keys or not isinstance(e, dict):
+            continue
+        for r, (u, n) in _bucket_routes(e).items():
+            a = week.setdefault(r, [0.0, 0])
+            a[0] += u
+            a[1] += n
+    week = {r: [round(a[0], 4), a[1]] for r, a in week.items() if round(a[0], 4) or a[1]}
+    if not week:
+        return None
+    billing = [{k: m[k] for k in _RAIL_BILLING_KEYS if k in m} for m in _spend_billing(week)]
+    return {"week": week, "billing": billing}
+
+
+def _with_rail_routes(out):
+    """`out` with this host's week by billing route (_rail_routes) as `spendRoutes`, when there is any."""
+    rr = _rail_routes()
+    if rr:
+        out["spendRoutes"] = rr
     return out
+
+
+def _rail_accounts(rows):
+    """The usage hover's by-account line, from every /usage/fleet row's spendRoutes folded by the spend detail's own rule
+    (_spend_accounts): ([{name, kind, usd, est}], hosts) where usd is the account's week dollars, est says a
+    subscription seat billed them (an estimate at API prices), and hosts are the machines whose spend is on the rail but
+    whose payload carries no routes (an older build), named rather than silently left out."""
+    per_host, sums, missing = [], {}, []
+    for row in rows:
+        host = row.get("host") or _self_host()
+        u = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+        sr = u.get("spendRoutes")
+        if not isinstance(sr, dict):
+            if u.get("spend"):
+                missing.append(host)
+            continue
+        per_host.append((host, sr.get("billing") or []))
+        for r, v in (sr.get("week") or {}).items():
+            if isinstance(v, list) and v:
+                sums[(host, r)] = float(v[0] or 0)
+    out = []
+    for a in _spend_accounts(per_host):
+        usd, est = 0.0, False
+        for rt in a.get("routes") or []:
+            v = sums.get((rt["host"], rt["route"]), 0.0)
+            if v >= _SPEND_GRAIN:
+                usd += v
+                est = est or bool(rt.get("estimate"))
+        if usd >= _SPEND_GRAIN:
+            out.append({"name": a["name"], "kind": a["kind"], "usd": round(usd, 4), "est": est})
+    return out, missing
 
 
 _jf_cache = {"fp": None, "val": None}                 # judge-failure scan, mtime-fingerprinted over the goals dir
@@ -49313,13 +49415,19 @@ def _spend_tree_memo_report():
     return {"entries": len(_SPEND_TREE_CACHE), "bytes": size, "bound": SPEND_GUARD_TREE_MEMO_BYTES, **_SPEND_TREE_STATS}
 
 
-def _spend_series(keyed_only=False, now=None):
+def _bucket_login_billed(e):
+    """True for a ledger bucket in which a stored login (T346) billed turns: its byLogin map names one."""
+    bl = e.get("byLogin")
+    return isinstance(bl, dict) and any(isinstance(v, dict) and (v.get("usd") or v.get("turns")) for v in bl.values())
+
+
+def _spend_series(keyed_only=False, now=None, login_split=False):
     """The hover graph's money-rate series (the user 2026-08-13): $/hour over the last 192 hours, a
     DENSE array plus a base hour (h0, epoch-hours), so cross-host summing is an index-wise add after
     aligning on h0 — correct without dedup, because each host records only its own turns even on a
     shared key. Zero IS the honest value for an hour with no turns (money, unlike pct, has a true
-    zero). None when nothing is recorded at all. Same keyed_only split as _spend_windows, for the same
-    reason. `now` anchors h0 — injectable so a caller with a frozen evidence clock (tests) can't
+    zero). None when nothing is recorded at all. Same keyed_only split (and login_split rule) as
+    _spend_windows, for the same reason. `now` anchors h0 — injectable so a caller with a frozen evidence clock (tests) can't
     straddle an hour boundary between writing a bucket and reading its index (the 23:00 UTC CI run)."""
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
@@ -49334,7 +49442,7 @@ def _spend_series(keyed_only=False, now=None):
         i = _series_index(k, h0)
         if i is None or not (0 <= i < _SERIES_HOURS) or not isinstance(e, dict):
             continue
-        if keyed_only:
+        if keyed_only or (login_split and _bucket_login_billed(e)):
             e = e.get("key") if isinstance(e.get("key"), dict) else {}
         usd[i] = round(float((e or {}).get("usd") or 0), 4)
     return {"h0": h0, "usd": usd}
@@ -49377,7 +49485,8 @@ _SPEND_GRAIN = 5e-5      # a bucket's dollars minus its sids' dollars below this
 def _spend_scope():
     """Which figure the rail shows for THIS host, mirrored for the usage modal so its numbers are the
     rail's: "total" on a no-login (key-only) machine — every turn there bills the key, and legacy files
-    predate the split — or "keyed" when a login's windows sit beside the key's spend, where only the
+    predate the split; a turn a stored login billed is the exception (its session row wears the estimate
+    mark, and the rail leaves it out since 2026-10-01) — or "keyed" when a login's windows sit beside the key's spend, where only the
     turns whose session billed the key are dollars anyone pays (_usage's two arms, the user 2026-08-08) —
     or "computed" for a login with no key at all, where the rail shows no spend and every recorded
     figure is a computed cost, not a bill."""
@@ -50192,7 +50301,7 @@ def _merge_spend_details(payloads, hosts, local):
     return out
 
 
-def _spend_windows(keyed_only=False):
+def _spend_windows(keyed_only=False, login_split=False):
     """API-mode usage windows MIRRORING the subscription bars (the user 2026-08-04, who wanted the two
     auth modes to read identically at a glance): rolling 5h and 7d summed from spend.json's hour
     buckets, month-to-date from its day buckets — each {usd, tok, turns}, plus `budget` where
@@ -50203,7 +50312,10 @@ def _spend_windows(keyed_only=False):
     API key (see _record_spend). That is what the rail's API readout shows beside a login's bars on a
     mixed host: the total would fold login turns' computed costs in — dollars nobody is billed (the
     user 2026-08-08). The no-login machine keeps the total (everything there IS the key, and legacy
-    files predate the split)."""
+    files predate the split), with ONE exception, login_split=True: a bucket in which a stored login
+    (T346) billed turns sums its key sub-counters, since those turns spent a subscription seat through
+    the login's token and are not the key's (2026-10-01; before, the cell showed them as key dollars).
+    A bucket no stored login billed is read exactly as before."""
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
     except Exception:
@@ -50225,7 +50337,7 @@ def _spend_windows(keyed_only=False):
         complete = True
         for e in entries:
             if isinstance(e, dict):
-                if keyed_only:
+                if keyed_only or (login_split and _bucket_login_billed(e)):
                     e = e.get("key") if isinstance(e.get("key"), dict) else {}
                     out["usd"] = round(out["usd"] + float(e.get("usd") or 0), 4)
                     out["turns"] += int(e.get("turns") or 0)
@@ -67069,6 +67181,7 @@ var WINS=[['fiveHour',5*3600,'5 hours'],
 // tooltip detail for the ones drawn into the aggregate; SELF names this machine for its hover heading
 // when there is more than one host.
 var ROWS=[],LAST=[],SELF='',NOREPORT=[];   // NOREPORT: machines attached and up with no usage report yet (named, never a column)
+var ACCTS=[],ACCTS_MISS=[];   // the by-account line (2026-10-01): every machine's week folded into accounts by the kernel, and the machines it could not fold
 // Limit / judge-degraded SIGNATURES (the user 2026-07-03; reshaped 2026-07-27): these used to gate fixed
 // top banners with a ✕ dismissal; the banners are gone — the same situations now log ONE entry each in
 // the shell's notification center (the bell, _LANDING_ERRS_JS). The stored signature means "this exact
@@ -67145,7 +67258,8 @@ if(u.spendSeries&&u.spendSeries.usd)det._spendSeries=u.spendSeries;}   // $/hour
 // the rail no longer draws each account's own bars (they aggregate, below), but the tip still tells
 // each host's story from this.
 function winDet(u,det){var nowS=Math.floor(Date.now()/1000);
-if(u.acctLabel)det._acct=u.acctLabel;   // WHICH login the windows belong to (the user 2026-08-09) — hover-only
+if(u.acctName)det._acct=u.acctName;   // WHICH login the windows belong to (the user 2026-08-09) — hover-only, by its kind since 2026-10-01
+if(u.noWindows)det._noWin=true;      // the account answered that it has no usage windows (an enterprise seat meters a monthly spend limit)
 WINS.forEach(function(w){var seg=u[w[0]];if(!seg)return;
 // A ROLLED window (its reset passed since the last report) is UNKNOWN, not 0 (the user 2026-07-31: a
 // remote whose kernel had no live session to ask sat on a days-old snapshot, and the rail drew a
@@ -67234,10 +67348,11 @@ if(tr>tb)best=r;});
 g.forEach(function(r){if(r===best)return;var v={},u=r.usage,b=best.usage,k;
 // a member whose OWN reading differs from the freshest is LAGGING (the user 2026-09-19): the account's block shows the
 // freshest, and the machine is named as lagging beside its name, with its own report's age
-r.lag=['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];
+// (none beside an account that answered it has no windows: a member's older reading is not a figure the block shows)
+r.lag=!b.noWindows&&['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];
 return JSON.stringify(x?[x.pct,x.resetsAt]:null)!==JSON.stringify(y?[y.pct,y.resetsAt]:null);});
 for(k in u)v[k]=u[k];
-['fiveHour','sevenDay','fable','t','limited','acctLabel'].forEach(function(w){
+['fiveHour','sevenDay','fable','t','limited','acctName','noWindows'].forEach(function(w){
 if(b[w]!==undefined)v[w]=b[w];else delete v[w];});
 r.usage=v;});});}
 var RAIL_HOME=(function(){var c=document.getElementById('rail-api');return c?c.parentNode:null;})();   // where the dot lives with no readout
@@ -67249,7 +67364,7 @@ function moveApiCell(c,into){var had=document.activeElement===c,mv=window.__romp
 into();if(had){try{c.focus({preventScroll:true});}catch(e){}}if(mv)mv(false);}
 function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)moveApiCell(c,function(){RAIL_HOME.insertBefore(c,el.nextSibling);});}
 function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();
-var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage);});
+var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage)||!!(r.usage&&r.usage.noWindows);});
 if(!live.length){el.innerHTML='';tip.style.display='none';return;}
 shareFreshest(live);
 LAST=live.map(function(r){var det={};det._t=(typeof r.usage.t==='number')?r.usage.t:null;
@@ -67341,15 +67456,17 @@ return '<div class=ru-tip-win><div class=ru-tip-name><span>'+esc(v.name)+'</span
 :(v.reset?'<span class=ru-tip-reset>resets in '+esc(v.reset)+'</span>':''))+'</div>'+barRows(v)+'</div>';}).join('');}
 function machineHTML(name){return '<span class="ru-tip-machine host-prefix">'+esc(name)+'</span>';}
 function acctBlocksHTML(sets,manyMachines){var groups=[],by={};
-sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];}))return;
+sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;
 var a=e.acct||('host:'+e.host);var g=by[a];if(!g){g={members:[]};by[a]=g;groups.push(g);}g.members.push(e);});
 return groups.map(function(g){var d=g.members[0].det,h='<div class=ru-tip-block>';
 if(d._acct)h+='<div class=ru-tip-acct>'+esc(d._acct)+'</div>';
-h+=winsHTML(d);
+var wh=winsHTML(d);
+// an account with no windows says so in one line, in place of bars it does not have, and carries no age: nothing is read
+h+=wh||'<div class=ru-tip-nowin>no 5-hour or weekly limits on this account</div>';
 if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){return machineHTML(e.host)
 +(e.lag?'<span class=ru-tip-lag> lagging'+(e.ownT?', updated '+fmtAgo(e.ownT):'')+'</span>':'');}).join(', ')+'</div>';
 var ts=g.members.map(function(e){return e.ownT;}).filter(function(t){return typeof t==='number';});
-if(ts.length)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';
+if(ts.length&&wh)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';
 return h+'</div>';});}
 // The ONE API-spend section for the whole hover (the user 2026-08-13): every host's windows summed —
 // one shared key is one number — plus the summed $/hour over the last 7 days as an area graph. A host
@@ -67402,6 +67519,7 @@ if(rowsOnly)return h.replace('<span>API spend','<span>Totals')+'</div>';
 if(per.length>1){per.sort(function(a,b){return b.usd-a.usd;});
 h+='<div class=ru-tip-row><span class=ru-tip-k>by machine \u00b7 1 week</span><span class=ru-tip-v>'
 +per.map(function(p){return esc(p.host)+' '+fmtUsd(p.usd);}).join(' \u00b7 ')+'</span></div>';}
+h+=acctLineHTML(ACCTS,ACCTS_MISS);
 if(series){var st=Math.max(0,series.usd.length-168),wk=series.usd.slice(st),mx=0;for(var i=0;i<wk.length;i++)if(wk[i]>mx)mx=wk[i];
 // 'peak $X/h': the costliest single HOUR of the week (the user 2026-08-13 asked whether the bare
 // number was per-hour \u2014 say so). The peak rides the label row's VALUE slot and the graph gets its
@@ -67413,6 +67531,15 @@ if(mx>0)h+='<div class=ru-tip-row><span class=ru-tip-k>$/h \u00b7 7d</span>'
 +moneyGraph(wk,'#9cd2ff',series.h0+st);}
 if(sAt)h+='<div class=ru-tip-age>last charge recorded '+fmtAgo(sAt)+'</div>';
 return h+'</div>';}
+// BY ACCOUNT, one line (the user 2026-10-01, who read seat dollars summed into this card's figures, unmarked): who
+// billed the week, folded by the kernel exactly as the spend detail's By account summary folds it (_rail_accounts). The
+// rows above are the key's dollars; a subscription seat's are Claude Code's cost at API prices, an estimate, and wear
+// the approx mark as they do in the detail. Drawn only when something besides the key billed the week: a key alone is
+// already the rows above. A machine whose older build sends no routes is counted out by name.
+function acctLineHTML(accts,miss){if(!(accts||[]).some(function(a){return a.kind!=='key';}))return '';
+return '<div class=ru-tip-row><span class=ru-tip-k>by account \u00b7 1 week</span><span class=ru-tip-v>'
++accts.map(function(a){return esc(a.name)+' '+(a.est?'\u2248':'')+fmtUsd(a.usd);}).join(' \u00b7 ')
++((miss||[]).length?' \u00b7 '+miss.map(esc).join(', ')+' not counted (older build)':'')+'</span></div>';}
 function tipHTML(){var sets=LAST||[];if(!sets.length&&!NOREPORT.length)return '';
 var manyMachines=(sets.length+NOREPORT.length)>1;
 var blocks=acctBlocksHTML(sets,manyMachines);
@@ -67483,6 +67610,7 @@ var _ruBusy=false;
 // today's exact rendering \u2014 whenever every machine is signed into the same login.
 function pullFleet(){return fetch('/usage/fleet',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
 .then(function(d){var rows=(d&&d.rows)||[];SELF=(d&&d.host)||SELF;NOREPORT=(d&&Array.isArray(d.noReport))?d.noReport:[];
+ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];ACCTS_MISS=(d&&Array.isArray(d.accountsMissing))?d.accountsMissing:[];
 var local=rows.length?rows[0].usage:null;
 notices(local);renderRows(rows,SELF);});}
 function pull(ack){if(_ruBusy)return;_ruBusy=true;
@@ -71312,7 +71440,7 @@ def _landing():
             # declarations ui/webview/styles.css gives a federated tab's host; a lagging machine's note in the amber
             # the 70 percent window wears; a machine not reporting named after the blocks in the same line style.)
             ".ru-tip-block{min-width:200px}"
-            ".ru-tip-machines{margin-top:6px;font-size:11px;color:#9aa0a6}"
+            ".ru-tip-machines,.ru-tip-nowin{margin-top:6px;font-size:11px;color:#9aa0a6}"
             ".ru-tip-machines .host-prefix{color:var(--dim,#9aa0a6);font-weight:400;font-style:italic;font-size:0.86em}"
             ".ru-tip-lag{color:#d7a23a;font-size:10px}"
             # the login the window bars belong to (the user 2026-08-09) — quiet, above the sections,
@@ -72932,7 +73060,10 @@ class Handler(BaseHTTPRequestHandler):
                         be.refresh_usage()
                 except Exception:
                     pass
-                return self._send(200, json.dumps({"rows": _fleet_usage(), "host": _self_host(), "noReport": _usage_no_report()}),
+                rows = _fleet_usage()
+                accts, accts_missing = _rail_accounts(rows)   # the hover's by-account line (2026-10-01)
+                return self._send(200, json.dumps({"rows": rows, "host": _self_host(), "noReport": _usage_no_report(),
+                                                   "accounts": accts, "accountsMissing": accts_missing}),
                                   "application/json", cache="no-cache")
             if p == "/spend/detail":                          # the usage MODAL's per-session breakdown (T247):
                 # who spent what and spend over time stacked by session, read from the ledger's bySid
