@@ -12,16 +12,20 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     leaf's policy) is unchanged. Nothing pops, and nothing is re-read after, when the document cannot stand for the entry:
     with checkpoints off, with a sibling cursor behind the entry, a fold recorded without its state, a cut behind the entry,
     a dirty path while the drop write is off, or a parse holding the very records list; over the cycle's budget the drop
-    waits unowed, and under the converge hold it is paid without its pop;
+    waits unowed, and under the converge hold it is paid without its pop; a cursor of another generation that the document
+    does not carry does not hold it;
   * the kernel's agent-file folds take the new policy and the parent-leaf fold does not;
-  * the spend guard routes its agent reads through the dropping folds, prices a dropped file from its memo without entering
-    it again, keeps a resumed agent's earlier rows in the window, prices a file a fresh process restored as a tail, prices a
-    restored tail that covers the window without a whole read and folds it out of memory, and re-scans its memo when a
-    tail entry becomes the whole file;
+  * the spend guard routes its agent reads through the dropping folds (never starting a steps state for a workflow agent,
+    never folding while a viewer's parse holds the records), prices a dropped file from its memo without entering it
+    again, prices a resumed agent from its memo and the tail without a whole read (a response split across the cut counted
+    once), reads the file whole when the memo ends short of the tail or starts after the window, prices a file a fresh
+    process restored as a tail, prices a restored tail that covers the window without a whole read and folds it out of
+    memory, and re-scans its memo when a tail entry becomes the whole file;
   * a lab-style run of a synthetic session (agents with cards, workflow agents without) on an advancing clock, the cards'
     folds run in lockstep, in the kernel's own pattern, or stopping before the agent returns: the entries holding records
     and their bytes return to the live set as agents return, the workflow agents' entries stop climbing, and the guard's
-    window equals a reference sum at every cycle; without the guard, a card cursor left behind keeps its agent resident.
+    window equals a reference sum at every cycle; agents that fall silent for over two minutes mid-run are dropped and
+    resumed with no whole read; without the guard, a card cursor left behind keeps its agent resident.
 SYNTHETIC fixtures only: placeholder ids, the notes-api demo names, transcripts written here."""
 import json
 import os
@@ -146,6 +150,8 @@ class Base(unittest.TestCase):
             em._asm_release(e)
         em._RECORD_CACHE_STATS["dropped"] = 0
         em._RECORD_CACHE_STATS["droppedBytes"] = 0
+        em._RECORD_CACHE_STATS["wholeReads"] = {}
+        em._RECORD_CACHE_STATS["wholeReadsByStage"] = {}
 
     def entry(self, p):
         with em._JSONL_CACHE_LOCK:
@@ -157,6 +163,10 @@ class Base(unittest.TestCase):
 
     def doc(self, p):
         return json.loads(em._ckpt_file(str(p)).read_text())
+
+    def guard_whole_reads(self):
+        """The whole reads the spend guard's own row scan made (a tail upgraded to the whole file, or a file read from zero)."""
+        return {k: v["count"] for k, v in em.record_cache_stats()["wholeReads"].items() if k.endswith("<-_spend_file_rows")}
 
 
 class ReturnedPolicy(Base):
@@ -348,6 +358,32 @@ class ReturnedPolicy(Base):
         self.fold(cache, p)
         self.assertIsNone(self.entry(p), "the parse gone, the next quiet fold drops")
 
+    def test_a_cursor_of_another_generation_the_document_does_not_carry_leaves_the_quiet_drop_alone(self):
+        p = self.sub / "agent-a9700000000000007.jsonl"
+        write(p, [rec(T0 - 200 + i, i) for i in range(4)], T0 - 11)
+        a, b = {}, {}
+        self.fold(b, p, name="synthB")                            # b folds early and stops, at 4
+        append(p, [rec(T0 - 100 + i, 4 + i) for i in range(96)], T0 - 5)
+        self.clock.t = T0 + 300
+        self.fold(a, p, name="synthA")                            # a's first fold steps all 100 over the quiet file: the drop
+        self.assertIsNone(self.entry(p))
+        self.assertNotIn("synthB", self.doc(p)["folds"], "b lags too far to be written: the document never carries it")
+        append(p, [rec(T0 + 301 + i, 100 + i) for i in range(8)], T0 + 308)   # the agent resumes
+        self.clock.t = T0 + 310
+        kinds = []
+        self.assertEqual(len(self.fold(a, p, name="synthA", kinds=kinds)), 108)
+        self.assertEqual(kinds[-1], "restore", "a restored from the document over the new tail")
+        ent = self.entry(p)
+        self.assertEqual((ent[5], len(ent[4])), (100, 8))
+        old = b[str(p)][1]
+        self.assertNotEqual(old, ent[6], "b's cursor sits at the generation before the drop")
+        self.clock.t = T0 + 600                                   # quiet again
+        self.fold(a, p, name="synthA")
+        self.assertIsNone(self.entry(p), "a cursor of another generation does not hold the quiet drop")
+        self.assertEqual(b[str(p)][1], old, "b never ran: its cursor still sits at the old generation")
+        self.assertEqual(len(self.fold(b, p, name="synthB", kinds=kinds)), 108, "b's next fold reads the file once and answers whole")
+        self.assertEqual(kinds[-1], "refold")
+
 
 class KernelFolds(Base):
     def test_the_agent_card_folds_drop_a_returned_agent_and_the_leaf_fold_keeps_an_idle_leaf(self):
@@ -390,6 +426,8 @@ class SpendGuard(Base):
         self.assertAlmostEqual(self.window(T0 + 120), want, places=9, msg="175 s quiet, still inside the window")
         self.assertIsNone(self.entry(wf), "returned: the guard's own read let its records go")
         self.assertIn("state", self.doc(wf)["folds"]["agentLaunchIds"], "through the dropping fold, which wrote its document")
+        self.assertNotIn(wf, km._AGENT_GIST_CACHE, "the guard never starts a steps state for a workflow agent")
+        self.assertNotIn("agentGist", self.doc(wf)["folds"], "nor writes one")
         r0 = self.read_of(wf)
         self.assertAlmostEqual(self.window(T0 + 130), want, places=9, msg="priced from the memo")
         self.assertIsNone(self.entry(wf), "and not entered again while it stays in the window")
@@ -416,10 +454,100 @@ class SpendGuard(Base):
         write(ap, early, T0 - 355)
         self.assertAlmostEqual(self.window(T0), sum(map(usd, early)), places=9)
         self.assertIsNone(self.entry(ap), "quiet for six minutes at the guard's first look: dropped as it was folded")
+        whole0 = self.guard_whole_reads()                         # the first look read the leaf and the agent from zero
+        size0, r0 = os.path.getsize(ap), self.read_of(ap)
         late = [rec(T0 + 5 + i, 100 + i) for i in range(3)]
-        append(ap, late, T0 + 8)                                  # the agent resumes
+        append(ap, late, T0 + 8)                                  # the agent resumes (a live agent's long silence ends the same way)
         self.assertAlmostEqual(self.window(T0 + 10), sum(map(usd, early + late)), places=9,
-                               msg="the earlier rows stay in the window: the resumed file is read whole once")
+                               msg="the earlier rows stay in the window: the memo's rows beside the tail's")
+        self.assertEqual(self.entry(ap)[5], 10, "the reader holds the tail past the drop's cut")
+        self.assertEqual(self.guard_whole_reads(), whole0, "the resume was priced from the tail, never read whole")
+        self.assertLessEqual(self.read_of(ap) - r0, os.path.getsize(ap) - size0 + 2 * em._JSONL_TAIL_GUARD, "the appended bytes and the guard")
+        self.assertAlmostEqual(self.window(T0 + 200), sum(map(usd, early + late)), places=9, msg="quiet again")
+        self.assertIsNone(self.entry(ap), "quiet again: dropped again")
+        r1 = self.read_of(ap)
+        self.assertAlmostEqual(self.window(T0 + 210), sum(map(usd, early + late)), places=9, msg="priced from the memo")
+        self.assertEqual(self.read_of(ap), r1, "and not entered again")
+        self.assertEqual(self.guard_whole_reads(), whole0)
+
+    def resumed(self, name, early, late, mid=()):
+        """An agent file whose `early` records the guard priced at T0 while fresh (its memo from the whole file); `mid` appended
+        at T0 + 5, after that look; a card's launch-ids fold over the quiet file drops it at T0 + 300; the agent then writes
+        `late` at T0 + 308. Returns the path."""
+        ap = str(self.sub / name)
+        write(ap, early, T0 - 11)
+        self.window(T0)
+        self.assertIsNotNone(self.entry(ap), "fresh at the guard's look: kept")
+        if mid:
+            append(ap, list(mid), T0 + 5)
+        self.clock.t = T0 + 300
+        km._agent_launch_ids(ap)
+        self.assertIsNone(self.entry(ap), "the quiet card fold dropped it")
+        append(ap, late, T0 + 308)
+        return ap
+
+    def test_a_memo_that_ends_before_the_tail_begins_reads_the_file_whole(self):
+        early = [rec(T0 - 60 + 5 * i, i) for i in range(10)]     # T0-60 .. T0-15
+        mid = [rec(T0 + 1 + i, 10 + i) for i in range(5)]
+        late = [rec(T0 + 305 + i, 20 + i) for i in range(3)]
+        self.resumed("agent-a9c00000000000001.jsonl", early, late, mid=mid)
+        self.assertAlmostEqual(self.window(T0 + 310), sum(map(usd, early + mid + late)), places=9,
+                               msg="the memo ends where the middle records begin, not where the tail does: the whole file")
+        self.assertEqual(self.guard_whole_reads().get("upgrade<-_spend_file_rows"), 1)
+
+    def test_a_window_reaching_past_the_memos_floor_reads_the_file_whole(self):
+        ap = self.resumed("agent-a9c00000000000002.jsonl", [rec(T0 - 900 + 30 * i, i) for i in range(30)], [rec(T0 + 305, 50)])
+        recs = [json.loads(ln) for ln in open(ap)]
+        since = T0 + 310 - 1100                                   # further back than the memo's floor (T0 - 660)
+        self.clock.t = T0 + 310
+        self.assertAlmostEqual(sum(c for _t, c in km._spend_file_rows(ap, since, PRICES, None, agent=True)),
+                               sum(usd(r) for r in recs if km._msg_epoch(r) >= since), places=9,
+                               msg="rows older than the memo's floor are in this window: the whole file")
+        self.assertEqual(self.guard_whole_reads().get("upgrade<-_spend_file_rows"), 1)
+
+    def test_a_response_logged_on_both_sides_of_a_drop_counts_once_at_its_largest_usage(self):
+        ap = str(self.sub / "agent-a9d00000000000001.jsonl")
+        early = [rec(T0 - 400 + 5 * i, i) for i in range(10)]
+        early[-1]["message"]["id"] = "msg-split"                 # a response's first content block, before the drop
+        write(ap, early, T0 - 355)
+        self.assertAlmostEqual(self.window(T0), sum(map(usd, early)), places=9)
+        self.assertIsNone(self.entry(ap))
+        whole0 = self.guard_whole_reads()
+        split = rec(T0 + 5, 100)
+        split["message"]["id"] = "msg-split"                     # its later block, past the cut, with the larger usage
+        split["message"]["usage"]["output_tokens"] = 3000
+        late = [split, rec(T0 + 6, 101)]
+        append(ap, late, T0 + 8)
+        self.assertAlmostEqual(self.window(T0 + 10), sum(map(usd, early[:-1] + late)), places=9,
+                               msg="one response, one row, at its largest usage, as a scan of the whole file counts it")
+        self.assertEqual(self.guard_whole_reads(), whole0, "priced from the tail")
+
+    def test_the_guard_leaves_an_agent_file_a_viewers_parse_holds_alone_until_the_parse_is_gone(self):
+        ap = str(self.sub / "agent-a9e00000000000001.jsonl")
+        recs = [rec(T0 - 300 + 5 * i, i) for i in range(20)]
+        write(ap, recs, T0 - 205)                                 # returned 205 s ago, first seen by this process (a restart)
+
+        def parse():                                              # the subagent viewer's parse of the agent's own file
+            em.parse_session(ap, rompuuid=SID, name="api", dir="/w/notes-api", candidate_files=[ap], states=None,
+                             postal_log=[], now=T0)
+        parse()
+        ent = self.entry(ap)
+        with em._ASM_LOCK:
+            held = [e for e in em._ASM_CACHE.values() if getattr(e.get("ad"), "_src", {}).get(ap) is ent[4]]
+        self.assertEqual(len(held), 1, "the parse holds the reader's very list")
+        self.assertAlmostEqual(self.window(T0), sum(map(usd, recs)), places=9)
+        self.assertIs(self.entry(ap), ent, "the guard's fold would drop records the parse still holds, freeing nothing")
+        self.assertNotIn(ap, km._AGENT_LAUNCH_IDS_CACHE, "no fold ran")
+        r0 = self.read_of(ap)
+        parse()                                                   # the viewer rebuilds
+        self.assertEqual(self.read_of(ap), r0, "and reads nothing")
+        with em._ASM_LOCK:
+            gone = list(em._ASM_CACHE.values())
+            em._ASM_CACHE.clear()
+        for e in gone:
+            em._asm_release(e)
+        self.assertAlmostEqual(self.window(T0 + 5), sum(map(usd, recs)), places=9)
+        self.assertIsNone(self.entry(ap), "the parse gone, the guard's next look folds the file and drops it")
 
     def test_a_fresh_process_prices_an_agent_file_it_restored_as_a_tail(self):
         ap = str(self.sub / "agent-a8888888888888888.jsonl")
@@ -481,7 +609,10 @@ class Lab(Base):
                  rebuild), the launch-ids fold only while the agent runs and not over its last two records (the awaiting
                  box's attribution, which reads live agents only);
       tabclosed  the steps fold only in the agent's first 30 s (the chat tab closed, or the laptop asleep, before the agent
-                 returned), the launch-ids fold while the agent runs."""
+                 returned), the launch-ids fold while the agent runs.
+    With `silences` each agent writes in three bursts of 45 s with two silences of 155 s between them (a long tool call, a
+    long response): a live agent quiet for over two minutes counts as returned and is dropped, and its next record resumes
+    it."""
 
     CYCLE = 5
 
@@ -495,7 +626,7 @@ class Lab(Base):
         card = {a["path"] for a in agents if a["kind"] == "task"}
         recent = {a["path"] for a in agents if a["recs"] and t - a["recs"][-1][1] < 120 + self.CYCLE}
         return {"t": int(t - T0), "spawned": sum(1 for a in agents if a["start"] <= t),
-                "writing": sum(1 for a in agents if a["start"] <= t < a["end"]),
+                "writing": sum(1 for a in agents if self.writes(a, t)),
                 "rcEntries": len(ents), "withRecords": sum(1 for e in ents.values() if e[4]),
                 "cardWithRecords": sum(1 for p, e in ents.items() if p in card and e[4]),
                 "bytes": sum(em._entry_weight(e) for e in ents.values()),
@@ -510,6 +641,15 @@ class Lab(Base):
 
     def test_the_guard_catches_up_a_card_whose_chat_stopped_being_built_before_it_returned(self):
         self.assert_drained(*self.run_lab("tabclosed"))
+
+    def test_a_live_agents_long_silences_drop_it_and_each_resume_is_priced_from_the_tail(self):
+        agents, series = self.run_lab("kernel", silences=True)
+        self.assert_drained(agents, series)
+        self.assertGreaterEqual(series[-1]["dropped"], 3 * len(agents), "each agent left memory in both silences and at its end")
+        self.assertEqual(self.guard_whole_reads().get("upgrade<-_spend_file_rows"), None,
+                         "no resume read its file whole for the guard: the memo's rows and the tail's priced it")
+        for a in agents:
+            self.assertLess(self.read_of(a["path"]), 1.25 * os.path.getsize(a["path"]), "each file read about once: %s" % a["path"])
 
     def test_without_the_guard_a_card_cursor_left_behind_keeps_its_agent_resident(self):
         # The dependency the change names: a card's launch-ids fold stops before its agent's last records, and with the guard
@@ -531,14 +671,20 @@ class Lab(Base):
         for a in agents:
             self.assertLess(self.read_of(a["path"]), 2 * os.path.getsize(a["path"]), "no agent file read whole twice: %s" % a["path"])
 
-    def run_lab(self, cards, guard=True):
+    @staticmethod
+    def writes(a, t):
+        return any(s <= t < e for s, e in a["bursts"])
+
+    def run_lab(self, cards, guard=True, silences=False):
         agents = []
         for i in range(24):
             kind = "task" if i % 2 == 0 else "workflow"
             aid = "a%016x" % (0xd0000 + i)
             p = (self.sub / ("agent-%s.jsonl" % aid) if kind == "task"
                  else self.sub / "workflows" / ("wf_%d" % i) / ("agent-%s.jsonl" % aid))
-            agents.append({"path": str(p), "kind": kind, "start": T0 + 60 * i, "end": T0 + 60 * i + 90, "recs": []})
+            s = T0 + 60 * i
+            bursts = [(s, s + 45), (s + 195, s + 240), (s + 390, s + 435)] if silences else [(s, s + 90)]
+            agents.append({"path": str(p), "kind": kind, "start": s, "end": bursts[-1][1], "bursts": bursts, "recs": []})
         t_end = agents[-1]["end"] + 900
         series, t = [], T0
         while t <= t_end:
@@ -546,7 +692,7 @@ class Lab(Base):
             em.checkpoint_cycle_begin(64 * 1024 * 1024)          # the pusher begins each cycle's checkpoint budget
             card_writing = False
             for a in agents:
-                if a["start"] <= t < a["end"]:
+                if self.writes(a, t):
                     r = (rec(t, len(a["recs"])), t)
                     if a["recs"]:
                         append(a["path"], [r[0]], t)
@@ -580,11 +726,12 @@ class Lab(Base):
             if (t - T0) % 300 == 0 or t == t_end:
                 series.append(self.snapshot(t, agents))
             t += self.CYCLE
-        tag = "%s%s" % (cards, "" if guard else " guardOff")
+        tag = "%s%s%s" % (cards, "" if guard else " guardOff", " silences" if silences else "")
         print("LAB %s %s" % (tag, json.dumps(series, separators=(",", ":"))))
-        print("LAB %s final=%s agentBytesOnDisk=%d maxReadRatio=%.3f" % (
+        print("LAB %s final=%s agentBytesOnDisk=%d maxReadRatio=%.3f guardWholeReads=%s" % (
             tag, json.dumps(series[-1]), sum(os.path.getsize(a["path"]) for a in agents),
-            max(self.read_of(a["path"]) / float(os.path.getsize(a["path"])) for a in agents)))
+            max(self.read_of(a["path"]) / float(os.path.getsize(a["path"])) for a in agents),
+            json.dumps(self.guard_whole_reads(), sort_keys=True)))
         return agents, series
 
 
