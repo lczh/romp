@@ -887,8 +887,29 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
             self.assertEqual(len(s._asks), 1, road)
             self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-5-5")   # a turn served on the pick put back
-            self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick left the retry standing" % road)
+            self.assertIsNone(s._upgrade_retry, "%s: a turn served on the pick put back left the retry standing" % road)
             self.assertEqual(h.restored, [("Opus 5", "Opus 5.5")], "%s: back on the pick put back" % road)
+        # the control: a pick put back that names no version (a Latest click) keeps a standing retry, which still ends
+        # at the model it fell from
+        road = ("a Latest click answered by Opus 5.5, Opus 4.8 picked and its dots ended on Opus 5.5, a real fallback to "
+                "Opus 4.5 below it, then the CLI refuses Opus 4.8")
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._pick(be, s, "opus")
+            self._settle(s, ["claude-opus-5-5"])
+            self._pick(be, s, "claude-opus-4-8")
+            self._served(s, "claude-opus-5-5")                       # ends the second pick's dots
+            self._served(s, "claude-opus-4-5")                       # a real fallback, below Opus 4.8
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.5")], "%s: the real fallback is carded" % road)
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: and armed, below the pick" % road)
+            self._settle(s, ["claude-opus-5-5"], lost=refused)       # the CLI's refusal
+            self.assertEqual(s.chosen_model, "opus", "%s: the refusal puts the accepted Latest click back" % road)
+            self.assertIs(s._upgrade_retry, arm, "%s: a pick put back that names no version cleared the retry" % road)
+            self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1, "%s: due, one attempt" % road)
+            self._init(s, "claude-opus-5-5"); self._served(s, "claude-opus-5-5")   # a turn served on the model it fell from
+            self.assertIsNone(s._upgrade_retry, "%s: a turn served on the model it fell from left the retry standing" % road)
+            self.assertEqual(h.restored, [("Opus 4.5", "Opus 5.5")], "%s: back on the model it fell from" % road)
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
