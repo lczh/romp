@@ -7480,7 +7480,8 @@ class SdkSession:
         the tier the session fell from, the retry is done: the arm clears and the kernel-wired hook mints the completed
         card saying the session is back (on_model_restored, the on_model_fallback idiom). At or above a VERSIONED pick's
         own model too (2026-09-30, the #33 follow-up's review): the learn arms from the live name, which after a pick below
-        it can still sit above the pick when a real fallback lands (a reply from before the pick moved it back), and the
+        it can still sit above the pick when a real fallback below the pick lands (a reply from before the pick moved it
+        back; a fallback at or above a versioned pick arms nothing, _learn_model), and the
         retry's reconnect runs the pick, so the model it was armed from never comes back. A pick that names no version
         (a Latest click, the account default) keeps the end at the tier it fell from. The pick read is the one the
         reconnect asserts (chosen_model), not the one the arm recorded: a live pick clears the arm, so they differ only
@@ -8324,7 +8325,14 @@ class SdkSession:
                         cards.append((self.model, pm, gid))
                 except Exception as e:
                     self.backend._log("model-fallback card (%s): %s" % (self.name, e), problem=True)
-            self._arm_upgrade_retry(self.model, pm)   # Retry upgrades after downgrades: remember the way back (off → nothing)
+            # Retry upgrades after downgrades: remember the way back (off → nothing). Not for a fallback to a model at or
+            # above a VERSIONED pick (the #33 follow-up's review, 2026-10-01): the live name can sit above the pick (a reply
+            # from before it moved the name back), but the session is served on what was picked, so the requested-model
+            # mark and _arm_if_below_pick see nothing to retry, and an arm here ended at the very next reply on the model
+            # it fell to (_note_model_served's end at the pick) with a "back on" card and no attempt made
+            _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
+            if _model_version(_plab) is None or _model_downgrade(_plab, pm):
+                self._arm_upgrade_retry(self.model, pm)
             # A NEW episode resets the cause (the CLI's refusal frame names it seconds later); an observation of the fallback
             # ALREADY standing — the API served this tier last time too: a host attach replaying the fallen reply the old
             # kernel never acked, a reconnect's init reporting the pick and the next reply falling back the same way — keeps
