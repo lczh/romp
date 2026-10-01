@@ -6937,16 +6937,22 @@ class SdkSession:
                     # Retry upgrades, judged again against the pick put back (the #33 follow-up's review, 2026-10-01). The
                     # learn judged a carded fallback's arm against the pick standing when the fallback landed, and a live
                     # pick is what otherwise clears or re-judges an arm; a refusal makes none. A retry standing at or
-                    # above a versioned pick put back has nothing to retry (its end at the pick would mint a "back on"
-                    # card for the very model the session fell to at the next reply), and a session left below the pick
-                    # put back with nothing armed is taken up, as the switch flip and the attach take it up.
+                    # above a versioned pick put back stands down (its end at the pick would mint a "back on" card for
+                    # the very model the session fell to at the next reply), and a session left below the pick put back
+                    # with nothing armed is taken up, as the switch flip and the attach take it up. A retry that stood
+                    # down falls through to that re-arm, which reads the model served now: a second hop while it stood
+                    # can leave the session below the pick put back though the model the retry fell to is not. A pick
+                    # still in flight is left alone, as the switch flip leaves it: set_model runs on the kernel thread,
+                    # so a newer pick can land during the revert, whose compare-and-swap leaves it standing; the live
+                    # name is the world before it, and an arm from it would end at its first reply with a false "back on".
                     arm = self._retry_armed()
                     _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
                     if arm and _model_version(_plab) is not None and not _model_downgrade(_plab, arm.get("to")):
                         self._upgrade_retry = None
-                        self.backend._log("retry upgrade (%s): the pick went back to %s, not above %s; nothing to retry"
-                                          % (self.name, _plab, arm.get("to")))
-                    elif not arm:
+                        self.backend._log("retry upgrade (%s): the pick went back to %s, not above %s; that retry "
+                                          "stands down" % (self.name, _plab, arm.get("to")))
+                        arm = None
+                    if not arm and not getattr(self, "_model_pending", ""):
                         self._arm_if_below_pick()
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
                                   "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
@@ -8344,7 +8350,7 @@ class SdkSession:
             # from before it moved the name back), but the session is served at or above what was picked, so the
             # requested-model mark and _arm_if_below_pick see nothing to retry, and an arm here ended at the very next reply
             # on the model it fell to (_note_model_served's end at the pick) with a "back on" card and no attempt made. A
-            # pick the CLI then refuses judges the arm again against the pick it puts back (_do_set_model)
+            # pick the CLI then refuses judges the arm again against the pick it puts back (_do_set_model).
             _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
             if _model_version(_plab) is None or _model_downgrade(_plab, pm):
                 self._arm_upgrade_retry(self.model, pm)
