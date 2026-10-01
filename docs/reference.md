@@ -51,7 +51,7 @@ These are for scripting and for agents rather than daily use:
 | `romp move <session> <dir>` | Move a session's working directory to `<dir>` (the folder must already exist); the conversation, name, mail and history stay with the session. Quiet session → moves now; open turn → queued, fires when the turn ends. See [Moving a session to another folder](#moving-a-session-to-another-folder) |
 | `romp checkin <host>` / `romp checkout <host>` | Publish this machine to an attached hub, or withdraw it. The hub files this machine under the name it declares only when that name is a machine name (letters, digits, dots, hyphens or underscores, starting with a letter or digit, at most 128 characters). Any other declared name is refused with a 400 that states the rule and echoes nothing, is recorded nowhere, and is said once on both machines: on the hub, one stderr line and one Log entry under the `refused` kind, naming the value as a clipped repr; on this machine, one stderr line, one dial-log record and one Log entry carrying the hub's reason, after which the same name is not re-sent until it, or the hub's kernel, changes. A hub's `POST /tunnels/trust` for a host it has never seen (the remembered-hosts entry that tiers relayed mail by origin) holds the wider rule that registry's writers share, a machine name or an ssh alias (letters, digits, dots, hyphens, underscores, at-signs, colons or square brackets, not starting with a hyphen, at most 255 characters), because a hub keys an attached peer by its ssh alias and carries that alias when you set trust between two of your machines; anything else is refused the same way, on the hub, with nothing recorded. `ROMP_HOST_NAME` (the kernel) and `ROMP_POSTAL_HOST` (the postal bus) override the declared name only when they clear the same rule; an unusable value (a space, an at-sign, a trailing newline) is set aside once, on stderr or in the bus log, and the derived name (the short hostname, else the platform's machine name, else a minted id) is used |
 | `romp default-dir [PATH]` | The default working directory for new sessions; no argument prints it, `""` clears it |
-| `romp login add <label> --cmd '<shell line>'`, `romp login list`, `romp login remove <label>` | The stored Claude logins a session can be billed to beside the machine's own (see [Several Claude logins](#several-claude-logins)): `add` records the command that prints the login's setup-token on demand (`--op` is the 1Password shorthand for `op read`); `list` and `remove` print labels only, never a token |
+| `romp login add <label> --cmd '<shell line>'`, `romp login list`, `romp login remove <label>`, `romp login link <label> --same-as <host> [--on <host>]`, `romp login unlink <label> [--on <host>]` | The stored Claude logins a session can be billed to beside the machine's own (see [Several Claude logins](#several-claude-logins)): `add` records the command that prints the login's setup-token on demand; `list` and `remove` print labels only, never a token; `link` records that a stored login is the same Claude account as `<host>`'s sign-in (this machine's name or `local`, or a connected kernel's host), copied from that machine's kernel (`--on` names the connected kernel that holds the stored login when it is not this machine's), and `unlink` takes it back |
 | `romp debug [on\|off\|status]` | Judge debug mode, where rejection rows carry the full input and reply |
 | `romp refresh --quiet` | Refresh at the next quiet window instead — waits for the turns and background work a restart would cut to finish (15-min backstop); a session under a host keeps its turn across the restart, so it is not waited on. The ONLY door to the quiet window: a deploy (a peer's `romp update`, a release self-update, an automatic converge) restarts immediately, by the user's 2026-09-08 decision |
 | `romp down --wait <s>`, `romp down --now` | How long `romp down` waits for the turns it would cut to finish (0 to 600 seconds; default 5), or no wait at all |
@@ -655,7 +655,13 @@ Code's own `~/.claude.json`; a stored login when its record holds one), else
 the organisation together with the kind word. Nothing else counts, the label
 and the email included: a stored login whose record holds neither is a row of
 its own under its label, noted `account not recorded`, and a login added with
-`romp login add` holds only its label and command, so it reads that way. Two
+`romp login add` holds only its label and command, so it reads that way until
+you link it to a machine's sign-in (`romp login link`, see
+[Several Claude logins](#several-claude-logins)). A linked login is that
+sign-in's account under the same rules, its spend from before the link
+included, since what is linked is the login's record; the hover over the
+account's name says `Token on server linked by you to laptop's sign-in.`, since
+the link is your statement and romp has not verified it. Two
 accounts that would share a name are told apart by organisation, else by
 route. The email is in the hover over the account's name, never on the row. A
 machine's sign-in is named by the account signed in now, since the ledger does
@@ -797,7 +803,7 @@ distiller calls carry that login's helper too, so its analysis is subscription
 usage on that login; a session on the machine default is unchanged. A pasted
 token's label is the user's word: romp cannot read an account or an
 organisation out of a token it never sees, so a login added from the command
-line carries only the label typed for it. And the tool the command calls must
+line carries only the label typed for it, until it is linked (below). And the tool the command calls must
 work non-interactively for the user who runs romp (a signed-in secret manager
 CLI, for example), as the machine's key helper already must.
 
@@ -811,6 +817,40 @@ prints the labels, `romp login remove <label>` forgets a record (a label two
 records share is refused; name the id instead); the token stays wherever it
 was kept.
 
+A stored login can be linked to a machine's sign-in when they are one account.
+A setup-token cannot tell romp its account (it carries the `user:inference`
+scope alone, and Claude Code's profile endpoint refuses it), so one enterprise
+seat reached as one machine's sign-in and as a stored login on another machine
+would otherwise read as two accounts in the spend breakdown.
+`romp login link <label> --same-as <host>` records your statement that they
+are one: `<host>` is this machine's name (or `local`) or the host name of a
+connected kernel, and romp copies that machine's sign-in identity (the account
+and organisation digests, the organisation's name, the kind word and the
+email) from that machine's own kernel, through its `GET /logins`, onto the
+stored login's record under `identity`, marked `source: "linked"` with the host
+and the time. It refuses and writes nothing when that machine has no Claude
+sign-in, its sign-in cannot be read just now, its kernel is not connected or
+does not answer, or it runs an older build that does not report its sign-in's
+account; a record that already names its own account refuses too.
+`romp login unlink <label>` takes the link back.
+
+Attachments often run one way, one machine's ssh reaching the other's kernel
+and not back, so the machine holding the stored login may have no way to ask
+the other for its sign-in. Run the link from the machine that reaches both and
+add `--on <host>`, naming the connected kernel that holds the stored login:
+this kernel reads the sign-in itself and asks that kernel to record it, and
+`romp login unlink <label> --on <host>` takes it back the same way. For the
+sign-in of the machine you run it from, `--same-as local` names it.
+
+The link copies the account signed in there at that moment: if that machine
+later signs into another account, the two read apart again until you link
+anew. Surfaces say the link
+is yours: `romp login list` reads `linked by you to <host>'s sign-in`, the
+gear's row reads `same account as <host>'s sign-in, linked by you`, and the
+spend breakdown's hover says the same. The login menus show the linked email,
+organisation and kind beside the label, as for a login whose record holds
+them.
+
 Every surface that offers a billing pick lists every login the machine knows
 plus the API key: the new-session picker's Billing row (segmented buttons up
 to three choices, one dropdown beyond; an unavailable choice greyed with its
@@ -819,7 +859,10 @@ check-marked, an unavailable one greyed with the reason in its hover), the tab
 hover's Billing row and the submenu's sub-line (`Login (name@example.com ·
 Org · enterprise)` for the machine's own login, `Login (<label> · Org ·
 kind)` for a stored one, each piece only when known), and the gear's Account
-section, which lists the stored logins with a Remove each. The pick reaches
+section, which lists the stored logins with a Remove each, plus a `Same account
+as…` picker (this machine and every connected kernel) on a login that names no
+account, or an Unlink on a linked one. That list is the stored logins of the
+kernel serving the dashboard. The pick reaches
 the kernel as `login` (the machine's own), `key` or `login:<id>`; the
 registry's `auth` stays `login` | `key`, and a new `authLogin` field names the
 stored login, so every older reader keeps its meaning. A fork bills the same

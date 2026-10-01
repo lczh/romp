@@ -197,6 +197,23 @@ class Payload(unittest.TestCase):
         self.assertEqual([a["name"] for a in d["accounts"]], ["Enterprise seat", "API key", "Unknown"])
         self.assertEqual(_vias(d["accounts"][0]), ["TESTHOST sign-in", "token on TESTHOST"])
 
+    def test_a_linked_stored_login_is_the_sign_in_its_linked_to_its_spend_from_before_the_link_included(self):
+        # `romp login link` (2026-10-01): the record is what is linked, so every turn the ledger filed under the login,
+        # all of them older than the link here, counts as that account, and an unlink splits it off again
+        rec = km.lg.read_record(self.state, LID)
+        rec.pop("acctDigest")
+        km.lg.write_record(self.state, rec)
+        d = km._spend_detail(now=NOW)
+        self.assertEqual([a["name"] for a in d["accounts"]], ["Enterprise seat", "enterprise", "API key", "Unknown"])
+        km.lg.link(self.state, LID, {k: v for k, v in _machine().items() if k != "route"}, "TESTHOST")
+        d = km._spend_detail(now=NOW)
+        self.assertEqual([a["name"] for a in d["accounts"]], ["Enterprise seat", "API key", "Unknown"])
+        self.assertEqual(_vias(d["accounts"][0]), ["TESTHOST sign-in", "token on TESTHOST"])
+        self.assertIn("Token on TESTHOST linked by you to TESTHOST's sign-in.", d["accounts"][0]["title"])
+        km.lg.unlink(self.state, LID)
+        d = km._spend_detail(now=NOW)
+        self.assertEqual([a["name"] for a in d["accounts"]], ["Enterprise seat", "enterprise", "API key", "Unknown"])
+
     def test_the_merged_payload_folds_routes_across_hosts_and_names_an_older_peer(self):
         local = km._spend_detail_local(now=NOW)
         n = len(local["hours"]["keys"])

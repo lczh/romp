@@ -80,7 +80,7 @@ EOF
     _romp_cmd "romp color <session> [<#hex|slot>]" -    "Recolor a session's identity swatch (palette hex or slot number; no color arg reads bg/fg)"
     _romp_cmd "romp tag [<name>] [--add ...]" -         "Session tags: bare lists them; <name> with --add/--remove/--color/--delete merges one (a tagged session leaves the no-tags view); --host <kernel> edits an attached kernel's tag; --rename renames"
     _romp_cmd "romp watch-pr <n> [--repo o/r]" -        "One mail here when the PR lands or fails — the kernel owns the watch, so it survives restarts (replaces the mortal shell loop)"
-    _romp_cmd "romp login add|list|remove <label>" -    "The stored Claude logins a session can be billed to beside the machine's own: add records a COMMAND that prints the login's setup-token on demand (--cmd '<shell line>'; how the token is kept is the user's); list and remove print labels only, never a token"
+    _romp_cmd "romp login add|list|remove|link|unlink <label>" - "The stored Claude logins a session can be billed to beside the machine's own: add records a COMMAND that prints the login's setup-token on demand (--cmd '<shell line>'; how the token is kept is the user's); list and remove print labels only, never a token; link --same-as <host> records that a login is the same Claude account as that machine's sign-in (copied from its kernel; --on <host> when the login is on another connected kernel; unlink takes it back)"
     _romp_cmd "romp watch --cmd '<pred>' [...]" -       "One mail when the command exits 0 (or the timeout passes) — kernel-owned like watch-pr, for ANY background wait (--every Ns --timeout Ns --note '...' | --list | --cancel <id>)"
     _romp_cmd "romp board define|list|show|remove <id>" - "The card boards a producer or you can make (plans/card-boards.md): define <id> --from <file> | --json <text> writes a board's definition (categories, sort, bell, badge); list and show read them; remove takes one away once no card stands on it"
     _romp_cmd "romp pane define|list|show|remove <id>" - "The dashboard panes as data (plans/panes-as-data.md): define <id> --from <file>|--json <text> (id, title, source, on, experimental, protocol), list, show, remove; a shipped pane's id is refused."
@@ -1412,10 +1412,15 @@ fi
 # setup-token on demand (romp only ever runs it, at a session's or a judge's launch, into that one process's environment);
 # how the user keeps the token (a secret manager, a private file) is theirs, romp assumes nothing about it (the user
 # 2026-09-13: no store's shorthand inside romp). No token is ever read, printed or logged here; the kernel answers from its registry (GET /logins,
-# POST /logins {"add"} | {"remove"}).
+# POST /logins {"add"} | {"remove"} | {"link"} | {"unlink"}). `link <label|id> --same-as <host>` records the user's statement
+# that a stored login is the same Claude account as <host>'s sign-in (this machine's name or `local`, or a connected kernel's
+# host), so the spend breakdown counts the two as one account (the user 2026-10-01): the kernel copies that sign-in's
+# identity from <host>'s own kernel and refuses when it has none or cannot be reached; `unlink` takes it back. `--on <host>`
+# names the connected kernel that holds the stored login when it is not this machine's: attachments often run one way, so
+# the kernel that reaches both reads the sign-in and asks that one to record it.
 if [[ "${1:-}" == "login" ]]; then
     shift
-    _lg_usage="usage: romp login add <label> --cmd '<shell line that prints the token>' | romp login list | romp login remove <label|id>"
+    _lg_usage="usage: romp login add <label> --cmd '<shell line that prints the token>' | romp login list | romp login remove <label|id> | romp login link <label|id> --same-as <host> [--on <host>] | romp login unlink <label|id> [--on <host>]"
     _lg_sub="${1:-}"; [[ $# -gt 0 ]] && shift
     _tok="$(_romp_token)"
     _kport="${ROMP_KERNEL_PORT:-29855}"
@@ -1436,6 +1441,9 @@ if not rows:
 print("stored logins:")
 for r in rows:
     note = r.get("why") or ("token expires soon" if r.get("expiresSoon") else "")
+    ln = r.get("linked") if isinstance(r.get("linked"), dict) else None
+    if ln:   # a link is the user statement, said as theirs
+        note = "; ".join(x for x in (note, "linked by you to %s'"'"'s sign-in" % ln.get("host")) if x)
     added = r.get("addedAt")
     when = time.strftime("%Y-%m-%d", time.localtime(added)) if isinstance(added, (int, float)) else "?"
     print("  %s  (id %s, added %s%s)" % (r.get("display") or r.get("label") or r.get("id"), r.get("id"), when,
@@ -1480,6 +1488,76 @@ print(json.dumps(b))' "$_lg_label" "$_lg_cmd")"
                 || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
             if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
                 echo "romp login: removed $1"
+                exit 0
+            fi
+            _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+            echo "romp login: refused: $_err" >&2
+            exit 1 ;;
+        link)
+            _lg_ref=""; _lg_host=""; _lg_on=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --same-as) shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
+                               _lg_host="$1"; shift ;;
+                    --on)      shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
+                               _lg_on="$1"; shift ;;
+                    -*)        echo "$_lg_usage" >&2; exit 2 ;;
+                    *)         [[ -n "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+                               _lg_ref="$1"; shift ;;
+                esac
+            done
+            [[ -z "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+            if [[ -z "$_lg_host" ]]; then
+                echo "romp login: --same-as <host> is required: this machine's name (or local), or a connected kernel's host" >&2
+                exit 2
+            fi
+            if [[ -z "$_tok" ]]; then echo "romp login: the kernel isn't running (no serve token). Start romp first." >&2; exit 1; fi
+            _payload="$(python3 -c 'import json, sys
+b = {"link": {"login": sys.argv[1], "sameAs": sys.argv[2]}}
+if sys.argv[3]:
+    b["on"] = sys.argv[3]
+print(json.dumps(b))' "$_lg_ref" "$_lg_host" "$_lg_on")"
+            # the kernel asks <host>'s kernel for its sign-in, and with --on the login's kernel to record it (bounded calls
+            # of its own), so this waits a little longer
+            _resp="$(_romp_token_cfg | curl -sf -m 25 --config - -X POST "http://127.0.0.1:$_kport/logins" \
+                          -H 'Content-Type: application/json' -d "$_payload")" \
+                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+                python3 -c 'import json, sys
+d = json.loads(sys.argv[1])
+host = (d.get("linked") or {}).get("host") or sys.argv[2]
+acct = d.get("account") or ""
+on = (" on " + d["on"]) if d.get("on") else ""
+print("romp login: linked %r%s to %s'"'"'s sign-in%s; the spend breakdown now counts it as that account (your statement: romp cannot verify a token'"'"'s account)"
+      % (d.get("label") or sys.argv[3], on, host, (" (" + acct + ")") if acct else ""))' "$_resp" "$_lg_host" "$_lg_ref"
+                exit 0
+            fi
+            _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+            echo "romp login: refused: $_err" >&2
+            exit 1 ;;
+        unlink)
+            _lg_ref=""; _lg_on=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --on) shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
+                          _lg_on="$1"; shift ;;
+                    -*)   echo "$_lg_usage" >&2; exit 2 ;;
+                    *)    [[ -n "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+                          _lg_ref="$1"; shift ;;
+                esac
+            done
+            [[ -z "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+            if [[ -z "$_tok" ]]; then echo "romp login: the kernel isn't running (no serve token). Start romp first." >&2; exit 1; fi
+            _payload="$(python3 -c 'import json, sys
+b = {"unlink": sys.argv[1]}
+if sys.argv[2]:
+    b["on"] = sys.argv[2]
+print(json.dumps(b))' "$_lg_ref" "$_lg_on")"
+            _resp="$(_romp_token_cfg | curl -sf -m 20 --config - -X POST "http://127.0.0.1:$_kport/logins" \
+                          -H 'Content-Type: application/json' -d "$_payload")" \
+                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+                echo "romp login: unlinked $_lg_ref${_lg_on:+ on $_lg_on}; it reads as its own record again"
                 exit 0
             fi
             _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"

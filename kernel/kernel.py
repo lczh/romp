@@ -48184,6 +48184,13 @@ def _claude_login_display():
     return " · ".join(x for x in (_ACCT_CACHE["label"], _ACCT_CACHE["org"], _kind_read()) if x)
 
 
+def _claude_login_display_of(idn):
+    """A sign-in identity (logins.clean_identity's shape) as the Billing surfaces name a login: `email · Organisation ·
+    kind`, each piece only when known."""
+    idn = idn if isinstance(idn, dict) else {}
+    return " · ".join(str(idn.get(k) or "") for k in ("email", "org", "kind") if idn.get(k))
+
+
 def _reg_login(d):
     """The stored login a reg or the remembered defaults name under `authLogin`, "" when none or junk."""
     v = (d or {}).get("authLogin") if isinstance(d, dict) else None
@@ -48227,8 +48234,115 @@ def _login_rows():
                      "addedAt": rec.get("addedAt"), "expiresAt": rec.get("expiresAt"),
                      "expiresSoon": bool(rec.get("expiresSoon")), "expired": bool(rec.get("expired")),
                      "hasCmd": bool(rec.get("hasCmd")), "refused": str(rec.get("refused") or ""),
-                     "why": lg.why_unavailable(rec)})
+                     "why": lg.why_unavailable(rec),
+                     # the user's own statement that this login is some machine's signed-in account (`romp login link`):
+                     # which machine and when, so every surface says it is theirs and never shows it as verified
+                     "linked": _login_link_public(rec),
+                     "ownAccount": bool(rec.get("acctDigest"))})   # the record names its account itself: nothing to link
     return rows
+
+
+def _login_link_public(rec):
+    """A stored login's link as a surface states it ({host, at}), or None when it is not linked."""
+    idn = lg.linked(rec)
+    return {"host": str(idn["host"]), "at": idn.get("at")} if idn else None
+
+
+_LOGIN_LINK_TIMEOUT_S = 8.0   # one bounded GET /logins on the machine whose sign-in a stored login is linked to
+_LOGIN_LINK_LOCAL = ("local",)
+
+
+def _login_link_here(host) -> bool:
+    """Whether a link's host word names this machine: its own name (case-blind) or "local"."""
+    h = str(host or "").strip().lower()
+    return h in _LOGIN_LINK_LOCAL or h == str(_self_host()).lower()
+
+
+def _login_link_kernel(host):
+    """(remotes-row snapshot, host name, error) for a connected kernel a link reads from or relays to: the row by its
+    host name (case-blind when one row matches), refused in words when no such kernel is attached or it is not up."""
+    h = " ".join(str(host or "").split())
+    with _remotes_lock:
+        row = dict(_remotes[h]) if h in _remotes else None
+        if row is None:   # a host typed in another case is the same machine (host names are case-blind)
+            hits = [dict(r) for k, r in _remotes.items() if str(k).lower() == h.lower()]
+            row = hits[0] if len(hits) == 1 else None
+        names = sorted(str(k) for k in _remotes)
+    if row is None:
+        return None, h, ("no connected kernel is named %r (this machine is %s%s)"
+                         % (h, _self_host(), ("; connected: " + ", ".join(names)) if names else "; none is connected"))
+    h = str(row.get("host") or h)
+    if row.get("status") != "up":
+        return None, h, ("%s's kernel is not connected just now (%s); link once it is"
+                         % (h, str(row.get("detail") or row.get("status") or "down")))
+    return row, h, ""
+
+
+def _login_link_relay(on, body):
+    """(answer, error): POST /logins `body` to the connected kernel `on`, the machine that holds the stored login, for a
+    link or an unlink asked HERE (`romp login link … --on <host>`): attachments often run one way (one machine's ssh
+    reaches the other's kernel and not back), so the kernel that can reach both reads the sign-in and hands the
+    record's kernel the identity it read. The answer is that kernel's own JSON (its ok or its refusal); the error says
+    why it could not be asked, an older build that has no link door included."""
+    row, h, err = _login_link_kernel(on)
+    if err:
+        return None, err
+    st, j, err = _remote_kernel_call(row, "POST", "/logins", body, timeout=_LOGIN_LINK_TIMEOUT_S)
+    if err or st is None or not isinstance(j, dict):
+        return None, "%s; try again once it answers" % (err or ("no answer from %s's kernel" % h))
+    if st in (401, 403):
+        return None, "%s's kernel refused this machine's token (HTTP %s)" % (h, st)
+    if st == 400 and "add {label, tokenCmd} or remove" in str(j.get("error") or ""):
+        return None, "%s's kernel is an older build that cannot record a link; update it, then link" % h
+    if not j.get("ok"):
+        return None, "%s's kernel refused: %s" % (h, str(j.get("error") or "HTTP %s" % st))
+    return dict(j, on=h), ""
+
+
+def _login_link_source(host):
+    """(identity, host_name, error): the signed-in account of `host`'s machine login, the identity `romp login link`
+    copies onto a stored login (the user 2026-10-01). Read from that machine's OWN kernel, the authoritative source:
+    this machine's _machine_identity when `host` is this machine's name or "local", else a connected kernel's GET /logins
+    over the tunnel with that machine's serve token (mirror_trust's transport, the one the spend detail asks peers
+    through). Every way it cannot be read refuses in words, never a guess: no such connected kernel, one not connected
+    or not answering, a refused token, a machine with no Claude sign-in, a sign-in unreadable just now, and an older
+    build whose /logins does not report its sign-in's account."""
+    h = " ".join(str(host or "").split())
+    me = _self_host()
+    if not h:
+        return None, "", "--same-as <host> is required: this machine's name (or local), or a connected kernel's host"
+    if _login_link_here(h):
+        mi = _machine_identity()
+        if mi.get("state") == "unreadable":
+            return None, me, "this machine's Claude sign-in could not be read just now; try again"
+        if mi.get("state") != "ok":
+            return None, me, "this machine (%s) has no Claude sign-in, so there is no account to link to" % me
+        try:
+            return lg.clean_identity(mi), me, ""
+        except ValueError as e:
+            return None, me, "this machine's sign-in: %s" % e
+    row, h, err = _login_link_kernel(h)
+    if err:
+        return None, h, err
+    st, j, err = _remote_kernel_call(row, "GET", "/logins", timeout=_LOGIN_LINK_TIMEOUT_S)
+    if err or st is None:
+        return None, h, "%s; link once it answers" % (err or ("no answer from %s's kernel" % h))
+    if st in (401, 403):
+        return None, h, "%s's kernel refused this machine's token (HTTP %s)" % (h, st)
+    m = j.get("machine") if st == 200 and isinstance(j, dict) else None
+    if not isinstance(m, dict):
+        return None, h, "%s's kernel answered HTTP %s with no sign-in to read" % (h, st)
+    state = m.get("state")
+    if state == "unreadable":
+        return None, h, "%s's Claude sign-in could not be read just now; try again" % h
+    if state != "ok":
+        return None, h, "%s has no Claude sign-in, so there is no account to link to" % h
+    if not isinstance(m.get("identity"), dict):
+        return None, h, "%s's kernel is an older build that does not report its sign-in's account; update it, then link" % h
+    try:
+        return lg.clean_identity(m["identity"]), h, ""
+    except ValueError as e:
+        return None, h, "%s's sign-in: %s" % (h, e)
 
 
 def _logins_view():
@@ -48238,10 +48352,16 @@ def _logins_view():
     machine's login at all (a managed helper outranks every per-session pick), with loginWhy saying why not. Both are
     _auth_avail's reading, the one the new-session picker's Billing row trusts, so the row's line and the picker agree."""
     a = _auth_avail()
-    return {"ok": True, "logins": _login_rows(),
-            "machine": {"label": _claude_login_display(), "acct": _claude_account_label(), "state": _claude_account_state(),
-                        "keyHelper": bool(a.get("key")), "loginUsable": bool(a.get("login")),
-                        "loginWhy": str(a.get("loginWhy") or "")}}
+    machine = {"label": _claude_login_display(), "acct": _claude_account_label(), "state": _claude_account_state(),
+               "keyHelper": bool(a.get("key")), "loginUsable": bool(a.get("login")),
+               "loginWhy": str(a.get("loginWhy") or "")}
+    # the signed-in account's identity as the spend breakdown matches accounts by it (_machine_identity: the account and
+    # organisation digests, the organisation's name, the kind word, the email), so another machine's `romp login link
+    # --same-as <this host>` copies it from here, the authoritative source; absent when no account is signed in
+    mi = _machine_identity()
+    if mi.get("state") == "ok":
+        machine["identity"] = {k: mi.get(k) or "" for k in ("acct", "orgDigest", "org", "kind", "email")}
+    return {"ok": True, "logins": _login_rows(), "host": _self_host(), "machine": machine}
 
 
 def _judge_err_status(msg):
@@ -49331,7 +49451,8 @@ def _machine_identity():
 def _spend_billing(routes):
     """The identity of every billing route this host's ledger names, for _spend_accounts: the key bare, the machine's
     sign-in as _machine_identity reads it, a stored login as its record holds it (label, email, organisation, kind and
-    the account digest when the add flow recorded them; a removed record says so), and "untracked" bare."""
+    the account digest when the add flow recorded them, else the sign-in identity the user linked it to, with `linked`
+    naming that machine; a removed record says so), and "untracked" bare."""
     out = []
     for r in sorted(routes):
         if r == "machine":
@@ -49346,8 +49467,20 @@ def _spend_billing(routes):
             m = {"route": r, "label": str(rec.get("label") or ""), "display": lg.display(rec),
                  "email": str(rec.get("email") or ""), "org": str(rec.get("org") or ""),
                  "kind": kind if kind in lg.KINDS.values() else lg.kind_word(kind)}
+            idn = lg.linked(rec)
             if rec.get("acctDigest"):
                 m["acct"] = str(rec["acctDigest"])   # the record schema's account digest (logins.py), _claude_account's shape
+            elif idn:
+                # the user linked this login to a machine's sign-in (`romp login link`, 2026-10-01): it is that account,
+                # matched under the same rules as any other, and the link's host rides so the hover can say it is theirs.
+                # The record is what is linked, so its spend from before the link counts as that account too.
+                m["acct"] = str(idn["acct"])
+                if idn.get("orgDigest"):
+                    m["orgDigest"] = str(idn["orgDigest"])
+                for k in ("email", "org", "kind"):
+                    if not m.get(k) and idn.get(k):
+                        m[k] = str(idn[k])
+                m["linked"] = str(idn["host"])
             out.append(m)
         else:
             out.append({"route": r})
@@ -49383,7 +49516,8 @@ def _spend_accounts(per_host):
     _same_account calls one account fold into ONE entry named by its kind ("Enterprise seat", "Personal plan"; the
     organisation added only when two entries would share a name), its routes the "via" words ("laptop sign-in",
     "token on server") and its emails and organisation the hover. A stored login whose record names no account is
-    its own entry under the user's label, noted "account not recorded"; a machine's sign-in that is signed out or
+    its own entry under the user's label, noted "account not recorded"; a stored login the user linked to a machine's
+    sign-in is that account like any other, its hover saying the link is theirs; a machine's sign-in that is signed out or
     unreadable, and spend from before billing was tracked, are the Unknown entry. Every seat route's dollars are an
     estimate at API prices (Claude Code's cost, not a bill); the key's are what the key was billed. The dollars
     themselves are summed client-side over the chart's range from the series' `routes`."""
@@ -49415,10 +49549,12 @@ def _spend_accounts(per_host):
                 home = g
                 break
         if home is None:
-            home = {"ids": [], "routes": []}
+            home = {"ids": [], "routes": [], "links": []}
             groups.append(home)
         home["ids"].append(m)
         home["routes"].append({"host": host, "route": r, "via": via, "estimate": True})
+        if m.get("linked"):   # the user's statement, never shown as verified: the hover says whose link it is
+            home["links"].append("%s%s linked by you to %s's sign-in." % (via[:1].upper(), via[1:], m["linked"]))
     out = []
     for g in groups:
         kind = next((x.get("kind") for x in g["ids"] if x.get("kind")), "")
@@ -49428,8 +49564,11 @@ def _spend_accounts(per_host):
         for x in g["ids"]:
             if x.get("email") and x["email"] not in emails:
                 emails.append(x["email"])
+        title = " · ".join(emails + [p for p in (org, kind) if p])
+        if g["links"]:
+            title = (title + ". " if title else "") + " ".join(g["links"])
         out.append({"kind": "seat", "name": _SEAT_NAMES.get(kind) or label or "Claude account", "org": org,
-                    "title": " · ".join(emails + [p for p in (org, kind) if p]), "routes": g["routes"]})
+                    "title": title, "routes": g["routes"]})
     # two accounts that would share a name: told apart by their organisations when those differ, else by where each is
     # reached ("Enterprise seat · laptop sign-in"); never by an email
     same = {}
@@ -49447,7 +49586,8 @@ def _spend_accounts(per_host):
         disp = m.get("display") or ""
         out.append({"kind": "seat", "name": m.get("label") or r, "note": "record missing" if m.get("missing") else "account not recorded",
                     "title": (disp + ". " if disp and disp != m.get("label") else "")
-                    + "Which Claude account this token belongs to isn't recorded, so it can't be matched to a sign-in.",
+                    + "Which Claude account this token belongs to isn't recorded, so it can't be matched to a sign-in. "
+                    "If it is a machine's sign-in, romp login link records that.",
                     "routes": [{"host": host, "route": r, "via": via, "estimate": True}]})
     if keys:
         out.append({"kind": "key", "name": "API key", "title": "Billed to the API key per token.", "routes": keys})
@@ -74083,12 +74223,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"ok": True, "id": tsid, "bg": bg,
                                                    "fg": pal.fg_for(bg)}), "application/json")
             if u.path == "/logins":
-                # The stored logins' two writes (T346). {"add": {label, tokenCmd, email?, org?, kind?}}
+                # The stored logins' writes (T346). {"add": {label, tokenCmd, email?, org?, kind?}}
                 # records a login: the label is the user's word, tokenCmd the shell line that prints its
                 # setup-token on demand (how the user keeps the token is theirs: no store's shorthand here, the
                 # user 2026-09-13), and no token ever rides this body. {"remove": <id or label>} forgets
                 # one (logins.remove: the record goes, the token stays wherever the user keeps it); a label two
-                # records share is refused naming the count, never picked from.
+                # records share is refused naming the count, never picked from. {"link"} and {"unlink"} record and
+                # take back the user's statement that a stored login is some machine's signed-in account (below).
                 b, berr = _json_object_body(raw_body)
                 if berr:
                     return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
@@ -74126,10 +74267,89 @@ class Handler(BaseHTTPRequestHandler):
                     _push_soon()
                     return self._send(200, json.dumps({"ok": True, "id": rec["id"], "label": label,
                                                        "display": lg.display(rec)}), "application/json")
+                link = b.get("link")
+                if link is not None:
+                    # {"link": {"login": <id or label>, "sameAs": <host>}, "on"?: <host>}: the user's statement that
+                    # this stored login is the same Claude account as that machine's sign-in (`romp login link`, the
+                    # gear's Same account row; the user 2026-10-01). The identity is copied from that machine's own
+                    # kernel (_login_link_source); every way it cannot be read refuses, and nothing is written. "on"
+                    # names the connected kernel that holds the login, when it is not this one; link.identity is how
+                    # that relay hands over the identity it read.
+                    if not isinstance(link, dict):
+                        return self._send(400, json.dumps({"ok": False, "error": "link must be an object"}), "application/json")
+                    on = str(b.get("on") or "").strip()
+                    if on and not _login_link_here(on):
+                        # the stored login lives on another machine (`--on <host>`): read the sign-in HERE, from its
+                        # source, and hand the record's kernel the identity read (_login_link_relay)
+                        idn, host, err = _login_link_source(link.get("sameAs"))
+                        if err:
+                            return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                        ans, err = _login_link_relay(on, {"link": {"login": str(link.get("login") or ""), "sameAs": host,
+                                                                   "identity": idn}})
+                        if err:
+                            return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                        return self._send(200, json.dumps(ans), "application/json")
+                    lid, err = lg.resolve(jd.STATE, str(link.get("login") or ""))
+                    if err:
+                        return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                    rec = lg.read_record(jd.STATE, lid) or {}
+                    if rec.get("acctDigest"):
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the %s login's record already names its account; there is nothing to link"
+                            % str(rec.get("label") or "stored")}), "application/json")
+                    if isinstance(link.get("identity"), dict):
+                        # relayed by the kernel that read the sign-in from its source (_login_link_relay): the identity
+                        # it read, under the host name it knows that machine by
+                        idn, host = link["identity"], " ".join(str(link.get("sameAs") or "").split())
+                        if not host:
+                            return self._send(400, json.dumps({"ok": False, "error":
+                                "link.sameAs (the machine whose sign-in it is) required with link.identity"}), "application/json")
+                    else:
+                        idn, host, err = _login_link_source(link.get("sameAs"))
+                        if err:
+                            return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                    try:
+                        rec = lg.link(jd.STATE, lid, idn, host)
+                    except ValueError as e:
+                        return self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
+                    except OSError as e:
+                        return self._send(200, json.dumps({"ok": False, "retryable": True, "error":
+                            "the login record could not be saved (%s); retry once romp's state directory takes writes again" % e}),
+                            "application/json")
+                    _push_soon()
+                    return self._send(200, json.dumps({"ok": True, "id": lid, "label": str(rec.get("label") or ""),
+                                                       "display": lg.display(rec), "linked": _login_link_public(rec),
+                                                       "account": _claude_login_display_of(idn)}), "application/json")
+                if b.get("unlink") is not None:
+                    # {"unlink": <id or label>}: take a link back; the login reads as its record alone again. With "on",
+                    # the stored login lives on that connected kernel, which is asked to (_login_link_relay)
+                    on = str(b.get("on") or "").strip()
+                    if on and not _login_link_here(on):
+                        ans, err = _login_link_relay(on, {"unlink": str(b.get("unlink") or "")})
+                        if err:
+                            return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                        return self._send(200, json.dumps(ans), "application/json")
+                    lid, err = lg.resolve(jd.STATE, str(b.get("unlink") or ""))
+                    if err:
+                        return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
+                    rec = lg.read_record(jd.STATE, lid) or {}
+                    try:
+                        had = lg.unlink(jd.STATE, lid)
+                    except OSError as e:
+                        return self._send(200, json.dumps({"ok": False, "retryable": True, "error":
+                            "the login record could not be saved (%s); retry once romp's state directory takes writes again" % e}),
+                            "application/json")
+                    if not had:
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the %s login is not linked to any sign-in" % str(rec.get("label") or "stored")}), "application/json")
+                    _push_soon()
+                    return self._send(200, json.dumps({"ok": True, "id": lid, "label": str(rec.get("label") or ""),
+                                                       "unlinked": True}), "application/json")
                 ref = str(b.get("remove") or "").strip()
                 if not ref:
                     return self._send(400, json.dumps({"ok": False, "error":
-                        "add {label, tokenCmd} or remove (a stored login's id or label) required"}), "application/json")
+                        "add {label, tokenCmd}, remove, link {login, sameAs} or unlink (a stored login's id or label) required"}),
+                        "application/json")
                 lid, err = lg.resolve(jd.STATE, ref)
                 if err:
                     return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")

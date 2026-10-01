@@ -158,3 +158,18 @@ test("the gear lists the stored logins with a Remove and the feed names a refuse
   assert.match(FEED, /it\.blocked\.login \? `⚠ Can't analyze · \$\{it\.blocked\.login\}`\s*\n\s*: it\.blocked\.mode === "key" \? "⚠ Can't analyze · API key" : "⚠ Can't analyze · login";/);
   assert.match(FEED, /mode\?: string; login\?: string; since\?: number;/);
 });
+
+test("the gear's stored-login row links a login to a machine's sign-in and unlinks it, said as the user's statement (2026-10-01)", () => {
+  // linked: the note names the machine and that the link is the user's, and an Unlink takes it back
+  assert.match(GEAR, /if \(ln\) note = \(note \? note \+ ' \\u00b7 ' : ''\) \+ 'same account as ' \+ lgSignIn\(ln\.host\) \+ ', linked by you';/);
+  assert.match(GEAR, /lgPost\(\{ unlink: r\.id \}, st, ul, 'Unlink'\);/);
+  // not linked, and the record names no account of its own: a Same account as… picker over this machine and every connected kernel
+  assert.match(GEAR, /\} else if \(!r\.ownAccount\) \{/);
+  assert.match(GEAR, /\[selfName \|\| 'local'\]\.concat\(\(kernels \|\| \[\]\)\.map\(function \(k\) \{ return k\.host; \}\)\)/);
+  assert.match(GEAR, /lgPost\(\{ link: \{ login: r\.id, sameAs: sel\.value \} \}, st, sel, ''\);/);
+  // the kernel's answer decides: ok re-reads the list, a refusal is said in the row with the control restored
+  assert.match(GEAR, /fetch\(ku\('\/logins'\), \{ method: 'POST', headers: \{ 'Content-Type': 'application\/json' \}, body: JSON\.stringify\(body\) \}\)/);
+  assert.match(GEAR, /\.then\(function \(d\) \{ if \(d && d\.ok\) lgFetchLogins\(\); else refused\(\(d && d\.error\) \|\| 'refused'\); \}\)/);
+  assert.match(GEAR, /sel\.disabled = true; st\.className = 'rs-note'; st\.textContent = 'Linking\\u2026';/, "acknowledged before the round-trip");
+  assert.match(GEARCSS, /\.rs-logins \.rs-login-link \{ flex: 0 0 auto;/);
+});

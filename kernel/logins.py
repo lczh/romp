@@ -6,11 +6,14 @@ The registry of the logins a romp install knows BESIDE the machine's own signed-
 can be billed to any one of them (docs/reference.md, "Several Claude logins"). One record per login under
 STATE/logins/<id>.json, metadata only:
 
-    {id, label, email?, org?, kind?, addedAt, acctDigest?, tokenCmd, refused?, refusedAt?}
+    {id, label, email?, org?, kind?, addedAt, acctDigest?, tokenCmd, refused?, refusedAt?, identity?}
 
 `label` is the user's word at add time (romp cannot read an account out of a token, so the label is all it
 knows about one it never sees); `email`, `org` and `kind` ("personal" | "enterprise") ride only when the
-add flow could read them from the CLI's own record. The credential itself, a `claude setup-token` bearer,
+add flow could read them from the CLI's own record. `identity` is the user's own statement that the login is the same
+Claude account as some machine's sign-in (`romp login link`, 2026-10-01): {source: "linked", host, at, acct, orgDigest?,
+org?, kind?, email?}, copied from that machine's kernel at link time and never presented as verified (link / linked /
+unlink below). The credential itself, a `claude setup-token` bearer,
 lives WHEREVER the user keeps it and nowhere in romp (the user 2026-09-11): `tokenCmd` is a shell command
 that prints the token on demand (a secret manager's read command, a private file's cat: romp never imports or
 assumes any store, it only runs the command; the user 2026-09-13), and a session or a judge call billed to
@@ -254,13 +257,15 @@ def record_state(state_dir, login_id: str, now=None):
 def display(rec) -> str:
     """The label a surface shows for a stored login: the user's label, then the email when it adds
     something, the organisation and the kind word when known, joined with middle dots. Never a token,
-    never the command, never an id."""
+    never the command, never an id. A piece the record does not hold itself comes from its linked
+    identity (link), the sign-in the user said it is the same account as."""
     if not isinstance(rec, dict):
         return ""
+    idn = linked(rec) or {}
     label = str(rec.get("label") or "").strip()
-    email = str(rec.get("email") or "").strip()
-    org = str(rec.get("org") or "").strip()
-    kind = str(rec.get("kind") or "").strip().lower()
+    email = str(rec.get("email") or idn.get("email") or "").strip()
+    org = str(rec.get("org") or idn.get("org") or "").strip()
+    kind = str(rec.get("kind") or idn.get("kind") or "").strip().lower()
     if kind not in KINDS.values():
         kind = kind_word(kind)          # a stored CLI word folds; anything else is no kind word
     pieces = [label]
@@ -271,6 +276,90 @@ def display(rec) -> str:
     if kind:
         pieces.append(kind)
     return " · ".join(p for p in pieces if p)
+
+
+# ── LINKED identity (the user 2026-10-01: one enterprise seat reached as one machine's sign-in and as a stored login's
+# token on another machine read as two accounts in the spend breakdown, because a setup-token cannot tell romp its
+# account: the profile endpoint refuses it). `romp login link <login> --same-as <host>` records the user's statement
+# that this stored login IS that machine's signed-in account: the kernel copies the sign-in's identity from that
+# machine's own kernel (the authoritative source of it) onto the record under `identity`, marked source "linked" with
+# the host and the moment, so every surface can say the link is the user's and never present it as verified. The
+# copy is the account signed in there AT LINK TIME: that machine signing into another account later does not move the
+# link (link again). `unlink` takes it back.
+IDENTITY_SOURCE = "linked"
+DIGEST_RE = re.compile(r"^[0-9a-f]{12}$")
+IDENTITY_TEXT_MAX = 120
+
+
+def _one_line(v, n=IDENTITY_TEXT_MAX) -> str:
+    return " ".join(str(v or "").split())[:n]
+
+
+def clean_identity(src) -> dict:
+    """The identity fields a link may copy, from a sign-in's identity as a kernel reports it ({acct, orgDigest, org,
+    kind, email}): the account digest (12 hex, required), the organisation digest (12 hex) when given, the organisation
+    name, the kind word folded (logins.kind_word; "personal" | "enterprise", anything else dropped) and the email, each
+    one line and capped. A ValueError names what is missing; nothing is guessed."""
+    if not isinstance(src, dict):
+        raise ValueError("no sign-in identity to copy")
+    acct = str(src.get("acct") or "")
+    if not DIGEST_RE.match(acct):
+        raise ValueError("the sign-in names no account to copy")
+    out = {"acct": acct}
+    od = str(src.get("orgDigest") or "")
+    if DIGEST_RE.match(od):
+        out["orgDigest"] = od
+    kind = str(src.get("kind") or "").strip().lower()
+    kind = kind if kind in KINDS.values() else kind_word(kind)
+    if kind:
+        out["kind"] = kind
+    for k in ("org", "email"):
+        v = _one_line(src.get(k))
+        if v:
+            out[k] = v
+    return out
+
+
+def linked(rec):
+    """The record's linked identity ({source, host, at, acct, orgDigest?, org?, kind?, email?}), or None when it has
+    none or the stored one does not read (a hand-edited file: no account digest, or another source)."""
+    idn = rec.get("identity") if isinstance(rec, dict) else None
+    if not isinstance(idn, dict) or idn.get("source") != IDENTITY_SOURCE:
+        return None
+    if not DIGEST_RE.match(str(idn.get("acct") or "")) or not str(idn.get("host") or "").strip():
+        return None
+    return idn
+
+
+def link(state_dir, login_id: str, identity: dict, host: str, now=None) -> dict:
+    """Record that stored login `login_id` is the same Claude account as `host`'s sign-in, whose identity (as that
+    host's kernel reported it) is `identity`. Overwrites an earlier link. A record that names its own account already
+    (acctDigest, read from Claude Code's record at add time) refuses: the user's statement never overrides what the
+    record read. Returns the written record; a ValueError says why nothing was written."""
+    rec = read_record(state_dir, login_id)
+    if rec is None:
+        raise ValueError("no stored login with that id")
+    if rec.get("acctDigest"):
+        raise ValueError("the %s login's record already names its account; there is nothing to link"
+                         % str(rec.get("label") or "stored"))
+    host = _one_line(host, 128)
+    if not host:
+        raise ValueError("a host to link to is required")
+    idn = dict(clean_identity(identity), source=IDENTITY_SOURCE, host=host,
+               at=int(time.time() if now is None else now))
+    rec["identity"] = idn
+    write_record(state_dir, rec)
+    return rec
+
+
+def unlink(state_dir, login_id: str) -> bool:
+    """Take back a link: the record's `identity` goes. True when one was removed, False when the record had none."""
+    rec = read_record(state_dir, login_id)
+    if rec is None or "identity" not in rec:
+        return False
+    rec.pop("identity", None)
+    write_record(state_dir, rec)
+    return True
 
 
 def why_unavailable(rec, now=None) -> str:
