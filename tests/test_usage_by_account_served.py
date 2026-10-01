@@ -6,8 +6,12 @@ Two machines on one account (TESTHOSTA, this machine, and TESTHOSTB, whose own s
 render ONE block: the account line as its head, the meters once, two names beneath in the tab strip's quiet host dress,
 TESTHOSTB named lagging with its own report's age, one updated-ago line (the oldest of the pair). A third machine on
 another account (TESTHOSTC) is a second block beside it. A fourth machine attached and up with no report (TESTHOSTD) is
-named after the blocks with its state, never a column. The rail's own aggregate bars are unchanged. Synthetic only:
-TESTHOST names, the logins user@example.test and other@example.test. Skips LOUDLY without a playwright (set
+named after the blocks with its state, never a column. The rail's own aggregate bars are unchanged. Each block is headed
+by the account's kind, the spend detail's name for it, never an email (2026-10-01). A second lab (NoWindowsServed) puts
+this machine on an account that answered it has no usage windows beside a machine still holding a weeks-old reading on
+the same account, with spend split by account: one block, headed by the kind, saying so in one line, no bars, no age, no
+lagging note, and the spend section's by-account line with the seat's dollars marked as an estimate (the user
+2026-10-01). Synthetic only: TESTHOST names and an invented email that must never render. Skips LOUDLY without a playwright (set
 ROMP_PLAYWRIGHT_NODE_PATH to a node_modules holding it) unless ROMP_SERVED_TESTS_REQUIRE=1 makes that a failure."""
 import json
 import os
@@ -30,7 +34,8 @@ os.environ.pop("ROMP_STATE_DIR", None)
 km = load_source("romp_kernel_usage_by_account", os.path.join(BIN, "romp-kernel"))
 
 ACCT1, ACCT2 = "d1" * 20, "d2" * 20          # opaque digests, as the kernel serves them
-LABEL1, LABEL2 = "user@example.test", "other@example.test"
+NAME1, NAME2 = "Personal plan", "Enterprise seat"   # each account named by its kind, as the kernel names it
+EMAIL = "user@example.test"                          # an older build's acctLabel: carried on a row, never rendered
 
 
 def _node_path():
@@ -73,10 +78,8 @@ class UsageByAccountServed(unittest.TestCase):
         now = int(time.time())
         # this machine's fresh reading; TESTHOSTB on the SAME account, an hour behind with a different 5-hour figure (lagging);
         # TESTHOSTC on another account; TESTHOSTD attached and up, no report yet
-        rows = [{"host": "", "acct": ACCT1, "usage": dict(_windows(now, 42, 17, 8, now - 120), acct=ACCT1, acctLabel=LABEL1)},
-                {"host": "TESTHOSTB", "acct": ACCT1, "usage": dict(_windows(now, 31, 17, 8, now - 3600), acct=ACCT1, acctLabel=LABEL1)},
-                {"host": "TESTHOSTC", "acct": ACCT2, "usage": dict(_windows(now, 73, 55, 12, now - 300), acct=ACCT2, acctLabel=LABEL2)}]
-        payload = json.dumps({"rows": rows, "host": "TESTHOSTA", "noReport": ["TESTHOSTD"]}).encode()
+        rows, extra = self._rows(now)
+        payload = json.dumps(dict({"rows": rows, "host": "TESTHOSTA", "noReport": ["TESTHOSTD"]}, **extra)).encode()
         html = km._landing().encode()
         blank = b"<!doctype html><html><body style='margin:0;background:#1e1e1e'></body></html>"
 
@@ -118,6 +121,11 @@ class UsageByAccountServed(unittest.TestCase):
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
+    def _rows(self, now):
+        return ([{"host": "", "acct": ACCT1, "usage": dict(_windows(now, 42, 17, 8, now - 120), acct=ACCT1, acctName=NAME1)},
+                 {"host": "TESTHOSTB", "acct": ACCT1, "usage": dict(_windows(now, 31, 17, 8, now - 3600), acct=ACCT1, acctName=NAME1)},
+                 {"host": "TESTHOSTC", "acct": ACCT2, "usage": dict(_windows(now, 73, 55, 12, now - 300), acct=ACCT2, acctName=NAME2)}], {})
+
     def tearDown(self):
         if hasattr(self, "srv"):
             self.srv.shutdown()
@@ -146,7 +154,7 @@ class UsageByAccountServed(unittest.TestCase):
         self.assertEqual(t["hosts"], 0, "no per-machine column heading anywhere")
         one, two = t["blocks"]
         # the shared account's block: the account line as its head, the meters ONCE, this machine's fresh figures
-        self.assertEqual(one["head"], LABEL1)
+        self.assertEqual(one["head"], NAME1)
         self.assertEqual(one["windows"], ["5 hours", "7 days", "Fable 5"], "the three meters, once")
         self.assertEqual(one["used"], ["42%", "17%", "8%"], "the freshest member's reading (this machine's), not TESTHOSTB's 31%")
         self.assertEqual(len(one["resets"]), 3, "each meter's reset, once")
@@ -158,7 +166,7 @@ class UsageByAccountServed(unittest.TestCase):
         self.assertEqual((one["dress"]["style"], one["dress"]["weight"]), ("italic", "400"), one["dress"])
         self.assertLess(float(one["dress"]["size"].rstrip("px")), 11.0, "a step smaller than the 11px line: %r" % one["dress"])
         # the other account's block
-        self.assertEqual(two["head"], LABEL2)
+        self.assertEqual(two["head"], NAME2)
         self.assertEqual(two["used"], ["73%", "55%", "12%"])
         self.assertEqual(two["machines"], ["TESTHOSTC"])
         self.assertEqual(two["lag"], [], "alone on its account: nothing to lag behind")
@@ -174,6 +182,44 @@ class UsageByAccountServed(unittest.TestCase):
         r = o["rail"]
         self.assertEqual(r["bars"], 3, "the rail draws the three windows once, aggregated: %r" % r)
         self.assertFalse(r["api"], "no key: no API cell")
+
+
+
+class NoWindowsServed(UsageByAccountServed):
+    """This machine's account answered that it has no usage windows; TESTHOSTB, signed into the same account on an older
+    build, still holds a reading from weeks ago and ships the login's email; the week's spend splits between the key and
+    the seat, and TESTHOSTC's older build sends no routes (the user 2026-10-01)."""
+    test_two_machines_on_one_account_are_one_block_a_third_on_another_a_second_and_the_unreported_one_is_named = None
+    test_the_rails_own_meter_is_unchanged_one_aggregate_set_of_bars = None
+
+    def _rows(self, now):
+        def old(pct):
+            return {"pct": pct, "resetsAt": now - 25 * 86400, "color": [84, 178, 4]}
+        spend = {w: {"usd": 5.0, "tok": 10, "turns": 1} for w in ("hour", "day", "week", "month", "monthToDate")}
+        rows = [{"host": "", "acct": ACCT2, "usage": {"noWindows": True, "t": now - 60, "acct": ACCT2, "acctName": NAME2, "spend": spend}},
+                {"host": "TESTHOSTB", "acct": ACCT2, "usage": {"fiveHour": old(71), "sevenDay": old(16), "fable": old(27),
+                                                               "t": now - 26 * 86400, "acct": ACCT2, "acctLabel": EMAIL}},
+                {"host": "TESTHOSTC", "acct": "", "usage": {"apiKey": True, "acct": "", "spend": spend}}]
+        return rows, {"accounts": [{"name": "API key", "kind": "key", "usd": 15.0, "est": False},
+                                   {"name": NAME2, "kind": "seat", "usd": 10.4, "est": True}],
+                      "accountsMissing": ["TESTHOSTC"]}
+
+    def test_an_account_without_windows_is_said_once_and_the_spend_splits_by_account(self):
+        o = self._drive()
+        t = o["tip"]
+        self.assertEqual(t["display"], "block", "the hover is up")
+        self.assertEqual(len(t["blocks"]), 1, [b["head"] for b in t["blocks"]])
+        b = t["blocks"][0]
+        self.assertEqual(b["head"], NAME2, "headed by the account's kind")
+        self.assertEqual(b["nowin"], "no 5-hour or weekly limits on this account")
+        self.assertEqual(b["windows"], [], "no bars: TESTHOSTB's weeks-old reading is not the account's")
+        self.assertEqual(b["machines"], ["TESTHOSTA", "TESTHOSTB"], "both machines signed into it")
+        self.assertEqual(b["lag"], [], "nothing to lag behind")
+        self.assertEqual(b["age"], "", "no age: nothing is read")
+        self.assertFalse(t["email"], "no email anywhere in the hover")
+        self.assertTrue(t["spend"], "the spend section")
+        self.assertEqual(t["acctLine"], "API key $15 \u00b7 Enterprise seat \u2248$10 \u00b7 TESTHOSTC not counted (older build)")
+        self.assertEqual((o["rail"]["windows"], o["rail"]["pcts"]), ([], []), "no window bars on the rail: %r" % o["rail"])
 
 
 if __name__ == "__main__":

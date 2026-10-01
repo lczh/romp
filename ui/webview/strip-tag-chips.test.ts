@@ -109,5 +109,5 @@ test("round two: the hidden host is out of the flow, the fit steps the run down 
   assert.match(fit, /const fits = \(\) => end\.offsetTop === without && host\.scrollWidth <= host\.clientWidth \+ 1;/, "a run stands when the end keeps its row and no chip is clipped");
   assert.match(fit, /for \(let limit = STRIP_CHIP_LIMIT - 1; limit >= 1; limit--\) \{\s*\n\s*feed\(limit\);\s*\n\s*if \(fits\(\)\) return;\s*\n\s*\}\s*\n\s*host\.hidden = true;/, "then chip by chip, and hidden when even one chip and the count do not fit");
   assert.match(RENDER, /^let stripFit: \(\(\) => void\) \| null = null;/m, "the last paint's fit, kept for the observer");
-  assert.match(RENDER, /tabRowObserver = new ResizeObserver\(\(\) => \{ stripFit\?\.\(\); paintTabRowLines\(bar\); \}\);/, "a resize re-runs the fit, then the hairlines follow the rows");
+  assert.match(RENDER, /tabRowObserver = new ResizeObserver\(\(\) => \{ flowStripRows\(bar\); stripFit\?\.\(\); paintTabRowLines\(bar\); \}\);/, "a resize re-flows the groups, re-runs the fit, then the hairlines follow the rows");
 });

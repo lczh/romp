@@ -620,15 +620,29 @@ the per-init check above confirms each one.
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
-key-billed dollars (5-hour burn and month-to-date, numbers only). Hovering
-breaks the windows down by ACCOUNT: one block per distinct login (the account
-line as its head, the meters written once, since they are the account's
-allowance), beneath them one line naming the machines logged into it in the
-tab strip's quiet host dress, a machine whose own reading lagged the freshest
-named as lagging beside its name, and one updated-ago line per block (the
-oldest report of the group); two accounts are two blocks side by side; a
+key-billed dollars (5-hour burn and month-to-date, numbers only). On a
+machine with no sign-in of its own every turn counts as the key's, except a
+turn billed to a stored login: that spent a subscription seat, and its dollars
+are not the key's. Hovering
+breaks the windows down by ACCOUNT: one block per distinct login (headed by
+the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
+detail gives it, never its email; the meters written once, since they are the
+account's allowance), beneath them one line naming the machines logged into it
+in the tab strip's quiet host dress, a machine whose own reading lagged the
+freshest named as lagging beside its name, and one updated-ago line per block
+(the oldest report of the group); two accounts are two blocks side by side; a
 machine attached but not yet reporting is named after the blocks rather than
-given a column; the key spend stays one section for every machine. A click on the
+given a column; the key spend stays one section for every machine. An account
+that answers Claude Code's usage request with no 5-hour or weekly window (an
+enterprise seat metered by a monthly spend limit) is recorded as such and its
+block says `no 5-hour or weekly limits on this account`, with no bars, no age
+and no lagging note, even beside a machine on an older build still holding a
+reading from before; a usage request the endpoint cannot answer says nothing
+about the account and changes nothing. Under the spend's per-machine line, a
+`by account · 1 week` line splits the week the way the spend detail's By
+account summary does, one entry per account, a seat's dollars wearing `≈`; it
+shows only when something besides the key billed the week, and a machine whose
+older build sends no billing routes is counted out by name. A click on the
 readout opens the spend detail: a chart of spend over time stacked by session,
 and under it the list of sessions with their dollars, turns and tokens. The
 list follows the chart's range (one day by hour, seven days by hour, ninety
@@ -5528,12 +5542,15 @@ sections: **Group by tag** in its Filter menu (off until you turn it on, per bro
 lanes out one section per tag in the same order, each session under every tag it carries and
 the untagged sessions behind a divider, with the tag's chip, the caret and the count on a row
 of its own; a section folded in either place is folded in both, and while grouped the lanes
-follow the tag order (dragging a lane pans, it does not reorder). A session reached from a card or the chat while its section is folded unfolds that section, in the strip too, and the arrow keys walk the rows on screen. The gear at the strip's right end, the same gear as the one at the bottom right of every romp page, opens the settings on the **Chat** tab. Its **Tab strip** section carries **Lock the tabs in place**, which freezes every tab move (a drag, a Move to, the Sessions pane's lanes) until you turn it off, and **State badge instead of the outline ring** (the state badge, above); the **Tab widgets** section next to it holds the per-widget rows. The strip's tag button, at the other end of the controls from the gear, shows no chips of its own: the tags show in the strip's sections when the tabs are grouped, and the button wears the accent while a filter is on. Every group starts on its own row; turning off
-the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
-strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
-tags stays short. Folded groups that follow one another in the tag order share one row, since each is
-only its header; an open group always starts a row of its own, and so do the untagged sessions, so a
-folded group between two open ones keeps its row too. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
+follow the tag order (dragging a lane pans, it does not reorder). A session reached from a card or the chat while its section is folded unfolds that section, in the strip too, and the arrow keys walk the rows on screen. The gear at the strip's right end, the same gear as the one at the bottom right of every romp page, opens the settings on the **Chat** tab. Its **Tab strip** section carries **Lock the tabs in place**, which freezes every tab move (a drag, a Move to, the Sessions pane's lanes) until you turn it off, and **State badge instead of the outline ring** (the state badge, above); the **Tab widgets** section next to it holds the per-widget rows. The strip's tag button, at the other end of the controls from the gear, shows no chips of its own: the tags show in the strip's sections when the tabs are grouped, and the button wears the accent while a filter is on. The groups
+share rows in the tag order while they fit: a folded group is its header alone, an open group its
+header and its tabs, and a group that does not fit the rest of a row moves to the next row whole
+rather than splitting across two (one wider than the whole strip wraps onto rows of its own). Folded
+headers side by side sit as close as tabs; a short divider stands between two groups on a row when
+either shows tabs. The untagged sessions keep a row of their own at the end, which is where a dragged
+tab goes to lose its tags. Turning off
+the gear's **Keep tag groups together in the tab strip** lets the groups run on across the strip and
+wrap wherever a row fills, with the untagged sessions behind a thin divider. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
 
 ### The tag menu
 

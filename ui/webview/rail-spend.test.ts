@@ -21,9 +21,10 @@ const BACKEND = fs.readFileSync(path.join(ROOT, "kernel", "sdk_backend.py"), "ut
 
 test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside bars", () => {
   // the spend-only view arms on the legacy apiKey marker OR a login-less machine with recorded spend,
-  // and keeps TOTAL sums (everything there bills the key; legacy files predate the split)
+  // and keeps TOTAL sums (everything there bills the key; legacy files predate the split), except in a
+  // bucket where a stored login billed turns, which reads its key sub-count (2026-10-01: a seat's turns)
   assert.ok(KERNEL.includes('if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):'));
-  assert.ok(KERNEL.includes('out = {"apiKey": True, "spend": _spend_windows(),'));
+  assert.ok(KERNEL.includes('out = {"apiKey": True, "spend": _spend_windows(login_split=True),'));
   // the hover's spend rows lead with the rolling hour (the user 2026-08-15); the collapsed cell keeps day+month
   // …'1 month' is ROLLING 30 days and 'this month' the calendar bill figure beneath it (T235, 2026-09-03)
   assert.ok(KERNEL.includes("var SPEND_WINS=[['hour','1 hour'],['day','1 day'],['week','1 week'],['month','1 month'],['monthToDate','this month']];"));
@@ -32,7 +33,7 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
   assert.ok(KERNEL.includes('out["spendSeries"] = ss'));
   // the bars payload attaches the KEYED split only — a login turn's computed cost there would be
   // dollars nobody is billed — and only when key turns actually exist (the user 2026-08-08)
-  assert.ok(KERNEL.includes("def _spend_windows(keyed_only=False):"));
+  assert.ok(KERNEL.includes("def _spend_windows(keyed_only=False, login_split=False):"));
   assert.ok(KERNEL.includes("ksp = _spend_windows(keyed_only=True)"));
   assert.match(KERNEL, /if any\(\(ksp\.get\(k\) or \{\}\)\.get\("turns"\) for k in \("day", "week", "month"\)\):/);
   // no fragment of the key rides ANY payload (the user 2026-08-08, evening): the tail plumbing is
@@ -145,7 +146,8 @@ test("the rich tip is the ONE hover surface: no native titles, per-host sections
   }
   // host sections carry WINDOWS only now — spend is ONE fleet-level section (the user 2026-08-13:
   // one shared key reads as one number; each host records only its own turns, so the sum IS the number)
-  assert.ok(usageJS.includes("sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];}))return;"), "a machine with no window block joins no account block (2026-09-19)");
+  assert.ok(usageJS.includes("sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;"),
+    "a machine with no window block joins no account block (2026-09-19), unless its account answered it has none (2026-10-01)");
   assert.ok(!usageJS.includes("spendOnly"), "spend renders for ANY host that has it");
   assert.ok(usageJS.includes("function fleetSpendHTML(sets)"));
   // the spend section renders even when NO host has window blocks (an all-keyed box, 2026-08-15) —
@@ -181,20 +183,22 @@ test("same-account hosts share the FRESHEST window reading — one truth per log
   assert.ok(usageJS.includes("function shareFreshest(live)"));
   assert.ok(usageJS.includes("var a=r.usage&&r.usage.acct;r.ownT=(typeof r.usage.t==='number')?r.usage.t:null;r.lag=false;if(a)(by[a]=by[a]||[]).push(r);"),
     "grouped on the digest; key-only hosts (no acct) stand alone; each member keeps its OWN report time for the machines line (2026-09-19)");
-  assert.ok(usageJS.includes("r.lag=['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];"), "a member whose own reading differed from the freshest is marked lagging");
+  assert.ok(usageJS.includes("r.lag=!b.noWindows&&['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];"),
+    "a member whose own reading differed from the freshest is marked lagging (never beside an account with no windows)");
   assert.ok(usageJS.includes("if(tr>tb)best=r;"), "freshest reading wins the group");
-  assert.ok(usageJS.includes("['fiveHour','sevenDay','fable','t','limited','acctLabel'].forEach"), "window fields shared — spend deliberately not");
+  assert.ok(usageJS.includes("['fiveHour','sevenDay','fable','t','limited','acctName','noWindows'].forEach"), "window fields shared — spend deliberately not");
   assert.ok(usageJS.includes("shareFreshest(live);"), "…and it runs on every render");
 });
 
 test("the hover names WHICH login the window bars belong to (the tab hover's label)", () => {
   // the user 2026-08-09: the usage tip says whose account the windows are, like the tab hover;
-  // the cross-host dedup stays on the opaque acct digest — acctLabel is display only
+  // the cross-host dedup stays on the opaque acct digest — the name is display only, by the account's kind since
+  // 2026-10-01 (the spend detail's words; the email stays off the rail)
   const usageJS = KERNEL.split('_LANDING_USAGE_JS = """')[1].split('"""')[0];
-  assert.ok(usageJS.includes("if(u.acctLabel)det._acct=u.acctLabel;"));
+  assert.ok(usageJS.includes("if(u.acctName)det._acct=u.acctName;"));
   assert.ok(usageJS.includes("if(d._acct)h+='<div class=ru-tip-acct>'+esc(d._acct)+'</div>';"),
     "…as the account block's HEAD (2026-09-19); a key-only host has no block, so its spend already says whose dollars");
-  assert.ok(KERNEL.includes('"acctLabel": _claude_account_label(),'));
+  assert.ok(KERNEL.includes('"acctName": _acct_name(),'));
   assert.ok(KERNEL.includes(".ru-tip-acct{"));
 });
 
@@ -209,7 +213,8 @@ test("a multi-account breakdown lays ACCOUNTS side by side, one block each, the 
   assert.ok(usageJS.includes("var a=e.acct||('host:'+e.host);var g=by[a];if(!g){g={members:[]};by[a]=g;groups.push(g);}g.members.push(e);"), "grouped by the account digest, in the panel's order");
   assert.ok(usageJS.includes("if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){return machineHTML(e.host)"), "the machines line, only when the mesh has more than one machine");
   assert.ok(usageJS.includes("+(e.lag?'<span class=ru-tip-lag> lagging'+(e.ownT?', updated '+fmtAgo(e.ownT):'')+'</span>':'');}).join(', ')+'</div>';"), "a lagging machine named beside its name with its own report's age");
-  assert.ok(usageJS.includes("if(ts.length)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';"), "updated-ago once per block: the oldest report of the group");
+  assert.ok(usageJS.includes("if(ts.length&&wh)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';"),
+    "updated-ago once per block: the oldest report of the group (none on a block with no windows: nothing is read)");
   assert.ok(usageJS.includes("if(NOREPORT.length)h+='<div class=ru-tip-machines>no usage report yet from '+NOREPORT.map(machineHTML).join(', ')+'</div>';"), "a machine not reporting is named, never a column");
   assert.ok(usageJS.includes("function machineHTML(name){return '<span class=\"ru-tip-machine host-prefix\">'+esc(name)+'</span>';}"), "the strip's quiet host dress");
   assert.ok(KERNEL.includes(".ru-tip-machines .host-prefix{color:var(--dim,#9aa0a6);font-weight:400;font-style:italic;font-size:0.86em}"), "…byte for byte the tab's host-prefix declarations");
