@@ -4,7 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_TURN_PX, OVERLAY_KINDS, gapAt, gapFraction, gapHeight, insertRun, landingCancel, landingNotice, pagesToAsk, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Ev, type Region, type Run } from "./chat-regions";
+import { DEFAULT_TURN_PX, GAPS_MAX_PX, OVERLAY_KINDS, gapAt, gapFraction, gapHeight, gapTurnPx, insertRun, landingCancel, landingNotice, pagesToAsk, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Ev, type Gap, type Region, type Run } from "./chat-regions";
 
 const ev = (k: string) => ({ uuid: k });
 const run = (lo: number, hi: number | null, keys: string[]): Run => ({ kind: "run", lo, hi, events: keys.map(ev) });
@@ -59,6 +59,41 @@ test("a gap's height is its turns times the measured row, the default row until 
   assert.equal(gapHeight({ lo: 0, hi: 96 }, null), 96 * DEFAULT_TURN_PX);
   assert.equal(gapHeight({ lo: 128, hi: 200 }, 42.5), Math.round(72 * 42.5));
   assert.equal(gapHeight({ lo: 10, hi: 10 }, 42.5), 43, "an empty span still shows a row's worth of space");
+});
+
+test("the gaps together stand under the browser's layout limit: a long session's px-per-turn is lowered, a short one's is the measure (2026-10-01)", () => {
+  const LIMIT_2X = 16_777_216;   // the tallest box Chrome lays out on a 2x display, the smallest limit a browser was seen to impose
+  assert.ok(GAPS_MAX_PX <= LIMIT_2X / 4, "the gaps' bound leaves most of the smallest limit to the rows the page holds");
+  // the reported shape: a head gap of 1,441 turns above the tail, measured at 14,800 px a turn, drew 21 million px, past the limit
+  const long: Region[] = regionsFromRuns([run(1441, null, ["t1"])]);
+  const per = gapTurnPx(long, 14_800);
+  assert.ok(per < 14_800, "the long session's gap is drawn at a lower figure than the measure");
+  assert.ok(gapHeight(long[0] as Gap, per) <= GAPS_MAX_PX, "…so the head gap stands at most the bound: " + gapHeight(long[0] as Gap, per));
+  assert.ok(gapHeight(long[0] as Gap, 14_800) > LIMIT_2X, "(at the measured figure it would pass the limit)");
+  // a short session keeps its measured figure, so its gaps are drawn true
+  assert.equal(gapTurnPx(regionsFromRuns([run(200, null, ["t1"])]), 42.5), 42.5);
+  assert.equal(gapTurnPx(regionsFromRuns([run(200, null, ["t1"])]), null), DEFAULT_TURN_PX, "unmeasured: the default figure");
+  assert.equal(gapTurnPx(regionsFromRuns([run(0, null, ["t1"])]), 14_800), 14_800, "no gap at all: the measure");
+  // several gaps (a landing split the head gap) share ONE figure, the bound over their turns together
+  let split: Region[] = regionsFromRuns([run(3000, null, ["t1"])]);
+  split = insertRun(split, run(1200, 1232, ["w"]));
+  const gaps = split.filter((r): r is Gap => r.kind === "gap");
+  assert.equal(gaps.length, 2);
+  const per2 = gapTurnPx(split, 9_000);
+  const total = gaps.reduce((n, g) => n + gapHeight(g, per2), 0);
+  assert.ok(total <= GAPS_MAX_PX + gaps.length, "the gaps together stand at most the bound (rounding aside): " + total);
+  // display units count their gap units only (render.ts's items: events, tool groups and gaps)
+  const items = [{ kind: "gap", lo: 0, hi: 1441, before: 0 }, { kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2] }];
+  assert.equal(gapTurnPx(items, 14_800), gapTurnPx(long, 14_800), "the display units' gaps give the regions' figure");
+});
+
+test("every gap height render.ts draws goes through the bound (2026-10-01): the element, its unit's signature, the spacer map, the scroll walk", () => {
+  const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+  assert.doesNotMatch(RENDER, /gapHeight\(\s*it\s*,\s*(v\.)?pxPerTurn\s*\)/, "no gap height is drawn at the raw measure");
+  assert.match(RENDER, /const per = gapTurnPx\(items, pxPerTurn\);[^\n]*\n\s*for \(let u = 0; u < items\.length; u\+\+\) \{ const it = items\[u\]; if \(it\.kind === "gap"\) gu\.set\(u, gapHeight\(it, per\)\); \}/, "the spacer map (gapUnitsOf)");
+  assert.match(RENDER, /g\.style\.height = gapHeight\(it, gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn\)\) \+ "px";/, "the gap element");
+  assert.match(RENDER, /"gap\|" \+ it\.lo \+ "\|" \+ it\.hi \+ "\|" \+ it\.before \+ "\|" \+ gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn\) \+ "\|"/, "a gap unit's signature names the figure it is drawn at, so a change repaints it");
+  assert.equal((RENDER.match(/v\.gapUnits\?\.get\(u\) \?\? gapHeight\(it, gapTurnPx\(items, v\.pxPerTurn\)\)/g) || []).length, 2, "the two scroll walks' fallbacks");
 });
 
 test("the page a gap asks for: scrolling up meets the bottom edge (the last aligned page, clipped to the gap); scrolling down the top edge", () => {

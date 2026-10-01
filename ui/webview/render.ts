@@ -40,7 +40,7 @@ import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
-import { insertRun, regionsFromRuns, gapHeight, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
+import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
 import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
@@ -12817,7 +12817,7 @@ function tailDiff(v: View, s: Session, items: DisplayItem[], working: boolean, a
  *  a folded run's open state; a user bubble's edit affordance; a gap's span, px-per-turn and loading glyph. The "worked …" footer
  *  is not in it: it is patched on the node (patchWorkedFooters), so a prompt landing never repaints the reply above it. */
 function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null, mark: number | null, turns: number[] | null): string {
-  if (it.kind === "gap") return "gap|" + it.lo + "|" + it.hi + "|" + it.before + "|" + (v.pxPerTurn ?? "") + "|" + (gapHasAsk(s.id, it) ? "ask" : "");
+  if (it.kind === "gap") return "gap|" + it.lo + "|" + it.hi + "|" + it.before + "|" + gapTurnPx(s.regions ?? [], v.pxPerTurn) + "|" + (gapHasAsk(s.id, it) ? "ask" : "");
   const f0 = itemFirstEvent(it);
   let sig = it.kind + "|" + (prevEpoch ?? "") + "|" + (mark ?? "") + "|" + (turns && f0 < turns.length ? turns[f0] : "");
   if (it.kind === "toolgroup") sig += openFolds.has(toolGroupKey(s.events[f0])) ? "|open" : "|shut";
@@ -13124,7 +13124,8 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
 /** The gap units' heights, by unit: each its own estimate (turns x px-per-turn), not the average row (T386 stage 2). */
 function gapUnitsOf(items: DisplayItem[], pxPerTurn: number | undefined): Map<number, number> | undefined {
   const gu = new Map<number, number>();
-  for (let u = 0; u < items.length; u++) { const it = items[u]; if (it.kind === "gap") gu.set(u, gapHeight(it, pxPerTurn)); }   // per TURN, not per display unit (medium 2)
+  const per = gapTurnPx(items, pxPerTurn);   // the gaps together stay under the browser's layout limit (chat-regions.ts GAPS_MAX_PX)
+  for (let u = 0; u < items.length; u++) { const it = items[u]; if (it.kind === "gap") gu.set(u, gapHeight(it, per)); }   // per TURN, not per display unit (medium 2)
   return gu.size ? gu : undefined;
 }
 /** The estimated height of the units [from, to): a gap its own, every other unit the measured average. */
@@ -19909,7 +19910,7 @@ function gapGlyph(): HTMLElement {
 function gapElement(s: Session, it: { lo: number; hi: number }, v: View): HTMLElement {
   const g = el("div", "tx-gap");
   g.dataset.lo = String(it.lo); g.dataset.hi = String(it.hi); g.dataset.sid = s.id;
-  g.style.height = gapHeight(it, v.pxPerTurn) + "px";   // per TURN, not per display unit (medium 2): the rendered gap element too, not only the spacer map
+  g.style.height = gapHeight(it, gapTurnPx(s.regions ?? [], v.pxPerTurn)) + "px";   // per TURN, not per display unit (medium 2): the rendered gap element too, not only the spacer map
   if (gapHasAsk(s.id, it)) { g.classList.add("tx-gap-loading"); g.appendChild(gapGlyph()); }
   gapObserver?.observe(g);
   return g;
@@ -20013,7 +20014,7 @@ function turnUnderTop(v: View, s: Session, items: DisplayItem[], turns: number[]
   if (top < topH) {
     const avg = v.avgTurnH ?? 60; let y = 0;
     for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
-      const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, v.pxPerTurn)) : avg;
+      const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn))) : avg;
       if (top < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((top - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
       y += h;
     }
@@ -20033,7 +20034,7 @@ function yOfTurn(v: View, s: Session, items: DisplayItem[], turns: number[], con
   }
   const avg = v.avgTurnH ?? 60; let y = 0;
   for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
-    const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, v.pxPerTurn)) : avg;
+    const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn))) : avg;
     if (it.kind === "gap" && t >= it.lo && t < it.hi) return y + h * ((t - it.lo) / (it.hi - it.lo));
     if (it.kind !== "gap") { const f = itemFirstEvent(it); if (f >= 0 && f < turns.length && turns[f] === whole) return y; }
     y += h;
