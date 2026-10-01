@@ -35,7 +35,7 @@ function fn(start: string): string {
 }
 
 const SRC = ["var SP_RANGE_BUCKETS=", "function spSeries(d){", "function spTail(ser,keep){", "function spKey(d,s){",
-  "function spSumArr(a){", "function spRound4(v){", "function spRangeView(d){", "function spRangeWords(ser){",
+  "function spSumArr(a){", "function spRound4(v){", "function spHostScope(d,host){", "function spSeatPart(d,st,usd){", "function spRangeView(d){", "function spRangeWords(ser){",
   "function spOrdered(d){", "function spRows(d){", "function spStackOrderRows(d,stacks,rows){", "function spDashedHosts(d){",
   "function spStacks(d,ser,model){"].map(fn).join("\n");
 
