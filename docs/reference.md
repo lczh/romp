@@ -620,15 +620,29 @@ the per-init check above confirms each one.
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
-key-billed dollars (5-hour burn and month-to-date, numbers only). Hovering
-breaks the windows down by ACCOUNT: one block per distinct login (the account
-line as its head, the meters written once, since they are the account's
-allowance), beneath them one line naming the machines logged into it in the
-tab strip's quiet host dress, a machine whose own reading lagged the freshest
-named as lagging beside its name, and one updated-ago line per block (the
-oldest report of the group); two accounts are two blocks side by side; a
+key-billed dollars (5-hour burn and month-to-date, numbers only). On every
+machine, one with no sign-in of its own included, those are the turns an API
+key billed: a session there billed to a stored login spends a subscription
+seat, and its dollars are not the key's. Hovering
+breaks the windows down by ACCOUNT: one block per distinct login (headed by
+the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
+detail gives it, never its email; the meters written once, since they are the
+account's allowance), beneath them one line naming the machines logged into it
+in the tab strip's quiet host dress, a machine whose own reading lagged the
+freshest named as lagging beside its name, and one updated-ago line per block
+(the oldest report of the group); two accounts are two blocks side by side; a
 machine attached but not yet reporting is named after the blocks rather than
-given a column; the key spend stays one section for every machine. A click on the
+given a column; the key spend stays one section for every machine. An account
+that answers Claude Code's usage request with no 5-hour or weekly window (an
+enterprise seat metered by a monthly spend limit) is recorded as such and its
+block says `no 5-hour or weekly limits on this account`, with no bars, no age
+and no lagging note, even beside a machine on an older build still holding a
+reading from before; a usage request the endpoint cannot answer says nothing
+about the account and changes nothing. Under the spend's per-machine line, a
+`by account · 1 week` line splits the week the way the spend detail's By
+account summary does, one entry per account, a seat's dollars wearing `≈`; it
+shows only when something besides the key billed the week, and a machine whose
+older build sends no billing routes is counted out by name. A click on the
 readout opens the spend detail: a chart of spend over time stacked by session,
 and under it the list of sessions with their dollars, turns and tokens. The
 list follows the chart's range (one day by hour, seven days by hour, ninety

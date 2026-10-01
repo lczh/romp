@@ -13869,14 +13869,23 @@ class SdkBackend:
         weekly_all → seven_day, weekly_scoped whose scope.model.display_name says Fable → fable (the
         included Fable 5 weekly allowance — the window NO other in-band source carries: RateLimitEvents
         attach a number only in the warning band and the statusline payload lacks the window entirely).
+        The reply's documented fields carry the same windows (the CLI's get_usage schema: five_hour and
+        seven_day as {utilization, resets_at}, the per-model weekly windows as model_scoped[]) and are read
+        where limits[] has no row for one: limits[] is the server's body passed through, and an account
+        whose body has none was dropped whole before 2026-10-01.
         resets_at arrives ISO-8601 → stored as epoch. This is an authoritative FULL snapshot, so mapped
         windows are overwritten outright (the merge games in _record_rate_limit are for partial sources);
         windows the snapshot doesn't carry keep their file value. Writes only on change (t stays the time
-        of the last real reading — the rail tooltip's "updated … ago")."""
+        of the last real reading — the rail tooltip's "updated … ago").
+        An answer that says the account HAS no windows (rate_limits present, five_hour and seven_day null, no
+        limits[] row: an enterprise seat metered by a monthly spend limit instead) is recorded as such, stamped,
+        `noWindows` (the user 2026-10-01, whose rail showed a 26-day-old reading as the account's allowance:
+        every answer since the account stopped reporting windows was dropped, and the unstamped reading before
+        them stayed). A null rate_limits is the endpoint unavailable, which says nothing about the account."""
         rl = r.get("rate_limits") if isinstance(r, dict) else None
-        lims = rl.get("limits") if isinstance(rl, dict) else None
-        if not isinstance(lims, list):
+        if not isinstance(rl, dict):
             return
+        lims = rl.get("limits") if isinstance(rl.get("limits"), list) else []
 
         def _epoch(v):
             if isinstance(v, (int, float)):
@@ -13886,6 +13895,9 @@ class SdkBackend:
                 return int(datetime.fromisoformat(str(v)).timestamp())
             except Exception:
                 return None
+
+        def _seg(pct, resets):
+            return {"pct": max(0, min(100, round(pct))), "resets_at": _epoch(resets)}
         out = {}
         for l in lims:
             if not isinstance(l, dict) or not isinstance(l.get("percent"), (int, float)):
@@ -13897,8 +13909,18 @@ class SdkBackend:
                    else "fable" if (kind == "weekly_scoped" and "fable" in scope_model.lower())
                    else None)
             if key:
-                out[key] = {"pct": max(0, min(100, round(l["percent"]))), "resets_at": _epoch(l.get("resets_at"))}
-        if not out:
+                out[key] = _seg(l["percent"], l.get("resets_at"))
+        for key in ("five_hour", "seven_day"):
+            w = rl.get(key)
+            if key not in out and isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+                out[key] = _seg(w["utilization"], w.get("resets_at"))
+        for m in rl.get("model_scoped") if isinstance(rl.get("model_scoped"), list) else []:
+            if ("fable" not in out and isinstance(m, dict) and isinstance(m.get("utilization"), (int, float))
+                    and "fable" in str(m.get("display_name") or "").lower()):
+                out["fable"] = _seg(m["utilization"], m.get("resets_at"))
+        none = (not out and not lims and "five_hour" in rl and "seven_day" in rl
+                and rl["five_hour"] is None and rl["seven_day"] is None)
+        if not out and not none:
             return
         with self._rl_lock:
             try:
@@ -13909,10 +13931,13 @@ class SdkBackend:
                 cur = {}
             data = {"t": int(time.time()),
                     "acct": acct_digest(),   # whose reading this is — the kernel drops the bars the moment that login is gone
-                    "five_hour": out.get("five_hour", cur.get("five_hour")),
-                    "seven_day": out.get("seven_day", cur.get("seven_day")),
-                    "fable": out.get("fable", cur.get("fable"))}
-            if all(data[k] == cur.get(k) for k in ("five_hour", "seven_day", "fable")):
+                    "five_hour": None if none else out.get("five_hour", cur.get("five_hour")),
+                    "seven_day": None if none else out.get("seven_day", cur.get("seven_day")),
+                    "fable": None if none else out.get("fable", cur.get("fable"))}
+            if none:
+                data["noWindows"] = True
+            if all(data.get(k) == cur.get(k) for k in ("five_hour", "seven_day", "fable", "noWindows")) \
+                    and (not none or data["acct"] == cur.get("acct")):
                 return                                # no change → keep t honest
             try:
                 tmp = self.state_dir / "usage.json.tmp"
@@ -13921,7 +13946,8 @@ class SdkBackend:
             except Exception:
                 self._log("usage.json write failed: %s" % traceback.format_exc())   # never silent
                 return
-            self._record_usage_history(data)
+            if not none:                              # the history graphs readings; an account without windows has none
+                self._record_usage_history(data)
         self._poke()
 
     def _record_usage_history(self, data, now=None) -> None:
