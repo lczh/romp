@@ -766,11 +766,13 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual((len(pairs), pairs[0], pairs[-1]), (cap, [198, 2], [200 - 2 * cap, cap + 1]),
                          "one past it, the first pair (the largest n, the oldest take) is forgotten")
 
-    def test_the_pairs_held_for_a_browser_are_capped_and_the_cap_can_only_make_the_kernel_take(self):
+    def test_the_pairs_held_for_a_browser_are_capped_and_what_the_cap_loses(self):
         # 16 pairs per browser (kernel.py _VIEW_FOLDS_PAIRS_CAP): past it the first pair goes. Forgetting a pair removes a
-        # reason to drop and adds none, so a publish the kernel takes without the cap is taken with it, and what the cap
-        # loses is the drop of a publish between the forgotten pair's n and the next one's, made before its browser
-        # received a frame built after that oldest take: taken, the base's last write wins
+        # reason to drop and adds none, so at the publish it judges the cap can only make the kernel take one it would have
+        # dropped, and what the cap loses is the drop of a publish between the forgotten pair's n and the next one's, made
+        # before its browser received a frame built after that oldest take: taken, the base's last write wins. Once taken,
+        # that publish is held as a pair like any other, so a later publish under it, made before its browser received a
+        # frame built after it, is dropped under it, even where the full list would have taken it
         self.assertEqual(km._VIEW_FOLDS_PAIRS_CAP, 16)
         self.fill_to_one_past_the_cap()
         [held] = self.dispatch(self.publish(dict(FOLDS, collapsed=["g197"]),
@@ -790,6 +792,14 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([m[0] for m in lost], ["phone", "desktop"],
                          "199 on count 0, which 200 would have dropped: taken once 200 is forgotten, the base's last write wins")
         self.assertEqual(self.logged, [])
+        self.assertEqual(km._view_folds_seen[self.B]["pairs"], [[199, 18]], "199's take removed every pair, each under it")
+        [after] = self.dispatch(self.publish(dict(FOLDS, collapsed=["g197"]),
+                                             {"browser": self.B, "n": 197, "received": {"boot": km._BOOT_ID, "n": 2}}))
+        self.assertEqual([m[0] for m in after], ["desktop"],
+                         "197 on 198's count, which the full list takes (judged against 198, taken at 2): dropped under 199")
+        self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=197 received=%r:2, kept n=199 taken at 18"
+                                       % (self.B[:8], km._BOOT_ID)])
+        self.assertEqual(self.stored_folds(), dict(FOLDS, collapsed=["g199", "lost"]), "the kernel keeps 199's state")
 
     def test_an_entry_of_the_shape_before_the_list_is_judged_as_it_was(self):
         # the kept and the largest alone, {n, at, top, top_at}, as the kernel kept them before the list: read as the pairs

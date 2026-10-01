@@ -6562,10 +6562,12 @@ _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": th
 # and a take at or above a pair removes it, so a real browser holds one pair, or two or three just after such a take.
 # _VIEW_FOLDS_PAIRS_CAP (16) only bounds what a buggy or hostile page can make this kernel hold: 256 browsers by 16
 # pairs. Past it the FIRST pair is forgotten, the largest n held, taken longest ago. Forgetting a pair removes a reason
-# to drop and adds none (a publish is dropped only under a pair still held, at that pair's own count), so the cap can
-# only make this kernel TAKE a publish it would have dropped, the base's last write wins, and never drop one. What is
-# lost at it is the drop of a publish numbered between that pair's n and the next pair's, made before its browser
-# received any frame built after that oldest take.
+# to drop and adds none (a publish is dropped only under a pair still held, at that pair's own count), so at the
+# publish it judges the cap can only make this kernel TAKE one it would have dropped, the base's last write wins. What
+# is lost at it is the drop of a publish numbered between that pair's n and the next pair's, made before its browser
+# received any frame built after that oldest take. Once taken, that publish is held as a pair like any other, so a
+# later publish numbered under it, made before its browser received a frame built after it, is dropped under it, even
+# where the full list would have taken it.
 _view_folds_by = [None]                  # the {browser, n} of the last setViewFolds handled, None when it carried none
 _view_folds_seen = {}                    # browser -> {"pairs": [[n, count], ...] its takes that no later take at or
 #                                          above replaced, n descending and the count ascending; "n" and "at": the last
