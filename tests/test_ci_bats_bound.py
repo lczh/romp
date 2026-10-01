@@ -35,40 +35,32 @@ class BatsStepBound(unittest.TestCase):
 
 
 class PythonJobCeiling(unittest.TestCase):
-    """The python job's ceiling is per cell (2026-09-16): the macOS cells run the same suite on the image's slower
-    runners, and the 3.10 cell was cancelled at the job's 25-minute ceiling after 25 min 27 s on one dispatch having
-    completed in 24 min 43 s on the one before, so the release's combined proof could die on a minute's margin. Forty
-    minutes then; sixty since 2026-09-24, when the release dispatch (run 35976250043) had the 3.13 macOS cell green in
-    38 min 52 s and the 3.10 macOS cell cancelled at 40 min 20 s with no failure in its log, the same cells having taken
-    33 to 35 minutes on the dispatch five hours before. The 3.10 cell reached 90 percent 36 min 40 s into its pytest
-    step, and its own tail from there to the pytest step's end ran 6 min 56 s and 9 min 46 s on runs 35952964334 and
-    35623182872 (the 3.13 cell's 5 min 38 s and 4 min 51 s are the wrong term: the three StateIsolationOrder tests
-    take 193 s and 279 s on 3.10), so the cut cell's suite sits near 43.5 to 46.5 minutes; the rule (the suite plus
-    the 600 s per-test timeout plus setup) gives 54.5 to 57, the floor is 57 and the ceiling 60, so a revert to 40 or
-    to the first cut's 55 goes red, and the next growth step is splitting or sharding the 3.10 cell, not a higher cap.
-    Linux 25 to 35 the same day by the same rule: the 3.10
-    Linux cell took 19 min 34 s on the dispatch of 2026-09-24 03:48 UTC (run 35952964334), under six minutes short of
-    the cap where about 20 plus 10 plus setup is about 31; its floor is 30 and its ceiling 45."""
+    """The Python cells' ceiling is per shard, and per OS (since 2026-09-30, when each cell's suite became two shards).
+    The rule: a shard's pytest step plus the 600 s per-test timeout plus setup, or a stall late in the step is cut by the
+    cap before the per-test timeout names it. Unsharded the caps had kept climbing with the suite: Linux 25 to 35 and
+    macOS 40 to 60 on 2026-09-24, when the release dispatch (run 35976250043) had the 3.10 macOS cell cancelled at
+    40 min 20 s with no failure in its log. By 2026-09-28 the 3.10 macOS cell's pytest step took 51 min 40 s on the weekly
+    run (36408096233), nine minutes under that cap, and the Linux cells took 14 to 19 minutes. A shard is about half:
+    26 minutes on macOS, 10 on Linux. So macOS gets 50 (26 plus 10 plus setup is about 37, and a slow macOS runner or a
+    split balanced on Linux timings can add several minutes), and Linux 30 (10 plus 10 plus setup is about 21). Past
+    the ceilings the next step is a third shard, not a higher cap."""
     def setUp(self):
         src = open(WF).read()
-        m = re.search(r"^  python:\n((?:    .*\n|\n)+?)    strategy:\n", src, re.M)
-        self.assertTrue(m, "the python job's head moved: re-anchor this pin")
+        m = re.search(r"^  python-shard:\n((?:    .*\n|\n)+?)    strategy:\n", src, re.M)
+        self.assertTrue(m, "the python shards' job head moved: re-anchor this pin")
         self.head = m.group(1)
 
-    def test_macos_cells_get_sixty_minutes_and_linux_thirty_five_and_neither_reverts_below_its_floor(self):
+    def test_macos_shards_get_fifty_minutes_and_linux_thirty_and_neither_reverts_below_its_floor(self):
         m = re.search(r"^    timeout-minutes: \$\{\{ matrix\.os == 'macos-latest' && (\d+) \|\| (\d+) \}\}$", self.head, re.M)
-        self.assertTrue(m, "the python job's timeout-minutes is not the per-cell expression (macos-latest && N || M)")
+        self.assertTrue(m, "the python shards' timeout-minutes is not the per-OS expression (macos-latest && N || M)")
         macos, linux = int(m.group(1)), int(m.group(2))
-        self.assertGreaterEqual(macos, 57, "the macOS cells need the margin: on run 35976250043 (2026-09-24) the 3.13 cell was green at "
-                                "38 min 52 s and the 3.10 cell cancelled at 40 min 20 s by the 40-minute cap, at 90 percent 36 min 40 s "
-                                "into its pytest step with its own tail from there 6 min 56 s to 9 min 46 s on runs 35952964334 and "
-                                "35623182872, so its suite sits near 43.5 to 46.5 minutes; that plus the 600 s per-test timeout plus "
-                                "setup is 54.5 to 57, so a cap below 57 cuts a green run (the next step is sharding the cell, not a raise)")
-        self.assertLessEqual(macos, 60, "past an hour a hung macOS cell eats the dispatch")
-        self.assertGreaterEqual(linux, 30, "the Linux cells need the margin: the 3.10 Linux cell took 19 min 34 s on run 35952964334 "
-                                "(2026-09-24) under a 25-minute cap; about 20 minutes of suite plus the 600 s per-test timeout plus "
-                                "setup is about 31, so a cap below 30 cuts a green run")
-        self.assertLessEqual(linux, 45, "a hung Linux cell past 45 minutes holds every PR's required check for nothing")
+        self.assertGreaterEqual(macos, 45, "a macOS shard: half of the 3.10 cell's 51 min 40 s pytest step (run 36408096233) is "
+                                "about 26 minutes, plus the 600 s per-test timeout plus setup is about 37, and a slow runner or "
+                                "a split balanced on Linux timings adds minutes, so a cap below 45 risks cutting a stall nameless")
+        self.assertLessEqual(macos, 60, "a macOS shard that needs more than an hour wants a third shard, not a higher cap")
+        self.assertGreaterEqual(linux, 25, "a Linux shard: half of the 3.10 cell's 19-minute pytest step plus the 600 s "
+                                "per-test timeout plus setup is about 21, so a cap below 25 leaves a slow runner no room")
+        self.assertLessEqual(linux, 35, "a Linux shard that needs more than 35 minutes wants a third shard, not a higher cap")
 
 
 class ExtensionJobCeiling(unittest.TestCase):
