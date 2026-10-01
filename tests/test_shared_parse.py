@@ -29,11 +29,11 @@ A = "11111111-2222-4333-8444-000000000201"
 B = "22222222-2222-4333-8444-000000000202"
 
 
-def _transcript(d, sid, n=2):
+def _transcript(d, sid, n=2, tag=""):
     p = Path(d) / (sid + ".jsonl")
     recs, parent = [], None
     for i in range(n):
-        u, a = "u%d" % i, "a%d" % i
+        u, a = "%su%d" % (tag, i), "%sa%d" % (tag, i)   # a tag gives a file uuids of its own (a resume fork's walk crosses files)
         recs.append({"type": "user", "uuid": u, "parentUuid": parent, "timestamp": "2026-09-10T00:%02d:00Z" % i,
                      "promptSource": "typed", "message": {"role": "user", "content": "wire the fixtures %d" % i}})
         recs.append({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": "2026-09-10T00:%02d:30Z" % i,
@@ -41,6 +41,12 @@ def _transcript(d, sid, n=2):
         parent = a
     p.write_text("".join(json.dumps(r) + "\n" for r in recs))
     return str(p)
+
+
+def _entries_over(em, path):
+    """The assembly entries that fold over `path`'s reader entry (its row in their recs): what a record drop would ask about."""
+    with em._ASM_LOCK:
+        return [k for k, e in em._ASM_CACHE.items() if e and path in (e.get("recs") or {})]
 
 
 class OneParseForBoth(unittest.TestCase):
@@ -473,6 +479,69 @@ class OneParseForBoth(unittest.TestCase):
             self.assertFalse([k for k in em._ASM_CACHE if k[0] == os.path.realpath(parent_leaf)], "no entry pins the file")
         with em._JSONL_CACHE_LOCK:
             self.assertIs(em._JSONL_CACHE.get(parent_leaf), rec0, "the parent's live leaf keeps its records")
+
+    def test_a_resume_forks_flip_keeps_the_resumed_from_file_the_new_leafs_parse_reads(self):
+        """The flip's record keep follows the new leaf's lineage, not only its candidates: after a /clear to L1, a resume fork
+        (a states resumeFork row, L1 to L2) retires L1, and L2's parse reads L1 through the lineage closure. The flip has just
+        released the session's entry of L1, so nothing pins its record entry; dropping it would send L2's parse to the disk for
+        the whole of L1 again, a release that costs more than it frees."""
+        em = jd.em
+        C = "99999999-2222-4333-8444-000000000991"
+        L1, L2 = "99999999-2222-4333-8444-000000000992", "99999999-2222-4333-8444-000000000993"
+        anchor = _transcript(self.d, C, n=3)
+        leaf1 = _transcript(self.d, L1, n=2, tag="l1")
+        leaf2 = _transcript(self.d, L2, n=1, tag="l2")
+        jd._note_leaf(C, anchor)
+        km._parse(anchor, C, self.now)
+        jd._note_leaf(C, leaf1)                            # the /clear
+        km._parse(leaf1, C, self.now)
+        states = Path(jd.STATESDIR) / (C + ".jsonl")
+        states.parent.mkdir(parents=True, exist_ok=True)
+        states.write_text(json.dumps({"t": self.now, "resumeFork": {"from": L1, "to": L2}}) + "\n")
+        self.addCleanup(lambda: states.unlink(missing_ok=True))
+        jd._note_leaf(C, leaf2)                            # the resume fork's flip retires L1
+        self.assertEqual(_entries_over(em, leaf1), [], "the flip released the session's entry of L1: nothing pins its records")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIn(leaf1, em._JSONL_CACHE, "L1 is in the new leaf's lineage: its records stay")
+        with em._READ_BYTES_LOCK:
+            b0 = em._READ_BYTES.get(leaf1, 0)
+        km._parse(leaf2, C, self.now)
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(leaf1, 0), b0, "L2's parse read L1 from the reader, not the disk")
+
+    def test_a_childs_flip_off_a_registered_sessions_own_file_keeps_its_records(self):
+        """The flip keeps a registered session's own file, as the judges' episode scan does. A fork child first handed its
+        parent's file flips to its own after the parent cleared to L1: the parent's file is then no session's current leaf and
+        outside the child's lineage, and with both sessions' entries of it released nothing pins it. It is still the parent's
+        anchor, which the parent's next parse of L1 reads through the reader."""
+        em = jd.em
+        P, CH = "99999999-2222-4333-8444-000000000994", "99999999-2222-4333-8444-000000000995"
+        L1 = "99999999-2222-4333-8444-000000000996"
+        Path(jd.SDKDIR).mkdir(parents=True, exist_ok=True)
+        reg = Path(jd.SDKDIR) / (P + ".json")
+        reg.write_text(json.dumps({"sid": P, "name": "api", "cwd": "/TESTDIR"}))
+        self.addCleanup(lambda: reg.unlink(missing_ok=True))
+        self.assertTrue(jd._sdk_owned(P), "the parent is a registered session")
+        parent_file = _transcript(self.d, P, n=3)
+        leaf1 = _transcript(self.d, L1, n=1, tag="l1")
+        child_leaf = _transcript(self.d, CH, n=1, tag="ch")
+        jd._note_leaf(P, parent_file)
+        km._parse(parent_file, P, self.now)
+        jd._note_leaf(P, leaf1)                            # the parent's /clear: its own file is its anchor now
+        jd._note_leaf(CH, parent_file)                     # a fork child's registry first names the parent's file
+        jd.parsed_session(CH, [parent_file], self.now)
+        with em._JSONL_CACHE_LOCK:
+            rec0 = em._JSONL_CACHE.get(parent_file)
+        self.assertIsNotNone(rec0)
+        jd._note_leaf(CH, child_leaf)                      # the child's init flipped its lastSid
+        self.assertEqual(_entries_over(em, parent_file), [], "both sessions' entries of the parent's file were released: nothing pins it")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIs(em._JSONL_CACHE.get(parent_file), rec0, "a registered session's own file keeps its records")
+        with em._READ_BYTES_LOCK:
+            b0 = em._READ_BYTES.get(parent_file, 0)
+        km._parse(leaf1, P, self.now)
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(parent_file, 0), b0, "the parent's parse of L1 read its anchor from the reader")
 
     def test_the_kernel_view_reads_the_store(self):
         p = _transcript(self.d, A)
