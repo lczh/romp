@@ -24,11 +24,14 @@ const UNIONS = viewTagUnion(VIEWS);
 /** The kernel's viewer store and its push, as kernel.py implements them (_write_view_folds, _view_order_frame), with the
  *  publish's name (2026-09-29) and the count of taken publishes (2026-09-30). Every publish not dropped is TAKEN: the
  *  count rises by one whether it is written, unchanged or refused, the name of the last one taken rides the frame as
- *  `foldsBy` (an unnamed publish clears it), and the count as `foldsSeq` with the kernel's life. A browser's publish
- *  numbered under the one kept from that browser (the latest taken), or under the largest taken from it (2026-09-30), is
- *  dropped, unless the count it says its browser had received (`by.received`) is of this life and at or above the count
- *  that one was taken at; a drop is logged and answered with the kernel's frame on the poster's own slot, which sends
- *  nothing when that slot already holds the same frame. */
+ *  `foldsBy` (an unnamed publish clears it), and the count as `foldsSeq` with the kernel's life. For each browser the
+ *  kernel keeps the (n, count) pairs it took (2026-10-01): a take removes every pair with n at or under its own and
+ *  appends its own, so n runs descending and the count ascending, the kept (latest) pair last and the largest first, and
+ *  past PAIRS_CAP the first is forgotten. A browser's publish numbered under a pair is judged against the pair with the
+ *  smallest n above its own, and dropped unless the count it says its browser had received (`by.received`) is of this
+ *  life and at or above that pair's count; a drop is logged under that pair ("kept", "largest" or "between") and answered
+ *  with the kernel's frame on the poster's own slot, which sends nothing when that slot already holds the same frame. */
+const PAIRS_CAP = 16;                         // kernel.py _VIEW_FOLDS_PAIRS_CAP
 function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
   const keepsFolds = opts.folds !== false;    // a kernel from before 2026-09-23 sends no folds half at all
   const keepsStamps = opts.stamps !== false;  // one from before 2026-09-29 keeps no name and no count, and serves neither
@@ -38,8 +41,8 @@ function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
     taken: 0,                                 // the fold publishes this life has taken (kernel.py _view_folds_taken)
     folds: null as Record<string, unknown> | null,
     by: null as { browser: string; n: number } | null,
-    // browser -> its kept (latest taken) publish's n and the count it was taken at, and the largest n taken from it and its count
-    seen: new Map<string, { n: number; at: number; top: number; topAt: number }>(),
+    // browser -> its pairs, [n, count] with n descending, and their two ends: the kept (latest taken) and the largest
+    seen: new Map<string, { n: number; at: number; top: number; topAt: number; pairs: [number, number][] }>(),
     refuse: false,
     warns: 0,
     drops: [] as string[],                    // the kernel's log line for each publish it dropped
@@ -65,20 +68,22 @@ function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
         && Number.isInteger(by.n) && by.n >= 1 ? { browser: by.browser as string, n: by.n as number } : null;
       const r = st && by.received && typeof by.received.boot === "string" && Number.isInteger(by.received.n) ? by.received : null;
       const kept = st ? k.seen.get(st.browser) : undefined;
+      const pairs: [number, number][] = kept ? kept.pairs.map((p) => [p[0], p[1]] as [number, number]) : [];
       const newer = (at: number) => !!r && r.boot === k.boot && r.n >= at;
-      let under: [string, number, number] | null = null;
-      if (st && kept && st.n < kept.n && !newer(kept.at)) under = ["kept", kept.n, kept.at];
-      else if (st && kept && st.n < kept.top && !newer(kept.topAt)) under = ["largest", kept.top, kept.topAt];
-      if (st && under) {
-        // this browser's overtaken state: logged, and answered on the poster's own slot
-        k.drops.push(`browser '${st.browser.slice(0, 8)}' n=${st.n} received=${r ? `'${r.boot}':${r.n}` : "none"}, ${under[0]} n=${under[1]} taken at ${under[2]}`);
+      let above: [number, number] | undefined;           // the pair with the smallest n above this publish's: n runs descending
+      if (st) for (let i = pairs.length - 1; i >= 0; i--) if (pairs[i][0] > st.n) { above = pairs[i]; break; }
+      if (st && above && !newer(above[1])) {
+        // this browser's overtaken state: logged under that pair, and answered on the poster's own slot
+        const under = above === pairs[pairs.length - 1] ? "kept" : above === pairs[0] ? "largest" : "between";
+        k.drops.push(`browser '${st.browser.slice(0, 8)}' n=${st.n} received=${r ? `'${r.boot}':${r.n}` : "none"}, ${under} n=${above[0]} taken at ${above[1]}`);
         if (from && from.connected) k.answer(from);
         return;
       }
       k.taken++;
       if (st) {
-        const top = !kept || st.n >= kept.top ? { top: st.n, topAt: k.taken } : { top: kept.top, topAt: kept.topAt };
-        k.seen.set(st.browser, { n: st.n, at: k.taken, ...top });
+        const next: [number, number][] = [...pairs.filter((p) => p[0] > st.n), [st.n, k.taken]];
+        while (next.length > PAIRS_CAP) next.shift();
+        k.seen.set(st.browser, { n: st.n, at: k.taken, top: next[0][0], topAt: next[0][1], pairs: next });
       }
       k.by = st;
       if (k.refuse) { k.warns++; return; }                          // refused: a warning to the poster, no push
@@ -847,6 +852,43 @@ test("a lower number taken on its count lets no older publish between it and the
   assert.deepEqual(yPane.as(() => readTabGroups(UNIONS).collapsed), ["api", "web", "tests"], "tab Y shows all three");
   assert.deepEqual(a.as(() => readTabGroups(UNIONS).collapsed), ["api", "web"],
     "tab T passes Y's frame over, since it names a number under T's own entry for 11, and shows tests only once a later frame is heard");
+});
+
+test("a largest taken before the record came back older holds nothing open: the older publish is judged against the take just above it", () => {
+  // the browser's publish 45 was taken before it was killed with its storage unwritten, so its record comes back at 9, and
+  // the phone's publish follows. In tab T, pane B folds docs as 10 on the connect push's count, taken under 45. Pane A then
+  // folds api on a slow socket (11) and pane B folds web over it (12), which lands first. Tab Y, whose copy of the storage
+  // has 10 but neither 11 nor 12, hears 12's count through a sibling pane and folds tests as its own 11, taken on that
+  // count. Pane A's 11 lands last: not under the kept 11, and on a count past 45's, but under 12, taken at a count above
+  // it, so it is dropped under 12 (a kernel judging on the kept and the largest alone took it, and went back to docs and api)
+  const k = fakeKernel();
+  const none = { collapsed: [], expanded: [], pinned: [] };
+  k.folds = { ...none };
+  const E = "e".repeat(32);
+  k.post({ ...none }, { browser: E, n: 45 });                          // before the kill: taken, unchanged, so no push
+  k.post({ ...none }, { browser: "c".repeat(32), n: 1 });               // the phone's publish
+  const t = new Map<string, string>([[PUBLISHES, JSON.stringify({ browser: E, n: 9, live: {} })]]);
+  const a = makeViewer("pane A", k, {}, t), b = makeViewer("pane B", k, {}, t);
+  for (const v of [a, b]) k.connect(v);                                // the connect push names the phone's publish
+  fold(b, "docs", true);                                               // T's 10
+  const y = new Map(t);                                                // tab Y's copy of the storage, which has 10
+  const ySibling = makeViewer("Y's sibling pane", k, {}, y), yPane = makeViewer("Y's pane", k, {}, y);
+  for (const v of [ySibling, yPane]) k.connect(v);
+  const out = slowSend(a);
+  fold(a, "api", true);                                                // T's 11, held on the slow socket
+  const yLink = slowLink(yPane);
+  fold(b, "web", true);                                                // T's 12, taken first; Y's sibling hears it
+  fold(yPane, "tests", true);                                          // Y's 11, on 12's count
+  out.flush();                                                         // T's 11 lands last
+  assert.deepEqual(k.bys.slice(2).map((by: any) => [by.n, by.received.n]), [[10, 2], [12, 3], [11, 4], [11, 3]],
+    "premise: the four publishes, in the order they landed, with the counts they carry");
+  assert.deepEqual(k.folds, { collapsed: ["docs", "api", "web", "tests"], expanded: [], pinned: [] }, "every fold stands");
+  assert.deepEqual(k.drops, ["browser 'eeeeeeee' n=11 received='1000.1':3, between n=12 taken at 4"], "T's 11 dropped under 12, a pair at neither end");
+  assert.deepEqual(k.seen.get(E)!.pairs, [[45, 1], [12, 4], [11, 5]], "45 first, then 12, then Y's 11");
+  yLink.flush();
+  assert.deepEqual(yPane.as(() => readTabGroups(UNIONS).collapsed), ["docs", "api", "web", "tests"], "tab Y shows every fold");
+  assert.deepEqual(a.as(() => readTabGroups(UNIONS).collapsed), ["docs", "api", "web"],
+    "tab T passes Y's frame over, since it names a number under T's own entry for 12, and shows tests only once a later frame is heard");
 });
 
 test("a declared redial gets no frame until a change is pushed: a fold made meanwhile waits, and lands over the next push", () => {
