@@ -2377,8 +2377,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   zero bytes). These occupancy gauges attribute a resident size to its
   holders; they do not sum to it. The transcript record cache, the largest
   resident holder when the kernel is large, is not among them: its occupancy
-  already rides this response under `recordCache` (`entries` and `bytes`
-  against `budgetBytes`), so a resident size these gauges leave unaccounted
+  already rides this response under `recordCache` (`entries`, and
+  `realBytes` against `budgetBytes`), so a resident size these gauges leave unaccounted
   for is read there first. The block reads a length or a counter per
   cache, under the cache's own lock where its readers take one and over a
   copied value list otherwise; on a plain read it walks neither the
@@ -2844,9 +2844,34 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   nobody can log into) or when the request says `?stacks=1` (`romp perf
   stacks`, T401); `null` otherwise.
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
-  `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
-  `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
+  `entries`; `bytes`, the held entries' file bytes; `realBytes`, the same
+  entries decoded, `bytes` times `decodedMultiple` (bytes of memory per file
+  byte: 2.85 by default, what a transcript measured decoded in a lab, which
+  the kernel's resident size over its cached file bytes agrees with;
+  `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, and 1
+  weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget in
+  memory, which `realBytes` is weighed against, the least recently used
+  entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  which is 4 GiB times `decodedMultiple` in memory, so a machine under about
+  23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
+  bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
+  in file bytes); `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright in
+  megabytes of memory). The budget bounds what this cache holds, not the
+  records' memory: a leaf evicted while a chat's assembly entry holds it
+  stays in memory until that entry is rebuilt, and its next append parses
+  whole (`asmCheckpoint.parse` `g:rewrite`, `g:nonleaf` for a lineage
+  file); `countCap`,
+  `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
+  `droppedBytes` (the quiescence drop), `budgetRereads` and
+  `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
+  the last `countCap` it evicted, each counted once, and the file bytes
+  they read again, a tail restored first and the whole read that upgrades
+  it both counted: near zero while the budget evicts only cold entries,
+  level with `budgetEvictions` once the files read every cycle no longer
+  fit and every read misses; after a change that lets the budget bind, read
+  them beside `budgetEvictions`, `wholeReads` and those two demotions),
+  every byte counter in file bytes,
+  `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
@@ -3687,7 +3712,7 @@ the pass's own, `failures` its tier crashes, and the five blocks (`recordCache` 
 gate counters per stage (`plan`, `group`, `close`, `distill`, `unblock`, `consolidate`): `ran`, `skipped`, `stamped`,
 `bypassed`, `incomplete`, `due_clock`, the admittance the pass ran under) are the DIFFERENCES against the previous pass's snapshot for every counter, so the kernel can feed its `/perf`
 counters per pass, while each block's GAUGES ride as their current values: in `recordCache` the keys `entries`, `bytes`
-(the cache's contents now), `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
+and `realBytes` (the cache's contents now), `decodedMultiple`, `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
 memo's size and cap); in `tierGate` the key `stamps` (the stage stamps held now); `parses` and `goalIo` carry counters only. `asmCheckpoint.restoreMs` is a counter like its neighbours (the restore's parts
 since boot, as described above), so the line carries the pass's own restore time. A non-numeric value (a name) rides as
 current too. `recovered` is the child's judge-module recovery flag (the once-per-storm

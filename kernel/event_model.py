@@ -643,40 +643,109 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
                                   # the assembly cache's identity gate to a full parse.
 # A BYTE budget beside the count (the kernel memory work, 2026-09-11): the count bounded slots, never memory, and the
 # working set is files of every size (a 177 MB leaf and a 2 KB states log take one slot each), so the kernel climbed to
-# 5 to 8 GB between restarts holding every live and subagent transcript's records (about 1.7 bytes resident per file
-# byte). Each entry weighs the bytes it holds (the file size less a tail entry's offset); past the budget the least
+# 5 to 8 GB between restarts holding every live and subagent transcript's records. Each entry weighs the bytes it
+# holds (the file size less a tail entry's offset), and the budget counts those bytes DECODED, times
+# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 31 GiB machine meant about 48 GB of
+# records, so it never bound, while the kernel grew to 16.4 GB resident plus swap); past the budget the least
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
-# never refused, the budget then holds that one entry. Counters under /perf recordCache.
-# The default is HALF of the machine's memory (the user's direction, 2026-09-11: use the memory we have), never under 4 GiB (2026-09-11, the day the budget shipped at 1 GiB):
+# never refused, the budget then holds that one entry. Counters under /perf recordCache, where `bytes` stays file
+# bytes and `realBytes` is the figure the budget compares.
+# The budget bounds what THIS cache holds, not the records' memory. An assembly entry's adapter keeps the very list it
+# read (FileAdapter._src) and every record in its maps, so a leaf evicted while a chat's assembly entry holds it stays
+# in memory until that entry is rebuilt, and the leaf's next append demotes the fold to a whole parse (asmCheckpoint.parse
+# g:rewrite, g:nonleaf for a lineage file) that holds a second decoded copy while it runs (review probe, 2026-10-01: an
+# eviction behind an assembly entry freed 0.4% of the leaf's memory, and the next append parsed whole). Nor does LRU
+# order follow need: a display walk the assembly entry serves by a stat check never touches this cache, and a file only
+# the judges read goes cold between their passes. An eviction frees memory once the assembly entry over the evicted
+# file is released or re-seated with it; until then the budget limits this cache's own books.
+# The default is HALF of the machine's memory (the user's direction, 2026-09-11, to use the memory we have; kept, in
+# real units, on 2026-10-01), never under 4 GiB of FILE bytes (2026-09-11, the day the budget shipped at 1 GiB of file
+# bytes, about 2.9 GiB decoded):
 # the working set of a devbox running 50 sessions is their live leaves, read by every build in every pusher cycle, and
 # a budget below it does not save memory, it thrashes: 18 entries filled the 1 GiB, every build re-read whole
 # transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one pusher cycle of 132 s, chat builds of 3 s
-# each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. What is not needed until looked at
+# each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. An LRU under reads that cycle through
+# more than it holds misses on EVERY read; it does not degrade partway. So the floor is a working-set bound and stays
+# in the working set's unit, file bytes (in memory, the floor times the multiple): wherever it binds (a machine under
+# about 23 GiB, or one without /proc/meminfo, such as macOS) the cache still holds 4 GiB of file bytes, what the floor
+# has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which held half its memory in file bytes before
+# 2026-10-01, now holds those 4 GiB.
+# Half of a 31 GiB machine in real units binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of
+# file bytes at 12.2 hours of uptime, after a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine
+# the budget can bind after about a day, later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus
+# 2.9 bytes per cached file byte), past the point where the machine it ran on began swapping it (about 14 GB, at 11.8
+# hours): half of memory caps this cache only past swap there, and a budget tight enough to bind before swap sits at
+# the working set, the thrash above. Once it binds it evicts the least recently used entries, cold ones first, which is
+# safe while the files read every cycle (live leaves and their lineage) stay under the binding point; past it the
+# thrash returns, and budgetRereads (an evicted path read back) shows it on /perf. What is not needed until looked at
 # (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
-# mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
-RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
+# mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright, in megabytes of memory, floor or not.
+RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budget is never under this times the multiple
 RECORD_CACHE_BUDGET_FRACTION = 0.5
+RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
+#                                        a lab process decoded to 2.86 live heap bytes per source byte (_scan_jsonl_stream's
+#                                        docstring). The old kernel's 147 samples, 5 minutes to 145 hours of uptime (ending
+#                                        2026-10-01), agree: resident size in millions of kB = 3.44 + 2.85 x the cache's
+#                                        file GB, R^2 0.92, about 2.92 bytes of memory per file byte, a slope that also
+#                                        carries whatever grew beside the cache (the kernel at 5f3569d39 fit 2.94 in the
+#                                        same units over its first 11.5 hours). One figure for every entry: it fits the
+#                                        bulk, whole live leaves; content moves it (plain ASCII about 1.1x, small
+#                                        metadata-heavy records over 4x). ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it;
+#                                        1 restores the file-byte budget.
+
+
+def _record_cache_decoded_multiple(value=None):
+    """The decoded multiple in force: `value` (ROMP_RECORD_CACHE_DECODED_MULTIPLE's text) when it is a positive finite
+    number, else RECORD_CACHE_DECODED_MULTIPLE. A value set but refused is said on stderr, never dropped silently, and
+    /perf recordCache.decodedMultiple reads the multiple in force either way."""
+    if value is None or not str(value).strip():
+        return RECORD_CACHE_DECODED_MULTIPLE
+    try:
+        m = float(value)
+    except (TypeError, ValueError):
+        m = float("nan")
+    if 0 < m < float("inf"):
+        return m
+    sys.stderr.write("romp: ROMP_RECORD_CACHE_DECODED_MULTIPLE=%r is not a positive number; the record cache weighs "
+                     "entries at %s\n" % (value, RECORD_CACHE_DECODED_MULTIPLE))
+    return RECORD_CACHE_DECODED_MULTIPLE
+
+
+_RECORD_CACHE_MULTIPLE = _record_cache_decoded_multiple(os.environ.get("ROMP_RECORD_CACHE_DECODED_MULTIPLE"))
+
+
+def _real_bytes(file_bytes) -> int:
+    """`file_bytes` of held entries as memory, decoded: the unit of the budget and of /perf recordCache.realBytes."""
+    return int(file_bytes * _RECORD_CACHE_MULTIPLE)
 
 
 def _record_cache_default_budget_bytes(meminfo_text=None):
-    """Half of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
-    is unreadable (macOS, a container without procfs)."""
+    """The default budget in memory units (the budget weighs held entries decoded): half of MemTotal (from /proc/meminfo,
+    or the text given), never under the floor's 4 GiB of FILE bytes (RECORD_CACHE_BUDGET_FLOOR_BYTES times the multiple
+    in force); the floor alone when the file is unreadable (macOS, a container without procfs), so such a machine holds
+    the 4 GiB of file bytes it held before 2026-10-01."""
+    floor = int(RECORD_CACHE_BUDGET_FLOOR_BYTES * _RECORD_CACHE_MULTIPLE)
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
         for line in text.splitlines():
             if line.startswith("MemTotal:"):
                 kb = int(line.split()[1])
-                return max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+                return max(floor, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
     except Exception:
         pass
-    return RECORD_CACHE_BUDGET_FLOOR_BYTES
+    return floor
 
 
 _JSONL_CACHE_BUDGET_BYTES = (int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]) * 1024 * 1024)
                              if os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB") else _record_cache_default_budget_bytes())
 _JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
 _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0,
+                       "budgetRereads": 0, "budgetRereadBytes": 0,   # inserts of a path the byte budget had evicted, and the
+                       #                   file bytes they read again (a tail restored first, then the whole read that
+                       #                   upgrades it): the thrash signal (2026-10-01). Near zero while the budget evicts
+                       #                   only cold entries; level with budgetEvictions once the files read every cycle
+                       #                   outgrow it, every read then a miss
                        "released": 0,   # #1735: EVERY pop that removed an entry, whatever the cause (eviction, a re-read
                        #                   replacement, an OSError pop, a quiescent drop). A /perf STATISTIC only, never a
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
@@ -689,10 +758,16 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
 #                                          and an append are not whole reads and are not counted here.
 _DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT_S", "120"))   # a file this long unchanged
 #                                   is one whose writer has finished (a subagent that returned): its records are not kept
+_BUDGET_EVICTED = {}              # path -> True or "tail": the paths the byte budget evicted, oldest first, the last
+#                                   _JSONL_CACHE_MAX of them; the first insert of one is a budget re-read (budgetRereads). A
+#                                   whole insert takes it off; a tail insert (a checkpoint restore came back first) leaves it
+#                                   as "tail" while that tail is held, so the whole read upgrading it adds its bytes to the
+#                                   same re-read (review find, 2026-10-01: the judges' upgrade went uncounted). Keyed on the
+#                                   eviction and the read back, the two events a thrash is made of, never on a time window
 
 
 def _entry_weight(ent) -> int:
-    """The bytes an entry holds, the unit the byte budget and recordCache.bytes count: a whole entry (base 0) the
+    """The bytes an entry holds, the unit recordCache.bytes counts and the byte budget weighs decoded: a whole entry (base 0) the
     file's size; a TAIL entry (base > 0, the records past a checkpoint's cut) the file's size less the offset its
     FIRST held record sits at, offs[0], and nothing while it holds no record (a checkpoint's bare cut before its
     first read, a tail of blank lines); a tail that holds records but carries no offsets to say where they start
@@ -731,25 +806,45 @@ def _cache_pop_locked(path):
 
 def _cache_insert_locked(path, ent):
     """Under _JSONL_CACHE_LOCK: insert `ent` at the LRU tail, evicting the least recently used entries past the count cap
-    and past the byte budget (the new entry's own weight counted; an entry larger than the budget alone still inserts)."""
+    and past the byte budget (the new entry's own weight counted, the held file bytes weighed decoded; an entry larger
+    than the budget alone still inserts). The first insert of a path the budget evicted counts under budgetRereads; when
+    it comes back as a tail, the whole read that upgrades that tail adds its bytes to the same re-read."""
+    prev = _JSONL_CACHE.get(path)
     _cache_pop_locked(path)
     w = _entry_weight(ent)
+    mark = _BUDGET_EVICTED.pop(path, None)
+    if mark is not None:
+        whole = not ent[5]
+        if mark is True:                         # the first insert back after a budget eviction: one re-read
+            _RECORD_CACHE_STATS["budgetRereads"] += 1; _RECORD_CACHE_STATS["budgetRereadBytes"] += w
+        elif prev is None:                       # "tail", but that tail left by another road (the count cap, a drop)
+            mark = None
+        elif whole:                              # "tail": the whole read upgrading the tail it came back as
+            _RECORD_CACHE_STATS["budgetRereadBytes"] += w
+        if mark is not None and not whole:
+            _BUDGET_EVICTED[path] = "tail"       # back as a tail, or that tail grown: a whole read may still follow
     while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
         _RECORD_CACHE_STATS["evictions"] += 1
         _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
-    while _JSONL_CACHE and _JSONL_CACHE_BYTES[0] + w > _JSONL_CACHE_BUDGET_BYTES:
+    while _JSONL_CACHE and _real_bytes(_JSONL_CACHE_BYTES[0] + w) > _JSONL_CACHE_BUDGET_BYTES:
+        old = next(iter(_JSONL_CACHE))
         _RECORD_CACHE_STATS["evictions"] += 1; _RECORD_CACHE_STATS["budgetEvictions"] += 1
-        _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(next(iter(_JSONL_CACHE)))
+        _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(old)
+        _BUDGET_EVICTED.pop(old, None); _BUDGET_EVICTED[old] = True   # newest: a fresh eviction is a fresh re-read
+        if len(_BUDGET_EVICTED) > _JSONL_CACHE_MAX:
+            del _BUDGET_EVICTED[next(iter(_BUDGET_EVICTED))]
     _JSONL_CACHE[path] = ent
     _JSONL_CACHE_BYTES[0] += w
     _RECORD_CACHE_STATS["inserts"] += 1
 
 
 def record_cache_stats() -> dict:
-    """The record cache for /perf: entries, held bytes, the budget, and the counters (inserts, evictions by count and by
-    budget, evicted bytes, drop-after-fold drops)."""
+    """The record cache for /perf: entries, held bytes (file bytes, as the kernel's samples read them), the same held
+    bytes decoded (realBytes, the budget's unit) and the multiple, the budget, and the counters (inserts, evictions by
+    count and by budget, evicted bytes, budget re-reads, drop-after-fold drops)."""
     with _JSONL_CACHE_LOCK:
-        out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
+        out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "realBytes": _real_bytes(_JSONL_CACHE_BYTES[0]),
+               "decodedMultiple": _RECORD_CACHE_MULTIPLE, "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
                "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS}
         table = _RECORD_CACHE_STATS.get("wholeReads")
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
