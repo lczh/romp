@@ -454,7 +454,8 @@ class CounterAndCap(Base):
         finished = lazy_atom(rec, path, at, "a")
         finished["message"] = em._norm_message(rec["message"])     # a peer's fill wrote the body; its marker pop is in flight
         self.assertEqual(meanwhile(finished), {"hydratedAtoms": 0, "hydratedHits": 0, "hydratedEvicted": 0},
-                         "an atom a peer finished, met at the re-check: completed from the memo, not counted")
+                         "an atom a peer finished, met at the in-place branch's second look: completed from the memo, "
+                         "not counted")
         self.assertNotIn("lazy", finished)
         in_place = lazy_atom(rec, path, at, "a")
         in_place["message"] = em._norm_message(rec["message"])     # the same, met at the first check of a warm memo
