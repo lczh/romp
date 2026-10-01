@@ -84,7 +84,7 @@ class ThreadMailOff(unittest.TestCase):
     def test_the_frames_carry_the_effective_state(self):
         # the comments frame says mailOff per thread; the /sessions thread rows and the Sessions pane rows carry the
         # effective postalServiceOff; the timeline lane and the chat rows read the effective reader too
-        src = inspect.getsource(km._comments_frame)
+        src = inspect.getsource(km._comment_frame_entry)   # the frame's per-thread row (the create's answer carries it too)
         self.assertIn('"mailOff": bool(mail_why)', src)
         rows = inspect.getsource(km._thread_rows)
         self.assertIn('**_mail_off_fields(tsid)', rows, "the thread rows carry both fields from one derivation")
@@ -106,7 +106,7 @@ class HeldMail(unittest.TestCase):
         for i in range(3):
             (box / ("m%d" % i)).write_text("From: peer\n\nhello\n")
         self.assertEqual(km._held_mail_count(THREAD), 3)
-        self.assertIn('"heldMail": _held_mail_count(tsid)', inspect.getsource(km._comments_frame), "the frame carries it beside mailOff")
+        self.assertIn('"heldMail": _held_mail_count(tsid)', inspect.getsource(km._comment_frame_entry), "the frame carries it beside mailOff")
 
 
 class UnreadableRecordOnTheKernelSide(unittest.TestCase):
@@ -136,7 +136,7 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
         self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 0, "…and no row derives it inline any more")
         fields_src = inspect.getsource(km._mail_off_fields)
         self.assertEqual(fields_src.count("_mail_off_why_k("), 1); self.assertIn('{"postalServiceOff": bool(why), "mailOffWhy": why}', fields_src)
-        self.assertIn('"mailOffWhy": mail_why', inspect.getsource(km._comments_frame), "…and the comments frame from its one derivation")
+        self.assertIn('"mailOffWhy": mail_why', inspect.getsource(km._comment_frame_entry), "…and the comments frame from its one derivation")
 
     def test_the_row_fields_come_from_one_derivation_and_agree(self):
         (Path(self.td) / "sdk" / (PLAIN + ".json")).write_text(json.dumps(["not", "a", "dict"]))
@@ -177,7 +177,7 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
             finally:
                 os.chmod(d / (PARENT + ".json"), 0o644)
             self.assertEqual(km._thread_reg_read(PARENT)[0], "ok", "the repair (a chmod, no rewrite) is seen: ctime moved the key")
-        src = inspect.getsource(km._comments_frame)
+        src = inspect.getsource(km._comment_frame_entry)
         self.assertIn("mail_why = _mail_off_why_k(tsid)", src); self.assertIn('"mailOff": bool(mail_why)', src); self.assertIn('"mailOffWhy": mail_why', src)
         self.assertEqual(src.count("_mail_off_why_k(tsid)"), 1, "one derivation for both fields")
 

@@ -3814,9 +3814,21 @@ the viewer on the heading the viewer gave that id.
 
 The comments frame follows the same own-slot model. The `{type: "comments"}` frame carries a
 thread's anchorUuid, which the chat page joins with the anchored reply turn (`data-uuid`) to draw
-the reply's mark, and it reaches a page on three roads: the pusher's full cycle, the create
-handler's direct send when a comment is written, and the ready reset's re-send once a reconnecting
-page's listeners are up.
+the reply's mark, and it reaches a page on two roads: the pusher's full cycle and the ready reset's
+re-send once a reconnecting page's listeners are up. A create's answer (`commentCreated`) carries
+the new thread's row itself, built as the frame builds it, so the page lists and opens the thread
+before the next frame; a frame built from the store as it stood before a write is dropped at the
+send (each store write bumps a generation the pusher reads before it builds the frame), so it can
+never follow that answer and take the thread away again. A document write over a session's parse,
+which only reads it, does not hold the comment's walk.
+
+Creating a comment runs off the page's socket thread, so the page's other messages are read while
+it runs. The cut is found on the session's own parse (the chat's assembly entry, whole or restored
+from its document), reading back only the few records before the document's cut that the walk
+needs; it reads the transcript whole only when that parse cannot answer, and says so in the kernel
+log. A thread's transcript opens with the parent's history the fork copied in, and the popover reads
+only what follows the cut: the cut record's line is found once by reading back from the end, then
+checked by a few guard bytes per change.
 
 The chat page compiles one matcher per index (`glossary-links.ts`): every form
 (the term, its aliases, and their plurals by the everyday rule; nothing shorter

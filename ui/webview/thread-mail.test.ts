@@ -28,7 +28,7 @@ test("the popover says the thread's mail is off, and the promoted view says it i
   assert.match(RENDER, /mailOn\.textContent = !th\.mailOff\s*\n\s*\? "Its mail is on now[^\n]*\n\s*: th\.mailOffWhy === "unreadable" \? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired\."\s*\n\s*: th\.mailOffWhy === "flags" \? "Its mail is held: the session settings file cannot be read, and mail flows again once it is written\."\s*\n\s*: "Its mailbox is off: the lane's mailbox toggle turns peer mail back on\."/,
                "the promoted line reads the reason: an unreadable record is no mailbox toggle's to clear");
   assert.match(COMMENTS, /mailOffWhy\?: string;/);
-  assert.match(KERNEL, /mail_why = _mail_off_why_k\(tsid\)\s*\n\s*threads\.append\(\{/, "the comments frame derives the reason once, before the row");
+  assert.match(KERNEL, /mail_why = _mail_off_why_k\(tsid\)\s*\n\s*return \{/, "the comments frame's row (_comment_frame_entry) derives the reason once, before the row");
   assert.match(KERNEL, /"mailOff": bool\(mail_why\),[^\n]*\n\s*"mailOffWhy": mail_why,/, "…and both fields read that one derivation");
   assert.match(RENDER, /" in a moment\."/);
 });

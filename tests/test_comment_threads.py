@@ -1411,12 +1411,26 @@ class ThreadProjection(CommentBase):
             th = self._frame_thread(recs + [uline(t + 131, repeat, "cu2", parent="ca1")], state="")
             self.assertEqual(th["queued"], 0)
             self.assertEqual(self._State.live, [], "landed by a record written after the send")
-            # the read ORDER alone, with an unfloored prune (an older backend's shape): the projection build
-            # retires the repeat-text echo, yet the fold — having read live_atoms first — still counts it
-            self._State.live = [{"type": "user", "author": "human", "t": t + 130, "uuid": "echo:r2", "_echo_text": repeat}]
+            # the projection parses the thread's OWN records alone (2026-10-01): a text only the fork-copied
+            # history carries is in no parse the prune reads, so even an unfloored prune (an older backend's
+            # shape) cannot retire the echo on it
+            self._State.live = [{"type": "user", "author": "human", "t": t + 130, "uuid": "echo:r3", "_echo_text": repeat}]
             self._State.unfloored = True
             try:
                 th = self._frame_thread(recs, state="")
+                self.assertEqual(th["queued"], 1)
+                self.assertEqual(len(self._State.live), 1, "the copied history's text retires nothing")
+            finally:
+                self._State.unfloored = False
+            # the read ORDER alone, with an unfloored prune: the projection build retires a repeat-text echo whose
+            # text an EARLIER record of the thread's own exchange carries, yet the fold — having read live_atoms
+            # first — still counts it
+            again = "ok, go on"
+            recs2 = recs + [uline(t + 125, again, "cu2", parent="ca1")]
+            self._State.live = [{"type": "user", "author": "human", "t": t + 130, "uuid": "echo:r2", "_echo_text": again}]
+            self._State.unfloored = True
+            try:
+                th = self._frame_thread(recs2, state="")
                 self.assertEqual(th["queued"], 1, "read before the (unfloored) prune retired it")
                 self.assertEqual(self._State.live, [], "…and the prune did retire it — so the order is what kept the count")
             finally:

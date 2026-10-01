@@ -54,6 +54,8 @@ EVENT_MODEL_ALLOWED = {
     "_atom_line", "_dump",                              # the module's own --test dump over a whole parse (never a restored tree)
     "fold_records", "_read_jsonl_entry_unlocked", "_read_jsonl_entry", "_scan_jsonl_bytes", "resume_fork_links",
     "_lineage_closure", "_load_states", "_read_jsonl", "_read_jsonl_incremental", "_tail_read", "_pinned_entry",
+    "_SeededGraph._loc",                                # reads a restored atom's lazy sentinel for its source_path slot, never a
+    #                                                     body: the comment cut reads the RAW record by offset (2026-10-01)
 }
 SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw records only: every site allowed, listed for the record
 

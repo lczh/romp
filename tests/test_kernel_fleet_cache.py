@@ -154,7 +154,7 @@ class FleetCacheTest(unittest.TestCase):
             km._sdk_sess = lambda t, now: object()
             km._chat_build_sig = lambda *a, **k: ("SIG",)
             km._chat_sig_ok = lambda t: None
-            km.build_session = lambda t, now, live_map=None: {"events": [{"uuid": "fresh"}]}
+            km.build_session = lambda t, now, live_map=None, **kw: {"events": [{"uuid": "fresh"}]}   # kw: the thread's cut (thread_cut)
             km._comment_thread_row_created = lambda t: 0
             key = ("SIG", None)                                                     # the stubbed signature plus no states row
             with mock.patch.object(km.time, "time", return_value=T):
