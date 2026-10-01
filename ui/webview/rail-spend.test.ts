@@ -20,11 +20,11 @@ const STRIPCSS = fs.readFileSync(path.join(ROOT, "ui", "webview", "strip.css"), 
 const BACKEND = fs.readFileSync(path.join(ROOT, "kernel", "sdk_backend.py"), "utf8");
 
 test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside bars", () => {
-  // the spend-only view arms on the legacy apiKey marker OR a login-less machine with recorded spend, and
-  // sums the key's turns there too since 2026-10-01 (a stored login can bill a seat on such a machine), a
-  // bucket from before the split counting whole
+  // the spend-only view arms on the legacy apiKey marker OR a login-less machine with recorded spend,
+  // and keeps TOTAL sums (everything there bills the key; legacy files predate the split), except in a
+  // bucket where a stored login billed turns, which reads its key sub-count (2026-10-01: a seat's turns)
   assert.ok(KERNEL.includes('if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):'));
-  assert.ok(KERNEL.includes('out = {"apiKey": True, "spend": _spend_windows(keyed_only=True, untracked_whole=True),'));
+  assert.ok(KERNEL.includes('out = {"apiKey": True, "spend": _spend_windows(login_split=True),'));
   // the hover's spend rows lead with the rolling hour (the user 2026-08-15); the collapsed cell keeps day+month
   // …'1 month' is ROLLING 30 days and 'this month' the calendar bill figure beneath it (T235, 2026-09-03)
   assert.ok(KERNEL.includes("var SPEND_WINS=[['hour','1 hour'],['day','1 day'],['week','1 week'],['month','1 month'],['monthToDate','this month']];"));
@@ -33,7 +33,7 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
   assert.ok(KERNEL.includes('out["spendSeries"] = ss'));
   // the bars payload attaches the KEYED split only — a login turn's computed cost there would be
   // dollars nobody is billed — and only when key turns actually exist (the user 2026-08-08)
-  assert.ok(KERNEL.includes("def _spend_windows(keyed_only=False, untracked_whole=False):"));
+  assert.ok(KERNEL.includes("def _spend_windows(keyed_only=False, login_split=False):"));
   assert.ok(KERNEL.includes("ksp = _spend_windows(keyed_only=True)"));
   assert.match(KERNEL, /if any\(\(ksp\.get\(k\) or \{\}\)\.get\("turns"\) for k in \("day", "week", "month"\)\):/);
   // no fragment of the key rides ANY payload (the user 2026-08-08, evening): the tail plumbing is

@@ -1013,14 +1013,14 @@ class UsagePayloadMixed(unittest.TestCase):
 
 
 class UsagePayloadNoSignIn(unittest.TestCase):
-    """The API cell on a machine with NO sign-in of its own counts the key's turns, never a stored login's. That arm
-    summed the whole ledger on the premise that every turn there bills the key, which stored logins (T346) broke: a
-    session on such a machine can bill a subscription seat through a stored login's token, and those turns are Claude
-    Code's cost at API prices, an estimate nobody is billed per token. The cell is labelled API and the spend detail's
-    By account summary shows them as the seat's, marked as estimates; the cell sums them as plain key dollars beside a
-    mixed host's cell that leaves its own seat turns out (the user 2026-10-01, who saw the seat's estimate on the
-    strip after linking the login). A bucket from before the ledger tracked billing still counts whole on this arm:
-    every turn on a machine with no sign-in billed the key then. Synthetic ledger, invented login id."""
+    """The API cell on a machine with NO sign-in of its own never counts a stored login's turns. That arm sums the whole
+    ledger on the premise that every turn there bills the key, which stored logins (T346) broke: a session on such a
+    machine can bill a subscription seat through a stored login's token, and those turns are Claude Code's cost at API
+    prices, an estimate nobody is billed per token. The cell is labelled API and the spend detail's By account summary
+    shows them as the seat's, marked as estimates; the cell summed them as plain key dollars beside a mixed host's cell
+    that leaves its own seat turns out (the user 2026-10-01, who saw the seat's estimate in the usage hover after
+    linking the login). A bucket where a stored login billed turns now reads its key sub-count; every other bucket is
+    read exactly as before, whole. Synthetic ledger, invented login id."""
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -1044,7 +1044,7 @@ class UsagePayloadNoSignIn(unittest.TestCase):
              "byLogin": {"aaaa1111": {"usd": 6.0, "turns": 2, "tok": 60}},
              "bySid": {"11111111-2222-3333-4444-555555555555": {"usd": 10.0, "turns": 5, "tok": 110,
                                                                   "key": {"usd": 3.0, "turns": 2, "tok": 30}}}}
-        legacy = {"usd": 4.0, "turns": 1, "tokIn": 40}   # written before the ledger tracked billing
+        legacy = {"usd": 4.0, "turns": 1, "tokIn": 40}   # no stored login billed this hour: whole, as before
         (Path(self.d) / "spend.json").write_text(json.dumps({"days": {day: b}, "hours": {hour: b, old_hour: legacy}}))
 
     def test_the_cell_counts_the_keys_turns_and_never_a_stored_logins(self):
@@ -1054,7 +1054,7 @@ class UsagePayloadNoSignIn(unittest.TestCase):
         self.assertEqual(u["spend"]["month"]["usd"], 3.0, "the key's $3; the seat's $6 and the remainder's $1 are not key dollars")
         self.assertEqual(u["spend"]["month"]["turns"], 2)
         self.assertEqual(u["spend"]["month"]["tok"], 30)
-        self.assertEqual(u["spend"]["day"]["usd"], 7.0, "the key's $3 plus the pre-tracking bucket's $4, which was all key")
+        self.assertEqual(u["spend"]["day"]["usd"], 7.0, "the key's $3 plus the other hour's $4, which no stored login billed")
         self.assertEqual(u["spend"]["day"]["turns"], 3)
         self.assertEqual(round(sum(u["spendSeries"]["usd"]), 4), 7.0, "the hover's graph follows the same rule")
 

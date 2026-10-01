@@ -48491,16 +48491,16 @@ def _usage():
         if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):
             # The spend WINDOWS mirror the subscription bars (5h / 7d / month) so the two auth modes
             # read identically; _spend_windows always returns all three, zero-filled on a fresh kernel
-            # (an empty slot reads as broken — the user 2026-08-04, post-restart). The KEYED split, as on
-            # a mixed host: this arm summed the total while every turn on a machine with no sign-in billed
-            # the key, until a stored login (T346) let a session here bill a subscription seat through its
-            # token; those turns are an estimate at API prices that the cell labelled API showed as key
-            # dollars (the user 2026-10-01, who saw the seat's figure on the strip after linking the login;
-            # the spend detail's By account summary shows it as the seat's, marked as an estimate). A
-            # bucket from before the ledger tracked billing still counts whole: every turn here billed the
-            # key then. The rail's label is the constant 'API' — no fragment of the key travels
+            # (an empty slot reads as broken — the user 2026-08-04, post-restart). TOTAL sums, not the
+            # keyed split: on a no-login machine every turn bills the key, and legacy files predate the
+            # split — EXCEPT a turn a stored login (T346) billed: a session here can bill a subscription
+            # seat through a login's token, an estimate at API prices that this cell, labelled API, showed
+            # as key dollars (the user 2026-10-01, who saw the seat's figure in the usage hover after
+            # linking the login; the spend detail's By account summary shows it as the seat's). A bucket
+            # holding such turns reads its key sub-count (login_split); every other bucket, its total.
+            # The rail's label is the constant 'API' — no fragment of the key travels
             # (the user 2026-08-08; hosts are told apart by name in the hover, not by key).
-            out = {"apiKey": True, "spend": _spend_windows(keyed_only=True, untracked_whole=True),
+            out = {"apiKey": True, "spend": _spend_windows(login_split=True),
                    "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
                    "acct": _claude_account()}
             # (The telemetryUnavailable flag + its "rate-limit telemetry unavailable under API-key
@@ -48508,7 +48508,7 @@ def _usage():
             # key-only and want the spend without a notice about rate limits that don't apply.
             # Absence of windows on a keyed host is the designed state and now simply looks like
             # what it is: no windows.)
-            ss = _spend_series(keyed_only=True, untracked_whole=True)   # the key's turns, like the windows above
+            ss = _spend_series(login_split=True)   # the key's turns, like the windows above
             if ss:
                 out["spendSeries"] = ss   # the hover's money-rate graph (the user 2026-08-13)
             sa = _spend_recorded_at()
@@ -49415,12 +49415,18 @@ def _spend_tree_memo_report():
     return {"entries": len(_SPEND_TREE_CACHE), "bytes": size, "bound": SPEND_GUARD_TREE_MEMO_BYTES, **_SPEND_TREE_STATS}
 
 
-def _spend_series(keyed_only=False, now=None, untracked_whole=False):
+def _bucket_login_billed(e):
+    """True for a ledger bucket in which a stored login (T346) billed turns: its byLogin map names one."""
+    bl = e.get("byLogin")
+    return isinstance(bl, dict) and any(isinstance(v, dict) and (v.get("usd") or v.get("turns")) for v in bl.values())
+
+
+def _spend_series(keyed_only=False, now=None, login_split=False):
     """The hover graph's money-rate series (the user 2026-08-13): $/hour over the last 192 hours, a
     DENSE array plus a base hour (h0, epoch-hours), so cross-host summing is an index-wise add after
     aligning on h0 — correct without dedup, because each host records only its own turns even on a
     shared key. Zero IS the honest value for an hour with no turns (money, unlike pct, has a true
-    zero). None when nothing is recorded at all. Same keyed_only split (and untracked_whole rule) as
+    zero). None when nothing is recorded at all. Same keyed_only split (and login_split rule) as
     _spend_windows, for the same reason. `now` anchors h0 — injectable so a caller with a frozen evidence clock (tests) can't
     straddle an hour boundary between writing a bucket and reading its index (the 23:00 UTC CI run)."""
     try:
@@ -49436,7 +49442,7 @@ def _spend_series(keyed_only=False, now=None, untracked_whole=False):
         i = _series_index(k, h0)
         if i is None or not (0 <= i < _SERIES_HOURS) or not isinstance(e, dict):
             continue
-        if keyed_only and not (untracked_whole and _bucket_untracked(e)):
+        if keyed_only or (login_split and _bucket_login_billed(e)):
             e = e.get("key") if isinstance(e.get("key"), dict) else {}
         usd[i] = round(float((e or {}).get("usd") or 0), 4)
     return {"h0": h0, "usd": usd}
@@ -49478,9 +49484,9 @@ _SPEND_GRAIN = 5e-5      # a bucket's dollars minus its sids' dollars below this
 
 def _spend_scope():
     """Which figure the rail shows for THIS host, mirrored for the usage modal so its numbers are the
-    rail's: "total" on a no-login (key-only) machine — its session list keeps every turn, since a turn
-    there billed the key unless a stored login's token billed a subscription seat (that part wears the
-    estimate mark per row; the rail's own figure is the key's turns since 2026-10-01) — or "keyed" when a login's windows sit beside the key's spend, where only the
+    rail's: "total" on a no-login (key-only) machine — every turn there bills the key, and legacy files
+    predate the split; a turn a stored login billed is the exception (its session row wears the estimate
+    mark, and the rail leaves it out since 2026-10-01) — or "keyed" when a login's windows sit beside the key's spend, where only the
     turns whose session billed the key are dollars anyone pays (_usage's two arms, the user 2026-08-08) —
     or "computed" for a login with no key at all, where the rail shows no spend and every recorded
     figure is a computed cost, not a bill."""
@@ -49510,13 +49516,6 @@ _PEER_SPEND_TIMEOUT_S = 6.0   # one bounded wait for every attached kernel's /sp
 _SEAT_NAMES = {"enterprise": "Enterprise seat", "personal": "Personal plan"}
 
 
-def _bucket_untracked(e):
-    """True for a ledger bucket written before the ledger tracked billing: no key split, no per-session map and no
-    per-login map, so its turns cannot be told apart by who billed them."""
-    return (not isinstance(e.get("key"), dict) and not isinstance(e.get("bySid"), dict)
-            and not (isinstance(e.get("byLogin"), dict) and e.get("byLogin")))
-
-
 def _bucket_routes(e):
     """{route: (usd, turns)} of one ledger bucket by WHO billed each turn: "key" (the bucket's key sub-count, the turns
     whose session billed an API key), "login:<id>" (its byLogin rows, the turns billed to a stored login) and "machine"
@@ -49526,7 +49525,7 @@ def _bucket_routes(e):
     tu, tn = float(e.get("usd") or 0), int(e.get("turns") or 0)
     k = e.get("key") if isinstance(e.get("key"), dict) else None
     bl = e.get("byLogin") if isinstance(e.get("byLogin"), dict) else {}
-    if _bucket_untracked(e):
+    if k is None and not isinstance(e.get("bySid"), dict) and not bl:
         return {"untracked": (tu, tn)} if (tu >= _SPEND_GRAIN or tn) else {}
     out = {}
     ku, kn = (float(k.get("usd") or 0), int(k.get("turns") or 0)) if k else (0.0, 0)
@@ -50302,7 +50301,7 @@ def _merge_spend_details(payloads, hosts, local):
     return out
 
 
-def _spend_windows(keyed_only=False, untracked_whole=False):
+def _spend_windows(keyed_only=False, login_split=False):
     """API-mode usage windows MIRRORING the subscription bars (the user 2026-08-04, who wanted the two
     auth modes to read identically at a glance): rolling 5h and 7d summed from spend.json's hour
     buckets, month-to-date from its day buckets — each {usd, tok, turns}, plus `budget` where
@@ -50312,11 +50311,11 @@ def _spend_windows(keyed_only=False, untracked_whole=False):
     keyed_only=True sums each bucket's `key` sub-counters instead — the turns whose SESSION billed an
     API key (see _record_spend). That is what the rail's API readout shows beside a login's bars on a
     mixed host: the total would fold login turns' computed costs in — dollars nobody is billed (the
-    user 2026-08-08). untracked_whole=True counts a bucket from before the ledger tracked billing
-    (_bucket_untracked) whole instead of as nothing: the machine with no sign-in of its own, whose
-    turns all billed the key until stored logins (T346) let a session there bill a subscription seat
-    through a login's token. Its readout is the key split too since 2026-10-01; it summed the total,
-    and a stored login's seat turns read as key dollars."""
+    user 2026-08-08). The no-login machine keeps the total (everything there IS the key, and legacy
+    files predate the split), with ONE exception, login_split=True: a bucket in which a stored login
+    (T346) billed turns sums its key sub-counters, since those turns spent a subscription seat through
+    the login's token and are not the key's (2026-10-01; before, the cell showed them as key dollars).
+    A bucket no stored login billed is read exactly as before."""
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
     except Exception:
@@ -50338,7 +50337,7 @@ def _spend_windows(keyed_only=False, untracked_whole=False):
         complete = True
         for e in entries:
             if isinstance(e, dict):
-                if keyed_only and not (untracked_whole and _bucket_untracked(e)):
+                if keyed_only or (login_split and _bucket_login_billed(e)):
                     e = e.get("key") if isinstance(e.get("key"), dict) else {}
                     out["usd"] = round(out["usd"] + float(e.get("usd") or 0), 4)
                     out["turns"] += int(e.get("turns") or 0)

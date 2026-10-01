@@ -620,10 +620,10 @@ the per-init check above confirms each one.
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
-key-billed dollars (5-hour burn and month-to-date, numbers only). On every
-machine, one with no sign-in of its own included, those are the turns an API
-key billed: a session there billed to a stored login spends a subscription
-seat, and its dollars are not the key's. Hovering
+key-billed dollars (5-hour burn and month-to-date, numbers only). On a
+machine with no sign-in of its own every turn counts as the key's, except a
+turn billed to a stored login: that spent a subscription seat, and its dollars
+are not the key's. Hovering
 breaks the windows down by ACCOUNT: one block per distinct login (headed by
 the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
 detail gives it, never its email; the meters written once, since they are the

@@ -2995,9 +2995,9 @@ class SpendRecord(unittest.TestCase):
             ksrc = f.read()
         self.assertIn('if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):',
                       ksrc, "_usage serves spend on the legacy marker OR a login-less machine with recorded spend")
-        # the key's turns on that arm too since 2026-10-01: a stored login's seat turns are not key dollars (test_session_auth)
-        self.assertIn('"spend": _spend_windows(keyed_only=True, untracked_whole=True)', ksrc)
-        self.assertIn("def _spend_windows(keyed_only=False, untracked_whole=False):", ksrc)   # keyed_only: the API sum (test_session_auth)
+        # less a stored login's turns since 2026-10-01: those spent a seat, not the key (test_session_auth)
+        self.assertIn('"spend": _spend_windows(login_split=True)', ksrc)
+        self.assertIn("def _spend_windows(keyed_only=False, login_split=False):", ksrc)   # keyed_only: the mixed-host API sum (test_session_auth)
 
     def _spend_session(self, sid="11111111-2222-3333-4444-bbbbbbbbbbbb", name="n", **reg):
         import asyncio
