@@ -49021,11 +49021,12 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
     guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
     read whole once when its first stamped record is not older than the window's floor, since the records before the
     document's cut may then be in the window (a fresh process restoring a file the window still covers), and a window
-    priced from the tail alone would read low. Except where the memo ends exactly where the tail begins (its stamp's size
-    is the byte offset of the tail's first record) and reaches back to the window's start: an agent that resumed after its
-    drop, which a LIVE agent's silence of over two minutes is (a long tool call, a long response). Then only the tail is
-    priced and the memo's rows from its floor on are kept beside it, a response logged on both sides of the cut counted
-    once at its largest usage by its message id, so a resume costs the tail, not a whole read and decode of the file."""
+    priced from the tail alone would read low. Except where the memo ends at a record the tail holds (its stamp's size is
+    that record's byte offset, _spend_tail_index) and reaches back to the window's start: an agent that resumed after its
+    drop, which a LIVE agent's silence of over two minutes is (a long tool call, a long response), at its first record
+    and at every one after while the reader holds the tail. Then only the records past the memo's end are priced and the
+    memo's rows from its floor on are kept beside them, a response logged on both sides counted once at its largest usage
+    by its message id, so a resume costs the new records, not a whole read and decode of the file."""
     if agent:
         hit = _SPEND_ROWS_CACHE.get(f)
         if hit is not None and hit[0][2] == 0 and hit[1] <= since and f not in em._JSONL_CACHE:
@@ -49050,15 +49051,17 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
         _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
         return _spend_rows_since(hit[2], since)
     floor = since - SPEND_GUARD_MEMO_SLACK_S
-    prior = None
+    prior, start = None, 0
     if agent and ent[5] > 0 and not _spend_tail_covers(ent[4], floor):
-        if hit is not None and hit[1] <= since and len(ent) > 7 and ent[7] and int(ent[7][0]) == hit[0][1]:
-            prior = hit                                  # the memo ends where the tail begins: the tail alone is priced
+        at = _spend_tail_index(ent, hit[0][1]) if hit is not None and hit[1] <= since else None
+        if at is not None:
+            prior, start = hit, at                       # the memo ends at the tail's record `at`: only the records past it are priced
         else:
             ent = em._read_jsonl_entry(f) or ent         # the whole file, once (the tail upgraded in place, its generation kept)
             stamp = (ent[0], ent[1], ent[5])
-    best, rows = {}, []
-    for o in reversed(ent[4]):
+    best, rows, recs = {}, [], ent[4]
+    for n in range(len(recs) - 1, start - 1, -1):
+        o = recs[n]
         if not isinstance(o, dict):
             continue
         t = _msg_epoch(o)
@@ -49115,6 +49118,26 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
 def _spend_rows_since(rows, since):
     """The (t, usd) pairs of memo rows (t, usd, message id) at or after `since`."""
     return [(r[0], r[1]) for r in rows if r[0] >= since]
+
+
+def _spend_tail_index(ent, size):
+    """The index of the tail entry's first held record that starts at byte `size`, where a row memo of the file at that
+    size ended (its scan saw every record before it), or len(records) when the held records end there; None when no
+    held record starts there (the memo ends before the tail begins, or inside a line). Searched from the newest record,
+    since a memo is usually a cycle or a few behind its file."""
+    recs = ent[4]
+    offs = ent[7] if len(ent) > 7 else None
+    if offs is None or len(offs) < 2 * len(recs):
+        return None
+    if int(ent[2]) == size:
+        return len(recs)
+    for i in range(len(recs) - 1, -1, -1):
+        o = int(offs[2 * i])
+        if o == size:
+            return i
+        if o < size:
+            return None
+    return None
 
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
