@@ -1342,22 +1342,28 @@ def _drop_or_reseat(key, ent):
     with _JSONL_CACHE_LOCK:
         if _JSONL_CACHE.get(key) is not ent:
             return None, 0
-        if not pinned:
-            w = _cache_pop_locked(key)
-            _RECORD_CACHE_STATS["dropped"] += 1
-            _RECORD_CACHE_STATS["droppedBytes"] += w
-            return "dropped", w
-        _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
-        cut = low - ent[5]
-        offs = ent[7] if len(ent) > 7 else None
-        if cut <= 0 or cut > len(ent[4]) or offs is None or len(offs) < 2 * len(ent[4]):
-            return "kept", 0
-        new = (ent[0], ent[1], ent[2], ent[3], ent[4][cut:], low, ent[6], array.array("q", offs[2 * cut:]))
-        w0, w1 = _entry_weight(ent), _entry_weight(new)
-        _JSONL_CACHE[key] = new                          # a new value under the same key: the LRU position stands
-        _JSONL_CACHE_BYTES[0] = max(0, _JSONL_CACHE_BYTES[0] - w0 + w1)
-        _RECORD_CACHE_STATS["pinnedFreedBytes"] = _RECORD_CACHE_STATS.get("pinnedFreedBytes", 0) + (w0 - w1)
-        return "kept", w0 - w1
+        return _drop_or_reseat_locked(key, ent, pinned, low)
+
+
+def _drop_or_reseat_locked(key, ent, pinned, low):
+    """_drop_or_reseat's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and (pinned, low)
+    _asm_pinned_base's answer for its generation, taken before the lock."""
+    if not pinned:
+        w = _cache_pop_locked(key)
+        _RECORD_CACHE_STATS["dropped"] += 1
+        _RECORD_CACHE_STATS["droppedBytes"] += w
+        return "dropped", w
+    _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
+    cut = low - ent[5]
+    offs = ent[7] if len(ent) > 7 else None
+    if cut <= 0 or cut > len(ent[4]) or offs is None or len(offs) < 2 * len(ent[4]):
+        return "kept", 0
+    new = (ent[0], ent[1], ent[2], ent[3], ent[4][cut:], low, ent[6], array.array("q", offs[2 * cut:]))
+    w0, w1 = _entry_weight(ent), _entry_weight(new)
+    _JSONL_CACHE[key] = new                              # a new value under the same key: the LRU position stands
+    _JSONL_CACHE_BYTES[0] = max(0, _JSONL_CACHE_BYTES[0] - w0 + w1)
+    _RECORD_CACHE_STATS["pinnedFreedBytes"] = _RECORD_CACHE_STATS.get("pinnedFreedBytes", 0) + (w0 - w1)
+    return "kept", w0 - w1
 
 
 def release_records(paths, keep=()):
@@ -2396,7 +2402,10 @@ def _drop_quiescent_entry(key, ent, pop=True):
                 _CKPT_STATS["converge"]["dropWrites"] += 1
     if not pop:
         return wrote
-    _drop_or_reseat(key, ent)                             # kept from its base while an assembly entry folds over it (2026-10-01)
+    pinned, low = _asm_pinned_base(key, ent[6])           # an assembly entry folding over it keeps it (_drop_or_reseat, 2026-10-01)
+    with _JSONL_CACHE_LOCK:
+        if _JSONL_CACHE.get(key) is ent:
+            _drop_or_reseat_locked(key, ent, pinned, low)
     return wrote
 
 
