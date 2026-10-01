@@ -714,7 +714,7 @@ class ReleaseOnTheEndOfUse(Episode):
             self.assertIn((os.path.realpath(self.leaf), PEER, False), em._ASM_CACHE, "another session's entry of the same file stays")
         self.assertIs(_reader_entry(self.leaf), rec0, "the record cache is not the release's to touch")
         with em._ASM_CKPT_LOCK:
-            self.assertFalse(set(em._HYDRATED) & pre, "the entry's hydrated bodies went with it")
+            self.assertEqual(len(set(em._HYDRATED) & pre), 0, "the entry's hydrated bodies went with it (of %d held)" % len(held))
             self.assertIn("peer-body-uuid", em._HYDRATED, "bodies of other records stay")
             self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()), "the memo's byte count follows")
         self.assertEqual(em._ASM_STATS.get("released", 0) - r0, 1, "counted")
