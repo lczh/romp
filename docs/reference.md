@@ -438,7 +438,9 @@ following to every connected machine's kernel):
   the session fell from or above it, or on the version you picked or above it, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
   A pick of your own ends it too, as does turning the switch off. A fallback to
-  a model at or above the version you picked is carded but arms no retry. While a
+  a model at or above the version you picked is carded but arms no retry. A pick
+  the CLI refuses puts back the model you had, and the retry is judged again
+  against it. While a
   fallback stands, the session's model picker, in the chat statusline and in the
   timeline's lane picker alike, marks the requested model with a yellow tick
   beside the blue tick on the model that answers; its tooltip says why
