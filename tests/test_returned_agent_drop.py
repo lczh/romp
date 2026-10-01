@@ -89,6 +89,17 @@ def usd(r):
     return u["input_tokens"] * p["in"] + u["output_tokens"] * p["out"]
 
 
+def in_window(recs, t):
+    """The reference: what the records written at or after t - 600 cost, each record once."""
+    return sum(usd(r) for r in recs if km._msg_epoch(r) >= t - 600)
+
+
+def bare(r):
+    """The record without its message id (a Codex transcript's records carry none, so each counts on its own)."""
+    r["message"].pop("id", None)
+    return r
+
+
 def write(path, recs, mtime):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
@@ -450,23 +461,28 @@ class SpendGuard(Base):
 
     def test_a_dropped_agent_that_resumes_keeps_its_earlier_rows_in_the_window(self):
         ap = str(self.sub / "agent-a7777777777777777.jsonl")
-        early = [rec(T0 - 400 + 5 * i, i) for i in range(10)]    # T0-400 .. T0-355
-        write(ap, early, T0 - 355)
-        self.assertAlmostEqual(self.window(T0), sum(map(usd, early)), places=9)
+        early = [bare(rec(T0 - 400 + 5 * i, i)) for i in range(10)]   # T0-400 .. T0-355, no message ids: nothing dedupes a
+        write(ap, early, T0 - 355)                                     #  record counted twice
+        self.assertAlmostEqual(self.window(T0), in_window(early, T0), places=9)
         self.assertIsNone(self.entry(ap), "quiet for six minutes at the guard's first look: dropped as it was folded")
         whole0 = self.guard_whole_reads()                         # the first look read the leaf and the agent from zero
         size0, r0 = os.path.getsize(ap), self.read_of(ap)
-        late = [rec(T0 + 5 + i, 100 + i) for i in range(3)]
-        append(ap, late, T0 + 8)                                  # the agent resumes (a live agent's long silence ends the same way)
-        self.assertAlmostEqual(self.window(T0 + 10), sum(map(usd, early + late)), places=9,
+        late = [bare(rec(T0 + 5 + i, 100 + i)) for i in range(3)]
+        append(ap, late[:2], T0 + 8)                              # the agent resumes (a live agent's long silence ends the same way)
+        self.assertAlmostEqual(self.window(T0 + 10), in_window(early + late[:2], T0 + 10), places=9,
                                msg="the earlier rows stay in the window: the memo's rows beside the tail's")
         self.assertEqual(self.entry(ap)[5], 10, "the reader holds the tail past the drop's cut")
+        append(ap, late[2:], T0 + 13)                             # and writes on: the memo now ends inside the tail
+        self.assertAlmostEqual(self.window(T0 + 15), in_window(early + late, T0 + 15), places=9,
+                               msg="only the record past the memo's end is priced: none counted twice")
+        self.assertEqual(self.entry(ap)[5], 10, "still the tail")
         self.assertEqual(self.guard_whole_reads(), whole0, "the resume was priced from the tail, never read whole")
-        self.assertLessEqual(self.read_of(ap) - r0, os.path.getsize(ap) - size0 + 2 * em._JSONL_TAIL_GUARD, "the appended bytes and the guard")
-        self.assertAlmostEqual(self.window(T0 + 200), sum(map(usd, early + late)), places=9, msg="quiet again")
+        self.assertLessEqual(self.read_of(ap) - r0, os.path.getsize(ap) - size0 + 4 * em._JSONL_TAIL_GUARD,
+                             "the appended bytes and the guard bytes of two reads")
+        self.assertAlmostEqual(self.window(T0 + 200), in_window(early + late, T0 + 200), places=9, msg="quiet again")
         self.assertIsNone(self.entry(ap), "quiet again: dropped again")
         r1 = self.read_of(ap)
-        self.assertAlmostEqual(self.window(T0 + 210), sum(map(usd, early + late)), places=9, msg="priced from the memo")
+        self.assertAlmostEqual(self.window(T0 + 210), in_window(early + late, T0 + 210), places=9, msg="priced from the memo")
         self.assertEqual(self.read_of(ap), r1, "and not entered again")
         self.assertEqual(self.guard_whole_reads(), whole0)
 
