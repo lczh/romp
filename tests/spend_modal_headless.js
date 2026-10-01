@@ -44,6 +44,34 @@ const { chromium } = require('playwright');
     railOpacity: getComputedStyle(document.getElementById('rail-usage')).opacity,
   }));
   if (shots) { await pg.screenshot({ path: shots + '-dark.png' }); const ch = await pg.$('#rsp-chart'); if (ch) await ch.screenshot({ path: shots + '-chart.png' }); }
+  // 2026-10-01: the By account summary — its rows, the hover words (the modal's own tooltip, from data-tip) on the seat's
+  // name and on its estimate mark, its notes, its place above the list, and a range switch re-summing it
+  const acctRows = () => pg.evaluate(() => Array.from(document.querySelectorAll('#rsp-accts .rsp-acct tr')).map((tr) => {
+    const nm = tr.querySelector('td.rsp-name'), n = tr.querySelectorAll('td.n');
+    return { name: nm.childNodes[0].textContent, text: nm.textContent, usd: n[0] ? n[0].textContent : '', tip: nm.getAttribute('data-tip') || '' };
+  }));
+  const tipAt = async (sel) => { const el = await pg.$(sel); if (!el) return ''; await el.hover(); await pg.waitForTimeout(80); return pg.evaluate(() => { const t = document.getElementById('rsp-tip'); return t && t.style.display === 'block' ? t.textContent : ''; }); };
+  const accts = { rows: await acctRows() };
+  accts.estTip = await tipAt('#rsp-accts tr[data-acct="seat"] .rsp-est');
+  accts.seatTip = await tipAt('#rsp-accts tr[data-acct="seat"] td.rsp-name');
+  if (shots) { await pg.screenshot({ path: shots + '-accounts-tip-dark.png' }); }
+  await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
+  Object.assign(accts, await pg.evaluate(() => ({ notes: Array.from(document.querySelectorAll('#rsp-accts .rsp-note')).map((e) => e.textContent),
+    top: document.getElementById('rsp-accts').getBoundingClientRect().top, listTop: document.getElementById('rsp-table').getBoundingClientRect().top })));
+  if (shots) {
+    const panel = await pg.$('#rsp-panel'); await panel.screenshot({ path: shots + '-accounts-dark.png' });
+    await pg.evaluate(() => document.body.classList.add('theme-light')); await pg.waitForTimeout(120);
+    await panel.screenshot({ path: shots + '-accounts-light.png' });
+    await tipAt('#rsp-accts tr[data-acct="seat"] td.rsp-name'); await pg.screenshot({ path: shots + '-accounts-tip-light.png' });
+    await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
+    await pg.evaluate(() => document.body.classList.remove('theme-light'));
+  }
+  await pg.click('#rsp-panel [data-act="range:day"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:day"]').classList.contains('on'), null, { timeout: 5000 });
+  accts.dayRows = await acctRows();
+  await pg.click('#rsp-panel [data-act="range:hours"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:hours"]').classList.contains('on'), null, { timeout: 5000 });
+  await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
   // T293: the crosshair. Hover the chart clear of every bar (its top 2px: the tallest bar stops at the 6px pad) at a
   // fraction of its width and read the hairline, the stamp and the tooltip's rows; the marks must take no pointer
   // events and move nothing under the pointer
@@ -151,6 +179,9 @@ const { chromium } = require('playwright');
     await pg.waitForTimeout(150);
     await pg.screenshot({ path: shots + '-light.png' });
     await pg.evaluate(() => document.body.classList.remove('theme-light'));
+    // back to the 90-day tokens view the run left before the shot: the choice persists, and the merge pins read it
+    await pg.click('#rsp-panel [data-act="measure:tok"]');
+    await pg.click('#rsp-panel [data-act="range:days"]');
   }
   await pg.keyboard.press('Escape');
   const hiddenAfter = await pg.evaluate(() => document.getElementById('rsp-back').hidden);
@@ -252,6 +283,6 @@ const { chromium } = require('playwright');
     first: (document.querySelector('#rsp-panel .rsp-tbl tbody tr') || {}).textContent || '' }));
   await pg.click('#rsp-panel [data-act="order:spend"]');   // restore the default for whoever runs next
   const mobile = { railHidden, panelOpened: true, modalOpened: true, btn, panelHint , persisted };
-  console.log(JSON.stringify({ merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
+  console.log(JSON.stringify({ accts, merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
   await b.close();
 })().catch((e) => { console.error(e); process.exit(1); });

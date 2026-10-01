@@ -332,10 +332,10 @@ class TargetedTagEdits(_Wire):
         self.assertTrue(store_tag("api")["id"].startswith("g"), "the kernel mints the id, /tag's shape")
 
     def test_a_move_is_one_write_both_halves_or_neither(self):
-        """The `move` op (no client gesture posts it yet; a tab strip's "Move to <tag>" row is the intended
-        caller): off the source tag, onto the target, as ONE write under the lock — a refused destination
-        leaves the source's membership exactly as it was, and the store moves its write sequence once per
-        move."""
+        """The `move` op (the tab strip's drag and the tab menu's "Move to <tag>" post it to a kernel without
+        the `tagSet` cap, for a one-to-one move): off the source tag, onto the target, as ONE write under the
+        lock — a refused destination leaves the source's membership exactly as it was, and the store moves its
+        write sequence once per move."""
         self.seed()                                                        # web = gA holding SID1
         api = self.edit("w1", {"op": "create", "name": "api", "color": "#54B204"})["tid"]
         writes, real = [], km._set_timeline_views

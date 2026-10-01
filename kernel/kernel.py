@@ -42431,6 +42431,14 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         anchors = seg_anchors.get(seg)
         is_prompt = ev.get("kind") in ("user", "teammate") or (ev.get("kind") == "postal-service" and ev.get("direction") == "in")
         ev["tlId"] = ((anchors[0] if is_prompt else anchors[1]) or seg) if anchors else seg
+        # `turn` = the turn of this build's turn list the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01): the
+        # numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a peer's message or a
+        # nudge opened counts as one, as here; counting the typed rows alone read about half the turns on a session that
+        # takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the raw
+        # event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries none.
+        _tn = _raw_turn.get(id(ev), _raw_turn.get(ev.get("uuid")))
+        if _tn is not None:
+            ev["turn"] = _tn
         if ev.get("askAnswer") and not ev.get("askAnswerFilled"):
             # AskUserQuestion whose record carried NO structured answers map (an old transcript) →
             # the lossy output-string scrape is all there is. The attach loop's authoritative fill
@@ -48931,6 +48939,186 @@ def _spend_scope():
 _PEER_SPEND_TIMEOUT_S = 6.0   # one bounded wait for every attached kernel's /spend/detail, asked in parallel
 
 
+# ── WHO billed the spend, by Claude account (the user 2026-10-01, who read an email in the spend display and could not
+# tell whether it was their enterprise account or something connected before, nor how the breakdown worked). One
+# enterprise seat reached two ways (a machine's own sign-in on one host, a stored login's token on another) is ONE
+# account in the modal, named plainly ("Enterprise seat"), its routes a quiet second line and the email only in the
+# hover. Each ledger bucket splits by billing ROUTE (_bucket_routes), each route carries the identity romp already
+# reads for it (_spend_billing), and _spend_accounts folds the routes that are one account by that identity alone:
+# the account digest, else the organisation plus the kind word. A route whose account cannot be read is said to be
+# unknown, never matched by its label or its email.
+_SEAT_NAMES = {"enterprise": "Enterprise seat", "personal": "Personal plan"}
+
+
+def _bucket_routes(e):
+    """{route: (usd, turns)} of one ledger bucket by WHO billed each turn: "key" (the bucket's key sub-count, the turns
+    whose session billed an API key), "login:<id>" (its byLogin rows, the turns billed to a stored login) and "machine"
+    (the rest: the turns billed to the machine's own sign-in). A bucket written before the ledger tracked billing
+    carries neither a key split nor a per-session map, so its non-key part cannot be told from a key turn of the days
+    before the split: the whole bucket is "untracked" and the modal says so, never a guess at a route."""
+    tu, tn = float(e.get("usd") or 0), int(e.get("turns") or 0)
+    k = e.get("key") if isinstance(e.get("key"), dict) else None
+    bl = e.get("byLogin") if isinstance(e.get("byLogin"), dict) else {}
+    if k is None and not isinstance(e.get("bySid"), dict) and not bl:
+        return {"untracked": (tu, tn)} if (tu >= _SPEND_GRAIN or tn) else {}
+    out = {}
+    ku, kn = (float(k.get("usd") or 0), int(k.get("turns") or 0)) if k else (0.0, 0)
+    if ku >= _SPEND_GRAIN or kn:
+        out["key"] = (ku, kn)
+    lu = ln = 0
+    for lid, v in bl.items():
+        if isinstance(v, dict):
+            u, n = float(v.get("usd") or 0), int(v.get("turns") or 0)
+            if u >= _SPEND_GRAIN or n:
+                out["login:" + str(lid)] = (u, n)
+            lu += u
+            ln += n
+    mu, mn = tu - ku - lu, tn - kn - ln
+    if mu >= _SPEND_GRAIN or mn > 0:
+        out["machine"] = (max(mu, 0.0), max(mn, 0))
+    return out
+
+
+def _machine_identity():
+    """The machine's own sign-in as the account grouping reads it: {"state": "ok", acct (the accountUuid digest), org,
+    orgDigest, kind, email} from Claude Code's own records (_claude_account, _ACCT_CACHE, _kind_read), or {"state":
+    "none" | "unreadable"} when no account is signed in or the file could not be read just now. The account is the one
+    signed in NOW: the ledger does not stamp which account a machine-login turn billed."""
+    acct = _claude_account()
+    if not acct:
+        return {"state": "unreadable" if _claude_account_state() == "unreadable" else "none"}
+    return {"state": "ok", "acct": acct, "org": _ACCT_CACHE["org"], "orgDigest": _ACCT_CACHE["orgDigest"],
+            "kind": _kind_read(), "email": _claude_account_label()}
+
+
+def _spend_billing(routes):
+    """The identity of every billing route this host's ledger names, for _spend_accounts: the key bare, the machine's
+    sign-in as _machine_identity reads it, a stored login as its record holds it (label, email, organisation, kind and
+    the account digest when the add flow recorded them; a removed record says so), and "untracked" bare."""
+    out = []
+    for r in sorted(routes):
+        if r == "machine":
+            out.append(dict(_machine_identity(), route=r))
+        elif r.startswith("login:"):
+            lid = r[len("login:"):]
+            rec = lg.read_record(jd.STATE, lid)
+            if not rec:
+                out.append({"route": r, "label": "login %s" % lid, "missing": True})
+                continue
+            kind = str(rec.get("kind") or "").strip().lower()
+            m = {"route": r, "label": str(rec.get("label") or ""), "display": lg.display(rec),
+                 "email": str(rec.get("email") or ""), "org": str(rec.get("org") or ""),
+                 "kind": kind if kind in lg.KINDS.values() else lg.kind_word(kind)}
+            if rec.get("acctDigest"):
+                m["acct"] = str(rec["acctDigest"])   # the record schema's account digest (logins.py), _claude_account's shape
+            out.append(m)
+        else:
+            out.append({"route": r})
+    return out
+
+
+def _acct_known(m):
+    """Whether a seat route carries an identity to tell accounts apart by: its account digest, or a kind word and an
+    organisation."""
+    return bool(m.get("acct")) or bool(m.get("kind") and (m.get("org") or m.get("orgDigest")))
+
+
+def _same_account(a, b):
+    """True / False for two seat routes that are / are not one Claude account, None when their identities cannot tell:
+    the account digests when both carry one; else the organisation (its digest when both carry one, else its name)
+    together with the kind word, when both carry them. Never the label, never the email."""
+    if a.get("acct") and b.get("acct"):
+        return a["acct"] == b["acct"]
+    if not (a.get("kind") and b.get("kind")):
+        return None
+    if a.get("orgDigest") and b.get("orgDigest"):
+        same_org = a["orgDigest"] == b["orgDigest"]
+    elif a.get("org") and b.get("org"):
+        same_org = " ".join(a["org"].split()).lower() == " ".join(b["org"].split()).lower()
+    else:
+        return None
+    return same_org and a["kind"] == b["kind"]
+
+
+def _spend_accounts(per_host):
+    """The modal's By account summary from every host's billing routes ([(host, _spend_billing list)], local first):
+    [{kind: "seat" | "key" | "unknown", name, title?, note?, routes: [{host, route, via, estimate}]}]. Seat routes that
+    _same_account calls one account fold into ONE entry named by its kind ("Enterprise seat", "Personal plan"; the
+    organisation added only when two entries would share a name), its routes the "via" words ("laptop sign-in",
+    "token on server") and its emails and organisation the hover. A stored login whose record names no account is
+    its own entry under the user's label, noted "account not recorded"; a machine's sign-in that is signed out or
+    unreadable, and spend from before billing was tracked, are the Unknown entry. Every seat route's dollars are an
+    estimate at API prices (Claude Code's cost, not a bill); the key's are what the key was billed. The dollars
+    themselves are summed client-side over the chart's range from the series' `routes`."""
+    seats, unrec, keys, unknown = [], [], [], []
+    for host, billing in per_host:
+        for m in billing or []:
+            if not isinstance(m, dict):
+                continue
+            r = str(m.get("route") or "")
+            if r == "key":
+                keys.append({"host": host, "route": r, "via": host, "estimate": False})
+            elif r == "machine":
+                if m.get("state") == "ok" and _acct_known(m):
+                    seats.append((0, host, r, m, "%s sign-in" % host))
+                else:
+                    why = "unreadable just now" if m.get("state") == "unreadable" else "signed out now"
+                    unknown.append({"host": host, "route": r, "via": "%s's own sign-in, %s" % (host, why), "estimate": True})
+            elif r.startswith("login:"):
+                (seats if _acct_known(m) else unrec).append((1, host, r, m, "token on %s" % host))
+            elif r == "untracked":
+                unknown.append({"host": host, "route": r, "via": "before billing was recorded", "estimate": False})   # one phrase for every host
+    seats.sort(key=lambda x: x[0])        # stable: the machines' sign-ins first in host order, then the stored logins
+    groups = []
+    for _o, host, r, m, via in seats:
+        home = None
+        for g in groups:
+            verdicts = [_same_account(m, x) for x in g["ids"]]
+            if False not in verdicts and True in verdicts:
+                home = g
+                break
+        if home is None:
+            home = {"ids": [], "routes": []}
+            groups.append(home)
+        home["ids"].append(m)
+        home["routes"].append({"host": host, "route": r, "via": via, "estimate": True})
+    out = []
+    for g in groups:
+        kind = next((x.get("kind") for x in g["ids"] if x.get("kind")), "")
+        label = next((x.get("label") for x in g["ids"] if x.get("label")), "")
+        org = next((x.get("org") for x in g["ids"] if x.get("org")), "")
+        emails = []
+        for x in g["ids"]:
+            if x.get("email") and x["email"] not in emails:
+                emails.append(x["email"])
+        out.append({"kind": "seat", "name": _SEAT_NAMES.get(kind) or label or "Claude account", "org": org,
+                    "title": " · ".join(emails + [p for p in (org, kind) if p]), "routes": g["routes"]})
+    # two accounts that would share a name: told apart by their organisations when those differ, else by where each is
+    # reached ("Enterprise seat · laptop sign-in"); never by an email
+    same = {}
+    for a in out:
+        same.setdefault(a["name"], []).append(a)
+    for dup in same.values():
+        if len(dup) > 1:
+            orgs = [a["org"] for a in dup]
+            by_org = all(orgs) and len(set(o.lower() for o in orgs)) == len(orgs)
+            for a in dup:
+                a["name"] += " · " + (a["org"] if by_org else a["routes"][0]["via"])
+    for a in out:
+        a.pop("org", None)
+    for _o, host, r, m, via in unrec:
+        disp = m.get("display") or ""
+        out.append({"kind": "seat", "name": m.get("label") or r, "note": "record missing" if m.get("missing") else "account not recorded",
+                    "title": (disp + ". " if disp and disp != m.get("label") else "")
+                    + "Which Claude account this token belongs to isn't recorded, so it can't be matched to a sign-in.",
+                    "routes": [{"host": host, "route": r, "via": via, "estimate": True}]})
+    if keys:
+        out.append({"kind": "key", "name": "API key", "title": "Billed to the API key per token.", "routes": keys})
+    if unknown:
+        out.append({"kind": "unknown", "name": "Unknown", "title": "Spend whose account romp cannot name.", "routes": unknown})
+    return out
+
+
 def _spend_detail_local(now=None):
     """THIS kernel's half of GET /spend/detail — the usage modal's per-SESSION story (T247, the user 2026-09-07, who wanted
     to click the usage readout and see how much each session used, with a stacked histogram colored
@@ -49038,6 +49226,8 @@ def _spend_detail_local(now=None):
         _lid = sbm.SdkBackend.reg_login(sbm.read_reg(jd.STATE, sid)) if sbm else ""
         if _lid and be:
             row["login"] = be.login_display(_lid)     # the stored login this session bills now (T346)
+            row["loginId"] = _lid                     # …its record id, which names its account in the modal's By account,
+            row["loginLabel"] = str((lg.read_record(jd.STATE, _lid) or {}).get("label") or "")   # …and its label alone
         if sid in keyt:
             k = keyt[sid]
             row["key"] = {"usd": round(k[0], 4), "tok": k[1], "turns": k[2]}
@@ -49065,6 +49255,8 @@ def _spend_detail_local(now=None):
         used[s["bg"]] = used.get(s["bg"], 0) + 1
     top = [s["sid"] for s in sessions]          # every session (T247e): the list IS the legend
     meta = {s["sid"]: s for s in sessions}
+    me = _self_host()
+    route_ids = set()                           # every billing route either series names: _spend_billing's subjects
 
     def _series(buckets, keys):
         idx = {k: i for i, k in enumerate(keys)}
@@ -49119,7 +49311,21 @@ def _spend_detail_local(now=None):
         uusd = [round(v, 4) for v in una[0]]
         if any(uusd) or any(una[1]):
             stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1], "turns": una[2]})
-        return {"keys": keys, "stacks": stacks}
+        # the same buckets by billing ROUTE (_bucket_routes), for the By account summary: the client sums each account's
+        # routes over the range the chart draws, as it sums the session rows (T353)
+        rts = {}
+        for k, e in buckets.items():
+            i = idx.get(k)
+            if i is None or not isinstance(e, dict):
+                continue
+            for r, (u, t) in _bucket_routes(e).items():
+                a = rts.setdefault(r, ([0.0] * n, [0] * n))
+                a[0][i] += u
+                a[1][i] += t
+                route_ids.add(r)
+        routes = [{"host": me, "route": r, "usd": [round(v, 4) for v in a[0]], "turns": a[1]}
+                  for r, a in sorted(rts.items()) if any(round(v, 4) for v in a[0]) or any(a[1])]
+        return {"keys": keys, "stacks": stacks, "routes": routes}
 
     h0 = int(now // 3600) - (_SERIES_HOURS - 1)
     hour_keys, epochs = [], []
@@ -49134,7 +49340,8 @@ def _spend_detail_local(now=None):
     lt = time.localtime(now)
     hrs = _series(hours, hour_keys)
     hrs["epochs"] = epochs
-    return {"host": _self_host(), "scope": scope,
+    dys = _series(days, day_keys)
+    return {"host": me, "scope": scope,
             "tz": time.strftime("%Z", lt), "tzOffsetMin": int((getattr(lt, "tm_gmtoff", 0) or 0) // 60),
             "recordedAt": _spend_recorded_at(),
             "sessions": sessions,
@@ -49147,8 +49354,9 @@ def _spend_detail_local(now=None):
             # client-side, the way the strip and the lanes apply it (view-order.ts).
             "order": [s for s in _session_order() if s in live or s in set(_kept_open)],
             "unattributed": {"usd": round(un[0], 4), "tok": un[1], "turns": un[2]},
-            "byLogin": by_login_rows,
-            "hours": hrs, "days": _series(days, day_keys)}
+            "byLogin": by_login_rows,             # kept for an older kernel that merges this host (its one-line note)
+            "billing": _spend_billing(route_ids),  # who each route is: the By account summary's identities
+            "hours": hrs, "days": dys}
 
 
 def _epoch_of_local_hour(key, off_min):
@@ -49290,6 +49498,8 @@ def _spend_detail(now=None):
         out["hosts"] = hosts
         out["order"] = [[me, s] for s in (local.get("order") or []) if isinstance(s, str)]
         out["tags"] = _spend_tags()
+        out["accounts"] = _spend_accounts([(me, local.get("billing"))])
+        out.pop("billing", None)
         return out
     return _merge_spend_details(payloads, hosts, local)
 
@@ -49370,8 +49580,21 @@ def _merge_spend_details(payloads, hosts, local):
         una = ([0.0] * n, [0] * n, [0] * n)
         una_turns = [True]   # false once any peer's unattributed stack came without turns: the merged row shows a dash
         una_hosts = {}
+        rts = {}             # (host, route) -> ([usd], [turns]): the By account summary's series, on our axes
         for host, p, rng, ax in peer_axes:
             idx = [pos.get(a) for a in ax]
+            if "routes" not in rng:
+                no_routes.add(host)     # an older build: its dollars are not in the By account summary, said by name
+            for rt in rng.get("routes") or []:
+                if not isinstance(rt, dict) or not _own(host, p, rt):
+                    continue
+                a = rts.setdefault((host, str(rt.get("route") or "")), ([0.0] * n, [0] * n))
+                usd, trn = rt.get("usd") or [], rt.get("turns") or []
+                for j, i in enumerate(idx):
+                    if i is None or j >= len(usd):
+                        continue
+                    a[0][i] += float(usd[j] or 0)
+                    a[1][i] += int((trn[j] if j < len(trn) else 0) or 0)
             for s in rng.get("stacks") or []:
                 if not isinstance(s, dict) or not _own(host, p, s):
                     continue
@@ -49449,7 +49672,9 @@ def _merge_spend_details(payloads, hosts, local):
             stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uu, "tok": una[1],
                            **({"turns": una[2]} if una_turns[0] else {}),
                            "hosts": {h: {"usd": [round(v, 4) for v in a[0]], "tok": a[1]} for h, a in una_hosts.items()}})
-        out = {"keys": keys, "stacks": stacks}
+        out = {"keys": keys, "stacks": stacks,
+               "routes": [{"host": h, "route": r, "usd": [round(v, 4) for v in a[0]], "turns": a[1]}
+                          for (h, r), a in rts.items() if any(round(v, 4) for v in a[0]) or any(a[1])]}
         if name == "hours":
             out["epochs"] = epochs
         return out
@@ -49475,6 +49700,7 @@ def _merge_spend_details(payloads, hosts, local):
         return sorted(acc.values(), key=lambda r: (-r["usd"], -r["tok"]))
 
     no_turns = set()   # hosts whose stacks carry no turns or key dollars per bucket (an older build), for the modal's note
+    no_routes = set()  # hosts whose series carry no billing routes (an older build): named under the By account summary
     hrs, dys = _merge_range("hours"), _merge_range("days")
     for h in hosts:
         if h.get("host") in no_turns:
@@ -49482,7 +49708,10 @@ def _merge_spend_details(payloads, hosts, local):
     out = dict(local)
     out.update({"hosts": hosts, "sessions": sessions, "unattributed": un, "order": order, "tags": _spend_tags(),
                 "byLogin": _merge_by_login(),
+                "accounts": _spend_accounts([(host, p.get("billing")) for host, p in payloads]),
+                "accountsMissing": [h for h, _p in payloads if h in no_routes],
                 "hours": hrs, "days": dys})
+    out.pop("billing", None)
     return out
 
 
@@ -54558,10 +54787,14 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
 #             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
 #             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "applyNow")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
+#   chatTurn — every chat event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
+#             2026-10-01), the numbering the history spans, tailLo and the gaps count in. The page counts turns off it (the
+#             px per turn a gap is drawn at, the turn a row names); an older page ignores the field, and a page on an older
+#             kernel counts its typed rows as before and files a turnCountTyped client-diag row saying so.
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 #   applyNow: Apply now (2026-10-01), a pick waiting for a quiet session pushed through from its control — a page that
@@ -66808,7 +67041,7 @@ var SP_RANGE_BUCKETS={day:24,hours:168};
 function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
 function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
 return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);
-if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;})};}
+if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;}),routes:(ser.routes||[]).map(function(r){return {host:r.host,route:r.route,usd:(r.usd||[]).slice(cut),turns:(r.turns||[]).slice(cut)};})};}
 // the hosts whose rows in THIS range view show a dash for turns (an older build's stacks carry none): a session row's
 // host, or the fold's hosts when the fold's turns are unknown; the local machine's own rows always carry turns
 function spDashedHosts(d){var dashed={};(d.sessions||[]).forEach(function(s){if(s.turns==null)dashed[String(s.host||d.host||'')]=1;});
@@ -66821,12 +67054,45 @@ if(d.other&&d.other.turns==null&&(d.other.usd>0||d.other.tok>0))(d.other.hosts||
 // stacks carry no turns or keyUsd: those columns read 0 for it, never a guess.
 function spSumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function spRound4(v){return Math.round(v*10000)/10000;}
+// ── By account (the user 2026-10-01, who read an email in the spend display and could not tell which account it was, nor
+// how the breakdown worked): the kernel folds every host's billing routes into accounts by identity (_spend_accounts:
+// one enterprise seat reached by one machine's sign-in and another's stored token is ONE row, "Enterprise seat"); the
+// rows here sum each account's routes over the buckets the chart draws, like the session rows. Dollars billed to a
+// subscription seat are Claude Code's cost at API prices, not a bill: they wear the approx mark, with the reason in the
+// hover and once under the summary; key-billed dollars stay plain. The email stays in the hover. The hover words ride
+// the modal's own tooltip from a data-tip attribute (spWordsAt below), never a native title: the rich tip is the ONE
+// hover surface (the user 2026-08-08, who got the browser's flat box on top of the rich hover).
+var SP_GRAIN=0.00005,SP_APPROX='\u2248',SP_DOT='\u00b7',SP_EST_TIP='An estimate at API prices: a subscription seat is not billed per token';
+function spUsd(v,est){return est?'<span class=rsp-est data-tip="'+esc(SP_EST_TIP)+'">'+SP_APPROX+fmtUsd(v)+'</span>':fmtUsd(v);}
+// a stack's host's billing rule, and the part of its dollars a subscription seat billed under it: none where the list
+// counts key-billed turns only, all of it where nothing bills a key ("computed"), and where every turn counts whatever
+// the key did not bill (an older peer's stack carries no key dollars: unknown, so no mark)
+function spHostScope(d,host){var hs=(d.hosts||[]).filter(function(h){return h.host===(host||d.host);})[0];return (hs&&hs.scope)||d.scope;}
+function spSeatPart(d,st,usd){var sc=spHostScope(d,st.host);if(sc==='keyed')return 0;if(sc==='computed')return usd;return st.keyUsd?Math.max(0,usd-spSumArr(st.keyUsd)):0;}
+function spRouteSums(d){var ser=spSeries(d),m={};((ser&&ser.routes)||[]).forEach(function(r){var k=String(r.host||d.host)+'|'+r.route,e=m[k]||(m[k]={usd:0,turns:0});e.usd+=spSumArr(r.usd);e.turns+=spSumArr(r.turns);});return m;}
+function spAccountRows(d){var sums=spRouteSums(d),out=[];
+(d.accounts||[]).forEach(function(a){var usd=0,turns=0,via=[],est=false;
+(a.routes||[]).forEach(function(r){var e=sums[String(r.host)+'|'+r.route];if(!e||!(e.usd>=SP_GRAIN||e.turns>0))return;usd+=e.usd;turns+=e.turns;if(via.indexOf(r.via)<0)via.push(r.via);if(r.estimate)est=true;});
+if(usd>=SP_GRAIN||turns>0)out.push({name:a.name,kind:a.kind,note:a.note||'',title:a.title||'',usd:spRound4(usd),turns:turns,via:via,est:est});});
+out.sort(function(x,y){return ((x.kind==='unknown')-(y.kind==='unknown'))||(y.usd-x.usd);});return out;}
+// the account a session's stored login belongs to, by name ("" when that login has no spend in the ledger's reach)
+function spAcctName(d,s){var want=String(s.host||d.host)+'|login:'+s.loginId,hit='';(d.accounts||[]).forEach(function(a){(a.routes||[]).forEach(function(r){if(String(r.host)+'|'+r.route===want)hit=a.name;});});return hit;}
+function accountsHTML(d){var rows=spAccountRows(d),miss=d.accountsMissing||[],anyEst=false;if(!rows.length&&!miss.length)return '';
+var h='<div class=ru-tip-name><span>By account</span><span class=ru-tip-reset>'+spRangeWords(spSeries(d))+'</span></div><table class=rsp-acct><tbody>';
+rows.forEach(function(r){if(r.est)anyEst=true;h+='<tr data-acct="'+esc(r.kind)+'"><td class=rsp-name'+(r.title?' data-tip="'+esc(r.title)+'"':'')+'>'+esc(r.name)
++'<span class=ru-tip-reset> '+SP_DOT+' '+esc(r.via.join(', '))+(r.note?' '+SP_DOT+' '+esc(r.note):'')+'</span></td>'
++'<td class=n>'+spUsd(r.usd,r.est)+'</td><td class=n>'+r.turns+' turn'+(r.turns===1?'':'s')+'</td></tr>';});
+h+='</tbody></table>';
+if(miss.length)h+='<div class=rsp-note>'+miss.map(esc).join(', ')+': older build, not in this breakdown</div>';
+if(anyEst)h+='<div class=rsp-note>'+SP_APPROX+' '+esc(SP_EST_TIP)+'.</div>';
+return h;}
 function spRangeView(d){var ser=spSeries(d);if(!ser||!ser.stacks)return d;var meta={};(d.sessions||[]).forEach(function(s){meta[spKey(d,s)]=s;});
 var sessions=[],un={usd:0,tok:0,turns:0},other=null;
 ser.stacks.forEach(function(st){var usd=spSumArr(st.usd),tok=spSumArr(st.tok),turns=st.turns?spSumArr(st.turns):null;   // null: an older peer's stack carries no turns (a dash, never a zero)
 if(st.kind==='sid'){if(!(usd>0||tok>0||(turns||0)>0))return;var m=meta[spKey(d,st)]||{};
 var row={sid:st.sid,host:st.host,name:st.name||m.name||'',bg:st.bg||m.bg||'',fg:m.fg||'',live:!!st.live,usd:spRound4(usd),tok:tok,turns:turns};
-if(m.bgDerived)row.bgDerived=true;
+if(m.bgDerived)row.bgDerived=true;if(m.login){row.login=m.login;row.loginId=m.loginId||'';row.loginLabel=m.loginLabel||'';}   // the stored login it bills, from the roster
+row.seat=spRound4(spSeatPart(d,st,usd));   // the part of its dollars billed to a subscription seat: an estimate at API prices
 // the key column follows the range too, but only where the ledger tracks a key split for the session (the roster's own
 // `key`, or key dollars inside the range): a stack whose keyUsd is all zeros on a login-only host grows no $0 column
 var ku=st.keyUsd?spSumArr(st.keyUsd):0;if(st.keyUsd&&(ku>0||(m.key&&typeof m.key.usd==='number')))row.key={usd:spRound4(ku)};sessions.push(row);}
@@ -66842,12 +67108,12 @@ function spRangeWords(ser){var n=ser&&ser.keys?ser.keys.length:0;if(SP.range==='
 // by the tag, colored by the tag store's color, the strip's chip color) and the untagged sessions as
 // themselves. A session under several tags counts under EACH (the user's ruling: tags are equivalent,
 // no home tag); the footer says how many do, because the rows then sum past the totals.
-function spRows(d){var ss=spOrdered(d);if(!SP.merge||!(d.tags&&d.tags.length))return {rows:ss.map(function(s,i){return {kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,rank:i};}),multi:0};
+function spRows(d){var ss=spOrdered(d);if(!SP.merge||!(d.tags&&d.tags.length))return {rows:ss.map(function(s,i){return {kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,seat:s.seat,rank:i};}),multi:0};
 var byKey={},counts={},tagged={},rows=[];ss.forEach(function(s,i){byKey[spKey(d,s)]={s:s,i:i};});
 d.tags.forEach(function(t){var mem=[];(t.members||[]).forEach(function(m){var e=byKey[m];if(e){mem.push(e);counts[m]=(counts[m]||0)+1;}});if(!mem.length)return;
-var usd=0,tok=0,turns=0,live=false,hosts={},minI=1e9;mem.forEach(function(e){usd+=e.s.usd||0;tok+=e.s.tok||0;if(e.s.turns==null)turns=null;else if(turns!=null)turns+=e.s.turns;live=live||!!e.s.live;hosts[String(e.s.host)]=1;if(e.i<minI)minI=e.i;tagged[spKey(d,e.s)]=1;});
-var hk=Object.keys(hosts);rows.push({kind:'tag',sid:'tag:'+t.name,name:t.name,bg:t.color||'',live:live,usd:usd,tok:tok,turns:turns,members:mem.map(function(e){return e.s;}),host:(hk.length===1?hk[0]:''),rank:minI});});
-ss.forEach(function(s,i){if(!tagged[spKey(d,s)])rows.push({kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,rank:i});});
+var usd=0,tok=0,turns=0,seat=0,live=false,hosts={},minI=1e9;mem.forEach(function(e){usd+=e.s.usd||0;tok+=e.s.tok||0;seat+=e.s.seat||0;if(e.s.turns==null)turns=null;else if(turns!=null)turns+=e.s.turns;live=live||!!e.s.live;hosts[String(e.s.host)]=1;if(e.i<minI)minI=e.i;tagged[spKey(d,e.s)]=1;});
+var hk=Object.keys(hosts);rows.push({kind:'tag',sid:'tag:'+t.name,name:t.name,bg:t.color||'',live:live,usd:usd,tok:tok,turns:turns,seat:seat,members:mem.map(function(e){return e.s;}),host:(hk.length===1?hk[0]:''),rank:minI});});
+ss.forEach(function(s,i){if(!tagged[spKey(d,s)])rows.push({kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,seat:s.seat,rank:i});});
 if(SP.order==='yours')rows.sort(function(a,b){return a.rank-b.rank;});else rows.sort(function(a,b){return ((b.usd||0)-(a.usd||0))||((b.tok||0)-(a.tok||0));});
 var multi=0;Object.keys(counts).forEach(function(k){if(counts[k]>1)multi++;});return {rows:rows,multi:multi};}
 // the stacks follow the rows: a tag row's stack is its members' stacks summed; untagged sessions keep
@@ -66890,6 +67156,14 @@ spBack.onclick=function(e){var d=spDown;spDown=false;if(e.target===spBack&&d)clo
 // ONE listener on the STABLE panel (the click-safety rule): every control is a data-act, acknowledged
 // at once (the pressed state flips before the chart re-renders) — never a handler on a node a render
 // rebuilds. The close ✕ and the retry ride the same door.
+// the hover words of the By account summary and the session rows (data-tip: an account's identity, why a figure is
+// approximate, the stored login a row bills), shown in the chart's own tooltip box; ONE pair of listeners on the STABLE
+// panel, so a re-render under the pointer loses nothing; the words follow the element the pointer enters and leaves
+var spWordsOn=null;
+function spWordsAt(t){while(t&&t!==spPanel){if(t.getAttribute&&t.getAttribute('data-tip'))return t;t=t.parentNode;}return null;}
+if(spPanel){spPanel.addEventListener('mouseover',function(e){var t=spWordsAt(e.target);if(t===spWordsOn)return;spWordsOn=t;if(!t){spTipHide();return;}
+var box=spTipBox();box.textContent=t.getAttribute('data-tip');spTipPlace(e.clientX,e.clientY,null);});
+spPanel.addEventListener('mouseleave',function(){if(spWordsOn){spWordsOn=null;spTipHide();}});}
 if(spPanel)spPanel.addEventListener('click',function(e){var t=e.target,b=null;
 while(t&&t!==spPanel){if(t.getAttribute&&t.getAttribute('data-act')){b=t;break;}t=t.parentNode;}
 if(!b)return;var a=b.getAttribute('data-act');
@@ -66902,7 +67176,8 @@ SP[m[1]]=m[2];spSavePrefs();
 // the list follows the chart (T353): a new RANGE re-sums the rows over the buckets the chart now draws, and the head
 // names the range; a new order's head rows, not a mid-list slice (review find)
 if(m[1]==='order'||m[1]==='range'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}
-var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));}
+var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));
+var ac=document.getElementById('rsp-accts');if(ac){var ah=accountsHTML(SP.data);ac.innerHTML=ah;ac.hidden=!ah;}}
 var sib=b.parentNode.querySelectorAll('[data-act^="'+m[1]+':"]');
 for(var i=0;i<sib.length;i++){if(sib[i]===b)sib[i].classList.add('on');else sib[i].classList.remove('on');}
 renderChart();});
@@ -66918,8 +67193,8 @@ var h='<table class=rsp-tbl><thead><tr><th>session</th><th class=n>dollars</th>'
 var many=spMany(d);
 var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
-+'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many)+(s.s&&s.s.login?'<span class=ru-tip-reset> \u00b7 bills '+esc(s.s.login)+'</span>':''))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
-+'<td class=n>'+fmtUsd(s.usd)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
++'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many)+(s.s&&s.s.login?'<span class=ru-tip-reset data-tip="'+esc(s.s.login)+'"> \u00b7 bills '+esc(spAcctName(d,s.s)||s.s.loginLabel||'a stored login')+'</span>':''))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
++'<td class=n>'+spUsd(s.usd,s.seat>SP_GRAIN)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
 +'<td class=n>'+(s.turns==null?'\u2014':(s.turns||0))+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});   // a dash: the turns are unknown (an older peer)
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
 // session accounts for: shown as its own row, never dropped or folded into a session (fail loudly);
@@ -66935,10 +67210,8 @@ h+='</tbody></table>';
 // dollars only when the key column is drawn; it lives in the table's node so a range switch re-decides it
 var dh=spDashedHosts(d);
 if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';
-// by LOGIN (T346): a session billed to a stored login has its dollars filed under that login too (the ledger's
-// byLogin, the judges' calls included); one line when any stored login has spend in the range. The machine's
-// own login and the API key are the remainder, said as such rather than rowed
-if(d.byLogin&&d.byLogin.length)h+='<div class=rsp-note>By login: '+d.byLogin.map(function(r){return esc(r.label||r.id||'?')+' '+fmtUsd(r.usd)+' \u00b7 '+(r.turns||0)+' turn'+(r.turns===1?'':'s');}).join('; ')+'. The rest is the machine\u2019s own login and the API key.</div>';
+// (the one-line "By login" note that sat here is the By account summary above the list since 2026-10-01: every account
+// a row, the machine's sign-ins and the key included, rather than one login named and the rest called the remainder)
 if(model.multi)h+='<div class=rsp-note>'+model.multi+(model.multi===1?' session carries':' sessions carry')+' several tags and count'+(model.multi===1?'s':'')+' under each of them, so the rows add up past the totals.</div>';
 return h;}
 // 1. the SAME window numbers the hover shows — the sums across every machine, rows only (one renderer).
@@ -66954,7 +67227,10 @@ function renderSpend(){if(!spPanel)return;var d=SP.data,h=spHead();
 if(!d){h+='<div class=rsp-err>Couldn\u2019t load the spend detail'+(SP.err?': '+esc(SP.err):'')+'. '
 +'<button class=rsp-btn data-act=retry>Try again</button></div>';spPanel.innerHTML=h;return;}
 var computed=d.scope==='computed';
-h+='<div class=rsp-sec id=rsp-totals>'+totalsHTML(d)+'</div>';
+// 1b. By account (2026-10-01) BESIDE the totals, the summary level side by side, wrapping into a stack on a narrow card:
+// below the chart it took the room the session pane needs and the card itself scrolled
+var ah=accountsHTML(d);
+h+='<div class=rsp-sum><div class=rsp-sec id=rsp-totals>'+totalsHTML(d)+'</div><div class=rsp-sec id=rsp-accts'+(ah?'':' hidden')+'>'+ah+'</div></div>';
 // 2. the histogram FIRST (T247e, the user 2026-09-08): the two ranges the ledger itself holds; dollars
 // by default, tokens on a toggle; the session list below is its legend
 h+='<div class=rsp-sec><div class=ru-tip-name><span>Spend over time</span></div>'
@@ -70454,6 +70730,14 @@ def _landing():
             # cells carry the dimming, the annotation inside stays at the row's level (it used to compound
             # .55 × .6 to a 2.3:1 read)
             ".rsp-dead td{opacity:.55}.rsp-dead .ru-tip-reset{opacity:1}"
+            # the By account summary (2026-10-01): the session list's cell grammar (its own class: the list's selectors,
+            # the scroll pane and the tests' row counts stay the sessions' alone), the route words free to wrap on a
+            # narrow card; an estimate's approx mark carries its reason in the hover
+            ".rsp-sum{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px 28px}.rsp-sum>.rsp-sec{flex:1 1 300px;min-width:0;margin-top:0}"
+            ".rsp-acct{width:100%;border-collapse:collapse;margin-top:2px}"
+            ".rsp-acct td{padding:3px 6px 3px 0;border-bottom:1px solid rgba(255,255,255,0.05)}"
+            ".rsp-acct td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.rsp-acct td.rsp-name{width:100%}"
+            ".rsp-est{cursor:help}"
             ".rsp-sw{display:inline-block;width:10px;height:10px;border-radius:3px;vertical-align:-1px;background:#6b7a8c}"
             # unattributed spend wears a TEXTURE, not a hue: it is not a session, and texture is the
             # dataviz fallback for a class that must never be confused with one
@@ -70838,6 +71122,7 @@ def _landing():
             "body.theme-light .rsp-x{color:#5D574E}body.theme-light .rsp-x:hover{color:#1F1E1D}"
             "body.theme-light .rsp-tbl th{border-bottom-color:rgba(0,0,0,0.10)}body.theme-light .rsp-tbl td{border-bottom-color:rgba(0,0,0,0.06)}"
             "body.theme-light .rsp-tbl thead th{background:#FFFFFF}body.theme-light .rsp-tbl th{color:#5D574E}"
+            "body.theme-light .rsp-acct td{border-bottom-color:rgba(0,0,0,0.06)}"
             "body.theme-light .rsp-name .host-prefix{color:var(--dim,#5D574E)}"
             "body.theme-light .ru-tip-machines .host-prefix{color:var(--dim,#5D574E)}"
             "body.theme-light .rsp-btn{border-color:rgba(0,0,0,0.18);color:#1F1E1D}"
