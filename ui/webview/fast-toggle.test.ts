@@ -65,7 +65,7 @@ test("a refusal answering the user's ask is loud — warn toast, ask cleared, ba
   assert.match(adopt, /refused_ask = bool\(reason\) and self\.fast_opt/);
   assert.match(adopt, /_FAST_REFUSALS/);                 // humanized reason in the toast
   assert.match(adopt, /"type": "warn"/);                 // fail loudly, not a vanishing control
-  assert.match(adopt, /self\.request_reconnect\(\)/);    // flagless reconnect → the badge comes back
+  assert.match(adopt, /self\.request_reconnect\(why="fast mode refusal"\)/);    // flagless reconnect → the badge comes back (once nothing would be cut, 2026-10-01)
 });
 
 test("setFast is a drive op that parks like /model and /effort", () => {
