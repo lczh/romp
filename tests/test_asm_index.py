@@ -554,7 +554,7 @@ class CapsSizedToTheMachine(unittest.TestCase):
     def test_the_caps_are_derived_in_source_not_literals(self):
         src = open(em.__file__).read()
         self.assertIn('_MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))', src)
-        self.assertIn('_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 128), 1024 * 1024)',
+        self.assertIn('_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 64), 1024 * 1024)',
                       src)
         self.assertIn('_CKPT_FOLD_CAP = _env_or("ROMP_CKPT_FOLD_CAP_KB", 8 * 1024 * 1024, 1024)', src)
 
