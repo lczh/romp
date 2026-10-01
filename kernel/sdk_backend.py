@@ -7221,14 +7221,17 @@ class SdkSession:
         own model too (2026-09-30, the #33 follow-up's review): the learn arms from the live name, which after a pick below
         it can still sit above the pick when a real fallback lands (a reply from before the pick moved it back), and the
         retry's reconnect runs the pick, so the model it was armed from never comes back. A pick that names no version
-        (a Latest click, the account default) keeps the end at the tier it fell from."""
+        (a Latest click, the account default) keeps the end at the tier it fell from. The pick read is the one the
+        reconnect asserts (chosen_model), not the one the arm recorded: a live pick clears the arm, so they differ only
+        after a refusal put the accepted model back under a standing arm, and a turn served on the refused version is
+        then a fallback from the model the reconnect runs, never the way back."""
         arm = self._retry_armed()
         if not arm:
             return
         if _model_rank(pm) is None:
             return
         frm = arm.get("from")
-        lab = _alias_label(str(arm.get("pick") or ""))
+        lab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
         back = _model_rank(frm) is not None and not _model_downgrade(frm, pm)
         on_pick = _model_version(lab) is not None and not _model_downgrade(lab, pm)
         if not (back or on_pick):
