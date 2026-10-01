@@ -1611,6 +1611,19 @@ def _asm_retire_version_mark(meta, doc):
     return True
 
 
+_TMP_PID_RE = re.compile(r"\.(?:mark\.)?(\d+)(?:\.[0-9a-f]+)?\.tmp$")   # the writers' temp names: <file>.<pid>[.<thread>].tmp, <meta>.mark.<pid>.<thread>.tmp
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True                                       # it exists under another user: alive for this purpose
+    return True
+
+
 def checkpoint_sweep():
     """One pass over the checkpoint directory at boot: a document whose recorded file no longer exists, or that does
     not parse, is removed (counted as swept), so cleared and removed sessions do not grow the directory forever."""
@@ -1618,6 +1631,14 @@ def checkpoint_sweep():
     if d is None or not Path(d).is_dir():
         return 0
     gone = 0
+    for tmp in Path(d).glob("*.tmp"):                     # a writer's temp file whose process died before its rename (an exit lands
+        m = _TMP_PID_RE.search(tmp.name)                  #  wherever the document refresh's thread stands, asm_refresh_document):
+        if m is None or int(m.group(1)) == os.getpid() or _pid_alive(int(m.group(1))):   # a live writer's is never touched
+            continue
+        try:
+            tmp.unlink(); gone += 1
+        except OSError:
+            pass
     for aside in Path(d).glob("*.asm.json.gz.meta.retired-*"):   # a retired refusal sidecar (the writer keeps the bytes of a mark it
         cp = aside.with_name(aside.name.split(".meta.retired-")[0])   #  replaced): it leaves with its document, never on its own
         if not cp.exists():
@@ -4915,6 +4936,19 @@ def _asm_compaction_under_share(entry, leaf_path):
     return tail * _ASM_TAIL_SHARE < max(1, int(pre))
 
 
+class _NoLock:
+    """A context manager that takes nothing (the writer over a private entry, asm_refresh_document)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_NO_LOCK = _NoLock()
+
+
 def _asm_key_lock(key):
     with _ASM_LOCK:
         lk = _ASM_KEYLOCKS.get(key)
@@ -4948,19 +4982,7 @@ def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sd
     """Full parse + a fresh cache entry — the same steps atoms() runs, inlined so the entry keeps
     the carry (st) the emit actually used; later folds continue from it. `keep_whole`: a restore just
     refused this leaf's document, so the entry is never re-seated on the one written from it (keepWhole)."""
-    ad = FileAdapter(candidate_files, leaf_path, resume_links=links)
-    ad.sdk_human = sdk_human
-    st = _emit_state()
-    kept = ad.kept_uuids(ad.active_path())
-    order = _chrono(ad, kept)
-    ad._prepass(order, st)
-    atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
-    atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
-    entry = {"ad": ad, "st": st, "atoms": atoms, "kept": kept,
-             "landed": ad.landed_text_uuids(),
-             "cands": tuple(str(f) for f in candidate_files), "links": dict(links or {}),
-             "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": [],
-             "path": str(leaf_path)}   # as handed: the reader's key for the same leaf (asm_whole_entries hands it back)
+    entry = _asm_whole_entry(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human)
     if keep_whole:
         entry["keepWhole"] = True
     with _ASM_LOCK:
@@ -4972,6 +4994,24 @@ def _asm_full(key, leaf_path, candidate_files, links, rompuuid, postal_index, sd
         _asm_release(e)                              # the replaced generation and the evicted entries give their memo back
     _asm_stat("full")
     return _asm_serve(entry)
+
+
+def _asm_whole_entry(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human):
+    """The whole parse's assembly entry, built and NOT installed: _asm_full installs it as the leaf's entry, and the document
+    refresh (asm_refresh_document) writes a document from one that no reader ever sees."""
+    ad = FileAdapter(candidate_files, leaf_path, resume_links=links)
+    ad.sdk_human = sdk_human
+    st = _emit_state()
+    kept = ad.kept_uuids(ad.active_path())
+    order = _chrono(ad, kept)
+    ad._prepass(order, st)
+    atoms = list(ad._emit_fold(order, st, rompuuid, postal_index))
+    atoms += ad._absorbed(ad.qatts, kept, st, rompuuid, postal_index)
+    return {"ad": ad, "st": st, "atoms": atoms, "kept": kept,
+            "landed": ad.landed_text_uuids(),
+            "cands": tuple(str(f) for f in candidate_files), "links": dict(links or {}),
+            "recs": dict(ad._src_keys), "n_qatts": len(ad.qatts), "prefix": [],
+            "path": str(leaf_path)}   # as handed: the reader's key for the same leaf (asm_whole_entries hands it back)
 
 
 def evict_document(leaf_path):
@@ -6168,7 +6208,8 @@ def asm_checkpoint_stats():
                              "multiple": _ASM_DOC_MEMO_MULTIPLE}   # the document memo the seeded walk and the restore share (unrelated to
         #                                                                 checkpoints.docMemo)
         out["parse"] = dict(_ASM_STATS)               # the parse's roads (T398): serve, fold, restore, full (with its reason), bypass,
-    return out                                        #  fallback, and every g:<reason> demotion, so a whole parse names its road
+        out["refresh"] = dict(_ASM_REFRESH_STATS)     #  fallback, and every g:<reason> demotion, so a whole parse names its road; the
+    return out                                        #  document refreshes a restored entry's churn bound asked for (asm_refresh_claim)
 
 
 def _asm_removed(reason):
@@ -6327,14 +6368,15 @@ def _tree_key(tree):
     return (id(tree), len(turns), turns[-1].get("id") if turns else None)
 
 
-def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle"):
+def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", from_entry=None):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a whole parse replaces the entry), no compaction boundary in
     the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
     needs (garbled stamps), or a document past the cap; each counted under asmCheckpoint.skipped, and appended to
     `reason_out` when a list is given (the converge pass reads its refusal there; T376 review). `who` names the caller
     in the blip line (the settle, the converge pass), said once per leaf and reason. An entry it wrote from is marked for
-    re-seat: the next parse restores the entry from this document (2026-09-24)."""
+    re-seat: the next parse restores the entry from this document (2026-09-24). `from_entry`, when given, is the whole entry
+    to write from in place of the leaf's own (the document refresh's private parse, asm_refresh_document)."""
     cp = _asm_ckpt_file(leaf_path)
     if cp is None:
         return False
@@ -6344,13 +6386,17 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             reason_out.append(reason)
         return _asm_ckpt_skip(reason)
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
-    with _asm_key_lock(key):
-        with _ASM_LOCK:
-            entry = _ASM_CACHE.get(key)
+    with (_asm_key_lock(key) if from_entry is None else _NO_LOCK):   # a private entry is nobody else's: the leaf's readers never
+        #                                                                wait on the refresh's write (they took the key lock for it)
+        if from_entry is not None:
+            entry = from_entry
+        else:
+            with _ASM_LOCK:
+                entry = _ASM_CACHE.get(key)
         if entry is None:
             return _skip("noEntry")
         if entry.get("prefix") or entry.get("preTurns"):
-            return _skip("restored")            # the document it came from stands
+            return _skip("restored")            # the document it came from stands (its refresh: asm_refresh_document)
         ad = entry["ad"]
         atoms = entry["atoms"]
         bounds = [a for a in atoms if a.get("type") == "system" and a.get("subtype") == "compact_boundary"]
@@ -6688,12 +6734,20 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 #                                          by its time, else the tail's
                 idxs = []
                 for ai_, u_ in enumerate(t_uuids):
-                    a = turn["atoms"][ai_] if not u_ or u_ not in row_of_atom else None   # built only for a uuid-less or unknown atom
-                    k_ = row_of_atom.get(u_) if u_ else row_of_scalars.pop(json.dumps(_atom_scalars(a), sort_keys=True, default=str), None)
+                    a = turn["atoms"][ai_] if not u_ or u_ not in row_of_atom or not turn.get("pre") else None   # a restored turn's
+                    #                                    atom is built only when it is uuid-less or unknown; a fresh turn's is in hand
+                    salvaged = a is not None and bool(a.get("orphaned"))   # a salvaged reply (synthesize_orphans): synthesized, whatever
+                    #                                    uuid it carries. Its marker can name a transcript record (a local command's
+                    #                                    streamed output, kept as a system/local_command row the emit skips, or an
+                    #                                    empty twin of the reply), and looked up by that uuid it found no row of its own
+                    #                                    and refused the document as turnRows at every write for the leaf's life (a
+                    #                                    203 MB live leaf read whole at every boot, 2026-10-01), or took the twin's row
+                    k_ = None if salvaged else (row_of_atom.get(u_) if u_ else
+                                                row_of_scalars.pop(json.dumps(_atom_scalars(a), sort_keys=True, default=str), None))
                     #  (two uuid-less attachments in one turn with the same enqueue stamp collide on the scalar key: the second
                     #   finds no row, the walk mints a synthesized one, and the coverage check refuses the section cleanly)
                     if k_ is None:
-                        if u_ in ad.seq_of:
+                        if u_ in ad.seq_of and not salvaged:
                             return skip("turnRows")      # a record atom with no row of its own: the tree and the entry disagree
                         k_ = len(pre_atoms)
                         row_ = {"i": -1, "syn": 1, "s": _atom_scalars(a)}   # a synthesized atom's row: its scalars, its message inline
@@ -6829,6 +6883,98 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         with _ASM_CKPT_LOCK:
             _ASM_CKPT_STATS["written"] += 1
         return True
+
+
+_ASM_REFRESH = {"inflight": None}    # the cache key of the leaf whose document refresh is running (one at a time: each is a whole
+#                                      parse), under _ASM_LOCK; set by asm_refresh_claim, cleared by asm_refresh_document
+_ASM_REFRESH_STATS = {"claimed": 0, "written": 0, "refused": 0, "failed": 0, "ms": 0.0}   # asmCheckpoint.refresh on /perf
+
+
+def asm_refresh_claim(leaf_path, rompuuid, sdk_human=False):
+    """Claim the document refresh for `leaf_path` when it is due, and say whether it was claimed. Due: the leaf's assembly
+    entry was RESTORED from a document that carries a turns section (a boot's restore, or a restore after a demotion that
+    was not a re-seat), so the fold's gate does not hold it to the churn bound (that gate reads the atoms-only form and a
+    re-seated entry only, _asm_gates), and the leaf's bytes past the document's cut, times _ASM_TAIL_SHARE, have reached the
+    document's pre-cut bytes (after a refresh in this process: the bytes past the point that refresh started from, against
+    the pre-cut bytes of the document it wrote). Claimed, the caller runs asm_refresh_document next, on a thread of its own,
+    and that call releases the claim. Not claimed when not due, when the leaf has no such entry, or while any refresh runs."""
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    with _ASM_LOCK:
+        entry = _ASM_CACHE.get(key)
+        if _ASM_REFRESH["inflight"] is not None or entry is None:
+            return False
+        if not entry.get("preTurns") or entry.get("prefix") or entry.get("reseated") or entry.get("docPre") is None:
+            return False                                  # a whole entry writes at its settle; the gate holds the other restored ones
+        pre, off = entry.get("refreshAt") or (entry["docPre"], entry.get("docCutOff") or 0)
+    try:
+        tail = os.stat(leaf_path).st_size - int(off)
+    except OSError:
+        return False
+    if tail <= 0 or tail * _ASM_TAIL_SHARE < max(1, int(pre)):
+        return False
+    with _ASM_LOCK:
+        if _ASM_REFRESH["inflight"] is not None or _ASM_CACHE.get(key) is not entry:
+            return False
+        _ASM_REFRESH["inflight"] = key
+    with _ASM_CKPT_LOCK:
+        _ASM_REFRESH_STATS["claimed"] += 1
+    return True
+
+
+def asm_refresh_release(leaf_path, rompuuid, sdk_human=False):
+    """Release a claim that asm_refresh_document never got to run (its caller raised first); a no-op for any other leaf."""
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    with _ASM_LOCK:
+        if _ASM_REFRESH["inflight"] == key:
+            _ASM_REFRESH["inflight"] = None
+
+
+def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=None, states=None, postal_log=None, now=None):
+    """The refresh a claim granted (asm_refresh_claim): a WHOLE parse of the leaf on the private road, which installs no entry and
+    takes no key lock, so the leaf's restored entry and every reader of it carry on untouched, then the writer over that parse,
+    so the document's cut moves up to the turn before the last settled one. Returns True when a document was written.
+
+    Why it exists (2026-10-01): a restored entry's cut moved only through a whole parse that REPLACED the entry (a demotion,
+    a compaction past the share), so a session restored at every boot kept the document it first got and the tail past its
+    cut grew without bound: a 133 MB session restored a 36 MB tail five days after its document was written, and the first
+    chat build after every boot rendered all 545 turns of it. Here the whole parse runs off the pusher, on the caller's own
+    thread, and only at a settle once the share is reached; the entry in hand is left as it is for this process and the
+    next boot restores from the new document. After the attempt, written or not, the entry carries the new baseline
+    (`refreshAt`: the new document's pre-cut bytes and the leaf's size when the refresh began), so the next refresh is due only
+    once the leaf has grown past that point by the share again: a cut that cannot move (one long open turn) costs a logarithm
+    of the growth, never a whole parse per settle. The claim is released whatever happens."""
+    key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
+    t0 = time.perf_counter()
+    wrote, outcome, new_pre = False, "failed", None
+    with _ASM_LOCK:
+        live = _ASM_CACHE.get(key)
+    try:
+        size0 = os.stat(leaf_path).st_size
+    except OSError:
+        size0 = None
+    try:
+        priv, reasons = [], []
+        tree = parse_session(leaf_path, rompuuid=rompuuid, candidate_files=candidate_files, states=states, postal_log=postal_log,
+                             now=now, sdk_human=sdk_human, private_entry_out=priv)
+        if priv:
+            wrote = bool(asm_checkpoint_write(leaf_path, rompuuid, sdk_human, tree=tree, reason_out=reasons, who="refresh",
+                                              from_entry=priv[0]))
+        outcome = "written" if wrote else "refused"
+        dc = priv[0].get("docCut") if wrote else None
+        new_pre = int(dc[1]) if dc else None
+    except Exception as e:                                # noqa: BLE001 - a refresh is an optimization: the standing document stands
+        _say_once("assembly checkpoint: the refresh of %s failed (%r); the standing document stands" % (leaf_path, e))
+    finally:
+        with _ASM_LOCK:
+            if live is not None and size0 is not None:    # the baseline moves on every attempt: a refusal or a failure is not retried
+                pre0 = (live.get("refreshAt") or (live.get("docPre") or 0, 0))[0]   # at the next settle, only after the next share
+                live["refreshAt"] = (new_pre if new_pre is not None else int(pre0), int(size0))
+            if _ASM_REFRESH["inflight"] == key:
+                _ASM_REFRESH["inflight"] = None
+        with _ASM_CKPT_LOCK:
+            _ASM_REFRESH_STATS[outcome] += 1
+            _ASM_REFRESH_STATS["ms"] += (time.perf_counter() - t0) * 1000.0
+    return wrote
 
 
 def _carry_encode(st):
@@ -7560,17 +7706,25 @@ def hydrate(atoms, rompuuid=None, by=None):
 
 
 def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, leaf_override,
-              mode_out=None):
+              mode_out=None, private_out=None):
     """(atoms, landed, cut_t, skill_loads) for parse_session; atoms are caller-owned copies. The one entry
     point that decides bypass vs serve vs fold vs full; see the block comment above. `mode_out`,
     when a list, receives the path taken ("serve" | "fold" | "full" | "bypass" | "fallback"): the
     kernel's chat-payload fold (issue 903) keys the validity of its cached prefix on it — a serve or
     a fold leaves every previously emitted atom in place (heals aside, which ride the postal index),
     while a full parse may have re-emitted history. Kept OUT of the returned tree on purpose: the
-    golden fixtures and the fold==full replay compare that tree byte for byte."""
+    golden fixtures and the fold==full replay compare that tree byte for byte. `private_out`, when a list, takes the
+    "private" road: a whole parse whose entry is appended there and never installed, under no key lock, so the leaf's
+    own entry and every reader of it are left as they stand (the document refresh, asm_refresh_document)."""
     def _mode(m):
         if mode_out is not None:
             mode_out.append(m)
+    if private_out is not None and not leaf_override:
+        entry = _asm_whole_entry(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human)
+        private_out.append(entry)
+        _asm_stat("private")
+        _mode("private")
+        return _asm_serve(entry)
     if leaf_override:
         # A pending cut changes the walk anchor and is transient: always a plain full parse,
         # never cached — a cut parse's truncated emit state must not seed later folds.
@@ -7707,7 +7861,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
 
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
                   candidate_files=None, states=None, postal_log=None, now=None, sdk_human=False,
-                  leaf_override=None, asm_mode_out=None):
+                  leaf_override=None, asm_mode_out=None, private_entry_out=None):
     """Build one session's Session -> Turn -> Atom tree from the on-disk transcript graph.
 
     leaf_path        the newest (leaf) transcript file; the walk's start pointer.
@@ -7725,6 +7879,8 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      bare rollback — the kernel's pending_cut); ignored if absent from the graph.
     asm_mode_out     a list, when given, that receives the assembly path taken (see _assemble);
                      never part of the returned tree.
+    private_entry_out  a list, when given: a whole parse whose assembly entry is appended there and never
+                     installed or offered to the writer here (_assemble's private road, the document refresh).
     """
     leaf_path = Path(leaf_path)
     if dir is None:
@@ -7747,7 +7903,8 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # the new records through the shared emit code; everything else is a full parse. atoms/landed
     # come back caller-owned (fresh top-level dicts), so the mutations below never reach the cache.
     atoms, landed, cut_t, skill_loads, pre_turns = _assemble(leaf_path, candidate_files, links, rompuuid,
-                                                postal_index, sdk_human, leaf_override, mode_out=asm_mode_out)
+                                                postal_index, sdk_human, leaf_override, mode_out=asm_mode_out,
+                                                private_out=private_entry_out)
     # a restored tree's pre-cut turns (T323 stage 4c) come whole from the document, their synthesized atoms included; the
     # tail alone is segmented and synthesized over below, and a span or a marker from before the tail's first atom is the
     # document's (or nothing: the whole parse put it in a pre-cut turn)
@@ -7803,6 +7960,8 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
             "skillLoads": skill_loads}
     if cut_turn:
         out["cutTurn"] = cut_turn                   # a restored tree only (T323 stage 4b): where its lazy atoms ended
+    if private_entry_out is not None:
+        return out                                  # a private parse read no document: a refusal flagged for the leaf is its own parse's
     _rk = os.path.realpath(str(leaf_path))
     with _ASM_CKPT_LOCK:
         _refused = _ASM_CHAIN_REFUSED_PATHS.pop(_rk, None)

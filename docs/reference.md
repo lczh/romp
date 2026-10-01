@@ -1643,6 +1643,22 @@ deliberately: the restore that serves it carries no bound, as every restore
 did before, so its cut waits for the next whole parse (a compaction once the
 tail has reached the share is one); held to the share, an entry kept whole for
 an open turn's tail would parse the history whole again at every descent.
+An entry restored at a boot, from a document with a `turns` section, is not
+held to the share by the gate either, so a session restored at every boot
+kept the document it first got (2026-10-01: a 133 MB session restored a
+36 MB tail five days on, and every first chat build rendered all of it).
+Its settle refreshes the document instead, once the tail past the cut has
+reached the share: a whole parse on a thread of its own that installs
+nothing and takes no lock a reader of the leaf waits on, then the writer
+over it. The entry in hand stays as it is for the process, the next boot
+restores from the new document, and the next refresh is due only once the
+leaf has grown past the point the last one started from by the share again,
+so a cut that cannot move (one long open turn) costs a logarithm of the
+growth. A salvaged reply (an `orphanReply` marker) is a synthesized row in
+the `turns` section whatever uuid it carries: a local command's streamed
+output is kept in the transcript under the same uuid as a `local_command`
+row, and looked up by that uuid it once refused the document as `turnRows`
+at every write, so that leaf was read whole at every boot.
 A compaction after the document restores from it, the tail read from the cut
 taking the compaction in, while the tail past the cut is under an eighth of
 the pre-cut bytes and nothing else in the same write parses whole for its own
@@ -2727,7 +2743,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `session`, `inputs`, `lineage`, `shrunk`,
   `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason
   (`noEntry`, `restored`, `written`, `noCut`, `reuse`, `closure`, `unsplittable`,
-  `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`;
+  `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`, `turnRows`;
   `offsets` is no reader entry at all, a tail entry (one read from a
   checkpoint's offset, its base above zero), or an entry holding fewer records
   than the tree read, or more for a lineage file or under another generation
@@ -2753,10 +2769,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   strings, not dicts, and the index takes each row's bytes with no re-encode
   (the deploy boot of that version refuses every standing document as
   `version` and the settle rewrites it: that boot is the migration, the boot
-  after is the read), and `converge`: the
+  after is the read), `converge`: the
   pass's writes of idle leaves' documents from the boot's own parse
   (`candidates`, `writes`, `bytes`, `deferred`, `skipped` per the writer's
-  reason).
+  reason), and `refresh`: the document refreshes a restored entry's settle
+  started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
+  time); the refresh's own parse counts under `parse` as `private`.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
   come from: `materialized` atoms built from the document's rows since boot,
   `materializedBy` (per consumer), `materializedByStage` (the same builds
