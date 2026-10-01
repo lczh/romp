@@ -13500,6 +13500,11 @@ def _persist_checkpoints(now):
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
         #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
         #                                          atom); never a parse of its own (the settle reads no leaf whole)
+            elif settle_due:
+                _asm_refresh_maybe(leaf, sid)  # a RESTORED entry writes nothing above: at its settle, once the tail past its
+        #                                          document's cut has reached the churn bound's share, the document is refreshed
+        #                                          from a whole parse on a thread of its own (2026-10-01: a session restored at
+        #                                          every boot kept its first document, and every boot restored a growing tail)
         except Exception:
             sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
@@ -13508,6 +13513,27 @@ def _persist_checkpoints(now):
     if len(_CKPT_PERIODIC_SEEN) > 4096:
         _CKPT_PERIODIC_SEEN.clear()
     return written
+
+
+def _asm_refresh_maybe(leaf, sid):
+    """Start the leaf's assembly document refresh on a thread of its own when it is due (em.asm_refresh_claim: a restored entry
+    whose tail past its document's cut has reached the churn bound's share; one refresh at a time). The refresh is a whole
+    parse and a document write, seconds of work for a 100 MB leaf, so it never runs on the pusher: the claim is a dict read
+    and a stat here, and the thread leaves the leaf's restored entry and its readers alone (em.asm_refresh_document). Returns
+    whether a refresh was started."""
+    human = _display_sdk_human(sid)
+    if not em.asm_refresh_claim(leaf, sid, human):
+        return False
+
+    def _run():
+        _set_stage("asm.refresh")             # its reads count under their own stage on /perf (recordCache.wholeReadsByStage)
+        try:
+            jd.asm_refresh(sid, leaf, int(time.time()), sdk_human=human)
+        except Exception:                     # asm_refresh_document releases the claim itself; this is a raise before it ran
+            em.asm_refresh_release(leaf, sid, human)
+            sys.stderr.write("assembly checkpoint refresh: %s\n" % traceback.format_exc())
+    threading.Thread(target=_run, name="asm-refresh", daemon=True).start()
+    return True
 
 
 def _interrupt_block_tick(now, live_map):
