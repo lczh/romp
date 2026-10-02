@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, weakref
+import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, traceback, weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -764,16 +764,18 @@ _SWALLOWED = {}                   # "site:ExceptionType" -> raises a handler kep
 _SWALLOWED_LOCK = threading.Lock()
 
 
-def note_swallowed(site, exc):
+def note_swallowed(site, exc, path):
     """A raise that a handler keeps from its caller (the returned-agent drop's witness check, the spend guard's agent folds;
     2026-10-02): counted under recordCache.swallowed on /perf by site and exception type, and said on stderr at the first,
     tenth, hundredth (each power of ten) of each, since these handlers run on every jobs pass. A raise that persists would
-    otherwise return those agents to the old retention with no trace."""
+    otherwise return those agents to the old retention with no trace. The line names the file `path` and, since both
+    handlers call this inside their except block, the frame that raised."""
     k = "%s:%s" % (site, type(exc).__name__)
     with _SWALLOWED_LOCK:
         n = _SWALLOWED[k] = _SWALLOWED.get(k, 0) + 1
     if n == 10 ** (len(str(n)) - 1):
-        sys.stderr.write("record cache: %s raised %s (%d so far): %s\n" % (site, type(exc).__name__, n, exc))
+        sys.stderr.write("record cache: %s raised %s (%d so far) on %s: %s\n%s"
+                         % (site, type(exc).__name__, n, path, exc, traceback.format_exc()))
 
 
 _JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
@@ -2423,7 +2425,7 @@ def _document_at_witness(key, ent):
                 return False
         return not _asm_holds_records(key, recs)
     except Exception as e:
-        note_swallowed("dropWitness", e)                  # the entry stays: memory, never a wrong answer
+        note_swallowed("dropWitness", e, key)             # the entry stays: memory, never a wrong answer
         return False
 
 

@@ -33706,12 +33706,19 @@ def _agent_launch_ids(agent_path):
     """The launch tool_use ids in one agent's own file (_launch_ids_step), folded append-incrementally like
     the head's steps (a growing file steps only its new records; an unchanged one costs a stat). The
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
-    file was launched by THIS agent. set() when unreadable. Its drop policy is "returned" (2026-10-01): a returned agent's
-    records leave memory at the first fold that finds nothing new, and the spend guard routes its agent reads through here."""
+    file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="returned")
+        return _agent_launch_ids_fold(agent_path)
     except Exception:
         return set()
+
+
+def _agent_launch_ids_fold(agent_path):
+    """The launch-ids fold over one agent's own file, raising: _agent_launch_ids wraps it, and the spend guard calls it after
+    pricing the file from a read of its own, behind the gate em.fold_steps_in_hand, so a raise reaches the guard's handler
+    and is counted and said (2026-10-02). Its drop policy is "returned" (2026-10-01): a returned agent's records leave memory
+    at the first fold that finds nothing new."""
+    return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="returned")
 
 
 def _agent_steps(agent_path):
@@ -34012,7 +34019,10 @@ def _subagent_viewer_closed(sid, agent_id):
     2026-10-02): the background-task cursor its render left on the agent's own file (_bg_scan_all_cached, run for a task
     notification or a nested background launch in that file) is popped, unless another client still has the same viewer
     open. No other reader steps that cursor, and once the agent writes on, a cursor behind the entry would hold the
-    returned agent's quiet drop for good (em._document_at_witness)."""
+    returned agent's quiet drop for good (em._document_at_witness). The fold is also retired from the file's checkpoint
+    document (em._retire_fold), since a document written while the viewer was open records the cursor's count and the next
+    write would carry it forward from disk, holding the cut there; guarded as rewound_memo_forget guards its retirement (a
+    cursor popped, or the document lists the fold), so a clean path stays clean (round two, 2026-10-02)."""
     try:
         with _clients_lock:
             if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
@@ -34020,7 +34030,14 @@ def _subagent_viewer_closed(sid, agent_id):
         ppath = _path_of(sid, int(time.time()))
         apath = _subagent_file(ppath, agent_id) if ppath else None
         if apath is not None:
-            _bgall_cache.pop(str(apath), None)
+            key = str(apath)
+            had = _bgall_cache.pop(key, None) is not None
+            with em._CKPT_LOCK:
+                shapes = em._CKPT_DOC_FOLDS.get(key)
+            if shapes is None:
+                shapes = em._doc_folds_on_disk(key)
+            if had or "bgAll" in (shapes or {}):
+                em._retire_fold(key, "bgAll")
     except Exception:
         sys.stderr.write("subagent viewer close %s/%s: %s\n" % (sid, agent_id, traceback.format_exc()))
 
@@ -49040,7 +49057,7 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
     a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
     transcript on the guard's first cycle; the window wants the newest records, which a tail holds.
     `agent` (an agent transcript beside the leaf, never the leaf; 2026-10-01): a returned agent's entry leaves the record
-    cache (the agent folds' drop_after="returned", which _spend_window_usd routes the guard's agent reads through), so a
+    cache (the agent folds' drop_after="returned", which _spend_fold_agent runs after this read has priced the file), so a
     memo scanned from the WHOLE file is served on a stat while the reader holds no entry for the path, instead of the
     guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
     read whole once when its first stamped record is not older than the window's floor, since the records before the
@@ -49195,15 +49212,20 @@ def _spend_fold_agent(f):
     restart before the exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the
     drop has a cursor and a document to restore from. The card's steps fold runs only over its own cursor or document
     state: it catches up a card whose chat stopped being built before the agent returned, whose cursor behind the entry
-    would hold the drop for good, and it never starts a steps state for a workflow agent. A fold that raises costs memory,
-    never the guard's rate, and is counted and said (em.note_swallowed)."""
+    would hold the drop for good, and it never starts a steps state for a workflow agent. Before both, the subagent viewer's
+    background-task fold runs only over its own cursor or document state: a viewer open at the exit drain leaves that state
+    in the document behind the file's end, and no close runs in the next process to retire it (round two, 2026-10-02). A
+    fold that raises costs memory, never the guard's rate, and is counted and said (em.note_swallowed): the launch-ids fold
+    is called raising (_agent_launch_ids_fold), not through _agent_launch_ids, which answers set() on a raise."""
     try:
+        if em.fold_steps_in_hand(_bgall_cache, "bgAll", f, new=False):
+            _bg_scan_all_cached(f)
         if em.fold_steps_in_hand(_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", f):
-            _agent_launch_ids(f)
+            _agent_launch_ids_fold(f)
         if em.fold_steps_in_hand(_AGENT_GIST_CACHE, "agentGist", f, new=False):
             _agent_gist_fold(f)
     except Exception as e:
-        em.note_swallowed("spendGuardFold", e)
+        em.note_swallowed("spendGuardFold", e, f)
 
 
 def _spend_guard_seed():

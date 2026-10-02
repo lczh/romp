@@ -2874,7 +2874,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
   returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
   spend guard's agent folds, whose file's records then stay), each said on
-  stderr at its first, tenth and hundredth raise and so on.
+  stderr, with the file and the traceback, at its first, tenth and hundredth
+  raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
   row fails its shape check at load, or fails its decode at the first read
