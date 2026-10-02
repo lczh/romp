@@ -654,8 +654,13 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # A budget eviction also releases every assembly entry that read the evicted file (_asm_drop_holding, the owner's call,
 # 2026-10-02): an entry's adapter keeps the very list it read (FileAdapter._src), so an eviction behind a chat's entry
 # freed 0.4% of the leaf's memory (review probe, 2026-10-01) and the budget bounded only this cache's books. Released
-# with it, the records go; the chat's next build restores from its document or parses whole, the cost a held leaf's
-# next append paid anyway, and near the limit busy sessions may rebuild repeatedly. LRU order does not follow need: a
+# with it, the records' lists go; an idle session's tree in the judges' parse store shares their strings, so the text
+# stays until the store replaces or drops that slot. Two windows keep records: a build that read the file before the
+# eviction and installs after it keeps what it read, and a path evicted during its own read is left out of the release
+# (_READ_IN_FLIGHT: that read re-inserts the records it began from). While the file is unchanged the display's next
+# build is a parse-store hit that rebuilds nothing; a comment create rebuilds the entry once (_comment_cut_from_parse),
+# as does the first build after an append (a restore from the document, or a whole parse), and near the limit busy
+# sessions may rebuild repeatedly. Counted under recordCache.budgetReleased. LRU order does not follow need: a
 # display walk the assembly entry serves by a stat check never touches this cache, and a file only the judges read goes
 # cold between their passes.
 # The default is HALF of the machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's
@@ -747,6 +752,8 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
                        #                   upgrades it): the thrash signal (2026-10-01). Near zero while the budget evicts
                        #                   only cold entries; level with budgetEvictions once the files read every cycle
                        #                   outgrow it, every read then a miss
+                       "budgetReleased": 0,   # assembly entries a budget eviction released (_asm_drop_holding): one evicted
+                       #                   lineage file read by several chats releases each of them (review, 2026-10-02)
                        "released": 0,   # #1735: EVERY pop that removed an entry, whatever the cause (eviction, a re-read
                        #                   replacement, an OSError pop, a quiescent drop). A /perf STATISTIC only, never a
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
@@ -767,6 +774,10 @@ _BUDGET_EVICTED = {}              # path -> True or "tail": the paths the byte b
 #                                   eviction and the read back, the two events a thrash is made of, never on a time window. A
 #                                   file shrunk, rewritten or replaced after its eviction counts as a re-read too (no writer
 #                                   in kernel/ does that to a cache tenant)
+_READ_IN_FLIGHT = set()           # paths whose read is under way, under _JSONL_CACHE_LOCK: marked at the read's hit check and
+#                                   cleared at its insert and in a finally. A budget eviction leaves them out of the paths it
+#                                   releases: the read re-inserts the very records it began from, so a release there freed
+#                                   nothing and cost the chat a rebuild (review find, 2026-10-02)
 
 
 def _entry_weight(ent) -> int:
@@ -815,7 +826,8 @@ def _cache_insert_locked(path, ent, began=None):
     (cached entry or None, budget mark) the read saw at its hit check; a path the budget evicted WHILE a read ran from its
     cached entry (another thread's insert, the reader holds no lock while it decodes) read nothing again for that
     eviction, so the read keeps the mark it began with (review find, 2026-10-02); a read that began uncached, a restore
-    included, counts. Returns the paths the budget evicted, for _asm_drop_holding once the caller has let this lock go."""
+    included, counts. Returns the paths the budget evicted, for _asm_drop_holding once the caller has let this lock go,
+    less any whose own read is under way (_READ_IN_FLIGHT)."""
     prev = _JSONL_CACHE.get(path)
     _cache_pop_locked(path)
     w = _entry_weight(ent)
@@ -843,7 +855,8 @@ def _cache_insert_locked(path, ent, began=None):
         _BUDGET_EVICTED.pop(old, None); _BUDGET_EVICTED[old] = True   # newest: a fresh eviction is a fresh re-read
         if len(_BUDGET_EVICTED) > _JSONL_CACHE_MAX:
             del _BUDGET_EVICTED[next(iter(_BUDGET_EVICTED))]
-        gone.append(old)
+        if old not in _READ_IN_FLIGHT:           # its read re-inserts the records the chat's entry holds: nothing to free
+            gone.append(old)
     _JSONL_CACHE[path] = ent
     _JSONL_CACHE_BYTES[0] += w
     _RECORD_CACHE_STATS["inserts"] += 1
@@ -2042,7 +2055,11 @@ def _read_jsonl_entry(path, on_fail=None, tail_ok=False, tail_from=None):
             _JSONL_CACHE[path] = hit
             return hit
     with _read_stripe(path):
-        return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        try:
+            return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        finally:
+            with _JSONL_CACHE_LOCK:
+                _READ_IN_FLIGHT.discard(path)      # marked at the read's hit check: cleared whatever road it left by
 
 
 def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None):
@@ -2071,6 +2088,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
             return hit
         began = (hit, _BUDGET_EVICTED.get(path))   # what this read starts from, before `hit` is reassigned below and
         #                                            before another thread's insert can evict the path mid-read
+        _READ_IN_FLIGHT.add(path)                  # a budget eviction meanwhile releases no entry over it (_cache_insert_locked)
     restored = None
     if tail_from is not None and (hit is None or hit[5] > tail_from[1]):
         # the assembly checkpoint's cut: an entry from its offset, when the guard before it stands (else whole)
@@ -2162,6 +2180,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
         return None
     ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs)
     with _JSONL_CACHE_LOCK:
+        _READ_IN_FLIGHT.discard(path)                   # done reading: an eviction from here on releases as any other
         gone = _cache_insert_locked(path, ent, began)   # the count cap and the byte budget, LRU order (hot entries survive
     if gone:                                            #  any cold flood)
         _asm_drop_holding(gone)              # AFTER the cache lock: the assembly entries over what the budget evicted go too
@@ -5433,11 +5452,17 @@ def _asm_drop_where(holds):
 def _asm_drop_holding(paths):
     """The byte budget's release (the owner's call, 2026-10-02): drop every assembly entry that read one of `paths`, the
     files a budget eviction just took (a file before a restore's cut, read by no one, is skipped), so the eviction frees
-    the records the entry's adapter held. The chat's next build restores from its document or parses whole. Called by
-    the reader after it lets _JSONL_CACHE_LOCK go, never under it: it takes _ASM_LOCK, then _MAT_LOCK, one at a time,
-    and no holder of either waits on any other lock."""
+    the records the entry's adapter held; each entry dropped counts under recordCache.budgetReleased. The next parse
+    that is not a parse-store hit (a comment create, the first build after an append) restores the entry from its
+    document or parses whole. Called by the reader after it lets _JSONL_CACHE_LOCK go, never under it: it takes
+    _ASM_LOCK, then _MAT_LOCK, then _JSONL_CACHE_LOCK for the count, one at a time (the last as the reader's own insert
+    takes it), and no holder of the first two waits on any other lock."""
     gone = set(paths)
-    return _asm_drop_where(lambda e: any(k in gone and v != ("skip",) for k, v in (e.get("recs") or {}).items()))
+    popped = _asm_drop_where(lambda e: any(k in gone and v != ("skip",) for k, v in (e.get("recs") or {}).items()))
+    if popped:
+        with _JSONL_CACHE_LOCK:
+            _RECORD_CACHE_STATS["budgetReleased"] += len(popped)
+    return popped
 
 
 def evict_document(leaf_path):

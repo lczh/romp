@@ -10,7 +10,8 @@ thread's transcript is a full copy of its parent up to the cut (five 40 MB threa
 Pinned here:
 - the cut is walked over the parent's DISPLAY parse (its assembly entry, whole or restored from its document), reading no
   transcript a chat build has read, and on a restored entry only the pre-cut records the walk needs a body of; a
-  pre-compaction passage and a restart seam still cut exactly as the whole read cuts them;
+  pre-compaction passage and a restart seam still cut exactly as the whole read cuts them; after the record cache's
+  budget released the entry (2026-10-02), one create rebuilds it and the next builds no adapter;
 - a comments frame reads each thread's own records past its cut, never the copied history;
 - the create runs off the socket thread and answers the moment the thread row exists, carrying the thread's frame row;
   a frame built before that row was saved is never sent after the answer.
@@ -184,6 +185,21 @@ class Base(unittest.TestCase):
         finally:
             km._anchor_adapter = real
 
+    def adapters_built(self, fn, *a):
+        """fn(*a), and how many transcript adapters (em.FileAdapter) it built: a read of the transcript or a rebuild of the
+        entry, whatever road (counted by build, since a reader cache holding the file serves either with no bytes read)."""
+        cls, n = em.FileAdapter, []
+        real = cls.__init__
+
+        def counting(self_, *x, **k):
+            n.append(1)
+            return real(self_, *x, **k)
+        cls.__init__ = counting
+        try:
+            return fn(*a), len(n)
+        finally:
+            cls.__init__ = real
+
     def roads(self):
         now = getattr(km, "_CUT_ROADS", {"whole": 0, "seeded": 0, "read": 0})
         return {k: now[k] - self.roads0.get(k, 0) for k in now}
@@ -316,6 +332,32 @@ class CutFromTheDisplayParse(Base):
             self.assertLess(read_of(path), 64 * 1024, road)
             self.assertEqual(got, self.cold(path, "kr25"), road)
             restart()
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_after_a_budget_eviction_one_create_rebuilds_the_entry_and_the_next_builds_no_adapter(self):
+        # the record cache's budget releases the chat's entry with the leaf (2026-10-02); for an idle session the display's
+        # next build is then a parse-store hit that rebuilds nothing, so the retry through it found no entry again and every
+        # create read the transcript (review round two: about 0.09 s a create on an 18 MB leaf). On "none" the retry
+        # rebuilds the entry through the event model's parse with the display's inputs, once
+        path, recs = self._session(n=20, size=20000)
+        km._parse(path, PARENT, self.now)
+        key = (os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))
+        other = write(self.proj / "notes-api-other.jsonl", [uline(self.now - 10, "another session's prompt", "o1")])
+        saved = em._JSONL_CACHE_BUDGET_BYTES
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
+        try:
+            em._read_jsonl_incremental(other)             # the cache's own loop evicts the leaf, and its release drops the entry
+        finally:
+            em._JSONL_CACHE_BUDGET_BYTES = saved
+        self.assertNotIn(key, em._ASM_CACHE, "the budget released the chat's entry")
+        km._parse(path, PARENT, self.now)
+        self.assertNotIn(key, em._ASM_CACHE, "the display's next build is a parse-store hit: nothing rebuilt")
+        got1, built1 = self.adapters_built(km._comment_cut_resolve, path, PARENT, "kr10")
+        got2, built2 = self.adapters_built(km._comment_cut_resolve, path, PARENT, "ka12")
+        self.assertEqual(built2, 0, "the second create walks the rebuilt entry: no adapter built")
+        self.assertEqual(built1, 1, "the first create rebuilt the entry, one adapter, and read nothing else")
+        self.assertIn(key, em._ASM_CACHE)
+        self.assertEqual((got1, got2), (self.cold(path, "kr10"), self.cold(path, "ka12")))
         self.assertEqual(self.roads()["read"], 0)
 
     def test_a_document_write_over_the_parse_does_not_hold_the_walk(self):

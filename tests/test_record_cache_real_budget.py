@@ -27,8 +27,9 @@ multiple's default (on a plain load too), its override, the values refused, and 
 budget on a fresh load; both environment variables end to end, and both test runners unsetting them; the /perf fields,
 the judge child's gauge list and the reference. Review round one (2026-10-02) added: two named mixes' measured memory
 per file byte; a budget eviction releasing the chat's assembly entry over the evicted file, outside the cache lock; the
-multiple's cap at 1000; a mid-read eviction not counted as a re-read; and a tail evicted again each cycle. Synthetic
-files and synthetic cache entries only."""
+multiple's cap at 1000; a mid-read eviction not counted as a re-read; and a tail evicted again each cycle. Round two
+(2026-10-02) added: the release's count, budgetReleased; and a path evicted during its own read keeping its chat's entry.
+Synthetic files and synthetic cache entries only."""
 import ast
 import contextlib
 import gc
@@ -513,6 +514,9 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         return [e for e in em._ASM_CACHE.values() if e.get("path") == leaf]
 
     def test_an_eviction_releases_the_chats_copy_and_frees_its_records(self):
+        """Measured with no parsed tree held (the test drops its own before the eviction): an idle session's tree in the
+        judges' parse store shares the records' strings, so in the kernel their text stays until the store replaces or
+        drops that slot; what this frees is the records' lists and the entry's copy."""
         leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 600)
         other = self._file("notes-api-states.jsonl")
         size = os.path.getsize(leaf)
@@ -525,6 +529,7 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
             del tree
             self.assertEqual((modes[-1:], len(self._held(leaf))), (["full"], 1), "a whole parse installed the chat's entry")
             em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))   # the other file's read evicts the rest
+            r0 = _stat("budgetReleased")
             _, delta = _traced(lambda: em._read_jsonl_incremental(other))
         finally:
             if not tracing:
@@ -532,6 +537,7 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         print("a %d-byte leaf evicted by the budget behind a chat's entry: %d bytes freed" % (size, -delta))
         self.assertNotIn(leaf, em._JSONL_CACHE)
         self.assertEqual(self._held(leaf), [], "the chat's assembly entry went with the evicted leaf")
+        self.assertEqual(_stat("budgetReleased") - r0, 1, "counted under budgetReleased")
         self.assertGreater(-delta, size, "the eviction freed %d bytes of a %d-byte leaf's records and entry" % (-delta, size))
         tree, modes = self._parse(leaf)
         self.assertEqual(modes[-1:], ["full"], "the next build parses whole (no document here)")
@@ -572,6 +578,36 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         t.join(30)
         self.assertFalse(t.is_alive(), "the read finished once the assembly lock was free")
         self.assertEqual(self._held(leaf), [])
+
+    def test_an_eviction_during_the_paths_own_read_keeps_the_chats_entry(self):
+        """Another thread's insert can evict a path while that path's read decodes its append from the cached entry. The
+        read then re-inserts the very records the chat's entry holds, so a release there freed nothing and cost the chat a
+        rebuild at its next build (review round two). A path whose own read is under way is left out of the release; once
+        that read has inserted, an eviction of the path releases as before."""
+        leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 20)
+        other = self._file("notes-api-states.jsonl")
+        self._parse(leaf)
+        held = self._held(leaf)
+        self.assertEqual(len(held), 1)
+        with open(leaf, "a") as f:
+            f.write(json.dumps({"type": "user", "uuid": "u00020", "parentUuid": "a00019", "timestamp": _iso(NOW - 100),
+                                "promptSource": "typed", "cwd": "/w/notes-api",
+                                "message": {"role": "user", "content": "step 20: %s" % FILLER}}) + "\n")
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(leaf))   # the grown leaf fits alone, not beside the other
+        real_scan, mid = em._scan_jsonl_stream, []
+
+        def scan_beside_an_insert(*args, **kw):                       # the leaf's read of its append, from the cached entry
+            em._scan_jsonl_stream = real_scan
+            em._read_jsonl_entry(other)                               # the other insert, mid-read: it evicts the leaf
+            mid.append((leaf in em._JSONL_CACHE, [e is held[0] for e in self._held(leaf)]))
+            return real_scan(*args, **kw)
+        with mock.patch.object(em, "_scan_jsonl_stream", scan_beside_an_insert):
+            em._read_jsonl_incremental(leaf)
+        self.assertEqual(mid, [(False, [True])], "the leaf evicted mid-read, the chat's entry standing")
+        self.assertEqual([e is held[0] for e in self._held(leaf)], [True], "the chat's entry stands after the read")
+        self.assertNotIn(leaf, em._READ_IN_FLIGHT, "the mark cleared")
+        em._read_jsonl_incremental(other)                             # the leaf's insert evicted it; read back, it evicts the leaf
+        self.assertEqual(self._held(leaf), [], "the read over, an eviction of the leaf releases its entry as before")
 
 
 class DecodedMultiple(unittest.TestCase):
@@ -671,7 +707,7 @@ class Surfaces(unittest.TestCase):
         self.assertEqual(len(found), 1, "one _SERVE_GAUGES assignment")
         for key in ("entries", "bytes", "realBytes", "decodedMultiple", "budgetBytes", "countCap"):
             self.assertIn(key, found[0]["recordCache"], key)
-        for key in ("budgetRereads", "budgetRereadBytes"):
+        for key in ("budgetRereads", "budgetRereadBytes", "budgetReleased"):
             self.assertNotIn(key, found[0]["recordCache"], key)
 
     def test_both_test_runners_unset_the_budget_variables(self):
@@ -692,7 +728,9 @@ class Surfaces(unittest.TestCase):
                   "without `/proc/meminfo` such as macOS", "never under 4 GiB of file bytes", "`ROMP_RECORD_CACHE_BUDGET_MB`",
                   "megabytes of memory", "`ROMP_RECORD_CACHE_DECODED_MULTIPLE`", "`budgetRereads`", "`budgetRereadBytes`",
                   "the whole read that upgrades", "in memory, per process", "1.44 to 7.7 by shape", "at most 1000",
-                  "releases every assembly entry", "may rebuild repeatedly", "rewritten after its eviction counted too"):
+                  "releases every assembly entry", "may rebuild repeatedly", "rewritten after its eviction counted too",
+                  "until the parse store replaces or drops it", "installs after it keeps what it read",
+                  "evicted during its own read is not released", "rebuilds the entry once", "`budgetReleased`"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]

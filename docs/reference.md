@@ -2858,9 +2858,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
   in file bytes); `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright in
   megabytes of memory). A budget eviction also releases every assembly
-  entry (a chat's copy) that read the evicted file, so the eviction frees
-  the records; that chat's next build restores from its document or parses
-  whole (`asmCheckpoint.parse`), and near the limit busy sessions may
+  entry (a chat's copy) that read the evicted file, so the records' lists
+  go, though an idle session's parsed tree shares their text until the
+  parse store replaces or drops it; a build that read the file before the
+  eviction and installs after it keeps what it read, and a file evicted
+  during its own read is not released. While the file is unchanged that
+  chat's display build is served from its parsed tree and rebuilds
+  nothing; a comment create rebuilds the entry once, as does the first
+  build after an append (a restore from its document or a whole parse,
+  under `asmCheckpoint.parse`), and near the limit busy sessions may
   rebuild repeatedly; `countCap`,
   `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
   `droppedBytes` (the quiescence drop), `budgetRereads` and
@@ -2872,7 +2878,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   level with `budgetEvictions` once the files read every cycle no longer
   fit and every read misses; after a change that lets the budget bind, read
   them beside `budgetEvictions`, `wholeReads` and the restores and whole
-  parses under `asmCheckpoint.parse`),
+  parses under `asmCheckpoint.parse`), `budgetReleased` (the assembly
+  entries budget evictions released, several when one evicted lineage file
+  was read by several chats),
   every byte counter in file bytes,
   `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
