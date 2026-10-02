@@ -515,16 +515,19 @@ class CounterAndCap(Base):
         re-check is a fill served without a read, a hit. A memo hit for an atom whose body a peer had already written
         when this call looked is not counted, on either check: the peer's own read or hit counted that body. That covers
         a body in place with its marker pop still in flight, completed from the memo, and an atom the peer finished
-        whole between hydrate's filter and its first check, which this call does not touch."""
+        whole between hydrate's filter and its first check, which this call does not touch. Counted or not, a hit at
+        the second look is a use: the served record ends the memo's order, after a record put since the first check."""
         rec = assistant(uid("wait", 0), None, 0, [{"type": "text", "text": "the retry budget is three"}])
+        other = uid("wait", 1)
         path = self.td / (SID + ".jsonl")
         at = write(path, [rec])[0]
         entry = ({"message": rec["message"]}, 5000)
+        other_entry = ({"message": {"role": "user", "content": "noted"}}, 300)
 
         class PeerPutMeanwhile(dict):
             """A memo that misses the record at this call's first check and holds it at the next: a peer's put lands
-            between the two, and with `fills` set the peer's fill of that atom's body lands too, its marker pop still in
-            flight."""
+            between the two, then another record's put, and with `fills` set the peer's fill of that atom's body lands
+            too, its marker pop still in flight."""
             gets = 0
             fills = None
 
@@ -533,7 +536,8 @@ class CounterAndCap(Base):
                     PeerPutMeanwhile.gets += 1
                     if PeerPutMeanwhile.gets == 2:
                         self[k] = entry
-                        em._HYDRATED_BYTES[0] += entry[1]
+                        self[other] = other_entry
+                        em._HYDRATED_BYTES[0] += entry[1] + other_entry[1]
                         if PeerPutMeanwhile.fills is not None:
                             PeerPutMeanwhile.fills["message"] = em._norm_message(rec["message"])
                 return super().get(k, default)
@@ -560,8 +564,10 @@ class CounterAndCap(Base):
         def meanwhile(atom, fills=False):
             PeerPutMeanwhile.gets = 0
             PeerPutMeanwhile.fills = atom if fills else None
-            got = run(atom, PeerPutMeanwhile())
+            memo = PeerPutMeanwhile()
+            got = run(atom, memo)
             self.assertEqual(PeerPutMeanwhile.gets, 2, "the peer's put landed between the first check and the second")
+            self.assertEqual(list(memo), [other, rec["uuid"]], "the hit moved the served record to the young end")
             return got
 
         waited = lazy_atom(rec, path, at, "a")

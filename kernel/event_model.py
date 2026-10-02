@@ -8028,9 +8028,11 @@ def hydrate(atoms, rompuuid=None, by=None):
         if not hasattr(msg, "source_path"):                 # another thread finished this atom between the memo miss above and
             with _ASM_CKPT_LOCK:                            #  here (2026-09-20): its body is a plain dict with no source, and the
                 hit = _HYDRATED.get(u) if u else None       #  per-session map below could name a newer document and refuse an atom
-            if hit is not None:                             #  whose body is in place, the whole call with it. Its bookkeeping (the
-                _hydrate_one(a, hit[0])                     #  popped marker) may still be in flight: finish it from the memo as the
-            filled += 1                                     #  hit branch does, or count it filled when the entry is gone already.
+                if hit is not None:                         #  whose body is in place, the whole call with it. Its bookkeeping (the
+                    _HYDRATED[u] = _HYDRATED.pop(u, hit)    #  popped marker) may still be in flight: finish it from the memo as the
+            if hit is not None:                             #  hit branch does, its entry to the LRU tail, or count it filled when
+                _hydrate_one(a, hit[0])                     #  the entry is gone already (the move, 2026-10-02: a hit uncounted here
+            filled += 1                                     #  is still a use, and the cap evicts the least recently used).
             continue                                        #  Entry gone with the marker present: the peer's pop is in flight, its
         #                                                      put having left the memo already, self-evicted under a cap the record
         #                                                      does not fit under or evicted by later puts from any thread between
@@ -8068,8 +8070,10 @@ def hydrate(atoms, rompuuid=None, by=None):
                 u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
-                    if hit is not None and a.get("lazy") is not None and hasattr(a.get("message"), "source_path"):
-                        _ASM_CKPT_STATS["hydratedHits"] += 1      # the rule of the first loop's count
+                    if hit is not None:
+                        _HYDRATED.pop(u, None); _HYDRATED[u] = hit    # a peer's put served here is used too: to the LRU tail
+                        if a.get("lazy") is not None and hasattr(a.get("message"), "source_path"):
+                            _ASM_CKPT_STATS["hydratedHits"] += 1      # the rule of the first loop's count
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
