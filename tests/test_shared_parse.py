@@ -96,8 +96,15 @@ def _episodes(tc, sid, fsids):
 
 def _open_budget(tc):
     """The pusher cycle's checkpoint budget opened wide for one test, so a drop's document write is never deferred by what
-    earlier tests in this process spent, and set back after."""
+    earlier tests in this process spent, and set back after. The checkpoint directory is set first, under the state root,
+    since the tests that open the budget write documents and the one judge.py sets at import may have been turned off by an
+    earlier module sharing this event model (round one of the fold's review); setting it resets the budget, so it comes
+    first, and the provider before it is put back at cleanup."""
     em = jd.em
+    saved_dir = em._CKPT_DIR_FN
+    ck = Path(jd.STATE) / "checkpoints"
+    em.set_checkpoint_dir(lambda: ck)
+    tc.addCleanup(em.set_checkpoint_dir, saved_dir)
     saved = dict(em._CKPT_CYCLE)
     em.checkpoint_cycle_begin(1 << 40)
     tc.addCleanup(lambda: (em._CKPT_CYCLE.clear(), em._CKPT_CYCLE.update(saved)))

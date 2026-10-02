@@ -86,6 +86,10 @@ class DeadLaneMemo(unittest.TestCase):
         km._parse_cache.pop(str(self.tpath), None)
         km._dead_lane_memo.clear()
         km._delta_entry_memo.clear()
+        saved_dir = km.em._CKPT_DIR_FN              # the release tests write documents: a checkpoint directory of the test's
+        km.em.set_checkpoint_dir(lambda: td / "checkpoints")   # own, set before any budget opens (setting it resets the budget),
+        self.addCleanup(km.em.set_checkpoint_dir, saved_dir)   # since an earlier module may have turned judge.py's off (round
+        #                                                        one of the fold's review)
 
     def tearDown(self):
         (km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR, km.jd.CAPDIR, km.jd.STATE, km.NAMES, km._live_map) = self.saved
@@ -301,6 +305,8 @@ class DeadLaneMemo(unittest.TestCase):
         assembly entry and drops the records no live lane reads, once per transcript version: a miss after it (a keyed input
         moved) derives the lane again through one restore and keeps what the restore rebuilt."""
         p = self._three_turns()
+        with km.em._ASM_CKPT_LOCK:                                    # an earlier module's hydrated body under one of these
+            km.em._HYDRATED.clear(); km.em._HYDRATED_BYTES[0] = 0      #  synthetic uuids must not serve this lane's atoms
         tree = km._parse(p, SID, NOW)
         self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=bool(km._display_sdk_human(SID)), tree=tree),
                         km.em.asm_checkpoint_stats()["skipped"])
