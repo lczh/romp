@@ -34009,9 +34009,10 @@ def _push_subagents(clients, now, live_map):
 
 def _subagent_viewer_closed(sid, agent_id):
     """A subagent viewer closed (closeSubagent, its socket went away, or the pusher found it closed after its render;
-    2026-10-02): the background-task cursor its render left on the agent's own file (_bg_scan_all_cached, run for a task notification or a nested background launch in that
-    file) is popped, unless another client still has the same viewer open. No other reader steps that cursor, and once the
-    agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good (em._document_at_witness)."""
+    2026-10-02): the background-task cursor its render left on the agent's own file (_bg_scan_all_cached, run for a task
+    notification or a nested background launch in that file) is popped, unless another client still has the same viewer
+    open. No other reader steps that cursor, and once the agent writes on, a cursor behind the entry would hold the
+    returned agent's quiet drop for good (em._document_at_witness)."""
     try:
         with _clients_lock:
             if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
