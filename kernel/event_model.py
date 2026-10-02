@@ -992,8 +992,8 @@ def fold_steps_in_hand(cache, name, path, new=True):
     hit, or an append), or the file's pending restore carries a complete state for the fold inside them (a tail restored from
     the document), or, with `new`, the entry is the whole file (a first fold over it reads nothing). False when the reader
     holds no entry for the path, or an empty one, and while a parse's assembly entry holds the entry's very records list
-    (the subagent viewer's, _asm_holds_records): a drop there frees nothing, and a stepping fold's drop would leave the
-    viewer's next rebuild a whole read. The spend guard asks before it folds an agent file it priced (2026-10-01), so its
+    (the subagent viewer's, _asm_holds_records), which a parse rebuilt since the file's last append does: a drop there
+    frees nothing, and a stepping fold's drop would leave the viewer's next rebuild a whole read. The spend guard asks before it folds an agent file it priced (2026-10-01), so its
     fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds."""
     key = str(path)
     with _JSONL_CACHE_LOCK:
@@ -2394,7 +2394,9 @@ def _document_at_witness(key, ent):
     its state at a count inside the entry's records, the cut sits at that count and the document is not at the witness;
     when it does not, its fold reads the file once at its next run, as any fold does after a drop. False too while a
     parse's assembly entry holds this very records list (the subagent viewer's): the pop would free nothing, and the
-    parse's next rebuild would read the file whole and parse it in full. A reader that wants the whole file and holds no
+    parse's next rebuild would read the file whole and parse it in full. The test is by identity, so it holds only for a
+    parse rebuilt since the file's last append: a parse built before it keeps an older list, the drop goes ahead, and
+    recordCache.droppedBytes then counts bytes that parse still holds until it is released. A reader that wants the whole file and holds no
     such entry pays one whole read after each drop, so a reader of agent files that runs every cycle takes a tail (the
     folds' rule)."""
     try:

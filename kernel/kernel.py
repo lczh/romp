@@ -49182,8 +49182,9 @@ def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, sta
 def _spend_fold_agent(f):
     """The spend guard's folds over an agent file it priced (2026-10-01), so the records its read holds leave memory under the
     agent folds' rule (drop_after="returned"), each fold only where it steps the records the reader holds (em.fold_steps_in_hand:
-    never a file the reader let go, never a tail pulled whole, never while a viewer's parse holds the same records, where a
-    drop would free nothing and cost the viewer's next rebuild a whole read). The launch-ids fold, the agent-file fold with
+    never a file the reader let go, never a tail pulled whole, never while a viewer's parse rebuilt since the file's last
+    append holds the same records, where a drop would free nothing and cost the viewer's next rebuild a whole read). The
+    launch-ids fold, the agent-file fold with
     the smallest state, runs over a whole entry, its own cursor, or a restored tail whose document carries its state (a
     restart before the exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the
     drop has a cursor and a document to restore from. The card's steps fold runs only over its own cursor or document

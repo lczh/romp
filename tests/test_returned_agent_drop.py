@@ -20,9 +20,11 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
   * the spend guard routes its agent reads through the dropping folds (never starting a steps state for a workflow agent,
     never folding while a viewer's parse holds the records), prices a dropped file from its memo without entering it
     again, prices a resumed agent from its memo and the tail without a whole read (a response split across the cut counted
-    once), reads the file whole when the memo ends short of the tail or starts after the window, prices a file a fresh
-    process restored as a tail, prices a restored tail that covers the window without a whole read and folds it out of
-    memory, and re-scans its memo when a tail entry becomes the whole file;
+    once, whichever side logged the larger usage), reads the file whole when the memo ends short of the tail or starts
+    after the window, prices a file a fresh process restored as a tail (one whole read after the boot, none later, the
+    drop after two quiet minutes), prices a restored tail that covers the window without a whole read and folds it out of
+    memory, re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written record;
+    a raise in the drop's witness check or the guard's fold is counted and said;
   * a lab-style run of a synthetic session (agents with cards, workflow agents without) on an advancing clock, the cards'
     folds run in lockstep, in the kernel's own pattern, or stopping before the agent returns: the entries holding records
     and their bytes return to the live set as agents return, the workflow agents' entries stop climbing, and the guard's
@@ -433,6 +435,8 @@ class KernelFolds(Base):
         self.assertIsNotNone(self.entry(ap))
         self.clock.t = T0 + 300                                   # both files untouched for five minutes
         self.assertEqual(km._agent_steps(ap), steps0)
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "the steps fold's own quiet fold let the records go")
         self.assertEqual(km._agent_launch_ids(ap), ids0)
         km._agent_launch_state(self.leaf)
         ent = self.entry(ap)
@@ -651,21 +655,30 @@ class SpendGuard(Base):
         self.assertEqual(self.guard_whole_reads().get("upgrade<-_spend_file_rows"), 1)
 
     def test_a_response_logged_on_both_sides_of_a_drop_counts_once_at_its_largest_usage(self):
+        self.split_response(larger_first=False)
+
+    def test_a_response_whose_larger_usage_was_logged_before_the_drop_counts_once_at_it(self):
+        self.split_response(larger_first=True)
+
+    def split_response(self, larger_first):
+        """One response logged as two records with one message id, one before a drop and one in the tail after it, the
+        larger usage on the side `larger_first` names: priced once at that usage, from the memo and the tail."""
         ap = str(self.sub / "agent-a9d00000000000001.jsonl")
         early = [rec(T0 - 400 + 5 * i, i) for i in range(10)]
         early[-1]["message"]["id"] = "msg-split"                 # a response's first content block, before the drop
+        split = rec(T0 + 5, 100)
+        split["message"]["id"] = "msg-split"                     # its later block, past the cut
+        (early[-1] if larger_first else split)["message"]["usage"]["output_tokens"] = 3000
         write(ap, early, T0 - 355)
         self.assertAlmostEqual(self.window(T0), sum(map(usd, early)), places=9)
         self.assertIsNone(self.entry(ap))
         whole0 = self.guard_whole_reads()
-        split = rec(T0 + 5, 100)
-        split["message"]["id"] = "msg-split"                     # its later block, past the cut, with the larger usage
-        split["message"]["usage"]["output_tokens"] = 3000
         late = [split, rec(T0 + 6, 101)]
         append(ap, late, T0 + 8)
-        self.assertAlmostEqual(self.window(T0 + 10), sum(map(usd, early[:-1] + late)), places=9,
+        kept = early + late[1:] if larger_first else early[:-1] + late
+        self.assertAlmostEqual(self.window(T0 + 10), sum(map(usd, kept)), places=9,
                                msg="one response, one row, at its largest usage, as a scan of the whole file counts it")
-        self.assertEqual(self.guard_whole_reads(), whole0, "priced from the tail")
+        self.assertEqual(self.guard_whole_reads(), whole0, "priced from the tail, never through a whole read")
 
     def test_the_guard_leaves_an_agent_file_a_viewers_parse_holds_alone_until_the_parse_is_gone(self):
         ap = str(self.sub / "agent-a9e00000000000001.jsonl")

@@ -120,7 +120,10 @@ class SpendRate(unittest.TestCase):
     def test_the_window_reads_the_cache_entry_with_a_tail_accepted_never_the_whole_file_road(self):
         """After a restart the assembly checkpoint restores a transcript as a TAIL entry (the records past its cut); the
         whole-file road would upgrade every live transcript to a full re-read on the guard's first cycle (the checkpoint's
-        served tests measure those bytes). The window reads the entry with tail_ok, and never calls the whole-file road."""
+        served tests measure those bytes). The window reads the session's own transcript with tail_ok and never calls the
+        whole-file road for it, nor for an agent file whose restored tail reaches back past the window's start; an agent file
+        whose tail does not is read whole once (tests/test_returned_agent_drop.py: the memo-end, window-floor and
+        fresh-process tests). Whether the leaf's tail prices the window right is not this test's claim."""
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_t", out_tokens=1000, in_tokens=0)])
         sub = Path(self.leaf).with_suffix("") / "subagents"
         write_jsonl(sub / "agent-1.jsonl", [assistant(NOW - 50, "msg_s", out_tokens=1000, in_tokens=0)], mtime=NOW - 50)

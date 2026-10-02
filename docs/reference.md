@@ -1633,18 +1633,20 @@ rule, `_path_needs_write`; a dirty path counts here and not for the pass, and a
 fold cold for want of a state counts for the pass, which heals it, and not
 here, where it would only be written cold again), before the entry is popped,
 and on a hit or a restore at the witness the entry stays as it always has,
-except over a subagent's own transcript (its card's folds, and the spend
-guard's agent reads, which go through them and catch up a card's cursor that
-stopped short of the file's end): there a fold that finds nothing new also pops
-an entry holding records once the file's document stands at the entry's witness
-with every current fold's state and no parse holds the same records, so a
+except over a subagent's own transcript (its card's folds, which the spend
+guard also runs over each agent file after pricing it from a read of its own,
+catching up a card's cursor that stopped short of the file's end): there a fold
+that finds nothing new also pops an entry holding records once the file's
+document stands at the entry's witness with every current fold's state and no
+parse rebuilt since the file's last append holds the same records, so a
 returned agent whose last record was folded while its file was fresh leaves
 memory too. The
 write is charged to the pusher cycle's byte budget, which the kernel begins at
 each cycle's start and the pass shares near its end; over the budget the write
 and the drop wait with the entry held (`converge.dropDeferred`), the drop then
 owed and paid at the next cycle's start with the room that cycle has, oldest
-first, or by the next fold over the file, whichever comes first. A document
+first, or by the next fold over the file, whichever comes first; a subagent's
+quiet pop is never owed and waits for the next fold that finds nothing new. A document
 already whole is never rewritten at a later drop (`converge.dropWrites` counts
 the writes), and a dropped file's next fold restores its cursor from the
 document over a tail read instead of reading the file whole, provided the
@@ -2790,7 +2792,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
   for the documents written at the reader's quiescence drop and the drops
-  deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
+  deferred for the shared budget (a cycle, or for a subagent's quiet pop until
+  the next fold that finds nothing new), `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
