@@ -41,8 +41,8 @@ function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
     taken: 0,                                 // the fold publishes this life has taken (kernel.py _view_folds_taken)
     folds: null as Record<string, unknown> | null,
     by: null as { browser: string; n: number } | null,
-    // browser -> its pairs, [n, count] with n descending, and their two ends: the kept (latest taken) and the largest
-    seen: new Map<string, { n: number; at: number; top: number; topAt: number; pairs: [number, number][] }>(),
+    // browser -> its pairs, [n, count] with n descending: the kept (latest taken) last and the largest first
+    seen: new Map<string, [number, number][]>(),
     refuse: false,
     warns: 0,
     drops: [] as string[],                    // the kernel's log line for each publish it dropped
@@ -68,7 +68,7 @@ function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
         && Number.isInteger(by.n) && by.n >= 1 ? { browser: by.browser as string, n: by.n as number } : null;
       const r = st && by.received && typeof by.received.boot === "string" && Number.isInteger(by.received.n) ? by.received : null;
       const kept = st ? k.seen.get(st.browser) : undefined;
-      const pairs: [number, number][] = kept ? kept.pairs.map((p) => [p[0], p[1]] as [number, number]) : [];
+      const pairs: [number, number][] = kept ? kept.map((p) => [p[0], p[1]] as [number, number]) : [];
       const newer = (at: number) => !!r && r.boot === k.boot && r.n >= at;
       let above: [number, number] | undefined;           // the pair with the smallest n above this publish's: n runs descending
       if (st) for (let i = pairs.length - 1; i >= 0; i--) if (pairs[i][0] > st.n) { above = pairs[i]; break; }
@@ -83,7 +83,7 @@ function fakeKernel(opts: { folds?: boolean; stamps?: boolean } = {}) {
       if (st) {
         const next: [number, number][] = [...pairs.filter((p) => p[0] > st.n), [st.n, k.taken]];
         while (next.length > PAIRS_CAP) next.shift();
-        k.seen.set(st.browser, { n: st.n, at: k.taken, top: next[0][0], topAt: next[0][1], pairs: next });
+        k.seen.set(st.browser, next);
       }
       k.by = st;
       if (k.refuse) { k.warns++; return; }                          // refused: a warning to the poster, no push
@@ -547,7 +547,7 @@ test("a browser whose record of its publishes comes back older (killed before it
   for (const v of [desktop, phone]) k.connect(v);
   fold(desktop, "api", true); fold(desktop, "web", true); fold(desktop, "web", false);
   const rec = JSON.parse(shared.get(PUBLISHES)!);
-  assert.deepEqual([rec.n, k.seen.get(rec.browser)?.n], [3, 3], "premise: three publishes, all handled");
+  assert.deepEqual([rec.n, k.seen.get(rec.browser)?.at(-1)?.[0]], [3, 3], "premise: three publishes, all handled");
   k.drop(desktop);
   shared.set(PUBLISHES, JSON.stringify({ browser: rec.browser, n: 1, live: {} }));   // the browser comes back with the record of its first
   const again = makeViewer("desktop after the restart", k, {}, shared);
@@ -884,7 +884,7 @@ test("a largest taken before the record came back older holds nothing open: the 
     "premise: the four publishes, in the order they landed, with the counts they carry");
   assert.deepEqual(k.folds, { collapsed: ["docs", "api", "web", "tests"], expanded: [], pinned: [] }, "every fold stands");
   assert.deepEqual(k.drops, ["browser 'eeeeeeee' n=11 received='1000.1':3, between n=12 taken at 4"], "T's 11 dropped under 12, a pair at neither end");
-  assert.deepEqual(k.seen.get(E)!.pairs, [[45, 1], [12, 4], [11, 5]], "45 first, then 12, then Y's 11");
+  assert.deepEqual(k.seen.get(E), [[45, 1], [12, 4], [11, 5]], "45 first, then 12, then Y's 11");
   yLink.flush();
   assert.deepEqual(yPane.as(() => readTabGroups(UNIONS).collapsed), ["docs", "api", "web", "tests"], "tab Y shows every fold");
   assert.deepEqual(a.as(() => readTabGroups(UNIONS).collapsed), ["docs", "api", "web"],
