@@ -416,17 +416,26 @@ class SourcePins(unittest.TestCase):
 
     def test_the_prefetch_is_the_one_caller_of_render_ts_idle_helper(self):
         # render.ts wraps its one capture in a helper, requestIdle; a second idle user calling it would pass the capture
-        # check above and still keep the idle queue busy, so the helper's callers are counted too (review, 2026-10-02).
-        calls = []
+        # check above and still keep the idle queue busy, so the helper's callers are counted too (review, 2026-10-02), and
+        # the one caller must sit inside schedulePrebuild, so a diff that moves the prefetch off the helper and adds an idle
+        # task calling it by name fails too (review round four).
+        calls, span, inside = [], None, None
         with open(os.path.join(ROOT, "ui", "webview", "render.ts"), encoding="utf-8") as f:
             for n, line in enumerate(f, 1):
                 code = line.strip()
+                if code.startswith("function schedulePrebuild("):
+                    inside = n
+                elif inside is not None and line.startswith("}"):
+                    span, inside = (span or (inside, n)), None
                 if not code.startswith(("//", "/*", "*")) and "requestIdle(" in code.split(" //")[0]:
-                    calls.append("ui/webview/render.ts:%d" % n)
+                    calls.append(n)
+        where = ["ui/webview/render.ts:%d" % n for n in calls]
         self.assertEqual(len(calls), 1, "render.ts's idle helper (requestIdle) has one caller, the prefetch's schedulePrebuild. The cold-boot "
                                         "lab (tests/test_cold_boot_diet_browser.py, roads 3b, 9 and 10) reads an empty idle queue as the "
                                         "prefetch having run, so before a second caller lands, make that record count only the prefetch's "
-                                        "own handles: %s" % calls)
+                                        "own handles: %s" % where)
+        self.assertTrue(span and span[0] < calls[0] < span[1],
+                        "the helper's one caller is inside schedulePrebuild (lines %s): %s" % (span, where))
 
     def test_the_helper_is_the_one_user_of_render_ts_capture(self):
         # A second idle user can also call render.ts's capture, _ric, directly, which passes both checks above; so the lines
