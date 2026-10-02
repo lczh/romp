@@ -402,7 +402,8 @@ class SourcePins(unittest.TestCase):
     """The premise the lab's at-rest record stands on, checked without a browser or the extension's dependencies (2026-10-02): the
     chat page's one idle-callback user is the prefetch pass. The record waits for the page's whole idle queue to empty (atRest in the
     driver), and roads 3b, 9 and 10 read that as the prefetch having run, so a second idle user that keeps itself queued would turn
-    them red with messages that point at the prefetch. This pin names the second user instead."""
+    them red with messages that point at the prefetch. These pins name the second user instead, whether it captures
+    requestIdleCallback itself or calls render.ts's requestIdle helper."""
 
     def test_the_chat_page_captures_request_idle_callback_in_one_place(self):
         hits = _idle_captures()
@@ -411,6 +412,20 @@ class SourcePins(unittest.TestCase):
                                        "reads an empty idle queue as the prefetch having run, so before a second capture lands, make that "
                                        "record count only the prefetch's own handles: %s" % hits)
         self.assertTrue(hits[0].startswith("ui/webview/render.ts:"), "the one capture is the prefetch's, in render.ts: %s" % hits)
+
+    def test_the_prefetch_is_the_one_caller_of_render_ts_idle_helper(self):
+        # render.ts wraps its one capture in a helper, requestIdle; a second idle user calling it would pass the capture
+        # check above and still keep the idle queue busy, so the helper's callers are counted too (review, 2026-10-02).
+        calls = []
+        with open(os.path.join(ROOT, "ui", "webview", "render.ts"), encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                code = line.strip()
+                if not code.startswith(("//", "/*", "*")) and "requestIdle(" in code.split(" //")[0]:
+                    calls.append("ui/webview/render.ts:%d" % n)
+        self.assertEqual(len(calls), 1, "render.ts's idle helper (requestIdle) has one caller, the prefetch's schedulePrebuild. The cold-boot "
+                                        "lab (tests/test_cold_boot_diet_browser.py, roads 3b, 9 and 10) reads an empty idle queue as the "
+                                        "prefetch having run, so before a second caller lands, make that record count only the prefetch's "
+                                        "own handles: %s" % calls)
 
 
 class ColdBootDiet(unittest.TestCase):
