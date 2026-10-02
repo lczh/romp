@@ -2847,29 +2847,32 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `entries`; `bytes`, the held entries' file bytes; `realBytes`, the same
   entries decoded, `bytes` times `decodedMultiple` (bytes of memory per file
   byte: 2.85 by default, what a transcript measured decoded in a lab, which
-  the kernel's resident size over its cached file bytes agrees with;
-  `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, and 1
-  weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget in
-  memory, which `realBytes` is weighed against, the least recently used
-  entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  the kernel's resident size over its cached file bytes agrees with; content
+  moves it, 1.44 to 7.7 by shape as measured;
+  `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, over 0 and at most 1000, and
+  1 weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget
+  in memory, per process, which `realBytes` is weighed against, the least
+  recently used entries going past it (half of MemTotal; never under 4 GiB of file bytes,
   which is 4 GiB times `decodedMultiple` in memory, so a machine under about
   23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
   bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
   in file bytes); `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright in
-  megabytes of memory). The budget bounds what this cache holds, not the
-  records' memory: a leaf evicted while a chat's assembly entry holds it
-  stays in memory until that entry is rebuilt, and its next append parses
-  whole (`asmCheckpoint.parse` `g:rewrite`, `g:nonleaf` for a lineage
-  file); `countCap`,
+  megabytes of memory). A budget eviction also releases every assembly
+  entry (a chat's copy) that read the evicted file, so the eviction frees
+  the records; that chat's next build restores from its document or parses
+  whole (`asmCheckpoint.parse`), and near the limit busy sessions may
+  rebuild repeatedly; `countCap`,
   `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
   `droppedBytes` (the quiescence drop), `budgetRereads` and
   `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
   the last `countCap` it evicted, each counted once, and the file bytes
   they read again, a tail restored first and the whole read that upgrades
-  it both counted: near zero while the budget evicts only cold entries,
+  it both counted, and a file rewritten after its eviction counted too:
+  near zero while the budget evicts only cold entries,
   level with `budgetEvictions` once the files read every cycle no longer
   fit and every read misses; after a change that lets the budget bind, read
-  them beside `budgetEvictions`, `wholeReads` and those two demotions),
+  them beside `budgetEvictions`, `wholeReads` and the restores and whole
+  parses under `asmCheckpoint.parse`),
   every byte counter in file bytes,
   `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735

@@ -25,16 +25,24 @@ procfs, on the real read path too; budgetRereads stays zero under cold churn pas
 evictions when the hot set does not fit, and a re-read that comes back as a tail counts its upgrade's bytes; the
 multiple's default (on a plain load too), its override, the values refused, and a multiple of 1 restoring the old
 budget on a fresh load; both environment variables end to end, and both test runners unsetting them; the /perf fields,
-the judge child's gauge list and the reference. Synthetic files and synthetic cache entries only."""
+the judge child's gauge list and the reference. Review round one (2026-10-02) added: two named mixes' measured memory
+per file byte; a budget eviction releasing the chat's assembly entry over the evicted file, outside the cache lock; the
+multiple's cap at 1000; a mid-read eviction not counted as a re-read; and a tail evicted again each cycle. Synthetic
+files and synthetic cache entries only."""
 import ast
 import contextlib
+import gc
 import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import tracemalloc
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 from romp_load import load_source
@@ -58,6 +66,49 @@ WORKING_SET_FILE_BYTES = 3_720_000_000            # a snapshot, not a ceiling: t
 #                                                   the kernel at 5f3569d39 held 3.4 GB at 12.2 hours and 4.0 GB at 15.4
 #                                                   hours, its count cap full since 12.5 (2026-10-01)
 FLOOR_FILE_BYTES = 4 * GiB                        # the default's floor, in FILE bytes
+SID = "11111111-2222-3333-4444-0000b0d9e7a1"     # this module's own placeholder session id
+NOW = 1781200000
+FILLER = ("the search endpoint ranks notes by recency, the tokenizer splits on punctuation, "
+          "and the pagination cursor carries the last note id so a reload resumes where it stopped")
+
+
+def _iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _conversation(path, turns):
+    """A synthetic leaf of `turns` typed prompts and replies in the notes-api demo world."""
+    parent = None
+    with open(path, "w") as f:
+        for k in range(turns):
+            t, u, a = NOW - 200000 + 600 * k, "u%05d" % k, "a%05d" % k
+            ask = {"role": "user", "content": "step %d: %s" % (k, FILLER)}
+            said = {"id": "msg_%05d" % k, "role": "assistant", "model": "claude-test-1", "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Step %d is in: %s." % (k, FILLER)}]}
+            f.write(json.dumps({"type": "user", "uuid": u, "parentUuid": parent, "timestamp": _iso(t), "promptSource": "typed",
+                                "cwd": "/w/notes-api", "message": ask}) + "\n")
+            f.write(json.dumps({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": _iso(t + 30),
+                                "cwd": "/w/notes-api", "message": said}) + "\n")
+            parent = a
+    return path
+
+
+def _traced(fn):
+    """(result, live): the bytes fn() left live under tracemalloc, as a delta from what was held when it started (the
+    harness of tests/test_reader_stream_peak.py); a tracer already running is used and left running."""
+    gc.collect()
+    tracing = tracemalloc.is_tracing()
+    if not tracing:
+        tracemalloc.start()
+    try:
+        held = tracemalloc.get_traced_memory()[0]
+        out = fn()
+        gc.collect()
+        cur = tracemalloc.get_traced_memory()[0]
+    finally:
+        if not tracing:
+            tracemalloc.stop()
+    return out, cur - held
 
 
 def _entry(size):
@@ -124,10 +175,11 @@ class RealUnitBudget(_CacheCase):
         files = [self._file("notes-api-%d.jsonl" % i) for i in range(4)]
         one = os.path.getsize(files[0])
         self.assertEqual({os.path.getsize(p) for p in files}, {one}, "four files of one size")
-        em._JSONL_CACHE_BUDGET_BYTES = int(2.5 * one * MEASURED)      # room for two such files decoded; seven by file bytes
-        for p in files:
+        em._JSONL_CACHE_BUDGET_BYTES = int(2.5 * one * MEASURED)      # room for two such files weighed at the multiple;
+        for p in files:                                               #  seven by file bytes
             em._read_jsonl_incremental(p)
-        self.assertEqual(list(em._JSONL_CACHE), files[2:], "the two most recently used stay: each file weighed 2.85x its size "
+        self.assertEqual(list(em._JSONL_CACHE), files[2:], "the two most recently used stay: each file weighed at the "
+                         "multiple, 2.85 times its size "
                          "(the file-byte budget held all four, %d bytes under a %d budget)" % (4 * one, em._JSONL_CACHE_BUDGET_BYTES))
         self.assertEqual(self._evicted(), 2, "two budget evictions, oldest first")
         st = em.record_cache_stats()
@@ -338,21 +390,215 @@ class BudgetRereads(_CacheCase):
             self._insert("notes-api/states-0.log", 1000)
         self.assertEqual((self._evicted(), _stat("budgetRereads") - rr0), (0, 0), "the count cap's misses are not the budget's")
 
+    @staticmethod
+    def _tail(size, first):
+        """A TAIL entry (base 5) of a `size`-byte file whose first held record sits at `first`: it weighs size - first."""
+        return (0.0, size, size, b"", [{"uuid": "11111111-2222-3333-4444-000000000003"}], 5, 0, [first])
+
+    def test_a_tail_evicted_again_each_cycle_is_read_back_each_cycle(self):
+        """A path back as a tail and evicted by the budget again is a fresh eviction, so its next return is a fresh re-read
+        (review find, 2026-10-02: with the eviction keeping the "tail" mark, every other re-read went uncounted). Two paths
+        under a one-entry budget, the tail evicting the whole file and the whole file evicting the tail, every cycle."""
+        p, q = "notes-api/web.jsonl", "notes-api/api.jsonl"
+        em._JSONL_CACHE_BUDGET_BYTES = int(15000 * MEASURED)          # room for one 10,000-byte entry, not two
+        self._insert(p, 10000); self._insert(q, 10000)                # p evicted
+        keys = ("budgetEvictions", "budgetRereads")
+        rows = []
+        for _ in range(4):
+            before = [_stat(k) for k in keys]
+            with em._JSONL_CACHE_LOCK:
+                em._cache_insert_locked(p, self._tail(10000, 4000))   # p back as a tail of 6,000 bytes: q goes
+            self._insert(q, 10000)                                    # q back whole: the tail goes
+            rows.append(tuple(_stat(k) - b for k, b in zip(keys, before)))
+        self.assertEqual(rows, [(2, 2)] * 4, "every cycle: two evictions, two read back")
+
+    def test_a_tail_evicted_again_is_the_newest_evicted_path(self):
+        """The eviction of a tail moves its path to the newest end of the record (pop, then set), so the 1024-path memory
+        forgets the oldest evictions first. A third path evicted between the tail's return and its next eviction stands
+        before it."""
+        p = "notes-api/web.jsonl"
+        em._JSONL_CACHE_BUDGET_BYTES = int(25000 * MEASURED)          # room for two 10,000-byte entries, not three
+        self._insert(p, 10000); self._insert("notes-api/api.jsonl", 10000); self._insert("notes-api/tests.jsonl", 10000)
+        with em._JSONL_CACHE_LOCK:
+            em._cache_insert_locked(p, self._tail(10000, 4000))       # p back as a tail: api.jsonl goes
+        self.assertEqual(em._BUDGET_EVICTED.get(p), "tail")
+        self._insert("notes-api/states.log", 10000)                   # tests.jsonl goes, after the tail's return
+        self.assertEqual(list(em._BUDGET_EVICTED)[-1], "notes-api/tests.jsonl")
+        self._insert("notes-api/messages.jsonl", 10000)               # the tail goes
+        self.assertEqual(list(em._BUDGET_EVICTED)[-1:], [p], "the tail's eviction is the newest: %r" % list(em._BUDGET_EVICTED))
+        self.assertIs(em._BUDGET_EVICTED[p], True)
+
+    def test_an_eviction_while_a_read_runs_from_its_cached_entry_is_not_a_reread(self):
+        """The reader lets the cache lock go while it decodes, so another thread's insert can evict the path mid-read; the
+        read's own insert then found a fresh eviction mark and counted a re-read of the whole entry, though it read only
+        the append (review find, 2026-10-02). The read keeps the mark it began with; a read that begins uncached after
+        an eviction still counts."""
+        a, b = self._file("notes-api-web.jsonl"), self._file("notes-api-api.jsonl")
+        em._JSONL_CACHE_BUDGET_BYTES = 10 ** 12
+        em._read_jsonl_incremental(a)                                 # cached whole
+        with open(a, "a") as f:
+            f.write(json.dumps({"uuid": "11111111-2222-3333-4444-000000000099", "type": "user"}) + "\n")
+        em._JSONL_CACHE_BUDGET_BYTES = int(1.5 * os.path.getsize(a) * MEASURED)   # room for one of the two
+        real_scan = em._scan_jsonl_stream
+
+        def scan_beside_an_insert(*args, **kw):                       # a's read of its append, from the cached entry
+            em._scan_jsonl_stream = real_scan
+            em._read_jsonl_entry(b)                                   # the other insert, mid-read: it evicts a
+            return real_scan(*args, **kw)
+        keys = ("budgetEvictions", "budgetRereads")
+        before = [_stat(k) for k in keys]
+        with mock.patch.object(em, "_scan_jsonl_stream", scan_beside_an_insert):
+            em._read_jsonl_incremental(a)
+        self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [2, 0],
+                         "a evicted mid-read, then b at a's insert; a read back nothing for its eviction")
+        self.assertEqual((a in em._JSONL_CACHE, a in em._BUDGET_EVICTED), (True, False))
+        em._read_jsonl_incremental(b)                                 # b begins uncached: a re-read
+        self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [3, 1])
+
+
+class MeasuredMixes(_CacheCase):
+    """What realBytes stands for, measured: two named synthetic mixes decoded through the reader under tracemalloc, live
+    bytes per file byte within 35% of the figure recorded on Python 3.12, a band that covers the interpreters CI runs
+    (one shape measured 6.48 on 3.12 and 3.13, 6.97 on 3.11 and 7.71 on 3.10). It pins each mix's ratio, not that 2.85
+    fits production: content moves the ratio from 1.44 to 7.7 by shape, and the constant estimates the bulk, whole live
+    leaves. A reader keeping a second decoded copy doubles the figure and fails here; the budget's other tests count file
+    bytes and passed it (review find, 2026-10-02)."""
+    BAND = 0.35
+    RECORDED = {"metadata rows": 6.87,            # _file's rows: a uuid and a type, nothing else
+                "text rows": 1.45}                # _leaf's rows: a uuid, a type and 900 characters of text
+
+    def test_two_mixes_decode_to_their_recorded_bytes_per_file_byte(self):
+        em._JSONL_CACHE_BUDGET_BYTES = 10 ** 12
+        for name, path in (("metadata rows", self._file("notes-api-meta.jsonl", n=20000)),
+                           ("text rows", self._leaf("notes-api-text.jsonl", 2_000_000))):
+            recs, live = _traced(lambda: em._read_jsonl_incremental(path))
+            size, want = os.path.getsize(path), self.RECORDED[name]
+            got = live / size
+            print("%s: %d records, %d file bytes, %.2f bytes of memory per file byte (recorded %.2f; cache realBytes "
+                  "weighs %.2f)" % (name, len(recs), size, got, want, em.record_cache_stats()["decodedMultiple"]))
+            self.assertGreater(len(recs), 1000, name)
+            self.assertGreaterEqual(got, want * (1 - self.BAND), "%s: %.2f bytes per file byte" % (name, got))
+            self.assertLessEqual(got, want * (1 + self.BAND), "%s: %.2f bytes per file byte" % (name, got))
+
+
+class BudgetReleasesAssemblyEntries(_CacheCase):
+    """A budget eviction releases every assembly entry (a chat's copy) that read the evicted file (the owner's call,
+    2026-10-02): the entry's adapter holds the very records the cache let go, so before, the eviction freed 0.4% of the
+    leaf's memory. The release runs after the reader lets the cache lock go: it takes the assembly lock and then the
+    materialization lock, one at a time, so it never waits on an assembly lock under the cache lock."""
+
+    def setUp(self):
+        super().setUp()
+        self._ckpt = em._CKPT_DIR_FN
+        em._CKPT_DIR_FN = None                    # checkpoints off: the rebuild after a release is the whole parse
+        em._ASM_CACHE.clear()
+
+    def tearDown(self):
+        em._ASM_CACHE.clear()
+        em._CKPT_DIR_FN = self._ckpt
+        super().tearDown()
+
+    def _parse(self, leaf):
+        modes = []
+        tree = em.parse_session(leaf, rompuuid=SID, name="web", dir="/w/notes-api", candidate_files=[leaf], states=None,
+                                postal_log=[], now=NOW, asm_mode_out=modes)
+        return tree, modes
+
+    def _held(self, leaf):
+        return [e for e in em._ASM_CACHE.values() if e.get("path") == leaf]
+
+    def test_an_eviction_releases_the_chats_copy_and_frees_its_records(self):
+        leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 600)
+        other = self._file("notes-api-states.jsonl")
+        size = os.path.getsize(leaf)
+        tracing = tracemalloc.is_tracing()
+        if not tracing:
+            tracemalloc.start()
+        try:
+            tree, modes = self._parse(leaf)
+            want = json.dumps(em.plain_tree(tree), sort_keys=True, default=lambda o: "<unserializable>")
+            del tree
+            self.assertEqual((modes[-1:], len(self._held(leaf))), (["full"], 1), "a whole parse installed the chat's entry")
+            em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))   # the other file's read evicts the rest
+            _, delta = _traced(lambda: em._read_jsonl_incremental(other))
+        finally:
+            if not tracing:
+                tracemalloc.stop()
+        self.assertNotIn(leaf, em._JSONL_CACHE)
+        self.assertEqual(self._held(leaf), [], "the chat's assembly entry went with the evicted leaf")
+        self.assertGreater(-delta, size, "the eviction freed %d bytes of a %d-byte leaf's records and entry" % (-delta, size))
+        tree, modes = self._parse(leaf)
+        self.assertEqual(modes[-1:], ["full"], "the next build parses whole (no document here)")
+        self.assertEqual(json.dumps(em.plain_tree(tree), sort_keys=True, default=lambda o: "<unserializable>"), want,
+                         "the rebuilt tree is the tree")
+        self.assertEqual(len(self._held(leaf)), 1)
+
+    def test_an_eviction_from_another_thread_never_waits_on_the_assembly_lock_under_the_cache_lock(self):
+        """The assembly lock held here, another thread's read evicts the leaf: its release waits for the assembly lock with
+        the cache lock free (a release under the cache lock would hold it, and a thread holding an assembly lock while it
+        reads would deadlock against it), then finishes once the assembly lock is let go. Every wait is bounded."""
+        leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 20)
+        other = self._file("notes-api-states.jsonl")
+        self._parse(leaf)
+        self.assertEqual(len(self._held(leaf)), 1)
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
+        ev0, done = _stat("budgetEvictions"), threading.Event()
+
+        def read_other():
+            em._read_jsonl_incremental(other)
+            done.set()
+        t = threading.Thread(target=read_other, daemon=True)
+        em._ASM_LOCK.acquire()
+        try:
+            t.start()
+            deadline = time.monotonic() + 30
+            while _stat("budgetEvictions") == ev0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertGreater(_stat("budgetEvictions"), ev0, "the other thread's read evicted the leaf")
+            time.sleep(0.2)                                            # it reaches the release and waits there
+            free = em._JSONL_CACHE_LOCK.acquire(timeout=10)
+            if free:
+                em._JSONL_CACHE_LOCK.release()
+            self.assertTrue(free, "the cache lock is free while the release waits on the assembly lock")
+            self.assertFalse(done.is_set(), "the read waits to release the chat's entry")
+        finally:
+            em._ASM_LOCK.release()
+        t.join(30)
+        self.assertFalse(t.is_alive(), "the read finished once the assembly lock was free")
+        self.assertEqual(self._held(leaf), [])
+
 
 class DecodedMultiple(unittest.TestCase):
-    def test_the_default_is_the_measured_figure(self):
+    def test_the_constant_is_pinned_at_its_value_2_85(self):
+        """The constant's value, against the literal above: what memory the multiple stands for is measured in
+        MeasuredMixes, not here."""
         self.assertEqual(em.RECORD_CACHE_DECODED_MULTIPLE, MEASURED)
-        self.assertEqual(em._record_cache_decoded_multiple(None), MEASURED, "unset: the measured figure")
+        self.assertEqual(em._record_cache_decoded_multiple(None), MEASURED, "unset: the constant")
         self.assertEqual(em._record_cache_decoded_multiple(""), MEASURED, "empty: the same")
 
     def test_the_environment_overrides_it_and_a_value_that_is_no_positive_number_is_refused_aloud(self):
         self.assertEqual(em._record_cache_decoded_multiple("1"), 1.0, "1 restores the file-byte budget")
         self.assertEqual(em._record_cache_decoded_multiple("3.5"), 3.5)
-        for bad in ("0", "-2", "nan", "inf", "three"):
+        self.assertEqual(em._record_cache_decoded_multiple("1000"), 1000.0, "the cap itself is accepted")
+        for bad in ("0", "-2", "nan", "inf", "three", "1001", "1e298", "1e300"):
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 self.assertEqual(em._record_cache_decoded_multiple(bad), MEASURED, bad)
             self.assertIn("ROMP_RECORD_CACHE_DECODED_MULTIPLE", err.getvalue(), "%r is refused on stderr, never silently" % bad)
+
+    def test_a_multiple_past_the_cap_is_refused_at_load_with_one_line(self):
+        """A finite multiple large enough to overflow (review find, 2026-10-02): 1e300 passed the old range test, and the
+        floor's int() of 4 GiB times it raised OverflowError at import with nothing on stderr. Capped at 1000, a fresh
+        load imports, says so once on stderr and weighs at 2.85."""
+        env = {k: v for k, v in os.environ.items() if k != "ROMP_RECORD_CACHE_BUDGET_MB"}
+        env["ROMP_RECORD_CACHE_DECODED_MULTIPLE"] = "1e300"
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stderr(err):
+            fresh = load_source("romp_event_model_real_budget_huge", os.path.join(BIN, "romp-event-model"))
+        said = [ln for ln in err.getvalue().splitlines() if "ROMP_RECORD_CACHE_DECODED_MULTIPLE" in ln]
+        self.assertEqual(len(said), 1, "one stderr line: %r" % err.getvalue()[-2000:])
+        self.assertEqual(fresh._RECORD_CACHE_MULTIPLE, MEASURED)
+        self.assertEqual(fresh._JSONL_CACHE_BUDGET_BYTES, fresh._record_cache_default_budget_bytes(), "the derived default")
 
     def test_a_plain_load_weighs_at_the_measured_multiple(self):
         """A module loaded with neither variable set (production's case) weighs entries at 2.85 and derives its budget:
@@ -439,7 +685,8 @@ class Surfaces(unittest.TestCase):
         for k in ("`bytes`", "`realBytes`", "`decodedMultiple`", "`budgetBytes`", "file bytes", "half of MemTotal",
                   "without `/proc/meminfo` such as macOS", "never under 4 GiB of file bytes", "`ROMP_RECORD_CACHE_BUDGET_MB`",
                   "megabytes of memory", "`ROMP_RECORD_CACHE_DECODED_MULTIPLE`", "`budgetRereads`", "`budgetRereadBytes`",
-                  "bounds what this cache holds, not the records' memory", "`g:rewrite`", "the whole read that upgrades"):
+                  "the whole read that upgrades", "in memory, per process", "1.44 to 7.7 by shape", "at most 1000",
+                  "releases every assembly entry", "may rebuild repeatedly", "rewritten after its eviction counted too"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]
