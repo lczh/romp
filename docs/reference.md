@@ -1635,7 +1635,9 @@ here, where it would only be written cold again), before the entry is popped,
 and on a hit or a restore at the witness the entry stays as it always has,
 except over a subagent's own transcript (its card's folds, which the spend
 guard also runs over each agent file after pricing it from a read of its own,
-catching up a card's cursor that stopped short of the file's end): there a fold
+catching up a card's cursor that stopped short of the file's end, and ahead of
+them the background-task state an open viewer of the agent left, which closing
+that viewer retires so a later write does not carry it forward): there a fold
 that finds nothing new also pops an entry holding records once the file's
 document stands at the entry's witness with every current fold's state and no
 parse rebuilt since the file's last append holds the same records, so a
@@ -2873,7 +2875,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   does the same for the hydration rows; `swallowed` counts raises two handlers
   keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
   returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
-  spend guard's agent folds, whose file's records then stay), each said on
+  spend guard's agent folds, each in a guard of its own, so a fold that raises
+  keeps the file's records only when no later fold drops them), each said on
   stderr, with the file and the traceback, at its first, tenth and hundredth
   raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
@@ -4858,7 +4861,8 @@ check reads little that is new: an agent file that changed inside the window is
 read, and after a restart an agent file inside the window whose restored tail
 does not reach back to the window's start is read whole once, since its records
 from before the checkpoint's cut may be in the window. After pricing an agent
-file, the check runs the file's agent folds over the records it holds; once the
+file, the check runs the file's agent folds over the records it holds, first
+the background-task state an open viewer of the agent left; once the
 agent has been quiet for two minutes they write the file's checkpoint document,
 charged to the cycle's byte budget, and let its records leave memory. A
 session's own transcript restored from its assembly checkpoint is priced from
