@@ -410,14 +410,17 @@ following to every connected machine's kernel):
   below the version the session was on: from the pick until the session reports
   a model of the picked family (any model, for the account default), no change
   counts as a fallback, and the session landing on the exact version you picked
-  is that pick. Three cases can still read a pick as a fallback: a reply from a
+  is that pick. Four cases can still read a pick as a fallback: a reply from a
   turn the session started on its own (a background task's notice, a scheduled
   prompt) arriving after a Latest or default pick, or after any pick above the
   model the session was on; a Latest or default pick made while the session is
   reconnecting, or any pick above the model the session was on made after a
   kernel restart before the session reconnects, either of which can miss its CLI;
-  and a reply from before the pick that the session replays after a kernel
-  restart. When any of them follows a Latest or default pick that
+  a reply from before the pick that the session replays after a kernel
+  restart; and a report of the first of two picks made one right after the
+  other, arriving after the second has taken effect, or after a reply on the
+  model the session was on when that model is of the second pick's family.
+  When any of them follows a Latest or default pick that
   resolves below the model the session was on, and the switch is on, the session
   is then reconnected every ten minutes on the pick, and turns served on it never
   end that. One more case shows a pick as not answering: a pick above the model the
@@ -432,7 +435,11 @@ following to every connected machine's kernel):
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
   below its pick when you turn the switch on is taken up at once, unless a pick
-  of its own is still taking effect. A fallback that
+  of its own is still taking effect. It is also taken up, and the pick's first
+  reply then shows a `Model back on …` card, when a reply on the model the
+  session was on arrived after a pick above that model and no reply has been
+  served on the pick yet; when the two are of one family, this holds even
+  before the pick has taken effect. A fallback that
   happens again is logged once per attempt; its card follows the board's usual
   rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the model
   the session fell from or above it, or on the version you picked or above it, a second
