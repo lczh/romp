@@ -531,7 +531,8 @@ class DeadLaneMemo(unittest.TestCase):
         """The record release raising at v1, after the version is recorded, then the document check raising at a moved
         version: the first line carries the wait and the second does not, since the v2 check raised before v2 was
         recorded and the lane's next miss asks again (round five of the fold's review: a presence check on the
-        recorded version, or a memo keyed on the event and the path, passed the first order alone)."""
+        recorded version, or a memo keyed on the event and the path that deduplicated only the default outcome, passed
+        the first order alone)."""
         p = self._three_turns()
         human = bool(km._display_sdk_human(SID))
         tree = km._parse(p, SID, NOW)
