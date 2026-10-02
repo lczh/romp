@@ -32,13 +32,16 @@ const { chromium } = require('playwright');
       machinesLine: (bl.querySelector('.ru-tip-machines') || {}).textContent || '',
       lag: Array.from(bl.querySelectorAll('.ru-tip-lag')).map((e) => e.textContent),
       age: (bl.querySelector('.ru-tip-age') || {}).textContent || '',
+      nowin: (bl.querySelector('.ru-tip-nowin') || {}).textContent || '',
       dress: (() => { const m = bl.querySelector('.ru-tip-machine'); if (!m) return null; const cs = getComputedStyle(m);
         return { style: cs.fontStyle, weight: cs.fontWeight, size: cs.fontSize, color: cs.color }; })(),
     }));
     const cols = t.querySelectorAll('.ru-tip-col').length;
     const noReport = Array.from(t.querySelectorAll('#ru-tip > .ru-tip-machines, #ru-tip .ru-tip-cols ~ .ru-tip-machines')).map((e) => e.textContent);
     return { blocks, cols, noReport, hosts: t.querySelectorAll('.ru-tip-host').length, accts: t.querySelectorAll('.ru-tip-acct').length,
-             spend: !!t.querySelector('.ru-tip-fleetspend'), display: getComputedStyle(t).display, colsDisplay: (() => { const c = t.querySelector('.ru-tip-cols'); return c ? getComputedStyle(c).display : null; })() };
+             spend: !!t.querySelector('.ru-tip-fleetspend'), email: /@/.test(t.textContent),
+             acctLine: (() => { const r = Array.from(t.querySelectorAll('.ru-tip-fleetspend .ru-tip-row')).filter((x) => /^by account/.test(((x.querySelector('.ru-tip-k') || {}).textContent || '')))[0];
+               return r ? r.querySelector('.ru-tip-v').textContent : null; })(), display: getComputedStyle(t).display, colsDisplay: (() => { const c = t.querySelector('.ru-tip-cols'); return c ? getComputedStyle(c).display : null; })() };
   });
   if (shots) { const tipEl = await pg.$('#ru-tip'); if (tipEl) await tipEl.screenshot({ path: shots + '-hover.png' }); }
   console.log(JSON.stringify({ rail, tip, errs }));

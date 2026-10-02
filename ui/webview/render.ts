@@ -32,7 +32,8 @@ import { prependHead, mergeWindow, historyLabel, indexOfUuid, keyOf, olderReques
 import { SUBAGENT_OPEN_WAIT_MS, subagentStallText, subagentStalled } from "./subagent-wait";   // the viewer's wait bound and its stall (T355)
 import { placeholderKind, placeholderStands, fillPlaceholder } from "./pane-placeholder";   // the empty pane's placeholder, by kind (T355)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, applyTagEdit, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
-import { lensVisible, surfaceLens } from "./tag-lens";
+import { lensVisible, surfaceLens, lensAll } from "./tag-lens";
+import { openTagContextMenu, openTagRenamePrompt, planTagUnionEdit, tagRenameVerdict, deleteTagWords, TAG_NAME_MAX, type TagUnionEdit, type TagMenuAct } from "./tag-context-menu";   // the tag menu (the user 2026-10-01: right-click a tag to rename or delete it)
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip, TAG_BTN_BORDER_CSS } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { inInputEvent } from "./input-event";
@@ -59,13 +60,14 @@ import { onHostSocketUp } from "./skeleton-tabs";   // the relay's reopen forget
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { applyViewOrder, hearSharedOrder, readViewOrder, setViewOrderPublisher, writeViewOrder } from "./view-order";   // the read: a page with no federation manager arranges its own strip (applyTabOrder, frame-listener.ts paneArranges)
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
-         followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, revealedTabs, phoneStandIns, hearSharedFolds,
+         carrySectionToName, forgetSection, restoreSection,
+         followAdoption, reorderTagOrder, homeSectionOf, neighborOfFolded, revealedTabs, phoneStandIns, hearSharedFolds, flowGroups,
          setFoldsPublisher, TABGROUPS_KEY, TABGROUPS_SHARED_KEY, TABGROUPS_EVENT, type TabSection, type StripItem, type PaintItem } from "./tab-groups";
 import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow } from "./tab-snapshot";
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
-import { titleWithKey, keyHint, chordOf, effectiveChord, loadOverrides, saveOverride, KEYS_EVENT } from "./keybindings";
+import { titleWithKey, keyHint, chordOf, displayChord, editorKeepsKey, effectiveChord, loadOverrides, savedHolder, saveOverride, chatAnswers, CHAT_KEY_COMMANDS, KEYS_EVENT, type Bindings } from "./keybindings";
 import { hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, goneTabKeys, renamedTabKeys } from "./tab-keys";   // per-tab hot keys (2026-09-10): the set and its bookkeeping; the keycap on the tab is the T379 widget, read from the same store
 import { notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, type SessionFlag } from "./flag-pending";   // the per-session view flags' pending guard (review 2026-09-14)
 import { DEFAULT_CHORDS } from "./commands";
@@ -126,7 +128,7 @@ import { RELOAD_COMMENT_KEY, reloadCommentRecord, takeReloadComment, type Reload
 import { keepResidentEvents } from "./frame-merge";
 import { activeTabToReannounce } from "./relay-active";
 import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from "./dir-complete";
-import { mediaSrc, kernelUrl } from "./media";
+import { mediaSrc, kernelUrl, swirlOSrc } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
 import { apiErrorReason } from "./api-error-reason";
@@ -960,6 +962,7 @@ function postViews(v: SessionViews, edited: string[] = []) {
   // no toast follows: nothing the user did was refused, and the ack's blob carries the newer tag
   if (vscodeApi) vscodeApi.postMessage({ type: "setTimelineViews", views: v, writeId, edited });
   renderTabs();
+  return writeId;
 }
 // a LENS or ORDER write — the whole blob, built from the STORE's blob (sessionViews, the last one
 // adopted) plus the fields set, never from the pending copy: a copy carrying targeted edits still
@@ -982,7 +985,7 @@ function postTagOrder(order: readonly string[]) { postLens({ tagOrder: order.sli
 // under `edit`: the federation router sends the message to the local kernel, and no top-level field
 // of it can read as a session's address. Answered by tagEditAck. `newId` is a create's optimistic
 // row id (the `pending-…` placeholder the ack's blob replaces).
-function postTagEdit(nv: SessionViews, edit: TagEditOp, newId?: string) {
+function postTagEdit(nv: SessionViews, edit: TagEditOp, newId?: string): string {
   // no `tagEdit` capability announced (a kernel from before it): the PRE-2026-09-05 path — the whole
   // blob, reconciled by the legacy exact-echo clear and three-frame yield in captureViews, since no
   // ack will come. The copy already carries the gesture, so nothing else changes — except a create's
@@ -994,13 +997,17 @@ function postTagEdit(nv: SessionViews, edit: TagEditOp, newId?: string) {
     const edited = [edit.tid, edit.tid_from, edit.tid_to].filter((t): t is string => !!t);
     const row = newId ? viewTags(nv).find((t) => t.id === newId) : undefined;
     if (row) { if (/^pending-/.test(row.id)) row.id = "g" + Date.now().toString(36); edited.push(row.id); }
-    postViews(nv, edited);
-    return;
+    return postViews(nv, edited);
   }
   const writeId = holdViews(nv, { edit, newId });
   if (vscodeApi) vscodeApi.postMessage({ type: "tagEdit", writeId, edit });
   renderTabs();
+  return writeId;
 }
+// What a REFUSED write puts back besides the copy, by writeId: the tag menu's Rename… and Delete tag… change the folds
+// at the gesture (the strip paints the optimistic copy in the same breath), and a refusal hands them back
+// (onViewsAck). Dropped unrun when the outcome cannot be known (a reconnect: onKernelCaps).
+const refusalUndo = new Map<string, () => void>();
 // the LOCAL kernel's capabilities, sent on every `ready` — the page's own at load, and the shim's
 // re-send on a reconnected socket. A reconnect is the one event that can lose an ack (the socket died
 // between the write and its answer), so writes still in flight when this frame arrives are unknowable:
@@ -1030,6 +1037,7 @@ function onKernelCaps(m: { caps?: unknown; viewsSeq?: unknown }) {
   if (viewsWrites.length) {
     viewsWrites = []; pendingSessionViews = null;
     warnToast("The connection to romp was re-established; a tag edit made just before it may not have landed. Check the tag.");
+    refusalUndo.clear();   // the outcomes are unknowable: whatever the tag menu moved at its gestures stays as it is
     syncNewTagInput();                     // a dropped create no longer gates the flyout's input
   } else if (!adopted) return;             // nothing in flight, nothing adopted: the caps changed, nothing shown did
   if (activeId) assertPeekFor(activeId);   // a views arrival like any other: re-derive the active session's peek
@@ -1062,6 +1070,9 @@ function onUnknownOp(m: { op?: unknown; writeId?: unknown }) {
 function onViewsAck(m: ViewsAck) {
   const out = ackOutcome(viewsWrites, m);
   viewsWrites = out.inflight;
+  const undo = typeof m.writeId === "string" ? refusalUndo.get(m.writeId) : undefined;
+  if (typeof m.writeId === "string") refusalUndo.delete(m.writeId);
+  if (undo && m.ok === false) undo();
   takeViews(m.views);   // the ack's blob is the base unless a newer frame already overtook it (the seq decides)
   if (out.clearPending) pendingSessionViews = null;
   else if (out.rederive) pendingSessionViews = rederivePending(sessionViews, viewsWrites);
@@ -1142,8 +1153,8 @@ function tabInView(id: string): boolean { return (id === peekId || chatVisible(i
 // header. Keyboard cycling walks the VISIBLE order, and a folded tab is not visible. The active tab's
 // section folds like any other, so the active id can be folded away too: its header is then its
 // stand-in (focusActiveTab lands there, the arrows step from its position through neighborOfFolded over
-// the last plan's items, kept here for both), and the pane shows the section at a glance
-// (renderSnapshot) instead of a transcript whose tab is nowhere on the strip.
+// the last plan's items, kept here for both) and wears the selected tab's box, while the pane goes on
+// showing that session's transcript (a header's click only folds, 2026-10-02).
 let collapsedTabIds = new Set<string>();
 // the strip plan the last render painted (planStrip's items): what the stand-in rules and the section view
 // read between renders (which header holds a folded-away id, which tab is next to it, which section a
@@ -6393,7 +6404,8 @@ function releaseTabStrip(): void {
 // (aria-hidden — the caret glyph was read aloud before the name), the header's name is an aria-label
 // in words (name and count, plus the pip's phrase when it wears one), so nothing runs into it
 // unplanned; and the header holding the active tab is the same button as the rest, marked current: it
-// folds like any other, and folded it is the hidden tab's stand-in.
+// folds like any other, and folded it is the hidden tab's stand-in. A click folds or opens and does
+// nothing else (the user 2026-10-02): the section at a glance opens from the tag menu (showOverview).
 function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean, hidden: readonly string[]): HTMLElement {
   // the untagged trail (unlabeled by the user's ruling): a row of its own under the one-group-per-row
   // setting, else behind a divider
@@ -6402,35 +6414,31 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   const head = el("div", "tab-group-head" + (collapsed ? " collapsed" : "") + (holdsActive ? " holds-active" : ""));
   head.dataset.group = name;
   // Every header folds, the one holding the ACTIVE tab too: folded, that header is the hidden tab's stand-in
-  // (focusActiveTab lands on it, the arrows step from it) and the pane shows the section at a glance, so no
-  // keyboard focus lands on a hidden node. The click derives the next fold state from the one it RENDERED
-  // (data-folded), never from the store, and the delegate (toggle-group) also shows the section in the pane.
+  // (focusActiveTab lands on it, the arrows step from it), so no keyboard focus lands on a hidden node, and the
+  // transcript stays on screen. The click derives the next fold state from the one it RENDERED (data-folded), never
+  // from the store, and the delegate (toggle-group) folds or opens and nothing else (the user 2026-10-02).
   head.dataset.act = "toggle-group";
   head.dataset.folded = collapsed ? "1" : "0";
-  // `shown`: the pane is showing this section, whatever the fold: the one bit the header's mark, its words
-  // (headWords) and its own way back are derived from
-  const shown = snapView === name;
-  if (shown) head.classList.add("snap-shown");
+  // the pane is showing this section's overview (the tag menu's Show overview, the palette's Show tag overview),
+  // whatever the fold: the header wears the mark
+  if (snapView === name) head.classList.add("snap-shown");
+  // THE STAND-IN's box (2026-10-02): the active tab folded away under THIS header (planStrip marked it and hid the
+  // tab), while the pane shows that session's transcript, not an overview or a file tab. A click that folds the
+  // group keeps the transcript, so the header is the one place on the strip that says where the session on
+  // screen lives, and it wears the selected tab's box as the shown row does (styles.css .tab-group-head.stand-in)
+  if (!snapView && !fileTabOpen && collapsed && holdsActive && !!activeId && hidden.includes(activeId)) head.classList.add("stand-in");
   // the tag's colour as the row's --chip-bg (the tab sets the same variable from its identity colour): the shown
-  // row's box wears the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
+  // row's box and the stand-in's wear the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
   if (sec.color) head.style.setProperty("--chip-bg", sec.color);
-  // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
-  // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
-  // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
-  // the title says which click this is. Escape does the same from anywhere.
-  const back = shown && !collapsed && holdsActive;
-  if (back) head.dataset.act = "show-transcript";
   const total = sec.ids.length;
-  const words = headWords(name, total, hidden.length, collapsed, holdsActive, back, shown);
+  const words = headWords(name, total, hidden.length, collapsed, holdsActive);
   head.title = words.title;
   let spoken = words.label;
   // a label the keyboard can fold: Enter or Space go through the same click → delegate path as the pointer
   head.setAttribute("role", "button");
-  // not a disclosure while its press puts the transcript back (`back`): "expanded" would promise a fold that
-  // press never does, so the state is left off and the label (headWords) names the action instead
-  if (!back) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  // the header holding the tab being read says so to assistive tech as well as by its mark (the chip
-  // accent-underlined): the tab itself may be folded out of the tree
+  head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // the header holding the tab being read says so to assistive tech (and, as the folded stand-in, by its box):
+  // the tab itself may be folded out of the tree
   if (holdsActive) head.setAttribute("aria-current", "true");
   head.tabIndex = 0;
   head.addEventListener("keydown", (e) => {
@@ -6441,9 +6449,15 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
     // the window's arrows do the same when focus is elsewhere). Enter drops back into the message box while
     // the transcript shows and the box takes input (the mirror of the box's Escape, which lands here); with
     // the box disabled (the section view up, a closed session) Enter presses the header as Space does. Space
-    // always presses: fold or open with the section in the pane (toggle-group), or the transcript back
-    // (show-transcript). Any other header: the arrows bubble to the window's handler (they step the ACTIVE
-    // tab, focus staying put) and Enter presses, as on any button.
+    // always presses: fold or open (toggle-group). Any other header: the arrows bubble to the window's handler
+    // (they step the ACTIVE tab, focus staying put) and Enter presses, as on any button.
+    // the menu key (or Shift+F10) opens the tag menu under the header, as the Sessions pane's rows do (2026-10-01)
+    if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+      e.preventDefault(); e.stopPropagation();
+      const r = head.getBoundingClientRect();
+      showTagMenu(r.left + 12, r.bottom, name, collapsed, true);
+      return;
+    }
     const aid = activeId;
     const standIn = holdsActive && !!aid && collapsedTabIds.has(aid) && sec.ids.includes(aid);
     if (aid && standIn && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
@@ -6519,16 +6533,17 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   return head;
 }
 /** A ROW BREAK (T264, the user 2026-09-08): a zero-height item spanning the strip, so whatever follows
- *  opens a new line — every tag group starts on its own row (chip at the left edge, its tabs after
- *  it, wrapping as they need) instead of the groups running on as one long concatenation; the one
- *  header that gets no break is a folded one packed onto the folded header before it (planStrip's
- *  `packed`, the user 2026-09-16: folded neighbours share a row, since each is only its header). The
- *  untagged trail's break also wears .tab-group-sep, the boundary sectionHeadOf reads (the trail
- *  stays unlabeled by the user's ruling — its own line, with no chip, says "in no tag"). Breaks are
- *  layout only: no drop, no hover, not a row for paintTabRowLines, and in the tab drag's virtual
- *  layout the box AFTER a break starts a row (`br`) so the simulation wraps where the strip does; a
- *  packed header, with no break ahead of it, is a plain box in its row there as here.
- *  Breaks are emitted only under the `stripGroupRows` setting (the gear's "One tag group per row in
+ *  opens a new line — a tag group's header at the left edge, its tabs after it, wrapping as they need,
+ *  instead of the groups running on as one long concatenation. The paint puts one ahead of every header
+ *  but the strip's first, and flowStripRows then keeps it only where the group does not fit the rest of
+ *  the row: a group that fits stays on the row behind a gutter (makeGroupGutter) or, a bare folded header
+ *  after another, with nothing between (tab-groups.ts flowGroups, the user 2026-10-01). The untagged
+ *  trail's break also wears .tab-group-sep, the boundary sectionHeadOf reads (the trail stays unlabeled
+ *  by the user's ruling — its own line, with no chip, says "in no tag"), and the flow never touches it.
+ *  Breaks are layout only: no drop, no hover, not a row for paintTabRowLines, and in the tab drag's
+ *  virtual layout the box AFTER a break starts a row (`br`) so the simulation wraps where the strip
+ *  does; a header with no break ahead of it is a plain box in its row there as here.
+ *  Breaks are emitted only under the `stripGroupRows` setting (the gear's "Keep tag groups together in
  *  the tab strip", on by default): with it off the groups follow one another and wrap as they need,
  *  and the trail stands behind makeTrailSep's divider. */
 function makeRowBreak(untagged: boolean): HTMLElement {
@@ -6536,7 +6551,17 @@ function makeRowBreak(untagged: boolean): HTMLElement {
   brk.setAttribute("aria-hidden", "true");
   return brk;
 }
-/** The untagged trail's DIVIDER with the one-group-per-row setting off: a visible 13px item, a 1px line
+/** A GUTTER between two tag groups that share a row (the user 2026-10-01, flowStripRows): a short divider
+ *  ahead of a group's header whenever that group or the one before it shows tabs, so the tabs after a
+ *  header read as its own up to the gutter, wherever on the row the group sits. Layout only, like the
+ *  break it stands in for: no drop, no hover, nothing to read aloud, not a row for paintTabRowLines; a
+ *  real box (its width is padding-free, no margin) that the tab drag's virtual layout measures. */
+function makeGroupGutter(): HTMLElement {
+  const g = el("div", "tab-group-gutter");
+  g.setAttribute("aria-hidden", "true");
+  return g;
+}
+/** The untagged trail's DIVIDER with the keep-groups-together setting off: a visible 13px item, a 1px line
  *  between 6px gutters, so the last group's tabs and the loose ones never read as one run. It wears
  *  .tab-group-sep (the boundary sectionHeadOf reads, and the drop's group edge) and takes its width
  *  in the layout (padding, not margin), so the tab drag's virtual layout measures it. */
@@ -6834,6 +6859,46 @@ function syncNoSessionsPlaceholder(visibleCount: number, totalCount = 0, heldCou
   content.appendChild(ph);
 }
 
+// THE GROUPS FLOW ONTO ROWS AS UNITS (the user 2026-10-01: two folded groups and one open group of three
+// tabs took three rows, because an open group always opened a row of its own). The paint puts a row break
+// ahead of every header but the first (renderTabs); this pass measures each group's unit (its header and
+// the tabs it shows) and asks tab-groups.ts flowGroups where each one goes: a group that fits the rest of
+// the current row stays on it, behind a gutter when either side shows tabs (makeGroupGutter) or flush
+// when both are bare folded headers; one that does not keeps its break and opens the next row whole; one
+// wider than a row wraps inside itself. The untagged trail keeps the row of its own it always had (the
+// drop that clears a session's tags lands there), so the walk stops at its boundary. Reconciles the
+// element ahead of each header in place, touching only those whose verdict changed, so a second run over
+// the same widths changes nothing (the observer below re-runs it on every resize of the strip, including
+// the ones this pass causes). Runs on the paint, on the strip's resize and when a web font lands (the
+// widths change with it); never while a tab is being dragged: the drag's virtual layout reads the breaks
+// live, and moving them in answer to the drag's own insert is the slot flap dragslot.ts exists to prevent.
+// An unmeasurable strip (a hidden pane, the phone's hidden strip) keeps the breaks as painted, one group
+// per row, until the observer sees it get a width.
+function flowStripRows(bar: HTMLElement): void {
+  if (!settings.stripGroupRows || draggedId) return;
+  const units: { lead: HTMLElement | null; head: HTMLElement; items: HTMLElement[] }[] = [];
+  let lead: HTMLElement | null = null;
+  for (const k of Array.from(bar.children) as HTMLElement[]) {
+    const c = k.classList;
+    if (c.contains("tab-group-sep")) break;   // the untagged trail: a row of its own, out of the flow
+    if (c.contains("tab-group-break") || c.contains("tab-group-gutter")) { lead = k; continue; }
+    if (c.contains("tab-group-head") && k.dataset.group) { units.push({ lead, head: k, items: [k] }); lead = null; continue; }
+    if (c.contains("tab") && !c.contains("tab-add") && units.length) units[units.length - 1].items.push(k);
+  }
+  if (units.length < 2) return;
+  const cs = getComputedStyle(bar);
+  const rowW = bar.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  if (!(rowW > 0)) return;
+  const joins = flowGroups(units.map((u) => u.items.map((n) => n.getBoundingClientRect().width)), rowW,
+                           parseFloat(cs.columnGap) || 0, parseFloat(cs.getPropertyValue("--strip-gutter")) || 0);
+  for (let i = 1; i < units.length; i++) {   // the first header opens the strip: nothing stands ahead of it
+    const u = units[i], want = joins[i];
+    const have = !u.lead ? "flush" : u.lead.classList.contains("tab-group-gutter") ? "gutter" : "row";
+    if (want === have) continue;
+    u.lead?.remove();
+    if (want !== "flush") bar.insertBefore(want === "row" ? makeRowBreak(false) : makeGroupGutter(), u.head);
+  }
+}
 // A hairline under EVERY row of tabs (T134, the user 2026-08-27, overturning the survey's
 // one-outer-line design — their call, flagged when it shipped: with three rows and a short third,
 // row 2's tabs "look like they're sitting there floating"). CSS cannot select flex-wrap rows, so
@@ -6866,8 +6931,10 @@ let tabRowObserver: ResizeObserver | null = null;
 let stripFit: (() => void) | null = null;   // the last strip paint's fit of the chip run (fitStripChips), re-run on the strip's resize (T413 round two)
 function ensureTabRowObserver(bar: HTMLElement): void {
   if (tabRowObserver) return;
-  tabRowObserver = new ResizeObserver(() => { stripFit?.(); paintTabRowLines(bar); });   // the fit first: its verdict can change the rows the lines follow
+  tabRowObserver = new ResizeObserver(() => { flowStripRows(bar); stripFit?.(); paintTabRowLines(bar); });   // the flow, then the fit: each verdict can change the rows the lines follow
   tabRowObserver.observe(bar);
+  // a web font landing re-measures every tab without resizing the strip whenever the rows stay as they were
+  document.fonts?.addEventListener?.("loadingdone", () => { flowStripRows(bar); stripFit?.(); paintTabRowLines(bar); });
 }
 
 // Coalesce the strip repaints that inbound frames ask for: a pusher cycle lands one tail per changed tab
@@ -6959,11 +7026,11 @@ function renderTabs() {
   // header per tag in tagOrder holding a visible tab, each tab under EVERY tag it carries (T264b, the
   // user 2026-09-08: tags are equivalent — a session under N tags has a copy in N groups), then that
   // section's tabs, and the untagged trail (the sessions in no tag) on its own line, or behind a
-  // divider with the one-group-per-row setting off (tab-groups.ts owns the rule). A folded section
+  // divider with the keep-groups-together setting off (tab-groups.ts owns the rule). A folded section
   // renders its header alone, with the count and a pip when a member is working or blocked, so the
   // gist survives the fold (progressive disclosure). The ACTIVE tab's section folds like any other: its
-  // header is then the hidden tab's stand-in (focus, the arrows) and the pane shows the section at a
-  // glance (renderSnapshot); the keyboard walk (visibleOrder()) drops the folded ids so ←/→
+  // header is then the hidden tab's stand-in (focus, the arrows, the selected box) and the pane keeps
+  // the transcript; the keyboard walk (visibleOrder()) drops the folded ids so ←/→
   // skip them. On the phone layout (phoneLayout — the kernel page's own media rule) the plan sections
   // the same way, so the phone's session list, scraped from the strip's children in order, reads as the
   // desktop strip does (the user 2026-09-16), and since 2026-09-23 it folds the same way too, from the
@@ -6998,7 +7065,7 @@ function renderTabs() {
   // and leaveSnapshot changes it with no fold change), and per
   // visible id either a placeholder's meta or the session's name, color, state and its tab class, faded,
   // context and its tint, viewer flag, host-down mark and note; plus the context-gauge setting, the
-  // one-group-per-row setting (the row breaks and the trail's boundary read it), the theme
+  // keep-groups-together setting (the row breaks and the trail's boundary read it), the theme
   // and the colormap (the gauge's tone and fallback read the theme — pickTone, ctxFallbackColor — and the
   // compacting sweep's gradient the colormap, so a settings change repaints through this signature), the +
   // tab's key hint, and the tag lens and unions the filter chips render. Equal string, same DOM: the guards
@@ -7077,13 +7144,12 @@ function renderTabs() {
   };
   for (const item of files.items) {
     if ("head" in item) {
-      // every group on its own line (T264), under the one-group-per-row setting: a row break ahead of
-      // each header except the strip's first item, which already opens the first row, and except a
-      // folded header PACKED onto the folded header before it (planStrip: a run of bare folded headers
-      // shares one row, the user 2026-09-16); the untagged trail's header IS a break. With the setting
-      // off, heads and tabs follow one another and wrap as they need, and the trail stands behind its
-      // divider (makeGroupHead).
-      if (settings.stripGroupRows && item.head.name !== null && bar.childElementCount && !item.packed) bar.appendChild(makeRowBreak(false));
+      // every group opens a line as painted (T264), under the keep-groups-together setting: a row break
+      // ahead of each header except the strip's first item, which already opens the first row; the
+      // untagged trail's header IS a break. flowStripRows, right after this loop, lets each group that
+      // fits the rest of a row stay on it (the user 2026-10-01). With the setting off, heads and tabs
+      // follow one another and wrap as they need, and the trail stands behind its divider (makeGroupHead).
+      if (settings.stripGroupRows && item.head.name !== null && bar.childElementCount) bar.appendChild(makeRowBreak(false));
       bar.appendChild(makeGroupHead(item.head, item.folded, item.active, item.hidden));
       copyGroup = item.head.name;
       continue;
@@ -7176,6 +7242,7 @@ function renderTabs() {
     markAway(tab, item);
     bar.appendChild(tab);
   }
+  flowStripRows(bar);   // the groups onto rows, from their widths (before the fit below, which reads the right end's row)
   const add = el("div", "tab tab-add");
   add.textContent = "+";
   // tooltip carries the CURRENT binding (the user 2026-08-10: shortcuts discoverable by hover). True on
@@ -7253,7 +7320,7 @@ function renderTabs() {
     // state syncs in the same call, host or none
     const feed = (limit: number) => syncTagFilter(tagBtn, plan.sectioned ? null : tagChipsHost, surfaceLens(v, "chat"), unions, (l) => {   // sectioned: the headings carry the tags, no host; else the chips
       postLens({ actives: Object.assign({}, (v || {}).actives, { chat: l }) });
-    }, "inline", { limit, tagsOnly: true });
+    }, "inline", { limit, tagsOnly: true, onContext: (name, ev) => showTagMenu(ev.clientX, ev.clientY, name, null) });
     stripFit = () => fitStripChips(end, tagChipsHost, feed);
   }
   stripFit();
@@ -7286,7 +7353,7 @@ function renderTabs() {
     syncTagFilter(mslot.children[0] as HTMLElement, phoneLayout() ? (mslot.children[1] as HTMLElement) : null,   // the chips only where the mount shows (the T405 read): the button's state syncs either way
       surfaceLens(mv2, "chat"), viewTagUnion(mv2), (l) => {
         postLens({ actives: Object.assign({}, (mv2 || {}).actives, { chat: l }) });
-      });
+      }, "inline", { onContext: (name, ev) => showTagMenu(ev.clientX, ev.clientY, name, null) });
   }
   paintTabRowLines(bar);
   ensureTabRowObserver(bar);
@@ -7410,10 +7477,12 @@ function showSelectionMenu(e: MouseEvent) {
   // Comment first, Quote second (the user 2026-08-23): Comment is the primary act — a side thread
   // about the passage — and Quote is the lighter one. Comment only when the selection sits in a real
   // transcript turn on a real session: commentAim's gate, the one the key asks too. Its sub-line names
-  // the key while one is bound (keyHint reads the live overrides), the tab menu bell row's way.
+  // the key while one is bound and no other command's saved binding takes it here (commentKeyHint reads
+  // the live overrides and asks the key handler's own stand-down), the tab menu bell row's way; a chord
+  // with no Ctrl, Alt or Meta it names on every page, though only the shell's dispatcher runs one.
   const aim = commentAim();
   if (typeof aim === "object") {
-    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), keyHint("chat.commentSelection") || undefined);
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), commentKeyHint() || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7462,18 +7531,64 @@ function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
     && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
+// The chat's own commands whose capture handler (the nav trail's or the jump moves', below) answers chord `ch`: those
+// handlers run on the chat document with or without the shell, and before the shell's dispatcher would hear the key, but
+// each reads a chord only with the modifiers it checks first (keybindings' CHAT_KEY_COMMANDS and chatAnswers: the nav
+// trail's needs Ctrl or Meta, the jump moves' Ctrl, Alt or Meta).
+function chatKeyCommands(ch: string): string[] {
+  return CHAT_KEY_COMMANDS.filter((id) => chatAnswers(id, ch));
+}
+// The command that runs on the comment key's chord `ch` on this page in place of the comment command, or null (review,
+// 2026-09-30). A binding the reader SAVED for another command outranks the comment key's default (keybindings' chordMap).
+// One of the chat's own commands saved there, when its handler below reads that chord, takes it on any page, so the
+// comment key steps aside and does not run beside it (where the chat's two handlers both run, keybindings' yieldsTo
+// lists as its store (3)). A Navigate back saved on an Alt chord does not: the nav trail's handler never reads a chord
+// without Ctrl or Meta, so the comment key keeps it (review, 2026-10-01).
+// Inside the shell the rest is the shell dispatcher's pick, asked of the shell (__rompChordPick), which holds the command
+// list: a key saved under an id no command has runs nothing there, so the comment command keeps it. On a page with no
+// shell nothing else runs a saved binding, so the comment key keeps its chord.
+function commentKeyTakenBy(ch: string, ov: Bindings, mac: boolean): string | null {
+  const own = savedHolder(ch, chatKeyCommands(ch), ov, mac);
+  if (own) return own;
+  if (!inRompShell()) return null;
+  let pick: unknown = null;
+  try { const f = (window.parent as any).__rompChordPick; if (typeof f === "function") pick = f(ch); } catch (e) { /* the shell's script has not run */ }
+  return typeof pick === "string" && pick !== "chat.commentSelection" ? pick : null;
+}
+// The key the right-click menu's Comment names: the comment key's chord, or none while another command runs on it here
+// (commentKeyTakenBy, the key handler's own stand-down), so the menu never names a key that does something else. A chord
+// with no Ctrl, Alt or Meta (the dialog records Shift+F2, say) it names as any other, though the key handler below reads
+// no such chord and only the shell's dispatcher runs one, from outside a text field: on a page with no shell the menu then
+// names a key that runs nothing (comment-key.test.ts discloses it).
+function commentKeyHint(): string {
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  const ov = loadOverrides();
+  const ch = effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], ov, mac);
+  return ch && !commentKeyTakenBy(ch, ov, mac) ? displayChord(ch, mac) : "";
+}
 // The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+/). With focus in
 // the chat this capture handler answers, reading the overrides store per press, so a rebind in the shortcuts dialog moves
 // it too (the chat.navBack pattern); with focus in the shell the command's run posts commentSelection here. It fires from
 // the message box too, as the jump cluster's keys do, and the selection it reads is the transcript's: taken in the
 // capture phase with its default prevented, the chord's "/" never reaches the box, so no "/" is typed and the slash menu
-// (which opens on the box's input) stays shut.
+// (which opens on the box's input) stays shut. Besides a chord with no Ctrl, Alt or Meta (which only the shell's
+// dispatcher runs), a held key and an input method's composition, it also leaves its chord alone in two cases the review
+// of #39 found: in the file viewer's code editor, whose own toggle comment is the same Mod+/ (keybindings'
+// editorKeepsKey; the shell's dispatcher on this document stands down there too), and when another command's SAVED
+// binding reads as the same chord and runs on this page instead (commentKeyTakenBy): one of the chat's own commands
+// whose handler below reads that chord and takes the key, or inside the shell the command the shell's dispatcher on
+// this document picks. A page with no shell (a standalone /chat, the VS Code view) has no dispatcher, so there a
+// binding saved for any other command leaves the key the comment key, as the menu's hint says, unless it is one of the
+// chat's own whose handler reads the chord.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a command
   const ch = chordOf(e);
   if (!ch || !ch.includes("+")) return;
   const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
-  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], loadOverrides(), mac)) return;
+  const ov = loadOverrides();
+  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], ov, mac)) return;
+  if (editorKeepsKey("chat.commentSelection", ch, e.target, mac)) return;   // the code editor comments its own line
+  if (commentKeyTakenBy(ch, ov, mac)) return;   // a binding saved for another command runs here instead
   e.preventDefault(); e.stopPropagation();
   commentOnSelection();
 }, true);
@@ -7746,6 +7861,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     bodyEl.appendChild(sb);
     tagsItem.appendChild(bodyEl);
     const caret = el("span", "ctx-caret"); caret.textContent = "▸"; tagsItem.appendChild(caret);
+    // a right-click on a tag's row opens the tag menu for that tag (2026-10-01), in place of this one
+    const tagRowMenu = (row: HTMLElement, g: TagUnion) => {
+      if (g.pending) return;
+      row.addEventListener("contextmenu", (e2) => { e2.preventDefault(); e2.stopPropagation(); showTagMenu(e2.clientX, e2.clientY, g.name, null); });
+    };
     // what one union edit did to the copy: the TARGETED ops to post for the local store, and whether
     // a remote entry's mirror changed (presentation only — the remote's own next push is the truth)
     type UnionEdit = { ops: TagEditOp[]; mirrored: boolean };
@@ -7827,6 +7947,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           chip.classList.add("ctx-tag-chip");
           lb.appendChild(chip); bodyE.appendChild(lb);
           row.appendChild(bodyE);
+          tagRowMenu(row, g);
           if (g.pending) {
             // a create still in flight: the row shows, and takes no gesture until the ack names the
             // tag (a ✕ here posted the placeholder id and was refused as a tag that does not exist)
@@ -7861,6 +7982,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
           const lb = el("span", "ctx-item-label");
           // the tag inside the sentence is the chip (T321): no swatch-and-name pair anywhere a tag shows
           const named = () => { const c = tagChip(g.name, g.color || null, { inheritSize: true }); c.classList.add("ctx-tag-chip"); return c; };
+          tagRowMenu(row, g);
           if (home) {
             lb.append("Move to ", named()); bodyE.appendChild(lb);
             row.appendChild(bodyE);
@@ -8261,6 +8383,139 @@ function startTabRename(id: string, copy?: string) {   // `copy`: which copy of 
   for (const ev of ["click", "mousedown", "dblclick", "contextmenu"]) input.addEventListener(ev, (e) => e.stopPropagation());
   input.focus();
   input.select();
+}
+
+// ── THE TAG MENU (the user 2026-10-01, who wanted to right-click a tag to rename it, delete it and so on) ──
+// Opened from a strip group header (the #tabs delegate; the phone picker's heading forwards its long press to the hidden
+// header, kernel.py _CHAT_MOBILE_JS), from a chip of the tab menu's Tags flyout, or from a filter chip of the flat strip.
+// The rows, the delete's words and the plan of what a gesture posts are tag-context-menu.ts; this page says what each row
+// does. Every pick resolves the tag by NAME when it runs, never a node captured at open time: the menu outlives the pushes
+// that rebuild the header it came from (the click-safety rule). `folded`: the header's rendered fold, null off a header.
+function showTagMenu(x: number, y: number, name: string, folded: boolean | null, viaKeyboard = false): void {
+  dismissTabMenu();
+  const g = unionNamed(name);
+  if (!g) return;   // gone, or a create still in flight: no id to address yet (the flyout's rule)
+  const lens = surfaceLens(effViews(), "chat");
+  const only = !lensAll(lens) && !lens.none && (lens.tags || []).length === 1 && (lens.tags || [])[0] === name;
+  // the overview's row on a group header alone (its section is on the strip, where renderSnapshot finds it), never on the
+  // phone (no overview there): Close overview while this tag's shows, Show overview otherwise
+  const overview = folded === null || phoneLayout() ? null : snapView === name;
+  ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true, overview }, g.color || "", paletteColors,
+    { pick: (act) => tagMenuPick(act, name, folded !== null), recolor: (c) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { color: c }); } },
+    { viaKeyboard, onClose: onTabMenuClosed });
+}
+function unionNamed(name: string): TagUnion | undefined {
+  const g = viewTagUnion(effViews()).find((u) => u.name === name);
+  return g && !g.pending ? g : undefined;
+}
+// `fromHead`: the menu came from a group header, so its Rename… edits the name in that header; from a chip it asks in the
+// prompt, where the click was (the header may be rows away, or folded out of sight)
+function tagMenuPick(act: TagMenuAct, name: string, fromHead: boolean): void {
+  const g = unionNamed(name);
+  if (!g) { warnToast(`The tag “${name}” is gone: it was renamed or deleted elsewhere.`); return; }
+  if (act === "rename") {
+    if (!(fromHead && startTagRename(name)))
+      openTagRenamePrompt(name, (raw) => tagRenameVerdict(viewTagUnion(effViews()), name, raw),
+        (to) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { rename: to }); });
+  } else if (act === "fold" || act === "open") {
+    writeTabGroups(setSectionCollapsed(tabGroups(), name, act === "fold"));   // the header's fold, as its click does
+  } else if (act === "overview") {
+    showOverview(name);   // the section at a glance (a header's click only folds, 2026-10-02)
+  } else if (act === "closeOverview") {
+    leaveSnapshot();
+  } else if (act === "only") {
+    postLens({ actives: Object.assign({}, (effViews() || {}).actives, { chat: { tags: [name] } }) });
+  } else if (act === "configure") {
+    vscodeApi?.postMessage({ type: "openTagsDialog" });
+  } else if (act === "delete") {
+    const w = deleteTagWords(name, g.members.length);
+    showConfirm(w.title, w.detail, [{ label: w.confirm, value: "delete", danger: true }, { label: "Cancel", value: "" }], (v) => {
+      if (v !== "delete") return;
+      const u = unionNamed(name);
+      if (u) commitTagUnionEdit(u, { delete: true });
+    });
+  }
+}
+// One gesture on a tag, for every store holding a tag of its name (planTagUnionEdit): the editTag wire to each remote home,
+// the targeted op for the local tag on the one optimistic copy (postTagEdit). The copy paints under the new name in this
+// same breath, so the folds move at the gesture: a renamed group stays folded with its pins shown through
+// (carrySectionToName; the follow retires the old name's entries once the kernel's blob lands, followTagRenames), a
+// deleted one's fold and pins go with it (forgetSection); a refusal puts them back (refusalUndo). The section the pane is
+// showing stays shown under its new name. A kernel without `tagNameCarry` keeps the order and the filters only if the
+// page writes them: one lens write after the edit, the carried copy's (plan.lens).
+function commitTagUnionEdit(g: TagUnion, edit: TagUnionEdit): void {
+  const plan = planTagUnionEdit(effViews(), g, edit);
+  const sec = sectionRef(g);
+  const before = tabGroups();
+  let undo: (() => void) | null = null;
+  if ("rename" in edit) {
+    writeTabGroups(carrySectionToName(before, sec, edit.rename));
+    if (snapView === g.name) snapView = edit.rename;
+    const to = { name: edit.rename, localId: g.localId };
+    undo = () => writeTabGroups(restoreSection(tabGroups(), before, to));
+  } else if ("delete" in edit) {
+    writeTabGroups(forgetSection(before, sec));
+    undo = () => writeTabGroups(restoreSection(tabGroups(), before, sec));
+  }
+  for (const r of plan.remote) vscodeApi?.postMessage({ type: "editTag", edit: r });
+  let last: string | undefined;
+  for (const op of plan.ops) last = postTagEdit(plan.nv, op);
+  if (!plan.ops.length) { pendingSessionViews = plan.nv; renderTabs(); }   // only remote tags bear the name: the mirror shows until their homes' push
+  if (plan.lens && kernelCaps.has("tagEdit") && !kernelCaps.has("tagNameCarry")) postLens(plan.lens);
+  if (last && undo) refusalUndo.set(last, undo);
+}
+// THE INLINE RENAME on a group header: the chip becomes the name field in place, the tab rename's shape (startTabRename:
+// the strip's renders wait while it is open, so a push never destroys the field mid-typing). Enter or a click away commits,
+// Escape cancels. A name another tag already has keeps the field open with the reason on Enter, and cancels with a toast on
+// a click away. False when no header of the tag is on screen (the phone's hidden strip, a flat strip): the prompt then.
+function startTagRename(name: string): boolean {
+  if (phoneLayout()) return false;
+  const bar = document.getElementById("tabs");
+  const head = bar ? Array.from(bar.children).find((h): h is HTMLElement => h instanceof HTMLElement && h.classList.contains("tab-group-head") && h.dataset.group === name) : undefined;
+  const chip = head ? head.querySelector<HTMLElement>(".tab-group-chip") : null;
+  if (!head || !chip || !head.getClientRects().length) return false;
+  if (head.querySelector(".tag-rename")) return true;
+  const input = document.createElement("input");
+  input.className = "tab-rename tag-rename";
+  input.value = name;
+  input.maxLength = TAG_NAME_MAX;
+  input.spellcheck = false;
+  input.size = Math.max(name.length, 4);
+  input.setAttribute("aria-label", `New name for the tag ${name}`);
+  renameActive = true;
+  head.draggable = false;
+  chip.style.display = "none";
+  chip.after(input);
+  let finished = false;
+  const done = (commit: boolean, keyed: boolean) => {
+    if (finished) return;
+    const v = commit ? tagRenameVerdict(viewTagUnion(effViews()), name, input.value) : { cancel: true as const };
+    if ("error" in v && keyed) { input.classList.add("bad"); input.title = v.error; return; }   // fix the name, or Escape
+    finished = true;
+    input.remove();
+    chip.style.display = "";
+    head.draggable = !settings.tabsLocked;
+    renameActive = false;
+    if ("error" in v) warnToast(`Not renamed: ${v.error}.`);
+    if ("name" in v) { const g = unionNamed(name); if (g) commitTagUnionEdit(g, { rename: v.name }); }
+    if (renderPendingAfterRename) { renderPendingAfterRename = false; renderTabs(); }
+    if (keyed) {   // Enter or Escape: the focus goes back to the header, under the name it has now
+      const now = "name" in v ? v.name : name;
+      Array.from(document.querySelectorAll<HTMLElement>("#tabs .tab-group-head")).find((h) => h.dataset.group === now)?.focus();
+    }
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();   // the header's own keys (Enter and Space fold) are not the field's
+    if (e.key === "Enter") { e.preventDefault(); done(true, true); }
+    else if (e.key === "Escape") { e.preventDefault(); done(false, true); }
+  });
+  input.addEventListener("input", () => { input.classList.remove("bad"); input.removeAttribute("title"); });
+  input.addEventListener("blur", () => done(true, false));
+  // a press inside the field is the field's: never the header's fold, its drag or its menu
+  for (const ev of ["click", "mousedown", "pointerdown", "dblclick", "contextmenu", "dragstart"]) input.addEventListener(ev, (e) => e.stopPropagation());
+  input.focus();
+  input.select();
+  return true;
 }
 
 // Keyboard nav on a focused tab: ←/→ step prev/next; ↑/↓ jump to the nearest tab
@@ -9631,7 +9886,7 @@ function rompLoaderInner(caption: string, opts?: { wordmark?: boolean; cls?: str
   const inner = el("div", "rl-in" + (opts?.cls ? " " + opts.cls : ""));   // cls: a size modifier for an inline placement (rl-sm), scaling the font-size — never a new keyframe
   const word = el("div", "rl-word");
   const swirl = el("img", "rl-o") as HTMLImageElement;
-  swirl.src = mediaSrc("romp-swirl-o.svg"); swirl.alt = ""; swirl.onerror = () => swirl.remove();
+  swirl.src = swirlOSrc(); swirl.alt = ""; swirl.onerror = () => swirl.remove();
   if (opts?.wordmark === false) {
     word.appendChild(swirl);
   } else {
@@ -13681,7 +13936,7 @@ function silentActivate(id: string): void {
   renderTabs();                // mark the shown tab active in this column's strip
   // deliberately NO unfoldSectionOf (unlike setActive, which unfolds a collapsed tab it activates): silentActivate is
   // a SILENT non-gesture adoption, so it leaves any fold to the user. A folded active tab is a designed state (its
-  // section header stands in and showActive renders the section snapshot, tabInView admits a folded tab), and the
+  // section header stands in while showActive renders the transcript, tabInView admits a folded tab), and the
   // persist + relay re-arm carry the tab to the kernel regardless of the strip fold (round three, low d)
   showActive();                // reveal the transcript on its own, and re-arm the relay via notifyActive; NO focus
   //                              hop (no focusActiveTab), no nav/anchor/landing (round two, medium 1)
@@ -14000,7 +14255,7 @@ function fileStripPaint(paint: readonly PaintItem[], sectioned: boolean): FileSt
   if (trail.length) {
     const last = [...paint].reverse().find((it) => "head" in it);
     if (sectioned && !(last && "head" in last && last.head.name === null))
-      items.push({ head: { name: null, localId: null, color: "", ids: [] }, folded: false, active: false, hidden: [], packed: false });
+      items.push({ head: { name: null, localId: null, color: "", ids: [] }, folded: false, active: false, hidden: [] });
     for (const t of trail) items.push({ id: t.id, file: true });
   }
   const labels = fileTabLabels(tabs);
@@ -14089,8 +14344,9 @@ function dropFileTab(dragged: HTMLElement, id: string): boolean {
 (window as any).__rompFileTabList = () => fileTabsNow().map((t) => ({ id: t.id, path: t.path, sid: t.sid, host: fileHost(t.sid) }));   // the shell's session switcher lists the open files too (palette-main.ts)
 
 // A SECTION AT A GLANCE (tab-snapshot.ts owns the model). `snapView` is the section the pane is showing:
-// page state like the peek, never stored. A header click sets it (the #tabs delegate's toggle-group), any
-// session pick clears it (setActive), Escape and the header's second click leave it (leaveSnapshot). The
+// page state like the peek, never stored. The tag menu's Show overview and the palette's Show tag overview set it
+// (showOverview; a header's click only folds since 2026-10-02), any session pick clears it (setActive), Escape and
+// the tag menu's Close overview leave it (leaveSnapshot). The
 // host is ONE stable node under #content, made once with its delegate installed once (the click-safe rule:
 // the rows are rebuilt from every push that changes one), and `snapModel` is the last model painted:
 // snapshotModel hands it back unchanged when no row differs, and then only the "ago" texts are refreshed
@@ -14166,8 +14422,7 @@ function snapshotHoldsFocus(): boolean {
   return !!host && !!document.activeElement && host.contains(document.activeElement);
 }
 /** Back to the active session's transcript without picking a session. Two gestures land here: Escape while
- *  the view shows (below), and a click on the header whose section the pane shows when the section is open
- *  and holds the tab being read (show-transcript: the click that put the section in the pane, undone).
+ *  the view shows (below), and the tag menu's Close overview on the header whose section the pane shows.
  *  Nothing about "active" moves: renderTabs drops the header's snap-shown mark, showActive puts the
  *  transcript back and re-enables the composer. A row that held focus is hidden with the host, so focus goes
  *  to the active tab (snapshotHoldsFocus, read before the hide). */
@@ -14179,6 +14434,22 @@ function leaveSnapshot(): void {
   showActive();
   if (held) focusActiveTab();
 }
+/** The view's way IN: a section's overview in the transcript's place. Two gestures land here, the tag menu's Show
+ *  overview on a group header and the palette's Show tag overview (the user 2026-10-02: a header's click only folds
+ *  now, and the overview moved where it is asked for by name). Never on the phone, whose picker is a list over the
+ *  pane rather than a strip beside it. A file tab up is left first (its discard ask; a no keeps the file and shows
+ *  nothing). renderTabs puts the mark on the header (the strip's signature reads snapView) and showActive paints the
+ *  view; a name the strip no longer shows puts the transcript back there (renderSnapshot: the absence is the event). */
+function showOverview(name: string): void {
+  if (!name || phoneLayout() || !leaveFileTab()) return;
+  snapView = name;
+  renderTabs();
+  showActive();
+}
+// the tag groups this column's strip shows, for the palette's Show tag overview (palette-main.ts): each group's tag, colour and
+// member count in strip order; null on the phone layout, which has no overview
+(window as any).__rompTagSections = () => phoneLayout() ? null
+  : lastStripItems.flatMap((it) => ("head" in it && it.head.name !== null ? [{ name: it.head.name, color: it.head.color || "", count: it.head.ids.length }] : []));
 // ESCAPE LEAVES THE VIEW, and yields to every layer that owns its own Escape: two phases on the window
 // (tab-snapshot-view.ts installSnapshotEscape). Armed at capture, while this page's layers are still on the
 // page to be seen: the menus (the tab menu's closer, registered before this one, runs first and marks the
@@ -21011,6 +21282,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   // the shell's palette / shell-focus chords: the chat owns the nav trail, the shell just asks
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
+  // the shell's palette: "Show tag overview" picked a tag group of this column's strip (palette-main.ts), the tag menu's path
+  if (m.romp === "showOverview") { if (typeof m.tag === "string") showOverview(m.tag); return; }
   // the shell's palette / shell-focus chords for the jump cluster's moves (palette-main.ts chat.prevMine and the rest)
   if (m.romp === "chatJump") { if ((MOVES as readonly string[]).includes(m.move)) runJump(m.move as Move); return; }
   // the shell's palette / shell-focus key for "Comment on selection" (palette-main.ts chat.commentSelection); a palette run
@@ -23387,31 +23660,34 @@ setupSettings();
 (() => {
   const tabs = document.getElementById("tabs");
   if (!tabs) return;
+  // THE TAG MENU on a group header (the user 2026-10-01): delegated on the stable strip like the header's click, so a push
+  // that rebuilds the header under the pointer cannot lose it; the menu opens on the header's RENDERED fold. A tab's own
+  // right-click stops at the tab (showTabMenu), and the inline rename's field keeps its own.
+  tabs.addEventListener("contextmenu", (e) => {
+    const t = e.target as Element | null;
+    const h = t?.closest?.(".tab-group-head[data-group]") as HTMLElement | null;
+    if (!h || !tabs.contains(h) || t?.closest?.(".tag-rename")) return;
+    e.preventDefault(); e.stopPropagation();
+    showTagMenu(e.clientX, e.clientY, h.dataset.group || "", h.dataset.folded === "1");
+  });
   delegate(tabs, {
     // Clicking a tab leaves focus ON the tab (renderTabs rebuilds the tab during setActive, which dropped
     // focus to the body — so Enter afterward did nothing). Now focus the (rebuilt) active tab, so the model
     // is consistent: tab focused → Enter drops into the message box; Escape there returns to the tabs.
     select: (el) => { const id = el.dataset.id; if (id) { selectStripTab(id); focusActiveTab(); } },   // a session, or a file tab (2026-09-30)
-    // a section header (tab groups): fold or open that group — the new state is the opposite of the
-    // one the header RENDERED (data-folded), never a toggle of the stored bit (a header can render a
-    // state the store does not hold). The write notifies (TABGROUPS_EVENT) and the listener re-renders:
-    // one render path for a local toggle and a sibling pane's alike. The same click shows the section at
-    // a glance in the transcript's place (snapView; showActive paints it), open or folded: the user
-    // looks at the group they just folded or opened, and a session pick puts a transcript back. On the
-    // PHONE the picker's heading folds through this same handler (kernel.py _CHAT_MOBILE_JS clicks the
-    // hidden header, 2026-09-23) and the tap folds and nothing else: the picker is a list over the pane,
-    // not a strip beside it, and the transcript under it stays where the reader left it.
+    // a section header (tab groups): fold or open that group, and NOTHING ELSE (the user 2026-10-02, who found the
+    // overview a click also opened confusing and wanted to stay where they were): the pane keeps what it shows, the
+    // active session's transcript included when its tab folds away under this header (the header then stands in for
+    // it), and the section at a glance opens from the tag menu and the palette instead (showOverview). The new state
+    // is the opposite of the one the header RENDERED (data-folded), never a toggle of the stored bit (a header can
+    // render a state the store does not hold). The write notifies (TABGROUPS_EVENT) and the listener re-renders:
+    // one render path for a local toggle and a sibling pane's alike. The PHONE picker's heading folds through this
+    // same handler (kernel.py _CHAT_MOBILE_JS clicks the hidden header, 2026-09-23), which never opened a view there.
     "toggle-group": (el) => {
       const name = el.dataset.group;
       if (!name) return;
-      const phone = phoneLayout();
-      if (!phone && leaveFileTab()) snapView = name;   // the view takes the pane from a file tab too (its discard ask first; a no folds and shows nothing)
       writeTabGroups(setSectionCollapsed(tabGroups(), name, el.dataset.folded !== "1"));
-      if (!phone) showActive();
     },
-    // the header whose section the pane shows, open and holding the tab being read (makeGroupHead): a
-    // second click puts the transcript back
-    "show-transcript": () => leaveSnapshot(),
     close: (el) => {
       const id = el.dataset.id;
       if (id && isFileTabId(id)) { closeFileTab(id); return; }   // a file tab (2026-09-30): nothing to end, the tab goes
@@ -23501,19 +23777,22 @@ setupSettings();
     // the virtual layout: the OTHER tabs in current DOM order, widths from the dragstart snapshot —
     // boundaries that cannot move in response to the insert they cause (dragslot.ts owns the math)
     // …plus the section headers (tab groups): they take width in the real layout, so they join the
-    // virtual one as boxes — the simulated wrap then matches the strip's. One group per line (T264,
-    // under the one-group-per-row setting): a header preceded by a row break OPENS a row in the
-    // simulation (`br`), as does the untagged trail's break itself, a zero-width row opener, so the
-    // slot past a group's last tab (the end of its row) and the slot before the trail's first tab
-    // (the head of the next row) stay two distinct slots, as they were when the trail stood behind a
-    // visible separator. A folded header PACKED onto the folded header before it (planStrip, the user
-    // 2026-09-16) has no break ahead of it and so opens no row here either: a plain box on the shared
-    // row, and the slot before it is the slot between the two headers. With the setting off the
-    // trail's divider is a real 13px box and no break exists, so the boxes below measure it as they
-    // did before T264. The hit-test places the tab and nothing more; what the release does to the
+    // virtual one as boxes — the simulated wrap then matches the strip's. Groups that do not fit a row
+    // open one (T264's break, kept by flowStripRows, which holds every verdict still for the drag): a
+    // header preceded by a row break OPENS a row in the simulation (`br`), as does the untagged trail's
+    // break itself, a zero-width row opener, so the slot past a group's last tab (the end of its row)
+    // and the slot before the trail's first tab (the head of the next row) stay two distinct slots, as
+    // they were when the trail stood behind a visible separator. A header that SHARES a row (the user
+    // 2026-09-16 for folded neighbours, 2026-10-01 for open groups) has no break ahead of it and so
+    // opens no row here either: a plain box on the shared row, behind the gutter's own box when one
+    // stands there (a real width, so the simulated row holds what the real one holds), and the slot
+    // before it is the end of the group before. With the setting off the trail's divider is a real
+    // 13px box and no break exists, so the boxes below measure it as they did before T264.
+    // The hit-test places the tab and nothing more; what the release does to the
     // session's tags is read from the slot it lands in (tabDropFor, below).
-    const others = Array.from(tabs.querySelectorAll<HTMLElement>(".tab[data-id], .tab-group-head, .tab-group-sep")).filter((t) => t !== dragged);
+    const others = Array.from(tabs.querySelectorAll<HTMLElement>(".tab[data-id], .tab-group-head, .tab-group-sep, .tab-group-gutter")).filter((t) => t !== dragged);
     const isBreak = (n: Element | null) => !!n && n.classList.contains("tab-group-break");
+    const isLead = (n: Element | null) => isBreak(n) || (!!n && n.classList.contains("tab-group-gutter"));   // what stands ahead of a header: its row break, or its gutter
     const before = (t: HTMLElement) => { let p = t.previousElementSibling; while (p && p === dragged) p = p.previousElementSibling; return p; };
     // the row openers: a break itself, and a HEADER a break precedes (the break before a named group is not in
     // `others`, so its header carries the opening). The trail's first tab follows its break but is not one: the break
@@ -23527,9 +23806,9 @@ setupSettings();
     const idx = dragSlotIndex(boxes, dragGeom.containerW, dragGeom.gapX, dragGeom.rowH,
                               e.clientX - br.left, e.clientY - br.top);
     let ref = idx < others.length ? others[idx] : dragged.parentElement === tabs ? tabs.querySelector(".tab-add") : null;
-    // the slot before a header is the END OF THE PREVIOUS ROW: insert ahead of the header's break, never
-    // between the break and the chip (a tab there would sit left of the chip on the group's own line)
-    if (ref && ref.classList.contains("tab-group-head") && isBreak(before(ref as HTMLElement))) ref = before(ref as HTMLElement);
+    // the slot before a header is the END OF THE GROUP BEFORE: insert ahead of the header's break or gutter,
+    // never between it and the chip (a tab there would sit left of the chip, outside every group's run)
+    if (ref && ref.classList.contains("tab-group-head") && isLead(before(ref as HTMLElement))) ref = before(ref as HTMLElement);
     if (ref !== dragged && dragged.nextElementSibling !== ref)
       flipTabs(() => tabs.insertBefore(dragged, ref));
     // …and the CUE for what a release here would do to this session's TAGS (drag into / out of a group,
@@ -23584,7 +23863,7 @@ setupSettings();
     // used to anchor on the group above's last tab — a tab whose place in the global order says
     // nothing about the group dragged in — so the drop landed elsewhere and the session's other copy
     // jumped. The walk stops at a header, a row break or the trail's divider (.tab-group-sep, its
-    // boundary with the one-group-per-row setting off); only a group holding no other tab falls back
+    // boundary with the keep-groups-together setting off); only a group holding no other tab falls back
     // to the nearest tab across groups (the flat strip has no edges, so it walks as it always did).
     // Never the dragged SESSION's own copy: reorderTo against itself would move nothing.
     const own = (n: Element | null) => !!n && (n as HTMLElement).dataset?.id === draggedId;

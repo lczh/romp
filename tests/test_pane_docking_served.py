@@ -354,8 +354,11 @@ async function drag(page, x0, y0, waypoints, { release = true, escape = false } 
     await page.mouse.move(own.x + own.w / 2, own.y + own.h * 0.85, { steps: 10 }); await frame(page);
     const outline = await outlineRect(page);
     await page.mouse.up(); await frame(page); await frame(page);
-    await page.waitForFunction(() => document.querySelectorAll(".pd-tabzone").length === 0, null, { timeout: 10000 }).catch(() => {});
-    return { tab: pt, started, own, before, outline, after: await leavesOf(page), tabStill: await tabIn("f-chat-2", cfg.api) };
+    // the release ends the gesture: the hit areas go on the drop (the refused plan runs in that same handler) or on the page's dragend.
+    // Recorded and asserted (2026-09-29): a gesture still open at the read had not applied its drop yet, so "nothing changed" held on it
+    const zonesCleared = await page.waitForFunction(() => document.querySelectorAll(".pd-tabzone").length === 0, null, { timeout: 10000 })
+      .then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
+    return { tab: pt, started, own, before, outline, zonesCleared, after: await leavesOf(page), tabStill: await tabIn("f-chat-2", cfg.api) };
   })();
   o.tabToStrip = await (async () => {
     const pt = await tabCentre("f-chat-2", cfg.api); if (!pt) return { tab: null };
@@ -785,6 +788,7 @@ class ServedPaneDocking(unittest.TestCase):
         ol = t["outline"]
         self.assertTrue(ol and ol["on"], "the outline shows over the pane: %r" % ol)
         self.assertTrue(ol["refused"], "and previews the refusal (a lone column on its own edge), as the pane drag's outline does over a strip: %r" % ol)
+        self.assertTrue(t["zonesCleared"], "the release ended the gesture (its hit areas went) before the tree was read: %r" % {k: t.get(k) for k in ("zonesCleared", "after")})
         self.assertEqual(t["after"], t["before"], "the release changes nothing: %r" % t["after"])
         self.assertTrue(t["tabStill"], "the tab stays in its column")
 

@@ -92,7 +92,7 @@ test("every existing control keeps its id and sits in exactly one pane, by the a
   assert.equal((GEAR.match(/fileLinkPane/g) || []).length, 1, "the dead key is named once, where load() drops it");
   assert.doesNotMatch(GEAR, /id=rs-activeonly\b|id=rs-collapsegaps\b|>Sessions pane</, "the Sessions-pane rows left settings: the pane carries them (T404)");
   assert.doesNotMatch(GEAR, /data-pane=appearance\b|\['appearance', 'Appearance'\]/, "no Appearance pane or pill remains");
-  // Chat: Display (the transcript rows, the text scheme, the strip's one-group-per-row), Comments, Thinking, Tab widgets
+  // Chat: Display (the transcript rows, the text scheme, the strip's keep-groups-together), Comments, Thinking, Tab widgets
   const C = ps.chat;
   assert.ok(C.indexOf(">Display<") < C.indexOf("id=rs-compact") && C.indexOf("id=rs-dense") < C.indexOf("id=rs-chatscheme") && C.indexOf("id=rs-chatscheme") < C.indexOf("id=rs-striprows")
             && C.indexOf("id=rs-striprows") < C.indexOf(">Comments<") && C.indexOf(">Comments<") < C.indexOf("id=rs-cmtmodel") && C.indexOf("id=rs-cmtfast") < C.indexOf(">Thinking<")

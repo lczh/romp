@@ -159,8 +159,19 @@ out.withSub = await readFly();
 await page.mouse.move(5, 690);
 await page.waitForTimeout(450);
 out.afterLeave = await page.evaluate(() => ({ fly: !!document.querySelector(".ctx-sub-billing"), sub: !!document.querySelector(".ctx-sub-default"), menu: !!document.querySelector(".ctx-menu") }));
-// hover again, then Escape closes the menu (and the flyout with it)
-row = await billingRow(); if (row) { bb = await row.boundingBox(); await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2); await page.waitForSelector(".ctx-sub-billing", { timeout: 1500 }).catch(() => {}); }
+// hover again, then Escape closes the menu (and the flyout with it). The re-open is recorded like the first (2026-09-29), with the
+// same click fallback, and the flyout is read open just before the key: a missed re-hover left it shut, and a flyout Escape never
+// had to close read as one it closed
+row = await billingRow();
+out.reopened = { opened: false, row: !!row };
+if (row) {
+  bb = await row.boundingBox(); const t1 = Date.now();
+  await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+  const again = await page.waitForSelector(".ctx-sub-billing", { timeout: 1500 }).then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
+  out.reopened = { opened: again, ms: Date.now() - t1, row: true };
+  if (!again) { await row.click(); await page.waitForSelector(".ctx-sub-billing", { timeout: 5000 }).catch(() => {}); }
+}
+out.beforeEscape = await page.evaluate(() => ({ fly: !!document.querySelector(".ctx-sub-billing"), menu: !!document.querySelector(".ctx-menu") }));
 await page.keyboard.press("Escape"); await page.waitForTimeout(150);
 out.afterEscape = await page.evaluate(() => ({ fly: !!document.querySelector(".ctx-sub-billing"), menu: !!document.querySelector(".ctx-menu") }));
 // the screenshots: the open flyout with its submenu, dark and light
@@ -369,6 +380,8 @@ class ServedBillingFlyout(unittest.TestCase):
     def test_leaving_closes_the_flyout_and_its_submenu_and_keeps_the_menu_and_escape_closes_all(self):
         r = self._run()
         self.assertEqual(r["afterLeave"], {"fly": False, "sub": False, "menu": True}, "leaving the row and the flyout closes the flyout and its submenu, the menu stays: " + json.dumps(r["afterLeave"]))
+        self.assertTrue(r["reopened"]["opened"], "a second hover over the row re-opened the flyout, no click: " + json.dumps(r["reopened"]))
+        self.assertEqual(r["beforeEscape"], {"fly": True, "menu": True}, "the flyout was open when Escape was pressed: " + json.dumps(r["beforeEscape"]))
         self.assertEqual(r["afterEscape"], {"fly": False, "menu": False}, "Escape closes the menu and the flyout with it: " + json.dumps(r["afterEscape"]))
 
     def test_the_flyout_lists_the_picks_then_a_rule_and_one_set_default_billing_entry_with_no_sub_line(self):

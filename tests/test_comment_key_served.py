@@ -4,7 +4,7 @@ wanted a keyboard shortcut for adding a comment, then wanted it two keys rather 
 was right-click, Comment).
 
 A hermetic kernel serves the shell page over a synthetic chat (the notes-api demo world, session web: one prompt, one
-reply). Asserted in the browser, in the shell's first chat column:
+reply). Asserted in the browser:
   a passage selected in the reply and Ctrl+/ pressed opens the comment box in its create mode, on that turn, quoting
   exactly that passage, with its corner just under the selection (the pointer a right-click would have supplied), and
   the box takes the caret;
@@ -17,13 +17,54 @@ reply). Asserted in the browser, in the shell's first chat column:
   the command palette lists "Comment on selection" with its key, and a run from the palette comments on the passage
   that was selected when the palette opened, even though the chat's selection was gone by the time it ran;
   the right-click menu's Comment and the shortcuts dialog name the key, Ctrl+/;
-  on a Mac, ⌘/ opens it, and so does a German Mac's ⌘⇧7; the menu, the palette row and the dialog say ⌘/; and a ⌘⌥M the
-  reader binds in place of it, which reaches the page as key "µ" (code KeyM) because Option composes a character, still
-  opens it.
-Red before the change: Ctrl+/ and ⌘/ do nothing, and the hints name Ctrl+Alt+M.
-With COMMENT_KEY_SHOTS=<dir> the driver writes the box the key opened, the menu with its key, the palette row and the
-toast. Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs,
-invented prose, host TESTHOST)."""
+  on a Mac, ⌘/ opens it; ⌘⇧/, which a Mac's browser reports as key "/" with Shift (with ⌘ held the key reads as if
+  Shift were up; read in w3c-keyname's source and the engines', not run on a Mac, and the Mac here is a
+  navigator.platform override on Linux with the keydown built by script), does not, and neither does a German Mac's
+  ⌘⇧7, which arrives as key "7" for the same reason; the menu,
+  the palette row and the dialog say ⌘/; and a ⌘⌥M the reader binds in place of it, which reaches the page as key "µ"
+  (code KeyM) because Option composes a character, still opens it;
+  with file editing on and a .py file open in the file viewer's editor, in the Files pane (with a passage selected in
+  the chat), in the chat's own viewer, on a Mac in the chat's viewer, and in a file tab the chat viewer's pop-out opened,
+  Ctrl+/ (⌘/) is the editor's toggle comment: the line under the cursor is commented, no toast or comment box appears,
+  and the focus stays in the editor; in the editor's search field (Ctrl+F) Ctrl+/ does nothing: the field keeps its
+  text, its selection and the focus, the line is unchanged, and no toast or comment box appears;
+  with Open the log saved on Ctrl+Shift+/ (the dialog's spelling of a German Ctrl+Shift+7 before #39), Ctrl+/ opens the
+  log, and the menu's Comment and the palette row name no key while the dialog's row says it yields;
+  with Open the log saved on Ctrl+/ and Token usage on Ctrl+Shift+/, which now share Ctrl+/, the dialog marks the comment
+  row and the log's row as yielding to Token usage, the command the key runs, and Ctrl+/ recorded for Remote kernels
+  names Token usage and, on Enter, unbinds both saved keys, so Ctrl+/ then opens Remote kernels;
+  with Open the log saved on Ctrl+M, Navigate back's default, the recorder asked for Ctrl+M on Remote kernels names
+  Open the log and Navigate back, and its Enter unbinds the log's key and Navigate back's default, so Ctrl+M pressed
+  from the transcript opens Remote kernels; the same with Ctrl+Alt+↑ and Go to your previous message; and that key
+  recorded again for Open the log, which holds it, names the chat command alone, and its Enter unbinds that command's
+  default and keeps the log's key, so the key pressed from the transcript opens the log;
+  with the comment key rebound to Alt+/ and Navigate back saved on Alt+Shift+/ (both read as Alt+/ now), Alt+/ comments
+  and the menu names it, in the shell and on the chat page on its own, since the nav handler reads no chord without
+  Ctrl or Meta;
+  with a key saved on Ctrl+/ under an id no command has (a command an upgrade removed), Ctrl+/ still comments and the
+  menu names it;
+  with Open the log saved on Shift+/ (the dialog's spelling of a German Shift+7 before #39), a "/" typed from the
+  transcript on a US keyboard reaches the message box and the log stays shut, and a German Shift+7 there (a keydown built
+  by script) opens the log;
+  on the chat page opened on its own (no shell around it, so no dispatcher), the same saved Ctrl+Shift+/ leaves Ctrl+/
+  the comment key, and the menu names it; with Navigate back saved on Ctrl+Shift+/ instead, the chat's own nav handler
+  takes Ctrl+/ there: no comment box, no notice, and the menu names no key.
+Red before #39: Ctrl+/ and ⌘/ do not comment, the hints name Ctrl+Alt+M, and the saved-binding, recorder and dialog
+cases fail as well, except the Shift+/ and Alt+/ cases and the key recorded again for the command that holds it, which
+keep behaviour from before #39.
+Red with #39 merged, before the fixes the review of #39 asked for: in the file viewer's editor the line stays as it
+was and the chat's notice takes the key, in the editor's search field too, or from the Files pane a comment box does,
+with the focus moved to the chat; ⌘⇧/ opens a comment box; with Open the log saved on Ctrl+Shift+/, Ctrl+/ opens a
+comment box instead, the menu and the palette name Ctrl+/, and the dialog marks nothing; the two saved keys are still
+two chords, so Ctrl+/ opens the log, and the recorder names Comment on selection, whose default yields there, and its
+Enter unbinds that default and not the saved keys; with Open the log saved on Ctrl+M or Ctrl+Alt+↑, the recorder names
+only Navigate back or Go to your previous message, and its Enter leaves the log's key in place; with Navigate back
+saved on Ctrl+Shift+/, the chat page on its own opens a comment box and its menu names Ctrl+/; and a German Shift+7
+does not open a log saved on Shift+/.
+With COMMENT_KEY_SHOTS=<dir> the driver writes the box the key opened, the menu with its key, the palette row, the toast,
+each editor after the key and its search field, and the chat page on its own. LAB_ENGINE=firefox or webkit runs the
+driver in that Playwright engine (CI runs Chromium). Skips LOUDLY without the extension deps or a Playwright browser.
+SYNTHETIC fixtures only (placeholder UUIDs, invented prose, host TESTHOST)."""
 import json
 import os
 import re
@@ -56,6 +97,8 @@ PASSAGE = "streams rows through a bounded buffer"
 SECOND = "The retry cap stays at two minutes"
 THIRD = "the header is written once"
 NONE_TOAST = "Select some text in the chat to comment on it."
+ENGINE = os.environ.get("LAB_ENGINE") or "chromium"   # the Playwright engine the driver launches (CI: Chromium)
+CODE_LINE = "def export_rows(buf):"   # line one of the file the editor cases open, and the line they comment
 
 
 def _free_port():
@@ -74,10 +117,10 @@ DRIVER = r"""
 import { createRequire } from "node:module";
 import fs from "node:fs";
 const require = createRequire(process.env.EXT_PKG);
-const { chromium } = require("playwright");
+const engines = require("playwright");
 const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
-try { browser = await chromium.launch(); }
+try { browser = await engines[cfg.engine].launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const out = {};
 const done = async (why) => { if (why) out.died = why; fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n"); await browser.close(); process.exit(0); };
@@ -122,7 +165,13 @@ const pop = (fr) => fr.evaluate(() => {
            caret: !!(a && a.closest && a.closest("#cmt-pop .cmt-input")) };
 });
 const waitPop = (fr) => fr.waitForFunction(() => !!document.getElementById("cmt-pop"), null, { timeout: 8000 }).then(() => true, () => false);
-const closePop = async (fr) => { await fr.click("#cmt-pop .cmt-x").catch(() => {}); await fr.waitForFunction(() => !document.getElementById("cmt-pop"), null, { timeout: 5000 }).catch(() => {}); };
+// the comment box closed by its own close button; with no box open it returns at once, since a click on a missing button
+// waits out Playwright's 30 s action timeout (the negative cases call it with no box)
+const closePop = async (fr) => {
+  if (!(await fr.evaluate(() => !!document.getElementById("cmt-pop")))) return;
+  await fr.click("#cmt-pop .cmt-x", { timeout: 5000 }).catch(() => {});
+  await fr.waitForFunction(() => !document.getElementById("cmt-pop"), null, { timeout: 5000 }).catch(() => {});
+};
 const toasts = (fr) => fr.evaluate(() => Array.from(document.querySelectorAll(".warn-toast-msg")).map((t) => t.textContent));
 const clearToasts = (fr) => fr.evaluate(() => { for (const t of Array.from(document.querySelectorAll(".warn-toast"))) t.remove(); });
 // the page rect of an element inside the chat column, for the page's own screenshot clip
@@ -135,6 +184,49 @@ const pageRect = (p, sel, pad) => p.evaluate(([sel, pad]) => {
 }, [sel, pad]);
 // the chat document takes the focus: a click on the prompt's own text (it collapses any selection; each case selects after)
 const focusChat = async (fr) => { await fr.click("#content .turn-user", { position: { x: 12, y: 8 } }).catch(async () => { await fr.evaluate(() => window.focus()); }); };
+
+// The file viewer's code editor: open the lab's .py file in `vf`, the frame `home` names (the chat's own, or the Files
+// pane's), with `tab` pop it out into a file tab of the chat strip, switch to edit mode (file editing is on in the lab's
+// state root), put the cursor on line one, press `key`, and read what happened: the line (commented by the editor, or
+// not), the chat's toasts and comment box, whether the focus is still in the editor, and which pane frame the shell's
+// focus is on. The viewer over the pane is #romp-fileview; a file tab's view sits in #filetab-host.
+const lineOne = (vf, root) => vf.evaluate((root) => { const l = document.querySelector(root + " .cm-content .cm-line"); return l ? l.textContent : null; }, root);
+const editorPress = async (p, cf, vf, key, home, label, tab = false) => {
+  const r = {};
+  // the shell posts the open, as its relay of a file link does; a pane still booting has no listener yet, so ask again
+  for (let i = 0; i < 12 && !r.viewer; i++) {
+    await p.evaluate(([id, path, sid]) => document.getElementById(id).contentWindow.postMessage({ romp: "viewFile", path, sid }, "*"), [home, cfg.file, cfg.sid]);
+    r.viewer = await vf.waitForSelector("#romp-fileview", { timeout: 1500 }).then(() => true, () => false);
+  }
+  if (tab) {
+    // the viewer's pop-out: the viewer closes and the file opens as a tab, shown in the pane in the transcript's place
+    r.popOut = await vf.waitForSelector("#romp-fileview .fileview-popout", { timeout: 20000 }).then(() => true, () => false);
+    if (!r.popOut) return r;
+    await vf.click("#romp-fileview .fileview-popout");
+    r.tab = await vf.waitForFunction(() => !document.getElementById("romp-fileview") && document.body.classList.contains("filetab-mode") && !!document.querySelector("#filetab-host .fileview-inline"), null, { timeout: 20000 }).then(() => true, () => false);
+    if (!r.tab) return r;
+  }
+  const root = tab ? "#filetab-host" : "#romp-fileview";
+  r.edit = await vf.waitForFunction((root) => { const b = document.querySelector(root + ' button[aria-label="Edit"]'); return !!b && !b.hidden; }, root, { timeout: 20000 }).then(() => true, () => false);
+  if (!r.edit) return r;
+  await vf.click(root + ' button[aria-label="Edit"]');
+  r.editor = await vf.waitForSelector(root + " .cm-editor .cm-line", { timeout: 20000 }).then(() => true, () => false);
+  if (!r.editor) return r;
+  r.before = await lineOne(vf, root);
+  await clearToasts(cf);
+  await vf.click(root + " .cm-content .cm-line >> nth=0", { position: { x: 30, y: 5 } });
+  r.focusBefore = await vf.evaluate(() => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest(".cm-editor")));
+  await p.keyboard.press(key);
+  await vf.waitForFunction(([root, was]) => { const l = document.querySelector(root + " .cm-content .cm-line"); return !!l && l.textContent !== was; }, [root, r.before], { timeout: 3000 }).catch(() => {});
+  await p.waitForTimeout(600);   // a toast or a box the key opened has had the time to draw
+  r.after = await lineOne(vf, root);
+  r.toasts = await toasts(cf);
+  r.pop = await pop(cf);
+  r.focusAfter = await vf.evaluate(() => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest(".cm-editor")));
+  r.shellFocus = await p.evaluate(() => document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : null);
+  await shot(p, label);
+  return r;
+};
 
 const ctx = await browser.newContext({ viewport: { width: 1300, height: 850 } });
 const page = await ctx.newPage();
@@ -156,6 +248,50 @@ const dialogChip = async (p) => {
   const chip = await p.evaluate(() => { const r = document.querySelector('#rkeys-back .rkeys-row[data-cmd="chat.commentSelection"]'); return r ? ((r.querySelector(".rkeys-chip") || {}).textContent || "") : null; });
   await p.keyboard.press("Escape");
   return chip;
+};
+// the bindings store, set from the shell's document and announced the way the dialog's own save announces it (the shell's
+// dispatcher rebuilds its chord map on that event; the chat reads the store on every press)
+const setKeys = (p, keys) => p.evaluate((keys) => {
+  if (keys) localStorage.setItem("romp:keys", JSON.stringify(keys)); else localStorage.removeItem("romp:keys");
+  window.dispatchEvent(new Event("romp:keys"));
+}, keys);
+// which of the shell's panels a key opened: the log, Token usage, Remote kernels; and closing them again
+const panels = (p) => p.evaluate(() => {
+  const shown = (id) => { const b = document.getElementById(id); return !!b && !b.hidden; };
+  const u = document.getElementById("ru-back");
+  return { log: shown("rerr-back"), usage: !!u && u.classList.contains("on"), net: shown("rnet-back") };
+});
+const closePanels = (p) => p.evaluate(() => { for (const f of ["__rompCloseErrs", "__rompUsageClose", "__rompCloseNet"]) { try { if (typeof window[f] === "function") window[f](); } catch (e) {} } });
+// the shell's own document takes the focus (a key pressed then is the shell dispatcher's alone)
+const focusShell = (p) => p.evaluate(() => { const a = document.activeElement; if (a && a !== document.body && a.blur) a.blur(); document.body.focus(); });
+// the dialog's rows for `ids`: what each shows after its title (the chip, and a yield when there is one), then closed
+const dialogRows = async (p, ids) => {
+  await p.evaluate(() => window.__rompKeysOpen());
+  await p.waitForSelector('#rkeys-back .rkeys-row[data-cmd="chat.commentSelection"]', { timeout: 8000 }).catch(() => {});
+  const rows = await p.evaluate((ids) => Object.fromEntries(ids.map((id) => {
+    const r = document.querySelector(`#rkeys-back .rkeys-row[data-cmd="${id}"]`);
+    return [id, r ? Array.from(r.children).filter((c) => c.tagName !== "BUTTON").slice(1).map((c) => c.textContent).join(" | ") : null];
+  })), ids);
+  await p.keyboard.press("Escape");
+  await p.waitForFunction(() => { const b = document.getElementById("rkeys-back"); return !b || b.hidden; }, null, { timeout: 5000 }).catch(() => {});
+  return rows;
+};
+// the recorder: Change on `id`'s row, `key` pressed (the row then names the command holding it), Enter, and the store after
+const record = async (p, id, key) => {
+  await p.evaluate(() => window.__rompKeysOpen());
+  await p.waitForSelector(`#rkeys-back .rkeys-row[data-cmd="${id}"]`, { timeout: 8000 });
+  await p.evaluate((id) => Array.from(document.querySelector(`#rkeys-back .rkeys-row[data-cmd="${id}"]`).querySelectorAll("button")).find((b) => b.textContent === "Change").click(), id);
+  await p.keyboard.press(key);
+  const prompt = await p.evaluate((id) => { const h = document.querySelector(`#rkeys-back .rkeys-row[data-cmd="${id}"] .rkeys-conflict`); return h ? h.textContent : null; }, id);
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(300);
+  const stored = await p.evaluate(() => JSON.parse(localStorage.getItem("romp:keys") || "{}"));
+  for (let i = 0; i < 2; i++) {
+    if (await p.evaluate(() => { const b = document.getElementById("rkeys-back"); return !b || b.hidden; })) break;
+    await p.keyboard.press("Escape");
+    await p.waitForTimeout(150);
+  }
+  return { prompt, stored };
 };
 const menuItems = (fr, text) => fr.evaluate((text) => {
   const turn = Array.from(document.querySelectorAll("#content .turn")).find((n) => (n.textContent || "").includes(text));
@@ -262,7 +398,126 @@ if (mr) await shot(page, "menu-key-hint-zoom", mr);
 await page.keyboard.press("Escape");
 out.dialogChip = await dialogChip(page);
 
-// 6. a Mac: navigator.platform says so. ⌘/ pressed for real, then a German Mac's ⌘⇧7 (key "/", code Digit7)
+// 11. Open the log saved on Ctrl+Shift+/, the dialog's spelling of a German Ctrl+Shift+7 before #39: it reads as
+// Ctrl+/, so Ctrl+/ opens the log, and the comment command's hints stop naming a key that runs something else
+await setKeys(page, { "log.open": "Ctrl+Shift+/" });
+await focusChat(fr);
+out.savedSel = await select(fr, cfg.passage);
+await page.keyboard.press("Control+/");
+await page.waitForFunction(() => { const b = document.getElementById("rerr-back"); return !!b && !b.hidden; }, null, { timeout: 5000 }).catch(() => {});
+await page.waitForTimeout(300);
+out.savedPanels = await panels(page);
+out.savedPop = await pop(fr);
+out.savedToasts = await toasts(fr);
+await closePop(fr);
+await closePanels(page);
+await focusChat(fr);
+await select(fr, cfg.passage);
+out.savedMenu = await menuItems(fr, cfg.passage);
+await page.keyboard.press("Escape");
+out.savedPalRow = await paletteRow(page, "Control+P");
+await page.keyboard.press("Escape");
+out.savedDialog = await dialogRows(page, ["chat.commentSelection", "log.open"]);
+
+// 12. Open the log saved on Ctrl+/ and Token usage on Ctrl+Shift+/: both read as Ctrl+/ now, and the dispatcher gives it to
+// Token usage, registered later. The dialog names that command; the recorder, asked for Ctrl+/ on Remote kernels, names it
+// too, and its Enter unbinds both saved keys, so Ctrl+/ then opens Remote kernels. The stored bindings after Enter are
+// what catch an Enter that unbinds only the named command: Remote kernels registers after Open the log, so its Ctrl+/
+// would open it even with the log's binding left in place
+await setKeys(page, { "log.open": "Ctrl+/", "usage.open": "Ctrl+Shift+/" });
+out.bothDialog = await dialogRows(page, ["chat.commentSelection", "log.open", "usage.open"]);
+await focusShell(page);
+await page.keyboard.press("Control+/");
+await page.waitForTimeout(600);
+out.bothKey = await panels(page);
+await closePanels(page);
+out.bothRecord = await record(page, "net.open", "Control+/");
+await focusShell(page);
+await page.keyboard.press("Control+/");
+await page.waitForTimeout(600);
+out.bothAfter = await panels(page);
+await closePanels(page);
+
+// 16. Open the log saved on Ctrl+M, Navigate back's default, and then on Ctrl+Alt+↑, Go to your previous message's: the
+// recorder, asked for that key on Remote kernels, names both commands, and its Enter unbinds the log's key and the chat
+// command's default, whose own handler would otherwise go on taking the key from the chat; so the key pressed from the
+// transcript opens Remote kernels. Asked for the same key again on Open the log, which holds it, the recorder names the
+// chat command, and its Enter unbinds that default and keeps the log's key, so the key from the transcript opens the log
+out.ownRecord = {};
+out.ownAfter = {};
+out.againRecord = {};
+out.againAfter = {};
+for (const [chord, press] of [["Ctrl+M", "Control+m"], ["Ctrl+Alt+ArrowUp", "Control+Alt+ArrowUp"]]) {
+  await setKeys(page, { "log.open": chord });
+  out.ownRecord[chord] = await record(page, "net.open", press);
+  await focusChat(fr);
+  await page.keyboard.press(press);
+  await page.waitForFunction(() => { const b = document.getElementById("rnet-back"); return !!b && !b.hidden; }, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  out.ownAfter[chord] = await panels(page);
+  await closePanels(page);
+  await setKeys(page, { "log.open": chord });
+  out.againRecord[chord] = await record(page, "log.open", press);
+  await focusChat(fr);
+  await page.keyboard.press(press);
+  await page.waitForFunction(() => { const b = document.getElementById("rerr-back"); return !!b && !b.hidden; }, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  out.againAfter[chord] = await panels(page);
+  await closePanels(page);
+}
+
+// 17. the comment key rebound to Alt+/ and Navigate back saved on Alt+Shift+/, both from before #39, which now read as one
+// chord: the nav trail's handler reads no chord without Ctrl or Meta, so Alt+/ comments and the menu names it, in the shell
+// here and on the chat page on its own below
+await setKeys(page, { "chat.commentSelection": "Alt+/", "chat.navBack": "Alt+Shift+/" });
+await focusChat(fr);
+out.altSel = await select(fr, cfg.passage);
+await page.keyboard.press("Alt+/");
+out.altOpened = await waitPop(fr);
+out.altPop = await pop(fr);
+await closePop(fr);
+await focusChat(fr);
+await select(fr, cfg.passage);
+out.altMenu = await menuItems(fr, cfg.passage);
+await page.keyboard.press("Escape");
+await setKeys(page, null);
+
+// 14. a key saved on Ctrl+/ under an id no command has (a command an upgrade removed): it runs nothing, so Ctrl+/ still
+// comments, and the menu still names it
+await setKeys(page, { "retired.command": "Ctrl+/" });
+await focusChat(fr);
+out.retiredSel = await select(fr, cfg.passage);
+await page.keyboard.press("Control+/");
+out.retiredOpened = await waitPop(fr);
+out.retiredPop = await pop(fr);
+out.retiredPanels = await panels(page);
+await closePop(fr);
+await focusChat(fr);
+await select(fr, cfg.passage);
+out.retiredMenu = await menuItems(fr, cfg.passage);
+await page.keyboard.press("Escape");
+
+// 15. Open the log saved on Shift+/ (the dialog's spelling of a German Shift+7 before #39): a "/" typed from the
+// transcript on a US keyboard is typing, so it reaches the message box and the log stays shut; a German Shift+7 from the
+// transcript opens the log, as it did before #39
+await setKeys(page, { "log.open": "Shift+/" });
+await focusChat(fr);
+await page.keyboard.press("/");
+await page.waitForTimeout(500);
+out.slashPanels = await panels(page);
+out.slashBox = await composer(fr);
+await closePanels(page);
+await fr.fill("#composer-input", "");
+await fr.waitForFunction(() => !document.getElementById("slash-pop"), null, { timeout: 5000 }).catch(() => {});
+await focusChat(fr);
+out.slashDeKey = await dispatchKey(fr, { key: "/", code: "Digit7", shiftKey: true });
+await page.waitForFunction(() => { const b = document.getElementById("rerr-back"); return !!b && !b.hidden; }, null, { timeout: 5000 }).catch(() => {});
+out.slashDePanels = await panels(page);
+await closePanels(page);
+await setKeys(page, null);
+
+// 6. a Mac: navigator.platform says so. ⌘/ pressed for real; then ⌘⇧/ as a Mac's browser reports it (key "/" with Shift:
+// with ⌘ held the key reads as if Shift were up) and a German Mac's ⌘⇧7 (key "7" for the same reason): neither is ⌘/
 const mctx = await browser.newContext({ viewport: { width: 1300, height: 850 } });
 await mctx.addInitScript(() => { Object.defineProperty(Navigator.prototype, "platform", { get: () => "MacIntel", configurable: true }); });
 const mpage = await mctx.newPage();
@@ -274,10 +529,11 @@ out.macOpened = await waitPop(mfr);
 out.macPop = await pop(mfr);
 await closePop(mfr);
 await focusChat(mfr);
-out.macDeSel = await select(mfr, cfg.second);
-out.macDeKey = await dispatchKey(mfr, { key: "/", code: "Digit7", metaKey: true, shiftKey: true });
-out.macDeOpened = await waitPop(mfr);
-out.macDePop = await pop(mfr);
+out.macHelpSel = await select(mfr, cfg.second);
+out.macHelpKey = await dispatchKey(mfr, { key: "/", code: "Slash", metaKey: true, shiftKey: true });
+out.macDeKey = await dispatchKey(mfr, { key: "7", code: "Digit7", metaKey: true, shiftKey: true });
+await mfr.waitForTimeout(400);
+out.macHelpPop = await pop(mfr);
 await closePop(mfr);
 // the hints say ⌘/ there: the menu's sub-line, the palette's chip, the dialog's
 await focusChat(mfr);
@@ -296,6 +552,115 @@ out.boundSel = await select(mfr, cfg.passage);
 out.boundKey = await dispatchKey(mfr, { key: "µ", code: "KeyM", altKey: true, metaKey: true });
 out.boundOpened = await waitPop(mfr);
 out.boundPop = await pop(mfr);
+await closePop(mfr);
+
+// 8. the file viewer's code editor on a Mac, in the chat's own viewer, the binding reset to the default: ⌘/ is the
+// editor's toggle comment there
+await mfr.evaluate(() => localStorage.removeItem("romp:keys"));
+out.edMac = await editorPress(mpage, mfr, mfr, "Meta+/", "f-chat", "editor-mac-chat");
+await mctx.close();
+
+// 9. the code editor in the Files pane, a passage selected in the chat: Ctrl+/ comments the editor's line, and neither the
+// chat's notice nor a comment box on that passage takes the key, nor the focus
+const ectx = await browser.newContext({ viewport: { width: 1500, height: 900 } });
+await ectx.addInitScript(() => { try { if (localStorage.getItem("romp:settings") === null) localStorage.setItem("romp:settings", JSON.stringify({ showFilesControl: true })); } catch (e) {} });
+const epage = await ectx.newPage();
+const efr = await boot(epage);
+await epage.evaluate(() => window.__rompPaneToggle("files", true));
+const ff = await (await epage.waitForSelector("#f-files", { timeout: 15000 })).contentFrame();
+await ff.waitForLoadState("load").catch(() => {});
+await ff.waitForFunction(() => document.readyState === "complete", null, { timeout: 15000 }).catch(() => {});
+out.edFilesSel = await select(efr, cfg.passage);
+out.edFiles = await editorPress(epage, efr, ff, "Control+/", "f-files", "editor-files");
+// 10. the code editor in the chat's own viewer
+out.edChat = await editorPress(epage, efr, efr, "Control+/", "f-chat", "editor-chat");
+// 19. the editor's search field there: Ctrl+F opens it, and Ctrl+/ typed in it does nothing: the line stays as the editor
+// left it, the field keeps its text, its selection and the focus, and no notice or comment box appears
+await clearToasts(efr);
+await epage.keyboard.press("Control+f");
+out.edSearch = { open: await efr.waitForFunction(() => { const a = document.activeElement; return !!(a && a.closest && a.closest(".cm-search")); }, null, { timeout: 5000 }).then(() => true, () => false) };
+if (out.edSearch.open) {
+  const field = () => efr.evaluate(() => { const a = document.activeElement; return { value: a.value, start: a.selectionStart, end: a.selectionEnd,
+    inSearch: !!(a.closest && a.closest(".cm-search")), line: (document.querySelector("#romp-fileview .cm-content .cm-line") || {}).textContent || null }; });
+  await epage.keyboard.type("rows");
+  out.edSearch.before = await field();
+  await epage.keyboard.press("Control+/");
+  await epage.waitForTimeout(600);
+  out.edSearch.after = await field();
+  out.edSearch.toasts = await toasts(efr);
+  out.edSearch.pop = await pop(efr);
+  await shot(epage, "editor-search");
+}
+await ectx.close();
+
+// 18. the code editor in a file tab: the chat viewer's pop-out keeps the file open as a tab of the chat strip, and Ctrl+/ in
+// its editor is the editor's toggle comment too
+const tctx = await browser.newContext({ viewport: { width: 1300, height: 850 } });
+const tpage = await tctx.newPage();
+const tfr = await boot(tpage);
+out.edTab = await editorPress(tpage, tfr, tfr, "Control+/", "f-chat", "editor-tab", true);
+await tctx.close();
+
+// 13. the chat page opened on its own, with no shell around it and so no dispatcher, and Open the log saved on
+// Ctrl+Shift+/: nothing here would run the log, so Ctrl+/ stays the comment key, and the menu names it
+const actx = await browser.newContext({ viewport: { width: 1300, height: 850 } });
+const apage = await actx.newPage();
+await apage.goto(cfg.chat, { waitUntil: "domcontentloaded", timeout: 60000 });
+try {
+  await apage.waitForSelector(`#tabs .tab[data-id="${cfg.sid}"]`, { state: "attached", timeout: 45000 });
+  await apage.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`).click(), cfg.sid);
+  await apage.waitForFunction((t) => Array.from(document.querySelectorAll("#content .turn")).some((n) => (n.textContent || "").includes(t)), cfg.passage, { timeout: 30000 });
+} catch (e) { await done("the chat page on its own never showed the reply: " + String(e).split("\n")[0]); }
+await apage.waitForTimeout(600);
+const afr = apage.mainFrame();
+out.aloneShell = await apage.evaluate(() => !!document.getElementById("f-chat") || window.parent !== window);
+await apage.evaluate(() => localStorage.setItem("romp:keys", JSON.stringify({ "log.open": "Ctrl+Shift+/" })));
+await focusChat(afr);
+out.aloneSel = await select(afr, cfg.passage);
+await apage.keyboard.press("Control+/");
+out.aloneOpened = await waitPop(afr);
+out.alonePop = await pop(afr);
+out.aloneToasts = await toasts(afr);
+await shot(apage, "chat-page-alone");
+await closePop(afr);
+await focusChat(afr);
+await select(afr, cfg.passage);
+out.aloneMenu = await menuItems(afr, cfg.passage);
+await apage.keyboard.press("Escape");
+// …and with Navigate back saved on Ctrl+Shift+/, the chat's own nav handler takes Ctrl+/ on this page too: no comment
+// box, no notice, and the menu names no key (a window listener added after the page's own reads that the key was taken)
+await apage.evaluate(() => {
+  localStorage.setItem("romp:keys", JSON.stringify({ "chat.navBack": "Ctrl+Shift+/" }));
+  window.__keySeen = null;
+  window.addEventListener("keydown", (e) => { if (e.key === "/") window.__keySeen = { prevented: e.defaultPrevented }; }, true);
+});
+await focusChat(afr);
+out.aloneNavSel = await select(afr, cfg.passage);
+await clearToasts(afr);
+await apage.keyboard.press("Control+/");
+await afr.waitForTimeout(600);
+out.aloneNavPop = await pop(afr);
+out.aloneNavToasts = await toasts(afr);
+out.aloneNavSeen = await apage.evaluate(() => window.__keySeen);
+await closePop(afr);
+await focusChat(afr);
+await select(afr, cfg.passage);
+out.aloneNavMenu = await menuItems(afr, cfg.passage);
+await apage.keyboard.press("Escape");
+// 17, on the chat page on its own: the comment key on Alt+/ beside a Navigate back saved on Alt+Shift+/ comments here too,
+// and the menu names it
+await apage.evaluate(() => localStorage.setItem("romp:keys", JSON.stringify({ "chat.commentSelection": "Alt+/", "chat.navBack": "Alt+Shift+/" })));
+await focusChat(afr);
+out.aloneAltSel = await select(afr, cfg.passage);
+await apage.keyboard.press("Alt+/");
+out.aloneAltOpened = await waitPop(afr);
+out.aloneAltPop = await pop(afr);
+await closePop(afr);
+await focusChat(afr);
+await select(afr, cfg.passage);
+out.aloneAltMenu = await menuItems(afr, cfg.passage);
+await apage.keyboard.press("Escape");
+await actx.close();
 await done();
 """
 
@@ -315,10 +680,10 @@ class ServedCommentKey(unittest.TestCase):
     def _boot(cls):
         if not os.path.isdir(os.path.join(EXT, "node_modules", "playwright")):
             raise unittest.SkipTest("extension deps absent (npm ci not run here) — the served guard needs them")
-        probe = subprocess.run(["node", "-e", "const p=require(process.argv[1]);process.stdout.write(p.chromium.executablePath())",
-                                os.path.join(EXT, "node_modules", "playwright")], capture_output=True, text=True)
+        probe = subprocess.run(["node", "-e", "const p=require(process.argv[1]);process.stdout.write(p[process.argv[2]].executablePath())",
+                                os.path.join(EXT, "node_modules", "playwright"), ENGINE], capture_output=True, text=True)
         if probe.returncode != 0 or not os.path.exists(probe.stdout.strip()):
-            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one (CI installs none)")
+            raise unittest.SkipTest("no playwright %s browser on this box: the served guard needs one" % ENGINE)
         cls.lab = tempfile.mkdtemp(prefix="comment-key-")
         b = subprocess.run(["node", "esbuild.js"], cwd=EXT, capture_output=True, text=True)
         if b.returncode != 0:
@@ -342,6 +707,10 @@ class ServedCommentKey(unittest.TestCase):
             {"sid": WEB, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": WEB, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
+        # file editing on (the opt-in the kernel reads before the viewer's Edit, kernel.py _file_editing_on) and a small
+        # Python file in the session's directory, for the editor cases
+        Path(state, "file-editing.json").write_text(json.dumps({"enabled": True, "gt": 1}))
+        Path(cwd, "export.py").write_text(CODE_LINE + "\n    return list(buf)\n")
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         t0 = int(time.time()) - 900
@@ -379,7 +748,9 @@ class ServedCommentKey(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (self.port, self.token), "sid": WEB,
+                       "chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token),
                        "passage": PASSAGE, "second": SECOND, "third": THIRD, "noneToast": NONE_TOAST,
+                       "file": os.path.join(self.lab, "proj", "export.py"), "engine": ENGINE,
                        "shots": os.environ.get("COMMENT_KEY_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -387,7 +758,7 @@ class ServedCommentKey(unittest.TestCase):
         p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=300,
                            env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
         if p.returncode == 3:
-            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one (CI installs none)")
+            raise unittest.SkipTest("no playwright %s browser on this box: the served guard needs one" % ENGINE)
         self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:] + "\nkernel:\n" + open(self.klog).read()[-1500:])
         line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
         self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
@@ -407,6 +778,22 @@ class ServedCommentKey(unittest.TestCase):
         self.assertLess(abs(pop["left"] - want_x), 1.5, "%s: the box's left at the selection's: %r vs %r" % (where, pop, sel))
         self.assertLess(abs(pop["top"] - want_y), 1.5, "%s: the box just under the selection: %r vs %r" % (where, pop, sel))
         self.assertTrue(pop["caret"], "%s: the box takes the caret, as the menu's Comment does: %r" % (where, pop))
+
+    def _dialog(self, rows):
+        """The dialog's rows as dialogRows read them ("<chip>", or "<chip> | <yield mark>"), each as its chip and the title
+        its yield mark quotes, None with no mark. The mark's other words are the dialog's copy, which tab-cycle.test.ts pins
+        as source text; a mark that quotes no title reads as itself."""
+        if not isinstance(rows, dict):
+            return rows
+        out = {}
+        for cid, shown in rows.items():
+            if shown is None:
+                out[cid] = None
+                continue
+            chip, _, mark = shown.partition(" | ")
+            m = re.search("\u201c(.*)\u201d", mark)
+            out[cid] = (chip, m.group(1) if m else (mark or None))
+        return out
 
     def test_the_key_and_the_palette_open_what_the_menu_opens(self):
         r = self._drive()
@@ -443,13 +830,14 @@ class ServedCommentKey(unittest.TestCase):
         self.assertEqual(menu.get("Comment"), "Ctrl+/", "the menu's Comment names the key: %r" % r["menu"])
         self.assertIsNone(menu.get("Quote"), r["menu"])
         self.assertEqual(r["dialogChip"], "Ctrl+/", "the shortcuts dialog's row: %r" % r["dialogChip"])
-        # 6. a Mac: ⌘/, and a German Mac's ⌘⇧7; every hint says ⌘/
+        # 6. a Mac: ⌘/ comments; ⌘⇧/ and a German Mac's ⌘⇧7 do not; every hint says ⌘/
         self.assertTrue(r["macOpened"], "⌘/ on a Mac opened no comment box: %r" % r)
         self._anchored(r["macPop"], r["macSel"], "a Mac's ⌘/")
-        self.assertEqual(r["macDeKey"]["platform"], "MacIntel", r["macDeKey"])
-        self.assertTrue(r["macDeKey"]["prevented"], "a German Mac's ⌘/ was taken: %r" % r["macDeKey"])
-        self.assertTrue(r["macDeOpened"], "a German Mac's ⌘/ (⌘⇧7) opened no comment box: %r" % r)
-        self._anchored(r["macDePop"], r["macDeSel"], "a German Mac's ⌘/")
+        self.assertEqual(r["macHelpKey"]["platform"], "MacIntel", r["macHelpKey"])
+        self.assertEqual(r["macHelpSel"]["text"], SECOND, r["macHelpSel"])
+        self.assertFalse(r["macHelpKey"]["prevented"], "⌘⇧/ (key \"/\" with Shift and ⌘) was taken as ⌘/: %r" % r["macHelpKey"])
+        self.assertFalse(r["macDeKey"]["prevented"], "a German Mac's ⌘⇧7 (key \"7\") was taken: %r" % r["macDeKey"])
+        self.assertIsNone(r["macHelpPop"], "⌘⇧/ or a German Mac's ⌘⇧7 opened a comment box: %r" % r["macHelpPop"])
         self.assertEqual({m["label"]: m["sub"] for m in r["macMenu"]}.get("Comment"), "⌘/", r["macMenu"])
         self.assertEqual(r["macPalRow"], {"title": "Comment on selection", "kbd": "⌘/"}, r["macPalRow"])
         self.assertEqual(r["macDialogChip"], "⌘/", r["macDialogChip"])
@@ -457,6 +845,110 @@ class ServedCommentKey(unittest.TestCase):
         self.assertTrue(r["boundKey"]["prevented"], "the bound ⌘⌥M was taken on a Mac: %r" % r["boundKey"])
         self.assertTrue(r["boundOpened"], "a bound ⌘⌥M on a Mac opened no comment box: %r" % r)
         self._anchored(r["boundPop"], r["boundSel"], "a Mac's bound ⌘⌥M")
+        # 8 to 10 and 18. the file viewer's code editor keeps its own toggle comment: the Files pane (with a passage selected
+        # in the chat), the chat's own viewer, the chat's viewer on a Mac, and a file tab's editor
+        self.assertEqual((r["edFilesSel"] or {}).get("text"), PASSAGE, r["edFilesSel"])
+        self.assertTrue(r["edTab"].get("popOut") and r["edTab"].get("tab"), "the chat viewer's pop-out never made a file tab: %r" % r["edTab"])
+        for name, where, home in (("edFiles", "the Files pane's editor, Ctrl+/", "f-files"),
+                                  ("edChat", "the chat viewer's editor, Ctrl+/", "f-chat"),
+                                  ("edMac", "the chat viewer's editor on a Mac, ⌘/", "f-chat"),
+                                  ("edTab", "a file tab's editor, Ctrl+/", "f-chat")):
+            e = r[name]
+            self.assertTrue(e.get("edit") and e.get("editor"), "%s: the viewer never reached its editor: %r" % (where, e))
+            self.assertEqual(e["before"], CODE_LINE, "%s: %r" % (where, e))
+            self.assertTrue(e["focusBefore"], "%s: the cursor was not in the editor when the key was pressed: %r" % (where, e))
+            self.assertEqual(e["after"], "# " + CODE_LINE, "%s: the editor did not comment its line: %r" % (where, e))
+            self.assertEqual(e["toasts"], [], "%s: the chat's notice took the key: %r" % (where, e))
+            self.assertIsNone(e["pop"], "%s: a comment box took the key: %r" % (where, e))
+            self.assertTrue(e["focusAfter"], "%s: the focus left the editor: %r" % (where, e))
+            self.assertEqual(e["shellFocus"], home, "%s: the shell moved the focus to another pane: %r" % (where, e))
+        # 19. the editor's search field: Ctrl+/ there leaves the field, the line and the focus as they were, and opens nothing
+        s = r["edSearch"]
+        self.assertTrue(s["open"], "Ctrl+F in the chat viewer's editor never opened its search field: %r" % s)
+        self.assertEqual(s["before"], {"value": "rows", "start": 4, "end": 4, "inSearch": True, "line": "# " + CODE_LINE}, s)
+        self.assertEqual(s["after"], s["before"], "Ctrl+/ in the editor's search field changed the field, its focus or the line: %r" % s)
+        self.assertEqual(s["toasts"], [], "the chat's notice took the key in the editor's search field: %r" % s)
+        self.assertIsNone(s["pop"], "a comment box took the key in the editor's search field: %r" % s)
+        # 11. Open the log saved on Ctrl+Shift+/: Ctrl+/ opens it, and no hint names Ctrl+/ as the comment key
+        self.assertEqual((r["savedSel"] or {}).get("text"), PASSAGE, r["savedSel"])
+        self.assertEqual(r["savedPanels"], {"log": True, "usage": False, "net": False},
+                         "Ctrl+/ with Open the log saved on Ctrl+Shift+/ did not open the log: %r" % r)
+        self.assertIsNone(r["savedPop"], "the comment key took Ctrl+/ from the saved binding: %r" % r["savedPop"])
+        self.assertEqual(r["savedToasts"], [], r["savedToasts"])
+        saved_menu = {m["label"]: m["sub"] for m in r["savedMenu"]}
+        self.assertIn("Comment", saved_menu, r["savedMenu"])
+        self.assertIsNone(saved_menu["Comment"], "the menu's Comment names a key that opens the log: %r" % r["savedMenu"])
+        self.assertEqual(r["savedPalRow"], {"title": "Comment on selection", "kbd": ""},
+                         "the palette row names a key that opens the log: %r" % r["savedPalRow"])
+        self.assertEqual(self._dialog(r["savedDialog"]), {"chat.commentSelection": ("Ctrl+/", "Open the log"), "log.open": ("Ctrl+/", None)},
+                         r["savedDialog"])
+        # 12. two saved keys that now share Ctrl+/: the dialog and the recorder name the command the key runs, and the
+        # recorder's Enter frees the chord from both, so the fresh binding runs
+        self.assertEqual(r["bothKey"], {"log": False, "usage": True, "net": False}, "Ctrl+/ did not run Token usage, the later registered of the two: %r" % r["bothKey"])
+        self.assertEqual(self._dialog(r["bothDialog"]), {"chat.commentSelection": ("Ctrl+/", "Token usage"),
+                                                         "log.open": ("Ctrl+/", "Token usage"),
+                                                         "usage.open": ("Ctrl+/", None)},
+                         "the dialog names a command the key does not run, or leaves the dead row unmarked: %r" % r["bothDialog"])
+        self.assertIn("\u201cToken usage\u201d", r["bothRecord"]["prompt"] or "", "the recorder did not name Token usage, the command holding Ctrl+/: %r" % r["bothRecord"])
+        self.assertEqual(r["bothRecord"]["stored"], {"log.open": "", "usage.open": "", "net.open": "Ctrl+/"}, r["bothRecord"])
+        self.assertEqual(r["bothAfter"], {"log": False, "usage": False, "net": True},
+                         "after the reassign Ctrl+/ must open Remote kernels: %r" % r["bothAfter"])
+        # 16. a key saved for another command on a chat command's default, recorded for a third: the recorder names both and
+        # unbinds both, so the key opens Remote kernels from the transcript
+        for chord, shown, own, title in (("Ctrl+M", "Ctrl+M", "chat.navBack", "Navigate back in the chat"),
+                                         ("Ctrl+Alt+ArrowUp", "Ctrl+Alt+\u2191", "chat.prevMine", "Go to your previous message")):
+            rec = r["ownRecord"][chord]
+            for named in ("Open the log", title):
+                self.assertIn("\u201c%s\u201d" % named, rec["prompt"] or "", "the recorder left out a command its Enter unbinds: %r" % rec)
+            self.assertEqual(rec["stored"], {"log.open": "", own: "", "net.open": chord}, "Enter left the saved key or %s's default bound: %r" % (own, rec))
+            self.assertEqual(r["ownAfter"][chord], {"log": False, "usage": False, "net": True},
+                             "%s from the transcript must open Remote kernels, not run %s: %r" % (chord, own, r["ownAfter"][chord]))
+            # …and recorded again for Open the log, which holds it: the recorder names the chat command alone, its Enter
+            # unbinds that default and keeps the log's key, and the key from the transcript opens the log
+            again = r["againRecord"][chord]
+            self.assertTrue((again["prompt"] or "").startswith(shown + " "),
+                            "recorded again for the command that holds it, the recorder showed no row for %s: %r" % (shown, again))
+            self.assertEqual(re.findall("\u201c([^\u201d]*)\u201d", again["prompt"] or ""), [title],
+                             "recorded again for the command that holds it, the recorder did not name %s alone: %r" % (own, again))
+            self.assertEqual(again["stored"], {"log.open": chord, own: ""}, "Enter left %s's default on %s: %r" % (own, chord, again))
+            self.assertEqual(r["againAfter"][chord], {"log": True, "usage": False, "net": False},
+                             "%s from the transcript must open the log, not run %s: %r" % (chord, own, r["againAfter"][chord]))
+        # 17. the comment key on Alt+/ beside a Navigate back saved on Alt+Shift+/: it comments and the menu names it, in the
+        # shell and on the chat page on its own
+        for pre, where in (("alt", "in the shell"), ("aloneAlt", "on the chat page on its own")):
+            self.assertEqual((r[pre + "Sel"] or {}).get("text"), PASSAGE, r[pre + "Sel"])
+            self.assertTrue(r[pre + "Opened"], "Alt+/ %s opened no comment box: %r" % (where, r))
+            self._anchored(r[pre + "Pop"], r[pre + "Sel"], "Alt+/ " + where)
+            self.assertEqual({m["label"]: m["sub"] for m in r[pre + "Menu"]}.get("Comment"), "Alt+/",
+                             "the menu %s names no key that comments: %r" % (where, r[pre + "Menu"]))
+        # 13. the chat page on its own: the saved Ctrl+Shift+/ takes nothing there, so Ctrl+/ comments and the menu says so
+        self.assertFalse(r["aloneShell"], "the chat page had a shell around it: %r" % r["aloneShell"])
+        self.assertTrue(r["aloneOpened"], "Ctrl+/ on the chat page on its own opened no comment box: %r" % r)
+        self._anchored(r["alonePop"], r["aloneSel"], "the chat page on its own")
+        self.assertEqual(r["aloneToasts"], [], r["aloneToasts"])
+        self.assertEqual({m["label"]: m["sub"] for m in r["aloneMenu"]}.get("Comment"), "Ctrl+/", r["aloneMenu"])
+        # …and with Navigate back saved there, the chat's nav handler takes the key: one command, no comment, no key named
+        self.assertEqual((r["aloneNavSel"] or {}).get("text"), PASSAGE, r["aloneNavSel"])
+        self.assertIsNone(r["aloneNavPop"], "Ctrl+/ with Navigate back saved on Ctrl+Shift+/ also opened a comment box: %r" % r["aloneNavPop"])
+        self.assertEqual(r["aloneNavToasts"], [], r["aloneNavToasts"])
+        self.assertEqual(r["aloneNavSeen"], {"prevented": True}, "nothing took the key (its default was not prevented): %r" % r["aloneNavSeen"])
+        alone_nav_menu = {m["label"]: m["sub"] for m in r["aloneNavMenu"]}
+        self.assertIn("Comment", alone_nav_menu, r["aloneNavMenu"])
+        self.assertIsNone(alone_nav_menu["Comment"], "the menu names a key that goes back: %r" % r["aloneNavMenu"])
+        # 14. a key saved under an id no command has takes nothing: Ctrl+/ comments, and the menu names it
+        self.assertTrue(r["retiredOpened"], "Ctrl+/ with a key saved under an unknown id opened no comment box: %r" % r)
+        self._anchored(r["retiredPop"], r["retiredSel"], "Ctrl+/ beside a key saved under an unknown id")
+        self.assertEqual(r["retiredPanels"], {"log": False, "usage": False, "net": False}, r["retiredPanels"])
+        self.assertEqual({m["label"]: m["sub"] for m in r["retiredMenu"]}.get("Comment"), "Ctrl+/",
+                         "the menu hides a key that still comments: %r" % r["retiredMenu"])
+        # 15. Open the log saved on Shift+/: a US keyboard's "/" from the transcript types into the message box, and a German
+        # Shift+7 opens the log
+        self.assertEqual(r["slashPanels"], {"log": False, "usage": False, "net": False},
+                         "a bare \"/\" opened the log saved on Shift+/: %r" % r["slashPanels"])
+        self.assertEqual(r["slashBox"]["value"], "/", "the \"/\" typed from the transcript never reached the message box: %r" % r["slashBox"])
+        self.assertTrue(r["slashDeKey"]["prevented"], "a German Shift+7 from the transcript was not taken: %r" % r["slashDeKey"])
+        self.assertEqual(r["slashDePanels"], {"log": True, "usage": False, "net": False},
+                         "a German Shift+7 did not open the log saved on Shift+/: %r" % r["slashDePanels"])
 
 
 if __name__ == "__main__":

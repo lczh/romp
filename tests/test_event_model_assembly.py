@@ -528,9 +528,19 @@ class PostalHeal(unittest.TestCase):
                     G.aline(T0 + 90, "folded it in", "a2", "att1")]
             path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
             kw = {"candidate_files": [str(path)], "states": None, "postal_log": [], "now": NOW}
+            # att1's file-order predecessor is stamped before its send, so each emit of it clamps and
+            # counts landedT-clamp: the parse's, and the heal's on the serve road once the log resolves
+            # the sender (a heal that raises falls back to a full parse, with the same tree)
+            keys = ("serve", "fallback", "landedT-clamp")
+            moved = lambda s0: {k: emi._ASM_STATS.get(k, 0) - s0.get(k, 0) for k in keys}
+            s0 = dict(emi._ASM_STATS)
             emi.parse_session(str(path), rompuuid=SID, name="impl", dir="/TESTDIR", **kw)
+            self.assertEqual(moved(s0)["landedT-clamp"], 1,
+                             "premise: the parse clamps the splice and counts it")
             kw["postal_log"] = list(G.SENT_LOG)
+            s0 = dict(emi._ASM_STATS)
             inc = emi.parse_session(str(path), rompuuid=SID, name="impl", dir="/TESTDIR", **kw)
+            self.assertEqual(moved(s0), {"serve": 1, "fallback": 0, "landedT-clamp": 1})
             emr._ASM_CACHE.clear()
             ref = emr.parse_session(str(path), rompuuid=SID, name="impl", dir="/TESTDIR", **kw)
             self.assertEqual(_tree(ref), _tree(inc))
