@@ -62,9 +62,11 @@ export const DEFAULT_CHORDS: Record<string, string> = {
   // was out: it is macOS's minimize, which the OS takes before a page sees it. Chrome binds Mod+/ on no platform, and
   // Google Docs answers to it in the browser, so a page can take it; Safari's menu has ⌘/ (View > Show Status Bar), which
   // the page is expected to claim first (still to be confirmed on a real Mac). keybindings' chordOf reads a "/" the layout
-  // types with Shift (Shift+7 on a German keyboard) as plain "/", so the key the hint prints is the one to press on any
-  // layout. It edits no text, so it works from the message box too, where its preventDefault keeps the "/" out of the box
-  // and the slash menu shut. The dialog rebinds.
+  // types with Shift (Shift+7 on a German keyboard) as plain "/" while Ctrl or Alt is held and Meta (⌘ on a Mac) is not,
+  // so off a Mac, on a layout that types "/" bare or with Shift, the key the hint prints is the one to press. It edits
+  // no text, so it works from the message box too, where its preventDefault keeps the "/" out of the box and the slash
+  // menu shut; in the file viewer's code editor it stays the editor's toggle comment (keybindings' editorKeepsKey). The
+  // dialog rebinds.
   "chat.commentSelection": "Mod+/",
 };
 
