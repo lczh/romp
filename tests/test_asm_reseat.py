@@ -862,6 +862,45 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         _quiet_drop(self.leaf)
         self.assertIsNone(_reader_entry(self.leaf), "an assembly entry at another generation keeps nothing")
 
+    def test_a_drop_over_an_append_the_whole_entry_has_not_taken_in_counts_only_what_its_adapter_holds(self):
+        """A whole entry whose leaf has a document a restore would take does not pin, and its adapter holds the reader's list as
+        far as its own read went. When the reader has since read an append the entry has not taken in, the pop counts as held
+        the bytes before the append and the append's as freed (round one of the fold's review: no test reached the end
+        clause)."""
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        size0 = os.path.getsize(self.leaf)
+        self.append_turn()
+        _aged(self.leaf)
+        appended = os.path.getsize(self.leaf) - size0
+        st0 = dict(em.record_cache_stats())
+        _quiet_drop(self.leaf)                                        # the fold reads the append, then the drop pops
+        self.assertIsNone(_reader_entry(self.leaf), "popped")
+        st1 = em.record_cache_stats()
+        fell = st1["droppedBytes"] - st0["droppedBytes"]
+        self.assertEqual(fell, os.path.getsize(self.leaf), "the count lost the whole file")
+        self.assertEqual((st1.get("droppedHeld", 0) - st0.get("droppedHeld", 0),
+                          st1.get("droppedHeldBytes", 0) - st0.get("droppedHeldBytes", 0)), (1, fell - appended),
+                         "held: every byte but the %d-byte append the entry never took in" % appended)
+
+    def test_a_restored_entry_whose_document_is_gone_does_not_hold_the_drop_back(self):
+        """A restored entry never pins, even once its leaf's document is gone, which for a whole entry would mean a whole parse
+        at its next visit and a pin: the restored entry holds the tail it read, and its next visit replaces it (round one of
+        the fold's review: no test reached the restored-entry exclusion)."""
+        _aged(self.leaf)
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.fresh()
+        _, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        em._asm_ckpt_file(self.leaf).unlink()                         # the document removed (a fallback, the boot's sweep)
+        self.assertFalse(em._asm_document_would_restore(self.leaf), "the premise: no document a restore would take")
+        st0 = dict(em.record_cache_stats())
+        _quiet_drop(self.leaf)
+        self.assertIsNone(_reader_entry(self.leaf), "popped")
+        st1 = em.record_cache_stats()
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
+
     def test_a_pin_check_that_raises_lets_the_drop_go_ahead_counted_and_said(self):
         """The pin check stats the leaf's document, and a stat refused for a reason other than not-found (an unsearchable
         checkpoints directory, an I/O error) raised out of the drop where the base popped. It now counts as no pin: the drop
@@ -882,8 +921,59 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
 
 
 class OwedDrops(Episode):
-    """A record drop the cycle's budget defers is owed and paid later; the budget's estimate of a file's first document lets a
-    file over four cycle caps fit a fresh cycle (round one of the fold's review)."""
+    """A record drop the cycle's budget defers is owed, and paid through the quiet drop's path (round one of the fold's review:
+    three of its paths had no test). A release takes an earlier owed mark of its file and leaves its own deferral owed; the
+    payment waits for the file's quiet; an owed file since deleted is popped though a whole entry with no document folds over
+    it; and a first document of a file over four cycle caps fits a fresh cycle."""
+
+    def test_a_release_the_budget_defers_stays_owed_and_is_paid_once_the_file_is_quiet(self):
+        p = str(self.td / "dq.jsonl")
+        Path(p).write_text("".join(json.dumps(r) + "\n" for r in _chat("dq", NOW - 7200, 3)))
+        _named_fold(self, p, "owedRelease")
+        _cycle(self, 1, spent=1)
+        self.assertEqual(em.release_records([p]), 0, "deferred: nothing dropped now")
+        self.assertIn(p, em._DROP_OWED, "the release's own deferral stays owed")
+        self.assertIsNotNone(_reader_entry(p), "and the entry is held")
+        em.checkpoint_cycle_begin(1 << 40)
+        em.checkpoint_pay_owed_drops()
+        self.assertIn(p, em._DROP_OWED, "a wide cycle's start leaves it owed while the file is fresh")
+        self.assertIsNotNone(_reader_entry(p))
+        with mock.patch.object(em, "_DROP_AFTER_QUIESCENT_S", 0.0):   # the file quiet for the drop's window
+            em.checkpoint_pay_owed_drops()
+        self.assertNotIn(p, em._DROP_OWED, "paid")
+        self.assertIsNone(_reader_entry(p), "popped")
+        self.assertTrue(em._ckpt_file(p).exists(), "after its document was written")
+
+    def test_a_release_that_drops_takes_an_earlier_owed_mark_so_a_re_read_survives_the_next_payment(self):
+        p = str(self.td / "dm.jsonl")
+        Path(p).write_text("".join(json.dumps(r) + "\n" for r in _chat("dm", NOW - 7200, 3)))
+        _named_fold(self, p, "owedEarlier")
+        _cycle(self, 1, spent=1)
+        em.release_records([p])
+        self.assertIn(p, em._DROP_OWED, "the premise: an earlier drop of the file is owed")
+        em.checkpoint_cycle_begin(1 << 40)
+        self.assertEqual(em.release_records([p]), 1, "a release with room writes and drops")
+        self.assertNotIn(p, em._DROP_OWED, "and takes the earlier owed mark")
+        ent = em._read_jsonl_entry(p, tail_ok=False)                  # a reader reads the file again
+        with mock.patch.object(em, "_DROP_AFTER_QUIESCENT_S", 0.0):
+            em.checkpoint_pay_owed_drops()
+        self.assertIs(_reader_entry(p), ent, "the next payment owes it nothing: the re-read stays")
+
+    def test_an_owed_file_since_deleted_is_popped_though_a_whole_entry_with_no_document_folds_over_it(self):
+        _aged(self.leaf)
+        self.parse()                                                  # a whole entry, no document: it pins the leaf while it stands
+        _named_fold(self, self.leaf, "owedGone")
+        self.assertEqual(self.entry()["recs"][self.leaf][0], _reader_entry(self.leaf)[6], "the premise: it folds over the entry")
+        _cycle(self, 1, spent=1)
+        self.assertEqual(em.release_records([self.leaf]), 0)
+        self.assertIn(self.leaf, em._DROP_OWED, "the premise: owed")
+        os.unlink(self.leaf)
+        d0 = em.record_cache_stats()["dropped"]
+        em.checkpoint_cycle_begin(1 << 40)
+        em.checkpoint_pay_owed_drops()
+        self.assertIsNone(_reader_entry(self.leaf), "the gone file's entry is popped: nothing to restore, no generation to keep")
+        self.assertNotIn(self.leaf, em._DROP_OWED)
+        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
 
     def test_a_first_document_of_a_file_over_four_cycle_caps_is_written_in_a_fresh_cycle(self):
         """A drop of a file with no document yet estimates the write from the file (an eighth of its size, taken twice for the

@@ -7,6 +7,7 @@ leaf transcript so a spent cut's tree goes and an override render of another fil
 the live leaf's tree, evicts least recently used instead of clearing wholesale,
 and answers the kernel's path-keyed readers through a view. Hermetic: synthetic transcripts under a temp root."""
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -755,13 +756,16 @@ class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
     """Judge verdict parity, driven through the events themselves (round one of the review: the earlier check called the event
     model's walks directly and handed the releases an empty keep set, so no keep or pin rule could fail it). Each event runs
     the way discover, the parse store and the timeline build run it: the leaf flips (_note_leaf) of a first /clear, a second
-    /clear and a resume fork, a fork child flipping off its registered parent's file, and a dead lane's release (the step the
-    timeline build takes, _release_dead_lane), each followed by the judges' own pass over the session (_chain_membership,
-    then the episode scan _per_file_rewound). The same world runs twice, once as shipped and once with the releases stubbed
-    out, and every pass must give the same verdicts, make the same whole reads and read the same bytes of every transcript,
-    but for the two costs the releases are documented to pay: after the second /clear the episode scan restores the first
-    clear's file from its fold document (the guard bytes, never the file), and a session revived after its dead lane let go
-    reads its leaf and its anchor at most once more each. A keep that let a live lineage's file go (the anchor at a /clear,
+    /clear and a resume fork, a fork child flipping off its registered parent's file, a dead lane's release (the step the
+    timeline build takes, _release_dead_lane), and the session reviving with one turn, each followed by the judges' own pass
+    over the session (_chain_membership, then the episode scan _per_file_rewound). The same world runs twice, once as shipped
+    and once with the releases stubbed out, and every pass must give the same verdicts, make the same whole reads and read
+    the same bytes of every transcript, but for the costs the releases are documented to pay: after the second /clear, and
+    after the dead lane let go, the episode scan restores the dropped files from their fold documents (the guard bytes,
+    never the file); and the revived session's chat parse restores its leaf from the document's cut, reading the tail past
+    it, then its turn sends the episode scan to the leaf whole once (measured: 3,760 bytes of the 2,223-byte leaf where the
+    stubbed run read the turn's 339; the anchor is not read; round one of the fold's review corrected the earlier claim of
+    at most one more read of the leaf and the anchor each). A keep that let a live lineage's file go (the anchor at a /clear,
     the resumed-from file at a resume fork, a registered session's own file at a child's flip) shows as a whole read the
     stubbed run never makes. The world is synthetic: placeholder ids, the notes-api demo wording."""
 
@@ -821,6 +825,9 @@ class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
             tree = km._parse(f["L3"], C, self.now)
             facts["doc"] = em.asm_checkpoint_write(f["L3"], C, sdk_human=bool(km._display_sdk_human(C)), tree=tree)
             facts["docWhy"] = dict(em.asm_checkpoint_stats()["skipped"])
+            if facts["doc"]:
+                doc = json.loads(gzip.decompress(em._asm_ckpt_file(f["L3"]).read_bytes()))
+                facts["cut"] = int(doc["files"][Path(f["L3"]).stem]["cut"][0])
 
         def fork_child():
             jd._note_leaf(P, f["P"]); km._parse(f["P"], P, self.now)
@@ -835,6 +842,13 @@ class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
             with em._JSONL_CACHE_LOCK:
                 facts["deadHeld"] = (f["L3"] in em._JSONL_CACHE, f["C"] in em._JSONL_CACHE)
 
+        def revive():                                      # the session revived and wrote a turn: its chat build's parse,
+            with open(f["L3"], "a") as fh:                 #  then the judges' pass
+                fh.write(json.dumps({"type": "user", "uuid": r + "zgrown", "parentUuid": r + "na3",
+                                     "timestamp": _iso(t0 + 9000 + 60 * 3 + 20 + 60), "promptSource": "typed",
+                                     "cwd": "/w/notes-api", "message": {"role": "user", "content": "and the export endpoint?"}}) + "\n")
+            km._parse(f["L3"], C, self.now)
+
         with contextlib.ExitStack() as stack:
             if stubbed:
                 stack.enter_context(mock.patch.object(em, "release_assembly", lambda *a, **k: 0))
@@ -844,7 +858,8 @@ class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
             step("second clear", C, "L2", second_clear)
             step("resume fork", C, "L3", resume_fork)
             step("fork child", P, "PL1", fork_child)
-            step("dead lane", C, "L3", dead_lane)       # the session revived: the judges pass over it again
+            step("dead lane", C, "L3", dead_lane)       # the judges pass over the session after its lane let go
+            step("revive", C, "L3", revive)
         return f, steps, facts
 
     def test_every_release_leaves_the_judges_verdicts_and_their_reads_as_they_were(self):
@@ -870,11 +885,19 @@ class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
                 self.assertLessEqual(a["bytes"]["L1"], guard, "the episode scan restored the first clear's file from its fold "
                                      "document, reading %d bytes of %d" % (a["bytes"]["L1"], os.path.getsize(f["L1"])))
                 want["L1"] = a["bytes"]["L1"]
-            if name == "dead lane":
-                for role in ("L3", "C"):
-                    self.assertLessEqual(a["bytes"][role], os.path.getsize(f[role]) + guard,
-                                         "the revived session reads its %s at most once more" % role)
+            if name == "dead lane":                        # the lane wrote each file's fold document before it let go, and the
+                for role in ("L3", "C"):                   #  judges' pass restores from it (round one of the fold's review)
+                    self.assertLessEqual(a["bytes"][role], guard, "the judges' pass after the dead lane restored its %s from "
+                                         "the fold document, reading %d bytes of %d" % (role, a["bytes"][role],
+                                                                                        os.path.getsize(f[role])))
                     want[role] = a["bytes"][role]
+            if name == "revive":                           # the restore reads the leaf's tail past the document's cut, and the
+                size = os.path.getsize(f["L3"])            #  episode scan, the turn moving its memo, reads the leaf whole once
+                self.assertEqual(a["whole"], {"upgrade<-_per_file_rewound": 1}, "the revived session's one whole read more")
+                self.assertLessEqual(a["bytes"]["L3"], b["bytes"]["L3"] + (size - lf["cut"]) + size + guard,
+                                     "the revived session read %d bytes of its %d-byte leaf, cut at %d (stubbed: %d)"
+                                     % (a["bytes"]["L3"], size, lf["cut"], b["bytes"]["L3"]))
+                want["L3"] = a["bytes"]["L3"]              # and its anchor not at all: C stays as the stubbed run read it
             else:
                 self.assertEqual(a["whole"], b["whole"], "%s: the same whole reads with the releases as without" % name)
             self.assertEqual(a["bytes"], want, "%s: every transcript read the bytes it read with the releases stubbed out" % name)
