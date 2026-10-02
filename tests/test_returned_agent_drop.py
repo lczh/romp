@@ -567,13 +567,28 @@ class SpendGuard(Base):
 
     def test_a_fresh_process_prices_an_agent_file_it_restored_as_a_tail(self):
         ap = str(self.sub / "agent-a8888888888888888.jsonl")
-        recs = [rec(T0 - 300 + 5 * i, i) for i in range(10)]
-        write(ap, recs, T0 - 255)
-        km._agent_steps(ap)                                       # a card's fold over a returned agent: the drop writes the document
-        self.assertTrue(em._ckpt_file(ap).exists())
+        recs = [rec(T0 - 100 + 5 * i, i) for i in range(10)]     # T0-100 .. T0-55
+        write(ap, recs, T0 - 55)
+        self.clock.t = T0 - 50
+        km._agent_steps(ap)                                       # the card's fold while the agent ran
+        self.assertTrue(em.checkpoint_write(ap))                  # the exit drain's document, at the file's end
         self.fresh_process()                                      # a restart: the memo and the entry gone, the document stands
-        self.assertAlmostEqual(self.window(T0), sum(map(usd, recs)), places=9,
+        want = sum(map(usd, recs))
+        self.assertAlmostEqual(self.window(T0), want, places=9,
                                msg="the restored tail holds none of the window's records: the guard reads the file whole")
+        self.assertEqual(self.guard_whole_reads().get("upgrade<-_spend_file_rows"), 1, "once, after the boot")
+        ent = self.entry(ap)
+        self.assertEqual((ent[5], len(ent[4])), (0, 10), "written to 55 s ago: held whole until it has been quiet for two minutes")
+        for t in (T0 + 30, T0 + 60):                              # 85 and 115 s quiet
+            self.assertAlmostEqual(self.window(t), want, places=9)
+            self.assertEqual(len(self.entry(ap)[4]), 10, "still held at +%d s" % (t - T0))
+        self.assertAlmostEqual(self.window(T0 + 70), want, places=9)
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "125 s quiet: the guard's fold let the records go")
+        r0 = self.read_of(ap)
+        self.assertAlmostEqual(self.window(T0 + 80), want, places=9, msg="priced from the memo")
+        self.assertEqual(self.read_of(ap), r0, "and not entered again")
+        self.assertEqual(self.guard_whole_reads().get("upgrade<-_spend_file_rows"), 1, "no whole read after the first")
 
     def test_a_restored_tail_that_covers_the_window_is_priced_from_it_and_folded_out_of_memory(self):
         wf = str(self.sub / "workflows" / "wf_1" / "agent-a9a00000000000001.jsonl")

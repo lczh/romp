@@ -4844,8 +4844,17 @@ dollars its transcript and the agent transcripts beside it (the subagents and
 workflow agents it fanned out) record over the last ten minutes, priced by the
 same per-model table the cost view uses, scaled to an hour. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
-check reads nothing new; only an agent file that changed inside the window is
-read. The ceiling is the `spend-ceiling-usd-per-hour` setting, a bare value
+check reads little that is new: an agent file that changed inside the window is
+read, and after a restart an agent file inside the window whose restored tail
+does not reach back to the window's start is read whole once, since its records
+from before the checkpoint's cut may be in the window. After pricing an agent
+file, the check runs the file's agent folds over the records it holds; once the
+agent has been quiet for two minutes they write the file's checkpoint document,
+charged to the cycle's byte budget, and let its records leave memory. A
+session's own transcript restored from its assembly checkpoint is priced from
+the records past the checkpoint's cut, so for up to ten minutes after a restart
+the rate can leave out what that session spent before the cut. The ceiling is
+the `spend-ceiling-usd-per-hour` setting, a bare value
 file under the state directory read at each check: 1000 dollars an hour with
 no file, any number in the file, and `0` disables the guard. When a session's
 rate crosses the ceiling, once per crossing, the kernel interrupts its turn

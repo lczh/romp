@@ -8,7 +8,10 @@ and falls back on none. What stays whole is asserted too, not left out: the leaf
 which the parse reads (stage 4's), read their whole size plus the guard reads the folds' restore made, and at most one
 more whole read: the reader serializes no reads, so two threads meeting a file's first read at the same instant (the
 judges' parse and the pusher's folds, at boot) both read it, which the reader trace showed as two from-zero reads of
-one states log back to back. Synthetic only: invented text, placeholder uuids, TESTHOST."""
+one states log back to back. The agent file's mtime is its last record's time, an hour back: a subagent file inside the
+spend guard's ten-minute window whose restored tail does not reach back to the window's start is read whole once after a
+boot (tests/test_returned_agent_drop.py pins that read), so this lab keeps its file out of the window to measure the
+tail alone. Synthetic only: invented text, placeholder uuids, TESTHOST."""
 import base64
 import json
 import os
@@ -201,6 +204,8 @@ class ExitThenBoot(unittest.TestCase):
                 sub = Path(proj, sid, "subagents"); sub.mkdir(parents=True, exist_ok=True)
                 cls.agent_file = str(sub / ("agent-%s.jsonl" % AGENT_ID))
                 Path(cls.agent_file).write_text("".join(json.dumps(r) + "\n" for r in agent_transcript(t0 + 32)))
+                os.utime(cls.agent_file, (t0 + 151, t0 + 151))   # stamped at its last record, an hour back: outside the spend
+                #                                                   guard's ten-minute window, so only the gist fold reads it
             Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
             cls.leaf_files = getattr(cls, "leaf_files", {}); cls.leaf_files[sid] = os.path.join(proj, sid + ".jsonl")
         Path(cls.state, "timeline", "messages.jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
