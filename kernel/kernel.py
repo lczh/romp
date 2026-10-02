@@ -18501,9 +18501,10 @@ def _comment_cut_from_parse(path, sid, anchor_uuid):
     "fallback" (an assembly that installs nothing), the event model's parse over the inputs jd.parsed_session hands it,
     with no cut, installs the entry once, so later creates answer from it; when that parse itself falls back (a rebuild
     whose restore or whole parse raises after a release), it installs nothing and each create parses again until the
-    files change (review round four: an induced state, disclosed rather than remembered). None when neither ask is
-    answered (no entry stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss), and the caller
-    reads the transcript."""
+    files change (review round four: an induced state, disclosed rather than remembered; pinned both ways by
+    test_a_rebuild_that_falls_back_after_a_release_parses_again_at_each_create_until_the_file_changes). None when
+    neither ask is answered (no entry stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss),
+    and the caller reads the transcript."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
     human = _display_sdk_human(sid)

@@ -2861,7 +2861,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entry (a chat's copy) that read the evicted file, so the records' lists
   go, though an idle session's parsed tree shares their text until the
   parse store replaces or drops it and a shown tab's build memos of it go
-  at that tab's next build; a build that read the file before the
+  at that tab's next build (its goal-tree memo at the next build that
+  walks its goals: a build that merges a live tail, runs while a rewind
+  is armed or reads an empty goal store keeps it), or when the tab is no
+  longer shown; a build that read the file before the
   eviction and installs after it keeps what it read, and a file evicted
   during its own read is not released. While the file is unchanged that
   chat's display build is served from its parsed tree and rebuilds

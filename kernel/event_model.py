@@ -655,13 +655,17 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # 2026-10-02): an entry's adapter keeps the very list it read (FileAdapter._src), so an eviction behind a chat's entry
 # freed 0.4% of the leaf's memory (review probe, 2026-10-01) and the budget bounded only this cache's books. Released
 # with it, the records' lists go; an idle session's tree in the judges' parse store shares their strings, so the text
-# stays until the store replaces or drops that slot. Two windows keep records: a build that read the file before the
+# stays until the store replaces or drops that slot and a shown tab's build memos of the tree go, at that tab's next
+# build (its goal-tree memo at the next build that walks its goals) or when the tab is no longer shown. Two windows
+# keep records: a build that read the file before the
 # eviction and installs after it keeps what it read, and a path evicted during its own read is left out of the release
 # (_READ_IN_FLIGHT: an append read re-inserts the records it began from; a read from zero or a tail's upgrade builds new
 # ones). While the file is unchanged the display's next build is a parse-store hit that rebuilds nothing; a comment
 # create rebuilds the entry once (_comment_cut_from_parse; for a session parsed whole, with no usable document, beside
 # the tree the store keeps, a second copy until the budget evicts the file again or the old tree goes: the store
-# replaces or drops its slot, and a shown tab's build memos of it go at that tab's next build; a session whose stored
+# replaces or drops its slot, and a shown tab's build memos of it go at that tab's next build (its goal-tree memo at
+# the next build that walks its goals: a build that merges a live tail, runs while a rewind is armed or reads an empty
+# goal store keeps it), or when the tab is no longer shown; a session whose stored
 # parse fell back installs nothing and its creates read the transcript, and one whose rebuild itself falls back after a
 # release parses again at each create until its files change), as does the first build after an append (a restore from
 # the document, or a whole parse), and near the limit busy sessions may rebuild repeatedly. Counted under
@@ -5458,9 +5462,11 @@ def _asm_drop_holding(paths):
     """The byte budget's release (the owner's call, 2026-10-02): drop every assembly entry that read one of `paths`, the
     files a budget eviction just took (a file before a restore's cut, read by no one, is skipped), so the eviction lets
     go of the records the entry's adapter held: for a chat still using the file, their lists go at once and their text
-    when the parse store's slot goes; each entry dropped counts under recordCache.budgetReleased. The next parse that is
-    not a parse-store hit (a comment create, the first build after an append) restores the entry from its document or
-    parses whole, adding the records again (a session whose assembly falls back installs nothing). Called by the reader
+    when the parse store's slot and a shown tab's build memos of the tree go; each entry dropped counts under
+    recordCache.budgetReleased. The next parse that is not a parse-store hit (a comment create, the first build after an
+    append) restores the entry from its document or parses whole, adding the records again (a session whose stored
+    parse fell back installs nothing; one whose rebuild itself falls back after this release parses again at each
+    create until its files change). Called by the reader
     after it lets _JSONL_CACHE_LOCK go, never under it: it takes _ASM_LOCK, then _MAT_LOCK, then _JSONL_CACHE_LOCK for
     the count, one at a time (the last as the reader's own insert takes it), and no holder of the first two waits on any
     other lock."""

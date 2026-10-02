@@ -14,7 +14,7 @@ Pinned here:
   budget released the entry (2026-10-02), one create rebuilds it and the next builds no adapter, on a restart seam and
   a /clear continuation too, and on a session whose stored parse fell back no create parses a second time, even with
   no current road for the leaf (one whose rebuild itself falls back after a release parses again at each create until
-  its files change: an induced state, disclosed);
+  its files change: an induced state, disclosed and pinned);
 - a comments frame reads each thread's own records past its cut, never the copied history;
 - the create runs off the socket thread and answers the moment the thread row exists, carrying the thread's frame row;
   a frame built before that row was saved is never sent after the answer.
@@ -415,8 +415,8 @@ class CutFromTheDisplayParse(Base):
         # the create reads the transcript, one adapter. A session whose parse installs is still rebuilt by one parse at its
         # first create (the budget-eviction tests above). The kernel's road for the leaf is cleared before the creates, as
         # after a restart before the chat's first build, so the retry's own _parse is what finds the stored road (round
-        # four). A session whose rebuild itself falls back after a release is not covered: it parses again at each create
-        # until its files change (an induced state, disclosed in the docstring of _comment_cut_from_parse)
+        # four). A session whose rebuild itself falls back after a release parses again at each create until its files
+        # change, as the next test pins (an induced state, disclosed in the docstring of _comment_cut_from_parse)
         path, recs = self._session(n=20, size=20000)
         key = (os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))
         real = em._asm_restore
@@ -438,6 +438,58 @@ class CutFromTheDisplayParse(Base):
         finally:
             em._asm_restore = real
         self.assertEqual(self.roads()["read"], 2)
+
+    def test_a_rebuild_that_falls_back_after_a_release_parses_again_at_each_create_until_the_file_changes(self):
+        # the state the texts disclose (review round five): an entry a parse that succeeded installed, released by the
+        # budget, and a rebuild whose restore and whole parse raise. The stored road stays the install's ("full"), so each
+        # create runs one event-model parse that falls back and installs nothing, then reads the transcript; after an
+        # append the parse that brings the leaf current falls back itself, its road reads "fallback", and the creates
+        # after it parse no more. With checkpoints on and off, which reach the whole parse by different roads.
+        for ckpt in (True, False):
+            with self.subTest(checkpoints=ckpt):
+                restart()
+                if not ckpt:
+                    em.set_checkpoint_dir(None)
+                path, recs = self._session(n=20, size=20000)
+                km._parse_mode.pop(path, None)
+                key = (os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))
+                km._parse(path, PARENT, self.now)
+                self.assertIn(key, em._ASM_CACHE, "the chat's parse installed its entry")
+                other = write(self.proj / "notes-api-other.jsonl",
+                              [uline(self.now - 10, "another session's prompt", "o1")])
+                saved = em._JSONL_CACHE_BUDGET_BYTES
+                em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
+                try:
+                    em._read_jsonl_incremental(other)     # the budget evicts the leaf and releases the entry
+                finally:
+                    em._JSONL_CACHE_BUDGET_BYTES = saved
+                self.assertNotIn(key, em._ASM_CACHE, "the budget released the chat's entry")
+                real = (em._asm_restore, em._asm_full)
+
+                def raises(*a, **k):
+                    raise RuntimeError("a synthetic rebuild failure")
+                em._asm_restore = em._asm_full = raises
+                try:
+                    for anchor in ("ka5", "kr10", "ka12"):
+                        got, built, parsed, reads = self.counted_create(path, anchor)
+                        self.assertEqual((parsed, reads, built), (1, 1, 2), "a parse that falls back, then the transcript "
+                                                                             "read, at every create (%s)" % anchor)
+                        self.assertEqual(km._parse_mode.get(path), "full",
+                                         "the stored road is still the install's (%s)" % anchor)
+                        self.assertNotIn(key, em._ASM_CACHE, anchor)
+                        self.assertEqual(got, self.cold(path, anchor), anchor)
+                    more, _, _ = turns(self.now - 500, 1, 2000, parent=recs[-1]["uuid"], tag="m")
+                    write(path, recs + more)              # the file changes
+                    self.counted_create(path, "ka12")
+                    self.assertEqual(km._parse_mode.get(path), "fallback",
+                                     "the parse that brought the leaf current fell back")
+                    got, built, parsed, reads = self.counted_create(path, "kr10")
+                    self.assertEqual((parsed, reads), (0, 1), "after the change no create parses: the transcript is read")
+                    self.assertEqual(got, self.cold(path, "kr10"))
+                finally:
+                    em._asm_restore, em._asm_full = real
+                    if not ckpt:
+                        em.set_checkpoint_dir(lambda: jd.STATE / "checkpoints")
 
     def test_a_document_write_over_the_parse_does_not_hold_the_walk(self):
         # the settle's document write holds the session's key lock for its whole length (14 s at 110 MB in the lab) and only

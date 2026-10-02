@@ -540,7 +540,8 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
     def test_an_eviction_releases_the_chats_copy_and_frees_its_records(self):
         """Measured with no parsed tree held (the test drops its own before the eviction): an idle session's tree in the
         judges' parse store shares the records' strings, so in the kernel their text stays until the store replaces or
-        drops that slot; what this frees is the records' lists and the entry's copy."""
+        drops that slot and a shown tab's build memos of the tree go; what this frees is the records' lists and the
+        entry's copy."""
         leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 600)
         other = self._file("notes-api-states.jsonl")
         size = os.path.getsize(leaf)
@@ -834,7 +835,8 @@ class Surfaces(unittest.TestCase):
                   "releases every assembly entry", "may rebuild repeatedly", "rewritten after its eviction counted too",
                   "until the parse store replaces or drops it", "installs after it keeps what it read",
                   "evicted during its own read is not released", "rebuilds the entry once", "`budgetReleased`",
-                  "a shown tab's build memos of it go"):
+                  "replaces or drops it and a shown tab's build memos of it go at that tab's next build",
+                  "replaces or drops that tree and a shown tab's build memos of it go, or the budget evicts"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]
