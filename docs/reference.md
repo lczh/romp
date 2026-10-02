@@ -2860,15 +2860,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   megabytes of memory). A budget eviction also releases every assembly
   entry (a chat's copy) that read the evicted file, so the records' lists
   go, though an idle session's parsed tree shares their text until the
-  parse store replaces or drops it; a build that read the file before the
+  parse store replaces or drops it and a shown tab's build memos of it go
+  at that tab's next build; a build that read the file before the
   eviction and installs after it keeps what it read, and a file evicted
   during its own read is not released. While the file is unchanged that
   chat's display build is served from its parsed tree and rebuilds
   nothing; a comment create rebuilds the entry once (for a chat parsed
   whole, beside the parsed tree, so two copies stand until the parse
-  store replaces or drops that tree or the budget evicts the file again;
-  a chat whose assembly falls back to a plain parse installs nothing, and
-  its creates read the transcript), as does the first
+  store replaces or drops that tree and a shown tab's build memos of it
+  go, or the budget evicts the file again; a chat whose stored parse fell
+  back to a plain parse installs nothing, and its creates read the
+  transcript, while one whose rebuild itself falls back after a release
+  parses again at each create until its files change), as does the first
   build after an append (a restore from its document or a whole parse,
   under `asmCheckpoint.parse`), and near the limit busy sessions may
   rebuild repeatedly; `countCap`,

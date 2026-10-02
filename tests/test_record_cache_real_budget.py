@@ -833,7 +833,8 @@ class Surfaces(unittest.TestCase):
                   "the whole read that upgrades", "in memory, per process", "1.44 to 7.7 by shape", "at most 1000",
                   "releases every assembly entry", "may rebuild repeatedly", "rewritten after its eviction counted too",
                   "until the parse store replaces or drops it", "installs after it keeps what it read",
-                  "evicted during its own read is not released", "rebuilds the entry once", "`budgetReleased`"):
+                  "evicted during its own read is not released", "rebuilds the entry once", "`budgetReleased`",
+                  "a shown tab's build memos of it go"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]

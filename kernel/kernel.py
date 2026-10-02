@@ -18499,9 +18499,11 @@ def _comment_cut_from_parse(path, sid, anchor_uuid):
     entry stands (a record cache budget eviction released it, 2026-10-02, and an idle session's _parse is then a
     parse-store hit that rebuilds nothing), the parse is brought current the same way and then, unless its road was
     "fallback" (an assembly that installs nothing), the event model's parse over the inputs jd.parsed_session hands it,
-    with no cut, installs the entry once, so later creates answer from it. None when neither ask is answered (no entry
-    stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss), and the caller reads the
-    transcript."""
+    with no cut, installs the entry once, so later creates answer from it; when that parse itself falls back (a rebuild
+    whose restore or whole parse raises after a release), it installs nothing and each create parses again until the
+    files change (review round four: an induced state, disclosed rather than remembered). None when neither ask is
+    answered (no entry stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss), and the caller
+    reads the transcript."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
     human = _display_sdk_human(sid)

@@ -12,7 +12,9 @@ Pinned here:
   transcript a chat build has read, and on a restored entry only the pre-cut records the walk needs a body of; a
   pre-compaction passage and a restart seam still cut exactly as the whole read cuts them; after the record cache's
   budget released the entry (2026-10-02), one create rebuilds it and the next builds no adapter, on a restart seam and
-  a /clear continuation too, and on a session whose assembly falls back no create parses a second time;
+  a /clear continuation too, and on a session whose stored parse fell back no create parses a second time, even with
+  no current road for the leaf (one whose rebuild itself falls back after a release parses again at each create until
+  its files change: an induced state, disclosed);
 - a comments frame reads each thread's own records past its cut, never the copied history;
 - the create runs off the socket thread and answers the moment the thread row exists, carrying the thread's frame row;
   a frame built before that row was saved is never sent after the answer.
@@ -405,13 +407,16 @@ class CutFromTheDisplayParse(Base):
         self.assertEqual((got1, got2), (self.cold(path, anchors[0]), self.cold(path, anchors[1])))
         self.assertEqual(self.roads()["read"], 0)
 
-    def test_a_session_whose_assembly_falls_back_is_not_parsed_a_second_time_at_each_create(self):
+    def test_a_session_whose_stored_parse_fell_back_is_not_parsed_a_second_time_at_each_create(self):
         # when the assembly raises it serves a plain parse that installs nothing (em._assemble's "fallback"), so no entry
         # ever stands, and the "none" retry parsed again at every create, fell back again and read the transcript anyway
         # (review round three: 0.22 to 0.29 s a create on a 12.2 MB leaf, the fallback induced). The retry brings the
         # display's parse current first, here a parse-store hit whose road reads "fallback", and then parses no second time:
         # the create reads the transcript, one adapter. A session whose parse installs is still rebuilt by one parse at its
-        # first create (the budget-eviction tests above)
+        # first create (the budget-eviction tests above). The kernel's road for the leaf is cleared before the creates, as
+        # after a restart before the chat's first build, so the retry's own _parse is what finds the stored road (round
+        # four). A session whose rebuild itself falls back after a release is not covered: it parses again at each create
+        # until its files change (an induced state, disclosed in the docstring of _comment_cut_from_parse)
         path, recs = self._session(n=20, size=20000)
         key = (os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))
         real = em._asm_restore
@@ -423,6 +428,7 @@ class CutFromTheDisplayParse(Base):
             km._parse(path, PARENT, self.now)
             self.assertEqual(km._parse_mode.get(path), "fallback", "the display's parse fell back")
             self.assertNotIn(key, em._ASM_CACHE, "…and installed no entry")
+            km._parse_mode.pop(path, None)                # no current road: the retry's own _parse brings it back
             for anchor in ("kr10", "ka12"):
                 got, built, parsed, reads = self.counted_create(path, anchor)
                 self.assertEqual((parsed, reads, built), (0, 1, 1), "no event model parse: the create reads the transcript, "

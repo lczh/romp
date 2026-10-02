@@ -661,9 +661,10 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # ones). While the file is unchanged the display's next build is a parse-store hit that rebuilds nothing; a comment
 # create rebuilds the entry once (_comment_cut_from_parse; for a session parsed whole, with no usable document, beside
 # the tree the store keeps, a second copy until the budget evicts the file again or the old tree goes: the store
-# replaces or drops its slot, and a tab's memo of it lasts to that tab's next build; a session whose assembly falls back
-# installs nothing and its creates read the transcript), as does the first build after an append (a restore from the
-# document, or a whole parse), and near the limit busy sessions may rebuild repeatedly. Counted under
+# replaces or drops its slot, and a shown tab's build memos of it go at that tab's next build; a session whose stored
+# parse fell back installs nothing and its creates read the transcript, and one whose rebuild itself falls back after a
+# release parses again at each create until its files change), as does the first build after an append (a restore from
+# the document, or a whole parse), and near the limit busy sessions may rebuild repeatedly. Counted under
 # recordCache.budgetReleased. LRU order does not follow need: a display walk the assembly entry serves by a stat check
 # never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
 # machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
