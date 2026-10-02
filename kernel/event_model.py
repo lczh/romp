@@ -755,10 +755,28 @@ def record_cache_stats() -> dict:
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
         out["wholeReadsByStage"] = {k: dict(v) for k, v in bys.items()} if isinstance(bys, dict) else {}
-        return out
+    with _SWALLOWED_LOCK:
+        out["swallowed"] = dict(_SWALLOWED)
+    return out
 
 
-_JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
+_SWALLOWED = {}                   # "site:ExceptionType" -> raises a handler kept from its caller (note_swallowed)
+_SWALLOWED_LOCK = threading.Lock()
+
+
+def note_swallowed(site, exc):
+    """A raise that a handler keeps from its caller (the returned-agent drop's witness check, the spend guard's agent folds;
+    2026-10-02): counted under recordCache.swallowed on /perf by site and exception type, and said on stderr at the first,
+    tenth, hundredth (each power of ten) of each, since these handlers run on every jobs pass. A raise that persists would
+    otherwise return those agents to the old retention with no trace."""
+    k = "%s:%s" % (site, type(exc).__name__)
+    with _SWALLOWED_LOCK:
+        n = _SWALLOWED[k] = _SWALLOWED.get(k, 0) + 1
+    if n == 10 ** (len(str(n)) - 1):
+        sys.stderr.write("record cache: %s raised %s (%d so far): %s\n" % (site, type(exc).__name__, n, exc))
+
+
+_JSONL_TAIL_GUARD = 64           # bytes of pre-offset content re-verified before an incremental read
 _JSONL_CACHE_LOCK = threading.Lock()   # the cache has cross-thread callers (the judge tiers' worker pools,
                                        # the pusher, the warm threads) and HITS mutate (LRU reinsert): the
                                        # lock covers only the cheap dict ops — the parse runs outside it —
@@ -2402,7 +2420,8 @@ def _document_at_witness(key, ent):
             if cur[0] != total or not (isinstance(f, dict) and "state" in f and int(f.get("count", -1)) == total):
                 return False
         return not _asm_holds_records(key, recs)
-    except Exception:
+    except Exception as e:
+        note_swallowed("dropWitness", e)                  # the entry stays: memory, never a wrong answer
         return False
 
 

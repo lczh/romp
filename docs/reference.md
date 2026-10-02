@@ -2865,7 +2865,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the stage being the pusher thread's current tick job (`jobs.<job>`) or
   `push`, `connect` for a fresh client's full push on its handler thread (a
   browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
-  does the same for the hydration rows.
+  does the same for the hydration rows; `swallowed` counts raises two handlers
+  keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
+  returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
+  spend guard's agent folds, whose file's records then stay), each said on
+  stderr at its first, tenth and hundredth raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
   row fails its shape check at load, or fails its decode at the first read

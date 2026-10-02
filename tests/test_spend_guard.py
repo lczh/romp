@@ -223,7 +223,8 @@ class Memo(unittest.TestCase):
         km._spend_file_rows(self.leaf, NOW - 600, PRICES, None)
         ent = km.em._read_jsonl_entry(self.leaf, tail_ok=True)
         self.assertEqual(km._SPEND_ROWS_CACHE[self.leaf][0], (ent[0], ent[1], ent[5]), "mtime, size, base (LOW a)")
-        self.assertEqual(len(km._SPEND_ROWS_CACHE[self.leaf]), 4, "and the last use, for the cap")
+        self.assertEqual(len(km._SPEND_ROWS_CACHE[self.leaf]), 5, "the last use, for the cap, and where the scanned records end")
+        self.assertEqual(km._SPEND_ROWS_CACHE[self.leaf][4], ent[2])
         with mock.patch.object(km, "SPEND_GUARD_ROWS_CACHE_MAX", 4):
             others = []
             for i in range(3):                             # the leaf's entry plus three: at the cap

@@ -30,6 +30,7 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     resumed with no whole read; without the guard, a card cursor left behind keeps its agent resident.
 SYNTHETIC fixtures only: placeholder ids, the notes-api demo names, transcripts written here."""
 import inspect
+import io
 import json
 import os
 import tempfile
@@ -380,6 +381,20 @@ class ReturnedPolicy(Base):
         self.fold(cache, p)
         self.assertIsNone(self.entry(p), "the parse gone, the next quiet fold drops")
 
+    def test_a_raise_in_the_witness_check_holds_the_drop_and_is_counted_and_said(self):
+        p, cache, ent = self.returned("agent-a9800000000000008.jsonl")
+        em._SWALLOWED.clear()
+        err = io.StringIO()
+        with mock.patch.object(em, "_asm_holds_records", side_effect=RuntimeError("synthetic witness fault")), \
+             mock.patch("sys.stderr", new=err):
+            self.fold(cache, p)
+            self.fold(cache, p)
+        self.assertIs(self.entry(p), ent, "the raise holds the drop: memory, never a wrong answer")
+        self.assertEqual(em.record_cache_stats()["swallowed"], {"dropWitness:RuntimeError": 2}, "counted on /perf")
+        self.assertEqual(err.getvalue().count("dropWitness raised RuntimeError"), 1, "said once, at the first raise")
+        self.fold(cache, p)
+        self.assertIsNone(self.entry(p), "the fault gone, the next quiet fold drops")
+
     def test_a_cursor_of_another_generation_the_document_does_not_carry_leaves_the_quiet_drop_alone(self):
         p = self.sub / "agent-a9700000000000007.jsonl"
         write(p, [rec(T0 - 200 + i, i) for i in range(4)], T0 - 11)
@@ -523,6 +538,20 @@ class SpendGuard(Base):
         self.assertEqual(self.read_of(wf), r0, "nothing read")
         self.assertEqual(self.window(T0 + 600), 0.0, "aged out of the window")
 
+    def test_a_raise_in_the_guards_agent_fold_keeps_its_total_and_is_counted_and_said(self):
+        wf = str(self.sub / "workflows" / "wf_1" / "agent-a9800000000000009.jsonl")
+        recs = [rec(T0 - 100 + 5 * i, i) for i in range(10)]
+        write(wf, recs, T0 - 55)
+        km.em._SWALLOWED.clear()
+        err = io.StringIO()
+        with mock.patch.object(km.em, "fold_steps_in_hand", side_effect=RuntimeError("synthetic fold fault")), \
+             mock.patch("sys.stderr", new=err):
+            self.assertAlmostEqual(self.window(T0), sum(map(usd, recs)), places=9, msg="the guard's rate stands")
+            self.assertAlmostEqual(self.window(T0 + 120), sum(map(usd, recs)), places=9)
+        self.assertEqual(km.em.record_cache_stats()["swallowed"], {"spendGuardFold:RuntimeError": 2}, "counted on /perf")
+        self.assertEqual(err.getvalue().count("spendGuardFold raised RuntimeError"), 1, "said once, at the first raise")
+        self.assertTrue(em.entry_whole_resident(wf), "no fold ran: the records stay, as on main")
+
     def test_the_row_memo_serves_a_tail_restore_of_the_same_bytes(self):
         ap = str(self.sub / "agent-a6666666666666666.jsonl")
         recs = [rec(T0 - 100 + 5 * i, i) for i in range(10)]
@@ -563,6 +592,28 @@ class SpendGuard(Base):
         self.assertAlmostEqual(self.window(T0 + 210), in_window(early + late, T0 + 210), places=9, msg="priced from the memo")
         self.assertEqual(self.read_of(ap), r1, "and not entered again")
         self.assertEqual(self.guard_whole_reads(), whole0)
+
+    def test_a_half_written_record_at_the_guards_read_costs_no_whole_read(self):
+        ap = str(self.sub / "agent-a9f00000000000001.jsonl")
+        early = [bare(rec(T0 - 400 + 5 * i, i)) for i in range(10)]   # no message ids: a record counted twice would show
+        late = [bare(rec(T0 + 5 + i, 100 + i)) for i in range(4)]
+        lines = [json.dumps(r) + "\n" for r in early + late]
+        Path(ap).parent.mkdir(parents=True, exist_ok=True)
+
+        def put(text, mtime):
+            with open(ap, "a") as fh:
+                fh.write(text)
+            os.utime(ap, (mtime, mtime))
+        put("".join(lines[:10]) + lines[10][:40], T0 - 355)       # the memo's first scan meets a half-written record
+        self.assertAlmostEqual(self.window(T0), in_window(early, T0), places=9)
+        self.assertIsNone(self.entry(ap), "quiet: dropped as it was folded")
+        whole0 = self.guard_whole_reads()
+        put(lines[10][40:] + lines[11] + lines[12][:40], T0 + 8)   # the agent resumes; the resume's read meets another half
+        self.assertAlmostEqual(self.window(T0 + 10), in_window(early + late[:2], T0 + 10), places=9)
+        self.assertEqual(self.entry(ap)[5], 10, "the tail past the drop's cut")
+        put(lines[12][40:] + lines[13], T0 + 13)
+        self.assertAlmostEqual(self.window(T0 + 15), in_window(early + late, T0 + 15), places=9)
+        self.assertEqual(self.guard_whole_reads(), whole0, "the memo ends where its records end, not past a half-written line")
 
     def resumed(self, name, early, late, mid=()):
         """An agent file whose `early` records the guard priced at T0 while fresh (its memo from the whole file); `mid` appended

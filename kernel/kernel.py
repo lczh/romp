@@ -48647,7 +48647,8 @@ def _spend_can_spend(tm):
     tm = tm or {}
     return tm.get("state") == "working" or bool(tm.get("subagents")) or bool(tm.get("bgTasks"))
 _SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
-_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd, message id), ...], last use): the window rows, memoized on the stamp
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd, message id), ...], last use, end): the window
+#                                     rows, memoized on the stamp; `end` is the offset the scanned records end at (a half line not counted)
 SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
 #                                     thousands of finished agent files, each a window row list nobody asks for again)
 SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
@@ -49038,8 +49039,9 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
     guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
     read whole once when its first stamped record is not older than the window's floor, since the records before the
     document's cut may then be in the window (a fresh process restoring a file the window still covers), and a window
-    priced from the tail alone would read low. Except where the memo ends at a record the tail holds (its stamp's size is
-    that record's byte offset, _spend_tail_index) and reaches back to the window's start: an agent that resumed after its
+    priced from the tail alone would read low. Except where the memo ends at a record the tail holds (the offset the memo's
+    records end at, kept beside its stamp, is that record's start, _spend_tail_index; a half-written last line is left
+    out, its record priced once whole) and reaches back to the window's start: an agent that resumed after its
     drop, which a LIVE agent's silence of over two minutes is (a long tool call, a long response), at its first record
     and at every one after while the reader holds the tail. Then only the records past the memo's end are priced and the
     memo's rows from its floor on are kept beside them, a response logged on both sides counted once at its largest usage
@@ -49052,7 +49054,7 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
             except OSError:
                 st = None
             if st is not None and (st.st_mtime, st.st_size) == hit[0][:2]:
-                _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
+                _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time(), hit[4])
                 return _spend_rows_since(hit[2], since)
     ent = em._read_jsonl_entry(f, tail_ok=True)
     if ent is None:
@@ -49065,12 +49067,13 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
     #   went UP over the same bytes (a drop, then a tail restored at the document's cut) is served: the memo saw them all
     hit = _SPEND_ROWS_CACHE.get(f)
     if hit is not None and hit[0][:2] == stamp[:2] and hit[0][2] <= stamp[2] and hit[1] <= since:
-        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
+        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time(), hit[4])
         return _spend_rows_since(hit[2], since)
     floor = since - SPEND_GUARD_MEMO_SLACK_S
     prior, start = None, 0
     if agent and ent[5] > 0 and not _spend_tail_covers(ent[4], floor):
-        at = _spend_tail_index(ent, hit[0][1]) if hit is not None and hit[1] <= since else None
+        at = _spend_tail_index(ent, hit[4]) if hit is not None and hit[1] <= since else None   # where the memo's records end,
+        #                                                                                      a half-written line not counted
         if at is not None:
             prior, start = hit, at                       # the memo ends at the tail's record `at`: only the records past it are priced
         else:
@@ -49120,7 +49123,7 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
             elif r[1] > rows[i][1]:
                 rows[i] = (rows[i][0], r[1], r[2])
         stamp = (ent[0], ent[1], prior[0][2])            # the memo's base: the rows saw what it saw, the records before the cut
-    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time(), int(ent[2]))
     if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
         # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
         # never again; without a bound a kernel life would hold one list per agent it ever priced. Down to three
@@ -49138,8 +49141,8 @@ def _spend_rows_since(rows, since):
 
 
 def _spend_tail_index(ent, size):
-    """The index of the tail entry's first held record that starts at byte `size`, where a row memo of the file at that
-    size ended (its scan saw every record before it), or len(records) when the held records end there; None when no
+    """The index of the tail entry's first held record that starts at byte `size`, where a row memo's scanned records
+    ended (its scan saw every record before it), or len(records) when the held records end there; None when no
     held record starts there (the memo ends before the tail begins, or inside a line). Searched from the newest record,
     since a memo is usually a cycle or a few behind its file."""
     recs = ent[4]
@@ -49186,14 +49189,14 @@ def _spend_fold_agent(f):
     drop has a cursor and a document to restore from. The card's steps fold runs only over its own cursor or document
     state: it catches up a card whose chat stopped being built before the agent returned, whose cursor behind the entry
     would hold the drop for good, and it never starts a steps state for a workflow agent. A fold that raises costs memory,
-    never the guard's rate."""
+    never the guard's rate, and is counted and said (em.note_swallowed)."""
     try:
         if em.fold_steps_in_hand(_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", f):
             _agent_launch_ids(f)
         if em.fold_steps_in_hand(_AGENT_GIST_CACHE, "agentGist", f, new=False):
             _agent_gist_fold(f)
-    except Exception:
-        pass
+    except Exception as e:
+        em.note_swallowed("spendGuardFold", e)
 
 
 def _spend_guard_seed():
