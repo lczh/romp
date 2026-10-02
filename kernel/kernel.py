@@ -34002,6 +34002,23 @@ def _push_subagents(clients, now, live_map):
             _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
 
 
+def _subagent_viewer_closed(sid, agent_id):
+    """A subagent viewer closed (closeSubagent, or its socket went away; 2026-10-02): the background-task cursor its render
+    left on the agent's own file (_bg_scan_all_cached, run for a task notification or a nested background launch in that
+    file) is popped, unless another client still has the same viewer open. No other reader steps that cursor, and once the
+    agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good (em._document_at_witness)."""
+    try:
+        with _clients_lock:
+            if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
+                return
+        ppath = _path_of(sid, int(time.time()))
+        apath = _subagent_file(ppath, agent_id) if ppath else None
+        if apath is not None:
+            _bgall_cache.pop(str(apath), None)
+    except Exception:
+        sys.stderr.write("subagent viewer close %s/%s: %s\n" % (sid, agent_id, traceback.format_exc()))
+
+
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
 # limit · raise it at claude.ai/settings/usage") — distinct from a 5h/7d RATE window (which _usage()
 # reports, _auto_pause_on_limit already pauses, and which resets on a KNOWN clock the card counts down
@@ -75250,6 +75267,7 @@ class Handler(BaseHTTPRequestHandler):
                 client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
             if msg["type"] == "closeSubagent":
                 (client.get("subagents") or {}).pop((sid, aid), None)
+                _subagent_viewer_closed(sid, aid)
                 return
             client.setdefault("subagents", {})[(sid, aid)] = True
             try:
@@ -76595,6 +76613,8 @@ class Handler(BaseHTTPRequestHandler):
                     _clients.remove(client)
             with _clients_lock:
                 _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
+            for _sv in list((client.get("subagents") or {}).keys()):
+                _subagent_viewer_closed(*_sv)         # its open viewers close with it
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's

@@ -15,6 +15,8 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     waits unowed, and under the converge hold it is paid without its pop; a cursor of another generation that the document
     does not carry does not hold it;
   * the kernel's agent-file folds take the new policy and the parent-leaf fold does not;
+  * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification,
+    so the agent still drops when it returns;
   * the spend guard routes its agent reads through the dropping folds (never starting a steps state for a workflow agent,
     never folding while a viewer's parse holds the records), prices a dropped file from its memo without entering it
     again, prices a resumed agent from its memo and the tail without a whole read (a response split across the cut counted
@@ -27,6 +29,7 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     window equals a reference sum at every cycle; agents that fall silent for over two minutes mid-run are dropped and
     resumed with no whole read; without the guard, a card cursor left behind keeps its agent resident.
 SYNTHETIC fixtures only: placeholder ids, the notes-api demo names, transcripts written here."""
+import inspect
 import json
 import os
 import tempfile
@@ -98,6 +101,14 @@ def bare(r):
     """The record without its message id (a Codex transcript's records carry none, so each counts on its own)."""
     r["message"].pop("id", None)
     return r
+
+
+def chain(recs, parent=None):
+    """The records as one conversation: each record's parent is the one before it (a null parent reads as a fork)."""
+    for r in recs:
+        r["parentUuid"], r["isSidechain"] = parent, True
+        parent = r["uuid"]
+    return recs
 
 
 def write(path, recs, mtime):
@@ -416,6 +427,73 @@ class KernelFolds(Base):
         leaf = self.entry(self.leaf)
         self.assertIsNotNone(leaf, "the idle parent leaf keeps its entry: a live session's file is never dropped on a quiet fold")
         self.assertEqual((leaf[5], len(leaf[4])), (0, 6))
+
+
+class ViewerClose(Base):
+    """The subagent viewer's render folds the background tasks of an agent file that carries a task notification (or a nested
+    background launch), and no other reader steps that cursor: once the viewer closes and the agent writes on, a cursor
+    behind the entry would hold the returned agent's quiet drop for good. Closing the viewer pops it."""
+
+    AID = "a9b00000000000001"
+
+    def setUp(self):
+        super().setUp()
+        self.saved_projects = jd.PROJECTS
+        jd.PROJECTS = Path(os.path.realpath(str(self.td))) / "projects"
+        jd._discover_cache["fp"] = None
+        jd._discover_cache["result"] = None
+        cwd = os.path.realpath(str(self.td / "notes-api"))
+        os.makedirs(cwd, exist_ok=True)
+        self.proj = jd._proj_dir(cwd)
+        self.proj.mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "names").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "names" / SID).write_text("web\t" + cwd)
+        self.leaf = str(self.proj / (SID + ".jsonl"))
+        self.sub = self.proj / SID / "subagents"
+        for c in (km._parse_cache, km._SUBAGENT_FILE_CACHE, km._SUBAGENT_META_CACHE, km._SUBAGENT_FRAMES):
+            c.clear()
+        p = mock.patch.object(km, "_live_map", lambda: {})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def tearDown(self):
+        super().tearDown()
+        jd.PROJECTS = self.saved_projects
+        jd._discover_cache.clear()
+
+    def agent_records(self, t):
+        """A prompt, a background shell command, its finished notification, then five tool calls: t-1 .. t+14."""
+        launch = rec(t + 1, 1, launch=True)
+        note = {"type": "user", "timestamp": iso(t + 9), "uuid": "n-%d" % t, "sessionId": SID,
+                "message": {"role": "user", "content": (
+                    "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>%s</tool-use-id>\n"
+                    "<output-file>/w/notes-api/.tasks/b1.output</output-file>\n<status>completed</status>\n"
+                    "<summary>Background command \"make test\" completed</summary>\n</task-notification>"
+                    % launch["message"]["content"][0]["id"])}}
+        prompt = {"type": "user", "timestamp": iso(t - 1), "uuid": "p-%d" % t, "sessionId": SID,
+                  "message": {"role": "user", "content": "Run the notes-api tests in the background and report."}}
+        return chain([prompt, rec(t, 0), launch, note] + [rec(t + 10 + i, 10 + i) for i in range(5)])
+
+    def test_a_closed_viewer_lets_go_of_the_background_task_cursor_its_render_left(self):
+        write(self.leaf, [rec(T0 - 200, 0)], int(time.time()))   # the parent transcript (discovery reads its real mtime)
+        ap = str(self.sub / ("agent-%s.jsonl" % self.AID))
+        recs = self.agent_records(T0 - 60)
+        write(ap, recs, T0 - 46)
+        self.assertEqual(str(km._subagent_file(self.leaf, self.AID)), ap)
+        km._agent_launch_ids(ap)                                  # the card's fold while the agent runs
+        fr = km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it
+        self.assertNotIn("error", fr)
+        self.assertIn(ap, km._bgall_cache, "the notification's join folded the agent file's background tasks")
+        append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)   # the agent writes on
+        client = {"app": "chat", "wid": "w1", "alive": True, "sent": {}, "send": lambda s: None}
+        km.Handler._dispatch_ws(object.__new__(km.Handler), {"type": "closeSubagent", "id": SID, "agentId": self.AID}, client)
+        km._agent_launch_ids(ap)                                  # the card's fold steps the new records while the file is fresh
+        self.clock.t = T0 + 300                                   # the agent returned
+        km._agent_launch_ids(ap)                                  # a quiet fold
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "the closed viewer's cursor no longer holds the returned agent's drop")
+        self.assertNotIn(ap, km._bgall_cache)
+        self.assertIn("_subagent_viewer_closed(*_sv)", inspect.getsource(km.Handler._ws), "a socket that goes away closes its viewers")
 
 
 class SpendGuard(Base):
