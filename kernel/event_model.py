@@ -657,34 +657,33 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # with it, the records' lists go; an idle session's tree in the judges' parse store shares their strings, so the text
 # stays until the store replaces or drops that slot. Two windows keep records: a build that read the file before the
 # eviction and installs after it keeps what it read, and a path evicted during its own read is left out of the release
-# (_READ_IN_FLIGHT: that read re-inserts the records it began from). While the file is unchanged the display's next
-# build is a parse-store hit that rebuilds nothing; a comment create rebuilds the entry once (_comment_cut_from_parse),
-# as does the first build after an append (a restore from the document, or a whole parse), and near the limit busy
-# sessions may rebuild repeatedly. Counted under recordCache.budgetReleased. LRU order does not follow need: a
-# display walk the assembly entry serves by a stat check never touches this cache, and a file only the judges read goes
-# cold between their passes.
-# The default is HALF of the machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's
-# direction, 2026-09-11, to use the memory we have; kept, in real units, on 2026-10-01), never under 4 GiB of FILE bytes
-# (2026-09-11, the day the budget shipped at 1 GiB of file bytes, about 2.9 GiB decoded):
-# the working set of a devbox running 50 sessions is their live leaves, read by every build in every pusher cycle, and
-# a budget below it does not save memory, it thrashes: 18 entries filled the 1 GiB, every build re-read whole
-# transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one pusher cycle of 132 s, chat builds of 3 s
-# each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. An LRU under reads that cycle through
-# more than it holds misses on EVERY read; it does not degrade partway. So the floor is a working-set bound and stays
-# in the working set's unit, file bytes (in memory, the floor times the multiple): wherever it binds (a machine under
-# about 23 GiB, or one without /proc/meminfo, such as macOS) the cache still holds 4 GiB of file bytes, what the floor
-# has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which held half its memory in file bytes before
-# 2026-10-01, now holds those 4 GiB.
-# Half of a 31 GiB machine in real units binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of
-# file bytes at 12.2 hours of uptime, after a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine
-# the budget can bind after about a day, later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus
-# 2.9 bytes per cached file byte), past the point where the machine it ran on began swapping it (about 14 GB, at 11.8
-# hours): half of memory caps this cache only past swap there, and a budget tight enough to bind before swap sits at
-# the working set, the thrash above. Once it binds it evicts the least recently used entries, cold ones first, which is
-# safe while the files read every cycle (live leaves and their lineage) stay under the binding point; past it the
-# thrash returns, and budgetRereads (an evicted path read back) shows it on /perf. What is not needed until looked at
-# (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
-# mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright, in megabytes of memory, floor or not.
+# (_READ_IN_FLIGHT: an append read re-inserts the records it began from; a read from zero or a tail's upgrade builds new
+# ones). While the file is unchanged the display's next build is a parse-store hit that rebuilds nothing; a comment
+# create rebuilds the entry once (_comment_cut_from_parse), as does the first build after an append (a restore from the
+# document, or a whole parse), and near the limit busy sessions may rebuild repeatedly. Counted under
+# recordCache.budgetReleased. LRU order does not follow need: a display walk the assembly entry serves by a stat check
+# never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
+# machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
+# memory we have; kept, in real units, on 2026-10-01), never under 4 GiB of FILE bytes (2026-09-11, the day the budget
+# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running 50 sessions is their live
+# leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: 18 entries
+# filled the 1 GiB, every build re-read whole transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one
+# pusher cycle of 132 s, chat builds of 3 s each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache.
+# An LRU under reads that cycle through more than it holds misses on EVERY read; it does not degrade partway. So the
+# floor is a working-set bound and stays in the working set's unit, file bytes (in memory, the floor times the
+# multiple): wherever it binds (a machine under about 23 GiB, or one without /proc/meminfo, such as macOS) the cache
+# still holds 4 GiB of file bytes, what the floor has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which
+# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 31 GiB machine in real units
+# binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of file bytes at 12.2 hours of uptime, after
+# a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine the budget can bind after about a day,
+# later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus 2.9 bytes per cached file byte), past the
+# point where the machine it ran on began swapping it (about 14 GB, at 11.8 hours): half of memory caps this cache only
+# past swap there, and a budget tight enough to bind before swap sits at the working set, the thrash above. Once it
+# binds it evicts the least recently used entries, cold ones first, which is safe while the files read every cycle (live
+# leaves and their lineage) stay under the binding point; past it the thrash returns, and budgetRereads (an evicted path
+# read back) shows it on /perf. What is not needed until looked at (subagent transcripts) leaves through
+# drop_after="quiescent" folds instead; the budget is the backstop, not the mechanism. ROMP_RECORD_CACHE_BUDGET_MB still
+# sets it outright, in megabytes of memory, floor or not.
 RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budget is never under this times the multiple
 RECORD_CACHE_BUDGET_FRACTION = 0.5
 RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
@@ -774,10 +773,12 @@ _BUDGET_EVICTED = {}              # path -> True or "tail": the paths the byte b
 #                                   eviction and the read back, the two events a thrash is made of, never on a time window. A
 #                                   file shrunk, rewritten or replaced after its eviction counts as a re-read too (no writer
 #                                   in kernel/ does that to a cache tenant)
-_READ_IN_FLIGHT = set()           # paths whose read is under way, under _JSONL_CACHE_LOCK: marked at the read's hit check and
-#                                   cleared at its insert and in a finally. A budget eviction leaves them out of the paths it
-#                                   releases: the read re-inserts the very records it began from, so a release there freed
-#                                   nothing and cost the chat a rebuild (review find, 2026-10-02)
+_READ_IN_FLIGHT = set()           # paths whose read is under way, under _JSONL_CACHE_LOCK: marked at the read's hit
+#                                   check and cleared at its insert and in a finally. A budget eviction leaves them out
+#                                   of the paths it releases: an append read re-inserts the very records it began from,
+#                                   so a release there freed nothing and cost the chat a rebuild (review find,
+#                                   2026-10-02); a read from zero or a tail's upgrade builds new records, and the chat's
+#                                   entry keeps the old ones until it is rebuilt
 
 
 def _entry_weight(ent) -> int:
@@ -855,7 +856,7 @@ def _cache_insert_locked(path, ent, began=None):
         _BUDGET_EVICTED.pop(old, None); _BUDGET_EVICTED[old] = True   # newest: a fresh eviction is a fresh re-read
         if len(_BUDGET_EVICTED) > _JSONL_CACHE_MAX:
             del _BUDGET_EVICTED[next(iter(_BUDGET_EVICTED))]
-        if old not in _READ_IN_FLIGHT:           # its read re-inserts the records the chat's entry holds: nothing to free
+        if old not in _READ_IN_FLIGHT:           # its own read is under way (an append re-inserts the entry's records)
             gone.append(old)
     _JSONL_CACHE[path] = ent
     _JSONL_CACHE_BYTES[0] += w
