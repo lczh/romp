@@ -274,8 +274,8 @@ test("executed + pinned: the section holding the ACTIVE tab folds like any other
   assert.match(head, /if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);/);
   assert.match(head, /\+ \(holdsActive \? " holds-active" : ""\)\);/);
   assert.match(head, /head\.draggable = !settings\.tabsLocked;/, "it still drags to reorder the groups, unless the tabs are locked (T395)");
-  assert.equal(headWords("infra", 1, 0, false, true).title, "infra — 1 session; holds the tab you are reading; click to fold this group and see its sessions at a glance; drag to reorder the groups");
-  assert.match(head, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive, back, shown\);\s*\n\s*head\.title = words\.title;/, "the words are the pure module's");
+  assert.equal(headWords("infra", 1, 0, false, true).title, "infra — 1 session; holds the tab you are reading; click to fold this group; drag to reorder the groups");
+  assert.match(head, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive\);\s*\n\s*head\.title = words\.title;/, "the words are the pure module's");
   assert.ok(!RENDER.includes('"group-active"'), "no delegate handler for a no-op either");
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \{ cursor: default; \}/, "the header folds, so its cursor promises the click");
   // the holding row wears no mark of its own (T322, the user 2026-09-10: the chip's accent underline read as a second
@@ -328,8 +328,8 @@ test("executed: the header click sets the fold state from what it RENDERED — n
   // the header carries its rendered state; the delegate reads it
   const head = RENDER.slice(RENDER.indexOf("function makeGroupHead("), RENDER.indexOf("function sectionHeadOf("));
   assert.match(head, /head\.dataset\.folded = collapsed \? "1" : "0";/);
-  assert.match(RENDER, /if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone && leaveFileTab\(\)\) snapView = name;[^\n]*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);\s*\n\s*if \(!phone\) showActive\(\);/,   // a file tab up gives the pane to the view (2026-09-30)
-    "rendered open → fold; rendered folded → open (and on the desktop the section shows in the pane: snapView; the phone's picker folds through the same handler and shows nothing, 2026-09-23)");
+  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);\s*\n\s*\},/,
+    "rendered open → fold; rendered folded → open, and nothing else: no view in the pane, on the desktop as on the phone (the user 2026-10-02)");
 });
 
 test("a folded section renders its header alone with the folded-away count and one MEMBER-derived pip after it — a label, not a session; cycling skips folded ids", () => {
@@ -383,8 +383,8 @@ test("the picker's Tags row is live for every offered backend, and the create al
 test("headers are click-safe: data-act on the node, the action on the stable #tabs delegate, one render path via the event", () => {
   assert.match(RENDER, /head\.dataset\.act = "toggle-group";/);
   // the click derives the next fold state from the one the header RENDERED (data-folded), never from the store, and
-  // shows the section in the pane (snapView; tab-snapshot-pane.test.ts)
-  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone && leaveFileTab\(\)\) snapView = name;[^\n]*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);/);
+  // does nothing else (the user 2026-10-02; tab-snapshot-pane.test.ts runs it)
+  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);/);
   // …and the kernel's copy of the folds, cached by a sibling pane (a fold there, or the kernel's push of one made on another device)
   assert.match(RENDER, /window\.addEventListener\("storage", \(e\) => \{ if \(e\.key === TABGROUPS_SHARED_KEY\) renderTabs\(\); \}\);/, "a fold cached by a sibling pane, or pushed from another device, repaints");
   assert.match(RENDER, /window\.addEventListener\(TABGROUPS_EVENT, \(\) => renderTabs\(\)\);/, "the same-window delivery");
@@ -743,7 +743,7 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
   // keyboard: a button to the keyboard, through the same click → delegate path as the pointer, on EVERY named
   // header, the one holding the tab being read too (it folds; aria-current marks it; the accessibility test
   // below). The stand-in's own keys come first in the handler (tab-snapshot-pane.test.ts runs them).
-  assert.match(head, /head\.setAttribute\("role", "button"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!back\) head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);\s*\n\s*head\.tabIndex = 0;\s*\n\s*head\.addEventListener\("keydown", \(e\) => \{/,
+  assert.match(head, /head\.setAttribute\("role", "button"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);\s*\n\s*head\.tabIndex = 0;\s*\n\s*head\.addEventListener\("keydown", \(e\) => \{/,
     "role, expanded state, the current mark, tab stop and key handler together");
   assert.match(head, /if \(e\.key === "Enter" \|\| e\.key === " "\) \{ e\.preventDefault\(\); head\.click\(\); \}\s*\n\s*\}\);/, "Enter and Space press the header");
   // a push mid-read must not kick focus off the header: renderTabs re-focuses the same group after the rebuild
@@ -1908,24 +1908,21 @@ test("executed: a folded section whose EVERY member is pinned stays folded — t
   // the words render.ts paints for that header
   assert.deepEqual(headWords("infra", 2, 0, true, false), {
     count: "2", label: "infra, 2 sessions, folded, all shown",
-    title: "infra — folded, but all 2 sessions are set to show when folded, so none is hidden; click to open and see its sessions at a glance",
-  }, "the total, never a 0 beside two visible tabs; the title names the menu row that did it (and the click's other effect: the section in the pane)");
-  assert.equal(headWords("infra", 1, 0, true, false).title, "infra — folded, but its one session is set to show when folded, so none is hidden; click to open and see its sessions at a glance");
-  // …and for the ordinary folded, part-pinned, open and active headers
-  assert.deepEqual(headWords("infra", 2, 2, true, false), { count: "2", label: "infra, 2 sessions folded", title: "infra — 2 sessions folded; click to open and see its sessions at a glance" });
-  assert.deepEqual(headWords("infra", 2, 1, true, false), { count: "1", label: "infra, 1 session folded", title: "infra — 1 session folded; click to open and see its sessions at a glance" },
+    title: "infra — folded, but all 2 sessions are set to show when folded, so none is hidden; click to open this group",
+  }, "the total, never a 0 beside two visible tabs; the title names the menu row that did it");
+  assert.equal(headWords("infra", 1, 0, true, false).title, "infra — folded, but its one session is set to show when folded, so none is hidden; click to open this group");
+  // …and for the ordinary folded, part-pinned, open and active headers: the click's clause is the fold alone, since the
+  // click no longer shows the section in the pane (the user 2026-10-02; the tag menu's Show overview does)
+  assert.deepEqual(headWords("infra", 2, 2, true, false), { count: "2", label: "infra, 2 sessions folded", title: "infra — 2 sessions folded; click to open this group" });
+  assert.deepEqual(headWords("infra", 2, 1, true, false), { count: "1", label: "infra, 1 session folded", title: "infra — 1 session folded; click to open this group" },
     "one pinned: the hidden count, the pinned tab shows itself");
-  // while the pane already shows the section (`shown`) the title names the fold alone; the open, shown header
-  // holding the tab being read is the way back (`back`) and its spoken label names the action (render.ts
-  // drops that header's aria-expanded, so a reader would otherwise hear a plain button with no word about it)
-  assert.equal(headWords("infra", 2, 2, true, false, false, true).title, "infra — 2 sessions folded; click to open this group");
-  assert.equal(headWords("infra", 2, 0, false, false, false, true).title, "infra — 2 sessions; click to fold this group; drag to reorder the groups");
-  assert.deepEqual(headWords("infra", 3, 0, false, true, true, true), { count: "3", label: "infra, 3 sessions, holds the tab you are reading; back to the transcript",
-    title: "infra — 3 sessions; holds the tab you are reading; click to go back to the transcript; drag to reorder the groups" });
-  assert.deepEqual(headWords("infra", 3, 0, false, true, false, false), headWords("infra", 3, 0, false, true), "the defaults are the ordinary open header");
-  assert.deepEqual(headWords("infra", 2, 0, false, false), { count: "2", label: "infra, 2 sessions", title: "infra — 2 sessions; click to fold this group and see its sessions at a glance; drag to reorder the groups" });
-  assert.deepEqual(headWords("infra", 3, 0, false, true), { count: "3", label: "infra, 3 sessions, holds the tab you are reading", title: "infra — 3 sessions; holds the tab you are reading; click to fold this group and see its sessions at a glance; drag to reorder the groups" });
-  assert.match(MAKE_HEAD, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive, back, shown\);\s*\n\s*head\.title = words\.title;/);
+  assert.deepEqual(headWords("infra", 2, 2, true, true), { count: "2", label: "infra, 2 sessions folded, holds the tab you are reading",
+    title: "infra — 2 sessions folded; holds the tab you are reading; click to open this group" }, "the stand-in: the same open, the phrase in the words");
+  assert.deepEqual(headWords("infra", 2, 0, false, false), { count: "2", label: "infra, 2 sessions", title: "infra — 2 sessions; click to fold this group; drag to reorder the groups" });
+  assert.deepEqual(headWords("infra", 3, 0, false, true), { count: "3", label: "infra, 3 sessions, holds the tab you are reading", title: "infra — 3 sessions; holds the tab you are reading; click to fold this group; drag to reorder the groups" });
+  for (const w of [headWords("infra", 2, 2, true, false), headWords("infra", 2, 0, false, true)])
+    assert.doesNotMatch(w.title + w.label, /at a glance|transcript/, "no word promises the view or a way back: the click folds and nothing else");
+  assert.match(MAKE_HEAD, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive\);\s*\n\s*head\.title = words\.title;/);
   assert.match(MAKE_HEAD, /n\.textContent = words\.count;/);
   assert.ok(!MAKE_HEAD.includes("hidden.length : total"), "no second count rule beside the pure one");
   assert.match(REF, /when every tab in a section is set to\s+show, the folded header shows the full count and its tooltip says nothing is hidden\./);
@@ -1947,12 +1944,12 @@ test("assistive tech hears a label: decoration is aria-hidden, the header's name
     "archived, 2 sessions folded; 2 sessions in this group are stopped on you: api, tests",
     "the spoken label of a folded header wearing the pip");
   assert.ok(!MAKE_HEAD.includes('label.setAttribute("aria-hidden"'), "the name is the name: not hidden");
-  // the header holding the tab being read is the same button as the rest (it folds; the section at a glance is the
-  // pane's answer to a folded active tab), marked current: no header is a no-op "labeled group" any more
+  // the header holding the tab being read is the same button as the rest (it folds, and folded it stands in for the
+  // tab while the transcript stays), marked current: no header is a no-op "labeled group" any more
   assert.ok(!MAKE_HEAD.includes('"role", "group"'), "no header is a no-op group: every one folds");
-  assert.equal(MAKE_HEAD.split('"aria-expanded"').length - 1, 1, "aria-expanded once, on the one fold button every named header is (left off only while its press puts the transcript back)");
+  assert.equal(MAKE_HEAD.split('"aria-expanded"').length - 1, 1, "aria-expanded once, on the one fold button every named header is");
   assert.equal(MAKE_HEAD.split('"role", "button"').length - 1, 1);
-  assert.match(MAKE_HEAD, /if \(!back\) head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);[\s\S]{0,400}if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);/, "the header holding the tab being read says so");
+  assert.match(MAKE_HEAD, /\n\s*head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);[\s\S]{0,400}if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);/, "always a disclosure (its press always folds or opens, the user 2026-10-02), and the header holding the tab being read says so");
   assert.match(MAKE_HEAD, /head\.tabIndex = 0;/, "…and takes focus like the rest: it is the hidden tab's stand-in");
   assert.equal(headWords("archived", 2, 2, true, false).label, "archived, 2 sessions folded");
   assert.equal(headWords("archived", 2, 2, true, true).label, "archived, 2 sessions folded, holds the tab you are reading", "the stand-in says whose it is");

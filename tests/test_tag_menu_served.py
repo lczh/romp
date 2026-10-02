@@ -7,7 +7,8 @@ browser context on the same kernel, watching. The fixture is the notes-api demo 
 (web, api, auth) and `release` (deploy, cache), dragged into the order qa, infra, release, with infra and release
 folded (the kernel's view-folds.json, the folds every device shares), and search in no tag. Then:
   - right-click infra's strip header: the menu names the tag (its chip), offers Rename…, the palette's swatches,
-    Open group (the header renders folded), Show only this tag, Configure tags… and Delete tag… ("3 sessions lose it");
+    Open group (the header renders folded), Show overview (the section at a glance, which a header's click no longer
+    opens since 2026-10-02), Show only this tag, Configure tags… and Delete tag… ("3 sessions lose it");
   - Rename… turns the header's chip into a field holding the name; "platform" and Enter rename the tag: the kernel's
     store keeps its id, its three sessions and its place in the order (qa, platform, release), both pages draw a folded
     platform header counting three and no infra header, the page posted ONE targeted rename (no order write: the kernel
@@ -388,7 +389,7 @@ class ServedTagMenu(unittest.TestCase):
         m = d["menu"]
         self.assertEqual(m["chip"], "infra", "the menu names the tag it acts on, with its chip" + detail)
         self.assertEqual([(r["act"], r["label"]) for r in m["rows"]],
-                         [("rename", "Rename…"), ("open", "Open group"), ("only", "Show only this tag"),
+                         [("rename", "Rename…"), ("open", "Open group"), ("overview", "Show overview"), ("only", "Show only this tag"),
                           ("configure", "Configure tags…"), ("delete", "Delete tag…")], detail)
         dele = m["rows"][-1]
         self.assertEqual((dele["danger"], dele["sub"]), (True, "3 sessions lose it; the sessions stay"), detail)
@@ -440,7 +441,7 @@ class ServedTagMenu(unittest.TestCase):
         self.assertEqual(d["chipLeg"], "", detail)
         self.assertEqual(d["chipMenu"]["chip"], "qa", detail)
         self.assertEqual([r["act"] for r in d["chipMenu"]["rows"]], ["rename", "only", "configure", "delete"],
-                         "a chip has no fold to offer" + detail)
+                         "a chip has no fold and no overview to offer" + detail)
         self.assertEqual(d["prompt"], {"title": "Rename the tag “qa”", "value": "qa", "focused": True, "buttons": ["Cancel", "Rename"]}, detail)
         self.assertEqual(d["promptClash"], "a tag named “platform” already exists", "a taken name is refused in place, with the reason" + detail)
         self.assertTrue(d["promptGone"] and d["qaStill"], "Escape closes it and changes nothing" + detail)
@@ -450,7 +451,7 @@ class ServedTagMenu(unittest.TestCase):
         detail = "\n  %s" % json.dumps(l, indent=1)[:3000]
         self.assertEqual(l["theme"], "light", detail)
         self.assertTrue(l["opened"], detail)
-        self.assertEqual([r["act"] for r in l["menu"]["rows"]], ["rename", "fold", "only", "configure", "delete"],
+        self.assertEqual([r["act"] for r in l["menu"]["rows"]], ["rename", "fold", "overview", "only", "configure", "delete"],
                          "qa renders open: Fold group" + detail)
         self.assertTrue(l["cancelled"], "Escape puts the chip back" + detail)
         self.assertEqual(l["chipLeg"], "", detail)
