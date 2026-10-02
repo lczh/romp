@@ -244,11 +244,14 @@ class CutFromTheDisplayParse(Base):
         self.assertEqual(self.roads()["read"], 0)
 
     def test_a_transcript_rewritten_in_place_since_the_restore_is_read_and_said(self):
-        # the file moved without its stat moving (rewritten in place at the same size, its mtime put back): the entry still
-        # stands, a pre-cut record's by-offset read finds another record at its offset and raises the lookup's miss, and
-        # the create reads the transcript, says so once on stderr, and cuts as the cold walk does
+        # the file moved after its pre-cut records were hydrated, without its stat moving (rewritten in place at the same
+        # size, its mtime put back): the entry and the memo still stand, a pre-cut record's by-offset read finds another
+        # record at its offset and raises the lookup's miss, and the create reads the transcript, says so once on stderr,
+        # and cuts as the cold walk does. Hydrated first, since an answer from the memo would meet no miss
         path, recs = self._session()
         self.restored(path)
+        em.hydrate(km._parse(path, PARENT, self.now), PARENT, by="test")
+        self.assertIn("ka10", em._HYDRATED, "the record the cut reads is in the memo before the file moves")
         lines = Path(path).read_bytes().split(b"\n")
         at = {json.loads(ln)["uuid"]: i for i, ln in enumerate(lines) if ln}
         a, b = at["ka10"], at["ka11"]
