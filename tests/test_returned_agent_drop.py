@@ -15,8 +15,8 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     waits unowed, and under the converge hold it is paid without its pop; a cursor of another generation that the document
     does not carry does not hold it;
   * the kernel's agent-file folds take the new policy and the parent-leaf fold does not;
-  * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification,
-    so the agent still drops when it returns;
+  * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification
+    and a nested background launch, so the agent still drops when it returns;
   * the spend guard routes its agent reads through the dropping folds (never starting a steps state for a workflow agent,
     never folding while a viewer's parse holds the records), prices a dropped file from its memo without entering it
     again, prices a resumed agent from its memo and the tail without a whole read (a response split across the cut counted
@@ -480,21 +480,35 @@ class ViewerClose(Base):
         jd.PROJECTS = self.saved_projects
         jd._discover_cache.clear()
 
+    @staticmethod
+    def user(t, uuid, content, **extra):
+        return dict({"type": "user", "timestamp": iso(t), "uuid": uuid, "sessionId": SID,
+                     "message": {"role": "user", "content": content}}, **extra)
+
     def agent_records(self, t):
-        """A prompt, a background shell command, its finished notification, then five tool calls: t-1 .. t+14."""
+        """A prompt, a background shell command, a nested background agent and its launch ack, the command's finished
+        notification, then five tool calls: t-1 .. t+14."""
         launch = rec(t + 1, 1, launch=True)
-        note = {"type": "user", "timestamp": iso(t + 9), "uuid": "n-%d" % t, "sessionId": SID,
-                "message": {"role": "user", "content": (
-                    "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>%s</tool-use-id>\n"
-                    "<output-file>/w/notes-api/.tasks/b1.output</output-file>\n<status>completed</status>\n"
-                    "<summary>Background command \"make test\" completed</summary>\n</task-notification>"
-                    % launch["message"]["content"][0]["id"])}}
-        prompt = {"type": "user", "timestamp": iso(t - 1), "uuid": "p-%d" % t, "sessionId": SID,
-                  "message": {"role": "user", "content": "Run the notes-api tests in the background and report."}}
-        return chain([prompt, rec(t, 0), launch, note] + [rec(t + 10 + i, 10 + i) for i in range(5)])
+        nested = rec(t + 2, 2)
+        nested["message"]["content"] = [{"type": "tool_use", "id": "toolu_nested_1", "name": "Agent", "input": {
+            "description": "lint the api", "prompt": "Run the linter over api/.", "subagent_type": "general-purpose",
+            "run_in_background": True}}]
+        ack = self.user(t + 3, "k-%d" % t, [{"type": "tool_result", "tool_use_id": "toolu_nested_1",
+                                             "content": "Async agent launched. Agent ID: a9b00000000000002."}],
+                        toolUseResult={"isAsync": True, "status": "async_launched", "agentId": "a9b00000000000002",
+                                       "description": "lint the api"})
+        note = self.user(t + 9, "n-%d" % t, (
+            "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>%s</tool-use-id>\n"
+            "<output-file>/w/notes-api/.tasks/b1.output</output-file>\n<status>completed</status>\n"
+            "<summary>Background command \"make test\" completed</summary>\n</task-notification>"
+            % launch["message"]["content"][0]["id"]))
+        prompt = self.user(t - 1, "p-%d" % t, "Run the notes-api tests in the background and report.")
+        return chain([prompt, rec(t, 0), launch, nested, ack, note] + [rec(t + 10 + i, 10 + i) for i in range(5)])
 
     def test_a_closed_viewer_lets_go_of_the_background_task_cursor_its_render_left(self):
-        write(self.leaf, [rec(T0 - 200, 0)], int(time.time()))   # the parent transcript (discovery reads its real mtime)
+        ask = self.user(T0 - 201, "w-1", "check the api tests with a subagent")
+        reply = dict(rec(T0 - 200, 0), parentUuid="w-1")
+        write(self.leaf, [ask, reply], int(time.time()))         # the parent transcript (discovery reads its real mtime)
         ap = str(self.sub / ("agent-%s.jsonl" % self.AID))
         recs = self.agent_records(T0 - 60)
         write(ap, recs, T0 - 46)
