@@ -821,6 +821,10 @@ class ViewerClose(Base):
         if bg:
             km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it and stays open
             self.assertIn(ap, km._bgall_cache)
+            # the viewer's parse released, as the assembly cache's own bound would: while it stands, the assembly pin (#87)
+            # keeps the records it folds over, by design; the background-task cursor the render left stays
+            em.release_assembly(ap, rompuuid=SID)
+            self.assertIn(ap, km._bgall_cache)
         more = chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"])
         append(ap, more, T0 - 38)                                 # the agent writes on; no card fold runs from here
         want = sum(usd(r) for r in recs + more if r["type"] == "assistant") + usd(rec(T0 - 200, 0))   # and the parent's reply

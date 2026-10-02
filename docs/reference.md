@@ -2902,9 +2902,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
   quiescence drop, the files a dead timeline lane releases, and a leaf a second
-  /clear retired; a subagent's quiet drop made while a viewer's parse built
-  before the file's last append still holds the older records counts bytes
-  that parse keeps until it is released), `pinnedKept` (drops that kept an entry because a whole assembly
+  /clear retired; a subagent's quiet drop is held back while a viewer's
+  parse built before the file's last append still stands, a whole entry the
+  assembly pin keeps, counted below), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the

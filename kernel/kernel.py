@@ -34180,7 +34180,8 @@ def _push_subagents(clients, now, live_map):
                 sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
                 continue
             if not c.get("alive", True) or (ssid, aid) not in (c.get("subagents") or {}):
-                _subagent_viewer_closed(ssid, aid)    # closed during the render: the cursor it left goes with it
+                _subagent_viewer_closed(ssid, aid)    # closed during the render: the cursor it left goes with it,
+                _release_subagent_view(ssid, aid)     #  and the parse that render rebuilt, or it would pin the records
                 continue
             _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
 
@@ -34203,8 +34204,11 @@ def _subagent_viewer_closed(sid, agent_id):
         with _clients_lock:
             if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
                 return
-        ppath = _path_of(sid, int(time.time()))
-        apath = _subagent_file(ppath, agent_id) if ppath else None
+        try:
+            ppath = _path_of(sid, int(time.time()))
+            apath = _subagent_file(ppath, agent_id) if ppath else None
+        except Exception:
+            return    # a failed lookup is said once, by _release_subagent_view, which every close calls beside this one
         if apath is not None:
             key = str(apath)
             had = _bgall_cache.pop(key, None) is not None
@@ -77118,7 +77122,8 @@ class Handler(BaseHTTPRequestHandler):
             with _clients_lock:
                 _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
             for _sv in list((client.get("subagents") or {}).keys()):
-                _subagent_viewer_closed(*_sv)         # its open viewers close with it
+                _subagent_viewer_closed(*_sv)         # its open viewers close with it: the cursor and, below, the parse
+                _release_subagent_view(*_sv)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's

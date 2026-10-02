@@ -2577,8 +2577,10 @@ def _document_at_witness(key, ent):
     when it does not, its fold reads the file once at its next run, as any fold does after a drop. False too while a
     parse's assembly entry holds this very records list (the subagent viewer's): the pop would free nothing, and the
     parse's next rebuild would read the file whole and parse it in full. The test is by identity, so it holds only for a
-    parse rebuilt since the file's last append: a parse built before it keeps an older list, the drop goes ahead, and
-    recordCache.droppedBytes then counts bytes that parse still holds until it is released. A reader that wants the whole file and holds no
+    parse rebuilt since the file's last append. A parse built before it keeps an older list at the same generation, a
+    whole entry, so the assembly pin holds the drop back (_write_then_drop, counted under recordCache.pinnedKept; under
+    droppedHeld when the pin check raises), and every close of the viewer releases that parse (the kernel's
+    _release_subagent_view) so it does not hold the records past the viewer. A reader that wants the whole file and holds no
     such entry pays one whole read after each drop, so a reader of agent files that runs every cycle takes a tail (the
     folds' rule)."""
     try:
