@@ -417,9 +417,10 @@ following to every connected machine's kernel):
   reconnecting, or any pick above the model the session was on made after a
   kernel restart before the session reconnects, either of which can miss its CLI;
   a reply from before the pick that the session replays after a kernel
-  restart; and a report of the first of two picks made one right after the
-  other, arriving after the second has taken effect, or after a reply on the
-  model the session was on when that model is of the second pick's family.
+  restart; and, for a pick made while an earlier one is still taking effect, a
+  report of the earlier pick arriving after the later one has taken effect, or
+  after a reply on the model the session was on when that model is of the later
+  pick's family.
   When any of them follows a Latest or default pick that
   resolves below the model the session was on, and the switch is on, the session
   is then reconnected every ten minutes on the pick, and turns served on it never
