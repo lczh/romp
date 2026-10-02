@@ -28,8 +28,9 @@ budget on a fresh load; both environment variables end to end, and both test run
 the judge child's gauge list and the reference. Review round one (2026-10-02) added: two named mixes' measured memory
 per file byte; a budget eviction releasing the chat's assembly entry over the evicted file, outside the cache lock; the
 multiple's cap at 1000; a mid-read eviction not counted as a re-read; and a tail evicted again each cycle. Round two
-(2026-10-02) added: the release's count, budgetReleased; and a path evicted during its own read keeping its chat's entry.
-Synthetic files and synthetic cache entries only."""
+(2026-10-02) added: a restored tail evicted while a whole read upgrades it; the release's population (a prior lineage
+file alone, a skip-marked file, two chats' leaves in one insert) and its count, budgetReleased; and a path evicted during
+its own read keeping its chat's entry. Synthetic files and synthetic cache entries only."""
 import ast
 import contextlib
 import gc
@@ -67,7 +68,8 @@ WORKING_SET_FILE_BYTES = 3_720_000_000            # a snapshot, not a ceiling: t
 #                                                   the kernel at 5f3569d39 held 3.4 GB at 12.2 hours and 4.0 GB at 15.4
 #                                                   hours, its count cap full since 12.5 (2026-10-01)
 FLOOR_FILE_BYTES = 4 * GiB                        # the default's floor, in FILE bytes
-SID = "11111111-2222-3333-4444-0000b0d9e7a1"     # this module's own placeholder session id
+SID = "11111111-2222-3333-4444-0000b0d9e7a1"     # this module's own placeholder session ids
+SID2 = "11111111-2222-3333-4444-0000b0d9e7a2"
 NOW = 1781200000
 FILLER = ("the search endpoint ranks notes by recency, the tokenizer splits on punctuation, "
           "and the pagination cursor carries the last note id so a reload resumes where it stopped")
@@ -77,12 +79,12 @@ def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _conversation(path, turns):
-    """A synthetic leaf of `turns` typed prompts and replies in the notes-api demo world."""
+def _conversation(path, turns, tag=""):
+    """A synthetic leaf of `turns` typed prompts and replies in the notes-api demo world (uuids prefixed with `tag`)."""
     parent = None
     with open(path, "w") as f:
         for k in range(turns):
-            t, u, a = NOW - 200000 + 600 * k, "u%05d" % k, "a%05d" % k
+            t, u, a = NOW - 200000 + 600 * k, "%su%05d" % (tag, k), "%sa%05d" % (tag, k)
             ask = {"role": "user", "content": "step %d: %s" % (k, FILLER)}
             said = {"id": "msg_%05d" % k, "role": "assistant", "model": "claude-test-1", "stop_reason": "end_turn",
                     "content": [{"type": "text", "text": "Step %d is in: %s." % (k, FILLER)}]}
@@ -460,6 +462,25 @@ class BudgetRereads(_CacheCase):
         ent = em._read_jsonl_entry(a, tail_ok=True, tail_from=(cut, 10, data[cut - 16:cut]))
         self.assertEqual(ent[5], 10, "a restored from the cut, a tail entry")
         self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [4, 2], "the restore is a re-read; b goes")
+        # the restored-tail half (review round two): a whole read upgrading that tail, the tail evicted mid-scan by a third
+        # file's first read; the read keeps the "tail" mark and the entry it began from, so the upgrade adds the whole
+        # file's bytes to the same re-read and counts no new one
+        self.assertEqual(em._BUDGET_EVICTED.get(a), "tail", "armed: a is back as the tail of a budget re-read")
+        c, mid = self._file("notes-api-tests.jsonl"), []
+
+        def scan_beside_a_first_read(*args, **kw):                    # a's whole read upgrading its tail
+            em._scan_jsonl_stream = real_scan
+            em._read_jsonl_entry(c)                                   # c's first read, mid-scan: it evicts the tail
+            mid.append(a in em._JSONL_CACHE)
+            return real_scan(*args, **kw)
+        keys = ("budgetEvictions", "budgetRereads", "budgetRereadBytes")
+        before = [_stat(k) for k in keys]
+        with mock.patch.object(em, "_scan_jsonl_stream", scan_beside_a_first_read):
+            em._read_jsonl_incremental(a)
+        self.assertEqual(mid, [False], "the tail evicted mid-read")
+        self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [2, 0, os.path.getsize(a)],
+                         "the tail, then c at a's insert; no new re-read, and the file's size added to the one under way")
+        self.assertEqual((em._JSONL_CACHE[a][5], a in em._BUDGET_EVICTED), (0, False))
 
 
 class MeasuredMixes(_CacheCase):
@@ -504,10 +525,10 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         em._CKPT_DIR_FN = self._ckpt
         super().tearDown()
 
-    def _parse(self, leaf):
+    def _parse(self, leaf, sid=SID, cands=None):
         modes = []
-        tree = em.parse_session(leaf, rompuuid=SID, name="web", dir="/w/notes-api", candidate_files=[leaf], states=None,
-                                postal_log=[], now=NOW, asm_mode_out=modes)
+        tree = em.parse_session(leaf, rompuuid=sid, name="web", dir="/w/notes-api", candidate_files=list(cands or [leaf]),
+                                states=None, postal_log=[], now=NOW, asm_mode_out=modes)
         return tree, modes
 
     def _held(self, leaf):
@@ -608,6 +629,54 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         self.assertNotIn(leaf, em._READ_IN_FLIGHT, "the mark cleared")
         em._read_jsonl_incremental(other)                             # the leaf's insert evicted it; read back, it evicts the leaf
         self.assertEqual(self._held(leaf), [], "the read over, an eviction of the leaf releases its entry as before")
+
+    def test_a_prior_lineage_file_evicted_alone_releases_every_chat_that_read_it(self):
+        """The release matches every file an entry read, not its leaf alone: two chats whose candidate files share one prior
+        file both go when the budget evicts that file and neither leaf, and budgetReleased counts both."""
+        prior = _conversation(os.path.join(self.dir, "notes-api-prior.jsonl"), 5, tag="p")
+        leaves = [_conversation(os.path.join(self.dir, sid + ".jsonl"), 20) for sid in (SID, SID2)]
+        other = self._file("notes-api-states.jsonl")
+        for sid, leaf in zip((SID, SID2), leaves):
+            self._parse(leaf, sid, [prior, leaf])
+            self.assertEqual([prior in e["recs"] for e in self._held(leaf)], [True], "the chat's entry read the prior file")
+        for leaf in leaves:
+            em._read_jsonl_incremental(leaf)                          # the leaves most recently used: the prior file is oldest
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(sum(os.path.getsize(p) for p in leaves + [other]))
+        ev0, r0 = _stat("budgetEvictions"), _stat("budgetReleased")
+        em._read_jsonl_incremental(other)
+        self.assertEqual((_stat("budgetEvictions") - ev0, prior in em._JSONL_CACHE, [p in em._JSONL_CACHE for p in leaves]),
+                         (1, False, [True, True]), "the prior file alone evicted")
+        self.assertEqual([self._held(p) for p in leaves], [[], []], "both chats that read it released")
+        self.assertEqual(_stat("budgetReleased") - r0, 2)
+
+    def test_a_skip_marked_file_evicted_from_another_readers_copy_releases_nothing(self):
+        """A restored entry marks a lineage file wholly before its document's cut ("skip"): it read none of that file, so
+        another reader's copy of it leaving by the budget frees nothing of the entry's. A synthetic entry stands for the
+        restored one (a resumed lineage and its document): the release reads only the entry's recs."""
+        prior, other = self._file("notes-api-prior.jsonl"), self._file("notes-api-states.jsonl")
+        leaf = os.path.join(self.dir, SID + ".jsonl")
+        entry = {"path": leaf, "recs": {prior: ("skip",), leaf: (1, 0, 40)}}
+        em._ASM_CACHE[("synthetic-restored", SID, False)] = entry
+        em._read_jsonl_incremental(prior)                             # another reader's copy of the prior file
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
+        r0 = _stat("budgetReleased")
+        em._read_jsonl_incremental(other)                             # evicts it
+        self.assertNotIn(prior, em._JSONL_CACHE)
+        self.assertIs(em._ASM_CACHE.get(("synthetic-restored", SID, False)), entry, "the entry that skipped the file stands")
+        self.assertEqual(_stat("budgetReleased") - r0, 0)
+
+    def test_one_insert_evicting_two_chats_leaves_releases_both(self):
+        leaves = [_conversation(os.path.join(self.dir, sid + ".jsonl"), 20) for sid in (SID, SID2)]
+        other = self._file("notes-api-states.jsonl")
+        for sid, leaf in zip((SID, SID2), leaves):
+            self._parse(leaf, sid)
+        self.assertEqual([len(self._held(p)) for p in leaves], [1, 1])
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
+        ev0, r0 = _stat("budgetEvictions"), _stat("budgetReleased")
+        em._read_jsonl_incremental(other)
+        self.assertEqual(_stat("budgetEvictions") - ev0, 2, "one insert evicted both leaves")
+        self.assertEqual([self._held(p) for p in leaves], [[], []], "both chats released")
+        self.assertEqual(_stat("budgetReleased") - r0, 2)
 
 
 class DecodedMultiple(unittest.TestCase):
