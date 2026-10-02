@@ -436,10 +436,10 @@ class DeadLaneMemo(unittest.TestCase):
 
     def test_a_release_that_raises_never_drops_the_frame(self):
         """The dead lane's release does file I/O (a stat, a sidecar read, a document write) inside the timeline build's lane
-        loop, whose other steps each report through a complaint of their own: a raise there is noted once per file, and the
-        frame is built with the lane in it (round one of the review: the raise left the build). Here the document check
-        raises, before either release and before the version is recorded: nothing was released, the lane's next miss asks
-        again, and the line claims no wait for the transcript (round three of the fold's review)."""
+        loop, whose other steps each report through a complaint of their own: a raise there is noted once per file and
+        outcome, and the frame is built with the lane in it (round one of the review: the raise left the build). Here the
+        document check raises, before either release and before the version is recorded: nothing was released, the lane's
+        next miss asks again, and the line claims no wait for the transcript (round three of the fold's review)."""
         p = self._three_turns()
         f0 = km.em._ASM_STATS.get("releaseFailed", 0)
         err = io.StringIO()
@@ -526,6 +526,31 @@ class DeadLaneMemo(unittest.TestCase):
         self.assertEqual(len(lines), 2, "both outcomes said: %r" % err.getvalue())
         self.assertNotIn("not retried", lines[0], "the document check's line claims no wait")
         self.assertIn("; not retried until the transcript moves", lines[1], "the record release's says it waits")
+
+    def test_the_dead_lanes_two_outcomes_are_each_said_in_the_reverse_order_too(self):
+        """The record release raising at v1, after the version is recorded, then the document check raising at a moved
+        version: the first line carries the wait and the second does not, since the v2 check raised before v2 was
+        recorded and the lane's next miss asks again (round five of the fold's review: a presence check on the
+        recorded version, or a memo keyed on the event and the path, passed the first order alone)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        alive = [{"sid": SID, "path": p}]
+        f0 = km.em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with mock.patch.object(km.em, "release_records", side_effect=OSError("permission denied")):
+                km._release_dead_lane(SID, p, ("v1",), alive, {})   # recorded first; the record release raises
+            self.assertEqual(km._dead_lane_released.get(SID), ("v1",), "the premise: v1 was recorded before the raise")
+            with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")) as chk:
+                km._release_dead_lane(SID, p, ("v2",), alive, {})   # moved: the check raises before v2 is recorded
+            self.assertEqual(chk.call_count, 1, "the check ran once at v2")
+        self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "both failures counted")
+        lines = [ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln]
+        self.assertEqual(len(lines), 2, "both outcomes said: %r" % err.getvalue())
+        self.assertIn("; not retried until the transcript moves", lines[0], "the record release's line says it waits")
+        self.assertNotIn("not retried", lines[1], "the v2 check's line claims no wait")
 
     def _many_turns(self, n):
         recs, parent = [], None

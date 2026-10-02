@@ -51817,8 +51817,8 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     that go are the leaf's and its anchor's, less every live lane's leaf and anchor in this build; a file a whole assembly
     entry still folds over stays (em.release_records), and each one's fold document is written first when it lacks what
     this process holds, so the next named fold over the leaf restores rather than reading it whole. This is the one step of
-    the lane loop that reports through no complaint of its own: a raise in it is noted once per file (em.release_failed)
-    and the frame is built as before. It runs only in the full timeline build, so only while a
+    the lane loop that reports through no complaint of its own: a raise in it is noted once per file and outcome
+    (em.release_failed) and the frame is built as before. It runs only in the full timeline build, so only while a
     timeline client is connected, and only for a dead lane inside the build's window: a session that ends while no timeline
     is open is released when a timeline build next sees its dead lane. The version is recorded before either release runs,
     so a release that raises is not retried until the transcript moves or the session leaves _dead_lane_released (bounded
