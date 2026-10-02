@@ -430,11 +430,14 @@ class SourcePins(unittest.TestCase):
 
     def test_the_helper_is_the_one_user_of_render_ts_capture(self):
         # A second idle user can also call render.ts's capture, _ric, directly, which passes both checks above; so the lines
-        # naming _ric outside its definition are counted too, and the one expected is the helper's own (review, 2026-10-02).
-        uses = []
+        # naming _ric outside its definition are counted too, and the one expected is the helper's own (review, 2026-10-02):
+        # the line after `const requestIdle =`, so a diff that moves the helper off the capture and adds a user of it fails too.
+        uses, helper = [], None
         with open(os.path.join(ROOT, "ui", "webview", "render.ts"), encoding="utf-8") as f:
             for n, line in enumerate(f, 1):
                 code = line.strip()
+                if code.startswith("const requestIdle "):
+                    helper = n
                 if code.startswith(("//", "/*", "*", "const _ric ")):
                     continue
                 if re.search(r"(?<![\w$])_ric(?![\w$])", code.split(" //")[0]):
@@ -443,6 +446,9 @@ class SourcePins(unittest.TestCase):
                                        "cold-boot lab (tests/test_cold_boot_diet_browser.py, roads 3b, 9 and 10) reads an empty idle queue "
                                        "as the prefetch having run, so before a second user lands, make that record count only the "
                                        "prefetch's own handles: %s" % uses)
+        self.assertEqual(uses, ["ui/webview/render.ts:%d" % (helper + 1)] if helper else ["the helper requestIdle"],
+                         "the capture's one user is the helper's body, the line after `const requestIdle =` (line %s): %s"
+                         % (helper, uses))
 
 
 class ColdBootDiet(unittest.TestCase):
