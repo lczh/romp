@@ -1670,7 +1670,9 @@ and deferral with no two-minute wait, since the event says the file's use
 ended (a drop the budget defers is paid later through the quiet drop's own
 path, after that wait): the judges' episode scan after the second /clear, and
 the next named fold over a dead lane's leaf, restore from the document instead
-of reading the file whole again.
+of reading the file whole again, while the file is unchanged. A session revived
+after its dead lane let go has its leaf read whole once on its first turn, by
+that scan, while its anchor is not read whole.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
 it (the drop then pops as it did before the write existed, unless a whole
 assembly entry pins it, counted `recordCache.pinnedKept`, and except under the
@@ -2771,7 +2773,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entry a later parse of that retired leaf installed, a dead timeline lane with
   a document a restore would take, the last viewer of a subagent closing),
   and `releaseFailed` (such a release that raised and was left undone, the
-  memory as it stood; said on stderr once per file); the same block rides `asmCheckpoint.parse` on GET /perf,
+  memory as it stood, and a record-cache drop whose pin check raised, which counts
+  that entry as not pinning and goes ahead unless another entry pins it; said on
+  stderr once per file); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar
@@ -2890,10 +2894,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
   bytes stay counted; a restored entry, or a whole one whose leaf has a document a
-  restore would take, never holds a drop back), `droppedHeld` and
+  restore would take, never holds a drop back, and neither does a whole entry
+  whose pin check raised, counted under `asmCheckpoint.parse.releaseFailed`), `droppedHeld` and
   `droppedHeldBytes` (the drops, of `dropped`, whose records an assembly entry
   folding over that generation still holds until its next visit, a restored
-  entry or a whole one whose leaf has a document a restore would take, and the
+  entry, a whole one whose leaf has a document a restore would take, or a whole
+  one whose pin check raised, and the
   bytes of those records: `bytes` fell by them while the memory stayed, so the
   memory drops freed is about `droppedBytes` less `droppedHeldBytes`), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
@@ -2950,7 +2956,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   time); the refresh's own parse counts under `parse` as `private`.
   Two more count what the hydrated-body memo does: `hydratedHits`, the
   fills it served without a read, and `hydratedEvicted`, the entries its
-  cap pushed out. A memo hit for an atom whose body another thread had
+  cap pushed out; a released leaf's bodies leave the memo uncounted. A memo
+  hit for an atom whose body another thread had
   already written when this call looked is not counted, since that
   thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns

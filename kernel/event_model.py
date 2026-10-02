@@ -1382,7 +1382,7 @@ def _asm_hold_of(key, ent):
             try:
                 pins = _asm_entry_pins(e, key)
             except Exception as exc:                      # noqa: BLE001 — the pin never fails the drop it guards
-                release_failed("record drop's pin check", key, exc, outcome="not pinned: the drop went ahead")
+                release_failed("record drop's pin check", key, exc, outcome="the check raised, so the entry counts as not pinning")
                 pins = False
             if pins:
                 return "pin", 0
@@ -1430,10 +1430,13 @@ def _write_then_drop(key, ent, pop=True):
     their next visit, reading the guard bytes, rather than reading the whole file again under a generation that no longer
     exists. The write runs with neither lock held (checkpoint_write takes _CKPT_LOCK and _JSONL_CACHE_LOCK itself); it
     charges the pusher cycle's byte budget shared with the converge pass, and over the budget the write AND the drop are
-    deferred by one cycle (the entry stays; the read is not lost), the drop owed (paid at the next cycle's start, or at the
+    deferred (the entry stays; the read is not lost), the drop owed (paid at the next cycle's start, or at the
     next quiet fold over the file, once the file is _DROP_AFTER_QUIESCENT_S old: both pay through _drop_quiescent_entry and
     its age gate, so a release's deferred drop waits for the file's quiet too), counted under
-    checkpoints.converge.dropDeferred. Then, with `pop`, the very entry `ent` goes through the pin
+    checkpoints.converge.dropDeferred. A file whose standing document is over half the cycle's cap never fits a fresh cycle
+    (the take is twice the document's size), so its drop stays owed at every cycle until the reader's bounds or the owed
+    table's bound evict the entry, as the quiet drop's did before the release existed. Then, with `pop`, the very entry
+    `ent` goes through the pin
     (_drop_unless_pinned_locked). Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the
     cache no longer holds `ent`, or "stayed" without `pop`."""
     try:
@@ -1485,10 +1488,11 @@ def _write_then_drop(key, ent, pop=True):
 def release_records(paths, keep=()):
     """The record side of the events that end a file's use (2026-10-01): each of `paths` outside `keep` (the files a live
     session still reads) leaves the reader's cache the way the quiet fold's drop lets a file go (_write_then_drop): the file's
-    fold document is written first when it lacks something this process holds, so the next fold or walk over the file
-    restores from it at the guard bytes' cost instead of reading the whole file again (round one of the review: a pop with no
-    write sent the judges' episode scan after a second /clear, and the next named fold over a dead lane's leaf, back to the
-    whole file); over the cycle's budget the drop is deferred and owed; and a file a whole assembly entry still folds over
+    fold document is written first when it lacks something this process holds, so the next fold or walk over the file, while
+    the file is unchanged, restores from it at the guard bytes' cost instead of reading the whole file again (round one of
+    the review: a pop with no write sent the judges' episode scan after a second /clear, and the next named fold over a dead
+    lane's leaf, back to the whole file); over the cycle's budget the drop is deferred and owed (for a file whose document is
+    over half the cycle's cap, at every cycle: _write_then_drop); and a file a whole assembly entry still folds over
     stays (_drop_unless_pinned_locked). There is no age gate: the event, not the file's quiet, says the use ended. Counted
     under dropped and droppedBytes. Returns how many entries were dropped now. A process that never begins a cycle (the
     judges child, with judges-process on, off by default) keeps the default cap for its life: once that is spent, a drop
@@ -5555,16 +5559,19 @@ def release_assembly(leaf_path, rompuuid=None):
     return len(popped)
 
 
-_RELEASE_FAILED = set()            # (where, path) whose release at the end of a file's use raised: said once each
+_RELEASE_FAILED = set()            # (where, path) whose release at the end of a file's use, or whose record drop's pin check,
+#                                    raised: said once each
 
 
 def release_failed(where, path, exc, sid=None, outcome="memory left as it stood"):
-    """A release at the end of a file's use raised (a stat or a sidecar read refused, a lineage that does not resolve): the
-    caller carries on with the memory as it stood before the release existed, since a trim must never fail the event it rides
-    (discover's leaf flip, under every pane; a timeline frame; a viewer's close). Counted `releaseFailed` among the parse's
+    """A release at the end of a file's use raised (a stat or a sidecar read refused, a lineage that does not resolve), and
+    the caller carries on as before the release existed, since a trim must never fail the event it rides (discover's leaf
+    flip, under every pane; a timeline frame; a viewer's close); or a record drop's pin check raised, and that entry counts
+    as not pinning, so the drop goes ahead unless another entry pins it. Counted `releaseFailed` among the parse's
     road counters at every failure, said on stderr once per (where, path) (2026-10-01), with the session `sid` when the
     caller has one; the memo keys on the event and the path alone, so of several sessions failing on a shared leaf only the
-    first is named. `outcome` says what happened instead (a record drop whose pin check raised went ahead)."""
+    first is named. `outcome` replaces the default's words (the pin check's says only that the entry counts as not
+    pinning)."""
     _asm_stat("releaseFailed")
     k = (str(where), str(path))
     if k in _RELEASE_FAILED:

@@ -246,7 +246,8 @@ def _heap_stats():
     capBytes bounds (2026-10-01; it was the whole records' length on disk, which a decoded record can exceed several times
     or fall well short of); a body an atom also holds is counted there as well, the memo and the atom sharing the one copy,
     so while that atom lives an eviction frees less than the gauge drops
-    (asmCheckpoint.hydratedEvicted counts the evictions). builtChat.events counts
+    (asmCheckpoint.hydratedEvicted counts the evictions; a released leaf's bodies leave the memo uncounted).
+    builtChat.events counts
     the cached payloads' events, a count and not bytes, the occupancy measure of that cache; serializedBytes sums the cached
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
@@ -51807,7 +51808,8 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     leaf has a document a restore would take (em.asm_document_restores: the file stands, no refusal mark stands at the leaf's
     stat, and no entry of the session was kept whole because a restore here refused it): a later parse (the session revived,
     its chat opened, a keyed input moving the lane) then restores from the document and reads the tail from its cut, never
-    the whole transcript. And once per transcript version (`tk`, the transcript's stat key): the lane is derived again
+    the whole transcript; the judges' episode scan still reads the leaf whole once on a revived session's first turn, while
+    the anchor is not read whole. And once per transcript version (`tk`, the transcript's stat key): the lane is derived again
     whenever a keyed input moves (a caption, a goals write, any session's flags, the archive, recorded downtime), and a
     release at every such miss would trade every serve of the entry for a restore. So the end state is a downgrade, not
     nothing: the first miss after the release restores, and the restored entry (the document's lazy rows and the tail past
@@ -51816,11 +51818,11 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     entry still folds over stays (em.release_records), and each one's fold document is written first when it lacks what
     this process holds, so the next named fold over the leaf restores rather than reading it whole. This is the one step of
     the lane loop that reports through no complaint of its own: a raise in it is noted once per file (em.release_failed)
-    and the frame is built as before, the memory left as it stood. It runs only in the full timeline build, so only while a
+    and the frame is built as before. It runs only in the full timeline build, so only while a
     timeline client is connected, and only for a dead lane inside the build's window: a session that ends while no timeline
     is open is released when a timeline build next sees its dead lane. The version is recorded before either release runs,
     so a release that raises is not retried until the transcript moves or the session leaves _dead_lane_released (bounded
-    like the lane memo); the entries stay as they stood meanwhile, still under the caches' bounds."""
+    like the lane memo); the record entries stay as they stood meanwhile, still under the caches' bounds."""
     try:
         if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
             return

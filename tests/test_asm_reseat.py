@@ -904,7 +904,9 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
     def test_a_pin_check_that_raises_lets_the_drop_go_ahead_counted_and_said(self):
         """The pin check stats the leaf's document, and a stat refused for a reason other than not-found (an unsearchable
         checkpoints directory, an I/O error) raised out of the drop where the base popped. It now counts as no pin: the drop
-        goes ahead, counted under releaseFailed and said once, in words that say so (round one of the fold's review)."""
+        goes ahead, counted under releaseFailed and said once (round one of the fold's review). The line is printed before
+        the drop's outcome is known (another entry may still pin, the reader's entry may have been replaced), so it says only
+        that the entry counts as not pinning (round two of the fold's review)."""
         _aged(self.leaf)
         self.parse()                                                  # a whole entry, no document: it would pin the leaf
         st0 = dict(em.record_cache_stats())
@@ -917,7 +919,8 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         st1 = em.record_cache_stats()
         self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
         self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "counted")
-        self.assertIn("the drop went ahead", err.getvalue())
+        self.assertIn("the entry counts as not pinning", err.getvalue())
+        self.assertNotIn("the drop went ahead", err.getvalue(), "no claim about an outcome not yet known")
 
 
 class OwedDrops(Episode):
