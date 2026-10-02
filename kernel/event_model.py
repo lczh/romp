@@ -4914,10 +4914,12 @@ class TranscriptGraph:
 def _read_record_at(path, at, uuid):
     """The raw transcript record at `at` = (byte offset, byte length) in `path`, verified to be `uuid`'s; hydrate's own read
     (one seek, one read, counted). Never the hydration memo: it keeps a record's body fields alone (2026-10-01), and the cut
-    walk decides on the record's type, time and provenance."""
+    walk decides on the record's type, time and provenance. Nor the file's read stripe (2026-10-02): this read fills no
+    cache, and under the stripe the comment cut waited, inside its entry's key lock, for a whole hydrate group of the file
+    or of a file sharing its stripe, or for a record-cache read."""
     off, ln = int(at[0]), int(at[1])
     try:
-        with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
+        with open(path, "rb") as fh:
             fh.seek(off)
             raw = fh.read(ln)
     except OSError as e:
@@ -8086,7 +8088,11 @@ def hydrate(atoms, rompuuid=None, by=None):
                 #                                           memo's lock but inside the file's read stripe, where the put must
                 #                                           land for a waiting thread to find it: the walk costs from a tenth
                 #                                           of the decode (a long file text) to several times it (many small
-                #                                           blocks), once per disk read, never on a hit
+                #                                           blocks), once per disk read, never on a hit. Every waiter on the
+                #                                           stripe waits for the walks too: another hydrate of this file, a
+                #                                           record-cache read that pulls its bytes (_read_jsonl_entry), and
+                #                                           both for the files whose paths share the stripe, one in 64. The
+                #                                           comment cut's by-offset read takes no stripe (_read_record_at)
                 with _ASM_CKPT_LOCK:
                     _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
                     _THREAD_BYTES.hydrated = getattr(_THREAD_BYTES, "hydrated", 0) + ln   # this thread's share (T397)

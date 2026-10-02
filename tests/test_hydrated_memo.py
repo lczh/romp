@@ -23,7 +23,7 @@ serves, an atom whose body a peer had already written not; the default cap is ma
 memory. And the guards that keep every reader as it was: each atom kind fills from a memo hit exactly as it fills from
 its whole record, a hit reads nothing, a consumed tool result reaches every atom of its record whichever atom read it, a
 malformed attachment fails the fill as the whole record does, and the by-offset record read the comment cut uses still
-returns the whole record after a hydration, and fails loudly once its file has moved.
+returns the whole record after a hydration, takes no read stripe, and fails loudly once its file has moved.
 
 SYNTHETIC fixtures only: invented notes-api text, placeholder uuids."""
 import gc
@@ -32,6 +32,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import tracemalloc
 import unittest
 import zlib
@@ -724,6 +725,35 @@ class ReadersKeepTheirBehavior(Base):
         os.truncate(path, at[1] // 2)
         with self.assertRaises(em.GraphMiss):
             em._read_record_at(str(path), at, rec["uuid"])
+
+    def test_the_record_read_by_offset_does_not_wait_on_the_files_read_stripe(self):
+        """The by-offset read fills no cache, so it takes no read stripe: a comment cut reading a pre-cut record answers
+        while a peer holds the stripe for the same path (a hydrate group, a record-cache read), rather than waiting
+        for it inside its entry's key lock."""
+        rec = user(uid("stripe", 0), None, 0, "where does the retry budget live?")
+        path = str(self.td / (SID + ".jsonl"))
+        at = write(path, [rec])[0]
+        held, release, done, out = threading.Event(), threading.Event(), threading.Event(), {}
+
+        def peer():
+            with em._read_stripe(path):
+                held.set()
+                release.wait(30)
+
+        def reader():
+            out["rec"] = em._read_record_at(path, at, rec["uuid"])
+            done.set()
+        holder = threading.Thread(target=peer, daemon=True)
+        holder.start()
+        try:
+            self.assertTrue(held.wait(10), "the peer holds the stripe")
+            threading.Thread(target=reader, daemon=True).start()
+            self.assertTrue(done.wait(5), "the read answered while the peer held the file's read stripe")
+        finally:
+            release.set()
+            holder.join(10)
+        self.assertTrue(done.wait(10))
+        self.assertEqual(out["rec"], rec)
 
 
 if __name__ == "__main__":
