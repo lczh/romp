@@ -6528,7 +6528,7 @@ _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": th
 # browser had received (`by.received`). A frame whose count is at or below that of a publish still out was built
 # before that publish was taken, and the page passes it over; and a publish numbered under the kept one is
 # still taken when it says its browser had received a frame built after the kept one was taken (the count
-# `at` beside the kept n), since only a newer state can say that.
+# the kept one was taken at), since only a newer state can say that.
 #
 # THE TAKES NUMBERED ABOVE A PUBLISH (2026-09-30, the second review round; a list since 2026-10-01, the third). A
 # publish taken on its count that way replaces the kept n with its own smaller one, so an older publish of the same
@@ -6574,10 +6574,10 @@ _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": th
 # that publish is held as a pair like any other, so a later publish numbered under it, made before its browser received
 # a frame built after it, is dropped under it, even where the full list would have taken it.
 _view_folds_by = [None]                  # the {browser, n} of the last setViewFolds handled, None when it carried none
-_view_folds_seen = {}                    # browser -> {"pairs": [[n, count], ...] its takes that no later take at or
-#                                          above replaced, n descending and the count ascending; "n" and "at": the last
-#                                          pair, its kept (latest taken) publish; "top" and "top_at": the first, the
-#                                          largest n held}, re-inserted on each update
+_view_folds_seen = {}                    # browser -> its pairs, [[n, count], ...]: its takes that no later take at or
+#                                          above replaced, n descending and the count ascending, so the last pair is its
+#                                          kept (latest taken) publish and the first the largest n held; re-inserted on
+#                                          each update
 _VIEW_FOLDS_SEEN_CAP = 256               # browsers remembered; past it the one heard from longest ago is forgotten
 _VIEW_FOLDS_PAIRS_CAP = 16               # pairs held per browser; past it the first (the largest n, the oldest take) goes
 _view_folds_taken = [0]                  # fold publishes taken in this kernel life (_BOOT_ID): the frame's foldsSeq.n
@@ -6627,19 +6627,6 @@ def _view_folds_received_of(raw):
     if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 2 ** 53:
         return None
     return {"boot": b, "n": n}
-
-
-def _view_folds_pairs(entry):
-    """A browser's pairs as _view_folds_seen holds them, [[n, count], ...] with n descending and the count ascending,
-    as a copy. An entry without "pairs" (the shape before 2026-10-01, which named the kept and the largest alone; the
-    entry is process memory and never served or written, so only code running in this process could leave one) reads
-    as the pairs it names, the largest first, one pair when the two are the same take, and is judged as before."""
-    pairs = entry.get("pairs")
-    if pairs is not None:
-        return [list(p) for p in pairs]
-    if entry["n"] < entry["top"]:
-        return [[entry["top"], entry["top_at"]], [entry["n"], entry["at"]]]
-    return [[entry["n"], entry["at"]]]
 
 
 def _view_folds_path():
@@ -6693,8 +6680,7 @@ def _write_view_folds(folds, by=None, received=None):
     next frame serves, whatever the write then does (unchanged, refused or written); an unstamped publish clears the
     stamp, since its frame reflects a publish nobody named. The notes above _view_folds_by have the why."""
     with _view_order_lock:                           # one lock for the viewer's store, both files, the stamp and the count
-        last = _view_folds_seen.get(by["browser"]) if by is not None else None
-        pairs = _view_folds_pairs(last) if last is not None else []
+        pairs = _view_folds_seen.get(by["browser"], []) if by is not None else []   # read only: a take builds a new list
         above = next((p for p in reversed(pairs) if p[0] > by["n"]), None)   # the smallest n above: n runs descending
         if above is not None and not (
                 received is not None and received["boot"] == _BOOT_ID and received["n"] >= above[1]):
@@ -6707,8 +6693,7 @@ def _write_view_folds(folds, by=None, received=None):
             while len(pairs) > _VIEW_FOLDS_PAIRS_CAP:
                 del pairs[0]
             _view_folds_seen.pop(by["browser"], None)
-            _view_folds_seen[by["browser"]] = {"n": by["n"], "at": at, "top": pairs[0][0], "top_at": pairs[0][1],
-                                               "pairs": pairs}
+            _view_folds_seen[by["browser"]] = pairs
             while len(_view_folds_seen) > _VIEW_FOLDS_SEEN_CAP:
                 del _view_folds_seen[next(iter(_view_folds_seen))]
         _view_folds_by[0] = dict(by) if by else None

@@ -485,9 +485,9 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([(m[0], m[2].get("foldsBy")) for m in equal], [("phone", {"browser": self.B, "n": 2}), ("desktop", {"browser": self.B, "n": 2})],
                          "an equal number is taken and pushed to every viewer")
         self.assertEqual(self.stored_folds(), again)
-        self.assertEqual(km._view_folds_seen[self.B], {"n": 2, "at": 2, "top": 2, "top_at": 2, "pairs": [[2, 2]]},
-                         "kept at the count it took now, and so is the largest, which it equals (2026-09-30): the one pair "
-                         "left, since a take removes every pair at or under its own n (2026-10-01)")
+        self.assertEqual(km._view_folds_seen[self.B], [[2, 2]],
+                         "kept at the count it took now, the one pair left, since a take removes every pair at or under its "
+                         "own n (2026-10-01): both the kept and the largest")
         other = dict(FOLDS, collapsed=["web"])
         [taken] = self.dispatch(self.publish(other, {"browser": self.C, "n": 1}))
         self.assertEqual([m[2].get("foldsBy") for m in taken], [{"browser": self.C, "n": 1}] * 2, "another browser's first publish is its own count")
@@ -526,7 +526,7 @@ class ViewFoldsStore(ViewOrderStore):
     # taken when that count is at or above the one the kept publish was taken at; a drop is logged and answered.
     def test_a_lower_number_is_taken_when_its_browser_had_received_a_frame_built_after_the_kept_one(self):
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 3}))
-        at = km._view_folds_seen[self.B]["at"]
+        at = km._view_folds_seen[self.B][-1][1]     # the count the kept pair, the last, was taken at
         self.dispatch(self.publish(dict(FOLDS, collapsed=["web"]), {"browser": self.C, "n": 1}))   # another device
         seq = km._view_order_frame()["foldsSeq"]       # the connect push a reload of B hears: it names the other device
         self.assertEqual((seq["boot"], seq["n"] > at), (km._BOOT_ID, True), "premise: built after B's kept publish was taken")
@@ -535,16 +535,15 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([(m[0], m[2].get("foldsBy")) for m in sent], [("phone", {"browser": self.B, "n": 1}), ("desktop", {"browser": self.B, "n": 1})],
                          "numbered under the kept 3, and taken: pushed to every viewer, named without the count")
         self.assertEqual(self.stored_folds(), again)
-        self.assertEqual(km._view_folds_seen[self.B], {"n": 1, "at": seq["n"] + 1, "top": 3, "top_at": at,
-                                                       "pairs": [[3, at], [1, seq["n"] + 1]]},
-                         "remembered at its own number now, and the count it took, beside the largest taken from it and that one's count")
+        self.assertEqual(km._view_folds_seen[self.B], [[3, at], [1, seq["n"] + 1]],
+                         "remembered at its own number now, the last pair, with the count it took, after the largest taken from it and that one's count")
         self.assertEqual(self.logged, [], "nothing dropped")
         [on] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 2, "received": seq}))
         self.assertEqual(len(on), 2, "and the browser's next publish, made before the answer to the last, is taken on its own number")
 
     def test_only_a_count_of_this_kernel_life_at_or_above_the_kept_publishes_takes_a_lower_number(self):
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 3}))
-        at = km._view_folds_seen[self.B]["at"]
+        at = km._view_folds_seen[self.B][-1][1]     # the count the kept pair, the last, was taken at
         refused = [{"boot": km._BOOT_ID, "n": at - 1}, {"boot": "another life", "n": at + 5}, None, "x", {"boot": km._BOOT_ID},
                    {"boot": km._BOOT_ID, "n": True}, {"boot": km._BOOT_ID, "n": float(at)}, {"boot": km._BOOT_ID, "n": -1},
                    {"boot": km._BOOT_ID, "n": 2 ** 53 + 1}, {"boot": "", "n": at}, {"boot": "x" * 65, "n": at}, {"boot": 7, "n": at}]
@@ -553,8 +552,7 @@ class ViewFoldsStore(ViewOrderStore):
             self.assertEqual([m[0] for m in out], ["desktop"], "dropped, the poster answered: %r" % (received,))
             self.assertEqual(len(self.logged), 1, repr(received))
         self.assertEqual(self.stored_folds(), FOLDS, "none of them written")
-        self.assertEqual(km._view_folds_seen[self.B], {"n": 3, "at": at, "top": 3, "top_at": at, "pairs": [[3, at]]},
-                         "and the kept publish is as it was")
+        self.assertEqual(km._view_folds_seen[self.B], [[3, at]], "and the kept publish is as it was")
         [out] = self.dispatch(self.publish(dict(FOLDS, collapsed=[]), {"browser": self.B, "n": 1, "received": {"boot": km._BOOT_ID, "n": at}}))
         self.assertEqual([m[0] for m in out], ["phone", "desktop"], "exactly the kept publish's count: taken")
 
@@ -565,7 +563,7 @@ class ViewFoldsStore(ViewOrderStore):
         km._write_view_folds(FOLDS, {"browser": self.B, "n": 3})
         before = (json.dumps(self.stored_folds()), dict(km._view_folds_by[0]), km._view_folds_taken[0],
                   json.dumps(km._view_folds_seen, sort_keys=True))
-        at = km._view_folds_seen[self.B]["at"]
+        at = km._view_folds_seen[self.B][-1][1]     # the count the kept pair, the last, was taken at
         got = {"phone": [], "desktop": []}
         phone = {"cid": "phone", "app": "chat", "alive": True, "send": lambda s: got["phone"].append(json.loads(s))}
         desktop = {"cid": "desktop", "app": "chat", "alive": True, "send": lambda s: got["desktop"].append(json.loads(s))}
@@ -647,9 +645,8 @@ class ViewFoldsStore(ViewOrderStore):
         [y11, a11] = self.dispatch(self.publish(four, {"browser": self.B, "n": 11, "received": seq12}),
                                    self.publish(dict(self.NONE, collapsed=["api"]), {"browser": self.B, "n": 11, "received": seq9}))
         self.assertEqual([m[0] for m in y11], ["phone", "desktop"], "premise: Y's 11 taken and pushed")
-        entry = km._view_folds_seen[self.B]
-        self.assertEqual((entry["top"], entry["top_at"], entry["pairs"]), (12, seq12["n"], [[12, seq12["n"]], [11, seq12["n"] + 2]]),
-                         "the largest stays 12 on 12's count, and Y's 11 replaced Y's 10")
+        self.assertEqual(km._view_folds_seen[self.B], [[12, seq12["n"]], [11, seq12["n"] + 2]],
+                         "the largest, the first pair, stays 12 on 12's count, and Y's 11 replaced Y's 10")
         self.assertEqual(self.stored_folds(), four, "all four folds stand")
         self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
         self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, largest n=12 taken at %d"
@@ -728,7 +725,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
         self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, between n=12 taken at %d"
                                        % (self.B[:8], km._BOOT_ID, at10, at12)], "logged under 12, a pair at neither end")
-        self.assertEqual(km._view_folds_seen[self.B]["pairs"], [[45, 1], [12, at12], [11, at12 + 1]],
+        self.assertEqual(km._view_folds_seen[self.B], [[45, 1], [12, at12], [11, at12 + 1]],
                          "45 held first, then 12, then Y's 11, which replaced nothing")
 
     def test_the_same_when_tab_y_numbers_its_publish_10(self):
@@ -737,7 +734,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
         self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, between n=12 taken at %d"
                                        % (self.B[:8], km._BOOT_ID, at10, at12)])
-        self.assertEqual(km._view_folds_seen[self.B]["pairs"], [[45, 1], [12, at12], [10, at12 + 1]])
+        self.assertEqual(km._view_folds_seen[self.B], [[45, 1], [12, at12], [10, at12 + 1]])
 
     def test_the_same_without_a_largest_from_before_the_record_came_back(self):
         # with no B:45, 12 is the largest held, and A's publish is dropped under it (as it was before the list)
@@ -746,7 +743,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([m[0] for m in a11], ["desktop"], "A's 11 dropped, the poster answered")
         self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:%d, largest n=12 taken at %d"
                                        % (self.B[:8], km._BOOT_ID, at10, at12)])
-        self.assertEqual(km._view_folds_seen[self.B]["pairs"], [[12, at12], [11, at12 + 1]])
+        self.assertEqual(km._view_folds_seen[self.B], [[12, at12], [11, at12 + 1]])
 
     def take_on_count(self, n, folds=FOLDS):
         """B:n, carrying the count of the frame the kernel would serve now."""
@@ -759,10 +756,10 @@ class ViewFoldsStore(ViewOrderStore):
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 200}))
         for i in range(1, cap):
             self.take_on_count(200 - 2 * i)
-        pairs = km._view_folds_seen[self.B]["pairs"]
+        pairs = km._view_folds_seen[self.B]
         self.assertEqual((len(pairs), pairs[0], pairs[-1]), (cap, [200, 1], [202 - 2 * cap, cap]), "at the cap, every pair held")
         self.take_on_count(200 - 2 * cap)
-        pairs = km._view_folds_seen[self.B]["pairs"]
+        pairs = km._view_folds_seen[self.B]
         self.assertEqual((len(pairs), pairs[0], pairs[-1]), (cap, [198, 2], [200 - 2 * cap, cap + 1]),
                          "one past it, the first pair (the largest n, the oldest take) is forgotten")
 
@@ -792,7 +789,7 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual([m[0] for m in lost], ["phone", "desktop"],
                          "199 on count 0, which 200 would have dropped: taken once 200 is forgotten, the base's last write wins")
         self.assertEqual(self.logged, [])
-        self.assertEqual(km._view_folds_seen[self.B]["pairs"], [[199, 18]], "199's take removed every pair, each under it")
+        self.assertEqual(km._view_folds_seen[self.B], [[199, 18]], "199's take removed every pair, each under it")
         [after] = self.dispatch(self.publish(dict(FOLDS, collapsed=["g197"]),
                                              {"browser": self.B, "n": 197, "received": {"boot": km._BOOT_ID, "n": 2}}))
         self.assertEqual([m[0] for m in after], ["desktop"],
@@ -800,28 +797,6 @@ class ViewFoldsStore(ViewOrderStore):
         self.assertEqual(self.logged, ["romp-kernel: setViewFolds dropped: browser %r n=197 received=%r:2, kept n=199 taken at 18"
                                        % (self.B[:8], km._BOOT_ID)])
         self.assertEqual(self.stored_folds(), dict(FOLDS, collapsed=["g199", "lost"]), "the kernel keeps 199's state")
-
-    def test_an_entry_of_the_shape_before_the_list_is_judged_as_it_was(self):
-        # the kept and the largest alone, {n, at, top, top_at}, as the kernel kept them before the list: read as the pairs
-        # they name, so a publish under the kept is judged on the kept's count and one between the two on the largest's,
-        # and the next take writes the list
-        km._view_folds_seen[self.B] = {"n": 10, "at": 3, "top": 12, "top_at": 2}
-        km._view_folds_seen[self.C] = {"n": 5, "at": 1, "top": 5, "top_at": 1}
-        km._view_folds_taken[0] = 3
-        api = dict(self.NONE, collapsed=["api"])
-        on = lambda n: {"boot": km._BOOT_ID, "n": n}
-        sent = self.dispatch(self.publish(api, {"browser": self.B, "n": 11, "received": on(1)}),
-                             self.publish(api, {"browser": self.B, "n": 9, "received": on(2)}),
-                             self.publish(api, {"browser": self.C, "n": 4, "received": on(0)}))
-        self.assertEqual([[m[0] for m in out] for out in sent], [["desktop"]] * 3, "all three dropped, each poster answered")
-        self.assertEqual(self.logged, [
-            "romp-kernel: setViewFolds dropped: browser %r n=11 received=%r:1, largest n=12 taken at 2" % (self.B[:8], km._BOOT_ID),
-            "romp-kernel: setViewFolds dropped: browser %r n=9 received=%r:2, kept n=10 taken at 3" % (self.B[:8], km._BOOT_ID),
-            "romp-kernel: setViewFolds dropped: browser %r n=4 received=%r:0, kept n=5 taken at 1" % (self.C[:8], km._BOOT_ID)])
-        [taken] = self.dispatch(self.publish(api, {"browser": self.B, "n": 11, "received": on(2)}))
-        self.assertEqual([m[0] for m in taken], ["phone", "desktop"], "11 on the largest's count: taken")
-        self.assertEqual(km._view_folds_seen[self.B], {"n": 11, "at": 4, "top": 12, "top_at": 2, "pairs": [[12, 2], [11, 4]]},
-                         "and the entry is written with its list")
 
     def test_a_new_kernel_life_counts_from_nothing_and_a_count_from_the_last_life_proves_nothing(self):
         self.dispatch(self.publish(FOLDS, {"browser": self.B, "n": 3}))
