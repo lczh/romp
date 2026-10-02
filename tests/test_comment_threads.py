@@ -108,6 +108,57 @@ def compacted_records(t):
             aline(t + 305, "The dashboard shows each endpoint's retry state.", "pa4", parent="p4")]
 
 
+def attline(t, prompt, uuid, parent, **fields):
+    """A message the person sent while the agent was working, spliced into the running turn, as the CLI records it: no
+    user record but a queued_command attachment stamped with the send time, uuid-bearing and parent-chained
+    (tests/test_event_model_golden.py's attline). `fields` go on the attachment (commandMode, origin)."""
+    return {"type": "attachment", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent, "isSidechain": False,
+            "attachment": dict({"type": "queued_command", "prompt": prompt}, **fields)}
+
+
+def other_attline(t, uuid, parent, **attachment):
+    """An attachment of another kind on the same chain, its fields `attachment`: for example the token-count reminder
+    the CLI writes at a request's start (tests/test_event_model_golden.py's reminder_line), or a hook's result after a
+    tool's."""
+    return {"type": "attachment", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent, "isSidechain": False,
+            "attachment": attachment}
+
+
+CORRECTION = "Keep the jitter under five percent, please."
+
+
+def spliced_records(t, prompt=CORRECTION, **fields):
+    """compacted_records' session with a message sent mid-turn: the agent's answer pa2 comes before the tool call it goes
+    on to make, the person's correction q1 is spliced in after that call's result (stamped with its send time, before the
+    result landed), the agent's reply pa3 answers it, and the person's typed follow-up p3 comes after that (so the later
+    replies are pa4 and pa5)."""
+    return [uline(t, "Set up the notes-api sync loop.", "p1"),
+            aline(t + 5, "Done: the loop polls the server every thirty seconds.", "pa1", parent="p1"),
+            uline(t + 60, "How should it back off when the server is down?", "p2", parent="pa1"),
+            aline(t + 65, "Use exponential backoff with a jitter of ten percent.", "pa2", parent="p2"),
+            tline(t + 66, "pt2", "pa2"),
+            tool_result_line(t + 70, "pr2", "pt2", "pt2"),
+            attline(t + 68, prompt, "q1", "pr2", **fields),
+            aline(t + 75, "Understood: five percent it is.", "pa3", parent="q1"),
+            uline(t + 120, "and the cap?", "p3", parent="pa3"),
+            aline(t + 125, "Cap the delay at two minutes.", "pa4", parent="p3"),
+            cli_boundary(t + 200, "pb1", "pa4"),
+            summary_line(t + 201, "ps1", "pb1"),
+            uline(t + 300, "now wire the dashboard", "p4", parent="ps1"),
+            aline(t + 305, "The dashboard shows each endpoint's retry state.", "pa5", parent="p4")]
+
+
+def forget_parses():
+    """Every parse of a transcript these tests rewrite in place under one path (the reader's records, the assembly entries,
+    the parse slots), so the next resolve parses the file as it now stands."""
+    with em._JSONL_CACHE_LOCK:
+        em._JSONL_CACHE.clear()
+    with em._ASM_LOCK:
+        em._ASM_CACHE.clear()
+    jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+    km._parse_cache.clear()
+
+
 class CommentBase(unittest.TestCase):
     """Temp state root shared by kernel + judge (km.jd IS the loaded jd module), synthetic
     transcripts under a temp projects/ dir — the test_sdk_clear_fork conventions."""
@@ -337,6 +388,504 @@ class PreCompactionContext(CommentBase):
         (sdir / (PARENT + ".jsonl")).write_text(
             json.dumps({"resumeFork": {"from": old_fsid, "to": new_fsid}, "t": t + 250}) + "\n")
         self.assertEqual(km._comment_cut_resolve(str(cur), PARENT, "a1")[1:], (int(em.parse_z(iso(t + 5))), None, ""))
+
+    # ── a message the person sent while the agent was working (the review of #37) ─────────────────────────────────
+    # The CLI records a message spliced into the running turn as a queued_command attachment. Whether an attachment
+    # is such a message (and the original, not a copy) and who sent it is the parse's atom for it (the display parse's;
+    # on the fresh read, the same emit run over that read); when that atom names the person, its words go through a user
+    # record's screens. Each case below is resolved through the create's road (the chat's parse, a whole entry here) and
+    # checked against a fresh read of the transcript, the walk's other road; tests/test_comment_create_fast.py runs
+    # several of them on restored entries too. PROMPTS holds the prompt as a string and as a content-block list, two
+    # text blocks around an image that the chat joins with a space (em._text_of), as the excerpt does.
+    PROMPTS = (CORRECTION, [{"type": "text", "text": "Keep the jitter"},
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+                            {"type": "text", "text": "under five percent, please."}])
+
+    def _spliced(self, anchor, prompt=CORRECTION, records=None, **fields):
+        p = self._write(PARENT, records or spliced_records(self.now - 900, prompt, **fields))
+        forget_parses()                                   # an earlier subtest's parse of the same path
+        roads = dict(km._CUT_ROADS)
+        got = km._comment_cut_resolve(str(p), PARENT, anchor)
+        self.assertEqual(km._CUT_ROADS["whole"] - roads["whole"], 1, "premise: the chat's parse answered, a whole entry")
+        self.assertEqual(got, km._comment_cut_walk(em.TranscriptGraph(km._anchor_adapter(str(p), PARENT)), str(p), anchor),
+                         "a fresh read of the transcript answers the same")
+        return got
+
+    def _shown(self, records, text):
+        """How many bubbles the chat shows with `text` for messages sent mid-turn: the parse's absorbed atoms."""
+        p = self._write(PARENT, records)
+        return [em._text_of(a["message"]["content"]) for a in em.FileAdapter([str(p)], str(p)).atoms(PARENT, {})
+                if a.get("absorbed")].count(text)
+
+    def test_the_agents_answer_before_a_message_sent_while_it_worked(self):
+        for prompt in self.PROMPTS:
+            with self.subTest(prompt=type(prompt).__name__):
+                cut, _t, err, prior = self._spliced("pa2", prompt)
+                self.assertIsNone(err)
+                self.assertEqual(cut, "")
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n"
+                              "> How should it back off when the server is down?\n\n", prior)
+                self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior,
+                              "the correction sent mid-turn, not the typed follow-up after the agent's reply to it")
+
+    def test_a_comment_on_a_message_sent_mid_turn(self):
+        for prompt in self.PROMPTS:
+            with self.subTest(prompt=type(prompt).__name__):
+                cut, _t, err, prior = self._spliced("q1", prompt)
+                self.assertIsNone(err)
+                self.assertEqual(cut, "")
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, you said:\n\n"
+                              "> Use exponential backoff with a jitter of ten percent.\n\n", prior,
+                              "the passage is the person's, so the excerpts are the agent's")
+                self.assertIn("Right after it, you said:\n\n> Understood: five percent it is.\n\n", prior,
+                              "the agent's reply to the correction")
+
+    def test_the_agents_reply_to_a_message_sent_mid_turn(self):
+        for prompt in self.PROMPTS:
+            with self.subTest(prompt=type(prompt).__name__):
+                cut, _t, err, prior = self._spliced("pa3", prompt)
+                self.assertIsNone(err)
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n> " + CORRECTION + "\n\n", prior,
+                              "the correction it answers, not the person's question before the agent's first answer")
+                self.assertIn("Right after it, I said:\n\n> and the cap?\n\n", prior)
+
+    def test_a_message_sent_mid_turn_keeps_its_line_breaks(self):
+        # each line of the message is quoted as a line of its own, the blank one included, in both prompt forms. Red
+        # before the fix (no splice was read), and red if the walk reads the words with their whitespace collapsed
+        lines = "Keep the jitter under five percent, please.\n\nAnd:\n- log each retry"
+        quoted = "> Keep the jitter under five percent, please.\n> \n> And:\n> - log each retry\n\n"
+        for prompt in (lines, [{"type": "text", "text": lines}]):
+            for anchor, label in (("pa2", "Right after it, I said:\n\n"), ("pa3", "Right before it, I said:\n\n")):
+                with self.subTest(prompt=type(prompt).__name__, anchor=anchor):
+                    _c, _t, err, prior = self._spliced(anchor, prompt)
+                    self.assertIsNone(err)
+                    self.assertIn(label + quoted, prior)
+
+    def test_two_messages_sent_at_one_tool_boundary(self):
+        # two messages the person sends here while one tool runs, which the CLI splices in at that tool's boundary, one
+        # attachment chained after the other before the agent's reply: a comment on either is framed by the agent's text,
+        # its answer before the pair and its reply after it, so each walk passes over the other message on the passage's
+        # own side. The agent's answer is followed by the first message, and its reply preceded by the second. Red before
+        # the fix (no splice was read), and red if a walk stops at a message on the passage's own side
+        t = self.now - 900
+        second = "And log each retry, please."
+        recs = spliced_records(t)
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "pa3")
+        recs[at] = dict(recs[at], parentUuid="q2")
+        recs.insert(at, attline(t + 69, second, "q2", "q1"))
+        self.assertEqual([self._shown(recs, w) for w in (CORRECTION, second)], [1, 1],
+                         "premise: the chat shows a bubble for each message")
+        said = lambda who, text: "%s said:\n\n> %s\n\n" % (who, text)
+        answer = said("you", "Use exponential backoff with a jitter of ten percent.")
+        reply = said("you", "Understood: five percent it is.")
+        for anchor, before, after in (
+                ("q1", answer, reply), ("q2", answer, reply),
+                ("pa2", said("I", "How should it back off when the server is down?"), said("I", CORRECTION)),
+                ("pa3", said("I", second), said("I", "and the cap?"))):
+            with self.subTest(anchor=anchor):
+                _c, _t, err, prior = self._spliced(anchor, records=recs)
+                self.assertIsNone(err)
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, " + before, prior)
+                self.assertIn("Right after it, " + after, prior)
+
+    def test_a_task_notification_spliced_mid_turn_is_nobody(self):
+        # the excluded case: each row here stamped as a task notification (the attachment's older commandMode spelling,
+        # or its origin field) is the harness talking, by the stamp alone, for both texts below; one stamped as another
+        # session's (origin kind peer) is nobody either; and so is one with no stamp whose prompt is wholly the
+        # notification block, which the event model files as the system's by its text. The person's next words after
+        # the passage are still their typed follow-up. A guard: before the fix no splice was read at all. Three checks
+        # refuse each block row: the atom's author, the reminder peel (which takes the whole block, leaving no words)
+        # and the harness-wrapper screen, so a block row stays green while any one of them holds; the plain rows are
+        # refused by the author alone
+        note = ("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+                "<summary>The notes-api build finished.</summary>\n</task-notification>")
+        plain = "The notes-api build finished."
+        for shape, prompt, fields in (("block", note, {"commandMode": "task-notification"}),
+                                      ("block", note, {"origin": {"kind": "task-notification"}}),
+                                      ("plain", plain, {"commandMode": "task-notification"}),
+                                      ("plain", plain, {"origin": {"kind": "task-notification"}}),
+                                      ("plain", plain, {"origin": {"kind": "peer", "from": "web"}}),
+                                      ("block", note, {"commandMode": "prompt"}),
+                                      ("block list", [{"type": "text", "text": note}], {"commandMode": "prompt"})):
+            with self.subTest(fields=fields, prompt=shape):
+                _c, _t, err, prior = self._spliced("pa2", prompt, **fields)
+                self.assertIsNone(err)
+                self.assertIn("Right after it, I said:\n\n> and the cap?\n\n", prior)
+                self.assertNotIn("build finished", prior)
+
+    def test_the_screens_on_a_message_sent_mid_turn(self):
+        # when its atom names the person, its words go through a user record's screens, in the excerpt after the agent's
+        # answer before it (pa2) and in the one before the agent's reply (pa3): a reminder the harness appended is
+        # peeled off (red before the fix, which read no splice). A slash command's wrapper is dropped by its screen
+        # though the atom names the person: this row pins that residual as it stands (red when it is closed, and red if
+        # a splice skips that screen). A harness banner is nobody (a guard), refused twice: by the atom's author and by
+        # the harness-wrapper screen, so the row stays green without either one
+        ask = "How should it back off when the server is down?"
+        for name, prompt, after, before in (
+                ("trailing reminder", CORRECTION + "\n\n<system-reminder>Be brief.</system-reminder>", CORRECTION,
+                 CORRECTION),
+                ("slash command", "<command-name>/compact</command-name>", "and the cap?", ask),
+                ("harness banner", "[SYSTEM NOTIFICATION - NOT USER INPUT] A background task finished.", "and the cap?",
+                 ask)):
+            for anchor, said in (("pa2", "Right after it, I said:\n\n> " + after),
+                                 ("pa3", "Right before it, I said:\n\n> " + before)):
+                with self.subTest(name, anchor=anchor):
+                    if name == "slash command":
+                        self.assertEqual(em.author_of([{"type": "text", "text": prompt}], None, {}, False, None),
+                                         "human", "premise: the atom names the person")
+                    _c, _t, err, prior = self._spliced(anchor, prompt)
+                    self.assertIsNone(err)
+                    self.assertIn(said + "\n\n", prior)
+                    for gone in ("Be brief", "background task", "/compact"):
+                        self.assertNotIn(gone, prior)
+
+    def test_a_splice_stamped_as_the_persons_own(self):
+        # an origin of kind human is the person's own stamp, no injected one: the splice is still their correction
+        _c, _t, err, prior = self._spliced("pa2", origin={"kind": "human"})
+        self.assertIsNone(err)
+        self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior)
+
+    def test_a_splice_the_chat_does_not_show_as_the_persons_is_nobody(self):
+        # romp's own mid-turn feeds and the harness's arrive as the same attachment, and the atom's author says they
+        # are not the person's for each row below. Without the author, the text screens alone (_comment_persons_words)
+        # would pass six of them (`alone` below, a premise): the mail and romp's injection each behind a reminder tag
+        # left open (the reminder split cuts the text at the open tag, and the marker with it), romp's marker written
+        # without its spaces (the marker screen reads the one spelling romp writes), the teammate's message, the
+        # scheduled prompt, and the words after the reminder once it is peeled.
+        # The premise on the author is only that it is not the person's; the comments over the rows say whose the
+        # event model files each as today, which the walk does not depend on
+        marker = "<!-- romp-msg-id: 11111111-2222-3333-4444-666666666666 -->"
+        for name, prompt, alone in (
+                # filed as a peer's
+                ("peer mail", "The tags route is done on my side.\n\n" + marker, False),
+                ("peer mail behind an open reminder",
+                 "The tags route is done on my side.\n\n<system-reminder>Be brief.\n\n" + marker, True),
+                # filed as romp's
+                ("romp's injection", "<!-- romp-injected -->\nWhere does the tags route stand?", False),
+                ("romp's injection behind an open reminder",
+                 "Where does the tags route stand?\n\n<system-reminder>Be brief.\n\n<!-- romp-injected -->", True),
+                ("romp's marker without its spaces", "<!--romp-injected-->\nWhere does the tags route stand?", True),
+                # filed as a teammate's, the SDK's and the system's, in that order
+                ("teammate", "Another Claude session sent a message while you were working: the tags route is done.",
+                 True),
+                ("scheduled prompt", "[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT] Check the tags route.",
+                 True),
+                ("after a harness reminder", "<system-reminder>Context for the model.</system-reminder>\n"
+                 "The tags route is done.", True)):
+            with self.subTest(name):
+                got = em.author_of([{"type": "text", "text": prompt}], None, {}, False, None)
+                self.assertNotEqual(got, "human", "premise: the chat does not show the text as the person's")
+                self.assertEqual(km._comment_persons_words(prompt, lambda t: False) is not None, alone,
+                                 "premise: whether the text screens alone would pass it")
+                _c, _t, err, prior = self._spliced("pa2", prompt)
+                self.assertIsNone(err)
+                self.assertIn("Right after it, I said:\n\n> and the cap?\n\n", prior)
+                self.assertNotIn("tags route", prior)
+
+    def test_a_reply_from_a_card_sent_mid_turn_is_dropped_as_it_stands(self):
+        # pins a residual as it stands (_comment_spliced): a reply the person sends from a card, and the card's Continue
+        # button, carry romp's goal marker (the Continue reply its canned marker too); the chat shows them as the
+        # person's, and the marker screen drops them from the excerpt after the agent's answer before them (pa2) and from
+        # the one before the agent's reply (pa3). Red when that residual is closed, and red if a splice skips the marker
+        # screen. The third case here, a message with no stamp, no marker and no harness wording, reads as the person's
+        # at both anchors, as the chat reads it (red before the fix, which read no splice)
+        card = km._followup_body(PARENT + ":g1", "Retry loop: back off with jitter", CORRECTION)
+        cont = km._followup_body(PARENT + ":g1", "Retry loop: back off with jitter",
+                                 km.CONTINUE_TEXT + "\n\n<!-- romp-canned: continue -->")
+        plain = "The tags route is done; the cap is two minutes."
+        ask = "How should it back off when the server is down?"
+        for name, prompt, after, before in (("card reply", card, "and the cap?", ask),
+                                            ("Continue", cont, "and the cap?", ask),
+                                            ("no sign it came from elsewhere", plain, plain, plain)):
+            for anchor, said in (("pa2", "Right after it, I said:\n\n> " + after),
+                                 ("pa3", "Right before it, I said:\n\n> " + before)):
+                with self.subTest(name, anchor=anchor):
+                    self.assertEqual(em.author_of([{"type": "text", "text": prompt}], None, {}, False, None), "human",
+                                     "premise: the chat shows it as the person's")
+                    _c, _t, err, prior = self._spliced(anchor, prompt)
+                    self.assertIsNone(err)
+                    self.assertIn(said + "\n\n", prior)
+                    if prompt != plain:
+                        self.assertNotIn("Retry loop", prior)
+
+    def test_a_comment_on_a_message_the_screens_drop_quotes_the_person_on_both_sides(self):
+        # pins a residual as it stands: a card reply, a Continue reply and a slash command's wrapper, each sent mid-turn
+        # and named the person's by its atom, are dropped by the screens, so a comment on one takes the passage as the
+        # agent's and both excerpts quote the person. Red when that is closed
+        card = km._followup_body(PARENT + ":g1", "Retry loop: back off with jitter", CORRECTION)
+        cont = km._followup_body(PARENT + ":g1", "Retry loop: back off with jitter",
+                                 km.CONTINUE_TEXT + "\n\n<!-- romp-canned: continue -->")
+        for name, prompt in (("card reply", card), ("Continue", cont),
+                             ("slash command", "<command-name>/compact</command-name>")):
+            with self.subTest(name):
+                self.assertEqual(em.author_of([{"type": "text", "text": prompt}], None, {}, False, None), "human",
+                                 "premise: the atom names the person")
+                _c, _t, err, prior = self._spliced("q1", prompt)
+                self.assertIsNone(err)
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n"
+                              "> How should it back off when the server is down?\n\n", prior)
+                self.assertIn("Right after it, I said:\n\n> and the cap?\n\n", prior)
+
+    def test_a_replayed_copy_of_the_message_past_the_boundary(self):
+        # a compaction or a resume writes the splice again under a new uuid with its send stamp and text. Here the chat
+        # shows the message once (a premise) whether the copy is written verbatim, with its whitespace changed or as a
+        # content-block list, and past the boundary the walk passes over the copy. Guards (no splice was read before the
+        # fix); red if the walk reads a copy
+        t = self.now - 900
+        for shape, copy in (("verbatim", CORRECTION), ("whitespace", "Keep the jitter  under five percent,\nplease."),
+                            ("list", [{"type": "text", "text": CORRECTION}])):
+            with self.subTest(copy=shape):
+                recs = spliced_records(t)
+                at = next(i for i, r in enumerate(recs) if r["uuid"] == "p4")
+                recs[at] = dict(recs[at], parentUuid="q1r")
+                recs.insert(at, attline(t + 68, copy, "q1r", "ps1"))
+                self.assertEqual(self._shown(recs, CORRECTION), 1, "premise: the chat shows the message once")
+                _c, _t, err, prior = self._spliced("pa4", records=recs)
+                self.assertIsNone(err)
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n> and the cap?\n\n", prior)
+                self.assertIn("Right after it, I said:\n\n> now wire the dashboard\n\n", prior)
+                self.assertNotIn("Keep the jitter", prior)
+
+    def test_three_copies_of_the_message(self):
+        # the original and two copies, one after each of two compactions. Here the chat shows the message once (a
+        # premise), the agent's reply quotes the original before it (red before the fix), and the passage before each
+        # compaction is followed by the person's next typed message, not a copy (guards)
+        t = self.now - 900
+        recs = spliced_records(t)[:12] + [
+            attline(t + 68, CORRECTION, "q1r", "ps1"),
+            uline(t + 300, "now wire the dashboard", "p4", parent="q1r"),
+            aline(t + 305, "The dashboard shows each endpoint's retry state.", "pa5", parent="p4"),
+            cli_boundary(t + 400, "pb2", "pa5"),
+            summary_line(t + 401, "ps2", "pb2"),
+            attline(t + 68, CORRECTION, "q1s", "ps2"),
+            uline(t + 500, "next, the alerts", "p6", parent="q1s"),
+            aline(t + 505, "The alerts fire after three failed retries.", "pa6", parent="p6")]
+        self.assertEqual(self._shown(recs, CORRECTION), 1, "premise: the chat shows the message once")
+        for anchor, said in (("pa3", "Right before it, I said:\n\n> " + CORRECTION + "\n\n"),
+                             ("pa4", "Right after it, I said:\n\n> now wire the dashboard\n\n"),
+                             ("pa5", "Right after it, I said:\n\n> next, the alerts\n\n")):
+            with self.subTest(anchor=anchor):
+                _c, _t, err, prior = self._spliced(anchor, records=recs)
+                self.assertIsNone(err)
+                self.assertIn(said, prior)
+                self.assertLessEqual(prior.count("Keep the jitter"), 1)
+                if anchor != "pa3":
+                    self.assertNotIn("Keep the jitter", prior)
+
+    def test_a_replayed_copy_before_the_passage(self):
+        # after a second compaction, a passage the agent wrote after the first compaction's copy of the message. Here the
+        # chat shows the message once (a premise), and the passage is preceded by the person's last typed message, not by
+        # the copy. A guard; red if the walk back reads a copy
+        t = self.now - 900
+        recs = spliced_records(t)[:12] + [
+            attline(t + 68, CORRECTION, "q1r", "ps1"),
+            aline(t + 230, "Noted: the jitter stays under five percent.", "pa6", parent="q1r"),
+            uline(t + 260, "ship it", "p7", parent="pa6"),
+            aline(t + 265, "Shipped.", "pa7", parent="p7"),
+            cli_boundary(t + 400, "pb2", "pa7"),
+            summary_line(t + 401, "ps2", "pb2"),
+            uline(t + 500, "next, the alerts", "p8", parent="ps2"),
+            aline(t + 505, "The alerts fire after three failed retries.", "pa8", parent="p8")]
+        self.assertEqual(self._shown(recs, CORRECTION), 1, "premise: the chat shows the message once")
+        _c, _t, err, prior = self._spliced("pa6", records=recs)
+        self.assertIsNone(err)
+        self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n> and the cap?\n\n", prior)
+        self.assertIn("Right after it, I said:\n\n> ship it\n\n", prior)
+        self.assertNotIn(CORRECTION, prior)
+
+    def test_the_message_is_its_copy_on_the_kept_chain_when_the_first_is_rewound_away(self):
+        # the same send written twice, the first copy on a branch the person rewound away and its twin on the kept chain:
+        # the parse makes no atom of a copy off the kept chain, so the twin is the message the chat shows, and the walk
+        # quotes it on both roads it runs here. Red before the fix (no splice was read), and red on the fresh read's
+        # road if its choice ignored the kept chain
+        t = self.now - 900
+        recs = spliced_records(t)
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "q1")
+        recs[at:at] = [attline(t + 68, CORRECTION, "q1x", "pr2"),
+                       aline(t + 72, "An answer the person rewound away.", "pa3x", parent="q1x")]
+        p = self._write(PARENT, recs)
+        ad = em.FileAdapter([str(p)], str(p))
+        self.assertEqual([a["uuid"] for a in ad.atoms(PARENT, {}) if a.get("absorbed")], ["q1"],
+                         "premise: the chat shows the kept twin, once")
+        self.assertNotIn("q1x", ad.kept_uuids(ad.active_path()), "premise: the first copy is off the kept chain")
+        _c, _t, err, prior = self._spliced("pa2", records=recs)
+        self.assertIsNone(err)
+        self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior)
+        self.assertNotIn("rewound away", prior)
+
+    def test_a_message_first_written_off_the_spine_is_skipped_as_it_stands(self):
+        # pins a residual as it stands: the send's first record sits on a chain the parse keeps off the spine (here a
+        # fragment whose parent is in no transcript), and a copy of it, same stamp and text under a new uuid, sits on
+        # the spine. The chat's atom is the fragment's record. The walk follows the spine, where the copy has no atom,
+        # so both excerpts skip the message. Red when that is closed, and red on the fresh read's road if its choice of
+        # the original took the spine alone for the kept chain
+        t = self.now - 900
+        recs = spliced_records(t)
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "q1")
+        recs[at] = dict(recs[at], parentUuid="lost0")      # a parent in no transcript
+        recs.insert(at + 1, attline(t + 68, CORRECTION, "q1c", "pr2"))
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "pa3")
+        recs[at] = dict(recs[at], parentUuid="q1c")
+        p = self._write(PARENT, recs)
+        ad = em.FileAdapter([str(p)], str(p))
+        active = ad.active_path()
+        self.assertEqual([a["uuid"] for a in ad.atoms(PARENT, {}) if a.get("absorbed")], ["q1"],
+                         "premise: the chat shows the fragment's record, once")
+        self.assertEqual(("q1" in active, "q1" in ad.kept_uuids(active), "q1c" in active), (False, True, True),
+                         "premise: the fragment is off the spine and kept; the copy is on the spine")
+        for anchor in ("pa2", "pa3"):
+            with self.subTest(anchor=anchor):
+                _c, _t, err, prior = self._spliced(anchor, records=recs)
+                self.assertIsNone(err)
+                self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n"
+                              "> How should it back off when the server is down?\n\n", prior)
+                self.assertIn("Right after it, I said:\n\n> and the cap?\n\n", prior)
+                self.assertNotIn(CORRECTION, prior)
+
+    def test_the_same_words_sent_again_later(self):
+        # a copy repeats the send stamp as well as the text: here the same words are sent again mid-turn under a later
+        # stamp, after the agent's reply to the first and a second tool call, and the chat shows two bubbles (a
+        # premise). Red before the fix (no splice was read)
+        t = self.now - 900
+        recs = spliced_records(t)[:8] + [
+            tline(t + 80, "pt3", "pa3"), tool_result_line(t + 85, "pr3", "pt3", "pt3"),
+            attline(t + 82, CORRECTION, "q2", "pr3"),
+            aline(t + 90, "Understood: five percent in the retry helper too.", "pa3b", parent="q2"),
+            uline(t + 120, "and the cap?", "p3", parent="pa3b"),
+            aline(t + 125, "Cap the delay at two minutes.", "pa4", parent="p3"),
+            cli_boundary(t + 200, "pb1", "pa4"),
+            summary_line(t + 201, "ps1", "pb1"),
+            uline(t + 300, "now wire the dashboard", "p4", parent="ps1"),
+            aline(t + 305, "The dashboard shows each endpoint's retry state.", "pa5", parent="p4")]
+        self.assertEqual(self._shown(recs, CORRECTION), 2, "premise: the chat shows two bubbles")
+        _c, _t, err, prior = self._spliced("pa3", records=recs)
+        self.assertIsNone(err)
+        self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n> " + CORRECTION + "\n\n", prior)
+        self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior,
+                      "the second send, not the typed follow-up after the agent's reply to it")
+
+    def test_the_same_words_with_unreadable_stamps_are_two_messages_where_the_chat_shows_two(self):
+        # two sends of the same words whose stamps do not parse, with readable records between them: here they key apart
+        # and the chat shows two bubbles (a premise); the excerpts follow the parse, so the second is quoted after the
+        # agent's reply to the first. Red before the fix (no splice was read)
+        t = self.now - 900
+        recs = spliced_records(t)[:8] + [
+            tline(t + 80, "pt3", "pa3"), tool_result_line(t + 85, "pr3", "pt3", "pt3"),
+            attline(t + 82, CORRECTION, "q2", "pr3"),
+            aline(t + 90, "Understood: five percent in the retry helper too.", "pa3b", parent="q2"),
+            uline(t + 120, "and the cap?", "p3", parent="pa3b"),
+            aline(t + 125, "Cap the delay at two minutes.", "pa4", parent="p3"),
+            cli_boundary(t + 200, "pb1", "pa4"),
+            summary_line(t + 201, "ps1", "pb1")]
+        recs = [dict(r, timestamp="not a time") if r["uuid"] in ("q1", "q2") else r for r in recs]
+        self.assertEqual(self._shown(recs, CORRECTION), 2, "premise: the chat shows two bubbles")
+        _c, _t, err, prior = self._spliced("pa3", records=recs)
+        self.assertIsNone(err)
+        self.assertIn(km._PRECOMPACT_LEAD + " Right before it, I said:\n\n> " + CORRECTION + "\n\n", prior)
+        self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior)
+
+    def test_a_different_message_with_the_same_stamp_is_no_copy(self):
+        # nor is a splice that shares only the send stamp: a task notification enqueued in the same instant as the person's
+        # correction leaves the correction a message of its own. Red before the fix (no splice was read)
+        t = self.now - 900
+        recs = spliced_records(t)
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "q1")
+        recs[at] = dict(recs[at], parentUuid="tn1")
+        recs.insert(at, attline(t + 68, "<task-notification>The build finished.</task-notification>", "tn1", "pr2",
+                                commandMode="task-notification"))
+        self.assertEqual(recs[at]["timestamp"], recs[at + 1]["timestamp"], "premise: one stamp")
+        _c, _t, err, prior = self._spliced("pa2", records=recs)
+        self.assertIsNone(err)
+        self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior)
+
+    def test_other_attachments_on_the_chain_are_nobody(self):
+        # the CLI chains attachments of other kinds through the same turns: a hook's result after a tool's, a token-count
+        # reminder at a request's start. The parse makes no atom of them, nor of an attachment of a kind it does not know,
+        # even one carrying a prompt, so each walk below crosses them and no excerpt changes. A guard: before the fix no
+        # attachment was read at all
+        t = self.now - 900
+        plain = spliced_records(t)
+        recs = list(plain)
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "q1")
+        recs[at] = dict(recs[at], parentUuid="uk1")
+        recs[at:at] = [other_attline(t + 71, "hk1", "pr2", type="hook_success", hookEvent="PostToolUse",
+                                     stdout="", stderr="", exitCode=0),
+                       other_attline(t + 71, "uk1", "hk1", type="unknown_kind", prompt="Not the person's words.")]
+        at = next(i for i, r in enumerate(recs) if r["uuid"] == "pa3")
+        recs[at] = dict(recs[at], parentUuid="rm1")
+        recs.insert(at, other_attline(t + 72, "rm1", "q1", type="total_tokens_reminder"))
+        for anchor in ("pa2", "q1", "pa3"):
+            with self.subTest(anchor=anchor):
+                want = self._spliced(anchor, records=plain)
+                self.assertIn("Right before it, ", want[3], "premise: the block this compares against has excerpts")
+                self.assertIn("Right after it, ", want[3], "premise: the block this compares against has excerpts")
+                self.assertEqual(self._spliced(anchor, records=recs), want)
+
+    def test_a_message_sent_mid_turn_is_still_no_cut_point(self):
+        # the cut walk still passes over the attachment, as over a tool row: the prose above it carries the cut. A guard
+        t = self.now - 900
+        recs = spliced_records(t) + [tline(t + 306, "pt5", "pa5"), tool_result_line(t + 308, "pr5", "pt5", "pt5"),
+                                     attline(t + 307, "Show the retry count too.", "q5", "pr5"),
+                                     aline(t + 315, "The dashboard shows the retry count too.", "pa6", parent="q5")]
+        cut, _t, err, prior = self._spliced("q5", records=recs)
+        self.assertIsNone(err)
+        self.assertEqual(cut, "pa5")
+        self.assertEqual(prior, "")
+
+    # Checks beside the walk: what the fresh read's road costs the parse stats, that the chat and the walk read a
+    # splice's prompt alike, and a user record's origin screen.
+
+    def test_the_fresh_reads_walk_counts_no_clamp_in_the_parse_stats(self):
+        # on the fresh read's road the walk runs the parse's own splice emit (_absorbed) over its adapter to learn which
+        # attachments are messages and whose; that is no parse, so a splice the parse clamps to its send time (sent a second
+        # after its file-order predecessor was written) is not counted again in landedT-clamp, the parse stat that shows a
+        # change in the CLI's write order. Red if the walk's emit counts
+        t = self.now - 900
+        recs = [dict(r, timestamp=iso(t + 71)) if r["uuid"] == "q1" else r for r in spliced_records(t)]
+        p = str(self._write(PARENT, recs))
+        forget_parses()
+        clamps = lambda: em._ASM_STATS.get("landedT-clamp", 0)
+        n0 = clamps()
+        em.FileAdapter([p], p).atoms(PARENT, {})
+        self.assertEqual(clamps() - n0, 1, "premise: a parse clamps the splice and counts it")
+        g = em.TranscriptGraph(km._anchor_adapter(p, PARENT))
+        n0 = clamps()
+        _c, _t, err, prior = km._comment_cut_walk(g, p, "pa2")
+        self.assertEqual(clamps(), n0, "the walk's own emit counts no clamp")
+        self.assertIsNone(err)
+        self.assertIn("Right after it, I said:\n\n> " + CORRECTION + "\n\n", prior, "premise: the walk read the splice")
+
+    def test_the_chat_and_the_walk_read_a_splices_prompt_alike(self):
+        # the chat fills a restored entry's lazy bubble for a message sent mid-turn from its record (em._hydrate_one,
+        # the atom kind "b"), and the walk reads the record's words (TranscriptGraph.splice_text): each gives the text
+        # the whole parse's atom carries, for a string or a content-block list, and for a string with whitespace at its
+        # edges
+        edges = ("\n\n" + CORRECTION + "\n", "    " + CORRECTION)
+        for label, prompt, text in (("string", self.PROMPTS[0], CORRECTION), ("blocks", self.PROMPTS[1], CORRECTION),
+                                    ("blank lines around", edges[0], edges[0]), ("indented", edges[1], edges[1])):
+            with self.subTest(prompt=label):
+                recs = spliced_records(self.now - 900, prompt)
+                p = str(self._write(PARENT, recs))
+                forget_parses()
+                ad = em.FileAdapter([p], p)
+                whole = [a["message"]["content"] for a in ad.atoms(PARENT, {}) if a.get("uuid") == "q1"]
+                self.assertEqual(whole, [[{"type": "text", "text": text}]], "premise: the whole parse's atom")
+                atom = {"uuid": "q1", "lazy": {"k": "b"}}
+                em._hydrate_one(atom, next(r for r in recs if r["uuid"] == "q1"))
+                self.assertEqual(atom["message"]["content"], [{"type": "text", "text": text}])
+                self.assertEqual(em.TranscriptGraph(ad).splice_text("q1"), text)
+
+    def test_a_user_record_stamped_with_an_injected_origin_is_nobody(self):
+        # a user record stamped as another session's or a task notification's is nobody; with the person's own stamp,
+        # or none, the plain text below is theirs. A guard; red if _comment_said drops its origin screen
+        text = "The notes-api build finished."
+        for origin, want in (({"kind": "peer", "from": "web"}, None), ({"kind": "task-notification"}, None),
+                             ({"kind": "human"}, ("me", text)), (None, ("me", text))):
+            with self.subTest(origin=origin):
+                rec = uline(self.now, text, "u0")
+                if origin is not None:
+                    rec = dict(rec, origin=origin)
+                self.assertEqual(km._comment_said(rec, lambda t: False), want)
 
     def test_rewind_still_refuses_a_pre_compaction_message(self):
         p = self._write(PARENT, compacted_records(self.now - 900))

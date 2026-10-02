@@ -10,7 +10,10 @@ thread's transcript is a full copy of its parent up to the cut (five 40 MB threa
 Pinned here:
 - the cut is walked over the parent's DISPLAY parse (its assembly entry, whole or restored from its document), reading no
   transcript a chat build has read, and on a restored entry only the pre-cut records the walk needs a body of; a
-  pre-compaction passage and a restart seam still cut exactly as the whole read cuts them;
+  pre-compaction passage and a restart seam still cut exactly as the whole read cuts them; a comment on or beside a
+  message the person sent while the agent worked, which the CLI spliced into its running turn (a queued_command
+  attachment, which turns() writes in every fifth turn), is walked on a whole entry and on a restored one, before its
+  cut and past it;
 - a comments frame reads each thread's own records past its cut, never the copied history;
 - the create runs off the socket thread and answers the moment the thread row exists, carrying the thread's frame row;
   a frame built before that row was saved is never sent after the answer.
@@ -91,20 +94,69 @@ def summary(t, uuid, parent):
     return r
 
 
+def attachment(t, uuid, parent, **att):
+    """An attachment record as the CLI chains one through a turn (uuid-bearing, parent-chained)."""
+    return {"type": "attachment", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent, "isSidechain": False,
+            "attachment": att}
+
+
+def splice(t, text, uuid, parent, **fields):
+    """A message the person sent while the agent was working, as the CLI records it once spliced into the running turn: no
+    user record but a queued_command attachment stamped with the send time."""
+    return attachment(t, uuid, parent, type="queued_command", prompt=text, **fields)
+
+
+def correction(k):
+    return "step %d: keep the page size under fifty, please." % k
+
+
+def blocks(text):
+    """`text` as a content-block list, the prompt's other form (the SDK injection path, FileAdapter._ingest): two text
+    blocks around an image, split at the step's colon, which the chat joins with a space (em._text_of)."""
+    head, _, tail = text.partition(": ")
+    return [{"type": "text", "text": head + ":"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+            {"type": "text", "text": tail}]
+
+
+SPLICE_TURN = 3                  # the turns with a message sent mid-turn: k % 5 == 3 (never 6 or 30, whose tool calls
+#                                  the tests below cut at the question above them)
+
+
 def turns(t0, n, size, parent=None, tag="k", compact_after=None):
-    """`n` notes-api turns, each a question, a tool call, its (padded) result and a prose answer; a compaction after turn
-    `compact_after` when given. Returns (records, last uuid, next free time)."""
-    out, t = [], t0
+    """`n` notes-api turns, each a question, a tool call, its (padded) result and a prose answer, with two of the
+    attachments the CLI chains through a turn: a token-count reminder at the request's start and a hook's result after the
+    tool's. In every fifth turn (k % 5 == SPLICE_TURN) the agent says a sentence (kp<k>) before its tool call, the person
+    sends a correction while the tool runs (kq<k>, a queued_command attachment), and the answer replies to it. A compaction
+    (kb, its summary ks) after turn `compact_after` when given, after whose summary the latest correction, when one
+    precedes it, is written again as a compaction's replay writes it (kc: the same send stamp and text, a new uuid).
+    Returns (records, last uuid, next free time)."""
+    out, t, last = [], t0, None
     for k in range(n):
         u, tu, tr, a = "%su%d" % (tag, k), "%st%d" % (tag, k), "%sr%d" % (tag, k), "%sa%d" % (tag, k)
         out += [uline(t, "step %d: how should the notes route page? %s" % (k, pad(200, k)), u, parent),
-                tool_use(t + 1, tu, u),
+                attachment(t, "%sn%d" % (tag, k), u, type="total_tokens_reminder")]
+        prev = "%sn%d" % (tag, k)
+        spliced = k % 5 == SPLICE_TURN
+        if spliced:
+            out.append(aline(t + 1, "step %d: let me read the notes route first." % k, "%sp%d" % (tag, k), prev))
+            prev = "%sp%d" % (tag, k)
+        out += [tool_use(t + 1, tu, prev),
                 tool_result(t + 2, tr, tu, tu, size),
-                aline(t + 3, "step %d done: %s" % (k, pad(400, k + 1)), a, tr)]
+                attachment(t + 2, "%sh%d" % (tag, k), tr, type="hook_success", hookEvent="PostToolUse", exitCode=0)]
+        prev = "%sh%d" % (tag, k)
+        if spliced:
+            last = splice(t + 2, correction(k), "%sq%d" % (tag, k), prev)
+            out.append(last)
+            prev = last["uuid"]
+        out.append(aline(t + 3, "step %d done: %s" % (k, pad(400, k + 1)), a, prev))
         parent, t = a, t + 10
         if compact_after is not None and k == compact_after:
             out += [boundary(t, "%sb" % tag, parent), summary(t + 1, "%ss" % tag, "%sb" % tag)]
             parent, t = "%ss" % tag, t + 10
+            if last is not None:
+                out.append(dict(last, uuid="%sc" % tag, parentUuid=parent))
+                parent = "%sc" % tag
     return out, parent, t
 
 
@@ -122,6 +174,15 @@ def read_of(path):
 def zero_reads():
     with em._READ_BYTES_LOCK:
         em._READ_BYTES.clear()
+
+
+def zero_reads_cold():
+    """zero_reads with the reader's records dropped too, so a whole read of the transcript costs its bytes again: cold(),
+    the reference walk, leaves the reader holding the file, and a measure after it would see no whole read on a later
+    anchor. The display entry keeps its graph (with_display_graph's currency test is the files' stat, never the reader's)."""
+    with em._JSONL_CACHE_LOCK:
+        em._JSONL_CACHE.clear()
+    zero_reads()
 
 
 def restart():
@@ -199,11 +260,13 @@ class Base(unittest.TestCase):
             return km._comment_cut_resolve(path, sid, anchor)
         return km._comment_cut_walk(em.TranscriptGraph(km._anchor_adapter(path, sid)), path, anchor)
 
-    def restored(self, path, sid=PARENT):
+    def restored(self, path, sid=PARENT, turns_section=True):
         """The chat's parse, a document written from it, and a restart: the parse that follows restores the entry from the
-        document (the road a large session takes at every boot), so the cut walk meets a SEEDED entry."""
+        document (the road a large session takes at every boot), so the cut walk meets a SEEDED entry. `turns_section`
+        False writes the document without the parsed tree, so the pre-cut part restores as an atoms-only prefix rather
+        than the lazy index of the turns section."""
         tree = km._parse(path, sid, self.now)
-        self.assertTrue(em.asm_checkpoint_write(path, sid, km._display_sdk_human(sid), tree=tree),
+        self.assertTrue(em.asm_checkpoint_write(path, sid, km._display_sdk_human(sid), tree=tree if turns_section else None),
                         "the fixture's document is written: %s" % em.asm_checkpoint_stats().get("skipped"))
         restart()
         km._parse(path, sid, self.now)
@@ -220,7 +283,7 @@ class CutFromTheDisplayParse(Base):
         km._parse(path, PARENT, self.now)                 # the chat's own parse of the session the comment is made on
         self.assertGreater(os.path.getsize(path), 2_000_000)
         for anchor in ("ka30", "kt30", "kr45"):           # prose, a tool call, a tool result (its prose ancestor is the cut)
-            zero_reads()
+            zero_reads_cold()
             got, rebuilt = self.walks_reading_the_transcript(km._comment_cut_resolve, path, PARENT, anchor)
             self.assertEqual(rebuilt, 0, "the walk read the graph the parse holds, never a rebuild from the transcript (%s)" % anchor)
             self.assertLess(read_of(path), 4096, "…and no bytes (%s)" % anchor)
@@ -234,7 +297,7 @@ class CutFromTheDisplayParse(Base):
         self.restored(path)
         size = os.path.getsize(path)
         for anchor in ("ka10", "kt20", "kr25", "ka58"):   # all but the last are before the document's cut
-            zero_reads()
+            zero_reads_cold()
             got, rebuilt = self.walks_reading_the_transcript(km._comment_cut_resolve, path, PARENT, anchor)
             self.assertEqual(rebuilt, 0, anchor)
             self.assertLess(read_of(path), 64 * 1024, "a few records read back by offset, not the %d bytes before the cut (%s)"
@@ -279,10 +342,15 @@ class CutFromTheDisplayParse(Base):
         for road in ("whole", "seeded"):
             if road == "seeded":
                 self.restored(path)
+                entry = em._ASM_CACHE[(os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))]
+                # kr33's walk after the passage reaches turn 33's message sent mid-turn, which lies before the cut
+                self.assertEqual(self._side_of_cut(entry, "kq33"), "before",
+                                 "premise: turn 33 has a splice before the cut")
+                self.assertIn("kq33", em._precut_locations(entry, PARENT)[2], "premise: the parse made an atom of it")
             else:
                 km._parse(path, PARENT, self.now)
             for anchor in ("ka20", "ku21", "kr33"):       # an answer, a question, a tool result: all before the boundary
-                zero_reads()
+                zero_reads_cold()
                 got, rebuilt = self.walks_reading_the_transcript(km._comment_cut_resolve, path, PARENT, anchor)
                 self.assertEqual(rebuilt, 0, "%s %s" % (road, anchor))
                 self.assertLess(read_of(path), 64 * 1024, "%s %s" % (road, anchor))
@@ -293,6 +361,298 @@ class CutFromTheDisplayParse(Base):
             after = km._comment_cut_resolve(path, PARENT, "ka50")
             self.assertEqual(after, (("ka50", after[1], None, "")), "a passage after the boundary cuts at itself")
         self.assertEqual(self.roads()["read"], 0)
+
+    # ── a message the person sent while the agent was working (the review of #37) ─────────────────────────────────────
+    # The CLI records one it splices into the running turn as a queued_command attachment. The walk asks the
+    # display parse's atom for the attachment who sent it: the entry's atoms on a whole entry or past a restored entry's
+    # cut, the atom's row before the cut.
+
+    ROADS = (("whole", None), ("seeded", True), ("seeded", False))   # a restored entry with the turns section, and without
+
+    def _on_road(self, path, road, turns_section):
+        """The parse `road` names for `path`: a whole entry, or one restored from a document written with or without the
+        turns section. Returns the assembly entry."""
+        restart()
+        shutil.rmtree(jd.STATE / "checkpoints", ignore_errors=True)   # the next parse is whole, so a document can be written
+        if road == "seeded":
+            self.restored(path, turns_section=turns_section)
+        else:
+            km._parse(path, PARENT, self.now)
+        entry = em._ASM_CACHE[(os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))]
+        if road == "seeded":
+            self.assertEqual(entry.get("index") is not None, turns_section, "premise: the pre-cut part's form")
+        return entry
+
+    def _side_of_cut(self, entry, u):
+        """Where record `u` lies on a restored entry: "past" the document's cut (the tail's adapter holds it) or "before"
+        it (a fact of the seed only)."""
+        if u in entry["ad"].by_uuid:
+            return "past"
+        self.assertIn(u, entry["ad"].seed["types"], "premise: %s is a record of the session" % u)
+        return "before"
+
+    def _walk(self, path, anchor):
+        """(the cut walk's answer for `anchor`, the uuids it read back by offset), with the whole-read and byte pins, and the
+        pin that the parse's own atoms answer: the walk runs no splice emit of its own (FileAdapter._absorbed), which only
+        the fresh read's road needs."""
+        zero_reads_cold()
+        read, real, emits, real_emit = [], em._read_record_at, [], em.FileAdapter._absorbed
+        em._read_record_at = lambda p, at, u: (read.append(u), real(p, at, u))[1]
+        em.FileAdapter._absorbed = lambda ad, *a, **k: (emits.append(1), real_emit(ad, *a, **k))[1]
+        try:
+            got, rebuilt = self.walks_reading_the_transcript(km._comment_cut_resolve, path, PARENT, anchor)
+        finally:
+            em._read_record_at, em.FileAdapter._absorbed = real, real_emit
+        self.assertEqual(rebuilt, 0, "never a rebuild from the transcript")
+        self.assertEqual(emits, [], "the display parse's atoms answer, never a splice emit of the walk's own")
+        self.assertLess(read_of(path), 64 * 1024, "a few records read back by offset at most")
+        self.assertEqual(got, self.cold(path, anchor), "a fresh read of the transcript answers the same")
+        return got, read
+
+    @staticmethod
+    def _text(recs, u):
+        c = next(r for r in recs if r.get("uuid") == u)["message"]["content"]
+        return c if isinstance(c, str) else c[0]["text"]
+
+    def test_a_message_sent_mid_turn_on_both_roads(self):
+        # turn 33, before the compaction: the question ku33, a token reminder, the agent's sentence kp33, its tool call and
+        # result, a hook's result, the correction kq33 sent while the tool ran, the answer ka33, then turn 34's question.
+        # The correction's prompt is a string or a content-block list (blocks); on a restored entry it lies before the cut,
+        # read back by its row's offset in either form
+        path, recs = self._session(compact_after=40)
+        q = lambda u: self._text(recs, u)
+        want = {"kp33": (("I", q("ku33")), ("I", correction(33))),      # the agent's sentence: the correction follows it
+                "kq33": (("you", q("kp33")), ("you", q("ka33"))),       # the correction itself: the agent on both sides
+                "ka33": (("I", correction(33)), ("I", q("ku34")))}      # the answer: the correction it answers before it
+        for shape, prompt in (("string", correction(33)), ("blocks", blocks(correction(33)))):
+            write(path, [dict(r, attachment=dict(r["attachment"], prompt=prompt)) if r.get("uuid") == "kq33" else r
+                         for r in recs])
+            for road, form in self.ROADS:
+                entry = self._on_road(path, road, form)
+                if road == "seeded":
+                    self.assertEqual(self._side_of_cut(entry, "kq33"), "before", "premise: the correction is before the cut")
+                for anchor, (before, after) in want.items():
+                    with self.subTest(prompt=shape, road=road, turns_section=form, anchor=anchor):
+                        got, read = self._walk(path, anchor)
+                        self.assertEqual(got[0], "", "a tip fork")
+                        self.assertIn("Right before it, %s said:\n\n> %s\n\n" % before, got[3])
+                        self.assertIn("Right after it, %s said:\n\n> %s\n\n" % after, got[3])
+                        self.assertFalse(set(read) & {"kt33", "kr33"}, "a tool call and its result are never read back")
+                        if road == "seeded":
+                            self.assertIn("kq33", read, "premise: the correction is read back by its row's offset")
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_message_with_line_breaks_keeps_them_on_both_roads(self):
+        # turn 33's correction written over eight lines, as a string or a content-block list (blocks): a blank line, one
+        # ending in two spaces, one indented with spaces, one led by a tab and one holding only a space; and, as a
+        # string, a correction whose every line is indented. Each excerpt beside it quotes every line as its own and
+        # keeps the whitespace inside the words, on every road (on a restored entry the correction is before the cut,
+        # read back by offset). Red if TranscriptGraph.splice_text, or the read back by offset before the cut, collapses
+        # the words' whitespace, strips a line's leading or trailing spaces, expands a tab, empties a line that holds
+        # only a space, or removes the margin every line shares
+        path, recs = self._session(compact_after=40)
+        lines = (correction(33) + "\n\nAnd:\n- log each page fetch  \n  - with its status code\n\t- and its time\n \n"
+                 "- that is all")
+        per_line = ("> %s\n> \n> And:\n> - log each page fetch  \n>   - with its status code\n> \t- and its time\n>  \n"
+                    "> - that is all\n\n" % correction(33))
+        margin = "    " + correction(33) + "\n    - log each page fetch"
+        for shape, prompt, quoted in (("string", lines, per_line), ("blocks", blocks(lines), per_line),
+                                      ("margin", margin, "> %s\n>     - log each page fetch\n\n" % correction(33))):
+            write(path, [dict(r, attachment=dict(r["attachment"], prompt=prompt)) if r.get("uuid") == "kq33" else r
+                         for r in recs])
+            for road, form in self.ROADS:
+                entry = self._on_road(path, road, form)
+                if road == "seeded":
+                    self.assertEqual(self._side_of_cut(entry, "kq33"), "before",
+                                     "premise: the correction is before the cut")
+                for anchor, label in (("kp33", "Right after it, I said:\n\n"),
+                                      ("ka33", "Right before it, I said:\n\n")):
+                    with self.subTest(prompt=shape, road=road, turns_section=form, anchor=anchor):
+                        got, _read = self._walk(path, anchor)
+                        self.assertIn(label + quoted, got[3])
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_two_messages_sent_at_one_tool_boundary_on_both_roads(self):
+        # two messages the person sent while turn 33's tool ran, both spliced in at its boundary: the correction kq33 and a
+        # second one, kq33b, chained after it before the answer ka33. A comment on either quotes the agent on both sides,
+        # its sentence kp33 before the pair and the answer after it, so each walk passes over the other message on the
+        # passage's own side; the sentence is followed by the first message and the answer preceded by the second. On a
+        # restored entry both lie before the cut
+        path, recs = self._session(compact_after=40)
+        second = "step 33: and log each page fetch, please."
+        q = next(r for r in recs if r.get("uuid") == "kq33")
+        at = next(i for i, r in enumerate(recs) if r.get("uuid") == "ka33")
+        recs[at] = dict(recs[at], parentUuid="kq33b")
+        recs.insert(at, splice(int(em.parse_z(q["timestamp"])), second, "kq33b", "kq33"))
+        write(path, recs)
+        shown = [em._text_of(a["message"]["content"]) for a in em.FileAdapter([path], path).atoms(PARENT, {})
+                 if a.get("absorbed")]
+        self.assertEqual([shown.count(w) for w in (correction(33), second)], [1, 1],
+                         "premise: the chat shows a bubble for each message")
+        txt = lambda u: self._text(recs, u)
+        want = {"kq33": (("you", txt("kp33")), ("you", txt("ka33"))),
+                "kq33b": (("you", txt("kp33")), ("you", txt("ka33"))),
+                "kp33": (("I", txt("ku33")), ("I", correction(33))),
+                "ka33": (("I", second), ("I", txt("ku34")))}
+        for road, form in self.ROADS:
+            entry = self._on_road(path, road, form)
+            if road == "seeded":
+                self.assertEqual([self._side_of_cut(entry, u) for u in ("kq33", "kq33b")], ["before", "before"],
+                                 "premise: both messages are before the cut")
+            for anchor, (before, after) in want.items():
+                with self.subTest(road=road, turns_section=form, anchor=anchor):
+                    got, _read = self._walk(path, anchor)
+                    self.assertEqual(got[0], "", "a tip fork")
+                    self.assertIn("Right before it, %s said:\n\n> %s\n\n" % before, got[3])
+                    self.assertIn("Right after it, %s said:\n\n> %s\n\n" % after, got[3])
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_message_sent_mid_turn_after_a_compaction_past_a_restored_cut(self):
+        # an auto-compaction fires in the middle of turn 58, after its hook's result; the agent goes on with a second tool
+        # call, and the person's correction kq58 lands after it. On a restored entry the document cuts at the boundary, so
+        # the agent's sentence kp58 lies before the cut and the correction past it, where the tail's atoms answer for it:
+        # a comment on kp58 quotes the correction after it on every road. Written over eight lines as a string or a
+        # content-block list (blocks), with a blank line, one ending in two spaces, one indented with spaces, one led
+        # by a tab and one holding only a space, or as a string whose every line is indented, each line is quoted as
+        # its own and the whitespace inside the words is kept
+        recs, _last, _t = turns(self.now - 100000, 60, 40000)
+        at = next(i for i, r in enumerate(recs) if r.get("uuid") == "kq58")
+        q = recs[at]
+        t = int(em.parse_z(q["timestamp"]))
+        recs[at:at + 1] = [boundary(t, "kbm", "kh58"), summary(t, "ksm", "kbm"),
+                           tool_use(t + 1, "kt58b", "ksm"), tool_result(t + 1, "kr58b", "kt58b", "kt58b", 2000),
+                           dict(q, parentUuid="kr58b", timestamp=iso(t + 1))]
+        lines = (correction(58) + "\n\nAnd:\n- log each page fetch  \n  - with its status code\n\t- and its time\n \n"
+                 "- that is all")
+        per_line = ("> %s\n> \n> And:\n> - log each page fetch  \n>   - with its status code\n> \t- and its time\n>  \n"
+                    "> - that is all\n\n" % correction(58))
+        for shape, prompt, quoted in (("one line", correction(58), "> %s\n\n" % correction(58)),
+                                      ("lines", lines, per_line), ("blocks", blocks(lines), per_line),
+                                      ("margin", "    " + correction(58) + "\n    - log each page fetch",
+                                       "> %s\n>     - log each page fetch\n\n" % correction(58))):
+            path = self.parent([dict(r, attachment=dict(r["attachment"], prompt=prompt)) if r.get("uuid") == "kq58"
+                                else r for r in recs])
+            for road, form in self.ROADS:
+                entry = self._on_road(path, road, form)
+                with self.subTest(prompt=shape, road=road, turns_section=form):
+                    if road == "seeded":
+                        self.assertEqual([self._side_of_cut(entry, u) for u in ("kp58", "kq58")], ["before", "past"],
+                                         "premise: the passage is before the document's cut and the correction past it")
+                    got, _read = self._walk(path, "kp58")
+                    self.assertEqual(got[0], "", "a tip fork")
+                    self.assertIn("Right after it, I said:\n\n" + quoted, got[3])
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_replayed_copy_on_both_roads(self):
+        # a copy of a correction carries its send stamp and text under a new uuid. Here the chat shows each correction
+        # once (a premise), and the walk passes over the copies to the person's own words. Two copies of kq38 follow the
+        # compaction's summary (kc as the fixture writes it, kc2 beside it): the passage before the compaction is
+        # followed by the next question. A copy of kq33 (kc36) sits before turn 36's answer: that answer is preceded by
+        # its own question. kq38 itself is still quoted beside its turn. On the restored entry kc36 lies before the
+        # document's cut with no atom row to read it by, and kc and kc2 past it. The session ends one turn after the
+        # compaction, so the document's cut falls at the boundary and the walk after ka40 crosses the summary in the
+        # tail (a summary before the cut has no row to read it by)
+        path, recs = self._session(n=42, compact_after=40)
+        at = next(i for i, r in enumerate(recs) if r.get("uuid") == "kc")
+        recs[at + 1] = dict(recs[at + 1], parentUuid="kc2")
+        recs.insert(at + 1, dict(recs[at], uuid="kc2", parentUuid="kc"))
+        at = next(i for i, r in enumerate(recs) if r.get("uuid") == "ka36")
+        recs[at] = dict(recs[at], parentUuid="kc36")
+        recs.insert(at, dict(next(r for r in recs if r.get("uuid") == "kq33"), uuid="kc36", parentUuid="kh36"))
+        write(path, recs)
+        shown = [em._text_of(a["message"]["content"]) for a in em.FileAdapter([path], path).atoms(PARENT, {})
+                 if a.get("absorbed")]
+        self.assertEqual([shown.count(correction(k)) for k in (33, 38)], [1, 1], "premise: the chat shows each correction once")
+        q = lambda u: self._text(recs, u)
+        want = {"ka40": "Right after it, I said:\n\n> %s\n\n" % q("ku41"),
+                "ka36": "Right before it, I said:\n\n> %s\n\n" % q("ku36"),
+                "ka38": "Right before it, I said:\n\n> %s\n\n" % correction(38)}
+        for road, form in self.ROADS:
+            entry = self._on_road(path, road, form)
+            if road == "seeded":
+                self.assertEqual([self._side_of_cut(entry, u) for u in ("kq38", "kc36", "ka40", "kc", "kc2")],
+                                 ["before"] * 3 + ["past"] * 2, "premise: where the document's cut falls")
+                self.assertNotIn("kc36", em._precut_locations(entry, PARENT)[2], "premise: kc36 has no atom row")
+            for anchor, said in want.items():
+                with self.subTest(road=road, turns_section=form, anchor=anchor):
+                    got, _read = self._walk(path, anchor)
+                    self.assertIn(said, got[3])
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_peers_message_spliced_before_the_cut_is_nobody_and_costs_no_read(self):
+        # romp's own mid-turn feeds arrive the same way: a peer's mail, carrying its message marker, spliced where turn 33's
+        # correction sat. The atom's author is the peer's, so on the restored entry its row answers without a read, and the
+        # excerpt before the answer is the person's question above it
+        path, recs = self._session(compact_after=40)
+        mail = "The tags route is done on my side. <!-- romp-msg-id: 11111111-2222-3333-4444-666666666666 -->"
+        recs = [dict(r, attachment=dict(r["attachment"], prompt=mail)) if r.get("uuid") == "kq33" else r for r in recs]
+        write(path, recs)
+        q = lambda u: self._text(recs, u)
+        for road, form in self.ROADS:
+            entry = self._on_road(path, road, form)
+            with self.subTest(road=road, turns_section=form):
+                if road == "seeded":
+                    self.assertEqual(self._side_of_cut(entry, "kq33"), "before", "premise: the splice is before the cut")
+                    self.assertIn("kq33", em._precut_locations(entry, PARENT)[2], "premise: the parse made an atom of it")
+                got, read = self._walk(path, "ka33")
+                self.assertIn("Right before it, I said:\n\n> %s\n\n" % q("ku33"), got[3])
+                self.assertNotIn("tags route is done", got[3])
+                self.assertNotIn("kq33", read, "the peer's splice is never read back")
+        self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_splice_the_restored_entry_cannot_answer_for_reads_the_transcript(self):
+        # here the person's correction kq33, before the cut: when its atom row gives no location to read the record by
+        # (either form), or its turns-section row does not decode, the walk raises GraphMiss and the create reads the
+        # transcript: the right excerpt, the read road counted, never one with the correction silently dropped
+        path, recs = self._session(compact_after=40)
+        for form, arm in ((True, "location"), (False, "location"), (True, "row")):
+            entry = self._on_road(path, "seeded", form)
+            with self.subTest(turns_section=form, arm=arm):
+                if arm == "location":
+                    real = em._SeededGraph._loc
+                    em._SeededGraph._loc = lambda g, u: None if u == "kq33" else real(g, u)
+                    undo = lambda: setattr(em._SeededGraph, "_loc", real)
+                else:
+                    index, bad = entry["index"], set(em._precut_locations(entry, PARENT)[2]["kq33"])
+                    real = index._row
+
+                    def row(k):
+                        if k in bad:
+                            raise em.LazyIndexError("a row of kq33 that does not decode")
+                        return real(k)
+                    index._row = row
+                    undo = lambda: delattr(index, "_row")
+                roads = dict(km._CUT_ROADS)
+                try:
+                    got = km._comment_cut_resolve(path, PARENT, "ka33")
+                finally:
+                    undo()
+                self.assertEqual(km._CUT_ROADS["read"] - roads["read"], 1, "the read road counted once")
+                self.assertIn("Right before it, I said:\n\n> %s\n\n" % correction(33), got[3])
+                self.assertEqual(got, self.cold(path, "ka33"))
+
+    def test_the_walk_builds_its_map_of_splices_once(self):
+        # on a whole entry, each walk below asks for more than one attachment's atom and builds its map from attachment
+        # to atom in one pass over the entry's atoms
+        path, recs = self._session(compact_after=40)
+        entry = self._on_road(path, "whole", None)
+
+        class Counted(list):
+            passes = 0
+
+            def __iter__(self):
+                self.passes += 1
+                return super().__iter__()
+        for anchor in ("kp33", "kq33", "kr33"):           # the agent's sentence, the correction, the tool's result
+            with self.subTest(anchor=anchor):
+                atoms, met = Counted(entry["atoms"]), []
+                g = em.TranscriptGraph(entry["ad"], atoms)
+                ask = g.splice_author
+                g.splice_author = lambda u: (met.append(u), ask(u))[1]
+                got = km._comment_cut_walk(g, path, anchor)
+                self.assertGreaterEqual(len(met), 2, "premise: the walk meets attachments")
+                self.assertEqual(atoms.passes, 1)
+                self.assertEqual(got, self.cold(path, anchor))
 
     def _seamed(self):
         """A machine-cut resume that forked fresh-headed: the old records in the resumed-from file, the new ones in the
@@ -310,7 +670,7 @@ class CutFromTheDisplayParse(Base):
         cur = self._seamed()
         km._parse(cur, PARENT, self.now)
         for anchor, cut in (("oa10", ""), ("ot12", ""), ("na5", "na5"), ("nt6", "nu6")):
-            zero_reads()
+            zero_reads_cold()
             got, rebuilt = self.walks_reading_the_transcript(km._comment_cut_resolve, cur, PARENT, anchor)
             self.assertEqual(rebuilt, 0, "the stitched chain the parse holds answers across the seam (%s)" % anchor)
             self.assertLess(read_of(cur) + read_of(self.proj / (PARENT + ".jsonl")), 4096, anchor)
