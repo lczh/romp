@@ -570,6 +570,114 @@ class OpeningMessage(unittest.TestCase):
         self.assertEqual(split(km._FORK_FRAME), ("", km._FORK_FRAME), "nothing but the line leaves no comment: whole")
         self.assertEqual(split(""), ("", ""))
 
+    def test_a_stored_opener_whose_comment_opens_with_a_quote(self):
+        # Each comment here opens with a markdown quote and splits off whole, on each layout and on an opener from
+        # before the identity line. The second passage ends in a blank line, which the builder quotes as a bare ">"
+        # (premise below), a line romp's quote must take. The last comment puts a pasted context block under its own
+        # quote, and the block stays the comment's.
+        layouts = (("", None), ("", km._FORK_FRAME), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME))
+        comments = ("> ten percent\nwhy not twenty?", "> ten percent\n\nwhy not twenty?", "> ten percent",
+                    "> first\n>\n> second\n\nand why?", "> ten percent\n\n" + self.PRIOR + "\n\nwhy not twenty?")
+        for exact, bare_end in (("line one\n\nline two", False), ("line one\n\n", True)):
+            # romp's quote read off the builder: one line per passage line, each starting with ">" and none empty,
+            # and for the second passage a bare ">" last line. How a blank line inside the passage is spelled is left
+            # free.
+            built = km._comment_opener_parts(exact, "c")[0]
+            quote = built.split(km._COMMENT_FRAME_HEAD + "\n\n", 1)[1].split("\n\n", 1)[0]
+            qlines = quote.split("\n")
+            self.assertEqual(len(qlines), len(exact.splitlines()), "premise: a quote line per passage line, none empty")
+            self.assertTrue(all(ln.startswith(">") for ln in qlines), "premise: every line of romp's quote is a > line")
+            self.assertEqual(qlines[-1] == ">", bare_end, "premise: a blank last line is quoted as a bare >")
+            for comment in comments:
+                self.assertTrue(comment.startswith(">"), "premise: the comment opens with a markdown quote")
+                for prior, frame in layouts:
+                    with self.subTest(exact=exact, comment=comment, prior=bool(prior), frame=bool(frame)):
+                        sent, said = km._comment_opener_parts(exact, comment, prior, frame)
+                        self.assertEqual(said, comment)
+                        self.assertIn("\n\n" + quote + "\n\n", sent + "\n\n",
+                                      "premise: every layout quotes the passage alike, a blank line after it")
+                        self.assertEqual(km._comment_opener_split(sent + "\n\n" + said), (sent, comment))
+                with self.subTest(exact=exact, comment=comment, before_the_identity_line=True):
+                    head = km._COMMENT_FRAME_HEAD + "\n\n" + quote
+                    self.assertEqual(km._comment_opener_split(head + "\n\n" + comment), (head, comment))
+
+    def test_a_comment_that_opens_with_a_pasted_context_block_right_after_romps_quote_is_misread(self):
+        # A known case, pinned as it stands: on an ordinary opener and on one from before the identity line, a comment
+        # that opens with the context block's lead sentence and has a line starting with its file pointer, as a pasted
+        # block would, reads as romp's through the pointer (and an ask label under it, if any); with nothing after
+        # the pointer, the whole opener comes back. On a pre-compaction opener the same comments split right.
+        split = km._comment_opener_split
+        ask = "\n\n" + km._COMMENT_ASK_HEAD
+        cases = (("text after the pointer", self.PRIOR + "\n\nwhy not twenty?", self.PRIOR),
+                 ("the ask label and text", self.PRIOR + ask + "\n\nwhy not twenty?", self.PRIOR + ask),
+                 ("nothing after the pointer", self.PRIOR, None))
+        for after, comment, romps in cases:
+            self.assertTrue(comment.startswith(km._PRECOMPACT_LEAD), "premise: the comment opens with the lead")
+            self.assertIn("\n" + km._PRECOMPACT_FILE_LEAD, comment, "premise: and has a line starting with the pointer")
+            sent, said = km._comment_opener_parts("line one", comment)
+            self.assertEqual(said, comment, "premise: the builder sends the comment as typed")
+            older = km._COMMENT_FRAME_HEAD + "\n\n> line one"
+            for layout, head in (("ordinary", sent), ("before the identity line", older)):
+                with self.subTest(layout=layout, after=after):
+                    opener = head + "\n\n" + comment
+                    if romps is None:
+                        self.assertEqual(split(opener), ("", opener), "no comment is left: the whole opener comes back")
+                    else:
+                        self.assertEqual(split(opener), (head + "\n\n" + romps, "why not twenty?"),
+                                         "through the pointer, and any ask label under it, reads as romp's")
+            with self.subTest(layout="pre-compaction", after=after):
+                sent, said = km._comment_opener_parts("line one", comment, self.PRIOR)
+                self.assertEqual(split(sent + "\n\n" + said), (sent, comment), "romp's own block comes first")
+
+    def test_a_stored_opener_with_a_context_block_after_the_comments_text_or_its_lead_sentence_without_a_pointer(self):
+        # Each comment splits off whole, on an ordinary opener and on one from before the identity line: a pasted
+        # context block after the comment's own text, below it or on the same line, with and without text after the
+        # block, and the block's lead sentence with no pointer line.
+        split = km._comment_opener_split
+        below = ("why not twenty?\n\n" + self.PRIOR, "why not twenty?\n\n" + self.PRIOR + "\n\nand the cap?")
+        same_line = ("see this: " + self.PRIOR, "see this: " + self.PRIOR + "\n\nwhy not twenty?")
+        no_pointer = km._PRECOMPACT_LEAD + " Why ten percent?"
+        for comment in below + same_line:
+            self.assertFalse(comment.startswith(km._PRECOMPACT_LEAD), "premise: the comment opens with its own text")
+            self.assertIn("\n" + km._PRECOMPACT_FILE_LEAD, comment, "premise: and has a line starting with the pointer")
+        for comment in below:
+            self.assertIn("\n" + km._PRECOMPACT_LEAD, comment, "premise: a line starting with the lead comes after it")
+        for comment in same_line:
+            self.assertIn(km._PRECOMPACT_LEAD, comment.splitlines()[0], "premise: the lead is on the first line")
+        self.assertNotIn(km._PRECOMPACT_FILE_LEAD, no_pointer, "premise: no pointer line")
+        for comment in below + same_line + (no_pointer,):
+            sent, said = km._comment_opener_parts("line one", comment)
+            self.assertEqual(said, comment, "premise: the builder sends the comment as typed")
+            older = km._COMMENT_FRAME_HEAD + "\n\n> line one"
+            for layout, head in (("ordinary", sent), ("before the identity line", older)):
+                with self.subTest(layout=layout, comment=comment):
+                    self.assertEqual(split(head + "\n\n" + comment), (head, comment))
+
+    def test_the_split_misreads_a_prompt_that_opens_with_the_quote_head_right_after_the_fork_line(self):
+        # A known case, pinned as it stands: right after the fork line, this prompt, which opens with the quote head,
+        # reads as romp's through the head and its quote.
+        prompt = km._COMMENT_FRAME_HEAD + "\n\n> the retry section\n\nTighten the wording here."
+        opener = km._FORK_FRAME + "\n\n" + prompt
+        self.assertEqual(km._comment_opener_split(opener),
+                         (km._FORK_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> the retry section",
+                          "Tighten the wording here."), "the prompt's head and quote read as romp's")
+
+    def test_a_text_with_nothing_after_romps_head_quote_pointer_or_ask_label_comes_back_whole(self):
+        # Each text here stops before any comment and comes back whole; a step that read past the last line would
+        # raise instead. The last two end at a pre-compaction opener's pointer line and at the ask label under it.
+        head = km._COMMENT_FRAME_HEAD
+        asked = km._comment_opener_parts("a", "c", self.PRIOR)[0]
+        ask = "\n\n" + km._COMMENT_ASK_HEAD
+        self.assertTrue(asked.endswith(self.PRIOR + ask), "premise: romp's part ends at the ask label")
+        pointed = asked[:-len(ask)]
+        self.assertTrue(pointed.splitlines()[-1].startswith(km._PRECOMPACT_FILE_LEAD), "premise: the pointer line")
+        texts = (head, head + "\n\n", head + "\n\n> a", head + "\n\n> a\n>", head + "\n\n> a\n\n",
+                 km._THREAD_FRAME + "\n\n" + head + "\n\n> a\n>", km._FORK_FRAME + "\n\n" + head + "\n\n> a",
+                 pointed, asked)
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertEqual(km._comment_opener_split(text), ("", text))
+
 
 # ── the transcript → popover projection ───────────────────────────────────────────────────────────
 
@@ -1064,6 +1172,217 @@ class ThreadProjection(CommentBase):
         users = [e for e in th["events"] if e.get("kind") == "user"]
         self.assertEqual(users[0]["md"], "Why jitter at all?")
         self.assertEqual(users[1]["md"], "About this part of the conversation: a later ask", "only the opener is stripped")
+
+    # Comments that open with a quote, through both popover views, the note and the relay.
+    QUOTE_LED = ("> ten percent\nwhy not twenty?", "> ten percent\n\nwhy not twenty?", "> ten percent")
+
+    def _seed_quote_led_thread(self, comment, row_sent, older=False):
+        """With `older`, the opener of a thread opened before the identity line: it starts at the quote head."""
+        t = self.now - 500
+        sent, said = km._comment_opener_parts("exponential backoff", comment)
+        self.assertTrue(said.startswith(">"), "premise: the comment opens with a markdown quote")
+        if older:
+            self.assertTrue(sent.startswith(km._THREAD_FRAME + "\n\n"), "premise: the identity line opens romp's part")
+            sent = sent[len(km._THREAD_FRAME + "\n\n"):]
+            self.assertTrue(sent.startswith(km._COMMENT_FRAME_HEAD), "premise: the quote head comes next")
+        recs = [uline(t, "how should the retry loop back off?", "u1"),
+                aline(t + 5, "Use exponential backoff with a jitter of ten percent.", "a1", parent="u1"),
+                uline(t + 100, sent + "\n\n" + said, "cu1", parent="a1"),
+                aline(t + 120, "Twenty stretches the waits.", "ca1", parent="cu1")]
+        self._seed_thread(records=recs)
+        if row_sent:
+            km._comment_update(PARENT, THREAD, sent=sent)
+        return recs, sent
+
+    def _assert_quote_led_popover(self, row_sent, kinds=(False,)):
+        for older in kinds:
+            for comment in self.QUOTE_LED:
+                with self.subTest(comment=comment, before_the_identity_line=older):
+                    recs, sent = self._seed_quote_led_thread(comment, row_sent, older)
+                    self.assertEqual("sent" in km._comment_thread(PARENT, THREAD), row_sent, "premise: the row's copy")
+                    th = self._frame_thread(recs, state="")
+                    users = [e for e in th["events"] if e.get("kind") == "user"]
+                    self.assertTrue(users, "the events projection is live in this harness")
+                    self.assertEqual(users[0]["md"], comment, "the events view's bubble keeps the comment's quote")
+                    self.assertEqual(th["msgs"][0]["text"], comment, "and so does the msgs view's")
+                    self.assertEqual(th["sent"], sent, "the note is what romp added, and only that")
+
+    def test_a_quote_led_comment_in_the_popover_on_a_row_with_its_copy(self):
+        self._assert_quote_led_popover(row_sent=True)
+
+    def test_a_quote_led_comment_in_the_popover_on_a_row_without_its_copy(self):
+        # an ordinary thread, and one opened before the identity line
+        self._assert_quote_led_popover(row_sent=False, kinds=(False, True))
+
+    def test_a_quote_led_comment_in_the_relay_to_the_parent(self):
+        be = FakeBackend()
+        saved = (km.Sessions.__dict__["backend_for"], km._push_soon)
+        km.Sessions.backend_for = staticmethod(lambda sid: be)
+        km._push_soon = lambda: None
+
+        def restore():
+            km.Sessions.backend_for, km._push_soon = saved
+        self.addCleanup(restore)
+        # rows with and without romp's copy hand the comment over alike, and so does a thread opened before the identity
+        # line, on a row without it
+        for comment in self.QUOTE_LED:
+            for row_sent, older in ((True, False), (False, False), (False, True)):
+                with self.subTest(comment=comment, row_sent=row_sent, before_the_identity_line=older):
+                    self._seed_quote_led_thread(comment, row_sent, older)
+                    self.assertEqual("sent" in km._comment_thread(PARENT, THREAD), row_sent, "premise: the row's copy")
+                    km._thread_msgs_cache.clear()
+                    del be.sent[:]
+                    self.assertIsNone(km._comment_merge(PARENT, THREAD))
+                    self.assertEqual([sid for sid, _ in be.sent], [PARENT], "one handoff, to the parent")
+                    body = be.sent[0][1]
+                    self.assertIn("Me: " + comment, body, "the person's turn starts at the comment's quote line")
+                    self.assertIn("Them: Twenty stretches the waits.", body)
+
+    def _seed_passage_thread(self, exact, comment, precompact=False):
+        """A thread on `exact` whose row keeps what romp sent: an ordinary one cut at the passage, or with `precompact`
+        a tip fork on a passage from before the last compaction, as _seed_precompact_thread leaves one."""
+        t = self.now - 500
+        sent, said = km._comment_opener_parts(exact, comment, self.PRIOR if precompact else "")
+        self.assertEqual(said, comment, "premise: the builder sends the comment as typed")
+        ot = self.now - 100 if precompact else t + 100
+        recs = [uline(t, "how should the retry loop back off?", "u1"),
+                aline(t + 5, "Use exponential backoff with a jitter of ten percent.", "a1", parent="u1"),
+                uline(ot, sent + "\n\n" + said, "cu1", parent="a1"),
+                aline(ot + 20, "Twenty stretches the waits.", "ca1", parent="cu1")]
+        self._write(THREAD, recs)
+        (jd.SDKDIR / (THREAD + ".json")).write_text(json.dumps(
+            {"sid": THREAD, "name": "thread-x", "cwd": self.cdir, "lastSid": THREAD, "alive": True,
+             "threadOf": PARENT}))
+        row = {"tid": THREAD, "sid": THREAD, "anchorUuid": "a1", "cutUuid": "" if precompact else "a1",
+               "anchorT": t + 5, "exact": exact, "status": "open", "sent": sent,
+               "createdT": self.now - (110 if precompact else 400), "lastSeenT": self.now}
+        if precompact:
+            row["beforeSummary"] = True
+        km._save_comments(PARENT, {"threads": [row]})
+        km._built_thread.clear(); km._comments_memo.clear(); km._comment_created_memo.clear()
+        return recs, sent
+
+    def _relay_body(self):
+        """What _comment_merge hands the parent for the seeded thread, through a fake backend."""
+        be = FakeBackend()
+        saved = (km.Sessions.__dict__["backend_for"], km._push_soon, km._sdk)
+        km.Sessions.backend_for = staticmethod(lambda sid: be)
+        km._push_soon = lambda: None
+        km._sdk = lambda: None
+        try:
+            km._thread_msgs_cache.clear()
+            self.assertIsNone(km._comment_merge(PARENT, THREAD))
+        finally:
+            km.Sessions.backend_for, km._push_soon, km._sdk = saved
+        self.assertEqual([sid for sid, _ in be.sent], [PARENT], "one handoff, to the parent")
+        return be.sent[0][1]
+
+    def test_an_unclosed_tag_in_the_passage_still_builds_the_frame(self):
+        # A passage holding an unclosed <system-reminder> or <task-notification> tag: the chat build folds each comment
+        # here away (premise below). The frame still builds, with each comment whole in the msgs view and the note
+        # equal to the row's copy.
+        plain, quoted = "Why not twenty?", "> ten percent\nwhy not twenty?"
+        self.assertTrue(quoted.startswith(">"), "premise: the second comment opens with a markdown quote")
+        for exact in ("before\n<system-reminder>\nnote", "before\n<task-notification>x"):
+            for comment in (plain, quoted):
+                with self.subTest(exact=exact, comment=comment):
+                    recs, sent = self._seed_passage_thread(exact, comment)
+                    th = self._frame_thread(recs, state="")
+                    users = [e for e in th["events"] if e.get("kind") == "user"]
+                    self.assertTrue(users, "the events projection is live in this harness")
+                    folded = any(comment in r for r in users[0].get("reminders") or [])
+                    self.assertTrue(folded and comment not in users[0]["md"],
+                                    "premise: the chat build folded the comment away")
+                    self.assertEqual(th["msgs"][0]["text"], comment, "the msgs view shows the comment whole")
+                    self.assertEqual(th["sent"], sent, "the note equals the row's copy")
+
+    def test_a_passage_that_ends_in_an_image_chip(self):
+        # A passage that ends in an "[Image #N]" chip, on a turn that carries an image (premise below). The msgs view
+        # and the relay show each comment whole and the note equals the row's copy. The events view shows each comment
+        # whole except in a known case, pinned as it stands: on the thread without a context block it shows the comment
+        # that opens with a one-line quote without that line, and the comment that is only a quote line as a text that
+        # starts with the identity line and ends with the comment.
+        exact = "see the chart [Image #1]"
+        plain = "why not twenty? /TESTDIR/notes-api/shot.png"
+        quoted = "> ten percent /TESTDIR/notes-api/shot.png\nwhy not twenty?"
+        quote_only = "> ten percent /TESTDIR/notes-api/shot.png"
+        self.assertTrue(quoted.startswith(">") and quote_only.startswith(">"),
+                        "premise: the second and third comments open with a markdown quote")
+        for precompact in (False, True):
+            for comment in (plain, quoted, quote_only):
+                with self.subTest(precompact=precompact, comment=comment):
+                    recs, sent = self._seed_passage_thread(exact, comment, precompact=precompact)
+                    th = self._frame_thread(recs, state="")
+                    users = [e for e in th["events"] if e.get("kind") == "user"]
+                    self.assertTrue(users, "the events projection is live in this harness")
+                    self.assertTrue(users[0].get("images"), "premise: the turn carries an image")
+                    self.assertEqual(th["msgs"][0]["text"], comment, "the msgs view shows the comment whole")
+                    self.assertEqual(th["sent"], sent, "the note equals the row's copy")
+                    if comment == quoted and not precompact:
+                        self.assertEqual(users[0]["md"], "why not twenty?", "the known case, as it stands")
+                    elif comment == quote_only and not precompact:
+                        md = users[0]["md"]
+                        self.assertTrue(md.startswith(km._THREAD_FRAME) and md.endswith(comment),
+                                        "the known case, as it stands: it starts with the identity line, ends with "
+                                        "the comment")
+                    else:
+                        self.assertEqual(users[0]["md"], comment, "the events view shows the comment whole")
+                    body = self._relay_body()
+                    self.assertIn("Me: " + comment, body, "the relay hands the parent the comment whole")
+                    self.assertIn("Them: Twenty stretches the waits.", body)
+
+    def test_a_closed_tag_line_in_the_passage(self):
+        # A passage line that is a whole <system-reminder> or <task-notification> block. _split_reminders, which the chat
+        # build runs on the message, leaves a bare ">" line in romp's quote (premise below). Each comment shows whole on
+        # both views.
+        plain, quoted = "Why not twenty?", "> ten percent\nwhy not twenty?"
+        self.assertTrue(quoted.startswith(">"), "premise: the second comment opens with a markdown quote")
+        seen, real = [], km._comment_strip_frame     # the events view's split (_thread_opener_shown)
+
+        def spy(text):
+            seen.append(text)
+            return real(text)
+        km._comment_strip_frame = spy
+        self.addCleanup(setattr, km, "_comment_strip_frame", real)
+        for exact in ("before\n<system-reminder>x</system-reminder>\nafter",
+                      "before\n<task-notification>x</task-notification>\nafter",
+                      "<system-reminder>x</system-reminder>"):
+            for comment in (plain, quoted):
+                for precompact in (False, True):
+                    with self.subTest(exact=exact, comment=comment, precompact=precompact):
+                        recs, sent = self._seed_passage_thread(exact, comment, precompact=precompact)
+                        shown = km._split_reminders(sent + "\n\n" + comment)[0]
+                        quote = shown.split(km._COMMENT_FRAME_HEAD + "\n\n", 1)[1].split("\n\n", 1)[0]
+                        self.assertIn(">", quote.split("\n"), "premise: a bare > line in romp's quote")
+                        del seen[:]
+                        th = self._frame_thread(recs, state="")
+                        self.assertIn(shown, seen, "premise: the events view splits that text")
+                        users = [e for e in th["events"] if e.get("kind") == "user"]
+                        self.assertTrue(users, "the events projection is live in this harness")
+                        self.assertEqual(users[0]["md"], comment, "the events view shows the comment whole")
+                        self.assertEqual(th["msgs"][0]["text"], comment, "the msgs view shows the comment whole")
+
+    def test_a_comment_that_opens_with_an_image_chip_two_spaces_and_a_pasted_context_block(self):
+        # A comment that opens with an "[Image #N]" chip, two spaces and a pasted context block, on a turn that carries
+        # an image. The events view splits a text whose comment is a space and then the block (premise below). The block
+        # stays the comment's on both views.
+        block = self.PRIOR + "\n\nwhy not twenty? /TESTDIR/notes-api/shot.png"
+        comment = "[Image #3]  " + block
+        seen, real = [], km._comment_strip_frame     # the events view's split (_thread_opener_shown)
+
+        def spy(text):
+            seen.append(text)
+            return real(text)
+        km._comment_strip_frame = spy
+        self.addCleanup(setattr, km, "_comment_strip_frame", real)
+        recs, sent = self._seed_passage_thread("exponential backoff", comment)
+        th = self._frame_thread(recs, state="")
+        users = [e for e in th["events"] if e.get("kind") == "user"]
+        self.assertTrue(users, "the events projection is live in this harness")
+        self.assertTrue(users[0].get("images"), "premise: the turn carries an image")
+        self.assertIn(sent + "\n\n " + block, seen, "premise: the events view splits a space, then the block")
+        self.assertEqual(users[0]["md"], block, "the events view keeps the block as the comment's")
+        self.assertEqual(th["msgs"][0]["text"], comment, "the msgs view shows the comment whole")
 
     def test_the_built_events_are_not_edited_in_place(self):
         recs = self._seed_precompact_thread()
