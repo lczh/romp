@@ -432,7 +432,8 @@ class BudgetRereads(_CacheCase):
         """The reader lets the cache lock go while it decodes, so another thread's insert can evict the path mid-read; the
         read's own insert then found a fresh eviction mark and counted a re-read of the whole entry, though it read only
         the append (review find, 2026-10-02). The read keeps the mark it began with; a read that begins uncached after
-        an eviction still counts."""
+        an eviction still counts, a restore from a checkpoint's cut included (it starts from an entry it builds, after
+        the hit check)."""
         a, b = self._file("notes-api-web.jsonl"), self._file("notes-api-api.jsonl")
         em._JSONL_CACHE_BUDGET_BYTES = 10 ** 12
         em._read_jsonl_incremental(a)                                 # cached whole
@@ -452,8 +453,13 @@ class BudgetRereads(_CacheCase):
         self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [2, 0],
                          "a evicted mid-read, then b at a's insert; a read back nothing for its eviction")
         self.assertEqual((a in em._JSONL_CACHE, a in em._BUDGET_EVICTED), (True, False))
-        em._read_jsonl_incremental(b)                                 # b begins uncached: a re-read
+        em._read_jsonl_incremental(b)                                 # b begins uncached: a re-read, and a goes
         self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [3, 1])
+        data = open(a, "rb").read()
+        cut = [i + 1 for i, ch in enumerate(data) if ch == 0x0A][9]   # the offset of a's eleventh record
+        ent = em._read_jsonl_entry(a, tail_ok=True, tail_from=(cut, 10, data[cut - 16:cut]))
+        self.assertEqual(ent[5], 10, "a restored from the cut, a tail entry")
+        self.assertEqual([_stat(k) - x for k, x in zip(keys, before)], [4, 2], "the restore is a re-read; b goes")
 
 
 class MeasuredMixes(_CacheCase):
@@ -576,7 +582,7 @@ class DecodedMultiple(unittest.TestCase):
         self.assertEqual(em._record_cache_decoded_multiple(None), MEASURED, "unset: the constant")
         self.assertEqual(em._record_cache_decoded_multiple(""), MEASURED, "empty: the same")
 
-    def test_the_environment_overrides_it_and_a_value_that_is_no_positive_number_is_refused_aloud(self):
+    def test_the_environment_overrides_it_and_a_value_outside_0_to_1000_is_refused_aloud(self):
         self.assertEqual(em._record_cache_decoded_multiple("1"), 1.0, "1 restores the file-byte budget")
         self.assertEqual(em._record_cache_decoded_multiple("3.5"), 3.5)
         self.assertEqual(em._record_cache_decoded_multiple("1000"), 1000.0, "the cap itself is accepted")
