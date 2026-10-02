@@ -290,6 +290,24 @@ installMenuEcho();
   const stepSession = (type: "nextTab" | "prevTab"): void => { if (fullPaneUp()) return; chatPost({ type, gesture: true }); };
   registerCommand({ id: "chat.nextTab", title: "Go to the next session", run: () => stepSession("nextTab") });
   registerCommand({ id: "chat.prevTab", title: "Go to the previous session", run: () => stepSession("prevTab") });
+  // "Show tag overview" (the user 2026-10-02): a group header's click only folds now, so the section at a glance opens from
+  // the tag's menu and from here. The pick lists the tag groups on the strip of the column last worked in (that page's own
+  // list, __rompTagSections, in strip order) and a pick asks that column to show the group's overview (render.ts
+  // showOverview, the menu's path). Loud, never an empty list: a column that did not answer, the phone layout's lack of
+  // an overview and a strip with no groups each say so in the list.
+  function openTagOverviewPick(): void {
+    let secs: Array<{ name: string; color: string; count: number }> | null | undefined;
+    try { const f = (chatPane()?.contentWindow as any)?.__rompTagSections; secs = typeof f === "function" ? f() : undefined; }
+    catch (e) { secs = undefined; }   // the chat pane not loaded
+    const note = (title: string): PickItem[] => [{ title, run: () => {} }];
+    const items: PickItem[] = secs === undefined ? note("Couldn't read the tag groups: the chat pane didn't answer")
+      : secs === null ? note("The phone layout has no tag overview")
+      : !secs.length ? note("No tag groups on this chat column's strip")
+      : secs.map((g) => ({ title: g.name, color: g.color || undefined, dim: g.count + " session" + (g.count === 1 ? "" : "s"),
+                           run: () => chatPost({ romp: "showOverview", tag: g.name }) }));
+    palette.openPick({ placeholder: "Show the overview of a tag…", items });
+  }
+  registerCommand({ id: "chat.tagOverview", title: "Show tag overview", run: openTagOverviewPick });
   // "Open this file as a tab" (2026-09-30): listed while a file viewer is up in any pane (a chat column, the feed's file
   // browser, the Files pane); the run presses that viewer's own pop-out, so the palette and the button are one path
   const popOutButton = (): HTMLElement | null => {

@@ -95,8 +95,9 @@ const fail = async (why) => {
 await page.goto(cfg.chat);
 try { await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab-group-head").length === n, cfg.groups, { timeout: 30000 }); }
 catch (e) { await fail("the five headers never rendered"); }
-// fold by a header click, reading the header first: a click on the header of the section the pane shows, holding the open
-// session, is the way back to the transcript and folds nothing (render.ts makeGroupHead), so that one is pressed and read again
+// fold by a header click, reading the header first: a header's click only folds or opens (render.ts makeGroupHead, 2026-10-02;
+// until then the header of the section the pane showed, holding the open session, put the transcript back and folded nothing,
+// which the loop pressed past), so the first press folds and the loop reads the header until it says so
 const fold = async (name) => {
   const sel = `#tabs .tab-group-head[data-group="${name}"]`;
   for (let i = 0; i < 3; i++) {   // loop-ok: at most a way-back press and the fold, each waited on

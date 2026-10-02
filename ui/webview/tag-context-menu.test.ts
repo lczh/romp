@@ -54,6 +54,23 @@ test("the rows: Rename… first; on a group header the fold as it renders; Show 
     ["rename", "fold", "only", "configure", "delete"]);
 });
 
+test("the overview's row (the user 2026-10-02: a header's click only folds, so the section at a glance opens here): Show overview after the fold on a header, Close overview while that tag's shows, none off a header or on the phone", () => {
+  const head = tagMenuSections({ name: "web", members: 2, folded: false, only: false, configure: true, overview: false });
+  assert.deepEqual(rowsOf(head), [["Rename…"], ["Fold group", "Show overview", "Show only this tag", "Configure tags…"], ["Delete tag…"]], "beside the fold, named as the view's heading names it (Overview of)");
+  assert.deepEqual([head[1][1].act, head[1][1].sub], ["overview", "what each of its sessions is doing"]);
+  const shown = tagMenuSections({ name: "web", members: 2, folded: true, only: false, configure: true, overview: true });
+  assert.deepEqual(rowsOf(shown)[1], ["Open group", "Close overview", "Show only this tag", "Configure tags…"], "its overview up: the way back to the session being read");
+  assert.deepEqual([shown[1][1].act, shown[1][1].sub], ["closeOverview", "back to the session you were reading"]);
+  for (const overview of [null, undefined])
+    assert.deepEqual(rowsOf(tagMenuSections({ name: "docs", members: 0, folded: null, only: false, configure: true, overview })), [["Rename…"], ["Show only this tag", "Configure tags…"], ["Delete tag…"]],
+      "a chip (or the phone, where no overview shows): no row");
+  // the page: the row only from a header and never on the phone, Close while this tag's overview shows; the picks take the
+  // view's own doors (tab-snapshot-pane.test.ts runs them over the lifted page)
+  assert.match(RENDER, /const overview = folded === null \|\| phoneLayout\(\) \? null : snapView === name;/);
+  assert.match(RENDER, /\{ name, members: g\.members\.length, folded, only, configure: true, overview \}/);
+  assert.match(RENDER, /\} else if \(act === "overview"\) \{\s*\n\s*showOverview\(name\);[^\n]*\n\s*\} else if \(act === "closeOverview"\) \{\s*\n\s*leaveSnapshot\(\);/);
+});
+
 test("the delete asks first and counts the sessions that lose the tag; the sessions stay", () => {
   assert.deepEqual(deleteTagWords("web", 3), { title: "Delete the tag “web”?", confirm: "Delete tag",
     detail: "3 sessions lose this tag. The sessions stay, with any other tags they have." });

@@ -821,28 +821,19 @@ export function followAdoption(st: TabGroupsState, prev: SessionViews | null | u
  *  truthful either way — the section IS folded, and the click opens it. */
 export interface HeadWords { count: string; title: string; label: string }
 
-// The click's clause: a click also shows the section in the pane (the section at a glance, tab-snapshot.ts),
-// open or folded, so every title says so, except while the pane already shows the section (`shown`): then the
-// clause names the fold alone, or the way back to the transcript when the open section also holds the tab
-// being read (`back`). `holdsActive`, the section holds the tab being read, is a phrase in the words, not a
-// different action: the section folds like any other, and folded, its header is the tab's stand-in.
-export function headWords(name: string, total: number, hidden: number, folded: boolean, holdsActive: boolean, back = false, shown = false): HeadWords {
+// The click's clause: a click folds or opens the group and does nothing else (the user 2026-10-02, who found the
+// overview it also opened confusing; the overview opens from the tag menu now). `holdsActive`, the section holds the
+// tab being read, is a phrase in the words, not a different action: the section folds like any other, and folded,
+// its header is the tab's stand-in while the transcript stays on screen.
+export function headWords(name: string, total: number, hidden: number, folded: boolean, holdsActive: boolean): HeadWords {
   const n = (k: number) => `${k} session${k === 1 ? "" : "s"}`;
   const reading = holdsActive ? "; holds the tab you are reading" : "";
   const here = holdsActive ? ", holds the tab you are reading" : "";
   if (!folded) {
-    // `back`: the pane is showing this section, the section is open and holds the tab being read: the click
-    // puts that transcript back (render.ts show-transcript), so the title says so, not "fold", and the spoken
-    // label names the action too (render.ts drops the header's aria-expanded in that state, since the press
-    // folds nothing). `shown` without `back`: the pane shows this open section but the tab being read is
-    // elsewhere, so the click still folds, and the title does not promise to show what the pane already shows.
-    const click = back ? "click to go back to the transcript" : shown ? "click to fold this group" : "click to fold this group and see its sessions at a glance";
-    return { count: String(total), label: `${name}, ${n(total)}${here}${back ? "; back to the transcript" : ""}`,
-             title: `${name} — ${n(total)}${reading}; ${click}; drag to reorder the groups` };
+    return { count: String(total), label: `${name}, ${n(total)}${here}`,
+             title: `${name} — ${n(total)}${reading}; click to fold this group; drag to reorder the groups` };
   }
-  // folded and `shown`: the header's click just folded the section and put its sessions in the pane, so the
-  // click opens it and the title says that alone
-  const open = shown ? "click to open this group" : "click to open and see its sessions at a glance";
+  const open = "click to open this group";
   if (hidden === 0) {
     const all = total === 1 ? "its one session is" : `all ${total} sessions are`;
     return { count: String(total), label: `${name}, ${n(total)}, folded, all shown${here}`,
@@ -886,8 +877,8 @@ export interface StripPlan {
  *  - The ACTIVE tab's section folds like any other. Its header is marked `active` whether open or
  *    folded: folded, the header is the hidden tab's stand-in, so keyboard focus never lands on a hidden
  *    node. render.ts focuses it where it would focus the tab, the arrows step from its position
- *    (neighborOfFolded), and the pane shows the section at a glance (tab-snapshot.ts) instead of a
- *    transcript whose tab is nowhere on screen.
+ *    (neighborOfFolded), and it wears the selected tab's box while the transcript stays on screen (a
+ *    header's click only folds since 2026-10-02; the section at a glance opens from the tag menu).
  *  - A session under several tags (T264b) has a copy in each section, and each copy's fold stands on
  *    its own. The header of a holder that SHOWS a copy (open, or folded with the copy pinned through the
  *    fold) is marked `active`; when no copy shows anywhere exactly one holder, the first in tagOrder, is

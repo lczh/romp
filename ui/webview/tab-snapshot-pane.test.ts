@@ -4,10 +4,12 @@
 // DOM, the way tab-strip-skip-exec.test.ts drives renderTabs: the rows paint from the model, a push that changes
 // nothing ticks only the ago texts, a changed row keeps its node, the section gone from the strip ends the view,
 // Escape leaves it in two phases, a row click opens its session only while the session is still on the strip,
-// the folded-away active tab's header is its stand-in for focus, the arrows and Enter, a header click folds and
-// shows the section and the way back is the same header's next click, a pick from the view records the reader's
-// spot on the trail, and a pick of a folded-away tab opens its section. The wiring the slices cannot reach
-// (showActive's branch, setActive, the strip's follow) is pinned at the source. The notes-api demo world.
+// the folded-away active tab's header is its stand-in for focus, the arrows and Enter and wears the selected box,
+// a header click folds or opens and does nothing else (the user 2026-10-02), the tag menu's Show overview shows
+// the section and its Close overview leaves it (showTagMenu and tagMenuPick lifted too), a pick from the view
+// records the reader's spot on the trail, and a pick of a folded-away tab opens its section. The wiring the
+// slices cannot reach (showActive's branch, setActive, the strip's follow) is pinned at the source. The notes-api
+// demo world.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -34,7 +36,8 @@ const KEYS_END = RENDER.indexOf('// "Enter to start typing" lands on whatever', 
 const TABS = RENDER.slice(RENDER.indexOf("function renderTabs() {"), RENDER.indexOf("function dismissTabMenu() {"));
 const HEAD = RENDER.slice(RENDER.indexOf("function makeGroupHead("), RENDER.indexOf("function sectionHeadOf("));
 const ACTS_AT = RENDER.indexOf('"toggle-group": (el) => {');
-const ACTS = RENDER.slice(ACTS_AT, RENDER.indexOf("close: (el) => {", ACTS_AT));   // the #tabs delegate's two header acts, up to the tab's close
+const ACTS = RENDER.slice(ACTS_AT, RENDER.indexOf("close: (el) => {", ACTS_AT));   // the #tabs delegate's header act, up to the tab's close
+const TAGMENU = RENDER.slice(RENDER.indexOf("function showTagMenu("), RENDER.indexOf("// One gesture on a tag, for every store holding a tag of its name"));   // the tag menu's open and its picks
 const NAV = RENDER.slice(RENDER.indexOf("const navHist = new NavHistory({"), RENDER.indexOf("function setActive(id: string"));
 
 // ── a fake DOM: enough of Element for the pane's paint, with a small selector engine for the queries it makes ──
@@ -136,23 +139,30 @@ type Hooks = {
   homeSectionOf: typeof homeSectionOf; neighborOfFolded: typeof neighborOfFolded; setSectionCollapsed: typeof setSectionCollapsed;
   headWords: typeof headWords; sectionPip: typeof sectionPip; sectionPipMembers: typeof sectionPipMembers; sectionPipTitle: typeof sectionPipTitle;
   groups: ReturnType<typeof parseTabGroups>;
+  views0: typeof V; viewTagUnion: typeof viewTagUnion;
   phone?: boolean;   // render.ts phoneLayout(): the kernel's phone page, whose picker folds through the header's own act (2026-09-23)
+  fileTab?: string | null;   // render.ts fileTabOpen: a file tab up in the pane (2026-09-30)
+  keepFile?: boolean;   // leaveFileTab's answer is no: the file tab's discard ask kept it
+  menus: Array<{ x: number; y: number; state: any; handlers: { pick: (act: string) => void } }>;   // what openTagContextMenu was handed
   navDeps: { now: () => { sid: string; top: number } | null } | null;   // what render.ts hands NavHistory (the stub constructor keeps it)
 };
 type Api = {
   renderSnapshot: () => boolean; hideSnapshot: () => void; leaveSnapshot: () => void; snapshotHost: () => FakeEl | null;
   onTabKey: (e: any) => void; focusActiveTab: () => void; unfoldSectionOf: (id: string) => void;
   makeGroupHead: (sec: TabSection, collapsed: boolean, holdsActive: boolean, hidden: readonly string[]) => FakeEl;
-  acts: { "toggle-group": (el: FakeEl) => void; "show-transcript": () => void };
-  get: () => { snapView: string | null; snapModel: SnapModel | null; snapKeep: any; tabPointerHeld: boolean; renderPendingWhilePressed: boolean; activeId: string | null };
+  acts: { "toggle-group": (el: FakeEl) => void };
+  showOverview: (name: string) => void; showTagMenu: (x: number, y: number, name: string, folded: boolean | null) => void;
+  tagSections: () => Array<{ name: string; color: string; count: number }> | null;
+  get: () => { snapView: string | null; snapModel: SnapModel | null; snapKeep: any; tabPointerHeld: boolean; renderPendingWhilePressed: boolean; activeId: string | null; fileTabOpen: string | null };
   set: (p: Record<string, unknown>) => void;
 };
 
 function lift(): (H: Hooks) => Api {
   assert.ok(SNAP_AT > 0 && SNAP_AT < SHOW_AT, "the pane block sits right above showActive: re-anchor");
   assert.ok(KEYS_AT > 0 && KEYS_END > KEYS_AT, "onTabKey .. focusActiveTab .. unfoldSectionOf run together above the composer-focus helper: re-anchor");
-  assert.ok(HEAD.length > 0 && ACTS.includes('"show-transcript"') && NAV.includes("apply: (spot) => {"), "makeGroupHead, the #tabs delegate's header acts or the nav trail's deps moved: re-anchor");
-  const js = requireCjs("esbuild").transformSync(RENDER.slice(SNAP_AT, SHOW_AT) + RENDER.slice(KEYS_AT, KEYS_END) + HEAD + NAV
+  assert.ok(HEAD.length > 0 && ACTS.includes('"toggle-group"') && NAV.includes("apply: (spot) => {"), "makeGroupHead, the #tabs delegate's header act or the nav trail's deps moved: re-anchor");
+  assert.ok(TAGMENU.includes("function tagMenuPick(") && TAGMENU.includes("function unionNamed("), "the tag menu's open and picks moved: re-anchor");
+  const js = requireCjs("esbuild").transformSync(RENDER.slice(SNAP_AT, SHOW_AT) + RENDER.slice(KEYS_AT, KEYS_END) + HEAD + NAV + TAGMENU
     + "const tabsActs = {\n" + ACTS + "};\n", { loader: "ts" }).code;
   const prelude = `
     const H = HOOKS;
@@ -172,6 +182,12 @@ function lift(): (H: Hooks) => Api {
     };
     const pickerOverlayUp = () => H.pickerOpen;   // render.ts's shown-overlay check (tab-cycle-standdown-exec.test.ts runs the real one)
     const window = { addEventListener: (t, f, cap) => { (cap ? H.winCap : H.winBub).push(f); } };
+    // the tag menu's surroundings: the real unions of the world, the card itself a recorder of what it was handed
+    const dismissTabMenu = () => {}; const onTabMenuClosed = () => {}; const paletteColors = [];
+    const effViews = () => H.views0; const viewTagUnion = H.viewTagUnion;
+    const surfaceLens = () => ({ all: true }); const lensAll = (l) => l.all === true;
+    const openTagContextMenu = (x, y, state, color, palette, handlers) => { H.menus.push({ x, y, state, handlers }); return el("div", "ctx-menu"); };
+    const warnToast = (t) => { H.calls.push("warn:" + t); };
     const Date = { now: () => H.nowMs };
     const delegate = (root, handlers) => { H.delegates.push({ root, handlers }); };
     const setActive = (id) => { H.calls.push("setActive:" + id); activeId = id; };   // recorded, and the pick lands: focusActiveTab then reads the new active
@@ -180,7 +196,8 @@ function lift(): (H: Hooks) => Api {
     const focusComposerOrAsk = () => { H.calls.push("focusComposerOrAsk"); return !H.composer.disabled; };
     const tabInAdjacentRow = () => null;
     // no FILE tab up (2026-09-30): a step is the session walk's, a pick a session's, and leaving one is a no-op
-    let fileTabOpen = null; const fileStep = () => false; const selectStripTab = (id) => setActive(id); const leaveFileTab = () => true;
+    let fileTabOpen = H.fileTab ?? null; const fileStep = () => false; const selectStripTab = (id) => setActive(id);
+    const leaveFileTab = () => { if (!fileTabOpen) return true; if (H.keepFile) return false; H.calls.push("leaveFileTab"); fileTabOpen = null; return true; };
     const visibleOrder = () => order.filter((id) => !collapsedTabIds.has(id));
     const isTypingTarget = (t) => !!t && t.typing === true;
     const agehms = (s) => Math.floor(s) + "s";
@@ -204,7 +221,8 @@ function lift(): (H: Hooks) => Api {
   `;
   const epilogue = `
     return { renderSnapshot, hideSnapshot, leaveSnapshot, snapshotHost, onTabKey, focusActiveTab, unfoldSectionOf, makeGroupHead, acts: tabsActs,
-      get: () => ({ snapView, snapModel, snapKeep, tabPointerHeld, renderPendingWhilePressed, activeId }),
+      showOverview, showTagMenu, tagSections: () => window.__rompTagSections(),
+      get: () => ({ snapView, snapModel, snapKeep, tabPointerHeld, renderPendingWhilePressed, activeId, fileTabOpen }),
       set: (p) => { for (const k of Object.keys(p)) {
         if (k === "snapView") snapView = p[k]; else if (k === "snapKeep") snapKeep = p[k]; else if (k === "activeId") activeId = p[k];
         else if (k === "tabPointerHeld") tabPointerHeld = p[k]; else if (k === "lastStripItems") lastStripItems = p[k]; else if (k === "collapsedTabIds") collapsedTabIds = p[k];
@@ -220,7 +238,7 @@ const V = { active: "all", tags: [{ id: "g1", name: "qa", color: "#DD42FF", memb
 const unions = viewTagUnion(V);
 
 /** The notes-api world: infra (web, api) and qa (api, tests), web active, infra's view about to show. */
-function world(active = "web", groups = parseTabGroups(null), ids = ["web", "api", "tests"]) {
+function world(active = "web", groups = parseTabGroups(null), ids = ["web", "api", "tests"], opts: Partial<Hooks> = {}) {
   DOC.activeElement = null; CLICKS.length = 0;
   const content = new FakeEl("div"); content.id = "content";
   const bar = new FakeEl("div"); bar.id = "tabs";
@@ -243,7 +261,7 @@ function world(active = "web", groups = parseTabGroups(null), ids = ["web", "api
     closingTabs: new Map(), views: new Map(), lastStripItems: plan.items, order: ids, collapsed: plan.folded, nowMs: T0 * 1000, pickerOpen: false,
     calls: [], delegates: [], winCap: [], winBub: [], writes: [], FakeEl, doc: DOC,
     snapshotModel, snapshotHeading, rowWords, statusChip, rowStillOpen, installSnapshotEscape, reconcileRows, homeSectionOf, neighborOfFolded, setSectionCollapsed,
-    headWords, sectionPip, sectionPipMembers, sectionPipTitle, groups, navDeps: null };
+    headWords, sectionPip, sectionPipMembers, sectionPipTitle, groups, views0: V, viewTagUnion, menus: [], navDeps: null, ...opts };
   const api = lift()(H);
   api.set({ activeId: active });
   return { H, api, content, bar, sessions, ledgers };
@@ -483,6 +501,7 @@ test("executed: the stand-in header answers a tab's keys: the arrows step from i
   assert.deepEqual([head.dataset.act, head.dataset.folded, head.getAttribute("role"), head.getAttribute("aria-expanded"), head.getAttribute("aria-current"), head.tabIndex],
     ["toggle-group", "1", "button", "false", "true", 0], "the same fold button as the rest, marked current, a tab stop");
   assert.ok(head.has("collapsed") && head.has("holds-active") && !head.has("snap-shown"));
+  assert.ok(head.has("stand-in"), "the stand-in wears the selected tab's box: the transcript stays, and this header is where its tab lives");
   assert.equal(head.title, headWords("infra", 2, 2, true, true).title, "the pure module's words");
   assert.equal(head.getAttribute("aria-label"), headWords("infra", 2, 2, true, true).label + "; " + sectionPipTitle("working", ["web"]),
     "the folded gist: web (hidden, working) puts the working pip on the header, and its phrase rides the spoken label");
@@ -537,60 +556,103 @@ test("executed: the stand-in header answers a tab's keys: the arrows step from i
   assert.deepEqual([w2.H.calls, CLICKS.at(-1)], [[], infHead], "and its Enter presses the header, not the message box");
 });
 
-test("executed: a header click folds or opens the section AND shows it at a glance; the way back is that header's next click once the section is open and holds the tab being read; a click on another header swaps the view", () => {
+test("executed: a header click folds or opens the section and NOTHING ELSE (the user 2026-10-02): no overview, no repaint of the pane; the transcript stays when the active tab folds away, the header standing in for it in the selected box; an overview the menu put up stays through a click", () => {
   const { api, H, bar } = world("web");   // infra open (web, api), web active; qa open (api, tests)
   let plan = planStrip(["web", "api", "tests"], unions, H.groups, "web", false);
   let head = realHead(api, bar, headOf(plan.items, "infra"));
-  assert.deepEqual([head.dataset.act, head.getAttribute("aria-expanded"), head.getAttribute("aria-current"), head.has("snap-shown")], ["toggle-group", "true", "true", false],
-    "open and holding the tab being read: a fold button like the rest, marked current");
-  assert.equal(head.title, headWords("infra", 2, 0, false, true).title, "the title promises the fold and the view");
+  assert.deepEqual([head.dataset.act, head.getAttribute("aria-expanded"), head.getAttribute("aria-current"), head.has("snap-shown"), head.has("stand-in")], ["toggle-group", "true", "true", false, false],
+    "open and holding the tab being read: a fold button like the rest, marked current, no box (the tab itself is selected)");
+  assert.equal(head.title, headWords("infra", 2, 0, false, true).title, "the title promises the fold alone");
   H.calls.length = 0;
   api.acts["toggle-group"](head);
-  assert.equal(api.get().snapView, "infra", "the section shows in the pane");
-  assert.deepEqual([H.writes.length, H.writes[0].collapsed], [1, ["infra"]], "and folds: the one fold write, from the state the header RENDERED");
-  assert.deepEqual(H.calls, ["showActive"], "showActive paints the view; the write's event re-renders the strip");
-  // the strip re-renders from the store: infra folded, shown, holding the tab being read
+  assert.deepEqual([H.writes.length, H.writes[0].collapsed], [1, ["infra"]], "the one fold write, from the state the header RENDERED");
+  assert.equal(api.get().snapView, null, "no section at a glance: the click folds and nothing else");
+  assert.deepEqual(H.calls, [], "and nothing repaints the pane: the transcript of web stays on screen (the write's event re-renders the strip)");
+  assert.equal(api.get().activeId, "web", "the session being read is still the one being read");
+  assert.equal(H.content.byId("tab-snapshot"), null, "the view's host was never even made");
+  // the strip re-renders from the store: infra folded, holding web, which is folded away: the header is its stand-in
   H.groups = H.writes[0]; plan = planStrip(["web", "api", "tests"], unions, H.groups, "web", false); api.set({ lastStripItems: plan.items, collapsedTabIds: plan.folded });
-  let inf = headOf(plan.items, "infra");
+  const inf = headOf(plan.items, "infra");
   assert.deepEqual([inf.folded, inf.active, inf.hidden], [true, true, ["web", "api"]]);
   head = realHead(api, bar, inf);
-  assert.deepEqual([head.dataset.act, head.dataset.folded, head.getAttribute("aria-expanded"), head.has("snap-shown"), head.getAttribute("aria-current")], ["toggle-group", "1", "false", true, "true"],
-    "folded and shown: the header wears the mark and its next click opens");
-  assert.equal(head.title, headWords("infra", 2, 2, true, true, false, true).title, "the title names the open alone: the pane already shows the section");
-  H.calls.length = 0;
+  assert.deepEqual([head.dataset.act, head.dataset.folded, head.getAttribute("aria-expanded"), head.getAttribute("aria-current"), head.has("snap-shown"), head.has("stand-in")],
+    ["toggle-group", "1", "false", "true", false, true], "folded: the stand-in, in the selected tab's box, and its next click opens");
+  assert.equal(head.title, headWords("infra", 2, 2, true, true).title);
   api.acts["toggle-group"](head);
-  assert.deepEqual([H.writes.length, H.writes[1].collapsed, api.get().snapView, H.calls], [2, [], "infra", ["showActive"]], "opened; the view stays");
-  H.groups = H.writes[1]; plan = planStrip(["web", "api", "tests"], unions, H.groups, "web", false); api.set({ lastStripItems: plan.items, collapsedTabIds: plan.folded });
-  inf = headOf(plan.items, "infra");
-  head = realHead(api, bar, inf);
-  assert.deepEqual([head.dataset.act, head.getAttribute("aria-expanded"), head.has("snap-shown"), head.getAttribute("aria-current")], ["show-transcript", null, true, "true"],
-    "open, shown and holding the tab being read: the way back, and not a disclosure (its press folds nothing)");
-  assert.equal(head.getAttribute("aria-label"), headWords("infra", 2, 0, false, true, true, true).label, "the spoken label names the action");
-  assert.equal(head.title, headWords("infra", 2, 0, false, true, true, true).title);
-  H.calls.length = 0;
-  api.acts["show-transcript"]();
-  assert.deepEqual([api.get().snapView, H.calls, H.writes.length], [null, ["renderTabs", "showActive"], 2], "the transcript back; no fold write: the way back moves no fold");
-  // the way back is only that header's: qa's header (open, not holding web) while infra shows folds qa and swaps the view to it
-  api.set({ snapView: "infra" });
-  const qh = realHead(api, bar, headOf(plan.items, "qa"));
-  assert.deepEqual([qh.dataset.act, qh.getAttribute("aria-expanded"), qh.has("snap-shown")], ["toggle-group", "true", false]);
-  api.acts["toggle-group"](qh);
-  assert.deepEqual([api.get().snapView, H.writes[2].collapsed], ["qa", ["qa"]], "the view swaps to the clicked section, which folds");
-  // the shown header that does NOT hold the tab being read is a fold button still, marked shown
+  assert.deepEqual([H.writes.length, H.writes[1].collapsed, api.get().snapView, H.calls], [2, [], null, []], "opened: again one write and nothing else");
+  // an overview up (the tag menu's): the folded holder's box gives way to the overview's row (one selection on the strip)
   api.set({ snapView: "qa" });
-  const qh2 = api.makeGroupHead(headOf(plan.items, "qa").head, false, false, []);
-  assert.deepEqual([qh2.dataset.act, qh2.has("snap-shown"), qh2.title], ["toggle-group", true, headWords("qa", 2, 0, false, false, false, true).title], "shown, open, the tab being read elsewhere: the click folds");
+  assert.equal(realHead(api, bar, inf).has("stand-in"), false, "one selection on the strip: the overview's row, not the stand-in");
+  // …and a click on any header folds and leaves the view as it is
+  H.groups = H.writes[1]; plan = planStrip(["web", "api", "tests"], unions, H.groups, "web", false); api.set({ lastStripItems: plan.items, collapsedTabIds: plan.folded });
+  const qh = realHead(api, bar, headOf(plan.items, "qa"));
+  assert.deepEqual([qh.dataset.act, qh.getAttribute("aria-expanded"), qh.has("snap-shown")], ["toggle-group", "true", true], "the shown row is a fold button like the rest");
+  H.calls.length = 0;
+  api.acts["toggle-group"](qh);
+  assert.deepEqual([api.get().snapView, H.writes[2].collapsed, H.calls], ["qa", ["qa"], []], "qa folds; its overview stays up, untouched");
+  api.acts["toggle-group"](realHead(api, bar, headOf(plan.items, "infra")));
+  assert.deepEqual([api.get().snapView, H.writes[3].collapsed, H.calls], ["qa", ["infra"], []], "another header folds; the overview stays");
+  // a file tab up: the click folds and the file stays (no discard ask, nothing left)
+  const w2 = world("web", parseTabGroups(null), ["web", "api", "tests"], { fileTab: "file:notes-api/README.md" });
+  const fh = realHead(w2.api, w2.bar, headOf(planStrip(["web", "api", "tests"], unions, w2.H.groups, "web", false).items, "infra"));
+  w2.api.acts["toggle-group"](fh);
+  assert.deepEqual([w2.H.writes.length, w2.api.get().fileTabOpen, w2.api.get().snapView, w2.H.calls], [1, "file:notes-api/README.md", null, []], "the file stays in the pane");
   const nameless = new FakeEl("div", "tab-group-head");   // no data-group
   H.writes.length = 0; api.set({ snapView: null });
   api.acts["toggle-group"](nameless);
   assert.deepEqual([H.writes.length, api.get().snapView], [0, null], "no group name: nothing");
 });
 
+test("executed: the tag menu on a group header offers Show overview, and the pick shows the section at a glance with no fold moved; while it shows the row is Close overview, which puts the transcript back; a chip and the phone get no row", () => {
+  const { api, H, bar } = world("web");
+  api.showTagMenu(10, 20, "infra", false);
+  assert.equal(H.menus.length, 1);
+  assert.deepEqual([H.menus[0].state.name, H.menus[0].state.folded, H.menus[0].state.overview], ["infra", false, false], "on a header, with no overview up: the Show overview row");
+  H.calls.length = 0;
+  H.menus[0].handlers.pick("overview");
+  assert.equal(api.get().snapView, "infra", "the section shows in the pane");
+  assert.deepEqual(H.calls, ["renderTabs", "showActive"], "the strip repaints (the header's mark) and showActive paints the view");
+  assert.equal(H.writes.length, 0, "no fold write: the overview moves no fold");
+  assert.equal(realHead(api, bar, headOf(H.lastStripItems, "infra")).has("snap-shown"), true, "the header wears the shown mark");
+  // the menu again, on the header whose overview shows: Close overview, which leaves the view
+  api.showTagMenu(10, 20, "infra", false);
+  assert.equal(H.menus[1].state.overview, true, "this tag's overview shows: the row is Close overview");
+  api.showTagMenu(10, 20, "qa", false);
+  assert.equal(H.menus[2].state.overview, false, "another tag's menu offers its own Show overview (the view swaps)");
+  H.calls.length = 0;
+  H.menus[1].handlers.pick("closeOverview");
+  assert.deepEqual([api.get().snapView, H.calls, H.writes.length], [null, ["renderTabs", "showActive"], 0], "the transcript back; no fold moved");
+  // off a header (a chip of the Tags flyout, a filter chip) and on the phone: no row, since no view can show there
+  api.showTagMenu(10, 20, "qa", null);
+  assert.equal(H.menus[3].state.overview, null, "a chip: no overview row");
+  H.phone = true;
+  api.showTagMenu(10, 20, "qa", false);
+  assert.equal(H.menus[4].state.overview, null, "the phone: no overview row");
+  H.menus[4].handlers.pick("overview");
+  assert.equal(api.get().snapView, null, "and the way in itself refuses on the phone");
+});
+
+test("executed: showOverview, the view's one way in: a file tab up is left first and a no keeps it; a name not on the strip puts the transcript back; the palette's list is the strip's groups, null on the phone", () => {
+  const w = world("web", parseTabGroups(null), ["web", "api", "tests"], { fileTab: "file:notes-api/README.md" });
+  w.api.showOverview("qa");
+  assert.deepEqual([w.api.get().snapView, w.api.get().fileTabOpen, w.H.calls], ["qa", null, ["leaveFileTab", "renderTabs", "showActive"]], "the file tab left, then the view");
+  const k = world("web", parseTabGroups(null), ["web", "api", "tests"], { fileTab: "file:notes-api/README.md", keepFile: true });
+  k.api.showOverview("qa");
+  assert.deepEqual([k.api.get().snapView, k.api.get().fileTabOpen, k.H.calls], [null, "file:notes-api/README.md", []], "the discard ask said no: the file stays and nothing shows");
+  const g = world("web");
+  g.api.showOverview("gone");
+  assert.equal(g.api.get().snapView, "gone", "set, and showActive's paint finds no such section…");
+  assert.equal(g.api.renderSnapshot(), false, "…and puts the transcript back (renderSnapshot: the absence is the event)");
+  assert.equal(g.api.get().snapView, null);
+  assert.deepEqual(g.api.tagSections(), [{ name: "qa", color: "#DD42FF", count: 2 }, { name: "infra", color: "#4EC9B0", count: 2 }], "the strip's groups in strip order, for the palette's pick");
+  g.H.phone = true;
+  assert.equal(g.api.tagSections(), null, "the phone layout has no overview to offer");
+});
+
 test("executed: on the PHONE the header's act folds and does nothing else — the picker's heading clicks it (2026-09-23), and the transcript under the picker stays put", () => {
   // the user asked to fold groups on the phone too; the picker's heading (kernel.py _CHAT_MOBILE_JS) clicks the strip's
-  // hidden header, the one fold path. The desktop's click also shows the section at a glance in the pane, which on the
-  // phone would swap the transcript the person is reading for a view they never asked for: the picker is a list over
-  // the pane, not a strip beside it
+  // hidden header, the one fold path. The phone never showed a view from it (the picker is a list over the pane, not a
+  // strip beside it), and since 2026-10-02 the desktop's click does the same: it folds and nothing else
   const { api, H, bar } = world("web");
   H.phone = true;
   const plan = planStrip(["web", "api", "tests"], unions, H.groups, "web", true);
@@ -615,7 +677,7 @@ test("executed: the nav trail records the reader's spot while the view shows: th
   H.views.set("web", v);
   H.content.scrollTop = 1200;
   assert.deepEqual(now(), { sid: "web", top: 1200 }, "the transcript showing: the pane's scroll is the reader's spot");
-  // the header put the view up: showActive's branch held the reader's spot; the reveal's clamp and the list's own
+  // the menu put the view up: showActive's branch held the reader's spot; the reveal's clamp and the list's own
   // scrolls then move #content (and, through followReader, the active view's saved spot)
   api.set({ snapView: "infra", snapKeep: { v, scrollTop: 1200, stick: false } });
   api.renderSnapshot();
@@ -651,11 +713,15 @@ test("pinned: the wiring the lifted slices cannot reach: showActive's branch, th
   assert.match(TABS, /collapsedTabIds = plan\.folded;\s*\n\s*lastStripItems = plan\.items;/);
   assert.match(TABS, /const shown = snapView;\s*\n\s*const held = shown \? snapshotHoldsFocus\(\) : false;\s*\n\s*if \(snapView\) renderSnapshot\(\);\s*\n\s*if \(shown && !snapView\) \{ showActive\(\); if \(held\) focusActiveTab\(\); \}/);
   assert.equal((TABS.match(/stripAftermath\(visibleIds, ids\)/g) || []).length, 2, "on the skip path and the rebuild path alike");
-  // the header and the #tabs delegate's two header acts run above (lifted); what the lift cannot show is that the acts
-  // are the ones the strip's delegate installs, and that the no-op act is gone
+  // the header and the #tabs delegate's header act run above (lifted); what the lift cannot show is that the act
+  // is the one the strip's delegate installs, and that the no-op act and the way-back act are gone
   const TABS_DELEGATE_AT = RENDER.indexOf("delegate(tabs, {");
-  assert.ok(TABS_DELEGATE_AT > 0 && ACTS_AT > TABS_DELEGATE_AT && !RENDER.slice(TABS_DELEGATE_AT + 1, ACTS_AT).includes("delegate("), "the header acts sit on the #tabs delegate");
+  assert.ok(TABS_DELEGATE_AT > 0 && ACTS_AT > TABS_DELEGATE_AT && !RENDER.slice(TABS_DELEGATE_AT + 1, ACTS_AT).includes("delegate("), "the header act sits on the #tabs delegate");
   assert.ok(!RENDER.includes('"group-active"'), "the no-op act is gone: every header folds");
+  assert.ok(!RENDER.includes('"show-transcript"'), "the way-back act is gone: a header's click always folds or opens (the user 2026-10-02)");
+  assert.doesNotMatch(ACTS, /snapView|showActive|leaveFileTab/, "the header's act touches no view: the fold write is all it does");
+  // the palette's way in: the shell's Show tag overview posts the picked tag to this page, which takes the menu's path
+  assert.match(RENDER, /if \(m\.romp === "showOverview"\) \{ if \(typeof m\.tag === "string"\) showOverview\(m\.tag\); return; \}/);
   // the tab menu's closer marks the Escape it consumed, so the view's Escape yields to it
   const CTX = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "ctx-menu.ts"), "utf8");   // the tab menu's closer is the shared builder's since v0.16.0
   assert.match(CTX, /const onKey = \(e: KeyboardEvent\) => \{ if \(e\.key === "Escape"\) \{ e\.preventDefault\(\); closeContextMenu\(\); \} \};/);
@@ -670,6 +736,7 @@ test("pinned: the wiring the lifted slices cannot reach: showActive's branch, th
 
 test("pinned: the sheet: the shown header's wash and the stand-in's mark on the tab-group rules; the view's two sizes, tokens only, the tab's state colors on the pip", () => {
   assert.match(CSS, /\.tab-group-head\.snap-shown \{ color: var\(--fg\); background: var\(--tab-active-bg\); box-shadow: inset 0 0 0 1\.5px var\(--chip-bg, transparent\); \}/, "the shown section's row wears the SELECTED TAB's box (T322): its fill token and its inset identity ring");
+  assert.match(CSS, /\.tab-group-head\.stand-in \{ color: var\(--fg\); background: var\(--tab-active-bg\); box-shadow: inset 0 0 0 1\.5px var\(--chip-bg, transparent\); \}/, "the folded stand-in wears the same box while the transcript shows (2026-10-02): the one selection on the strip");
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \{ cursor: default; \}/, "the header folds, so its cursor promises the click");
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \.tab-group-chip \{ text-decoration: underline/, "the stand-in wears no mark of its own (T322): the tab's highlight says which session is active");
   const block = CSS.slice(CSS.indexOf("#tab-snapshot {"), CSS.indexOf(".snap-when {") + 200);
@@ -715,11 +782,14 @@ test("executed: the guide describes the fold rule and the view", () => {
   // the fold rule and the view are sections there, and the pins follow them
   const REF = fs.readFileSync(path.resolve(process.cwd(), "..", "docs", "reference.md"), "utf8");
   const prose = (t: string) => new RegExp(t.replace(/[.()*]/g, "\\$&").split(" ").join("\\s+"));   // the document wraps its lines
-  assert.match(REF, prose("The section of the tab you are reading folds like any other; its header marks that it holds the tab (the tag's name is underlined), and folded, the header stands in for the tab: focus lands on it, and the left and right arrows step from there."));
+  assert.match(REF, prose("The section of the tab you are reading folds like any other, and the transcript stays on screen; folded, its header stands in for the tab: it wears the selected tab's box, focus lands on it, and the left and right arrows step from there."));
   assert.doesNotMatch(REF, prose("never folds (its header says so, and a click there changes nothing)"), "the old rule is gone");
   assert.match(REF, prose("### A tag section at a glance"), "the view has a section of its own");
-  assert.match(REF, prose("Clicking a tag section's header also shows the section in the transcript's place"));
-  assert.match(REF, prose("The transcript comes back when you pick a session, press Escape, or click that header again while its section is open and holds the tab you are reading."));
+  assert.match(REF, prose("**Show overview** in a group header's tag menu, or **Show tag overview** in the command palette, shows the section in the transcript's place"));
+  assert.match(REF, prose("The transcript comes back when you pick a session, press Escape, or pick **Close overview** in the tag's menu."));
+  assert.match(REF, prose("A click on a group header only folds or opens the group, and never changes what the pane shows"));
+  assert.doesNotMatch(REF, prose("Clicking a tag section's header also shows the section"), "the click no longer opens the view");
+  assert.doesNotMatch(REF, prose("without the section view a header click also opens"), "nor does the tag menu say it does");
   assert.match(REF, prose("a session that has published a note of what it is working on shows the note as a quieter second line."));
   // the paragraph's chip word (plans/needs-you.md; the docs restoration moved the paragraph here with the old word once)
   assert.match(REF, prose("with the same words and colours: **Needs you** when the feed shows one of the session's cards under Needs you or the session is stopped on a prompt"));

@@ -1,9 +1,9 @@
 // A SECTION AT A GLANCE: the pane the transcript normally fills shows one compact row per session in a
 // tab-strip section (name, state pip, what it is doing now in the user's terms, when it last did anything,
 // and whether it needs the user), so a group can be surveyed at a glance and any of its sessions opened
-// from there. It shows when a section header is clicked (which also folds or opens the section) and stays
-// until a session is picked; a section holding the tab being read folds like any other, its header
-// standing in for the hidden tab (tab-groups.ts planStrip).
+// from there. It shows from the tag menu's Show overview on a section header, or the palette's Show tag
+// overview, and stays until a session is picked or Escape; a header's click only folds or opens its
+// section (the user 2026-10-02, who found the view a click also opened confusing).
 //
 // PURE: the model is a function from what the chat client already holds per session (the session frame:
 // name, color, status, the events tail; and its ledger: the same summary / current task / recent tops the

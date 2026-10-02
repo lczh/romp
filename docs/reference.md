@@ -5511,9 +5511,9 @@ the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
-group is renamed. The section of the tab you are reading folds like any other; its header marks
-that it holds the tab (the tag's name is underlined), and folded, the header stands in for the tab:
-focus lands on it, and the left and right arrows step from there. The `archived` section starts
+group is renamed. The section of the tab you are reading folds like any other, and the transcript stays on
+screen; folded, its header stands in for the tab: it wears the selected tab's box, focus lands on it,
+and the left and right arrows step from there. The `archived` section starts
 folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
@@ -5578,8 +5578,9 @@ and on a phone a long press on a group heading in the session picker opens it ov
 long press as a right-click (Android's does). The menu shows the tag's chip at the top, so it is clear which tag it acts on, then:
 
 - **Rename…**, and under it the session palette's swatches, the current colour ringed: a swatch recolours the tag.
-- **Fold group** or **Open group**, on a header only: the header's own fold, without the section view a header click
-  also opens. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
+- **Fold group** or **Open group**, on a header only: the same fold as a click on the header. **Show overview**, on a
+  header only, shows the section at a glance (below); while it shows, the row reads **Close overview** and puts back the
+  session you were reading. The phone's menu has no overview row. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
   that tag). **Configure tags…** opens the tags dialog.
 - **Delete tag…**, whose sub-line counts the sessions that lose the tag.
 
@@ -5606,8 +5607,8 @@ tab, which still names the old tag after a rename until you change it.
 
 ### A tag section at a glance
 
-Clicking a tag section's header also shows the section in the transcript's place: one
-row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
+**Show overview** in a group header's tag menu, or **Show tag overview** in the command palette, shows the
+section in the transcript's place: one row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
 API error only you can clear, amber retrying an API error on its own, teal compacting, green waiting
 on background work, none while it is idle), a state chip when the state is worth a word, what it is
 doing now in a few words, and how long ago it last did anything. The chip is the one the bar under
@@ -5622,8 +5623,9 @@ working on shows the note as a quieter second line. Hover a row for its last mes
 its formatting; click one to open that session, which also opens its section if the section is
 folded (with several tags, the first folded group of them). The rows update as the sessions work and
 change only when something about a session changes; the **Needs you** chip follows the feed, one
-refresh behind it at most. The transcript comes back when you pick a session, press Escape, or click
-that header again while its section is open and holds the tab you are reading.
+refresh behind it at most. The transcript comes back when you pick a session, press Escape, or pick **Close overview** in the
+tag's menu. A click on a group header only folds or opens the group, and never changes what the pane
+shows (until 2026-10-02 it also opened this view).
 
 ### Coming back after a dropped connection
 
