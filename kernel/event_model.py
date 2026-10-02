@@ -1435,10 +1435,10 @@ def _write_then_drop(key, ent, pop=True):
     its age gate, so a release's deferred drop waits for the file's quiet too), counted under
     checkpoints.converge.dropDeferred. A file whose standing document is over half the cycle's cap never fits a fresh cycle
     (the take is twice the document's size), so its drop stays owed at every cycle until the reader's bounds or the owed
-    table's bound evict the entry, as the quiet drop's did before the release existed. Then, with `pop`, the very entry
-    `ent` goes through the pin
-    (_drop_unless_pinned_locked). Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the
-    cache no longer holds `ent`, or "stayed" without `pop`."""
+    table's bound evict the entry, a limit the quiet drop already had before the release existed. Then, with `pop`, the
+    very entry `ent` goes through the pin (_drop_unless_pinned_locked).
+    Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the cache no longer holds `ent`, or
+    "stayed" without `pop`."""
     try:
         needs = checkpoint_drop_writes_on() and _path_needs_write(key, ent, at_drop=True)   # off (a cap of 0): the pop alone
     except Exception:
@@ -1489,15 +1489,16 @@ def release_records(paths, keep=()):
     """The record side of the events that end a file's use (2026-10-01): each of `paths` outside `keep` (the files a live
     session still reads) leaves the reader's cache the way the quiet fold's drop lets a file go (_write_then_drop): the file's
     fold document is written first when it lacks something this process holds, so the next fold or walk over the file, while
-    the file is unchanged, restores from it at the guard bytes' cost instead of reading the whole file again (round one of
-    the review: a pop with no write sent the judges' episode scan after a second /clear, and the next named fold over a dead
-    lane's leaf, back to the whole file); over the cycle's budget the drop is deferred and owed (for a file whose document is
-    over half the cycle's cap, at every cycle: _write_then_drop); and a file a whole assembly entry still folds over
-    stays (_drop_unless_pinned_locked). There is no age gate: the event, not the file's quiet, says the use ended. Counted
-    under dropped and droppedBytes. Returns how many entries were dropped now. A process that never begins a cycle (the
-    judges child, with judges-process on, off by default) keeps the default cap for its life: once that is spent, a drop
-    that needs a write stays owed until the reader's bounds or the owed table's bound evict the entry, as that process's
-    quiet drops already did before this release existed."""
+    the file is unchanged, restores from it at the guard bytes' cost instead of reading the whole file again (round one of the
+    review: a pop with no write sent the judges' episode scan after a second /clear, and the next named fold over a dead
+    lane's leaf, back to the whole file); over the cycle's budget the drop is deferred and owed (a file whose document is over
+    half the cycle's cap stays owed at every cycle until the reader's bounds or the owed table's bound evict the entry, a
+    limit the quiet drop already had: _write_then_drop); and a file a whole assembly entry still folds over stays
+    (_drop_unless_pinned_locked). There is no age gate: the event, not the file's quiet, says the use ended. Counted under
+    dropped and droppedBytes. Returns how many entries were dropped now. A process that never begins a cycle (the judges
+    child, with judges-process on, off by default) keeps the default cap for its life: once that is spent, a drop that needs a
+    write stays owed until the reader's bounds or the owed table's bound evict the entry, as that process's quiet drops
+    already did before this release existed."""
     keep = {str(p) for p in keep}
     n = 0
     for p in paths:

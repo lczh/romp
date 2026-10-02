@@ -1672,7 +1672,7 @@ path, after that wait): the judges' episode scan after the second /clear, and
 the next named fold over a dead lane's leaf, restore from the document instead
 of reading the file whole again, while the file is unchanged. A session revived
 after its dead lane let go has its leaf read whole once on its first turn, by
-that scan, while its anchor is not read whole.
+the judges' episode scan, while its anchor is not read whole.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
 it (the drop then pops as it did before the write existed, unless a whole
 assembly entry pins it, counted `recordCache.pinnedKept`, and except under the
