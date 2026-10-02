@@ -18648,7 +18648,14 @@ def _comment_opener_split(text):
     pointer) and the _COMMENT_ASK_HEAD label are romp's; what follows is the comment. A thread opened before the
     identity line existed starts at the quote head and splits the same way. A message romp added nothing to (an
     unframed send, or a dispatched thread from before the fork line) is ("", text), and so is one that would leave
-    no comment at all."""
+    no comment at all.
+
+    Romp's quote is one run of ">" lines. The stored message has a blank line after it, so its split keeps a
+    comment's leading markdown quote. Romp's part takes a pre-compaction context block only when nothing but blank
+    lines comes between it and the quote.
+
+    The events view splits the chat build's text of the message (_thread_opener_shown), not the stored one. That
+    text can end inside the quote, so no step reads past the last line."""
     if not text:
         return "", text
     pos = 0
@@ -18661,10 +18668,15 @@ def _comment_opener_split(text):
     if text.startswith(_COMMENT_FRAME_HEAD, pos):
         lines = text[pos:].splitlines(keepends=True)
         off, i = len(lines[0]), 1
-        while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
+        while i < len(lines) and not lines[i].strip():                  # blank lines under the head
             off += len(lines[i]); i += 1
-        if i < len(lines) and lines[i].startswith(_PRECOMPACT_LEAD):
-            end = next((k for k in range(i, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
+        while i < len(lines) and lines[i].lstrip().startswith(">"):      # romp's quote: one run of ">" lines
+            off += len(lines[i]); i += 1
+        lead = i
+        while lead < len(lines) and not lines[lead].strip():            # blank lines, stepped over only before the lead
+            lead += 1
+        if lead < len(lines) and lines[lead].startswith(_PRECOMPACT_LEAD):
+            end = next((k for k in range(lead, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
             if end is not None:
                 k = end + 1
                 while k < len(lines) and not lines[k].strip():
