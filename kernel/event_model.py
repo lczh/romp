@@ -776,7 +776,7 @@ def note_swallowed(site, exc):
         sys.stderr.write("record cache: %s raised %s (%d so far): %s\n" % (site, type(exc).__name__, n, exc))
 
 
-_JSONL_TAIL_GUARD = 64           # bytes of pre-offset content re-verified before an incremental read
+_JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
 _JSONL_CACHE_LOCK = threading.Lock()   # the cache has cross-thread callers (the judge tiers' worker pools,
                                        # the pusher, the warm threads) and HITS mutate (LRU reinsert): the
                                        # lock covers only the cheap dict ops — the parse runs outside it —

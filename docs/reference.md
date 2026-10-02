@@ -2856,10 +2856,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
-  cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
-  statistic only, since these entries are acyclic and it never triggers a
-  gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
+  quiescence drop; a subagent's quiet drop made while a viewer's parse built
+  before the file's last append still holds the older records counts bytes
+  that parse keeps until it is released), `released` (every pop that removed
+  an entry, whatever the cause: an eviction, a re-read replacement, an OSError
+  pop, a drop; a #1735 statistic only, since these entries are acyclic and it
+  never triggers a gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
   `shrunk` and `upgrade`, and the first calling function outside the event
   model and the parse family), with `count` and `bytes`; a tail read, an
