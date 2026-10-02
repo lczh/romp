@@ -8493,25 +8493,30 @@ class SdkSession:
         The picks still in flight before the latest one (_held_chain) end the same way: a report drops every one it
         reflects, and a versioned one it reflects on another version joins the memory. The revert puts a pick back with
         its dots only while it is still listed (_revert_model): given them back after its report, a pick hid a real
-        fallback at the next reply, neither carded nor armed until its next report (round three of that review)."""
-        unlanded = getattr(self, "_pick_unlanded", ())   # getattr: __new__-built test doubles skip __init__
-        kept = tuple(p for p in unlanded if not _lands_on_pick(pm, p))
-        if any(_model_reflects_alias(pm, p) for p in getattr(self, "_held_chain", ())):
-            with self._lock:                             # set_model rewrites the list under it, on the kernel's thread
-                chain = self._held_chain
+        fallback at the next reply, neither carded nor armed until its next report (round three of that review).
+
+        The list's check and rewrite and the marker's read and clear sit in one hold of the session lock, under which
+        set_model writes both on the kernel's thread. Held for the rewrite alone, a pick landing during the check, or
+        between the rewrite and the marker's clear, left the pick this report reflects listed, and a refusal of the new
+        pick gave it its dots back (round four). __new__-built test doubles have no lock, and take a fresh one."""
+        with (getattr(self, "_lock", None) or threading.Lock()):
+            unlanded = getattr(self, "_pick_unlanded", ())   # getattr: __new__-built test doubles skip __init__
+            kept = tuple(p for p in unlanded if not _lands_on_pick(pm, p))
+            chain = getattr(self, "_held_chain", ())
+            if any(_model_reflects_alias(pm, p) for p in chain):
                 self._held_chain = tuple(p for p in chain if not _model_reflects_alias(pm, p))
-            for p in chain:
-                if _model_reflects_alias(pm, p) and _model_version(_alias_label(p)) is not None \
-                        and not _lands_on_pick(pm, p) and p not in kept:
-                    kept = (kept + (p,))[-8:]
-        if kept != unlanded:
-            self._pick_unlanded = kept
-        marker = self._model_pending
-        if not marker or not _model_reflects_alias(pm, marker):
-            return False
-        if _model_version(_alias_label(marker)) is not None and not _lands_on_pick(pm, marker) and marker not in kept:
-            self._pick_unlanded = (kept + (marker,))[-8:]
-        self._model_pending = ""
+                for p in chain:
+                    if _model_reflects_alias(pm, p) and _model_version(_alias_label(p)) is not None \
+                            and not _lands_on_pick(pm, p) and p not in kept:
+                        kept = (kept + (p,))[-8:]
+            if kept != unlanded:
+                self._pick_unlanded = kept
+            marker = self._model_pending
+            if not marker or not _model_reflects_alias(pm, marker):
+                return False
+            if _model_version(_alias_label(marker)) is not None and not _lands_on_pick(pm, marker) and marker not in kept:
+                self._pick_unlanded = (kept + (marker,))[-8:]
+            self._model_pending = ""
         try:
             self.backend._update_reg(self.sid, modelPending=False)
         except Exception as e:
