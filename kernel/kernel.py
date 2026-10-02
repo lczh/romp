@@ -33991,9 +33991,9 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
 def _push_subagents(clients, now, live_map):
     """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
     cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
-    no polling loop of its own — and costs a stat per open viewer when nothing changed. A viewer that closed while its
-    render ran (the close runs on the handler thread) is not sent the frame, and the background-task cursor that render
-    left is popped here, since the close's own pop ran before the render wrote it (2026-10-02)."""
+    no polling loop of its own — and costs a stat per open viewer when nothing changed. A viewer that closed, or whose
+    socket went away, while its render ran (both on the handler thread) is not sent the frame, and the background-task
+    cursor that render left is popped here, in case the close's own pop ran before the render wrote it (2026-10-02)."""
     for c in clients:
         for (ssid, aid) in list((c.get("subagents") or {}).keys()):
             try:
