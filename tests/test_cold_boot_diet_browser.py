@@ -79,8 +79,8 @@ await page.addInitScript(() => {
   window.__sent = []; const send = WebSocket.prototype.send;   // every frame the page sends its kernel (the prefetch's needFull asks among them)
   WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type) window.__sent.push(m); } catch (e) { /* not a frame */ } return send.call(this, d); };
   // idle callbacks: every request counted (__idles), and the ones queued and not yet run held by handle (__idlePending, 2026-09-29). The
-  // page's one idle user is the prefetch pass (render.ts schedulePrebuild), so an empty queue read after a fill says the pass the fill
-  // queued has had its turn: a callback leaves the queue by running, or by a cancel
+  // page's one idle user is the prefetch pass (render.ts schedulePrebuild; SourcePins below checks that premise), so an empty queue read
+  // after a fill says the pass the fill queued has had its turn: a callback leaves the queue by running, or by a cancel
   window.__idlePending = new Set();
   const ric = window.requestIdleCallback, cic = window.cancelIdleCallback;
   if (typeof ric === "function") window.requestIdleCallback = function (cb, o) { window.__idles++;
@@ -378,6 +378,41 @@ def _goal_store(sid):
                       "g2": {"text": "write the search route", "t": t + 100, "mt": t + 100, "parentId": "g1"}}}
 
 
+def _idle_captures():
+    """Every line of the chat page's code that names requestIdleCallback outside a comment: the webview sources under ui/webview
+    (test files left out) and the page shim the kernel serves inline (kernel/kernel.py). A line whose text starts with //, /*, * or #
+    is a comment, and a trailing ` //` comment is cut off before the line is read."""
+    files = sorted(p for p in Path(ROOT, "ui", "webview").rglob("*") if p.suffix in (".ts", ".js") and ".test." not in p.name)
+    files.append(Path(ROOT, "kernel", "kernel.py"))
+    hits = []
+    for path in files:
+        with open(path, encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                if "requestIdleCallback" not in line:
+                    continue
+                code = line.strip()
+                if code.startswith(("//", "/*", "*", "#")):
+                    continue
+                if "requestIdleCallback" in code.split(" //")[0]:
+                    hits.append("%s:%d" % (path.relative_to(ROOT).as_posix(), n))
+    return hits
+
+
+class SourcePins(unittest.TestCase):
+    """The premise the lab's at-rest record stands on, checked without a browser or the extension's dependencies (2026-10-02): the
+    chat page's one idle-callback user is the prefetch pass. The record waits for the page's whole idle queue to empty (atRest in the
+    driver), and roads 3b, 9 and 10 read that as the prefetch having run, so a second idle user that keeps itself queued would turn
+    them red with messages that point at the prefetch. This pin names the second user instead."""
+
+    def test_the_chat_page_captures_request_idle_callback_in_one_place(self):
+        hits = _idle_captures()
+        self.assertEqual(len(hits), 1, "the chat page's code captures requestIdleCallback in one place, the prefetch's in "
+                                       "ui/webview/render.ts. The cold-boot lab (tests/test_cold_boot_diet_browser.py, roads 3b, 9 and 10) "
+                                       "reads an empty idle queue as the prefetch having run, so before a second capture lands, make that "
+                                       "record count only the prefetch's own handles: %s" % hits)
+        self.assertTrue(hits[0].startswith("ui/webview/render.ts:"), "the one capture is the prefetch's, in render.ts: %s" % hits)
+
+
 class ColdBootDiet(unittest.TestCase):
     maxDiff = None
 
@@ -542,7 +577,8 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(rv_tabs := r["revealed"]["tabs"], h["start"]["tabs"] + hidden_n, "the filter hid the eighteen api and tests tabs and showed the nine web tabs: %r then %r" % (h["start"], r["revealed"]))
         self.assertGreaterEqual(h["start"]["skel"], 1, "the shown tabs other than the selected start as skeletons: %r" % h["start"])
         self.assertEqual(h["skelVisibleAfterWait"], 0, "the shown skeletons filled on idle callbacks: %r" % h)
-        self.assertTrue(h["rested"], "the prefetch came to rest after the fill (the pass past the visible set ran): %r" % h)
+        self.assertTrue(h["rested"], "the page's idle queue emptied after the fill; its one user is the prefetch, so the pass past the visible "
+                                     "set ran (a second idle user that keeps itself queued also fails here: SourcePins checks for one): %r" % h)
         self.assertEqual(h["hiddenAsks"], 0, "…and asked for no tab the filter hides: %r" % h)
         rv = r["revealed"]
         self.assertGreaterEqual(rv["tabs"], N_SESSIONS, "lifting the filter shows every tab: %r" % rv)
@@ -576,7 +612,8 @@ class ColdBootDiet(unittest.TestCase):
         f = r["folded"]
         self.assertEqual(f["header"], "1", "the fold survived the restart reload: %r" % f)
         self.assertTrue(f["shownFilled"], "the shown skeletons filled: %r" % f)
-        self.assertTrue(f["rested"], "…and the prefetch came to rest after the fill (the pass that would reach a folded tab ran): %r" % f)
+        self.assertTrue(f["rested"], "…and the page's idle queue emptied after the fill; its one user is the prefetch, so the pass that would "
+                                     "reach a folded tab ran (a second idle user that keeps itself queued also fails here: SourcePins checks for one): %r" % f)
         self.assertEqual((f["apiFulls"], f["apiAsks"]), (0, 0), "no folded tab was built or asked for while folded: %r" % f)
         u = r["unfolded"]
         self.assertEqual(u["header"], "0", "the header's click opened the section: %r" % u)
@@ -619,7 +656,9 @@ class ColdBootDiet(unittest.TestCase):
         r = self._result()
         b, a = r["siblingBefore"], r["siblingAfter"]
         self.assertEqual(b["header"], "1", "the api section folded again on this page before the sibling opened it: %r" % b)
-        self.assertTrue(b["shownFilled"] and b["rested"], "the shown skeletons filled and the prefetch came to rest after the fill: %r" % b)
+        self.assertTrue(b["shownFilled"] and b["rested"], "the shown skeletons filled, and the page's idle queue emptied after the fill; its one "
+                                                          "user is the prefetch (a second idle user that keeps itself queued also fails here: "
+                                                          "SourcePins checks for one): %r" % b)
         self.assertEqual(b["apiAsks"], 0, "no folded tab asked for while folded: %r" % b)
         self.assertEqual(a["header"], "0", "the sibling's click opened the section here (the store's storage event repainted): %r" % a)
         self.assertGreater(a["idles"], b["idles"], "…and this page scheduled an idle pass: %r -> %r" % (b, a))
