@@ -11,7 +11,8 @@ Pinned here:
 - the cut is walked over the parent's DISPLAY parse (its assembly entry, whole or restored from its document), reading no
   transcript a chat build has read, and on a restored entry only the pre-cut records the walk needs a body of; a
   pre-compaction passage and a restart seam still cut exactly as the whole read cuts them; after the record cache's
-  budget released the entry (2026-10-02), one create rebuilds it and the next builds no adapter;
+  budget released the entry (2026-10-02), one create rebuilds it and the next builds no adapter, on a restart seam and
+  a /clear continuation too, and on a session whose assembly falls back no create parses a second time;
 - a comments frame reads each thread's own records past its cut, never the copied history;
 - the create runs off the socket thread and answers the moment the thread row exists, carrying the thread's frame row;
   a frame built before that row was saved is never sent after the answer.
@@ -42,6 +43,7 @@ km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 PARENT = "5e5e5e5e-1212-3434-5656-787878787878"     # private synthetic sids: this module mints no goals, but shares no slot
 SEAM_NEW = "5e5e5e5e-1212-3434-5656-000000000001"
+CLEARED = "5e5e5e5e-1212-3434-5656-000000000002"     # the transcript a /clear opened under PARENT's session
 THREADS = ["7d7d7d7d-1212-3434-5656-00000000000%d" % i for i in range(1, 5)]
 BASE = ("the notes route pages by cursor and the tags route filters by owner before the search index is rebuilt; "
         "the sync loop backs off with a jitter of ten percent and caps the delay at two minutes. ")
@@ -200,6 +202,19 @@ class Base(unittest.TestCase):
         finally:
             cls.__init__ = real
 
+    def counted_create(self, path, anchor, sid=PARENT):
+        """km._comment_cut_resolve(path, sid, anchor) and what it cost: (answer, adapters built, event model parses, reads
+        of the transcript). A parse is any em.parse_session call (the cut's retry, or the parse store's on a miss); a read
+        is the cut's own (_anchor_adapter); an adapter is either one's build."""
+        parses, real = [], em.parse_session
+        em.parse_session = lambda *x, **k: (parses.append(1), real(*x, **k))[1]
+        try:
+            (got, reads), built = self.adapters_built(self.walks_reading_the_transcript, km._comment_cut_resolve, path, sid,
+                                                      anchor)
+        finally:
+            em.parse_session = real
+        return got, built, len(parses), reads
+
     def roads(self):
         now = getattr(km, "_CUT_ROADS", {"whole": 0, "seeded": 0, "read": 0})
         return {k: now[k] - self.roads0.get(k, 0) for k in now}
@@ -340,8 +355,34 @@ class CutFromTheDisplayParse(Base):
         # create read the transcript (review round two: about 0.09 s a create on an 18 MB leaf). On "none" the retry
         # rebuilds the entry through the event model's parse with the display's inputs, once
         path, recs = self._session(n=20, size=20000)
+        self._two_creates_after_a_budget_eviction(path, [path], ("kr10", "ka12"))
+
+    def test_after_a_budget_eviction_a_seamed_session_is_rebuilt_over_its_states_log(self):
+        # a restart seam's link lives in the states log, and the walk takes an entry only when its links are the walk's own
+        # (em.with_display_graph): an entry the retry built without that log never matches, so every create would parse
+        # again and read the transcript
+        cur = self._seamed()
+        self._two_creates_after_a_budget_eviction(cur, [cur, str(self.proj / (PARENT + ".jsonl"))], ("nr5", "oa10"))
+
+    def test_after_a_budget_eviction_a_clear_continuation_is_rebuilt_over_both_transcripts(self):
+        # after a /clear the leaf is a new transcript beside the session's first one, which the display parses with it (the
+        # anchor candidate); an entry the retry built over the leaf alone never matches the walk's candidates
+        old, _last, t = turns(self.now - 100000, 20, 20000)
+        first = write(self.proj / (PARENT + ".jsonl"), old)
+        new, _l2, _t2 = turns(t + 100, 10, 20000, parent=None, tag="c")
+        leaf = write(self.proj / (CLEARED + ".jsonl"), new)
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf, first], "two files: the leaf and the first transcript")
+        self._two_creates_after_a_budget_eviction(leaf, [leaf, first], ("cr5", "ca7"))
+
+    def _two_creates_after_a_budget_eviction(self, path, files, anchors):
+        """The chat's parse of the session whose leaf is `path` (its transcripts `files`) installs its entry; another file's
+        read under a budget that holds only that file evicts the transcripts and releases the entry; the display's next
+        build is a parse-store hit that rebuilds nothing; then two creates, on anchors[0] and anchors[1]. The first rebuilds
+        the entry, one event model parse and one adapter and no read of the transcript; the second walks it: no parse, no
+        adapter, no read."""
         km._parse(path, PARENT, self.now)
         key = (os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))
+        self.assertIn(key, em._ASM_CACHE, "the chat's parse installed its entry")
         other = write(self.proj / "notes-api-other.jsonl", [uline(self.now - 10, "another session's prompt", "o1")])
         saved = em._JSONL_CACHE_BUDGET_BYTES
         em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
@@ -352,13 +393,45 @@ class CutFromTheDisplayParse(Base):
         self.assertNotIn(key, em._ASM_CACHE, "the budget released the chat's entry")
         km._parse(path, PARENT, self.now)
         self.assertNotIn(key, em._ASM_CACHE, "the display's next build is a parse-store hit: nothing rebuilt")
-        got1, built1 = self.adapters_built(km._comment_cut_resolve, path, PARENT, "kr10")
-        got2, built2 = self.adapters_built(km._comment_cut_resolve, path, PARENT, "ka12")
-        self.assertEqual(built2, 0, "the second create walks the rebuilt entry: no adapter built")
-        self.assertEqual(built1, 1, "the first create rebuilt the entry, one adapter, and read nothing else")
+        got1, built1, parsed1, read1 = self.counted_create(path, anchors[0])
+        zero_reads()
+        got2, built2, parsed2, read2 = self.counted_create(path, anchors[1])
+        self.assertEqual((built2, parsed2, read2), (0, 0, 0), "the second create walks the rebuilt entry: no adapter built, "
+                                                              "no parse, no read of the transcript")
+        self.assertLess(sum(read_of(f) for f in files), 4096, "…and no bytes of it")
+        self.assertEqual((built1, parsed1, read1), (1, 1, 0), "the first create rebuilt the entry, one parse and one adapter, "
+                                                              "and read nothing else")
         self.assertIn(key, em._ASM_CACHE)
-        self.assertEqual((got1, got2), (self.cold(path, "kr10"), self.cold(path, "ka12")))
+        self.assertEqual((got1, got2), (self.cold(path, anchors[0]), self.cold(path, anchors[1])))
         self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_session_whose_assembly_falls_back_is_not_parsed_a_second_time_at_each_create(self):
+        # when the assembly raises it serves a plain parse that installs nothing (em._assemble's "fallback"), so no entry
+        # ever stands, and the "none" retry parsed again at every create, fell back again and read the transcript anyway
+        # (review round three: 0.22 to 0.29 s a create on a 12.2 MB leaf, the fallback induced). The retry brings the
+        # display's parse current first, here a parse-store hit whose road reads "fallback", and then parses no second time:
+        # the create reads the transcript, one adapter. A session whose parse installs is still rebuilt by one parse at its
+        # first create (the budget-eviction tests above)
+        path, recs = self._session(n=20, size=20000)
+        key = (os.path.realpath(path), PARENT, bool(km._display_sdk_human(PARENT)))
+        real = em._asm_restore
+
+        def restore_raises(*a, **k):                      # checkpoints are on here: a leaf with no entry tries its document first
+            raise RuntimeError("a synthetic restore failure")
+        em._asm_restore = restore_raises
+        try:
+            km._parse(path, PARENT, self.now)
+            self.assertEqual(km._parse_mode.get(path), "fallback", "the display's parse fell back")
+            self.assertNotIn(key, em._ASM_CACHE, "…and installed no entry")
+            for anchor in ("kr10", "ka12"):
+                got, built, parsed, reads = self.counted_create(path, anchor)
+                self.assertEqual((parsed, reads, built), (0, 1, 1), "no event model parse: the create reads the transcript, "
+                                                                     "its one adapter (%s)" % anchor)
+                self.assertNotIn(key, em._ASM_CACHE, anchor)
+                self.assertEqual(got, self.cold(path, anchor), anchor)
+        finally:
+            em._asm_restore = real
+        self.assertEqual(self.roads()["read"], 2)
 
     def test_a_document_write_over_the_parse_does_not_hold_the_walk(self):
         # the settle's document write holds the session's key lock for its whole length (14 s at 110 MB in the lab) and only

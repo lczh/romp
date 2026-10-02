@@ -30,7 +30,8 @@ per file byte; a budget eviction releasing the chat's assembly entry over the ev
 multiple's cap at 1000; a mid-read eviction not counted as a re-read; and a tail evicted again each cycle. Round two
 (2026-10-02) added: a restored tail evicted while a whole read upgrades it; the release's population (a prior lineage
 file alone, a skip-marked file, two chats' leaves in one insert) and its count, budgetReleased; and a path evicted during
-its own read keeping its chat's entry. Synthetic files and synthetic cache entries only."""
+its own read keeping its chat's entry. Round three (2026-10-02) added: that entry folding the append at the chat's next
+build, and a read that raises mid-scan leaving no in-flight mark. Synthetic files and synthetic cache entries only."""
 import ast
 import contextlib
 import gc
@@ -519,9 +520,11 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         self._ckpt = em._CKPT_DIR_FN
         em._CKPT_DIR_FN = None                    # checkpoints off: the rebuild after a release is the whole parse
         em._ASM_CACHE.clear()
+        em._READ_IN_FLIGHT.clear()                # a mark left by a read that raised elsewhere would hide a release here
 
     def tearDown(self):
         em._ASM_CACHE.clear()
+        em._READ_IN_FLIGHT.clear()
         em._CKPT_DIR_FN = self._ckpt
         super().tearDown()
 
@@ -627,8 +630,39 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         self.assertEqual(mid, [(False, [True])], "the leaf evicted mid-read, the chat's entry standing")
         self.assertEqual([e is held[0] for e in self._held(leaf)], [True], "the chat's entry stands after the read")
         self.assertNotIn(leaf, em._READ_IN_FLIGHT, "the mark cleared")
+        _, modes = self._parse(leaf)                                  # the chat's next build, with no eviction since the read
+        self.assertEqual(modes[-1:], ["fold"], "the re-inserted records kept their generation: the entry folds the append "
+                                               "(a fresh one would read as a rewrite and parse whole)")
         em._read_jsonl_incremental(other)                             # the leaf's insert evicted it; read back, it evicts the leaf
         self.assertEqual(self._held(leaf), [], "the read over, an eviction of the leaf releases its entry as before")
+
+    def test_a_read_that_raises_mid_scan_leaves_no_mark_and_a_later_eviction_releases(self):
+        """The in-flight mark is cleared in a finally, whatever road the read leaves by (review round three): a read of the
+        leaf's append that raises mid-scan (anything but OSError, which the reader answers itself) propagates and leaves no
+        mark, so a budget eviction of the leaf with no read of it in between releases the chat's entry. A mark left standing
+        would skip that release, once, until the path's next read cleared it."""
+        leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 20)
+        other = self._file("notes-api-states.jsonl")
+        self._parse(leaf)
+        self.assertEqual(len(self._held(leaf)), 1)
+        with open(leaf, "a") as f:
+            f.write(json.dumps({"type": "user", "uuid": "u00020", "parentUuid": "a00019", "timestamp": _iso(NOW - 100),
+                                "promptSource": "typed", "cwd": "/w/notes-api",
+                                "message": {"role": "user", "content": "step 20: %s" % FILLER}}) + "\n")
+
+        def scan_raises(*args, **kw):                                 # the leaf's read of its append, from the cached entry
+            raise ValueError("a synthetic decode failure")
+        with mock.patch.object(em, "_scan_jsonl_stream", scan_raises):
+            with self.assertRaises(ValueError):
+                em._read_jsonl_incremental(leaf)
+        self.assertNotIn(leaf, em._READ_IN_FLIGHT, "the mark cleared though the read raised")
+        self.assertIn(leaf, em._JSONL_CACHE, "the entry the read began from stands")
+        em._JSONL_CACHE_BUDGET_BYTES = em._real_bytes(os.path.getsize(other))
+        r0 = _stat("budgetReleased")
+        em._read_jsonl_incremental(other)                             # evicts the leaf, which was not read since the raise
+        self.assertNotIn(leaf, em._JSONL_CACHE)
+        self.assertEqual(self._held(leaf), [], "the eviction released the chat's entry")
+        self.assertEqual(_stat("budgetReleased") - r0, 1)
 
     def test_a_prior_lineage_file_evicted_alone_releases_every_chat_that_read_it(self):
         """The release matches every file an entry read, not its leaf alone: two chats whose candidate files share one prior
