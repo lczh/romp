@@ -1664,8 +1664,18 @@ document over a tail read instead of reading the file whole, provided the
 document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
+The record drops at the events that end a file's use (a leaf a second /clear
+retired, a dead timeline lane's leaf and anchor) take the same write, budget
+and deferral with no two-minute wait, since the event says the file's use
+ended (a drop the budget defers is paid later through the quiet drop's own
+path, after that wait): the judges' episode scan after the second /clear, and
+the next named fold over a dead lane's leaf, restore from the document instead
+of reading the file whole again, while the file is unchanged. A session revived
+after its dead lane let go has its leaf read whole once on its first turn, by
+the judges' episode scan, while its anchor is not read whole.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
-it (the drop then pops as it did before the write existed, except under the
+it (the drop then pops as it did before the write existed, unless a whole
+assembly entry pins it, counted `recordCache.pinnedKept`, and except under the
 incident scan's memo, which keeps a walked file's records resident when the
 document write is off, since its memo cannot reach the disk); `ROMP_CKPT_CONVERGE_MB`
 is the cycle budget both charge, and `0` turns the drop write off the same way
@@ -1695,7 +1705,9 @@ judges' flag is skipped and counted (`flagMismatch`), since the reader would
 delete a document under the wrong flag. A leaf with no compaction boundary has
 no cut and no document: it is read whole at every boot by design. `ROMP_ASM_CONVERGE=0` turns that step off, and so do the pass's
 own switch and a zero byte budget, as for the drop write. The owed table
-is bounded: over it the oldest owed drop is paid by its pop alone, and an owed
+is bounded: over it the oldest owed drop is paid by its pop alone (unless a
+whole assembly entry pins it: that entry stays, no longer owed, until the
+file's next quiet drop retries it), and an owed
 file since deleted has its entry popped when the cycle pays. A leaf unchanged for longer than the reader keeps a quiescent
 file's whole entry (two minutes) is refused by the pass and counted under
 `quiescent`: its heal would read the file whole every cycle and the write
@@ -2755,8 +2767,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   pass has written, re-seated on it by the restore road, where it lands
   here only when that restore refused the document),
   `full:noDocument`, `full:noDir` (no checkpoint directory), `full:refused` (a document that stood but did not verify,
-  its fallback reason counted), `bypass` (a pending cut armed on the session)
-  and `fallback`; the same block rides `asmCheckpoint.parse` on GET /perf,
+  its fallback reason counted), `bypass` (a pending cut armed on the session),
+  `fallback`, and `released` (assembly entries dropped at an event that ended
+  their file's use: a leaf a /clear or a resume fork retired, and again any
+  entry a later parse of that retired leaf installed, a dead timeline lane with
+  a document a restore would take, the last viewer of a subagent closing),
+  and `releaseFailed` (such a release that raised, stopping where it raised
+  with what ran before it still released, and once for each assembly entry
+  whose pin check raised at a record-cache drop, which counts that entry as
+  not pinning, the drop going ahead unless another entry pins it; said on
+  stderr once per file and outcome); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar
@@ -2804,7 +2824,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `docReadBytes`, the documents the pass's writes read for their carry,
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
-  for the documents written at the reader's quiescence drop and the drops
+  for the documents written at the reader's quiescence drop (and at the record
+  drops of the events that end a file's use) and the drops
   deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
@@ -2868,7 +2889,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
   `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
   `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
+  quiescence drop, the files a dead timeline lane releases, and a leaf a second
+  /clear retired), `pinnedKept` (drops that kept an entry because a whole assembly
+  entry still folds over its generation and its next parse after a drop would be
+  whole again: its leaf has no document a restore would take, or a restore here
+  refused it; the drop would have freed nothing that entry does not hold, so the
+  bytes stay counted; a restored entry, or a whole one whose leaf has a document a
+  restore would take, never holds a drop back, and neither does a whole entry
+  whose pin check raised, counted under `asmCheckpoint.parse.releaseFailed`), `droppedHeld` and
+  `droppedHeldBytes` (the drops, of `dropped`, whose records an assembly entry
+  folding over that generation still holds until its next visit, a restored
+  entry, a whole one whose leaf has a document a restore would take, or a whole
+  one whose pin check raised, and the
+  bytes of those records: `bytes` fell by them while the memory stayed, so the
+  memory drops freed is about `droppedBytes` less `droppedHeldBytes`), `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
@@ -2923,7 +2957,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   time); the refresh's own parse counts under `parse` as `private`.
   Two more count what the hydrated-body memo does: `hydratedHits`, the
   fills it served without a read, and `hydratedEvicted`, the entries its
-  cap pushed out. A memo hit for an atom whose body another thread had
+  cap pushed out; a released leaf's bodies leave the memo uncounted. A memo
+  hit for an atom whose body another thread had
   already written when this call looked is not counted, since that
   thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns

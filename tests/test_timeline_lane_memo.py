@@ -30,6 +30,7 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
+from unittest import mock
 from romp_load import load_source
 from fs_clock import move_ctime   # noqa: E402  the shared test helper, on the path the line above put there
 from pathlib import Path
@@ -85,6 +86,10 @@ class DeadLaneMemo(unittest.TestCase):
         km._parse_cache.pop(str(self.tpath), None)
         km._dead_lane_memo.clear()
         km._delta_entry_memo.clear()
+        saved_dir = km.em._CKPT_DIR_FN              # the release tests write documents: a checkpoint directory of the test's
+        km.em.set_checkpoint_dir(lambda: td / "checkpoints")   # own, set before any budget opens (setting it resets the budget),
+        self.addCleanup(km.em.set_checkpoint_dir, saved_dir)   # since an earlier module may have turned judge.py's off (round
+        #                                                        one of the fold's review)
 
     def tearDown(self):
         (km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR, km.jd.CAPDIR, km.jd.STATE, km.NAMES, km._live_map) = self.saved
@@ -272,6 +277,324 @@ class DeadLaneMemo(unittest.TestCase):
             self.assertEqual(len(parses), 4, "served")
         finally:
             km._parse = real
+
+    def _open_budget(self):
+        """The pusher cycle's checkpoint budget opened wide for the test, so the release's document write (the quiet drop's
+        write half) is never deferred by what earlier tests in this process spent, and set back after."""
+        saved = dict(km.em._CKPT_CYCLE)
+        km.em.checkpoint_cycle_begin(1 << 40)
+        self.addCleanup(lambda: (km.em._CKPT_CYCLE.clear(), km.em._CKPT_CYCLE.update(saved)))
+
+    def _three_turns(self):
+        recs = [_rec("user", T0, "u1", None, "run the long benchmark"), _rec("assistant", T0 + 10, "a1", "u1", "Launched it."),
+                _rec("user", T0 + 600, "u2", "a1", "and the cap?"), _rec("assistant", T0 + 610, "a2", "u2", "Raised to 4096."),
+                _rec("user", T0 + 1200, "u3", "a2", "ship it"), _rec("assistant", T0 + 1210, "a3", "u3", "Shipped.")]
+        self._write(recs)
+        getattr(km, "_dead_lane_released", {}).clear()
+        self._open_budget()
+        return str(self.tpath)
+
+    def _asm_keys(self, path):
+        with km.em._ASM_LOCK:
+            return [k for k in km.em._ASM_CACHE if k[0] == os.path.realpath(path) and k[1] == SID]
+
+    def test_a_dead_lane_whose_document_stands_releases_its_assembly_entry_and_records_once(self):
+        """Release on the events that end a file's use (2026-10-01): the lever dropped a dead lane's parse and left the
+        session's assembly entry (an adapter over every record, its atoms) and the leaf's record entry resident. When the
+        leaf's assembly document stands (so any later parse restores from it, never parses whole), the lever releases the
+        assembly entry and drops the records no live lane reads, once per transcript version: a miss after it (a keyed input
+        moved) derives the lane again through one restore and keeps what the restore rebuilt."""
+        p = self._three_turns()
+        with km.em._ASM_CKPT_LOCK:                                    # an earlier module's hydrated body under one of these
+            km.em._HYDRATED.clear(); km.em._HYDRATED_BYTES[0] = 0      #  synthetic uuids must not serve this lane's atoms
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=bool(km._display_sdk_human(SID)), tree=tree),
+                        km.em.asm_checkpoint_stats()["skipped"])
+        km._parse_cache.pop(p, None)
+        self.assertTrue(self._asm_keys(p), "the session's assembly entry stands before the lane is built")
+        tl1 = self._build()
+        self.assertEqual(self._asm_keys(p), [], "the dead lane's assembly entry is released at the lever")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE, "no live lane reads the leaf: its records are dropped")
+        tl2 = self._build()
+        self.assertEqual(tl2["turns"][SID], tl1["turns"][SID], "served from the lane memo")
+        arch = Path(self.td.name) / "archive" / (SID + ".json")
+        arch.parent.mkdir(parents=True, exist_ok=True)
+        arch.write_text(json.dumps({"touched": 1}))                   # a keyed input moves: the lane is derived again
+        tl3 = self._build()
+        self.assertEqual(km._parse_mode.get(p), "restore", "the parse after the release restores from the document")
+        self.assertTrue(self._asm_keys(p), "one release per transcript version: what the restore rebuilt stays")
+        self.assertEqual(tl3["turns"][SID], tl1["turns"][SID], "and the lane it derives is the same")
+
+    def test_a_dead_lane_with_no_document_keeps_its_assembly_entry(self):
+        """With no document a parse after the release would be a whole parse: the lever leaves the entry as before."""
+        p = self._three_turns()
+        km._parse(p, SID, NOW)
+        km._parse_cache.pop(p, None)
+        self.assertFalse(km.em.asm_document_stands(p))
+        self._build()
+        self.assertTrue(self._asm_keys(p), "kept: nothing to restore from")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE)
+
+    def test_a_dead_lane_whose_document_a_restore_would_refuse_keeps_its_assembly_entry(self):
+        """A document under a standing refusal mark (the chain proof refused it for the tail's shape at this very stat), or one
+        a restore in this process refused (the session's entry kept whole for it), would not be restored from: a parse after
+        a release would be a whole parse, so the lever leaves the entry and the records as before."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        self.assertTrue(km.em._asm_mark_refused(p, "shape", rompuuid=SID, sdk_human=human))
+        self._build()                                                 # the lane's parse is the store's (a hit): the entry as it stands
+        self.assertTrue(self._asm_keys(p), "kept: the document stands, but a refusal mark stands over it")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE)
+
+    def test_a_dead_lane_whose_entry_a_restore_refused_keeps_it(self):
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        for k in self._asm_keys(p):
+            with km.em._ASM_LOCK:
+                km.em._ASM_CACHE[k]["keepWhole"] = True                # as the whole parse after a refused restore marks it
+        self._build()
+        self.assertTrue(self._asm_keys(p), "kept: a restore here already refused the document")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE)
+
+    def test_the_dead_lanes_record_release_keeps_every_file_a_live_lane_reads(self):
+        """The record half of the release drops the dead lane's leaf and anchor only outside every live lane's leaf and anchor:
+        a fork child that is live while its registry still names the dead parent's file reads that very file."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        child = "11111111-2222-3333-4444-5555555555c1"
+        alive = [{"sid": SID, "path": p}, {"sid": child, "path": p}]
+        km._release_dead_lane(SID, p, ("v1",), alive, {child: {"state": "waiting"}})
+        self.assertEqual(self._asm_keys(p), [], "the dead session's own assembly entry goes")
+        with km.em._ASM_LOCK:
+            self.assertFalse([k for k in km.em._ASM_CACHE if k[0] == os.path.realpath(p)], "no entry pins the file")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE, "a live lane reads the file: its records stay")
+        km._release_dead_lane(SID, p, ("v2",), alive, {})              # the child ended too (a new transcript version)
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE, "no live lane reads it any more: dropped")
+
+    def test_after_a_dead_lane_release_the_next_named_fold_over_the_leaf_restores_from_its_document(self):
+        """The release drops the leaf's record entry the way the quiet fold's drop does, its fold document written first when
+        it lacks what this process holds (round one of the review: a pop with no write left the kernel's named folds over the
+        leaf with cursors at a generation that no longer existed, so the next one read the whole file again and put the whole
+        entry back). The next named fold restores its cursor from the document and steps nothing, reading the guard bytes."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        km._parse_cache.pop(p, None)
+        name = "deadLaneNamedFold"
+        self.addCleanup(lambda: km.em._FOLD_REG.pop(name, None))
+        cache = {}
+        s1 = km.em.fold_records(cache, p, lambda: 0, lambda s, r: s + 1, ckpt=name)   # a named fold over the leaf, as the kernel's
+        self.assertEqual(s1, 6)
+        self._build()                                                 # dead: the lane is cached and released
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE, "the premise: the release dropped the leaf's records")
+        with km.em._READ_BYTES_LOCK:
+            b0 = km.em._READ_BYTES.get(p, 0)
+        kinds = []
+        s2 = km.em.fold_records(cache, p, lambda: 0, lambda s, r: s + 1, on=kinds.append, ckpt=name)
+        with km.em._READ_BYTES_LOCK:
+            read = km.em._READ_BYTES.get(p, 0) - b0
+        self.assertEqual(kinds, ["restore"], "the next fold restores from the document the release wrote, not a whole refold")
+        self.assertEqual(s2, s1, "to the same state")
+        self.assertLessEqual(read, 4 * km.em._JSONL_TAIL_GUARD, "reading the guard bytes, not the %d-byte file" % os.path.getsize(p))
+
+    def test_a_dead_lane_after_a_clear_drops_its_leaf_and_its_anchor(self):
+        """After a /clear the dead lane's leaf is a file of its own and the session's first file is its anchor, the new leaf's
+        candidate: the release drops both record entries (round one of the review: every dead-lane test had a leaf that was its
+        own anchor, so a release that left the anchor passed them all)."""
+        self._three_turns()
+        anchor = str(self.tpath)
+        leaf = str(self.tpath.with_name("11111111-2222-3333-4444-5555555555c2.jsonl"))
+        Path(leaf).write_text("\n".join(json.dumps(r) for r in [
+            _rec("user", T0 + 1800, "cu1", None, "page the notes-api index"), _rec("assistant", T0 + 1810, "ca1", "cu1", "Paged."),
+            _rec("user", T0 + 2400, "cu2", "ca1", "and by cursor?"), _rec("assistant", T0 + 2410, "ca2", "cu2", "By cursor too."),
+            _rec("user", T0 + 3000, "cu3", "ca2", "ship it"), _rec("assistant", T0 + 3010, "ca3", "cu3", "Shipped.")]) + "\n")
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(leaf, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(leaf, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertTrue(leaf in km.em._JSONL_CACHE and anchor in km.em._JSONL_CACHE, "the premise: the parse read both files")
+        km._parse_cache.pop(leaf, None)
+        km._release_dead_lane(SID, leaf, ("v1",), [{"sid": SID, "path": leaf}], {})
+        self.assertEqual(self._asm_keys(leaf), [], "the session's entry of its leaf is released")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(leaf, km.em._JSONL_CACHE, "the leaf's records go")
+            self.assertNotIn(anchor, km.em._JSONL_CACHE, "and so do its anchor's: no live lane reads it")
+
+    def test_a_release_that_raises_never_drops_the_frame(self):
+        """The dead lane's release does file I/O (a stat, a sidecar read, a document write) inside the timeline build's lane
+        loop, whose other steps each report through a complaint of their own: a raise there is noted once per file and
+        outcome, and the frame is built with the lane in it (round one of the review: the raise left the build). Here the
+        document check raises, before either release and before the version is recorded: nothing was released, the lane's
+        next miss asks again, and the line claims no wait for the transcript (round three of the fold's review)."""
+        p = self._three_turns()
+        f0 = km.em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")) as chk, \
+                redirect_stderr(err):
+            tl = self._build()
+            self.assertTrue(tl["turns"][SID], "the lane is drawn")
+            self.assertIn(SID, km._dead_lane_memo, "and cached as any dead lane is")
+            self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the failure is counted")
+            self.assertNotIn(SID, km._dead_lane_released, "no version recorded before the document check answered")
+            km._release_dead_lane(SID, p, km._dead_lane_memo[SID][0][0], [{"sid": SID, "path": p}], {})   # the lane's next miss
+            self.assertEqual(chk.call_count, 2, "at the build's own version the next miss asks again (round four of the review)")
+            self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "and its failure is counted too")
+        self.assertIn("dead lane", err.getvalue())
+        self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
+        self.assertIn("(the release stopped where it raised and what ran before it stays released; said once per file and "
+                      "outcome)", err.getvalue(), "the default outcome alone: %r" % err.getvalue())
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(p, km.em._JSONL_CACHE, "nothing was released")
+
+    def test_a_release_that_raises_after_the_version_is_recorded_is_not_retried_until_the_transcript_moves(self):
+        """The dead lane records the transcript's version before either release runs, so a release that raises is not tried
+        again at the same version, and its line says so; what ran before the raise stays released. A raise at the document
+        check comes before the version is recorded and says no such thing (the test above), since the lane's next miss asks
+        again (round three of the fold's review: the line said the memory was left as it stood, false once the assembly
+        release had popped the entry)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        self.assertTrue(self._asm_keys(p), "the premise: the session's assembly entry stands")
+        alive = [{"sid": SID, "path": p}]
+        f0 = km.em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(km.em, "release_records", side_effect=OSError("permission denied")) as rel, redirect_stderr(err):
+            km._release_dead_lane(SID, p, ("v1",), alive, {})
+            km._release_dead_lane(SID, p, ("v1",), alive, {})       # the same transcript version: not tried again
+            self.assertEqual(rel.call_count, 1, "tried once at this version")
+            km._release_dead_lane(SID, p, ("v2",), alive, {})       # the transcript moved: tried again
+            self.assertEqual(rel.call_count, 2, "and again once the transcript moved")
+        self.assertEqual(self._asm_keys(p), [], "the assembly release ran before the record release raised, and stays released")
+        self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "each failure counted")
+        line = next(ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln)
+        self.assertIn("(the release stopped where it raised and what ran before it stays released; not retried until the "
+                      "transcript moves; said once per file and outcome)", line)
+        self.assertIn("for session %s" % SID, line)
+
+    def test_an_assembly_release_that_raises_stops_the_lane_and_is_not_retried_at_its_version(self):
+        """The version is recorded before either release, and the assembly release runs first: one that raises stops the
+        lane's release there, so the record release never runs, the same transcript version does not try again, and the
+        line says so (round four of the fold's review: only the record release had been made to raise here, so recording
+        the version after the assembly release passed)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        alive = [{"sid": SID, "path": p}]
+        err = io.StringIO()
+        with mock.patch.object(km.em, "release_assembly", side_effect=OSError("permission denied")) as asm, \
+                mock.patch.object(km.em, "release_records") as rel, redirect_stderr(err):
+            km._release_dead_lane(SID, p, ("v1",), alive, {})
+            km._release_dead_lane(SID, p, ("v1",), alive, {})       # the same transcript version: not tried again
+        self.assertEqual(asm.call_count, 1, "the assembly release was tried once at this version")
+        self.assertEqual(rel.call_count, 0, "and the record release never ran: the release stopped where it raised")
+        line = next(ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln)
+        self.assertIn("; not retried until the transcript moves", line)
+
+    def test_the_dead_lanes_two_outcomes_for_one_leaf_are_each_said(self):
+        """A raise at the document check and a raise after the version is recorded say different things for the same leaf,
+        so each is said once: the memo keys on the outcome as well as the event and the path (round four of the fold's
+        review: keyed on the event and the path alone, the second outcome went unsaid)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        alive = [{"sid": SID, "path": p}]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")):
+                km._release_dead_lane(SID, p, ("v1",), alive, {})   # refused before the version is recorded
+            with mock.patch.object(km.em, "release_records", side_effect=OSError("permission denied")):
+                km._release_dead_lane(SID, p, ("v1",), alive, {})   # the check clears; the record release raises
+        lines = [ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln]
+        self.assertEqual(len(lines), 2, "both outcomes said: %r" % err.getvalue())
+        self.assertNotIn("not retried", lines[0], "the document check's line claims no wait")
+        self.assertIn("; not retried until the transcript moves", lines[1], "the record release's says it waits")
+
+    def test_the_dead_lanes_two_outcomes_are_each_said_in_the_reverse_order_too(self):
+        """The record release raising at v1, after the version is recorded, then the document check raising at a moved
+        version: the first line carries the wait and the second does not, since the v2 check raised before v2 was
+        recorded and the lane's next miss asks again (round five of the fold's review: a presence check on the
+        recorded version, or a memo keyed on the event and the path that deduplicated only the default outcome, passed
+        the first order alone)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        alive = [{"sid": SID, "path": p}]
+        f0 = km.em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with mock.patch.object(km.em, "release_records", side_effect=OSError("permission denied")):
+                km._release_dead_lane(SID, p, ("v1",), alive, {})   # recorded first; the record release raises
+            self.assertEqual(km._dead_lane_released.get(SID), ("v1",), "the premise: v1 was recorded before the raise")
+            with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")) as chk:
+                km._release_dead_lane(SID, p, ("v2",), alive, {})   # moved: the check raises before v2 is recorded
+            self.assertEqual(chk.call_count, 1, "the check ran once at v2")
+        self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "both failures counted")
+        lines = [ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln]
+        self.assertEqual(len(lines), 2, "both outcomes said: %r" % err.getvalue())
+        self.assertIn("; not retried until the transcript moves", lines[0], "the record release's line says it waits")
+        self.assertNotIn("not retried", lines[1], "the v2 check's line claims no wait")
+
+    def _many_turns(self, n):
+        recs, parent = [], None
+        for k in range(n):
+            u, a = "u%d" % k, "a%d" % k
+            recs += [_rec("user", T0 + 60 * k, u, parent, "page %d of the notes-api index" % k),
+                     _rec("assistant", T0 + 60 * k + 10, a, u, "Paged %d." % k)]
+            parent = a
+        self._write(recs)
+        getattr(km, "_dead_lane_released", {}).clear()
+        self._open_budget()
+        return str(self.tpath), recs
+
+    def test_a_revived_session_restores_once_after_the_release_and_then_folds(self):
+        """The release's own regression risk: a session revived after its dead lane let go of its entry and records pays one
+        restore (the document's pre-cut rows and the tail from its cut), never a whole parse, for its lane and its chat's
+        parse together, and folds its next turn over the restored entry."""
+        p, recs = self._many_turns(48)
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        km._parse_cache.pop(p, None)
+        self._build()                                                 # dead: the lane is cached and the session released
+        self.assertEqual(self._asm_keys(p), [], "released at the lever")
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(p, km.em._JSONL_CACHE)
+        live = {SID: {"state": "waiting", "since": NOW - 100, "model": "", "effort": "", "context": None, "compactPct": None,
+                      "color": None, "mode": ""}}
+        km._live_map = lambda: live
+        s0 = dict(km.em._ASM_STATS)
+        km.build_timeline(NOW, live, with_bars=True)                  # revived: its lane parses
+        km._parse(p, SID, NOW)                                        # and its chat build's parse, through the same store
+        roads = {k: km.em._ASM_STATS.get(k, 0) - s0.get(k, 0) for k in ("restore", "full", "fold")}
+        self.assertEqual(roads, {"restore": 1, "full": 0, "fold": 0}, "one restore, no whole parse")
+        self.assertTrue(self._asm_keys(p), "the restored entry stands for the live session")
+        recs = recs + [_rec("user", T0 + 60 * 48, "u48", "a47", "and the last page?"),
+                       _rec("assistant", T0 + 60 * 48 + 10, "a48", "u48", "Paged the last one.")]
+        self._write(recs)
+        s1 = dict(km.em._ASM_STATS)
+        km.build_timeline(NOW, live, with_bars=True)
+        roads = {k: km.em._ASM_STATS.get(k, 0) - s1.get(k, 0) for k in ("restore", "full", "fold")}
+        self.assertEqual(roads, {"restore": 0, "full": 0, "fold": 1}, "the next turn folds over the restored entry")
+        self.assertEqual(len(km._parse(p, SID, NOW)["turns"]), 49)
 
 
 class HorizonFilterIsExact(unittest.TestCase):
