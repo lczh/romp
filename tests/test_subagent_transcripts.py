@@ -712,6 +712,7 @@ class OpenClose(World):
             self.assertNotIn((SID, AID_BG), c["subagents"], "the close took effect")
             self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "each failure counted")
             self.assertEqual(err.getvalue().count("viewer close"), 1, "said once for the file: %r" % err.getvalue())
+            self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
         finally:
             km._clients[:] = saved
 
@@ -740,6 +741,7 @@ class OpenClose(World):
             self.assertNotIn((SID, AID_BG), c["subagents"], "the close took effect")
             self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the release that never ran is counted")
             self.assertEqual(err.getvalue().count("viewer close"), 1, "and said: %r" % err.getvalue())
+            self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
             self.assertEqual(entries(), before, "the memory as it stood")
         finally:
             km._clients[:] = saved

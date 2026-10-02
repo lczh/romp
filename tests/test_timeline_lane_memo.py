@@ -447,6 +447,7 @@ class DeadLaneMemo(unittest.TestCase):
         self.assertIn(SID, km._dead_lane_memo, "and cached as any dead lane is")
         self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the failure is counted")
         self.assertIn("dead lane", err.getvalue())
+        self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
         with km.em._JSONL_CACHE_LOCK:
             self.assertIn(p, km.em._JSONL_CACHE, "nothing was released")
 

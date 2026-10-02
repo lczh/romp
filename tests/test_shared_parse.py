@@ -536,6 +536,9 @@ class OneParseForBoth(unittest.TestCase):
         self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 3, "every failure counted")
         self.assertEqual((err.getvalue().count("leaf flip"), err.getvalue().count("retired parse")), (1, 1),
                          "said once per file and event: %r" % err.getvalue())
+        for where in ("leaf flip", "retired parse"):      # one buffer holds both lines, so each line is checked on its own
+            line = next(ln for ln in err.getvalue().splitlines() if " at %s failed" % where in ln)
+            self.assertIn("for session %s" % C, line, "the %s line names the session (round two of the fold's review)" % where)
 
     def test_a_lineage_that_cannot_be_read_at_the_flip_is_counted_and_said_and_drops_nothing(self):
         """The flip's record drop reads the new leaf's lineage first (its candidates, the states log's resume links) to know
