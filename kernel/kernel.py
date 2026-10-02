@@ -18392,10 +18392,12 @@ _PRECOMPACT_EXCERPT_CAP = 1200     # characters per side: enough to place the pa
 
 
 def _comment_said(r, is_nudge):
-    """("me" | "you", text) when raw transcript record `r` is something one side of the conversation SAID — a prose
-    user/assistant record's visible text, "me" for the person (a user record), "you" for the agent — else None: tool
-    traffic, thinking, a compaction summary, the CLI's own settle, harness wrappers and romp's own injections are
-    nobody talking (the filter _thread_messages applies to the side conversation)."""
+    """("me" | "you", text) when raw transcript record `r` is a prose user or assistant record that one side of the
+    conversation said: its visible text, "me" for the person's user record, "you" for the agent's; else None. Tool
+    traffic, thinking, a compaction summary, the CLI's own settle, an API error and a synthetic reply are nobody
+    talking, and so is a user record stamped with an injected origin (any kind but the person's own) or whose text
+    _comment_persons_words refuses. A user record is judged by that stamp and those screens, not by the author its
+    atom carries. A message the CLI spliced into the running turn is no user record: _comment_spliced reads it."""
     if not _comment_prose_record(r) or r.get("isApiErrorMessage"):
         return None
     if (r.get("message") or {}).get("model") == "<synthetic>":
@@ -18403,11 +18405,39 @@ def _comment_said(r, is_nudge):
     txt = _comment_msg_text(r)
     if r.get("type") != "user":
         return ("you", txt) if txt else None
+    if (em._record_origin(r) or {}).get("kind") not in (None, "human"):
+        return None
+    return _comment_persons_words(txt, is_nudge)
+
+
+def _comment_persons_words(txt, is_nudge):
+    """("me", the person's words) from `txt`, the text of a user record or of a message spliced into a running turn,
+    else None. Harness reminders are peeled off (_split_reminders), and what is left is nobody's when it is empty, opens
+    with a harness or slash-command wrapper, is romp's resume nudge, or contains "<!-- romp-". These screens read text
+    only: _comment_said reads a user record's origin stamp, and a spliced message's stamp is already in its atom's
+    author (_comment_spliced)."""
     txt = _split_reminders(txt)[0].strip()
     if (not txt or em.SYSTEM_WRAPPER_RE.match(txt) or em.CMD_WRAP_RE.match(txt) or is_nudge(txt)
-            or "<!-- romp-" in txt or (em._record_origin(r) or {}).get("kind") not in (None, "human")):
+            or "<!-- romp-" in txt):
         return None
     return "me", txt
+
+
+def _comment_spliced(g, u, is_nudge):
+    """("me", text) when attachment `u` on transcript graph `g` is a message spliced into the running turn whose atom
+    names the person and whose words pass the screens a user record's text passes (_comment_persons_words), else None.
+    The CLI records such a message as a queued_command attachment, and writes the record again when a compaction
+    or a resume replays it.
+
+    Whether `u` is a message spliced into the turn, the original and not a copy, and who sent it, is the parse's atom
+    for it (g.splice_author: the display parse's, or on a fresh read the event model's _absorbed run over that read).
+    Its words are read only when that atom names the person. Known cases whose atom names the person and that the
+    context walk does not quote: a reply sent from a card or with its Continue button (romp's markers), text that opens
+    with a slash command's wrapper, and a message whose atom the parse made from a record off the spine, which the walk
+    does not follow. The cut walk still passes over the attachment (_comment_cut_walk)."""
+    if g.splice_author(u) != "human":
+        return None
+    return _comment_persons_words(g.splice_text(u), is_nudge)
 
 
 def _precompact_excerpt(text, tail):
@@ -18456,12 +18486,17 @@ def _precompact_context(g, path, anchor_uuid, newer):
     """_precompact_block for a pre-compaction anchor on the stitched chain `g` (an em.TranscriptGraph: the display parse's
     graph, or a fresh read's). `newer` is the active chain from the leaf down to the record just after the anchor (leaf
     first), as the cut walk collected it. The passage's TURN is the anchor's side (the person's message, or the agent's
-    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it. Only a
-    user or assistant record can be something said (_comment_said), so the walks read no other record's body."""
+    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it.
+    Only a user or assistant record (_comment_said) or a message the CLI spliced into the agent's turn
+    (_comment_spliced) can be something said, so the walks read no other record's body, and a spliced message's only
+    when the parse's atom for it names the person as its author."""
     is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
 
     def said_of(u):
-        return _comment_said(g.rec(u) or {}, is_nudge) if g.kind(u)[0] in ("user", "assistant") else None
+        kind = g.kind(u)[0]
+        if kind == "attachment":
+            return _comment_spliced(g, u, is_nudge)
+        return _comment_said(g.rec(u) or {}, is_nudge) if kind in ("user", "assistant") else None
     said = said_of(anchor_uuid)
     side = "me" if said and said[0] == "me" else "you"
     before, u, hops = None, g.parent(anchor_uuid), 0

@@ -3571,7 +3571,7 @@ class FileAdapter:
         return set(active) | {u for u, v in self.chain_verdicts(active).items()
                               if v in ("active", "broken", "eclipsed")}
 
-    def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index):
+    def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index, *, stats):
         """One synthesized user atom for a mid-turn splice, placed where the model READ it (T252d, the
         user 2026-09-08): its `t` is the LANDING time — the moment the CLI took the message off its
         queue, the file-order predecessor's stamp (_landing_t) — so the atom sits BELOW the steps that
@@ -3595,7 +3595,9 @@ class FileAdapter:
         The atom carries the FULL text — any whitespace-collapsed form is for MATCHING only (the user
         2026-07-08: collapsing ate the blank line between a follow-up's quoted context and the typed
         reply, so markdown folded the reply INTO the blockquote; and the kernel's optimistic echo could
-        never text-prune against the collapsed copy, so the message rendered TWICE)."""
+        never text-prune against the collapsed copy, so the message rendered TWICE).
+
+        `stats` False keeps the clamp below out of the parse stats, for a caller that is no parse (_absorbed's)."""
         blocks = [{"type": "text", "text": full}]
         arec = self.by_uuid.get(auid) or {}
         origin = _record_origin(arec)   # a queued_command attachment carries its own origin / commandMode
@@ -3628,7 +3630,8 @@ class FileAdapter:
                 # these would show up, since a silent clamp would hide a CLI write-order change. (The
                 # 2026-09-06 review: two goldens had pinned a landedT 30-40 s before the send, from a
                 # synthetic shape with no tool_result before the attachment.)
-                _asm_stat("landedT-clamp")
+                if stats:
+                    _asm_stat("landedT-clamp")
                 landed_t = t
             atom["t"] = landed_t         # placed where the model READ it (T252d); `sentAt` keeps the send
         if ROMP_AUTO_RE.search(full):   # an AUTO-nudge → flag it, mirroring the native user-record path
@@ -3652,7 +3655,7 @@ class FileAdapter:
         i = bisect.bisect_left(self._seq_ts, (seq,)) - 1
         return self._seq_ts[i][1] if i >= 0 else None
 
-    def _absorbed(self, qatts, kept, st, rompuuid, postal_index):
+    def _absorbed(self, qatts, kept, st, rompuuid, postal_index, stats=True):
         """Mid-turn prompts spliced into a running turn. The witness is the queued_command
         ATTACHMENT record: the CLI writes one per splice, uuid-bearing and parent-chained,
         carrying the FULL prompt text and stamped with the ENQUEUE timestamp — and writes
@@ -3674,7 +3677,11 @@ class FileAdapter:
         or in atoms()) changes placement identity just like an id drift — previously-invisible
         atoms become fresh plannable segments and dormant sessions replay them as new goals
         (2026-07-10). Bump jd.PLACEMENTS_V in the same commit; tests/test_placements_canary.py
-        pins both dimensions."""
+        pins both dimensions.
+
+        `stats` False: a caller that is no parse (the comment walk's fresh read, TranscriptGraph._splice_atom)
+        adds nothing to the parse stats, whose landedT-clamp count is there to show a change in the CLI's
+        write order across parses."""
         atoms, emitted = [], st["absorbed_keys"]   # dedup memory rides the carry: one set whether
         #                                            the qatts arrive in one full parse or many folds
         for q in qatts:
@@ -3689,7 +3696,7 @@ class FileAdapter:
                 continue   # this copy sits on a rewound branch — a kept twin may still emit
             emitted.add(key)
             a = self._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"],
-                                    rompuuid, postal_index)
+                                    rompuuid, postal_index, stats=stats)
             if not _author_final(a.get("author"), q["text"]):
                 st["postal_miss_att"].add(key)   # trailing marker unresolved — the heal re-checks
             atoms.append(a)
@@ -4880,19 +4887,34 @@ def _membership_of(adapter):
 # spine root to cut) plus the atom rows' byte locations, so a pre-cut record is read back alone, by offset, only when
 # the walk needs its body. A fact the entry cannot give (a pre-cut record with no row to read it by, a walk leaving the
 # spine) raises GraphMiss, and the caller reads the transcript as before: never an answer from a guess.
+# A message the CLI splices into a running turn is no user record: the CLI writes it as a queued_command attachment
+# (FileAdapter._absorbed), and writes it again when a compaction or a resume replays it. Whether an attachment is such a
+# message, and the original rather than a copy, is the display parse's own answer, the atom _absorbed emitted for the
+# record: read from the entry's atoms, or on a restored entry's pre-cut part from the atom's row.
 
 
 class GraphMiss(LookupError):
     """A restored entry's pre-cut part cannot answer what the walk asked: read the transcript instead."""
 
 
+def _splice_prompt(rec):
+    """The words of queued_command attachment record `rec` as its atom carries them: the prompt as is when it is a string,
+    else the joined text of its content blocks (FileAdapter._ingest's witness, _hydrate_one's kind "b")."""
+    p = (rec.get("attachment") or {}).get("prompt")
+    return p if isinstance(p, str) else _text_of(p or [])
+
+
 class TranscriptGraph:
     """The read surface of a walk over one session's stitched transcript graph (the comment cut, kernel
-    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, and the leaf."""
+    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, the leaf, and
+    splice_author / splice_text for a message spliced into a running turn. `atoms`: the atoms the display parse emitted
+    from those maps (its assembly entry's); None over a fresh read, where _absorbed is run on the adapter's own splices."""
 
-    def __init__(self, ad):
+    def __init__(self, ad, atoms=None):
         self._ad = ad
         self.leaf = ad.leaf_uuid
+        self._atoms = atoms
+        self._splices = None
 
     def has(self, u):
         return u in self._ad.by_uuid
@@ -4909,6 +4931,30 @@ class TranscriptGraph:
 
     def fsid(self, u):
         return self._ad.fsid_of.get(u)
+
+    def _splice_atom(self, u):
+        """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
+        the adapter's splices and its kept chain, from an empty dedup memory as a whole parse starts, with no postal index
+        and no count in the parse stats: this read is no parse. The map is built once per graph, so a walk across a long
+        tool turn's attachments costs one pass over the atoms."""
+        if self._splices is None:
+            atoms = self._atoms
+            if atoms is None:
+                ad = self._ad
+                atoms = ad._absorbed(ad.qatts, ad.kept_uuids(ad.active_path()), _emit_state(), None, {}, stats=False)
+            self._splices = {a["uuid"]: a for a in atoms if a.get("absorbed") and a.get("uuid")}
+        return self._splices.get(u)
+
+    def splice_author(self, u):
+        """The author (author_of's) of the atom the parse emitted for queued_command attachment `u`, a message spliced into
+        a running turn (_splice_atom: the display parse's, or over a fresh read the same emit run on it); None when it
+        emitted none, for example for a splice off the kept chain."""
+        a = self._splice_atom(u)
+        return a.get("author") if a is not None else None
+
+    def splice_text(self, u):
+        """The prompt of attachment `u`'s record (_splice_prompt)."""
+        return _splice_prompt(self._ad.by_uuid.get(u) or {})
 
 
 def _read_record_at(path, at, uuid):
@@ -4966,10 +5012,11 @@ class _SeededGraph(TranscriptGraph):
     """TranscriptGraph over a RESTORED entry (its adapter seeded from the assembly document): the tail past the cut from the
     adapter, the pre-cut part from the seed's facts (types, the active spine root to cut) and the atom rows' locations. A
     pre-cut tool record (its row's lazy header lists tool calls or results) answers as a body-less record of its type, so a
-    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset."""
+    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset. A splice's atom is the
+    entry's (its tail's atoms) past the cut, its atom row before it."""
 
     def __init__(self, entry, rompuuid):
-        super().__init__(entry["ad"])
+        super().__init__(entry["ad"], entry["atoms"])
         seed = self._ad.seed
         self._types = seed["types"]
         sp = seed.get("_spineParent")
@@ -5056,6 +5103,34 @@ class _SeededGraph(TranscriptGraph):
         self._recs[u] = out
         return out
 
+    def splice_author(self, u):
+        """Past the cut, the tail's atoms answer; before it, the scalars of the atom row the document holds for `u`: a row
+        only for an attachment the parse made an atom of, so a hook's result or a token reminder costs no read."""
+        if u in self._ad.by_uuid or u not in self._types:
+            return super().splice_author(u)
+        form, src, got = self._locs
+        for c in got.get(u) or ():
+            if form == "index":
+                try:
+                    sc = src._row(c).get("s") or {}
+                except LazyIndexError as e:
+                    raise GraphMiss(str(e))
+            else:
+                sc = c
+            if sc.get("absorbed"):
+                return sc.get("author")
+        return None
+
+    def splice_text(self, u):
+        """Before the cut, the attachment record read back alone by the offset its atom row carries (an attachment's only
+        atom is its splice's)."""
+        if u in self._ad.by_uuid or u not in self._types:
+            return super().splice_text(u)
+        loc = self._loc(u)
+        if loc is None:
+            raise GraphMiss("record %s: no row carries its splice's location" % u)
+        return _splice_prompt(_read_record_at(loc["path"], loc["at"], u))
+
 
 def _files_witness(files):
     """{path: (size, mtime_ns, inode)} for every file in `files`, None when one cannot be stat'd: the witness _assemble stamps on
@@ -5092,7 +5167,7 @@ def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, 
         if seen is None or seen != _files_witness(candidate_files):
             return "stale", None
         if entry["ad"].seed is None:
-            return "whole", fn(TranscriptGraph(entry["ad"]))
+            return "whole", fn(TranscriptGraph(entry["ad"], entry["atoms"]))
         return "seeded", fn(_SeededGraph(entry, rompuuid))
 
     def cached():
@@ -5515,7 +5590,7 @@ def _asm_heal(entry, rompuuid, postal_index):
             if q is None:
                 st["postal_miss_att"].discard(key)
                 continue
-            a2 = ad._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"], rompuuid, postal_index)
+            a2 = ad._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"], rompuuid, postal_index, stats=True)
             if a2 != a:
                 entry["atoms"][i] = a2
             if _author_final(a2.get("author"), q["text"]):
@@ -7884,9 +7959,7 @@ def _hydrate_one(a, rec):
         a["skillMd"] = btext[:SKILL_MD_CAP] + ("\n\n…(skill content truncated)" if len(btext) > SKILL_MD_CAP else "")
         a["message"] = {"role": "assistant", "content": [], "stop_reason": None}
     elif k == "b":
-        att = rec.get("attachment") or {}
-        full = att.get("prompt") if isinstance(att.get("prompt"), str) else _text_of(att.get("prompt") or [])
-        a["message"] = {"role": "user", "content": [{"type": "text", "text": full or ""}]}
+        a["message"] = {"role": "user", "content": [{"type": "text", "text": _splice_prompt(rec) or ""}]}
     a.pop("lazy", None)
 
 
