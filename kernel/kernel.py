@@ -34018,11 +34018,16 @@ def _subagent_viewer_closed(sid, agent_id):
     """A subagent viewer closed (closeSubagent, its socket went away, or the pusher found it closed after its render;
     2026-10-02): the background-task cursor its render left on the agent's own file (_bg_scan_all_cached, run for a task
     notification or a nested background launch in that file) is popped, unless another client still has the same viewer
-    open. No other reader steps that cursor, and once the agent writes on, a cursor behind the entry would hold the
-    returned agent's quiet drop for good (em._document_at_witness). The fold is also retired from the file's checkpoint
-    document (em._retire_fold), since a document written while the viewer was open records the cursor's count and the next
-    write would carry it forward from disk, holding the cut there; guarded as rewound_memo_forget guards its retirement (a
-    cursor popped, or the document lists the fold), so a clean path stays clean (round two, 2026-10-02)."""
+    open. No card reader steps that cursor. The spend guard, where it passes the file (a live session, a ceiling above 0,
+    the file in the window, no parse keeping the records: _spend_fold_agent), steps it where it stands at the entry's
+    generation or where the file's document restores it after a restart, and a close that lands inside the guard's step
+    can leave the cursor that step stores, which the guard then keeps current. Where the guard does not pass the file,
+    once the agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good
+    (em._document_at_witness). The fold is also retired from the file's checkpoint document (em._retire_fold), since a
+    document written while the viewer was open records the cursor's count and the next write would carry it forward from
+    disk, holding the cut there; guarded as rewound_memo_forget guards its retirement (a cursor popped, or the document
+    lists the fold, read from disk when no fold of this process has loaded it, as for a viewer loaded before a restart and
+    closed after it), so a clean path stays clean (round two, 2026-10-02)."""
     try:
         with _clients_lock:
             if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
@@ -49214,18 +49219,21 @@ def _spend_fold_agent(f):
     state: it catches up a card whose chat stopped being built before the agent returned, whose cursor behind the entry
     would hold the drop for good, and it never starts a steps state for a workflow agent. Before both, the subagent viewer's
     background-task fold runs only over its own cursor or document state: a viewer open at the exit drain leaves that state
-    in the document behind the file's end, and no close runs in the next process to retire it (round two, 2026-10-02). A
-    fold that raises costs memory, never the guard's rate, and is counted and said (em.note_swallowed): the launch-ids fold
-    is called raising (_agent_launch_ids_fold), not through _agent_launch_ids, which answers set() on a raise."""
-    try:
-        if em.fold_steps_in_hand(_bgall_cache, "bgAll", f, new=False):
-            _bg_scan_all_cached(f)
-        if em.fold_steps_in_hand(_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", f):
-            _agent_launch_ids_fold(f)
-        if em.fold_steps_in_hand(_AGENT_GIST_CACHE, "agentGist", f, new=False):
-            _agent_gist_fold(f)
-    except Exception as e:
-        em.note_swallowed("spendGuardFold", e, f)
+    in the document behind the file's end, and the next process retires it only if that viewer, loaded before the restart,
+    is closed (round two, 2026-10-02). A fold that raises costs at most memory, never the guard's rate, and is counted and
+    said (em.note_swallowed): the launch-ids fold is called raising (_agent_launch_ids_fold), not through
+    _agent_launch_ids, which answers set() on a raise. Each fold has a try of its own (round three, 2026-10-02): with one
+    try around all three, a fold whose raise repeats every pass skipped the folds after it at every pass, and a returned
+    agent whose card's chat stopped being built kept its whole entry, where a later fold would have stepped its cursor up
+    to the file's end and dropped it."""
+    for cache, name, new, fold in ((_bgall_cache, "bgAll", False, _bg_scan_all_cached),
+                                   (_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", True, _agent_launch_ids_fold),
+                                   (_AGENT_GIST_CACHE, "agentGist", False, _agent_gist_fold)):
+        try:
+            if em.fold_steps_in_hand(cache, name, f, new=new):
+                fold(f)
+        except Exception as e:
+            em.note_swallowed("spendGuardFold", e, f)
 
 
 def _spend_guard_seed():

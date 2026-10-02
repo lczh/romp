@@ -18,7 +18,10 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
   * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification
     and a nested background launch, and retires it from a document written while the viewer was open, so the agent still
     drops when it returns: a close through closeSubagent or the socket going away, a close that lands while the pusher
-    renders the viewer or whose socket goes away then, and the last of two clients' closes (the first keeps the cursor);
+    renders the viewer or whose socket goes away then, the last of two clients' closes (the first keeps the cursor), a
+    close in a new process before any render (the state a viewer open at the exit drain left, read from the document on
+    disk) and a close inside a document write, before any document exists; a close with nothing to retire leaves the path
+    clean;
   * the spend guard prices agent files from a read of its own, then runs the dropping folds where they step records the
     reader holds (never starting a steps state for a workflow agent, never folding while a viewer's parse holds the
     records, stepping the viewer's background-task state a restart left behind), prices a dropped file from its memo without entering it
@@ -28,13 +31,15 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     drop after two quiet minutes), prices a restored tail that covers the window without a whole read and folds it out of
     memory, re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written record;
     a raise in the drop's witness check or the guard's folds (its launch-ids fold included) is counted and said with the
-    file and the frame, at the 1st, 10th, 100th and 1000th raise;
+    file and the frame, at the 1st, 10th, 100th and 1000th raise, and a guard fold that raises at every pass does not keep
+    the folds after it from dropping a returned agent;
   * a lab-style run of a synthetic session (agents with cards, workflow agents without) on an advancing clock, the cards'
     folds run in lockstep, in the kernel's own pattern, or stopping before the agent returns: the entries holding records
     and their bytes return to the live set as agents return, the workflow agents' entries stop climbing, and the guard's
     window equals a reference sum at every cycle; agents that fall silent for over two minutes mid-run are dropped and
     resumed with no whole read; without the guard, a card cursor left behind keeps its agent resident.
 SYNTHETIC fixtures only: placeholder ids, the notes-api demo names, transcripts written here."""
+import contextlib
 import inspect
 import io
 import json
@@ -456,9 +461,13 @@ class KernelFolds(Base):
 
 class ViewerClose(Base):
     """The subagent viewer's render folds the background tasks of an agent file that carries a task notification (or a nested
-    background launch), and no other reader steps that cursor: once the viewer closes and the agent writes on, a cursor
-    behind the entry would hold the returned agent's quiet drop for good. Closing the viewer pops it, and retires it from a
-    document written while the viewer was open."""
+    background launch), and no card reader steps that cursor. The spend guard, where it passes the file (a live session, a
+    ceiling above 0, the file in the window, no parse keeping the records), steps it where it stands at the entry's
+    generation or where the file's document restores it after a restart, and a close that lands inside the guard's step can
+    leave the cursor that step stores, which the guard then keeps current. Where the guard does not pass the file, once the
+    viewer closes and the agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good.
+    Closing the viewer pops it, and retires it from a document written while the viewer was open, or left by a viewer open
+    at the exit drain."""
 
     AID = "a9b00000000000001"
 
@@ -628,8 +637,9 @@ class ViewerClose(Base):
 
     def test_a_restarted_kernel_steps_the_state_a_viewer_open_at_the_exit_drain_left(self):
         """With the viewer open at the exit drain, the document carries the background-task state behind the file's end (the
-        cut at its count), and no close runs in the next process to retire it. The guard's pass steps that state over the
-        records the reader holds, before the card's folds, so the returned agent drops in that pass."""
+        cut at its count), and the next process retires it only if that viewer, loaded before the restart, is closed (the
+        restart test of the close below); here it is not. The guard's pass steps that state over the records the reader
+        holds, before the card's folds, so the returned agent drops in that pass."""
         ap, recs = self.scene()
         km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it
         append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)   # the agent writes on
@@ -638,7 +648,7 @@ class ViewerClose(Base):
         d = self.doc(ap)
         self.assertEqual((d["count"], d["folds"]["bgAll"]["count"], d["folds"]["agentLaunchIds"]["count"]),
                          (len(recs), len(recs), len(recs) + 3), "the cut sits at the viewer's cursor, behind the file's end")
-        self.fresh_process()                                      # a restart: no close runs in the new process
+        self.fresh_process()                                      # a restart; the viewer is not closed in the new process
         for c in (km._parse_cache, km._SUBAGENT_FRAMES):
             c.clear()
         self.clock.t = T0 + 300                                   # the agent returned
@@ -734,6 +744,113 @@ class ViewerClose(Base):
         self.assertNotIn(ap, km._bgall_cache, "the last close pops it")
         self.returns_and_drops(ap, recs, "after the last close the returned agent drops")
 
+    def test_a_close_in_a_new_process_before_any_render_retires_the_state_a_viewer_open_at_the_exit_drain_left(self):
+        """A viewer loaded before a restart and closed after it: the page sends the close although the new process never
+        rendered the viewer, so no cursor is in memory and no fold of the new process has loaded the file's document. The
+        close reads the document's folds from disk and retires the background-task state, so the card's quiet folds drop the
+        returned agent with no guard pass (a guard pass would step that state itself, the restart test above)."""
+        ap, recs = self.scene()
+        km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it
+        append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)   # the agent writes on
+        km._agent_launch_ids(ap)                                  # the card's fold steps the new records
+        self.assertTrue(em.checkpoint_write(ap))                  # the exit drain, the viewer still open
+        d = self.doc(ap)
+        self.assertEqual((d["count"], d["folds"]["bgAll"]["count"]), (len(recs), len(recs)), "the cut sits at the viewer's cursor")
+        self.fresh_process()                                      # a restart
+        for c in (km._parse_cache, km._SUBAGENT_FRAMES):
+            c.clear()
+        self.assertNotIn(ap, km._bgall_cache, "no cursor in the new process")
+        with em._CKPT_LOCK:
+            self.assertNotIn(ap, em._CKPT_DOC_FOLDS, "and no fold of it has loaded the document")
+        self.clock.t = T0 + 300                                   # the agent returned
+        self.close(self.client(viewer=False))                     # the page closes the viewer it loaded before the restart
+        for i in range(2):
+            km._agent_launch_ids(ap)                              # the card's quiet folds; no guard pass
+            ent = self.entry(ap)
+            self.assertTrue(ent is None or not ent[4], "quiet fold %d: the close retired the state and the agent dropped" % (i + 1))
+        self.assertNotIn("bgAll", self.doc(ap)["folds"], "the document no longer carries the closed viewer's state")
+
+    def test_a_close_with_nothing_to_retire_leaves_a_clean_path_clean(self):
+        """A returned agent whose quiet fold wrote its document and dropped it, and whose viewer never rendered: the close
+        finds no cursor to pop and no background-task state in the document, so it retires nothing and dirties nothing."""
+        ap, recs = self.scene()
+        self.clock.t = T0 + 300                                   # the agent returned
+        km._agent_launch_ids(ap)                                  # a quiet fold: the document written, the entry dropped
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4])
+        self.assertNotIn("bgAll", self.doc(ap)["folds"])
+        with em._CKPT_LOCK:
+            self.assertEqual((ap in em._FOLD_DIRTY, ap in em._RETIRED_FOLDS), (False, False), "clean before the close")
+        self.close(self.client(viewer=False))
+        with em._CKPT_LOCK:
+            self.assertNotIn(ap, em._FOLD_DIRTY, "the close left the path clean")
+            self.assertNotIn(ap, em._RETIRED_FOLDS, "and owes it no retirement")
+
+    def test_a_close_that_lands_inside_a_write_before_any_document_keeps_the_fold_out_of_it(self):
+        """The close runs on the handler thread and a document write on the pusher's. A close that lands after the write took
+        its cursors and before it carries the disk's states finds no document to consult, so only the cursor it popped says
+        there is something to retire, and the write must still leave the fold out."""
+        ap, recs = self.scene()
+        km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it
+        append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)   # the agent writes on
+        km._agent_launch_ids(ap)                                  # the card's fold steps the new records
+        self.assertFalse(em._ckpt_file(ap).exists(), "no document yet")
+        real, popped = em._carry_forward_states, []
+
+        def closing_carry(*a, **kw):
+            self.close(self.client(viewer=False))                 # the viewer closes while the write runs
+            popped.append(ap not in km._bgall_cache)
+            return real(*a, **kw)
+        with mock.patch.object(em, "_carry_forward_states", closing_carry):
+            self.assertTrue(em.checkpoint_write(ap))
+        self.assertEqual(popped, [True], "the close landed inside the write and popped the cursor")
+        self.assertNotIn("bgAll", self.doc(ap)["folds"], "the write left out the fold the close retired")
+        self.clock.t = T0 + 300                                   # the agent returned
+        km._agent_launch_ids(ap)                                  # a quiet fold
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "the closed viewer's cursor does not hold the returned agent's drop")
+
+    def guard_over_a_raising_reader(self, bg):
+        """A returned agent whose card's chat stopped being built before it returned (the steps cursor stands where the chat
+        last folded, behind the file's end) meets the guard's first passes over the quiet file with one of the guard's
+        readers raising at every pass: with `bg`, the open viewer's background-task step, over a tool call whose input is a
+        string (transcripts write that input as an object); otherwise the launch-ids step. The folds after the raising one
+        still run, so the agent drops at the first pass, the rate stands and each raise is counted. Returns stderr's text."""
+        ap, recs = self.scene()
+        km._agent_steps(ap)                                       # the card's steps fold, while its chat was still built
+        if bg:
+            km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it and stays open
+            self.assertIn(ap, km._bgall_cache)
+        more = chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"])
+        if bg:
+            more[1]["message"]["content"][0]["input"] = "api/notes.py"   # a tool call whose input is a string
+        append(ap, more, T0 - 38)                                 # the agent writes on; no card fold runs from here
+        want = sum(usd(r) for r in recs + more if r["type"] == "assistant") + usd(rec(T0 - 200, 0))   # and the parent's reply
+        site = "spendGuardFold:%s" % ("AttributeError" if bg else "RuntimeError")
+        fault = (contextlib.nullcontext() if bg
+                 else mock.patch.object(km, "_launch_ids_step", side_effect=RuntimeError("synthetic step fault")))
+        em._SWALLOWED.clear()
+        err = io.StringIO()
+        with fault, mock.patch("sys.stderr", new=err):
+            for n, t in enumerate((T0 + 300, T0 + 305), 1):       # the agent returned: the guard's passes over the quiet file
+                self.clock.t = t
+                self.assertAlmostEqual(km._spend_window_usd(self.leaf, t, 600, PRICES), want, places=9,
+                                       msg="pass %d: the guard's rate stands" % n)
+                ent = self.entry(ap)
+                self.assertTrue(ent is None or not ent[4], "pass %d: the folds after the raising one ran, and the agent dropped" % n)
+                self.assertEqual(em.record_cache_stats()["swallowed"], {site: 1},
+                                 "pass %d: the first pass's raise counted; over the file let go no fold runs again" % n)
+        self.assertEqual(err.getvalue().count("spendGuardFold raised"), 1, "said once, at the first raise")
+        self.assertIn(" on %s: " % ap, err.getvalue(), "the line names the file")
+        em._SWALLOWED.clear()
+        return err.getvalue()
+
+    def test_a_background_task_step_that_raises_every_pass_does_not_keep_a_returned_agent(self):
+        self.assertIn("in _bg_step", self.guard_over_a_raising_reader(bg=True), "the background-task step raised")
+
+    def test_a_launch_ids_step_that_raises_every_pass_does_not_keep_a_returned_agent(self):
+        self.assertIn("in _agent_launch_ids_fold", self.guard_over_a_raising_reader(bg=False), "the launch-ids step raised")
+
 
 class SpendGuard(Base):
     def setUp(self):
@@ -772,7 +889,8 @@ class SpendGuard(Base):
              mock.patch("sys.stderr", new=err):
             self.assertAlmostEqual(self.window(T0), sum(map(usd, recs)), places=9, msg="the guard's rate stands")
             self.assertAlmostEqual(self.window(T0 + 120), sum(map(usd, recs)), places=9)
-        self.assertEqual(km.em.record_cache_stats()["swallowed"], {"spendGuardFold:RuntimeError": 2}, "counted on /perf")
+        self.assertEqual(km.em.record_cache_stats()["swallowed"], {"spendGuardFold:RuntimeError": 6},
+                         "counted on /perf: each of the three folds asks in a try of its own, at each of the two passes")
         self.assertEqual(err.getvalue().count("spendGuardFold raised RuntimeError"), 1, "said once, at the first raise")
         self.assertIn(" on %s: synthetic fold fault" % wf, err.getvalue(), "the line names the file")
         self.assertIn("in _spend_fold_agent", err.getvalue(), "and the frame that raised")
