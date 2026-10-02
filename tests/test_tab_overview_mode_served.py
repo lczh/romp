@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """T322 (the user 2026-09-10): the tab strip grouped by tag, one tag per row, and a tag's overview, on the real /chat page
 of a hermetic kernel with four sessions under two tags. Asserted: with a session active inside an expanded row, the
-row's tag chip wears no underline; a click on the row shows the overview whose heading reads "Overview of", the tag's
-ordinary chip and the count; while it shows the message box (the whole footer) is gone, no tab renders as selected
+row's tag chip wears no underline; a click on that row folds it and does nothing else (the user 2026-10-02): the active
+session's transcript stays on screen with the message box, no overview opens, and the folded row stands in for the
+hidden tab in the selected tab's box; a second click opens it again. The overview opens from the tag menu instead: a
+right-click on the other row offers Show overview, whose pick shows the overview with the heading "Overview of", the tag's
+ordinary chip and the count, and the same menu then offers Close overview; while it shows the message box (the whole
+footer) is gone, no tab renders as selected
 (the active tab's fill is transparent) and the row wears the selected tab's box (the tab's fill token, the identity
 ring); selecting a tab clears it and brings the footer and the tab's fill back. T322b: a row's state words are the SHARED
 status chip: the ui tag's session is idle awaiting three background agents (a Codex-backed session the Codex registry
@@ -71,6 +75,7 @@ const measure = () => page.evaluate(() => {
   const rows = Array.from(document.querySelectorAll("#tabs .tab-group-head")).map((h) => {
     const chip = h.querySelector(".tab-group-chip"); const cs = getComputedStyle(h);
     return { group: h.dataset.group, folded: h.dataset.folded, holdsActive: h.classList.contains("holds-active"), shown: h.classList.contains("snap-shown"),
+             standIn: h.classList.contains("stand-in"), act: h.dataset.act || "",
              chipUnderline: chip ? getComputedStyle(chip).textDecorationLine : null, bg: cs.backgroundColor, shadow: cs.boxShadow, color: cs.color,
              padding: cs.padding, border: cs.borderTopWidth + " " + cs.borderTopStyle + " " + cs.borderTopColor, chipBg: h.style.getPropertyValue("--chip-bg") };
   });
@@ -115,12 +120,44 @@ await page.evaluate(() => document.body.classList.add("theme-light")); await pag
 out.activeLight = await measure();
 if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-groups-active-light.png", clip: { x: 0, y: 0, width: 1100, height: 260 } });
 await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(250);
-// the OTHER tag's row: the overview of ui, while web (in the still-expanded infra row) stays the active session — so the
-// strip shows an active tab whose selected dress must be gone (a click on infra's own row would fold web away instead)
-await page.click('#tabs .tab-group-head[data-group="ui"]');
+// A HEADER'S CLICK ONLY FOLDS (the user 2026-10-02): a click on infra's row, which holds the session being read (web),
+// folds the group and nothing else. web's transcript stays on screen with the message box, no overview opens, and the
+// folded row stands in for web's hidden tab in the selected tab's box. A second click opens the row again.
+const infraHead = '#tabs .tab-group-head[data-group="infra"]';
+const thread = () => page.evaluate((id) => { const t = document.querySelector('#content .thread[data-session="' + id + '"]'); if (!t) return null;
+  const r = t.getBoundingClientRect(); return { display: getComputedStyle(t).display, h: Math.round(r.height), text: t.textContent.replace(/\s+/g, " ").slice(0, 600) }; }, cfg.web);
+const foldedIs = (f) => page.waitForFunction(([s, f]) => { const h = document.querySelector(s); return !!h && h.dataset.folded === f; }, [infraHead, f], { timeout: 10000 }).then(() => true).catch(() => false);
+out.threadBefore = await thread();
+await page.click(infraHead);
+await page.mouse.move(700, 600);
+out.foldedSeen = await foldedIs("1");
+await page.waitForTimeout(500);
+out.foldedActive = await measure();
+out.foldedActive.thread = await thread();
+if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-groups-folded-active-dark.png", clip: { x: 0, y: 0, width: 1100, height: 360 } });
+await page.click(infraHead);
+await page.mouse.move(700, 600);
+out.reopenedSeen = await foldedIs("0");
+await page.waitForTimeout(400);
+out.reopened = await measure();
+// the OTHER tag's row: the overview of ui, from its tag menu (right-click, Show overview), while web (in the expanded
+// infra row) stays the active session, so the strip shows an active tab whose selected dress must be gone
+await page.click('#tabs .tab-group-head[data-group="ui"]', { button: "right" });
+const menuRows = () => page.waitForSelector(".ctx-menu.ctx-tagmenu", { timeout: 5000 }).then(() => page.evaluate(() =>
+  Array.from(document.querySelectorAll(".ctx-menu.ctx-tagmenu .ctx-item")).map((r) => ({ act: ((r.className.match(/ctx-tag-(\w+)/) || [])[1]) || "",
+    label: (r.querySelector(".ctx-item-label") || r).textContent.trim() })))).catch(() => null);
+out.menu = await menuRows();
+if (await page.$(".ctx-menu.ctx-tagmenu .ctx-tag-overview")) await page.click(".ctx-menu.ctx-tagmenu .ctx-tag-overview");   // absent: the assertions say so
 await page.mouse.move(700, 600);
 await page.waitForTimeout(600);
 out.overview = await measure();
+// the same menu while ui's overview shows: Close overview in the row's place; Escape closes the menu and leaves the view
+await page.click('#tabs .tab-group-head[data-group="ui"]', { button: "right" });
+out.menuShown = await menuRows();
+await page.keyboard.press("Escape");
+await page.mouse.move(700, 600);
+await page.waitForTimeout(300);
+out.afterMenuEscape = await page.evaluate(() => ({ snap: document.body.classList.contains("snap-mode"), menu: !!document.querySelector(".ctx-menu.ctx-tagmenu") }));
 if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-overview-dark.png", fullPage: false });
 if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-tab-overview-awaiting-dark.png", clip: { x: 0, y: 0, width: 1100, height: 360 } });   // T322b: the awaiting row's chip
 // the cascade's two exceptions, probed in the mode: a hard-blocked active tab keeps its red fill (the state class the tab
@@ -138,7 +175,7 @@ out.yatharth = await probe((id) => { const t = document.querySelector('#tabs .ta
   return { border: cs.borderTopColor, bg: cs.backgroundColor, restBgs: rest, snap: document.body.classList.contains("snap-mode") }; });
 await probe(() => document.body.classList.remove("chat-theme-yatharth"));
 await page.waitForTimeout(150);
-// a tab pick clears the overview: the docs tab, in the untagged trail (the row's click folded infra's tabs away)
+// a tab pick clears the overview: the docs tab, in the untagged trail
 await page.click('#tabs .tab[data-id="' + cfg.docs + '"]');
 await page.waitForTimeout(500);
 out.picked = await measure();
@@ -276,6 +313,38 @@ class ServedTabOverviewMode(unittest.TestCase):
         self.assertTrue(a["composerVisible"])
         self.assertEqual(r["activeLight"]["theme"], "light")
         self.assertEqual(next(row for row in r["activeLight"]["rows"] if row["group"] == "infra")["chipUnderline"], "none", "light theme: no underline either")
+        # the header's click only folds (the user 2026-10-02): infra holds web, the session being read
+        self.assertTrue(r["foldedSeen"], "the click on infra's row folded it: %r" % r["foldedActive"]["rows"])
+        f = r["foldedActive"]
+        fi = next(row for row in f["rows"] if row["group"] == "infra")
+        self.assertEqual((fi["folded"], fi["act"], fi["holdsActive"], fi["shown"]), ("1", "toggle-group", True, False), "folded, still the fold button: %r" % fi)
+        self.assertNotIn("snap-mode", f["body"].split(), "no overview: the click folds and nothing else: %r" % f["body"])
+        self.assertTrue(f["snap"] is None or f["snap"]["display"] == "none", "no overview host on screen: %r" % f["snap"])
+        self.assertNotEqual(f["footer"], "none", "the message box stays")
+        self.assertTrue(f["composerVisible"])
+        self.assertFalse(any(t["id"] == SIDS["web"] for t in f["tabs"]), "web's tab is folded away under infra: %r" % f["tabs"])
+        th = f["thread"]
+        self.assertIsNotNone(th, "web's transcript is still in the pane")
+        self.assertNotEqual(th["display"], "none", "…shown: %r" % th)
+        self.assertGreater(th["h"], 0, "…with a height: %r" % th)
+        self.assertIn("web side of the notes-api", th["text"], "…and it is web's: %r" % th)
+        self.assertEqual(th["text"], r["threadBefore"]["text"], "the same transcript as before the click")
+        self.assertTrue(fi["standIn"], "the folded row stands in for the hidden tab: %r" % fi)
+        self.assertEqual(fi["bg"], f["activeFill"], "…in the selected tab's fill: %r" % fi)
+        self.assertIn("inset", fi["shadow"], "…and its inset identity ring: %r" % fi)
+        self.assertTrue(r["reopenedSeen"], "the second click opened infra again")
+        ro = r["reopened"]
+        ri = next(row for row in ro["rows"] if row["group"] == "infra")
+        self.assertEqual((ri["folded"], ri["standIn"]), ("0", False), "open: no stand-in, the tab itself is selected: %r" % ri)
+        self.assertEqual(next(t for t in ro["tabs"] if t["active"])["id"], SIDS["web"], "web is still the session being read")
+        self.assertNotIn("snap-mode", ro["body"].split())
+        # the overview's door is the tag menu now: Show overview beside the fold, Close overview while it shows
+        self.assertIsNotNone(r["menu"], "a right-click on ui's row opened the tag menu")
+        self.assertIn({"act": "overview", "label": "Show overview"}, r["menu"], r["menu"])
+        self.assertIsNotNone(r["menuShown"])
+        self.assertIn({"act": "closeOverview", "label": "Close overview"}, r["menuShown"], r["menuShown"])
+        self.assertNotIn("overview", [m["act"] for m in r["menuShown"]], r["menuShown"])
+        self.assertEqual(r["afterMenuEscape"], {"snap": True, "menu": False}, "Escape closes the menu and leaves the overview up")
         # 2, 3, 5, 6. the overview
         o = r["overview"]
         self.assertIn("snap-mode", o["body"].split(), "the mode class: %r" % o["body"])

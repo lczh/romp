@@ -63,15 +63,13 @@ the DOM alone. The cue is measured mid-gesture too: the group about to be joined
 that would clear tags names them all before the release — the whole safety, since there is no undo stack — and a
 drag that only reorders shows neither.
 
-THE OPEN SESSION IS CHOSEN, AND A HEADER IS READ BEFORE IT IS PRESSED (2026-09-29). A header's click folds its group
-except on an OPEN group whose section the pane shows and which holds the open session: that click is the way back to
-the transcript and folds nothing (render.ts makeGroupHead, pinned by tab-snapshot-pane.test.ts). The page used to open
-whichever session's frame reached it first, and when the header's group contained that session at a re-fold's click (a
-grouped session, or one a drop had moved into the group), the re-fold waited out its bound for a fold that by design
-never comes, always at one of the two re-folds that follow an open. So the saved state names a trail session that no
-recorded gesture drags, drops on or renames (PINNED, asserted from the driver's record), each fold click first reads
-what the header says its click does (the way back is taken only when the header shows every state that makes it one,
-and tallied: the main run expects none), and a last phase meets the way back on purpose.
+THE OPEN SESSION IS CHOSEN, AND A HEADER IS READ BEFORE IT IS PRESSED (2026-09-29). Until 2026-10-02 a header's click
+folded its group except on an OPEN group whose section the pane showed and which held the open session: that click was
+the way back to the transcript and folded nothing. Since then a header's click only folds or opens (the user 2026-10-02;
+render.ts makeGroupHead, pinned by tab-snapshot-pane.test.ts) and the way back is gone. The saved state still names a
+trail session that no recorded gesture drags, drops on or renames (PINNED, asserted from the driver's record), each
+fold click still reads what the header says its click does and tallies any way back it meets (none expected anywhere
+now), and a last phase folds the group holding the open session on purpose: one click folds it.
 
 Each case records the row layout (every tab's left/top/width), the release point and the landing rect, and
 expects the tab to sit where the pointer was released: after every other tab on the release row whose
@@ -81,9 +79,8 @@ strip's rebuilds) says, when a case fails, whether a drop reached the strip at a
 extension deps or a Playwright browser. SYNTHETIC fixtures only (the notes-api demo world, host TESTHOST,
 placeholder sids). TAB_DRAG_DIST=<dir> serves another tree's UI bundle (the bisect's before);
 TAB_DRAG_DUMP=<path> writes the whole measurement; TAB_DRAG_SHOTS=<prefix> writes strip screenshots of the packed layouts;
-TAB_DRAG_ACTIVE=<name> opens another session than PINNED (a qa member meets the way back at the re-fold after the
-unfolded shape; an infra member, or backup, a trail session at boot that the first drop between the two folded
-headers moves into infra, at the fold ahead of the folded-header join)."""
+TAB_DRAG_ACTIVE=<name> opens another session than PINNED (a qa member, or an infra member, or backup, a trail session at
+boot that the first drop between the two folded headers moves into infra: each once met the way back, which is gone)."""
 import json
 import os
 import re
@@ -443,13 +440,12 @@ await page.waitForFunction((n) => { const names = Array.from(document.querySelec
 //    trail's head, a header dragged across the shared row still reorders the groups, and with one group opened again
 //    the folded one shares its row behind a gutter. Then the same under the classic theme.
 // A HEADER'S CLICK, READ BEFORE IT IS PRESSED (2026-09-29). The header says what its click does in data-act, from the state it
-// rendered (render.ts makeGroupHead): "toggle-group" folds or opens, and "show-transcript" is THE WAY BACK, the click on an
-// open group the pane shows that holds the open session, which puts the transcript back and folds nothing (pinned by
-// tab-snapshot-pane.test.ts). A blind click there waited out the bound for a fold that never comes, and a second blind click
-// on a header that DID fold would open it again, so the header is read first. The way back is taken only when the header
-// shows every state that makes it one (shown, open, holding the open session), and tallied; show-transcript on any other
-// header is a regression and throws with what the header showed. Then the fold's own click, on a header offering the fold
-// from the opposite state, and the wait for the fold's render (its members' tabs gone, or back), each bound named on expiry.
+// rendered (render.ts makeGroupHead): "toggle-group" folds or opens. Until 2026-10-02 an open group the pane showed, holding
+// the open session, offered "show-transcript" instead, THE WAY BACK, which put the transcript back and folded nothing; a
+// header's click only folds since then (pinned by tab-snapshot-pane.test.ts), so a header offering it is a regression: taken
+// and tallied when the header shows every state that once made it one (shown, open, holding the open session), so the
+// assertions name it, and thrown with what the header showed otherwise. Then the fold's own click, on a header offering the
+// fold from the opposite state, and the wait for the fold's render (its members' tabs gone, or back), each bound named on expiry.
 const headState = (name) => page.evaluate((n) => {
   const h = document.querySelector(`#tabs .tab-group-head[data-group="${n}"]`), a = document.querySelector("#tabs .tab.active");
   return h ? { act: h.dataset.act || "", folded: h.dataset.folded || "", cls: h.className, current: h.getAttribute("aria-current"),
@@ -634,10 +630,10 @@ const folder = L.rows[trailRow()][4].name;
 out.foldedJoin = { group: open0[1], joiner: folder };
 await dragCopy("join: a tab dragged onto a FOLDED group's header joins it", folder, "", { head: open0[1] }, 0.75, { tagWrite: true });
 out.joinEnd = { tags: tagsOf(), rows: (await layout()).rows.map((r) => r.map((t) => t.name)) };
-// 7. THE WAY BACK, MET ON PURPOSE (2026-09-29): the one header click that folds nothing, so foldGroup's reading of it is
-//    exercised whatever session the main run opened. A pick of one of qa's members (a pick also ends the pane's section
-//    view, setActive) makes qa's header the holder of the open session; a fold and an open put qa's section in the pane,
-//    open; the re-fold's header then offers the way back, which is taken exactly once, and the click after it folds.
+// 7. THE GROUP HOLDING THE OPEN SESSION, FOLDED ON PURPOSE: until 2026-10-02 this was where the way back met a click (a
+//    fold and an open put qa's section in the pane, and the re-fold's header offered the transcript back instead of the
+//    fold). A pick of one of qa's members makes qa's header the holder of the open session; a fold and an open, then
+//    the re-fold, which now offers the fold and folds on its one click, with no section view put up by any of them.
 const wbCase = { group: "qa", setup: [], wayBacks: [] };
 out.wayBackCase = wbCase;
 try {   // recorded, not thrown: every case above already has its result, and a throw here would fail them all with this phase
@@ -653,6 +649,7 @@ try {   // recorded, not thrown: every case above already has its result, and a 
   wbCase.offered = await headState("qa");   // what the re-fold's header offers before the press
   await foldGroup("qa", true, wbCase.wayBacks);
   wbCase.after = await headState("qa");
+  wbCase.view = await page.evaluate(() => ({ snap: document.body.classList.contains("snap-mode"), shown: !!document.querySelector("#tabs .tab-group-head.snap-shown") }));
 } catch (e) { wbCase.error = String((e && e.stack) || e); }
 out.cases = cases;
 fs.writeFileSync(cfg.out, JSON.stringify(out));   // a file, not stdout: the per-case logs outgrow one pipe write
@@ -1199,10 +1196,10 @@ class ServedTabDragReorder(unittest.TestCase):
             self.assertEqual(norm(end[name]), norm(want),
                              "%s holds what it held, plus only the session the last case deliberately joined" % name + detail)
 
-    # ── THE OPEN SESSION AND THE WAY BACK (2026-09-29) ──
-    # A header's click folds its group, except the way back: on an open group the pane shows, holding the open session,
-    # the click puts the transcript back and folds nothing. The page opens a chosen session (never the first frame's),
-    # the main run's fold clicks meet no way back, and the last phase meets one on purpose.
+    # ── THE OPEN SESSION AND THE FOLD (2026-09-29; the way back gone 2026-10-02) ──
+    # A header's click folds or opens its group and does nothing else (the user 2026-10-02): no click is a way back to
+    # the transcript any more. The page opens a chosen session (never the first frame's), the main run's fold clicks meet
+    # no way back, and the last phase folds the group holding the open session on one click.
     def test_the_page_opens_the_pinned_session(self):
         r = self._run()
         o = r["opened"]
@@ -1221,22 +1218,21 @@ class ServedTabDragReorder(unittest.TestCase):
 
     def test_no_fold_click_of_the_main_run_meets_the_way_back(self):
         r = self._run()
-        self.assertEqual(r["wayBack"], [], "no header's group contains the open session, so every header click of the main run"
-                         " folds or opens; a way back here means the header's group contained the open session at that click"
-                         " (a grouped session, or one a drop moved into a group): %r, opened %r" % (r["wayBack"], r["opened"]))
+        self.assertEqual(r["wayBack"], [], "every header click of the main run folds or opens; a way back here is a regression,"
+                         " since a header's click only folds (2026-10-02): %r, opened %r" % (r["wayBack"], r["opened"]))
 
-    def test_the_way_back_is_one_click_and_the_click_after_it_folds(self):
+    def test_the_group_holding_the_open_session_folds_on_one_click(self):
         c = self._run()["wayBackCase"]
         detail = "\n  %r" % (c,)
-        self.assertIsNone(c.get("error"), "the way-back phase ran to its end" + detail)
-        self.assertTrue(c["picked"], "the pick opened a qa member and ended the pane's section view" + detail)
+        self.assertIsNone(c.get("error"), "the phase ran to its end" + detail)
+        self.assertTrue(c["picked"], "the pick opened a qa member" + detail)
         self.assertEqual(c["setup"], [], "the fold and the open ahead of the re-fold are plain fold clicks" + detail)
-        self.assertEqual(c["offered"]["act"], "show-transcript",
-                         "open, shown in the pane and holding the open session, the header offers the way back" + detail)
-        self.assertEqual(c["wayBacks"], [{"group": "qa", "folded": True, "active": c["member"]}],
-                         "the re-fold took the way back exactly once, on qa's header, with the picked member open" + detail)
-        self.assertEqual(c["after"]["folded"], "1", "…and the click after it folded the group" + detail)
+        self.assertEqual((c["offered"]["act"], c["offered"]["folded"]), ("toggle-group", "0"),
+                         "open and holding the open session, the header offers the fold, never a way back (2026-10-02)" + detail)
+        self.assertEqual(c["wayBacks"], [], "no click met a way back" + detail)
+        self.assertEqual(c["after"]["folded"], "1", "the one click folded the group" + detail)
         self.assertIn("collapsed", c["after"]["cls"].split(), "…as the header renders it" + detail)
+        self.assertEqual(c["view"], {"snap": False, "shown": False}, "and no section view came up: the click folds and nothing else" + detail)
 
 
 class PinnedSessionRecordCheck(unittest.TestCase):
