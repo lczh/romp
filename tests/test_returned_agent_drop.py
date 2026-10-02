@@ -39,7 +39,6 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     window equals a reference sum at every cycle; agents that fall silent for over two minutes mid-run are dropped and
     resumed with no whole read; without the guard, a card cursor left behind keeps its agent resident.
 SYNTHETIC fixtures only: placeholder ids, the notes-api demo names, transcripts written here."""
-import contextlib
 import inspect
 import io
 import json
@@ -813,22 +812,21 @@ class ViewerClose(Base):
     def guard_over_a_raising_reader(self, bg):
         """A returned agent whose card's chat stopped being built before it returned (the steps cursor stands where the chat
         last folded, behind the file's end) meets the guard's first passes over the quiet file with one of the guard's
-        readers raising at every pass: with `bg`, the open viewer's background-task step, over a tool call whose input is a
-        string (transcripts write that input as an object); otherwise the launch-ids step. The folds after the raising one
-        still run, so the agent drops at the first pass, the rate stands and each raise is counted. Returns stderr's text."""
+        readers raising at every pass: with `bg`, the open viewer's background-task step (em._bg_step, which the fold looks
+        up at call time, patched to raise as the launch-ids variant patches its own step, so the test does not rest on a
+        product step's crash: review round four); otherwise the launch-ids step. The folds after the raising one still
+        run, so the agent drops at the first pass, the rate stands and each raise is counted. Returns stderr's text."""
         ap, recs = self.scene()
         km._agent_steps(ap)                                       # the card's steps fold, while its chat was still built
         if bg:
             km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it and stays open
             self.assertIn(ap, km._bgall_cache)
         more = chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"])
-        if bg:
-            more[1]["message"]["content"][0]["input"] = "api/notes.py"   # a tool call whose input is a string
         append(ap, more, T0 - 38)                                 # the agent writes on; no card fold runs from here
         want = sum(usd(r) for r in recs + more if r["type"] == "assistant") + usd(rec(T0 - 200, 0))   # and the parent's reply
-        site = "spendGuardFold:%s" % ("AttributeError" if bg else "RuntimeError")
-        fault = (contextlib.nullcontext() if bg
-                 else mock.patch.object(km, "_launch_ids_step", side_effect=RuntimeError("synthetic step fault")))
+        site = "spendGuardFold:RuntimeError"
+        fault = mock.patch.object(em, "_bg_step", side_effect=RuntimeError("synthetic step fault")) if bg \
+            else mock.patch.object(km, "_launch_ids_step", side_effect=RuntimeError("synthetic step fault"))
         em._SWALLOWED.clear()
         err = io.StringIO()
         with fault, mock.patch("sys.stderr", new=err):
@@ -846,7 +844,7 @@ class ViewerClose(Base):
         return err.getvalue()
 
     def test_a_background_task_step_that_raises_every_pass_does_not_keep_a_returned_agent(self):
-        self.assertIn("in _bg_step", self.guard_over_a_raising_reader(bg=True), "the background-task step raised")
+        self.assertIn("in _bg_scan_all_cached", self.guard_over_a_raising_reader(bg=True), "the background-task step raised")
 
     def test_a_launch_ids_step_that_raises_every_pass_does_not_keep_a_returned_agent(self):
         self.assertIn("in _agent_launch_ids_fold", self.guard_over_a_raising_reader(bg=False), "the launch-ids step raised")

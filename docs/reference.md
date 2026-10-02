@@ -2875,8 +2875,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   does the same for the hydration rows; `swallowed` counts raises two handlers
   keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
   returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
-  spend guard's agent folds, each in a guard of its own, so a fold that raises
-  keeps the file's records only when no later fold drops them), each said on
+  spend guard's agent folds, each in a try of its own, so a raise does not skip
+  the ones after it and the file's records stay only when no later fold drops
+  them), each said on
   stderr, with the file and the traceback, at its first, tenth and hundredth
   raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
