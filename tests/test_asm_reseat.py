@@ -13,7 +13,9 @@ the share is not re-seated; a re-seat the restore refuses, or an entry whose lea
 whole, and the writer's churn hold keeps its document as it is until the share; and an entry whose postal author still
 waits on the log is not re-seated. Synthetic transcripts only: invented text in the notes-api demo world, private
 placeholder ids."""
+import contextlib
 import gzip
+import io
 import json
 import os
 import random
@@ -559,6 +561,21 @@ def _reader_entry(path):
         return em._JSONL_CACHE.get(str(path))
 
 
+def _named_fold(tc, path, name):
+    """A named fold over `path`, as the kernel's folds run: its cursor is one the file's fold document lacks, so a drop of the
+    file writes the document first (the one rule), charged to the cycle's budget. Unregistered at cleanup."""
+    tc.addCleanup(lambda: em._FOLD_REG.pop(name, None))
+    em.fold_records({}, str(path), lambda: 0, lambda s, r: s + 1, ckpt=name)
+
+
+def _cycle(tc, cap, spent=0):
+    """The pusher cycle's checkpoint budget at `cap` with `spent` already taken, set back at cleanup."""
+    saved = dict(em._CKPT_CYCLE)
+    tc.addCleanup(lambda: (em._CKPT_CYCLE.clear(), em._CKPT_CYCLE.update(saved)))
+    em.checkpoint_cycle_begin(cap)
+    em._CKPT_CYCLE["spent"] = spent
+
+
 def _chat(prefix, t0, n, parent=None):
     """n settled turns, uuids under `prefix` (unique across this module's sessions: the hydrated memo is keyed by uuid)."""
     recs = []
@@ -845,6 +862,44 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         _quiet_drop(self.leaf)
         self.assertIsNone(_reader_entry(self.leaf), "an assembly entry at another generation keeps nothing")
 
+    def test_a_pin_check_that_raises_lets_the_drop_go_ahead_counted_and_said(self):
+        """The pin check stats the leaf's document, and a stat refused for a reason other than not-found (an unsearchable
+        checkpoints directory, an I/O error) raised out of the drop where the base popped. It now counts as no pin: the drop
+        goes ahead, counted under releaseFailed and said once, in words that say so (round one of the fold's review)."""
+        _aged(self.leaf)
+        self.parse()                                                  # a whole entry, no document: it would pin the leaf
+        st0 = dict(em.record_cache_stats())
+        f0 = em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(em, "_asm_document_would_restore", side_effect=PermissionError(13, "Permission denied")), \
+                contextlib.redirect_stderr(err):
+            _quiet_drop(self.leaf)
+        self.assertIsNone(_reader_entry(self.leaf), "the drop went ahead, as before the pin existed")
+        st1 = em.record_cache_stats()
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
+        self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "counted")
+        self.assertIn("the drop went ahead", err.getvalue())
+
+
+class OwedDrops(Episode):
+    """A record drop the cycle's budget defers is owed and paid later; the budget's estimate of a file's first document lets a
+    file over four cycle caps fit a fresh cycle (round one of the fold's review)."""
+
+    def test_a_first_document_of_a_file_over_four_cycle_caps_is_written_in_a_fresh_cycle(self):
+        """A drop of a file with no document yet estimates the write from the file (an eighth of its size, taken twice for the
+        carry's read and the write), so a file over four caps (32 MiB at the default 8 MiB) never fit and its drop was
+        deferred at every cycle. The estimate is now at most half the cap: a fresh cycle takes it, writes and drops."""
+        _named_fold(self, self.leaf, "firstWrite")
+        self.assertFalse(em._ckpt_file(self.leaf).exists(), "the premise: no document yet")
+        cap = os.path.getsize(self.leaf) // 6
+        self.assertGreater(2 * (os.path.getsize(self.leaf) // 8), cap, "the premise: the file's own estimate is over the cap")
+        _cycle(self, cap)
+        cv0 = dict(em.checkpoint_stats()["converge"])
+        self.assertEqual(em.release_records([self.leaf]), 1, "written and dropped in this cycle")
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual((cv["dropWrites"] - cv0["dropWrites"], cv["dropDeferred"] - cv0["dropDeferred"]), (1, 0))
+        self.assertTrue(em._ckpt_file(self.leaf).exists())
+
 
 class ReleaseOnTheEndOfUse(Episode):
     """The assembly side: em.release_assembly drops a leaf's assembly entries (one session's, when named), gives the lazy index
@@ -933,11 +988,12 @@ class ReleaseOnTheEndOfUse(Episode):
             self.assertEqual(len(set(em._HYDRATED) & pre), 0, "the atoms-only entry's bodies went with it (of %d held)" % len(held))
             self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()))
 
-    def test_a_release_keeps_the_hydrated_bodies_another_entry_still_names(self):
+    def test_a_release_drops_the_hydrated_bodies_another_entry_also_names_and_that_entry_reads_them_back(self):
         """The hydrated memo is keyed by uuid alone, and another live entry can name the same records: an SDK fork child's
-        transcript carries its parent's history verbatim. Releasing one session's entry leaves the bodies the other entry's
-        lazy index still names, which removing would only have turned into seek reads from disk at that entry's next read
-        (round one of the review), and they go with the last entry that names them."""
+        transcript carries its parent's history verbatim. Releasing one session's entry drops its bodies outright, those the
+        other entry's lazy index also names included, and that entry's next hydrate reads each back with one seek read, to
+        the same bodies (round one of the fold's review: sparing them meant reading every other entry's rows at every
+        release)."""
         twin = str(self.td / (PEER + ".jsonl"))
         shutil.copyfile(self.leaf, twin)                              # the fork child's file: the history, record for record
 
@@ -961,13 +1017,60 @@ class ReleaseOnTheEndOfUse(Episode):
         em.hydrate(out, SID)
         with em._ASM_CKPT_LOCK:
             held = set(em._HYDRATED) & shared
+            bodies = {u: em._HYDRATED[u][0] for u in held}
         self.assertTrue(held, "the bodies were memoized")
         self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
         with em._ASM_CKPT_LOCK:
-            self.assertEqual(set(em._HYDRATED) & shared, held, "the bodies the peer's index still names stay")
-        self.assertEqual(em.release_assembly(twin, rompuuid=PEER), 1)
+            self.assertEqual(set(em._HYDRATED) & shared, set(), "the released entry's bodies go, the peer's index naming them too")
+            self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()))
+        with em._READ_BYTES_LOCK:
+            b0 = em._READ_BYTES.get(twin, 0)
+        em.hydrate(t2, PEER)
+        with em._READ_BYTES_LOCK:
+            read = em._READ_BYTES.get(twin, 0) - b0
         with em._ASM_CKPT_LOCK:
-            self.assertEqual(set(em._HYDRATED) & shared, set(), "and go with the last entry that names them")
+            self.assertEqual({u: em._HYDRATED[u][0] for u in held if u in em._HYDRATED}, bodies,
+                             "the peer's next hydrate reads them back, the same bodies")
+        self.assertGreater(read, 0, "from its own file, a seek read per body")
+        self.assertLessEqual(read, self.doc_cut(), "of pre-cut records only, never the whole file")
+
+    def test_a_release_reads_no_other_entrys_rows(self):
+        """The release costs its own entry's rows, whatever else the cache holds (round one of the fold's review: it subtracted
+        every other entry's lazy rows from the bodies it removed, so twenty dead lanes against thirty peers of fifty thousand
+        rows added seconds to a timeline build, under its lock). With thirty lazy peers in the cache, each naming one of the
+        released entry's records, and that entry's bodies in the memo, no peer's rows are read, and every body of the
+        released entry goes."""
+        out, _ = self.parse()
+        self.assertTrue(self.settle(out))
+        self.fresh()
+        out, mode = self.parse()
+        self.assertEqual(mode, "restore")
+        em.hydrate(out, SID)
+        pre = [r[0] for r in self.entry()["index"].records if r]
+        reads = []
+
+        class Rows:                                                   # a peer's lazy index that reports every read of its rows
+            def __init__(self, k, rows):
+                self.k, self._rows = k, rows
+
+            @property
+            def records(self):
+                reads.append(self.k)
+                return self._rows
+
+            def release(self):
+                pass
+        with em._ASM_LOCK:
+            for k in range(30):
+                rows = [("peer%d-%d" % (k, i), 0, 0) for i in range(2000)] + [(pre[k], 0, 0)]
+                em._ASM_CACHE[(str(self.td / ("peer%d.jsonl" % k)), "peer-%d" % k, False)] = {"index": Rows(k, rows)}
+        with em._ASM_CKPT_LOCK:
+            held = set(em._HYDRATED) & set(pre)
+        self.assertTrue(held & set(pre[:30]), "the premise: bodies the peers name are in the memo")
+        self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
+        self.assertEqual(reads, [], "no peer's rows were read")
+        with em._ASM_CKPT_LOCK:
+            self.assertEqual(set(em._HYDRATED) & set(pre), set(), "every body of the released entry went (of %d held)" % len(held))
             self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()))
 
 

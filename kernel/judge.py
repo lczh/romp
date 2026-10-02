@@ -3156,7 +3156,7 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
         try:
             em.release_assembly(leaf, rompuuid=fsid)
         except Exception as e:                    # noqa: BLE001 — a trim never fails the parse it rides
-            em.release_failed("retired parse", leaf, e)
+            em.release_failed("retired parse", leaf, e, sid=fsid)
         return
     slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
@@ -9096,7 +9096,7 @@ def _note_leaf(sid, path_str):
             #                                           of the retired leaf until the cache's count cap
             _release_retired_records(sid, prev, path_str)
         except Exception as e:                        # noqa: BLE001 — a trim never fails discover
-            em.release_failed("leaf flip", prev, e)
+            em.release_failed("leaf flip", prev, e, sid=sid)
 
 
 def _release_retired_records(sid, prev, leaf):
@@ -9117,7 +9117,7 @@ def _release_retired_records(sid, prev, leaf):
         links = em.resume_fork_links(em._load_states(str(STATESDIR / (sid + ".jsonl"))))
         keep = {str(f) for f in em._lineage_closure(Path(leaf), cands, links)}
     except Exception as e:                         # noqa: BLE001 — the lineage could not be read: nothing is dropped on a guess
-        em.release_failed("leaf flip lineage", prev, e)
+        em.release_failed("leaf flip lineage", prev, e, sid=sid)
         return
     with _LEAF_LOCK:
         keep.update(str(p) for p in _LEAF_SEEN.values())

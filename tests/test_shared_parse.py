@@ -556,6 +556,8 @@ class OneParseForBoth(unittest.TestCase):
         self.assertEqual(jd._LEAF_SEEN.get(C), leaf2, "the flip took effect")
         self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the drop that could not run is counted")
         self.assertEqual(err.getvalue().count("leaf flip lineage"), 1, "and said: %r" % err.getvalue())
+        self.assertIn("for session %s" % C, err.getvalue(), "naming the session, which the cleared file's own name does not "
+                      "(round one of the fold's review)")
         with em._JSONL_CACHE_LOCK:
             self.assertIs(em._JSONL_CACHE.get(leaf1), rec0, "nothing is dropped on a guess: the retired leaf's records stand")
 

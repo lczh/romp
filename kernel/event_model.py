@@ -1367,14 +1367,20 @@ def _asm_hold_of(key, ent):
     of their adapters still holds (_asm_held_bytes), which the pop cannot free before that entry's next visit replaces it (a
     restored entry; a whole one whose leaf has a document a restore would take); (None, 0) when none folds over it. Takes
     _ASM_LOCK for the snapshot alone, never under the reader's lock; the pin test's stat and sidecar read run with no lock
-    held."""
+    held. A pin test that raises (a stat refused other than not-found) counts as no pin, so the drop goes ahead as it did
+    before the pin existed, counted and said through release_failed (round one of the fold's review)."""
     with _ASM_LOCK:
         entries = list(_ASM_CACHE.values())
     gen, kind, held = ent[6], None, 0
     for e in entries:
         row = (e.get("recs") or {}).get(key) if e else None
         if row is not None and len(row) == 3 and row[0] == gen:
-            if _asm_entry_pins(e, key):
+            try:
+                pins = _asm_entry_pins(e, key)
+            except Exception as exc:                      # noqa: BLE001 — the pin never fails the drop it guards
+                release_failed("record drop's pin check", key, exc, outcome="not pinned: the drop went ahead")
+                pins = False
+            if pins:
                 return "pin", 0
             kind, held = "held", max(held, _asm_held_bytes(e, key, ent))
     return kind, held
@@ -1438,7 +1444,10 @@ def _write_then_drop(key, ent, pop=True):
         except OSError:
             est = 0
         if est <= 0:                                      # no previous document (a first write, or one the fallback removed): an
-            est = max(4096, int(ent[1]) // 8)             #  estimate from the file, never a free pass against the budget
+            est = max(4096, int(ent[1]) // 8)             #  estimate from the file, never a free pass against the budget, and at
+            with _CKPT_LOCK:                              #  most half the cycle's cap, so a file over four caps fits a fresh cycle
+                est = min(est, max(1, _CKPT_CYCLE["cap"] // 2))   # instead of deferring at every one (the true-up below charges
+            #                                                   what was written; round one of the fold's review)
         if not checkpoint_cycle_take(2 * est):           # the previous document read for the carry, and about as much written:
             oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
             with _CKPT_LOCK:
@@ -5491,8 +5500,8 @@ def evict_document(leaf_path):
 
 def _asm_lazy_uuids(e):
     """The uuids of the pre-cut records assembly entry `e` serves as lazy atoms, whose bodies the hydrated memo holds, one at a
-    time (no set is built for an entry only checked against): its lazy index's record rows, or the atoms-only form's prefix
-    atoms (read without materializing any). Nothing for a whole entry."""
+    time: its lazy index's record rows, or the atoms-only form's prefix atoms (read without materializing any). Nothing for a
+    whole entry."""
     ix = e.get("index") if e else None
     if ix is not None:
         for r in ix.records or ():
@@ -5516,23 +5525,19 @@ def release_assembly(leaf_path, rompuuid=None):
     popped entry's lazy index gives its memo back outside _ASM_LOCK (_asm_release), and the hydrated bodies of its pre-cut
     records leave the memo: nothing serves that entry's atoms again, and the session parsed again restores and hydrates
     afresh, as after an eviction. The memo is keyed by uuid alone, and other live entries can name the same records (an SDK
-    fork child's transcript carries its parent's history verbatim, a resume fork's leaf walks through the old one's), so a
-    body any remaining entry's lazy index or atoms-only prefix still names stays (round one of the review: removing it only
-    turned that entry's next read of it into a seek read from disk). Returns how many entries went, counted `released`
-    among the parse's road counters."""
+    fork child's transcript carries its parent's history verbatim, a resume fork's leaf walks through the old one's): those
+    bodies go too, and such an entry's next read of one is a seek read from disk. No other entry's rows are read here (round
+    one of the fold's review: subtracting what every other entry named read every peer's rows, under the timeline build's
+    lock at a dead lane, to spare reads that cost one seek each). Returns how many entries went, counted `released` among
+    the parse's road counters."""
     rp = os.path.realpath(str(leaf_path))
     with _ASM_LOCK:
         keys = [k for k in _ASM_CACHE if k[0] == rp and (rompuuid is None or k[1] == str(rompuuid))]
         popped = [e for e in (_ASM_CACHE.pop(k, None) for k in keys) if e is not None]
-        others = list(_ASM_CACHE.values()) if popped else []
     uuids = set()
     for e in popped:
         _asm_release(e)                              # OUTSIDE _ASM_LOCK: release takes _MAT_LOCK, never nested with it
         uuids.update(_asm_lazy_uuids(e))
-    for e in others:                                 # at most the cache's 256 entries, their record rows read once, outside the lock
-        if not uuids:
-            break
-        uuids.difference_update(_asm_lazy_uuids(e))
     if uuids:
         with _ASM_CKPT_LOCK:
             for u in uuids:
@@ -5547,11 +5552,13 @@ def release_assembly(leaf_path, rompuuid=None):
 _RELEASE_FAILED = set()            # (where, path) whose release at the end of a file's use raised: said once each
 
 
-def release_failed(where, path, exc):
+def release_failed(where, path, exc, sid=None, outcome="memory left as it stood"):
     """A release at the end of a file's use raised (a stat or a sidecar read refused, a lineage that does not resolve): the
     caller carries on with the memory as it stood before the release existed, since a trim must never fail the event it rides
     (discover's leaf flip, under every pane; a timeline frame; a viewer's close). Counted `releaseFailed` among the parse's
-    road counters at every failure, said on stderr once per (where, path) (2026-10-01)."""
+    road counters at every failure, said on stderr once per (where, path) (2026-10-01), with the session `sid` when the
+    caller has one; the memo keys on the event and the path alone, so of several sessions failing on a shared leaf only the
+    first is named. `outcome` says what happened instead (a record drop whose pin check raised went ahead)."""
     _asm_stat("releaseFailed")
     k = (str(where), str(path))
     if k in _RELEASE_FAILED:
@@ -5560,8 +5567,9 @@ def release_failed(where, path, exc):
         _RELEASE_FAILED.clear()                      # re-arm past the bound: a repeated line beats a silence that never lifts
     _RELEASE_FAILED.add(k)
     try:
-        sys.stderr.write("romp event-model: releasing the caches of %s at %s failed (memory left as it stood; said once per "
-                         "file): %s\n" % (path, where, ("%s: %s" % (type(exc).__name__, exc))[:200]))
+        sys.stderr.write("romp event-model: releasing the caches of %s%s at %s failed (%s; said once per file): %s\n"
+                         % (path, " for session %s" % sid if sid else "", where, outcome,
+                            ("%s: %s" % (type(exc).__name__, exc))[:200]))
     except Exception:
         pass
 

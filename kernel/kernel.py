@@ -34006,14 +34006,14 @@ def _release_subagent_view(sid, agent_id):
         ppath = _path_of(sid)
         apath = _subagent_file(ppath, agent_id) if ppath else None
     except Exception as e:                        # noqa: BLE001 — a trim never fails the viewer's close, nor goes unsaid
-        em.release_failed("viewer close", agent_id, e)
+        em.release_failed("viewer close", agent_id, e, sid=sid)
         return
     if apath is not None:
         try:
             jd.parse_cache_drop_leaf(str(apath), sid)
             em.release_assembly(str(apath), rompuuid=sid)
         except Exception as e:                    # noqa: BLE001 — a trim never fails the viewer's close
-            em.release_failed("viewer close", apath, e)
+            em.release_failed("viewer close", apath, e, sid=sid)
 
 
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
@@ -51568,7 +51568,7 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
                 keep.update((str(o["path"]), os.path.join(os.path.dirname(str(o["path"])), o["sid"] + ".jsonl")))
         em.release_records({str(path), os.path.join(os.path.dirname(str(path)), sid + ".jsonl")}, keep=keep)
     except Exception as e:                        # noqa: BLE001 — a trim never drops a timeline frame
-        em.release_failed("dead lane", path, e)
+        em.release_failed("dead lane", path, e, sid=sid)
 
 
 def _dead_lane_marks(marks, t0):
