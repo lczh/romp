@@ -2375,10 +2375,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `thresholds` as lists, and `stats` (per generation: `collections`,
   `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
-  lazy bodies read on demand: `entries`, and `bytes`, the records' length on
-  disk, which `capBytes` bounds, a proxy that locates the holder without
-  sizing it: decoded bodies usually weigh more, but escaped text can make the
-  disk bytes exceed the decoded storage),
+  lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
+  memory of the body fields kept plus an estimate of each entry's own
+  overhead (its tuple, key and table slot), which `capBytes` bounds; a body an atom
+  still holds counts there too, so while that atom lives an eviction frees
+  less than `bytes` drops; the cap is a 48th of physical memory, never under
+  256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it outright),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
   lazy indexes alive, a weak count), `materializedLruSlots` (the
@@ -2919,6 +2921,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reason), and `refresh`: the document refreshes a restored entry's settle
   started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
   time); the refresh's own parse counts under `parse` as `private`.
+  Two more count what the hydrated-body memo does: `hydratedHits`, the
+  fills it served without a read, and `hydratedEvicted`, the entries its
+  cap pushed out. A memo hit for an atom whose body another thread had
+  already written when this call looked is not counted, since that
+  thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
   come from: `materialized` atoms built from the document's rows since boot,
   `materializedBy` (per consumer), `materializedByStage` (the same builds
