@@ -33991,7 +33991,9 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
 def _push_subagents(clients, now, live_map):
     """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
     cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
-    no polling loop of its own — and costs a stat per open viewer when nothing changed."""
+    no polling loop of its own — and costs a stat per open viewer when nothing changed. A viewer that closed while its
+    render ran (the close runs on the handler thread) is not sent the frame, and the background-task cursor that render
+    left is popped here, since the close's own pop ran before the render wrote it (2026-10-02)."""
     for c in clients:
         for (ssid, aid) in list((c.get("subagents") or {}).keys()):
             try:
@@ -33999,12 +34001,15 @@ def _push_subagents(clients, now, live_map):
             except Exception:
                 sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
                 continue
+            if not c.get("alive", True) or (ssid, aid) not in (c.get("subagents") or {}):
+                _subagent_viewer_closed(ssid, aid)    # closed during the render: the cursor it left goes with it
+                continue
             _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
 
 
 def _subagent_viewer_closed(sid, agent_id):
-    """A subagent viewer closed (closeSubagent, or its socket went away; 2026-10-02): the background-task cursor its render
-    left on the agent's own file (_bg_scan_all_cached, run for a task notification or a nested background launch in that
+    """A subagent viewer closed (closeSubagent, its socket went away, or the pusher found it closed after its render;
+    2026-10-02): the background-task cursor its render left on the agent's own file (_bg_scan_all_cached, run for a task notification or a nested background launch in that
     file) is popped, unless another client still has the same viewer open. No other reader steps that cursor, and once the
     agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good (em._document_at_witness)."""
     try:

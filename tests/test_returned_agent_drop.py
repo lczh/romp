@@ -16,7 +16,8 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     does not carry does not hold it;
   * the kernel's agent-file folds take the new policy and the parent-leaf fold does not;
   * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification
-    and a nested background launch, so the agent still drops when it returns;
+    and a nested background launch, so the agent still drops when it returns, a close that lands while the pusher renders
+    the viewer included;
   * the spend guard routes its agent reads through the dropping folds (never starting a steps state for a workflow agent,
     never folding while a viewer's parse holds the records), prices a dropped file from its memo without entering it
     again, prices a resumed agent from its memo and the tail without a whole read (a response split across the cut counted
@@ -527,6 +528,40 @@ class ViewerClose(Base):
         self.assertTrue(ent is None or not ent[4], "the closed viewer's cursor no longer holds the returned agent's drop")
         self.assertNotIn(ap, km._bgall_cache)
         self.assertIn("_subagent_viewer_closed(*_sv)", inspect.getsource(km.Handler._ws), "a socket that goes away closes its viewers")
+
+    def test_a_viewer_closed_while_the_pusher_renders_it_lets_go_of_the_cursor_that_render_left(self):
+        """The close runs on the handler thread and the pusher's re-push renders on its own: a close that lands during the
+        render pops nothing (the render has not folded the file yet), so the pusher, finding the viewer gone after its
+        render, pops the cursor that render left and sends nothing."""
+        ask = self.user(T0 - 201, "w-1", "check the api tests with a subagent")
+        reply = dict(rec(T0 - 200, 0), parentUuid="w-1")
+        write(self.leaf, [ask, reply], int(time.time()))         # the parent transcript (discovery reads its real mtime)
+        ap = str(self.sub / ("agent-%s.jsonl" % self.AID))
+        recs = self.agent_records(T0 - 60)
+        write(ap, recs, T0 - 46)
+        km._agent_launch_ids(ap)                                  # the card's fold while the agent runs
+        client = {"app": "chat", "wid": "w1", "alive": True, "sent": {}, "send": lambda s: None,
+                  "subagents": {(SID, self.AID): True}}          # the viewer is open on this client
+        real, left, sent = km.build_subagent, [], []
+
+        def closing_build(sid, agent_id, now, live_map=None):
+            km.Handler._dispatch_ws(object.__new__(km.Handler), {"type": "closeSubagent", "id": sid, "agentId": agent_id}, client)
+            fr = real(sid, agent_id, now, live_map)
+            left.append(ap in km._bgall_cache)
+            return fr
+
+        with mock.patch.object(km, "build_subagent", closing_build), \
+                mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, **kw: sent.append(key)):
+            km._push_subagents([client], int(time.time()), {})
+        self.assertEqual(left, [True], "the push rendered the viewer once, after the close, and the render left its cursor")
+        self.assertNotIn(ap, km._bgall_cache, "the pusher let go of the cursor its render left for the closed viewer")
+        self.assertEqual(sent, [], "a viewer closed during its render is not sent the frame")
+        append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)   # the agent writes on
+        km._agent_launch_ids(ap)                                  # the card's fold steps the new records while the file is fresh
+        self.clock.t = T0 + 300                                   # the agent returned
+        km._agent_launch_ids(ap)                                  # a quiet fold
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "no cursor left by the closed viewer's render holds the returned agent's drop")
 
 
 class SpendGuard(Base):
