@@ -659,8 +659,11 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # eviction and installs after it keeps what it read, and a path evicted during its own read is left out of the release
 # (_READ_IN_FLIGHT: an append read re-inserts the records it began from; a read from zero or a tail's upgrade builds new
 # ones). While the file is unchanged the display's next build is a parse-store hit that rebuilds nothing; a comment
-# create rebuilds the entry once (_comment_cut_from_parse), as does the first build after an append (a restore from the
-# document, or a whole parse), and near the limit busy sessions may rebuild repeatedly. Counted under
+# create rebuilds the entry once (_comment_cut_from_parse; for a session parsed whole, no document or one over the cap,
+# beside the tree the store keeps, a second copy until the store replaces or drops that slot or the budget evicts the
+# file again; a session whose assembly falls back installs nothing and its creates read the transcript), as does the
+# first build after an append (a restore from the document, or a whole parse), and near the limit busy sessions may
+# rebuild repeatedly. Counted under
 # recordCache.budgetReleased. LRU order does not follow need: a display walk the assembly entry serves by a stat check
 # never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
 # machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
@@ -5452,12 +5455,14 @@ def _asm_drop_where(holds):
 
 def _asm_drop_holding(paths):
     """The byte budget's release (the owner's call, 2026-10-02): drop every assembly entry that read one of `paths`, the
-    files a budget eviction just took (a file before a restore's cut, read by no one, is skipped), so the eviction frees
-    the records the entry's adapter held; each entry dropped counts under recordCache.budgetReleased. The next parse
-    that is not a parse-store hit (a comment create, the first build after an append) restores the entry from its
-    document or parses whole. Called by the reader after it lets _JSONL_CACHE_LOCK go, never under it: it takes
-    _ASM_LOCK, then _MAT_LOCK, then _JSONL_CACHE_LOCK for the count, one at a time (the last as the reader's own insert
-    takes it), and no holder of the first two waits on any other lock."""
+    files a budget eviction just took (a file before a restore's cut, read by no one, is skipped), so the eviction lets
+    go of the records the entry's adapter held: for a chat still using the file, their lists go at once and their text
+    when the parse store's slot goes; each entry dropped counts under recordCache.budgetReleased. The next parse that is
+    not a parse-store hit (a comment create, the first build after an append) restores the entry from its document or
+    parses whole, adding the records again (a session whose assembly falls back installs nothing). Called by the reader
+    after it lets _JSONL_CACHE_LOCK go, never under it: it takes _ASM_LOCK, then _MAT_LOCK, then _JSONL_CACHE_LOCK for
+    the count, one at a time (the last as the reader's own insert takes it), and no holder of the first two waits on any
+    other lock."""
     gone = set(paths)
     popped = _asm_drop_where(lambda e: any(k in gone and v != ("skip",) for k, v in (e.get("recs") or {}).items()))
     if popped:

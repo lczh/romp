@@ -2864,7 +2864,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   eviction and installs after it keeps what it read, and a file evicted
   during its own read is not released. While the file is unchanged that
   chat's display build is served from its parsed tree and rebuilds
-  nothing; a comment create rebuilds the entry once, as does the first
+  nothing; a comment create rebuilds the entry once (for a chat parsed
+  whole, beside the parsed tree, so two copies stand until the parse
+  store replaces or drops that tree or the budget evicts the file again;
+  a chat whose assembly falls back to a plain parse installs nothing, and
+  its creates read the transcript), as does the first
   build after an append (a restore from its document or a whole parse,
   under `asmCheckpoint.parse`), and near the limit busy sessions may
   rebuild repeatedly; `countCap`,
