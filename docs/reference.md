@@ -2776,7 +2776,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   with what ran before it still released, and once for each assembly entry
   whose pin check raised at a record-cache drop, which counts that entry as
   not pinning, the drop going ahead unless another entry pins it; said on
-  stderr once per file); the same block rides `asmCheckpoint.parse` on GET /perf,
+  stderr once per file and outcome); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar

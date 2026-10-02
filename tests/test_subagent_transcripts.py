@@ -705,13 +705,22 @@ class OpenClose(World):
             self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
             f0 = em._ASM_STATS.get("releaseFailed", 0)
             err = io.StringIO()
+            rp = os.path.realpath(str(self.bg_file))
+
+            def slots():
+                return [p for p in km._parse_cache if os.path.realpath(p) == rp]
             with mock.patch.object(em, "release_assembly", side_effect=OSError("permission denied")), redirect_stderr(err):
+                self.assertTrue(slots(), "the premise: the viewed file has a parse slot before the close")
                 self._dispatch(c, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
+                self.assertEqual(slots(), [], "the parse slot, dropped before the raise, stays dropped (round four of the review)")
                 self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
                 self._dispatch(c, {"type": "closeSubagent", "id": SID, "agentId": AID_BG})
             self.assertNotIn((SID, AID_BG), c["subagents"], "the close took effect")
             self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "each failure counted")
-            self.assertEqual(err.getvalue().count("viewer close"), 1, "said once for the file: %r" % err.getvalue())
+            lines = [ln for ln in err.getvalue().splitlines() if "viewer close" in ln]
+            self.assertEqual(len(lines), 1, "said once for the file: %r" % err.getvalue())
+            self.assertIn(em.RELEASE_FAILED_OUTCOME, lines[0], "the line says the release stopped where it raised")
+            self.assertNotIn("left as it stood", lines[0])
             self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
         finally:
             km._clients[:] = saved
@@ -733,7 +742,8 @@ class OpenClose(World):
             self._dispatch(c, {"type": "openSubagent", "id": SID, "agentId": AID_BG})
             before = entries()
             self.assertTrue(before, "the premise: the viewer's frame parsed the agent's file into an assembly entry")
-            em._RELEASE_FAILED.discard(("viewer close", AID_BG))   # said once per (event, key) in a process: re-armed here
+            for k in [k for k in em._RELEASE_FAILED if k[:2] == ("viewer close", AID_BG)]:
+                em._RELEASE_FAILED.discard(k)                  # said once per (event, key, outcome) in a process: re-armed here
             f0 = em._ASM_STATS.get("releaseFailed", 0)
             err = io.StringIO()
             with mock.patch.object(km, "_path_of", side_effect=OSError("permission denied")), redirect_stderr(err):

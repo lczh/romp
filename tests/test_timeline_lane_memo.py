@@ -443,15 +443,20 @@ class DeadLaneMemo(unittest.TestCase):
         p = self._three_turns()
         f0 = km.em._ASM_STATS.get("releaseFailed", 0)
         err = io.StringIO()
-        with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")), redirect_stderr(err):
+        with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")) as chk, \
+                redirect_stderr(err):
             tl = self._build()
-        self.assertTrue(tl["turns"][SID], "the lane is drawn")
-        self.assertIn(SID, km._dead_lane_memo, "and cached as any dead lane is")
-        self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the failure is counted")
+            self.assertTrue(tl["turns"][SID], "the lane is drawn")
+            self.assertIn(SID, km._dead_lane_memo, "and cached as any dead lane is")
+            self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the failure is counted")
+            self.assertNotIn(SID, km._dead_lane_released, "no version recorded before the document check answered")
+            km._release_dead_lane(SID, p, km._dead_lane_memo[SID][0][0], [{"sid": SID, "path": p}], {})   # the lane's next miss
+            self.assertEqual(chk.call_count, 2, "at the build's own version the next miss asks again (round four of the review)")
+            self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "and its failure is counted too")
         self.assertIn("dead lane", err.getvalue())
         self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
-        self.assertIn("(the release stopped where it raised and what ran before it stays released; said once per file)",
-                      err.getvalue(), "the default outcome alone: %r" % err.getvalue())
+        self.assertIn("(the release stopped where it raised and what ran before it stays released; said once per file and "
+                      "outcome)", err.getvalue(), "the default outcome alone: %r" % err.getvalue())
         with km.em._JSONL_CACHE_LOCK:
             self.assertIn(p, km.em._JSONL_CACHE, "nothing was released")
 
@@ -479,8 +484,48 @@ class DeadLaneMemo(unittest.TestCase):
         self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "each failure counted")
         line = next(ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln)
         self.assertIn("(the release stopped where it raised and what ran before it stays released; not retried until the "
-                      "transcript moves; said once per file)", line)
+                      "transcript moves; said once per file and outcome)", line)
         self.assertIn("for session %s" % SID, line)
+
+    def test_an_assembly_release_that_raises_stops_the_lane_and_is_not_retried_at_its_version(self):
+        """The version is recorded before either release, and the assembly release runs first: one that raises stops the
+        lane's release there, so the record release never runs, the same transcript version does not try again, and the
+        line says so (round four of the fold's review: only the record release had been made to raise here, so recording
+        the version after the assembly release passed)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        alive = [{"sid": SID, "path": p}]
+        err = io.StringIO()
+        with mock.patch.object(km.em, "release_assembly", side_effect=OSError("permission denied")) as asm, \
+                mock.patch.object(km.em, "release_records") as rel, redirect_stderr(err):
+            km._release_dead_lane(SID, p, ("v1",), alive, {})
+            km._release_dead_lane(SID, p, ("v1",), alive, {})       # the same transcript version: not tried again
+        self.assertEqual(asm.call_count, 1, "the assembly release was tried once at this version")
+        self.assertEqual(rel.call_count, 0, "and the record release never ran: the release stopped where it raised")
+        line = next(ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln)
+        self.assertIn("; not retried until the transcript moves", line)
+
+    def test_the_dead_lanes_two_outcomes_for_one_leaf_are_each_said(self):
+        """A raise at the document check and a raise after the version is recorded say different things for the same leaf,
+        so each is said once: the memo keys on the outcome as well as the event and the path (round four of the fold's
+        review: keyed on the event and the path alone, the second outcome went unsaid)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        alive = [{"sid": SID, "path": p}]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            with mock.patch.object(km.em, "asm_document_restores", side_effect=OSError("permission denied")):
+                km._release_dead_lane(SID, p, ("v1",), alive, {})   # refused before the version is recorded
+            with mock.patch.object(km.em, "release_records", side_effect=OSError("permission denied")):
+                km._release_dead_lane(SID, p, ("v1",), alive, {})   # the check clears; the record release raises
+        lines = [ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln]
+        self.assertEqual(len(lines), 2, "both outcomes said: %r" % err.getvalue())
+        self.assertNotIn("not retried", lines[0], "the document check's line claims no wait")
+        self.assertIn("; not retried until the transcript moves", lines[1], "the record release's says it waits")
 
     def _many_turns(self, n):
         recs, parent = [], None
