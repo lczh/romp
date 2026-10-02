@@ -5771,7 +5771,8 @@ class SdkSession:
         #   chosen alias but left liveModel stale, and model_label PREFERS liveModel → the badge kept the OLD name).
         #   Cleared the instant _learn_model / _do_refresh_context reports a model matching the alias (event-based).
         self._held_chain = ()                        # the markers still standing before the latest live pick, the nearest
-        #   first (SdkBackend.set_model): that pick's refusal puts back the pick among them with its dots (_revert_model)
+        #   first (SdkBackend.set_model): that pick's refusal puts back the pick among them with its dots (_revert_model);
+        #   a report drops every one it reflects (_resolve_model_pending). Written under self._lock
         self._pick_unlanded = ()                     # the versioned picks whose dots a report of their family on ANOTHER
         #   version ended, one entry per pick, each kept until a report lands on its version (_resolve_model_pending): a
         #   refusal that puts one back skips the re-arm, the live name being the world before it (_do_set_model)
@@ -6952,7 +6953,7 @@ class SdkSession:
                     # still in flight is left alone, as the switch flip leaves it: set_model runs on the kernel thread,
                     # so a newer pick can land during the revert, whose compare-and-swap leaves it standing; the live
                     # name is the world before it, and an arm from it would end at its first reply with a false "back on".
-                    # So is a pick put back that was itself still in flight when the refused pick was made: the revert
+                    # So is a pick put back that is itself still in flight, with no report of it yet: the revert
                     # gives it its dots back (_revert_model), the live name being the world before it too (round two of
                     # that review). So is a versioned pick put back whose dots a report of another version in its family
                     # ended before it had reported (_pick_unlanded: Opus 4.8, a reply of a turn the CLI opened itself,
@@ -8487,9 +8488,22 @@ class SdkSession:
         another: a newer pick whose own dots the same turn's next reply ends (Opus 5 after Opus 5.5, or a Latest click)
         can be the one refused, and the pick it puts back is the older one, still not reported. Kept in one slot that
         every clear overwrote, that older pick went back unremembered and was armed from the world before it (a later
-        check on that fix). Only a report that lands on a pick's version ends its entry."""
+        check on that fix). Only a report that lands on a pick's version ends its entry.
+
+        The picks still in flight before the latest one (_held_chain) end the same way: a report drops every one it
+        reflects, and a versioned one it reflects on another version joins the memory. The revert puts a pick back with
+        its dots only while it is still listed (_revert_model): given them back after its report, a pick hid a real
+        fallback at the next reply, neither carded nor armed until its next report (round three of that review)."""
         unlanded = getattr(self, "_pick_unlanded", ())   # getattr: __new__-built test doubles skip __init__
         kept = tuple(p for p in unlanded if not _lands_on_pick(pm, p))
+        if any(_model_reflects_alias(pm, p) for p in getattr(self, "_held_chain", ())):
+            with self._lock:                             # set_model rewrites the list under it, on the kernel's thread
+                chain = self._held_chain
+                self._held_chain = tuple(p for p in chain if not _model_reflects_alias(pm, p))
+            for p in chain:
+                if _model_reflects_alias(pm, p) and _model_version(_alias_label(p)) is not None \
+                        and not _lands_on_pick(pm, p) and p not in kept:
+                    kept = (kept + (p,))[-8:]
         if kept != unlanded:
             self._pick_unlanded = kept
         marker = self._model_pending
@@ -16850,15 +16864,18 @@ class SdkBackend:
         on" card at its first reply) after a second pick refused before the first had reported. The whole
         chain, not only the marker the refused pick replaced: two picks refused together (the second
         written before the first's answer) put back a pick made before both, and the first one's refusal,
-        superseded, puts back nothing. A pick in the chain whose name landed after a later pick replaced its
-        marker gets its dots back too, until the next report naming it, as the nearest one does; the
-        refusal's own refresh is such a report."""
+        superseded, puts back nothing. A pick gets its dots back only while it is still listed: a report
+        that reflects it drops it from the list (_resolve_model_pending), so a pick that reported after a
+        later pick replaced its marker goes back without them, and a real fallback at the next reply is
+        carded and armed. Given its dots back, it hid that fallback until its next report, and a fallback
+        over by then was never carded (round three of that review)."""
         picked = prev.get("picked")
         chain = prev.get("chain") or ()
         with sess._lock:
             back_model = sess._model_accepted
             want = back_model or "default"
-            keep = want if want in chain else ""   # set_model's marker for the pick put back, while it is in flight
+            # set_model's marker for the pick put back, while it is in flight and no report has reflected it since
+            keep = want if want in chain and want in getattr(sess, "_held_chain", ()) else ""
             if sess.chosen_model == picked:
                 sess.chosen_model = back_model or ""
                 sess._model_pending = keep
