@@ -1361,6 +1361,62 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                     self.assertEqual((arm["from"], arm["to"]), ("Opus 5.5", "Sonnet 5"), road)
                     self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1,
                                      "%s: due, one attempt" % road)
+        # The same report on ANOTHER version of the listed pick's family (round four of that review): the prune drops
+        # Opus 5.5 from the list on a report of Opus 4.8 and remembers it as not landed, so the refusal skips the re-arm.
+        # Dropped and not remembered, Opus 5.5 was armed at the refusal from Opus 4.8, the world before it, and its first
+        # reply showed a false "Model back on" card. A real fallback to Sonnet 5 after that is carded and armed from the
+        # live name
+        for report, learn in (("a turn's init", self._init), ("a reply", self._served)):
+            for outcome, answer in (("failing", down), ("answering without a model", "NOMODEL")):
+                road = ("Opus 5.5 picked on Opus 4.8 and taken, its refresh failing, Fable 5 picked, %s on Opus 4.8, "
+                        "then Fable 5 refused, its refresh %s, and a real fallback to Sonnet 5" % (report, outcome))
+                with self.subTest(road=road), _Hooks() as h:
+                    be, s = self._world(**self.ON48)
+                    self._pick(be, s, "claude-opus-5-5")
+                    self._settle(s, [down])                          # taken; its dots stand
+                    self._pick(be, s, "claude-fable-5")
+                    learn(s, "claude-opus-4-8")                      # Opus 4.8 reports while Fable 5 is in flight
+                    self.assertEqual((s.model, s._model_pending, h.fallbacks), ("Opus 4.8", "claude-fable-5", []),
+                                     "%s: the premise" % road)
+                    self._settle(s, [answer], lost=refused5)         # the CLI's refusal of Fable 5
+                    self.assertIsNone(s._upgrade_retry, "%s: the pick put back was armed as a fallback nobody had" % road)
+                    self.assertEqual([m for m in be._logs if m.startswith("retry upgrade")], [],
+                                     "%s: a fallback that never happened was logged" % road)
+                    self.assertEqual((s.chosen_model, s._model_pending), ("claude-opus-5-5", ""),
+                                     "%s: the pick put back gets no switching dots back" % road)
+                    self._served(s, "claude-sonnet-5")               # a real fallback at the next reply
+                    self.assertEqual(h.fallbacks, [("Opus 4.8", "Sonnet 5")], "%s: the real fallback is carded" % road)
+                    arm = s._upgrade_retry
+                    self.assertIsNotNone(arm, "%s: and armed" % road)
+                    self.assertEqual((arm["from"], arm["to"]), ("Opus 4.8", "Sonnet 5"), road)
+                    self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1,
+                                     "%s: due, one attempt" % road)
+        # the controls for those roads: a second refusal re-arms where the pick put back is not remembered, since the
+        # memory takes only a versioned pick (a Latest click names no version) and only one its report did not land on
+        for road, reg, pick, report, fell, frm in (
+                ("a Latest click (opus) on Sonnet 5 taken, its refresh failing, Fable 5 picked, a reply on Opus 5, Fable 5 "
+                 "refused, a real fallback to Sonnet 5 armed, then Fable 5 picked and refused again",
+                 sonnet, "opus", "claude-opus-5", "Opus 5", "Opus"),
+                ("Opus 5.5 picked on Opus 4.8 and taken, its refresh failing, Fable 5 picked, a reply on Opus 5.5, Fable 5 "
+                 "refused, a real fallback to Sonnet 5 armed, then Fable 5 picked and refused again",
+                 self.ON48, "claude-opus-5-5", "claude-opus-5-5", "Opus 5.5", "Opus 5.5")):
+            with self.subTest(road=road), _Hooks() as h:
+                be, s = self._world(**reg)
+                self._pick(be, s, pick)
+                self._settle(s, [down])                              # taken; its dots stand
+                self._pick(be, s, "claude-fable-5")
+                self._served(s, report)                              # the pick reports while Fable 5 is in flight
+                self._settle(s, [down], lost=refused5)               # the CLI's refusal of Fable 5
+                self.assertEqual((s.chosen_model, s._model_pending, s._upgrade_retry), (pick, "", None),
+                                 "%s: the premise" % road)
+                self._served(s, "claude-sonnet-5")                   # a real fallback: carded and armed
+                self.assertEqual(h.fallbacks, [(fell, "Sonnet 5")], "%s: the real fallback is carded" % road)
+                self.assertIsNotNone(s._upgrade_retry, "%s: and armed" % road)
+                self._pick(be, s, "claude-fable-5")                  # the pick clears the arm
+                self._settle(s, [down], lost=refused5)               # refused again
+                arm = s._upgrade_retry
+                self.assertIsNotNone(arm, "%s: the session sits below the pick put back and nothing retries it" % road)
+                self.assertEqual((arm["from"], arm["to"]), (frm, "Sonnet 5"), road)
 
     def test_a_refusal_arms_nothing_for_a_newer_pick_still_in_flight(self):
         # the refusal's re-arm stands aside for a pick still in flight, as the switch flip's does. set_model runs on the
@@ -1476,12 +1532,7 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # green with the lock gone, and a pick landing between the arm's identity check and the pick's read then had the
         # end judged against it again (the #33 follow-up's review, round three). The pick's label read records whether
         # it runs under the session lock; every such read must, so a later second read keeps this green only if it does
-        road = "a real fallback to Opus 4.8 armed on Opus 5.5, then the next reply, on Opus 5.5, judged against the retry"
-        with self.subTest(road=road), _Hooks() as h:
-            be, s = self._world()
-            self._served(s, "claude-opus-4-8")                       # a real fallback: carded and armed
-            self.assertIsNotNone(s._upgrade_retry, "%s: the real fallback is armed" % road)
-            held = []
+        def judged(s, held, judging):
             real_label, real_judge = sb._alias_label, s._note_model_served
 
             def label(*a, **k):
@@ -1489,14 +1540,103 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 return real_label(*a, **k)
 
             def judge(*a, **k):
-                with mock.patch.object(sb, "_alias_label", label):
-                    return real_judge(*a, **k)
+                judging.append(True)
+                try:
+                    with mock.patch.object(sb, "_alias_label", label):
+                        return real_judge(*a, **k)
+                finally:
+                    judging.clear()
             s._note_model_served = judge
+
+        road = "a real fallback to Opus 4.8 armed on Opus 5.5, then the next reply, on Opus 5.5, judged against the retry"
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._served(s, "claude-opus-4-8")                       # a real fallback: carded and armed
+            self.assertIsNotNone(s._upgrade_retry, "%s: the real fallback is armed" % road)
+            held = []
+            judged(s, held, [])
             self._served(s, "claude-opus-5-5")                       # the next reply, on the model it fell from
             del s._note_model_served
             self.assertTrue(held, "%s: the end was never judged against the pick" % road)
             self.assertTrue(all(held), "%s: the pick was read outside the session lock: %r" % (road, held))
             self.assertEqual(h.restored, [("Opus 4.8", "Opus 5.5")], "%s: back on the model it fell from" % road)
+        # and the arm is checked against the one it read under that lock too (round four of that review): a pick landing
+        # as the judgment takes the lock clears the arm, so nothing ends. Checked before the lock, the arm still read as
+        # standing, and the pick that landed next was read as the way back: "Model back on Opus 4.8" for a pick of the
+        # user's own. The stand-in lock lands the pick at its first entry inside the judgment, before it acquires, and
+        # names the function that entered it, so an earlier entry cannot stand in for the judgment's
+        road = ("a real fallback to Opus 4.8 armed on Opus 5.5, then Opus 4.8 picked as the next reply, on Opus 4.8, takes "
+                "the session lock to be judged against the retry")
+        with self.subTest(road=road), _Hooks() as h:
+            be, s = self._world()
+            self._served(s, "claude-opus-4-8")                       # a real fallback: carded and armed
+            self.assertIsNotNone(s._upgrade_retry, "%s: the real fallback is armed" % road)
+            real_lock, held, judging, entered = s._lock, [], [], []
+
+            class Landing:
+                """The session lock, forwarding what set_model and the label read above call."""
+                def __enter__(self):
+                    if judging and not entered:
+                        entered.append(sys._getframe(1).f_code.co_name)
+                        be.set_model(SID, "claude-opus-4-8")         # the kernel thread's pick; it takes this lock too
+                    return real_lock.__enter__()
+
+                def __exit__(self, *a):
+                    return real_lock.__exit__(*a)
+
+                def locked(self):
+                    return real_lock.locked()
+            s._lock = Landing()
+            judged(s, held, judging)
+            self._served(s, "claude-opus-4-8")                       # the next reply, the first frame of a turn
+            del s._note_model_served
+            s._lock = real_lock
+            self.assertEqual(entered, ["_note_model_served"], "%s: the pick did not land at the judgment's own entry to "
+                                                              "the session lock" % road)
+            self.assertEqual(s.chosen_model, "claude-opus-4-8", "%s: the pick stands" % road)
+            self.assertEqual(h.restored, [], "%s: a 'Model back on' card for a pick of the user's own" % road)
+            self.assertEqual([m for m in be._logs if "back on" in m], [], "%s: the retry was logged as ending" % road)
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Opus 4.8")], "%s: one card, the real fallback's" % road)
+
+    def test_a_report_drops_the_picks_it_reflects_under_the_session_lock(self):
+        # a report drops every pick it reflects from the list of picks in flight (_resolve_model_pending), and set_model
+        # writes that list and the marker under the session lock on the kernel thread. A pick landing between the
+        # prune's check and the marker's clear, with the lock released, left the pick the report reflected listed, and a
+        # refusal of the newer pick gave it its dots back (round four of that review). A stand-in for the list records,
+        # for each read and write inside the prune, whether the session lock is held
+        road = "Opus 5.5 picked on Opus 4.8 and taken, its refresh failing, Fable 5 picked, then a reply on Opus 5.5"
+        with self.subTest(road=road), _Hooks():
+            be, s = self._world(**self.ON48)
+            self._pick(be, s, "claude-opus-5-5")
+            self._settle(s, [RuntimeError(self.DOWN)])               # taken; its dots stand
+            self._pick(be, s, "claude-fable-5")                      # Opus 5.5 is listed in flight
+            seen, pruning = [], []
+            real_prune = s._resolve_model_pending
+
+            def prune(*a, **k):
+                pruning.append(True)
+                try:
+                    return real_prune(*a, **k)
+                finally:
+                    pruning.clear()
+
+            def read(sess):
+                if pruning:
+                    seen.append(("read", sess._lock.locked()))
+                return sess.__dict__["_held_chain"]
+
+            def write(sess, v):
+                if pruning:
+                    seen.append(("write", sess._lock.locked()))
+                sess.__dict__["_held_chain"] = v
+            s._resolve_model_pending = prune
+            with mock.patch.object(sb.SdkSession, "_held_chain", property(read, write), create=True):
+                self._served(s, "claude-opus-5-5")                   # Opus 5.5 reports while Fable 5 is in flight
+            del s._resolve_model_pending
+            self.assertIn("write", [op for op, _ in seen], "%s: the report never dropped the pick: %r" % (road, seen))
+            self.assertTrue(all(lk for _, lk in seen), "%s: the list was read or written outside the session lock: %r"
+                                                       % (road, seen))
+            self.assertEqual(s._held_chain, (), "%s: the pick that reported is still listed" % road)
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
