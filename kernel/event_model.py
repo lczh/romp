@@ -5561,18 +5561,26 @@ def release_assembly(leaf_path, rompuuid=None):
 
 
 _RELEASE_FAILED = set()            # (where, path) whose release at the end of a file's use, or whose record drop's pin check,
-#                                    raised: said once each
+#                                    raised: said once each, a release's line saying it stopped where it raised and that what
+#                                    ran before it stays released (RELEASE_FAILED_OUTCOME), the pin check's that the entry
+#                                    counts as not pinning
+RELEASE_FAILED_OUTCOME = "the release stopped where it raised and what ran before it stays released"
 
 
-def release_failed(where, path, exc, sid=None, outcome="memory left as it stood"):
+def release_failed(where, path, exc, sid=None, outcome=RELEASE_FAILED_OUTCOME):
     """A release at the end of a file's use raised (a stat or a sidecar read refused, a lineage that does not resolve), and
-    the caller carries on as before the release existed, since a trim must never fail the event it rides (discover's leaf
-    flip, under every pane; a timeline frame; a viewer's close); or a record drop's pin check raised, and that entry counts
-    as not pinning, so the drop goes ahead unless another entry pins it. Counted `releaseFailed` among the parse's
+    the caller's event goes on, since a trim must never fail the event it rides (discover's leaf flip, under every pane; a
+    timeline frame; a viewer's close); or a record drop's pin check raised, and that entry counts as not pinning, so the
+    drop goes ahead unless another entry pins it. Counted `releaseFailed` among the parse's
     road counters at every failure, said on stderr once per (where, path) (2026-10-01), with the session `sid` when the
     caller has one; the memo keys on the event and the path alone, so of several sessions failing on a shared leaf only the
-    first is named. `outcome` replaces the default's words (the pin check's says only that the entry counts as not
-    pinning)."""
+    first is named. The default `outcome` says only that the release stopped where it raised and that what ran before it
+    stays released, true at every caller, one where nothing had run yet included: the leaf flip's record drop and its
+    lineage read run after its assembly release, and a dead lane's record release after its own. A caller adds what holds
+    at it alone (the dead lane, once it has recorded the transcript's version: not retried until the transcript moves; the
+    leaf flip: its record drop is not retried), and the pin check's words replace the default, saying only that the entry
+    counts as not pinning (round three of the fold's review: the old default said the memory was left as it stood, false
+    wherever a release had popped an entry before the raise)."""
     _asm_stat("releaseFailed")
     k = (str(where), str(path))
     if k in _RELEASE_FAILED:

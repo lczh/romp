@@ -437,7 +437,9 @@ class DeadLaneMemo(unittest.TestCase):
     def test_a_release_that_raises_never_drops_the_frame(self):
         """The dead lane's release does file I/O (a stat, a sidecar read, a document write) inside the timeline build's lane
         loop, whose other steps each report through a complaint of their own: a raise there is noted once per file, and the
-        frame is built with the lane in it, the memory left as it stood (round one of the review: the raise left the build)."""
+        frame is built with the lane in it (round one of the review: the raise left the build). Here the document check
+        raises, before either release and before the version is recorded: nothing was released, the lane's next miss asks
+        again, and the line claims no wait for the transcript (round three of the fold's review)."""
         p = self._three_turns()
         f0 = km.em._ASM_STATS.get("releaseFailed", 0)
         err = io.StringIO()
@@ -448,8 +450,37 @@ class DeadLaneMemo(unittest.TestCase):
         self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the failure is counted")
         self.assertIn("dead lane", err.getvalue())
         self.assertIn("for session %s" % SID, err.getvalue(), "naming the session (round two of the fold's review)")
+        self.assertIn("(the release stopped where it raised and what ran before it stays released; said once per file)",
+                      err.getvalue(), "the default outcome alone: %r" % err.getvalue())
         with km.em._JSONL_CACHE_LOCK:
             self.assertIn(p, km.em._JSONL_CACHE, "nothing was released")
+
+    def test_a_release_that_raises_after_the_version_is_recorded_is_not_retried_until_the_transcript_moves(self):
+        """The dead lane records the transcript's version before either release runs, so a release that raises is not tried
+        again at the same version, and its line says so; what ran before the raise stays released. A raise at the document
+        check comes before the version is recorded and says no such thing (the test above), since the lane's next miss asks
+        again (round three of the fold's review: the line said the memory was left as it stood, false once the assembly
+        release had popped the entry)."""
+        p = self._three_turns()
+        human = bool(km._display_sdk_human(SID))
+        tree = km._parse(p, SID, NOW)
+        self.assertTrue(km.em.asm_checkpoint_write(p, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+        self.assertTrue(self._asm_keys(p), "the premise: the session's assembly entry stands")
+        alive = [{"sid": SID, "path": p}]
+        f0 = km.em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(km.em, "release_records", side_effect=OSError("permission denied")) as rel, redirect_stderr(err):
+            km._release_dead_lane(SID, p, ("v1",), alive, {})
+            km._release_dead_lane(SID, p, ("v1",), alive, {})       # the same transcript version: not tried again
+            self.assertEqual(rel.call_count, 1, "tried once at this version")
+            km._release_dead_lane(SID, p, ("v2",), alive, {})       # the transcript moved: tried again
+            self.assertEqual(rel.call_count, 2, "and again once the transcript moved")
+        self.assertEqual(self._asm_keys(p), [], "the assembly release ran before the record release raised, and stays released")
+        self.assertEqual(km.em._ASM_STATS.get("releaseFailed", 0) - f0, 2, "each failure counted")
+        line = next(ln for ln in err.getvalue().splitlines() if " at dead lane failed" in ln)
+        self.assertIn("(the release stopped where it raised and what ran before it stays released; not retried until the "
+                      "transcript moves; said once per file)", line)
+        self.assertIn("for session %s" % SID, line)
 
     def _many_turns(self, n):
         recs, parent = [], None

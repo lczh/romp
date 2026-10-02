@@ -696,8 +696,8 @@ class OpenClose(World):
 
     def test_a_release_that_raises_does_not_fail_the_viewers_close(self):
         """The close's release does file I/O (the agent file's path, the caches' locks): a raise there is noted once per file
-        and the close goes on, the viewer unregistered and the memory left as it stood (round one of the review: the handler
-        raised out of the close)."""
+        and the close goes on, the viewer unregistered and the release stopped where it raised, the parse slot it dropped first
+        staying dropped (round one of the review: the handler raised out of the close)."""
         c = _Client()
         saved = list(km._clients)
         km._clients[:] = [c]

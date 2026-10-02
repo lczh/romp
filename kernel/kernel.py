@@ -51822,7 +51822,9 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     timeline client is connected, and only for a dead lane inside the build's window: a session that ends while no timeline
     is open is released when a timeline build next sees its dead lane. The version is recorded before either release runs,
     so a release that raises is not retried until the transcript moves or the session leaves _dead_lane_released (bounded
-    like the lane memo); the record entries stay as they stood meanwhile, still under the caches' bounds."""
+    like the lane memo), and its line says so; what the release had not reached when it raised stays meanwhile, still under
+    the caches' bounds. A raise at the document check comes before the version is recorded, so the lane's next miss asks
+    again, and its line claims no wait."""
     try:
         if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
             return
@@ -51836,7 +51838,8 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
                 keep.update((str(o["path"]), os.path.join(os.path.dirname(str(o["path"])), o["sid"] + ".jsonl")))
         em.release_records({str(path), os.path.join(os.path.dirname(str(path)), sid + ".jsonl")}, keep=keep)
     except Exception as e:                        # noqa: BLE001 — a trim never drops a timeline frame
-        em.release_failed("dead lane", path, e, sid=sid)
+        em.release_failed("dead lane", path, e, sid=sid, outcome=em.RELEASE_FAILED_OUTCOME + (
+            "; not retried until the transcript moves" if _dead_lane_released.get(sid) == tk else ""))   # recorded: a release raised
 
 
 def _dead_lane_marks(marks, t0):

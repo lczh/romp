@@ -9081,7 +9081,8 @@ def _note_leaf(sid, path_str):
     is current again and stores as before. With the slots go this sid's assembly entry of the retired leaf and, when no
     live lineage reads the file, its record entry (_release_retired_records, 2026-10-01). Those two do file I/O (a stat, a
     sidecar read, a states read, a document write) inside discover, which every pane rides: a raise there is noted once per
-    file (em.release_failed) and the flip goes on, the memory left as it stood."""
+    file (em.release_failed) and the flip goes on: the release stops where it raised, what ran before it stays released (the
+    slots, and the assembly entry when the record drop or its lineage read raised), and the record drop is not retried."""
     with _LEAF_LOCK:
         prev = _LEAF_SEEN.get(sid)
         _LEAF_SEEN[sid] = path_str
@@ -9096,7 +9097,8 @@ def _note_leaf(sid, path_str):
             #                                           of the retired leaf until the cache's count cap
             _release_retired_records(sid, prev, path_str)
         except Exception as e:                        # noqa: BLE001 — a trim never fails discover
-            em.release_failed("leaf flip", prev, e, sid=sid)
+            em.release_failed("leaf flip", prev, e, sid=sid,
+                              outcome=em.RELEASE_FAILED_OUTCOME + "; the record drop is not retried")
 
 
 def _release_retired_records(sid, prev, leaf):
@@ -9117,7 +9119,8 @@ def _release_retired_records(sid, prev, leaf):
         links = em.resume_fork_links(em._load_states(str(STATESDIR / (sid + ".jsonl"))))
         keep = {str(f) for f in em._lineage_closure(Path(leaf), cands, links)}
     except Exception as e:                         # noqa: BLE001 — the lineage could not be read: nothing is dropped on a guess
-        em.release_failed("leaf flip lineage", prev, e, sid=sid)
+        em.release_failed("leaf flip lineage", prev, e, sid=sid,
+                          outcome=em.RELEASE_FAILED_OUTCOME + "; the record drop is not retried")   # the assembly release ran
         return
     with _LEAF_LOCK:
         keep.update(str(p) for p in _LEAF_SEEN.values())

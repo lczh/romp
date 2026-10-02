@@ -919,6 +919,46 @@ class AQuietDropKeepsWhatTheAssemblyEntryHolds(Episode):
         st1 = em.record_cache_stats()
         self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 1))
         self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "counted")
+        fell = st1["droppedBytes"] - st0["droppedBytes"]
+        self.assertEqual(fell, os.path.getsize(self.leaf), "the count lost the whole file")
+        self.assertEqual((st1.get("droppedHeld", 0) - st0.get("droppedHeld", 0),
+                          st1.get("droppedHeldBytes", 0) - st0.get("droppedHeldBytes", 0)), (1, fell),
+                         "and counted as held, every byte of it: the whole entry whose check raised still holds the records "
+                         "(round three of the fold's review)")
+        self.assertIn("the entry counts as not pinning", err.getvalue())
+        self.assertNotIn("the drop went ahead", err.getvalue(), "no claim about an outcome not yet known")
+
+    def test_a_pin_check_that_raises_still_lets_a_later_entry_pin_the_drop(self):
+        """A raised pin check counts its entry as not pinning, and the other entries folding over the same generation are still
+        asked: one that pins keeps the reader entry as it stands (round three of the fold's review: a loop that stopped at the
+        first raised check popped a reader entry a later entry would have kept, retiring the generation, so that entry's next
+        visit parsed the leaf whole). The second session's entry is marked keepWhole, standing in for the whole parse after a
+        refused restore, as the dead-lane keep test in tests/test_timeline_lane_memo.py marks it; that pin needs no document
+        check, so only the first entry's check raises."""
+        _aged(self.leaf)
+        self.parse()                                                  # this session's whole entry, no document
+        em.parse_session(self.leaf, rompuuid=PEER, name="api", dir="/w/notes-api", candidate_files=[self.leaf], states=None,
+                         postal_log=[], now=NOW)                      # the same file parsed whole for another session
+        ent0 = _reader_entry(self.leaf)
+        rp = os.path.realpath(self.leaf)
+        with em._ASM_LOCK:
+            em._ASM_CACHE[(rp, PEER, False)]["keepWhole"] = True
+            rows = [(k[1], (e.get("recs") or {}).get(self.leaf)) for k, e in em._ASM_CACHE.items() if k[0] == rp]
+        self.assertEqual([sid for sid, _ in rows], [SID, PEER], "the premise: this session's entry is asked first, so its check "
+                         "raises before the pinning entry is reached (the other order passes a loop that stops at the raise)")
+        self.assertEqual([row and row[0] for _, row in rows], [ent0[6], ent0[6]],
+                         "the premise: both fold over the reader entry's generation")
+        st0 = dict(em.record_cache_stats())
+        f0 = em._ASM_STATS.get("releaseFailed", 0)
+        err = io.StringIO()
+        with mock.patch.object(em, "_asm_document_would_restore", side_effect=PermissionError(13, "Permission denied")), \
+                contextlib.redirect_stderr(err):
+            _quiet_drop(self.leaf)
+        self.assertIs(_reader_entry(self.leaf), ent0, "the later entry pins: the reader entry stays, that very one")
+        st1 = em.record_cache_stats()
+        self.assertEqual(tuple(st1.get(k, 0) - st0.get(k, 0) for k in ("pinnedKept", "dropped", "droppedHeld")), (1, 0, 0),
+                         "kept for the pinning entry, neither dropped nor counted as held")
+        self.assertEqual(em._ASM_STATS.get("releaseFailed", 0) - f0, 1, "the raised check counted, once")
         self.assertIn("the entry counts as not pinning", err.getvalue())
         self.assertNotIn("the drop went ahead", err.getvalue(), "no claim about an outcome not yet known")
 
@@ -1024,6 +1064,7 @@ class ReleaseOnTheEndOfUse(Episode):
         rec0 = _reader_entry(self.leaf)
         r0 = em._ASM_STATS.get("released", 0)
         slots0 = em._ASM_INDEX_STATS["released"]
+        ev0 = em.asm_checkpoint_stats()["hydratedEvicted"]
         self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
         self.assertIsNone(self.entry(), "this session's entry is gone")
         self.assertGreater(em._ASM_INDEX_STATS["released"] - slots0, 0, "its lazy index gave the atoms it built back to the LRU")
@@ -1034,6 +1075,8 @@ class ReleaseOnTheEndOfUse(Episode):
             self.assertEqual(len(set(em._HYDRATED) & pre), 0, "the entry's hydrated bodies went with it (of %d held)" % len(held))
             self.assertIn("peer-body-uuid", em._HYDRATED, "bodies of other records stay")
             self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()), "the memo's byte count follows")
+        self.assertEqual(em.asm_checkpoint_stats()["hydratedEvicted"], ev0, "a release is not an eviction by the memo's cap: "
+                         "the bodies it removes leave hydratedEvicted where it stood (round three of the fold's review)")
         self.assertEqual(em._ASM_STATS.get("released", 0) - r0, 1, "counted")
         out, mode = self.parse()
         self.assertEqual(mode, "restore", "the session parsed again restores from its document")
@@ -1076,10 +1119,12 @@ class ReleaseOnTheEndOfUse(Episode):
         with em._ASM_CKPT_LOCK:
             held = set(em._HYDRATED) & pre
         self.assertTrue(held, "the restored prefix's bodies were memoized")
+        ev0 = em.asm_checkpoint_stats()["hydratedEvicted"]
         self.assertEqual(em.release_assembly(self.leaf, rompuuid=SID), 1)
         with em._ASM_CKPT_LOCK:
             self.assertEqual(len(set(em._HYDRATED) & pre), 0, "the atoms-only entry's bodies went with it (of %d held)" % len(held))
             self.assertEqual(em._HYDRATED_BYTES[0], sum(v[1] for v in em._HYDRATED.values()))
+        self.assertEqual(em.asm_checkpoint_stats()["hydratedEvicted"], ev0, "and are not counted as the memo's evictions")
 
     def test_a_release_drops_the_hydrated_bodies_another_entry_also_names_and_that_entry_reads_them_back(self):
         """The hydrated memo is keyed by uuid alone, and another live entry can name the same records: an SDK fork child's

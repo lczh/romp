@@ -539,12 +539,17 @@ class OneParseForBoth(unittest.TestCase):
         for where in ("leaf flip", "retired parse"):      # one buffer holds both lines, so each line is checked on its own
             line = next(ln for ln in err.getvalue().splitlines() if " at %s failed" % where in ln)
             self.assertIn("for session %s" % C, line, "the %s line names the session (round two of the fold's review)" % where)
+            self.assertIn("the release stopped where it raised and what ran before it stays released", line)
+            self.assertEqual("the record drop is not retried" in line, where == "leaf flip", "only the flip says its record "
+                             "drop is not retried; the retired parse's release runs again at its next parse: %r" % line)
 
     def test_a_lineage_that_cannot_be_read_at_the_flip_is_counted_and_said_and_drops_nothing(self):
         """The flip's record drop reads the new leaf's lineage first (its candidates, the states log's resume links) to know
         what a live session still reads. A read that raises leaves the retired leaf's records in place, since nothing is
         dropped on a guess, and it is counted under releaseFailed and said on stderr like every failed release (fold round 2
-        of the review: it returned in silence, so a drop that could not run was invisible)."""
+        of the review: it returned in silence, so a drop that could not run was invisible). The flip's assembly release ran
+        before it, so the line says the release stopped there with what ran before it released, not that the memory was left
+        as it stood (round three of the fold's review)."""
         em = jd.em
         _open_budget(self)                                 # the budget is no reason for the records to stay
         C, L1, L2 = ("88888888-2222-4333-8444-00000000088c", "88888888-2222-4333-8444-00000000088d",
@@ -569,6 +574,11 @@ class OneParseForBoth(unittest.TestCase):
         self.assertEqual(err.getvalue().count("leaf flip lineage"), 1, "and said: %r" % err.getvalue())
         self.assertIn("for session %s" % C, err.getvalue(), "naming the session, which the cleared file's own name does not "
                       "(round one of the fold's review)")
+        self.assertIn("the release stopped where it raised and what ran before it stays released; the record drop is not "
+                      "retried", err.getvalue(), "the line says what holds: the flip's assembly release ran before the lineage "
+                      "read, and nothing drops the records later: %r" % err.getvalue())
+        self.assertNotIn("left as it stood", err.getvalue(), "not that the memory was left as it stood (round three of the "
+                         "fold's review)")
         with em._JSONL_CACHE_LOCK:
             self.assertIs(em._JSONL_CACHE.get(leaf1), rec0, "nothing is dropped on a guess: the retired leaf's records stand")
 
