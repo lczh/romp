@@ -79,8 +79,8 @@ await page.addInitScript(() => {
   window.__sent = []; const send = WebSocket.prototype.send;   // every frame the page sends its kernel (the prefetch's needFull asks among them)
   WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type) window.__sent.push(m); } catch (e) { /* not a frame */ } return send.call(this, d); };
   // idle callbacks: every request counted (__idles), and the ones queued and not yet run held by handle (__idlePending, 2026-09-29). The
-  // page's one idle user is the prefetch pass (render.ts schedulePrebuild; SourcePins below checks that premise), so an empty queue read
-  // after a fill says the pass the fill queued has had its turn: a callback leaves the queue by running, or by a cancel
+  // page's one idle user is the prefetch pass (render.ts schedulePrebuild; SourcePins below checks the source shapes it names), so an
+  // empty queue read after a fill says the pass the fill queued has had its turn: a callback leaves the queue by running, or by a cancel
   window.__idlePending = new Set();
   const ric = window.requestIdleCallback, cic = window.cancelIdleCallback;
   if (typeof ric === "function") window.requestIdleCallback = function (cb, o) { window.__idles++;
@@ -402,8 +402,9 @@ class SourcePins(unittest.TestCase):
     """The premise the lab's at-rest record stands on, checked without a browser or the extension's dependencies (2026-10-02): the
     chat page's one idle-callback user is the prefetch pass. The record waits for the page's whole idle queue to empty (atRest in the
     driver), and roads 3b, 9 and 10 read that as the prefetch having run, so a second idle user that keeps itself queued would turn
-    them red with messages that point at the prefetch. These pins name the second user instead, whether it captures
-    requestIdleCallback itself or calls render.ts's requestIdle helper."""
+    them red with messages that point at the prefetch. These pins name the second user instead when it captures
+    requestIdleCallback itself, uses render.ts's capture (_ric) directly, or calls render.ts's requestIdle helper by that name. A user
+    that calls the helper under another name (an alias) gets past them."""
 
     def test_the_chat_page_captures_request_idle_callback_in_one_place(self):
         hits = _idle_captures()
@@ -426,6 +427,22 @@ class SourcePins(unittest.TestCase):
                                         "lab (tests/test_cold_boot_diet_browser.py, roads 3b, 9 and 10) reads an empty idle queue as the "
                                         "prefetch having run, so before a second caller lands, make that record count only the prefetch's "
                                         "own handles: %s" % calls)
+
+    def test_the_helper_is_the_one_user_of_render_ts_capture(self):
+        # A second idle user can also call render.ts's capture, _ric, directly, which passes both checks above; so the lines
+        # naming _ric outside its definition are counted too, and the one expected is the helper's own (review, 2026-10-02).
+        uses = []
+        with open(os.path.join(ROOT, "ui", "webview", "render.ts"), encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                code = line.strip()
+                if code.startswith(("//", "/*", "*", "const _ric ")):
+                    continue
+                if re.search(r"(?<![\w$])_ric(?![\w$])", code.split(" //")[0]):
+                    uses.append("ui/webview/render.ts:%d" % n)
+        self.assertEqual(len(uses), 1, "render.ts's capture of requestIdleCallback (_ric) has one user, its idle helper requestIdle. The "
+                                       "cold-boot lab (tests/test_cold_boot_diet_browser.py, roads 3b, 9 and 10) reads an empty idle queue "
+                                       "as the prefetch having run, so before a second user lands, make that record count only the "
+                                       "prefetch's own handles: %s" % uses)
 
 
 class ColdBootDiet(unittest.TestCase):
@@ -593,7 +610,8 @@ class ColdBootDiet(unittest.TestCase):
         self.assertGreaterEqual(h["start"]["skel"], 1, "the shown tabs other than the selected start as skeletons: %r" % h["start"])
         self.assertEqual(h["skelVisibleAfterWait"], 0, "the shown skeletons filled on idle callbacks: %r" % h)
         self.assertTrue(h["rested"], "the page's idle queue emptied after the fill; its one user is the prefetch, so the pass past the visible "
-                                     "set ran (a second idle user that keeps itself queued also fails here: SourcePins checks for one): %r" % h)
+                                     "set ran (a second idle user that keeps itself queued also fails here: SourcePins names one that "
+                                     "captures the callback, uses render.ts's capture or calls its helper by name): %r" % h)
         self.assertEqual(h["hiddenAsks"], 0, "…and asked for no tab the filter hides: %r" % h)
         rv = r["revealed"]
         self.assertGreaterEqual(rv["tabs"], N_SESSIONS, "lifting the filter shows every tab: %r" % rv)
@@ -628,7 +646,8 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(f["header"], "1", "the fold survived the restart reload: %r" % f)
         self.assertTrue(f["shownFilled"], "the shown skeletons filled: %r" % f)
         self.assertTrue(f["rested"], "…and the page's idle queue emptied after the fill; its one user is the prefetch, so the pass that would "
-                                     "reach a folded tab ran (a second idle user that keeps itself queued also fails here: SourcePins checks for one): %r" % f)
+                                     "reach a folded tab ran (a second idle user that keeps itself queued also fails here: SourcePins names "
+                                     "one that captures the callback, uses render.ts's capture or calls its helper by name): %r" % f)
         self.assertEqual((f["apiFulls"], f["apiAsks"]), (0, 0), "no folded tab was built or asked for while folded: %r" % f)
         u = r["unfolded"]
         self.assertEqual(u["header"], "0", "the header's click opened the section: %r" % u)
@@ -673,7 +692,8 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(b["header"], "1", "the api section folded again on this page before the sibling opened it: %r" % b)
         self.assertTrue(b["shownFilled"] and b["rested"], "the shown skeletons filled, and the page's idle queue emptied after the fill; its one "
                                                           "user is the prefetch (a second idle user that keeps itself queued also fails here: "
-                                                          "SourcePins checks for one): %r" % b)
+                                                          "SourcePins names one that captures the callback, uses render.ts's capture "
+                                                          "or calls its helper by name): %r" % b)
         self.assertEqual(b["apiAsks"], 0, "no folded tab asked for while folded: %r" % b)
         self.assertEqual(a["header"], "0", "the sibling's click opened the section here (the store's storage event repainted): %r" % a)
         self.assertGreater(a["idles"], b["idles"], "…and this page scheduled an idle pass: %r -> %r" % (b, a))
