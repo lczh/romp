@@ -13074,7 +13074,8 @@ CKPT_CONVERGE_MS = em._CKPT_CONVERGE_MS_DEFAULT   # the converge pass's wall bud
 ASM_CONVERGE = os.environ.get("ROMP_ASM_CONVERGE", "1") != "0"   # the pass writes idle leaves' ASSEMBLY documents from the boot's own
 #                                                                    parse (T376); 0 turns that off (the pass's own switch covers it too)
 CKPT_CONVERGE_BYTES = em._CKPT_CYCLE_CAP_DEFAULT   # ...and its bytes (documents written plus leaves read for a heal), the cycle budget the
-#                                                     quiescence drop's writes share (T362); 0 turns those writes off too (the drop then pops as before)
+#                                                     quiescence drop's writes share (T362); 0 turns those writes off too (the drop then pops as before,
+#                                                     unless a whole assembly entry pins it: recordCache.pinnedKept)
 
 
 def _session_fold_files(sid, leaf):
@@ -13186,7 +13187,8 @@ def _begin_checkpoint_cycle():
     builds' quiescence-drop writes and the converge pass near the cycle's end (the boot's first builds are capped where the
     volume is; before, the pass began the cycle and the first cycle's drops ran uncapped), and the drops an earlier cycle
     deferred are paid with this cycle's room, oldest first, no fold over their files needed. The pass's off switch
-    (ROMP_CKPT_CONVERGE_MS=0) covers the drop write: the cycle begins with no budget, and the drop pops as before T362."""
+    (ROMP_CKPT_CONVERGE_MS=0) covers the drop write: the cycle begins with no budget, and the drop pops as before T362, unless
+    a whole assembly entry pins it (recordCache.pinnedKept)."""
     em.checkpoint_cycle_begin(CKPT_CONVERGE_BYTES if CKPT_CONVERGE_MS > 0 else 0)
     em.checkpoint_pay_owed_drops()
 
@@ -51554,7 +51556,9 @@ def _release_dead_lane(sid, path, tk, alive, live_map):
     the lane loop that reports through no complaint of its own: a raise in it is noted once per file (em.release_failed)
     and the frame is built as before, the memory left as it stood. It runs only in the full timeline build, so only while a
     timeline client is connected, and only for a dead lane inside the build's window: a session that ends while no timeline
-    is open is released when a timeline build next sees its dead lane."""
+    is open is released when a timeline build next sees its dead lane. The version is recorded before either release runs,
+    so a release that raises is not retried until the transcript moves or the session leaves _dead_lane_released (bounded
+    like the lane memo); the entries stay as they stood meanwhile, still under the caches' bounds."""
     try:
         if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
             return

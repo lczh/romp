@@ -1652,7 +1652,8 @@ path, after that wait): the judges' episode scan after the second /clear, and
 the next named fold over a dead lane's leaf, restore from the document instead
 of reading the file whole again.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
-it (the drop then pops as it did before the write existed, except under the
+it (the drop then pops as it did before the write existed, unless a whole
+assembly entry pins it, counted `recordCache.pinnedKept`, and except under the
 incident scan's memo, which keeps a walked file's records resident when the
 document write is off, since its memo cannot reach the disk); `ROMP_CKPT_CONVERGE_MB`
 is the cycle budget both charge, and `0` turns the drop write off the same way
@@ -1682,7 +1683,9 @@ judges' flag is skipped and counted (`flagMismatch`), since the reader would
 delete a document under the wrong flag. A leaf with no compaction boundary has
 no cut and no document: it is read whole at every boot by design. `ROMP_ASM_CONVERGE=0` turns that step off, and so do the pass's
 own switch and a zero byte budget, as for the drop write. The owed table
-is bounded: over it the oldest owed drop is paid by its pop alone, and an owed
+is bounded: over it the oldest owed drop is paid by its pop alone (unless a
+whole assembly entry pins it: that entry stays, no longer owed, until the
+file's next quiet drop retries it), and an owed
 file since deleted has its entry popped when the cycle pays. A leaf unchanged for longer than the reader keeps a quiescent
 file's whole entry (two minutes) is refused by the pass and counted under
 `quiescent`: its heal would read the file whole every cycle and the write

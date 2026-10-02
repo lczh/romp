@@ -907,10 +907,13 @@ def _ckpt_cycle_default_cap():
 
 _CKPT_CYCLE = {"cap": _ckpt_cycle_default_cap(), "spent": 0}   # the cycle in progress: the kernel begins each pusher cycle at
 #                                   its START (so the boot's first builds are capped where the volume is); before any cycle the
-#                                   default above stands; a cap of 0 turns the drop write off (the drop pops as before T362)
+#                                   default above stands; a cap of 0 turns the drop write off (the drop pops as before T362,
+#                                   unless a whole assembly entry pins it: recordCache.pinnedKept)
 _DROP_OWED = {}                   # path -> when its quiescence drop was deferred for the cycle's budget (T362): paid at the next
 #                                   cycle's start with the room it has, oldest first, or by the next fold over the file
-_DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwritten (its memory released), never the table cleared
+_DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwritten (its memory released), never the table
+#                                   cleared; one a whole assembly entry pins stays, no longer owed, until the file's next quiet
+#                                   drop retries it
 _DROP_HOLD = threading.local()    # the converge pass holds this thread's quiescence drops while it heals and primes a leaf, then pays
 #                                   them once (T362 follow-up review, low 2): {path: pop} of the drops held, or absent
 _CKPT_LOCK = threading.Lock()
@@ -1270,7 +1273,8 @@ def _path_needs_write(key, ent, at_drop=False):
 def checkpoint_cycle_begin(cap):
     """The pusher's cycle begins: the checkpoint byte budget `cap` (documents written and read, leaves read for a heal) is
     whole again; the converge pass and the quiescence drop's writes charge it (T362). A cap of 0 (the pass off, or a zero
-    byte knob) turns the drop write off: the drop pops as before, holding nothing."""
+    byte knob) turns the drop write off: the drop pops as before, holding nothing, unless a whole assembly entry pins it
+    (recordCache.pinnedKept)."""
     with _CKPT_LOCK:
         _CKPT_CYCLE["cap"] = int(cap); _CKPT_CYCLE["spent"] = 0
 
@@ -1486,7 +1490,10 @@ def release_records(paths, keep=()):
     write sent the judges' episode scan after a second /clear, and the next named fold over a dead lane's leaf, back to the
     whole file); over the cycle's budget the drop is deferred and owed; and a file a whole assembly entry still folds over
     stays (_drop_unless_pinned_locked). There is no age gate: the event, not the file's quiet, says the use ended. Counted
-    under dropped and droppedBytes. Returns how many entries were dropped now."""
+    under dropped and droppedBytes. Returns how many entries were dropped now. A process that never begins a cycle (the
+    judges child, with judges-process on, off by default) keeps the default cap for its life: once that is spent, a drop
+    that needs a write stays owed until the reader's bounds or the owed table's bound evict the entry, as that process's
+    quiet drops already did before this release existed."""
     keep = {str(p) for p in keep}
     n = 0
     for p in paths:
