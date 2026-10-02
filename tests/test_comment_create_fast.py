@@ -833,12 +833,15 @@ class CutFromTheDisplayParse(Base):
 
     def test_a_rebuild_that_falls_back_after_a_release_parses_again_at_each_create_until_the_file_changes(self):
         # the state the texts disclose (review round five): an entry a parse that succeeded installed, released by the
-        # budget, and a rebuild whose restore and whole parse raise. The stored road stays the install's ("full"), so each
+        # budget, and a rebuild whose restore or whole parse raises. The stored road stays the install's ("full"), so each
         # create runs one event-model parse that falls back and installs nothing, then reads the transcript; after an
         # append the parse that brings the leaf current falls back itself, its road reads "fallback", and the creates
-        # after it parse no more. With checkpoints on and off, which reach the whole parse by different roads.
-        for ckpt in (True, False):
-            with self.subTest(checkpoints=ckpt):
+        # after it parse no more. Three legs (review round six): checkpoints on with the restore raising (the whole parse
+        # is never reached); checkpoints off with the whole parse raising; and checkpoints on with no document, so the
+        # real restore answers None and the whole parse raises, the usual road for a session with no document.
+        for leg, ckpt, restore_raises in (("the restore raises", True, True), ("checkpoints off", False, False),
+                                          ("no document, the whole parse raises", True, False)):
+            with self.subTest(leg=leg):
                 restart()
                 if not ckpt:
                     em.set_checkpoint_dir(None)
@@ -860,7 +863,9 @@ class CutFromTheDisplayParse(Base):
 
                 def raises(*a, **k):
                     raise RuntimeError("a synthetic rebuild failure")
-                em._asm_restore = em._asm_full = raises
+                em._asm_full = raises
+                if restore_raises:
+                    em._asm_restore = raises
                 try:
                     for anchor in ("ka5", "kr10", "ka12"):
                         got, built, parsed, reads = self.counted_create(path, anchor)

@@ -2886,14 +2886,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   at that tab's next build (its goal-tree memo at the next build that
   walks its goals: a build that merges a live tail, runs while a rewind
   is armed or reads an empty goal store keeps it), or when the tab is no
-  longer shown; a build that read the file before the
+  longer shown, and the live-merge memo, which the chat, feed and
+  timeline builds fill for any alive session, shown or not, keeps it
+  until a build merges a live tail over a newer parse or the session is
+  neither shown nor alive; a build that read the file before the
   eviction and installs after it keeps what it read, and a file evicted
   during its own read is not released. While the file is unchanged that
   chat's display build is served from its parsed tree and rebuilds
   nothing; a comment create rebuilds the entry once (for a chat parsed
   whole, beside the parsed tree, so two copies stand until the parse
   store replaces or drops that tree and a shown tab's build memos of it
-  go, or the budget evicts the file again; a chat whose stored parse fell
+  go, or the budget evicts the file again (the live-merge memo keeps it
+  as above); a chat whose stored parse fell
   back to a plain parse installs nothing, and its creates read the
   transcript, while one whose rebuild itself falls back after a release
   parses again at each create until its files change), as does the first

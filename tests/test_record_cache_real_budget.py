@@ -540,8 +540,8 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
     def test_an_eviction_releases_the_chats_copy_and_frees_its_records(self):
         """Measured with no parsed tree held (the test drops its own before the eviction): an idle session's tree in the
         judges' parse store shares the records' strings, so in the kernel their text stays until the store replaces or
-        drops that slot and a shown tab's build memos of the tree go; what this frees is the records' lists and the
-        entry's copy."""
+        drops that slot, a shown tab's build memos and the live-merge memo of the tree go; what this frees is the
+        records' lists and the entry's copy."""
         leaf = _conversation(os.path.join(self.dir, SID + ".jsonl"), 600)
         other = self._file("notes-api-states.jsonl")
         size = os.path.getsize(leaf)
