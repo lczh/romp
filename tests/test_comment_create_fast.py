@@ -16,6 +16,8 @@ Pinned here:
   a frame built before that row was saved is never sent after the answer.
 
 SYNTHETIC fixtures only: invented notes-api text, placeholder uuids. The state root is the test's own (session hosts off)."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -240,6 +242,34 @@ class CutFromTheDisplayParse(Base):
             self.assertEqual(got, self.cold(path, anchor), anchor)
         self.assertEqual(self.roads()["seeded"], 4)
         self.assertEqual(self.roads()["read"], 0)
+
+    def test_a_transcript_rewritten_in_place_since_the_restore_is_read_and_said(self):
+        # the file moved without its stat moving (rewritten in place at the same size, its mtime put back): the entry still
+        # stands, a pre-cut record's by-offset read finds another record at its offset and raises the lookup's miss, and
+        # the create reads the transcript, says so once on stderr, and cuts as the cold walk does
+        path, recs = self._session()
+        self.restored(path)
+        lines = Path(path).read_bytes().split(b"\n")
+        at = {json.loads(ln)["uuid"]: i for i, ln in enumerate(lines) if ln}
+        a, b = at["ka10"], at["ka11"]
+        self.assertEqual(len(lines[a]), len(lines[b]), "two answers of the same length")
+        lines[a], lines[b] = lines[b], lines[a]
+        st = os.stat(path)
+        with open(path, "r+b") as fh:
+            fh.write(b"\n".join(lines))
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        now = os.stat(path)
+        self.assertEqual((now.st_size, now.st_mtime_ns, now.st_ino), (st.st_size, st.st_mtime_ns, st.st_ino))
+        km._cut_read_said.discard((PARENT, "miss"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = km._comment_cut_resolve(path, PARENT, "ka10")
+        self.assertEqual(self.roads()["read"], 1)
+        said = [ln for ln in err.getvalue().splitlines() if ln.startswith("comment cut for")]
+        self.assertEqual(len(said), 1, err.getvalue())
+        self.assertIn("miss (record ka10", said[0])
+        self.assertEqual(got, self.cold(path, "ka10"))
+        self.assertEqual(got[0], "ka10")
 
     def test_a_pre_compaction_passage_still_opens_a_tip_fork_with_what_surrounded_it(self):
         path, recs = self._session(compact_after=40)

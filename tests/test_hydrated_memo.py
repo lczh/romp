@@ -11,17 +11,19 @@ body of many small blocks.
 
 Pinned here: the memory the memo holds matches the bytes it counts (measured with tracemalloc) for non-ASCII text as
 the CLI writes it, for the synthetic extreme of the same text escaped, and for bodies of many small blocks; small
-records carry their entry's own overhead in their weight; the size walk counts each object once and skips the shared
-singletons, exactly; an atom filled from the memo, by a miss or by a hit, shares its body rather than copying it, so
-while such an atom lives an eviction frees only the entry's own share, and once it is gone the eviction has freed what
-was counted; a Read result's duplicate text is not kept, nor an attachment's fields beside its prompt; the counter
-stays the sum of its entries' weights when a peer memoized the same record first; the memo's serves and evictions are
-counted, a body a peer put while this call waited on the file's read stripe among the serves, an atom whose body a peer
-had already written not; the default cap is max(256 MiB, MemTotal/48) of real memory. And the guards that keep every
-reader as it was: each atom kind fills from a memo hit exactly as it fills from its whole record, a hit reads nothing,
-a consumed tool result reaches every atom of its record whichever atom read it, a malformed attachment fails the fill as
-the whole record does, and the by-offset record read the comment cut uses still returns the whole record after a
-hydration.
+records carry their entry's own overhead in their weight; a kept tool result (an Edit's original file, a question's
+answers) and a long queued prompt count in it too; the size walk counts each object once and skips the shared
+singletons, exactly, and runs outside the memo's lock; an atom filled from the memo, by a miss or by a hit, shares its
+body rather than copying it, so while such an atom lives an eviction frees only the entry's own share, and once it is
+gone the eviction has freed what was counted; a Read result's duplicate text is not kept, nor an attachment's fields
+beside its prompt; the counter stays the sum of its entries' weights when a peer memoized the same record first, and the
+replaced record moves to the young end; a hit moves its entry there too, so the cap evicts the least recently used; the
+memo's serves and evictions are counted, a body a peer put while this call waited on the file's read stripe among the
+serves, an atom whose body a peer had already written not; the default cap is max(256 MiB, MemTotal/48) of real
+memory. And the guards that keep every reader as it was: each atom kind fills from a memo hit exactly as it fills from
+its whole record, a hit reads nothing, a consumed tool result reaches every atom of its record whichever atom read it, a
+malformed attachment fails the fill as the whole record does, and the by-offset record read the comment cut uses still
+returns the whole record after a hydration, and fails loudly once its file has moved.
 
 SYNTHETIC fixtures only: invented notes-api text, placeholder uuids."""
 import gc
@@ -94,6 +96,40 @@ def write(path, recs, escaped=False):
     return offs
 
 
+def edit_results(n=40, lines=300):
+    """n Edit results: the line the atom shows, and a top-level tool result of a consumed shape (a structured patch) that
+    carries the whole original file, a few hundred lines, so the memo keeps it."""
+    old, new = "    return store.page(cursor, limit)", "    return store.page(cursor, min(limit, 100))"
+    recs = []
+    for i in range(n):
+        src = "".join("    # line %d of notes_%d.py\n%s\n" % (k, i, old) for k in range(lines // 2))
+        patch = [{"oldStart": 120, "oldLines": 6, "newStart": 120, "newLines": 6,
+                  "lines": ["    # line %d of notes_%d.py" % (k, i) for k in range(60, 64)] + ["-" + old, "+" + new]}]
+        tur = {"filePath": "/notes-api/src/notes_%d.py" % i, "oldString": old, "newString": new, "originalFile": src,
+               "structuredPatch": patch, "userModified": False, "replaceAll": False}
+        recs.append(user(uid("edit", i), None, i, [{"type": "tool_result", "tool_use_id": "toolu_%04d" % i,
+                                                    "content": "The file /notes-api/src/notes_%d.py has been updated." % i}],
+                         tur=tur))
+    return recs
+
+
+def answer_results(n=200):
+    """n answers to the agent's questions: the line the atom shows, and a top-level tool result of a consumed shape (the
+    questions with their options, and the answers), so the memo keeps it."""
+    recs = []
+    for i in range(n):
+        qs = [{"question": "Which store should the notes route page from (%d.%d)?" % (i, q), "header": "Store %d" % q,
+               "multiSelect": False,
+               "options": [{"label": "store %d" % o, "description": "page from store %d by a cursor of %d rows" % (o, 50 * o)}
+                           for o in range(4)]}
+              for q in range(3)]
+        answers = {x["question"]: "store %d" % q for q, x in enumerate(qs)}
+        text = "User has answered your questions: " + ", ".join('"%s"="%s"' % kv for kv in answers.items())
+        recs.append(user(uid("ans", i), None, i, [{"type": "tool_result", "tool_use_id": "toolu_%04d" % i, "content": text}],
+                         tur={"questions": qs, "answers": answers}))
+    return recs
+
+
 def lazy_atom(rec, path, at, kind, own_uuid=False, **lz):
     """A pre-cut atom as a restore builds it: identity scalars, the record's location under `lazy`, a sentinel body.
     own_uuid gives the atom a uuid string object of its own, as an atom built from a document row has, so the memo's key
@@ -133,8 +169,9 @@ class RealUnits(Base):
     that memory back only once no such atom holds them: while one does, the eviction frees the entry's own share alone,
     and /perf's hydrated bytes overstate what a cap frees by the bodies live atoms hold."""
 
-    def measure(self, recs, kind="a", escaped=False):
-        """The memory figures for `recs` hydrated through lazy atoms of `kind`, a dict of:
+    def measure(self, recs, kind="a", escaped=False, tur=False):
+        """The memory figures for `recs` hydrated through lazy atoms of `kind` (with `tur`, kind u atoms whose marker
+        carries the record's tool result, so they share it with the memo as they share the message), a dict of:
         counted     the bytes the memo counts for them; lines, their line bytes on disk;
         alive       what the misses allocated, the memo's entries and the first atoms' bodies together;
         hits        what filling a second set of fresh atoms from the memo allocated: they share its bodies;
@@ -151,7 +188,8 @@ class RealUnits(Base):
         tiny = assistant(uid("tiny", 0), None, 0, [{"type": "text", "text": "noted"}])
         path = self.td / (SID + ".jsonl")
         offs = write(path, list(recs) + [tiny], escaped=escaped)
-        sets = [[lazy_atom(r, path, at, kind) for r, at in zip(recs, offs)] for _ in range(3)]
+        lz = {"tur": True} if tur else {}
+        sets = [[lazy_atom(r, path, at, kind, **lz) for r, at in zip(recs, offs)] for _ in range(3)]
         last = lazy_atom(tiny, path, offs[-1], "a")
         keep = [(a["lazy"], a["message"]) for s in sets + [[last]] for a in s]
         lines = sum(ln for _, ln in offs[:-1])
@@ -193,8 +231,8 @@ class RealUnits(Base):
         return {"counted": counted, "lines": lines, "alive": alive, "hits": hits, "held": held, "freedAlive": freed_alive,
                 "freed": freed}
 
-    def check(self, recs, kind="a", escaped=False):
-        m = self.measure(recs, kind, escaped)
+    def check(self, recs, kind="a", escaped=False, tur=False):
+        m = self.measure(recs, kind, escaped, tur)
         said = ", ".join("%s %d" % kv for kv in m.items())
         counted = m["counted"]
         self.assertGreater(counted, 0, said)
@@ -248,9 +286,19 @@ class RealUnits(Base):
         self.assertLess(m["counted"], 0.65 * m["lines"], "the duplicate file text is not counted: " + said)
         self.assertLess(m["held"], 0.65 * m["lines"], "…and not held: " + said)
 
+    def test_an_edit_results_original_file_counts_in_its_weight(self):
+        """An Edit's tool result is a shape atoms carry, its structured patch beside the whole original file, and the
+        memo keeps it: the weight counts it, or the memo would hold many times what it counts."""
+        self.check(edit_results(), kind="u", tur=True)
+
+    def test_a_questions_answers_count_in_their_weight(self):
+        """A question's tool result, its options and the answers chosen, is kept and weighed the same way."""
+        self.check(answer_results(), kind="u", tur=True)
+
     def test_an_attachment_is_kept_as_its_prompt_alone(self):
         """A queued command's attachment carries its type, its mode and whatever else the CLI writes beside the prompt;
-        the fill reads the prompt, and the memo keeps nothing else of it."""
+        the fill reads the prompt, and the memo keeps nothing else of it. A long prompt weighs at least its text: the
+        floor beside the ceiling, so a weight that left the attachment out shows."""
         rec = _meta(uid("att", 0), None, 0, "attachment")
         rec["attachment"] = {"type": "queued_command", "prompt": "also run the api tests", "commandMode": "prompt",
                              "extra": "x" * 20000}
@@ -262,6 +310,14 @@ class RealUnits(Base):
         self.assertEqual(body, {"attachment": {"prompt": "also run the api tests"}})
         self.assertLess(weight, 2000, "weighed without the rest of the attachment")
         self.assertEqual(atom["message"], {"role": "user", "content": [{"type": "text", "text": "also run the api tests"}]})
+        long = _meta(uid("att", 1), None, 1, "attachment")
+        prompt = "also run the api tests, then " + "page the notes route by cursor and check the retry budget. " * 100
+        long["attachment"] = {"type": "queued_command", "prompt": prompt, "commandMode": "prompt", "extra": "x" * 20000}
+        at = write(path, [long])[0]
+        self.assertEqual(em.hydrate([lazy_atom(long, path, at, "b")], SID, by="test"), 1)
+        weight = em._HYDRATED[long["uuid"]][1]
+        self.assertGreaterEqual(weight, sys.getsizeof(prompt), "a long prompt weighs at least its text")
+        self.assertLess(weight, sys.getsizeof(prompt) + 2000, "…and not the rest of the attachment")
 
     def test_small_records_carry_their_entry_overhead_in_their_weight(self):
         """On a small record the entry's own parts (its tuple, its weight, its uuid key and its slot in the memo's table:
@@ -321,6 +377,23 @@ class RealUnits(Base):
         self.assertEqual(em._decoded_size(None), 0)
         self.assertEqual(em._decoded_size({}), size({}))
 
+    def test_the_size_walk_runs_outside_the_memo_lock_and_inside_the_read_stripe(self):
+        """The walk can cost several times the decode, so it never runs under the memo's lock, which every hydrate and
+        every /perf read takes; it runs under the file's read stripe, where the put lands."""
+        recs = [assistant(uid("walk", i), None, i, [{"type": "text", "text": "note %d on the retry budget" % i}])
+                for i in range(3)]
+        path = self.td / (SID + ".jsonl")
+        offs = write(path, recs)
+        atoms = [lazy_atom(r, path, at, "a") for r, at in zip(recs, offs)]
+        stripe, real, seen = em._read_stripe(str(path)), em._decoded_size, []
+
+        def watched(obj):
+            seen.append((em._ASM_CKPT_LOCK.locked(), stripe._is_owned()))
+            return real(obj)
+        with mock.patch.object(em, "_decoded_size", watched):
+            self.assertEqual(em.hydrate(atoms, SID, by="test"), 3)
+        self.assertEqual(seen, [(False, True)] * 3, "(memo lock held, read stripe held) at each of the three walks")
+
 
 class CounterAndCap(Base):
     def test_the_counter_stays_the_sum_of_its_entries_when_a_peer_memoized_the_record_first(self):
@@ -352,6 +425,34 @@ class CounterAndCap(Base):
             self.assertEqual(em._HYDRATED_BYTES[0], sum(w for _, w in memo.values()),
                              "the counter is the sum of the entries' weights, the replaced one's taken out")
         self.assertEqual(PeerPut.misses, 2, "the peer's put landed between the check and the put")
+
+    def test_a_put_over_a_peers_entry_moves_the_record_to_the_young_end(self):
+        """The same race with another record put after the peer's: this thread's put replaces the peer's entry and the
+        record ends the memo's order, the young end, rather than keeping the peer's older place."""
+        rec = assistant(uid("young", 0), None, 0, [{"type": "text", "text": "the retry budget is three"}])
+        other = uid("young", 1)
+        path = self.td / (SID + ".jsonl")
+        at = write(path, [rec])[0]
+        atom = lazy_atom(rec, path, at, "a")
+
+        class PeerPutThenAnother(dict):
+            misses = 0
+
+            def get(self, k, default=None):
+                hit = super().get(k, default)
+                if hit is None and k == rec["uuid"]:
+                    PeerPutThenAnother.misses += 1
+                    if PeerPutThenAnother.misses == 2:
+                        self[k] = ({"message": rec["message"]}, 5000)
+                        self[other] = ({"message": {"role": "user", "content": "noted"}}, 300)
+                        em._HYDRATED_BYTES[0] += 5300
+                return hit
+
+        memo = PeerPutThenAnother()
+        with mock.patch.object(em, "_HYDRATED", memo):
+            em.hydrate([atom], SID, by="test")
+            self.assertEqual(list(memo), [other, rec["uuid"]], "the replaced record ends the memo's order")
+        self.assertEqual(PeerPutThenAnother.misses, 2, "the peer's puts landed between the check and the put")
 
     def test_the_memo_counts_its_serves_and_its_evictions(self):
         """With the gauge in real bytes it no longer equals hydratedBytes (line bytes read) while nothing is evicted, so
@@ -385,6 +486,27 @@ class CounterAndCap(Base):
             self.assertEqual(em.hydrate(atoms(6), SID, by="test"), 6)
             self.assertEqual(delta(st0), {"hydratedAtoms": 6, "hydratedHits": 0, "hydratedEvicted": 6},
                              "the six again: read again, each pushed out as it lands")
+
+    def test_a_hit_moves_its_entry_to_the_young_end_so_the_cap_evicts_the_least_recently_used(self):
+        """Under a cap of two equal entries, a hit on a fresh copy of the first and then a third record's put push out
+        the second: the hit made the first the most recently used."""
+        recs = [assistant(uid("lru", i), None, i, [{"type": "text", "text": "note %d on the retry budget" % i}])
+                for i in range(3)]
+        path = self.td / (SID + ".jsonl")
+        offs = write(path, recs)
+        first, third = recs[0]["uuid"], recs[2]["uuid"]
+
+        def atom(i):
+            return lazy_atom(recs[i], path, offs[i], "a")
+        self.assertEqual(em.hydrate([atom(0), atom(1)], SID, by="test"), 2)
+        weights = {w for _, w in em._HYDRATED.values()}
+        self.assertEqual(len(weights), 1, "two entries of equal weight")
+        with mock.patch.object(em, "_HYDRATED_CAP", 2 * weights.pop()):
+            st0 = em.asm_checkpoint_stats()
+            self.assertEqual(em.hydrate([atom(0)], SID, by="test"), 1)
+            self.assertEqual(em.asm_checkpoint_stats()["hydratedHits"] - st0["hydratedHits"], 1, "a hit on the first")
+            self.assertEqual(em.hydrate([atom(2)], SID, by="test"), 1)
+            self.assertEqual(list(em._HYDRATED), [first, third], "the second, least recently used, was pushed out")
 
     def test_a_body_a_peer_put_while_this_call_waited_counts_as_a_serve(self):
         """Two hydrations of the same atoms (the judges' unit text and a chat build) both miss at hydrate's first check;
@@ -582,6 +704,26 @@ class ReadersKeepTheirBehavior(Base):
         em.hydrate([atom], SID, by="test")
         self.assertIn(rec["uuid"], em._HYDRATED)
         self.assertEqual(em._read_record_at(str(path), at, rec["uuid"]), rec)
+
+    def test_the_record_read_by_offset_fails_loudly_once_its_file_has_moved(self):
+        """A transcript rewritten at the same size since its records were hydrated, or cut short: the by-offset read
+        raises the lookup's miss error, which the comment cut catches before it reads the transcript, rather than
+        answering from a copy of a file that is gone."""
+        rec = user(uid("moved", 0), None, 0, "where does the retry budget live?")
+        other = user(uid("moved", 1), None, 0, "where does the retry budget live?")
+        path = self.td / (SID + ".jsonl")
+        at = write(path, [rec])[0]
+        em.hydrate([lazy_atom(rec, path, at, "u")], SID, by="test")
+        self.assertIn(rec["uuid"], em._HYDRATED)
+        size = os.path.getsize(path)
+        write(path, [other])
+        self.assertEqual(os.path.getsize(path), size, "rewritten at the same size, another record at the offset")
+        with self.assertRaises(em.GraphMiss):
+            em._read_record_at(str(path), at, rec["uuid"])
+        write(path, [rec])
+        os.truncate(path, at[1] // 2)
+        with self.assertRaises(em.GraphMiss):
+            em._read_record_at(str(path), at, rec["uuid"])
 
 
 if __name__ == "__main__":
