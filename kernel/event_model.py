@@ -658,8 +658,9 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # stays until the store replaces or drops that slot and a shown tab's build memos of the tree go, at that tab's next
 # build (its goal-tree memo at the next build that walks its goals) or when the tab is no longer shown, and the
 # live-merge memo (the kernel's _merge_sets_memo), which the chat, feed and timeline builds fill for any alive session,
-# shown or not, keeps it until a build merges a live tail over a newer parse or the session is neither shown nor alive.
-# Two windows keep records: a build that read the file before the
+# shown or not, keeps it until a build merges a live tail over a newer parse or, at the next push that serves a chat
+# tab or the Sessions pane, the session is neither shown nor alive (its 512-entry cap ages out the oldest first). Two
+# windows keep records: a build that read the file before the
 # eviction and installs after it keeps what it read, and a path evicted during its own read is left out of the release
 # (_READ_IN_FLIGHT: an append read re-inserts the records it began from; a read from zero or a tail's upgrade builds new
 # ones). While the file is unchanged the display's next build is a parse-store hit that rebuilds nothing; a comment

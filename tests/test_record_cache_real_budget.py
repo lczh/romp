@@ -836,7 +836,10 @@ class Surfaces(unittest.TestCase):
                   "until the parse store replaces or drops it", "installs after it keeps what it read",
                   "evicted during its own read is not released", "rebuilds the entry once", "`budgetReleased`",
                   "replaces or drops it and a shown tab's build memos of it go at that tab's next build",
-                  "replaces or drops that tree and a shown tab's build memos of it go, or the budget evicts"):
+                  "replaces or drops that tree, a shown tab's build memos of it go and the live-merge memo lets it go "
+                  "(as above), or the budget evicts",
+                  "the live-merge memo, which the chat, feed and timeline builds fill for any alive session",
+                  "the session is neither shown nor alive"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]
