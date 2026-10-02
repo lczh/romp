@@ -8493,7 +8493,9 @@ class SdkSession:
         The picks still in flight before the latest one (_held_chain) end the same way: a report drops every one it
         reflects, and a versioned one it reflects on another version joins the memory. The revert puts a pick back with
         its dots only while it is still listed (_revert_model): given them back after its report, a pick hid a real
-        fallback at the next reply, neither carded nor armed until its next report (round three of that review).
+        fallback at the next reply, neither carded nor armed until its next report (round three of that review). For a
+        Latest, default or upward pick, the report that drops it includes the old model's reply of a turn the CLI opened
+        itself: the first of the cases docs/reference.md lists, reached through a refused pick.
 
         The list's check and rewrite and the marker's read and clear sit in one hold of the session lock, under which
         set_model writes both on the kernel's thread. Held for the rewrite alone, a pick landing during the check, or
@@ -16873,7 +16875,9 @@ class SdkBackend:
         that reflects it drops it from the list (_resolve_model_pending), so a pick that reported after a
         later pick replaced its marker goes back without them, and a real fallback at the next reply is
         carded and armed. Given its dots back, it hid that fallback until its next report, and a fallback
-        over by then was never carded (round three of that review)."""
+        over by then was never carded (round three of that review). For a Latest, default or upward pick,
+        that report includes the old model's reply of a turn the CLI opened itself: the first of the cases
+        docs/reference.md lists, reached through a refused pick."""
         picked = prev.get("picked")
         chain = prev.get("chain") or ()
         with sess._lock:
