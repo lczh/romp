@@ -241,10 +241,12 @@ def _heap_stats():
     stats), so there is no lock order with the perf lock to get wrong. materializedLruSlots counts the LRU's SLOTS: a kernel
     whose LRU holds its atom lists weakly keeps a collected list's slots until they expire, so the number is an upper bound on
     the live materialized atoms; where the LRU holds the lists strongly the two are equal; it is the same read
-    asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the records' length on disk,
-    what capBytes bounds: a proxy for the memo's share that locates the holder without sizing it (decoded bodies usually
-    weigh more, but escaped text can make disk bytes exceed the decoded storage: a record of 10,000 escaped non-ASCII
-    characters is 60 KB on disk and 21 KB decoded, measured). builtChat.events counts
+    asmIndex.resident publishes, repeated here so the holders sit together. hydrated.bytes is the decoded size of the body
+    fields the memo keeps plus an estimate of each entry's own overhead (its tuple, key and table slot), real bytes, what
+    capBytes bounds (2026-10-01; it was the whole records' length on disk, which a decoded record can exceed several times
+    or fall well short of); a body an atom also holds is counted there as well, the memo and the atom sharing the one copy,
+    so while that atom lives an eviction frees less than the gauge drops
+    (asmCheckpoint.hydratedEvicted counts the evictions). builtChat.events counts
     the cached payloads' events, a count and not bytes, the occupancy measure of that cache; serializedBytes sums the cached
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
@@ -8403,6 +8405,111 @@ def _default_tag_name(tags):
     return "tag %d" % n
 
 
+def _carry_tag_order(order, old, new=None, held=False):
+    """A NAME list after the tag `old` is renamed to `new`, or deleted (`new` None): the union display
+    order (tagOrder) and each lens's tags. A rename takes the old name's slot, so a group stays where the
+    user dragged it instead of falling to the end as a name the order lacks (the tag menu's Rename…, the
+    user 2026-10-01, who asked to right-click a tag to rename or delete it). `held`: another tag still
+    bears `old` (a same-named tag on an attached kernel, the name-keyed union's other half), so `old`
+    keeps its slot and `new` goes right behind it. A list without `old` comes back unchanged; a `new` it
+    already holds keeps its own slot. Returns a new list. The client's optimistic copy applies the same
+    rule (views-writes.ts carryTagOrder)."""
+    out = list(order or [])
+    if old not in out or new == old:
+        return out
+    if new is not None and new not in out:
+        out.insert(out.index(old) + 1, new)
+    if not held:
+        out.remove(old)
+    return out
+
+
+def _carry_tag_names(v, old, new=None, held=False):
+    """Carry a rename or a delete through every NAME-keyed field of the views blob `v`, in place: the
+    union order (`tagOrder`) and each surface's lens (`actives`, whose entries are names too: a tab filter
+    on the old name named a tag that no longer existed and showed nothing). A lens left empty by a delete
+    reads as All, the lens never stranding an empty selection. Tags themselves are the caller's to edit.
+    Returns whether anything changed."""
+    changed = False
+    if isinstance(v.get("tagOrder"), list) and old in v["tagOrder"]:
+        o = _carry_tag_order(v["tagOrder"], old, new, held)
+        if o != v["tagOrder"]:
+            changed = True
+            if o:
+                v["tagOrder"] = o
+            else:
+                v.pop("tagOrder", None)
+    acts = v.get("actives")
+    for lens in (acts.values() if isinstance(acts, dict) else ()):
+        if not isinstance(lens, dict) or not isinstance(lens.get("tags"), list) or old not in lens["tags"]:
+            continue
+        names = _carry_tag_order(lens["tags"], old, new, held)
+        if names == lens["tags"]:
+            continue
+        changed = True
+        if names:
+            lens["tags"] = names
+        else:
+            lens.pop("tags", None)
+            if not lens.get("none"):
+                lens.clear()
+                lens["all"] = True
+    return changed
+
+
+def _remote_tag_names(skip=None):
+    """The tag names the attached kernels' cached readings bear (the name basis, as _views_client renders
+    them), less `skip`, a (host, name) pair: the remote tag an edit just renamed or deleted, whose cached
+    reading may still show the old name. What a rename's or delete's `held` reads (_carry_tag_names)."""
+    with _remotes_lock:
+        cand = [(r.get("host"), r.get("views")) for r in _remotes.values() if isinstance(r.get("views"), dict)]
+    out = set()
+    for host, rv in cand:
+        for t in (rv.get("tags") or [])[:_VIEWS_MAX_TAGS]:
+            if not isinstance(t, dict):
+                continue
+            nm = _tag_name_basis(t.get("name")) or "tag"
+            if skip is None or (host, nm) != skip:
+                out.add(nm)
+    return out
+
+
+def _carry_local_tag_names(host, old, new=None):
+    """The carry for a tag homed on ANOTHER kernel (the editTag route and POST /tag with a host): the home
+    applies the rename or delete to its own store, whose _edit_tag carries ITS names; the order and the
+    lenses that rank and filter the tag for THIS kernel's viewer live in this store, so they are carried
+    here once the home has answered ok, as ONE lens write under _views_lock (the tags stand: the home owns
+    them). The renamed remote tag itself (`host`, `old`) does not hold the old name, whatever this kernel's
+    cached reading of the host still says. Faults raise like every views write. Returns whether the store
+    changed."""
+    old = _tag_name_basis(old)
+    new = _tag_name_basis(new) if new is not None else None
+    if not old or new == "":
+        return False
+    held_remote = _remote_tag_names(skip=(host, old))
+    with _views_lock:
+        v0 = _timeline_views_proved()
+        v = json.loads(json.dumps(v0))
+        if not _carry_tag_names(v, old, new, held=old in held_remote or any(t["name"] == old for t in v["tags"])):
+            return False
+        _set_timeline_views(_norm_timeline_views(v), base=v0, edited=[])   # a lens and order write: no tag changes
+    return True
+
+
+def _carry_after_forward(host, body):
+    """After a forwarded tag edit the home answered ok: a rename or a delete carries this store's names
+    (_carry_local_tag_names). Logged, never raised: the edit itself landed, and a store that cannot take
+    the carry costs the group its place, which the next drag restores."""
+    try:
+        rn = body.get("rename")
+        if body.get("delete"):
+            _carry_local_tag_names(host, body.get("name"), None)
+        elif isinstance(rn, str) and rn.strip():
+            _carry_local_tag_names(host, body.get("name"), rn)
+    except Exception as e:
+        sys.stderr.write("romp-kernel: tag order carry after the edit on %s: %s\n" % (host, e))
+
+
 def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=None, tid=None, exists=None):
     """Targeted edit of ONE tag in the views blob — the merge op behind POST /tag and, since
     2026-09-05, behind the dashboards' WS tagEdit op (_apply_tag_edit). The WS setTimelineViews op
@@ -8427,6 +8534,10 @@ def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=Non
     # the raw name would miss the stored tag and mint an unaddressable same-named duplicate on every
     # subsequent edit. A name that is empty after the strip is no name: a create takes the default.
     name = (str(name)[:_VIEWS_MAX_NAME].strip() or None) if name is not None else None
+    # the names the attached kernels' tags bear, read BEFORE the views lock (the remotes lock is never
+    # taken under it): a rename or delete keeps the old name's place in the order and the lenses while a
+    # remote tag still bears it (_carry_tag_names)
+    held_remote = _remote_tag_names() if (delete or rename is not None) else set()
     with _views_lock:   # the server is threaded; two unlocked merges would both copy the same pre-state
         v0 = _timeline_views_proved()   # PROVED: a read fault RAISES (_StateUnreadable; a failed publish
         #                                below, _StateUnwritable) to the door, which refuses -- never an
@@ -8449,7 +8560,11 @@ def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=Non
         if delete:
             if not hits:
                 return None, 'no tag named "%s"' % name
+            gone = hits[0]["name"]
             v["tags"] = [t for t in v["tags"] if t["id"] != hits[0]["id"]]
+            # the deleted name leaves the order and every lens in the SAME write (the tag menu's Delete tag…,
+            # the user 2026-10-01): a tab filter left naming it showed nothing at all
+            _carry_tag_names(v, gone, None, held=gone in held_remote or any(t2["name"] == gone for t2 in v["tags"]))
             _set_timeline_views(v, base=v0)   # an active pointing at it falls back to "all" (the All view) in the normalizer
             return None, None
         if hits:
@@ -8469,7 +8584,13 @@ def _edit_tag(name=None, add=(), remove=(), color=None, delete=False, rename=Non
                 return None, "the new name is empty"
             if any(t2["name"] == rn and t2["id"] != (hits[0]["id"] if hits else None) for t2 in v["tags"]):
                 return None, 'a tag named "%s" already exists' % rn   # names address edits — no twins
+            was = t["name"]
             t["name"] = rn
+            if rn != was:
+                # the group keeps its place and its filters in the SAME write (the tag menu's Rename…, the user
+                # 2026-10-01): the order and the lenses name tags, and the old name named nothing any more
+                _carry_tag_names(v, was, rn, held=was in held_remote
+                                 or any(t2["name"] == was and t2 is not t for t2 in v["tags"]))
         # add/remove arrive as viewer-relative id strings (the route's contract); the store is
         # canonical pairs — convert on the way in, match removals by pair (federation v0)
         addp = [m for m in (_member_pair(x) for x in add) if m]
@@ -18392,10 +18513,12 @@ _PRECOMPACT_EXCERPT_CAP = 1200     # characters per side: enough to place the pa
 
 
 def _comment_said(r, is_nudge):
-    """("me" | "you", text) when raw transcript record `r` is something one side of the conversation SAID — a prose
-    user/assistant record's visible text, "me" for the person (a user record), "you" for the agent — else None: tool
-    traffic, thinking, a compaction summary, the CLI's own settle, harness wrappers and romp's own injections are
-    nobody talking (the filter _thread_messages applies to the side conversation)."""
+    """("me" | "you", text) when raw transcript record `r` is a prose user or assistant record that one side of the
+    conversation said: its visible text, "me" for the person's user record, "you" for the agent's; else None. Tool
+    traffic, thinking, a compaction summary, the CLI's own settle, an API error and a synthetic reply are nobody
+    talking, and so is a user record stamped with an injected origin (any kind but the person's own) or whose text
+    _comment_persons_words refuses. A user record is judged by that stamp and those screens, not by the author its
+    atom carries. A message the CLI spliced into the running turn is no user record: _comment_spliced reads it."""
     if not _comment_prose_record(r) or r.get("isApiErrorMessage"):
         return None
     if (r.get("message") or {}).get("model") == "<synthetic>":
@@ -18403,11 +18526,39 @@ def _comment_said(r, is_nudge):
     txt = _comment_msg_text(r)
     if r.get("type") != "user":
         return ("you", txt) if txt else None
+    if (em._record_origin(r) or {}).get("kind") not in (None, "human"):
+        return None
+    return _comment_persons_words(txt, is_nudge)
+
+
+def _comment_persons_words(txt, is_nudge):
+    """("me", the person's words) from `txt`, the text of a user record or of a message spliced into a running turn,
+    else None. Harness reminders are peeled off (_split_reminders), and what is left is nobody's when it is empty, opens
+    with a harness or slash-command wrapper, is romp's resume nudge, or contains "<!-- romp-". These screens read text
+    only: _comment_said reads a user record's origin stamp, and a spliced message's stamp is already in its atom's
+    author (_comment_spliced)."""
     txt = _split_reminders(txt)[0].strip()
     if (not txt or em.SYSTEM_WRAPPER_RE.match(txt) or em.CMD_WRAP_RE.match(txt) or is_nudge(txt)
-            or "<!-- romp-" in txt or (em._record_origin(r) or {}).get("kind") not in (None, "human")):
+            or "<!-- romp-" in txt):
         return None
     return "me", txt
+
+
+def _comment_spliced(g, u, is_nudge):
+    """("me", text) when attachment `u` on transcript graph `g` is a message spliced into the running turn whose atom
+    names the person and whose words pass the screens a user record's text passes (_comment_persons_words), else None.
+    The CLI records such a message as a queued_command attachment, and writes the record again when a compaction
+    or a resume replays it.
+
+    Whether `u` is a message spliced into the turn, the original and not a copy, and who sent it, is the parse's atom
+    for it (g.splice_author: the display parse's, or on a fresh read the event model's _absorbed run over that read).
+    Its words are read only when that atom names the person. Known cases whose atom names the person and that the
+    context walk does not quote: a reply sent from a card or with its Continue button (romp's markers), text that opens
+    with a slash command's wrapper, and a message whose atom the parse made from a record off the spine, which the walk
+    does not follow. The cut walk still passes over the attachment (_comment_cut_walk)."""
+    if g.splice_author(u) != "human":
+        return None
+    return _comment_persons_words(g.splice_text(u), is_nudge)
 
 
 def _precompact_excerpt(text, tail):
@@ -18456,12 +18607,17 @@ def _precompact_context(g, path, anchor_uuid, newer):
     """_precompact_block for a pre-compaction anchor on the stitched chain `g` (an em.TranscriptGraph: the display parse's
     graph, or a fresh read's). `newer` is the active chain from the leaf down to the record just after the anchor (leaf
     first), as the cut walk collected it. The passage's TURN is the anchor's side (the person's message, or the agent's
-    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it. Only a
-    user or assistant record can be something said (_comment_said), so the walks read no other record's body."""
+    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it.
+    Only a user or assistant record (_comment_said) or a message the CLI spliced into the agent's turn
+    (_comment_spliced) can be something said, so the walks read no other record's body, and a spliced message's only
+    when the parse's atom for it names the person as its author."""
     is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
 
     def said_of(u):
-        return _comment_said(g.rec(u) or {}, is_nudge) if g.kind(u)[0] in ("user", "assistant") else None
+        kind = g.kind(u)[0]
+        if kind == "attachment":
+            return _comment_spliced(g, u, is_nudge)
+        return _comment_said(g.rec(u) or {}, is_nudge) if kind in ("user", "assistant") else None
     said = said_of(anchor_uuid)
     side = "me" if said and said[0] == "me" else "you"
     before, u, hops = None, g.parent(anchor_uuid), 0
@@ -18658,7 +18814,14 @@ def _comment_opener_split(text):
     pointer) and the _COMMENT_ASK_HEAD label are romp's; what follows is the comment. A thread opened before the
     identity line existed starts at the quote head and splits the same way. A message romp added nothing to (an
     unframed send, or a dispatched thread from before the fork line) is ("", text), and so is one that would leave
-    no comment at all."""
+    no comment at all.
+
+    Romp's quote is one run of ">" lines. The stored message has a blank line after it, so its split keeps a
+    comment's leading markdown quote. Romp's part takes a pre-compaction context block only when nothing but blank
+    lines comes between it and the quote.
+
+    The events view splits the chat build's text of the message (_thread_opener_shown), not the stored one. That
+    text can end inside the quote, so no step reads past the last line."""
     if not text:
         return "", text
     pos = 0
@@ -18671,10 +18834,15 @@ def _comment_opener_split(text):
     if text.startswith(_COMMENT_FRAME_HEAD, pos):
         lines = text[pos:].splitlines(keepends=True)
         off, i = len(lines[0]), 1
-        while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
+        while i < len(lines) and not lines[i].strip():                  # blank lines under the head
             off += len(lines[i]); i += 1
-        if i < len(lines) and lines[i].startswith(_PRECOMPACT_LEAD):
-            end = next((k for k in range(i, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
+        while i < len(lines) and lines[i].lstrip().startswith(">"):      # romp's quote: one run of ">" lines
+            off += len(lines[i]); i += 1
+        lead = i
+        while lead < len(lines) and not lines[lead].strip():            # blank lines, stepped over only before the lead
+            lead += 1
+        if lead < len(lines) and lines[lead].startswith(_PRECOMPACT_LEAD):
+            end = next((k for k in range(lead, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
             if end is not None:
                 k = end + 1
                 while k < len(lines) and not lines[k].strip():
@@ -48496,15 +48664,21 @@ def _usage():
         # and the guard is what keeps unstamped fixtures/CI (temp STATE, no credential file, no spend)
         # reading None instead of coupling to the runner's real login (the deliberate decoupling the
         # acct-stamp comment above records). A window-less file on a LOGGED-IN machine stays None —
-        # nothing known, draw nothing (never a confident zero).
+        # nothing known, draw nothing (never a confident zero) — unless the account itself answered that
+        # it has no windows (the noWindows arm below).
         if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):
             # The spend WINDOWS mirror the subscription bars (5h / 7d / month) so the two auth modes
             # read identically; _spend_windows always returns all three, zero-filled on a fresh kernel
             # (an empty slot reads as broken — the user 2026-08-04, post-restart). TOTAL sums, not the
-            # keyed split: on a no-login machine every turn bills the key, and legacy files predate
-            # the split. The rail's label is the constant 'API' — no fragment of the key travels
+            # keyed split: on a no-login machine every turn bills the key, and legacy files predate the
+            # split — EXCEPT a turn a stored login (T346) billed: a session here can bill a subscription
+            # seat through a login's token, an estimate at API prices that this cell, labelled API, showed
+            # as key dollars (the user 2026-10-01, who saw the seat's figure in the usage hover after
+            # linking the login; the spend detail's By account summary shows it as the seat's). A bucket
+            # holding such turns reads its key sub-count (login_split); every other bucket, its total.
+            # The rail's label is the constant 'API' — no fragment of the key travels
             # (the user 2026-08-08; hosts are told apart by name in the hover, not by key).
-            out = {"apiKey": True, "spend": _spend_windows(),
+            out = {"apiKey": True, "spend": _spend_windows(login_split=True),
                    "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
                    "acct": _claude_account()}
             # (The telemetryUnavailable flag + its "rate-limit telemetry unavailable under API-key
@@ -48512,14 +48686,28 @@ def _usage():
             # key-only and want the spend without a notice about rate limits that don't apply.
             # Absence of windows on a keyed host is the designed state and now simply looks like
             # what it is: no windows.)
-            ss = _spend_series()          # TOTAL, like the windows above: everything here bills the key
+            ss = _spend_series(login_split=True)   # the key's turns, like the windows above
             if ss:
                 out["spendSeries"] = ss   # the hover's money-rate graph (the user 2026-08-13)
             sa = _spend_recorded_at()
             if sa:
                 out["spendAt"] = sa       # the spend's OWN freshness (the user 2026-08-24: the windows'
                                           # stale "updated 9h ago" sat over the spend and read as its age)
-            return out
+            return _with_rail_routes(out)
+        # The account ANSWERED that it has no usage windows (the snapshot writer's `noWindows`: an enterprise seat
+        # metered by a monthly spend limit instead), stamped by the login signed in now: that is known, so it is
+        # said, the account named, and the key's spend rides beside it as on the windows arm (the user 2026-10-01,
+        # whose hover showed a 26-day-old reading as that account's allowance).
+        if o.get("noWindows") and o.get("acct") and o.get("acct") == _claude_account():
+            out = {"noWindows": True, "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
+                   "acct": _claude_account(), "acctName": _acct_name()}
+            mo = _monthly_allowance(o)        # the seat's monthly allowance, the one bar such an account has (2026-10-01)
+            if mo:
+                if "pct" in mo:
+                    mo.update({k: v for k, v in seg(mo).items() if k in ("color", "tone")})
+                out["monthly"] = mo
+            _attach_key_spend(out)
+            return _with_rail_routes(out)
         return None
     # LIMIT REACHED (the user 2026-07-01): a window at 100% whose reset is still in the future = the account is
     # rate-limited on it now. Drives the top banner + the auto retry-pause. A window past its resetsAt has rolled
@@ -48537,8 +48725,10 @@ def _usage():
            "acct": _claude_account(),
            # …and its NAME, for the hover (the user 2026-08-09, who wanted the usage tip to say which
            # account the windows belong to, the way the tab hover does). The dedup stays on the digest;
-           # this is display only, "" when no login.
-           "acctLabel": _claude_account_label(),
+           # this is display only, "" when no login. Named by its kind, the spend detail's own words, since
+           # 2026-10-01 (the user, who could not tell which account an email in the spend display was): the
+           # email stays off the rail.
+           "acctName": _acct_name(),
            "limited": limited if any(limited.values()) else None}
     # API-KEY spend BESIDE the bars — the KEYED split only (turns whose session billed the key; a login
     # turn's computed cost is dollars nobody pays), attached only when key turns actually exist, so a
@@ -48546,6 +48736,16 @@ def _usage():
     # never carry spend (the user 2026-08-08, morning): that held for a machine whose sessions all
     # share one auth; per-session auth (same day, evening) makes one host BOTH, and the key's real
     # dollars belong on the rail next to the login's real %.
+    _attach_key_spend(out)
+    # (the winSeries per-window utilization series is gone — the user 2026-08-14, who wanted the one
+    # fleet $/h graph and nothing per window. usage-history.json keeps recording — sdk_backend
+    # _record_usage_history — so a future graph starts with history instead of a blank.)
+    return _with_rail_routes(out)
+
+
+def _attach_key_spend(out):
+    """The API key's spend beside a signed-in machine's account (_usage's windows arm and its no-windows arm): the
+    keyed split's windows, series and own-freshness stamp, attached only when the box has a key and key turns exist."""
     if _auth_key_present():
         ksp = _spend_windows(keyed_only=True)
         if any((ksp.get(k) or {}).get("turns") for k in ("day", "week", "month")):
@@ -48556,10 +48756,109 @@ def _usage():
             sa = _spend_recorded_at()
             if sa:
                 out["spendAt"] = sa               # same own-freshness stamp as the key-only arm
-    # (the winSeries per-window utilization series is gone — the user 2026-08-14, who wanted the one
-    # fleet $/h graph and nothing per window. usage-history.json keeps recording — sdk_backend
-    # _record_usage_history — so a future graph starts with history instead of a blank.)
+
+
+def _monthly_allowance(o, now=None):
+    """The seat's monthly allowance from a no-windows reading's `monthly` (the get_usage answer's documented extra_usage
+    fields, kept as answered by the snapshot writer, sdk_backend _record_usage_snapshot), for the usage hover's one bar:
+    {"pct", "resetsOn"} while the reading is from the current month, {"stale": True, "resetsOn"} once that reset has
+    passed (the bar would show last month's spend as this month's), None when the answer carried no limit to measure
+    against (no extra_usage, an unlimited one, no figures). The percent is the answer's utilization, or used over
+    limit where it has none, the way Claude Code's /usage screen reads the same fields. The answer carries no reset
+    date: resetsOn is the first of the month after the reading (local time), the date that screen shows for it."""
+    m = o.get("monthly") if isinstance(o, dict) else None
+    if not isinstance(m, dict):
+        return None
+
+    def num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    lim, used, ut, t = m.get("monthly_limit"), m.get("used_credits"), m.get("utilization"), o.get("t")
+    if not (num(lim) and lim > 0 and (num(ut) or num(used)) and num(t)):
+        return None
+    read = time.localtime(t)
+    resets_on = "%04d-%02d-01" % (read.tm_year + (read.tm_mon == 12), read.tm_mon % 12 + 1)
+    if time.strftime("%Y-%m-%d", time.localtime(time.time() if now is None else now)) >= resets_on:
+        return {"stale": True, "resetsOn": resets_on}
+    return {"pct": max(0, min(100, round(ut if num(ut) else used / lim * 100))), "resetsOn": resets_on}
+
+
+def _acct_name():
+    """The machine's sign-in named the way the spend detail's By account summary names an account: by its kind
+    ("Enterprise seat", "Personal plan"), "Claude account" when the kind cannot be read, "" when no account is
+    signed in. The rail's usage hover heads the account's block with it; the email stays off the rail."""
+    if not _claude_account():
+        return ""
+    return _SEAT_NAMES.get(_kind_read()) or "Claude account"
+
+
+# what folding routes into accounts reads of a route's identity (_spend_billing): never its email or display label
+_RAIL_BILLING_KEYS = ("route", "state", "acct", "org", "orgDigest", "kind", "label", "missing", "linked")
+
+
+def _rail_routes(now=None):
+    """This host's spend over the rail's week (the hour keys _spend_windows' rolling week reads) split by billing route
+    (_bucket_routes), each route's identity (_spend_billing) beside it, stripped to what folding accounts reads:
+    {"week": {route: [usd, turns]}, "billing": [...]}, or None when the week holds no spend. /usage/fleet folds every
+    host's into the usage hover's by-account line (_rail_accounts)."""
+    try:
+        d = json.loads((jd.STATE / "spend.json").read_text())
+    except Exception:
+        return None
+    hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
+    now = time.time() if now is None else now
+    keys = {time.strftime("%Y-%m-%dT%H", time.localtime(now - i * 3600)) for i in range(7 * 24 + 1)}
+    week = {}
+    for k, e in hours.items():
+        if k not in keys or not isinstance(e, dict):
+            continue
+        for r, (u, n) in _bucket_routes(e).items():
+            a = week.setdefault(r, [0.0, 0])
+            a[0] += u
+            a[1] += n
+    week = {r: [round(a[0], 4), a[1]] for r, a in week.items() if round(a[0], 4) or a[1]}
+    if not week:
+        return None
+    billing = [{k: m[k] for k in _RAIL_BILLING_KEYS if k in m} for m in _spend_billing(week)]
+    return {"week": week, "billing": billing}
+
+
+def _with_rail_routes(out):
+    """`out` with this host's week by billing route (_rail_routes) as `spendRoutes`, when there is any."""
+    rr = _rail_routes()
+    if rr:
+        out["spendRoutes"] = rr
     return out
+
+
+def _rail_accounts(rows):
+    """The usage hover's by-account line, from every /usage/fleet row's spendRoutes folded by the spend detail's own rule
+    (_spend_accounts): ([{name, kind, usd, est}], hosts) where usd is the account's week dollars, est says a
+    subscription seat billed them (an estimate at API prices), and hosts are the machines whose spend is on the rail but
+    whose payload carries no routes (an older build), named rather than silently left out."""
+    per_host, sums, missing = [], {}, []
+    for row in rows:
+        host = row.get("host") or _self_host()
+        u = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+        sr = u.get("spendRoutes")
+        if not isinstance(sr, dict):
+            if u.get("spend"):
+                missing.append(host)
+            continue
+        per_host.append((host, sr.get("billing") or []))
+        for r, v in (sr.get("week") or {}).items():
+            if isinstance(v, list) and v:
+                sums[(host, r)] = float(v[0] or 0)
+    out = []
+    for a in _spend_accounts(per_host):
+        usd, est = 0.0, False
+        for rt in a.get("routes") or []:
+            v = sums.get((rt["host"], rt["route"]), 0.0)
+            if v >= _SPEND_GRAIN:
+                usd += v
+                est = est or bool(rt.get("estimate"))
+        if usd >= _SPEND_GRAIN:
+            out.append({"name": a["name"], "kind": a["kind"], "usd": round(usd, 4), "est": est})
+    return out, missing
 
 
 _jf_cache = {"fp": None, "val": None}                 # judge-failure scan, mtime-fingerprinted over the goals dir
@@ -49323,13 +49622,19 @@ def _spend_tree_memo_report():
     return {"entries": len(_SPEND_TREE_CACHE), "bytes": size, "bound": SPEND_GUARD_TREE_MEMO_BYTES, **_SPEND_TREE_STATS}
 
 
-def _spend_series(keyed_only=False, now=None):
+def _bucket_login_billed(e):
+    """True for a ledger bucket in which a stored login (T346) billed turns: its byLogin map names one."""
+    bl = e.get("byLogin")
+    return isinstance(bl, dict) and any(isinstance(v, dict) and (v.get("usd") or v.get("turns")) for v in bl.values())
+
+
+def _spend_series(keyed_only=False, now=None, login_split=False):
     """The hover graph's money-rate series (the user 2026-08-13): $/hour over the last 192 hours, a
     DENSE array plus a base hour (h0, epoch-hours), so cross-host summing is an index-wise add after
     aligning on h0 — correct without dedup, because each host records only its own turns even on a
     shared key. Zero IS the honest value for an hour with no turns (money, unlike pct, has a true
-    zero). None when nothing is recorded at all. Same keyed_only split as _spend_windows, for the same
-    reason. `now` anchors h0 — injectable so a caller with a frozen evidence clock (tests) can't
+    zero). None when nothing is recorded at all. Same keyed_only split (and login_split rule) as
+    _spend_windows, for the same reason. `now` anchors h0 — injectable so a caller with a frozen evidence clock (tests) can't
     straddle an hour boundary between writing a bucket and reading its index (the 23:00 UTC CI run)."""
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
@@ -49344,7 +49649,7 @@ def _spend_series(keyed_only=False, now=None):
         i = _series_index(k, h0)
         if i is None or not (0 <= i < _SERIES_HOURS) or not isinstance(e, dict):
             continue
-        if keyed_only:
+        if keyed_only or (login_split and _bucket_login_billed(e)):
             e = e.get("key") if isinstance(e.get("key"), dict) else {}
         usd[i] = round(float((e or {}).get("usd") or 0), 4)
     return {"h0": h0, "usd": usd}
@@ -49387,7 +49692,8 @@ _SPEND_GRAIN = 5e-5      # a bucket's dollars minus its sids' dollars below this
 def _spend_scope():
     """Which figure the rail shows for THIS host, mirrored for the usage modal so its numbers are the
     rail's: "total" on a no-login (key-only) machine — every turn there bills the key, and legacy files
-    predate the split — or "keyed" when a login's windows sit beside the key's spend, where only the
+    predate the split; a turn a stored login billed is the exception (its session row wears the estimate
+    mark, and the rail leaves it out since 2026-10-01) — or "keyed" when a login's windows sit beside the key's spend, where only the
     turns whose session billed the key are dollars anyone pays (_usage's two arms, the user 2026-08-08) —
     or "computed" for a login with no key at all, where the rail shows no spend and every recorded
     figure is a computed cost, not a bill."""
@@ -50202,7 +50508,7 @@ def _merge_spend_details(payloads, hosts, local):
     return out
 
 
-def _spend_windows(keyed_only=False):
+def _spend_windows(keyed_only=False, login_split=False):
     """API-mode usage windows MIRRORING the subscription bars (the user 2026-08-04, who wanted the two
     auth modes to read identically at a glance): rolling 5h and 7d summed from spend.json's hour
     buckets, month-to-date from its day buckets — each {usd, tok, turns}, plus `budget` where
@@ -50213,7 +50519,10 @@ def _spend_windows(keyed_only=False):
     API key (see _record_spend). That is what the rail's API readout shows beside a login's bars on a
     mixed host: the total would fold login turns' computed costs in — dollars nobody is billed (the
     user 2026-08-08). The no-login machine keeps the total (everything there IS the key, and legacy
-    files predate the split)."""
+    files predate the split), with ONE exception, login_split=True: a bucket in which a stored login
+    (T346) billed turns sums its key sub-counters, since those turns spent a subscription seat through
+    the login's token and are not the key's (2026-10-01; before, the cell showed them as key dollars).
+    A bucket no stored login billed is read exactly as before."""
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
     except Exception:
@@ -50235,7 +50544,7 @@ def _spend_windows(keyed_only=False):
         complete = True
         for e in entries:
             if isinstance(e, dict):
-                if keyed_only:
+                if keyed_only or (login_split and _bucket_login_billed(e)):
                     e = e.get("key") if isinstance(e.get("key"), dict) else {}
                     out["usd"] = round(out["usd"] + float(e.get("usd") or 0), 4)
                     out["turns"] += int(e.get("turns") or 0)
@@ -55274,7 +55583,12 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #   tagSet  — …and its `setTags` op (2026-09-30): a session's local tags set to exactly a list, as one
 #             write (_set_member_tags). Without it the strip's drag posts the fewest older ops that reach
 #             the same tags (`move` for a one-to-one move, else addMember / removeMember in turn).
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+#   tagNameCarry — a rename or delete carries the tag's NAME-keyed fields in the same write (2026-10-01, the
+#             tag menu): the union order keeps the renamed group's place and each lens follows the name
+#             (_carry_tag_names), on this kernel's own tags and, after the home answers ok, on a tag homed on
+#             an attached kernel (_carry_after_forward). Without it the page writes the carried order itself,
+#             a lens write after the edit (render.ts commitTagUnionEdit).
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow", "tagNameCarry")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
@@ -65804,6 +66118,12 @@ list.addEventListener('pointerdown',function(){held=true;});
 // a heading is a button to the keyboard too: Enter and Space press it, through the same click
 list.addEventListener('keydown',function(e){var hd=e.target&&e.target.closest?e.target.closest('.mhead'):null;
 if(hd&&(e.key==='Enter'||e.key===' ')){e.preventDefault();hd.click();}});
+// a long press (or a right-click) on a HEADING opens the TAG MENU (2026-10-01, the user's right-click on a tag): it is
+// forwarded to the strip's own hidden header as the right-click the desktop header takes, at the finger's point, so the
+// one menu (render.ts showTagMenu) opens over the list; its rename asks in a prompt here, the header being hidden
+list.addEventListener('contextmenu',function(e){var hd=e.target&&e.target.closest?e.target.closest('.mhead'):null;if(!hd)return;
+e.preventDefault();e.stopPropagation();var rh=realHead(hd.getAttribute('data-group'));
+if(rh)rh.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:e.clientX,clientY:e.clientY}));});
 function release(){if(held){held=false;if(dirty){dirty=false;sync();}}}
 document.addEventListener('pointerup',release);
 document.addEventListener('pointercancel',release);
@@ -65814,6 +66134,30 @@ new MutationObserver(sync).observe(tabs,{childList:true,subtree:true,attributes:
 sync();})();
 """
 
+
+def _svg_data_uri(path):
+    """A media SVG as a `data:image/svg+xml,` URI, the same bytes /media serves with runs of whitespace folded to
+    one space and the characters a CSS url("...") string or a URI cannot carry raw percent-encoded. esbuild.js
+    builds the webview bundles' copy (__ROMP_SWIRL_O__) by the same rule; tests/test_wordmark_first_paint_served.py and
+    ui/webview/media-base.test.ts pin that each decodes to the media file. An unreadable file falls back to the
+    /media URL, the fetch it replaces."""
+    try:
+        svg = path.read_text(encoding="utf-8")
+    except OSError:
+        return "/media/" + path.name
+    svg = re.sub(r"\s+", " ", re.sub(r">\s+<", "><", svg)).strip()
+    for ch, esc in (("%", "%25"), ("#", "%23"), ("<", "%3C"), (">", "%3E"), ('"', "%22")):
+        svg = svg.replace(ch, esc)
+    return "data:image/svg+xml," + svg
+
+
+# The wordmark's "o" rides INSIDE the page, never behind a fetch (the user 2026-10-01, who saw R, m and p paint
+# at once and the spinning o land a beat later). As an <img src=/media/romp-swirl-o.svg> it waited on its own
+# request, and /media is served no-cache, so even a cached copy cost a revalidation round trip on every load
+# while the letters painted from the HTML. Carried as a data URI in the loader's CSS, it paints in the same
+# frame as the letters. One copy per page (the CSS rule), not one per loader markup: the landing splices the
+# markup into its scripts twice more.
+_SWIRL_O_URI = _svg_data_uri(MEDIA / "romp-swirl-o.svg")
 
 # The shared romp LOADER (the user 2026-06-26): the romp WORDMARK — the swirl glyph spinning as the lowercase
 # "o", with R/m/p around it in the swirl's three arm colours (blue/green/teal, Anta typeface, mirroring the
@@ -65829,6 +66173,11 @@ _LOADER_CSS = (
     ".rl-word{font-family:'RompAnta','Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:38px;"
     "line-height:1;white-space:nowrap}"
     ".rl-o{width:.65em;height:.65em;vertical-align:middle;margin:0 -.0335em;animation:rl-spin 7s linear infinite}"
+    # span.rl-o, the kernel's own markup: an inline-block lays out exactly as the <img> it replaced did (no line
+    # box inside it, so vertical-align:middle centres the same box). Scoped to the span because a pane's
+    # webview loader is an <img class=rl-o> with the same picture as its src: a background under it would
+    # paint the swirl's glows twice.
+    "span.rl-o{display:inline-block;background:url(\"" + _SWIRL_O_URI + "\") center/contain no-repeat}"
     ".rl-dots{display:flex;gap:7px}"
     ".rl-dots i{width:7px;height:7px;border-radius:50%;background:#9cd2ff;animation:rl-bnc 1.1s ease-in-out infinite}"
     ".rl-dots i:nth-child(2){animation-delay:.16s}.rl-dots i:nth-child(3){animation-delay:.32s}"
@@ -65842,7 +66191,7 @@ def _loader_inner():
     """The loader's inner markup — the 'Romp' wordmark with the swirl spinning as the 'o', + dots below."""
     return ("<div class=rl-in><div class=rl-word>"
             "<span style='color:#1EA1EB'>R</span>"
-            "<img class=rl-o src=/media/romp-swirl-o.svg alt=o>"
+            "<span class=rl-o role=img aria-label=o></span>"
             "<span style='color:#54B204'>m</span><span style='color:#4EA8A9'>p</span>"
             "</div><div class=rl-dots><i></i><i></i><i></i></div></div>")
 
@@ -66460,10 +66809,13 @@ def _timeline_page():
             "<script>%s</script>"                               # the shared WS shim (connect/queue/watchdog)
             "<script src=/dist/federation.js?v=%d></script>"    # multi-kernel manager: after the shim, before the boot
             "<script>%s</script>"
-            "<script>var module={exports:{}};(function(module,exports){\n%s\n})(module,module.exports);"
+            # the wordmark's swirl-o for the view's loader, inline (see _SWIRL_O_URI): the global the view reads,
+            # which esbuild bakes in as a constant when it bundles the same file for VS Code
+            "<script>var __ROMP_SWIRL_O__=%s;var module={exports:{}};(function(module,exports){\n%s\n})(module,module.exports);"
             "var TimelinePanel=module.exports.TimelinePanel;"
             "window.__rompConnectTimeline(new TimelinePanel(document.getElementById('host')));"
-            "</script></body></html>") % (THEME_CSS, tl_css, _shim("timeline", v), v, _TIMELINE_BOOT, view_js))
+            "</script></body></html>") % (THEME_CSS, tl_css, _shim("timeline", v), v, _TIMELINE_BOOT,
+                                          json.dumps(_SWIRL_O_URI), view_js))
 
 
 def _chat_body():
@@ -67047,6 +67399,7 @@ var WINS=[['fiveHour',5*3600,'5 hours'],
 // tooltip detail for the ones drawn into the aggregate; SELF names this machine for its hover heading
 // when there is more than one host.
 var ROWS=[],LAST=[],SELF='',NOREPORT=[];   // NOREPORT: machines attached and up with no usage report yet (named, never a column)
+var ACCTS=[],ACCTS_MISS=[];   // the by-account line (2026-10-01): every machine's week folded into accounts by the kernel, and the machines it could not fold
 // Limit / judge-degraded SIGNATURES (the user 2026-07-03; reshaped 2026-07-27): these used to gate fixed
 // top banners with a ✕ dismissal; the banners are gone — the same situations now log ONE entry each in
 // the shell's notification center (the bell, _LANDING_ERRS_JS). The stored signature means "this exact
@@ -67122,17 +67475,27 @@ if(u.spendSeries&&u.spendSeries.usd)det._spendSeries=u.spendSeries;}   // $/hour
 // One payload's WINDOW detail for the hover (used/elapsed/reset per window). Detail only, no markup:
 // the rail no longer draws each account's own bars (they aggregate, below), but the tip still tells
 // each host's story from this.
+// a reading's fill colour
+function segCol(seg,pct){var nc=document.body.classList.contains('chat-theme-yatharth');   // dual palette (PR #763): the yatharth themes take seg.tone, classic keeps seg.color verbatim
+var csrc=(nc&&seg.tone&&seg.tone.length===3)?seg.tone:seg.color;
+return (csrc&&csrc.length===3)?('rgb('+csrc.join(',')+')'):(nc?(pct>=88?'#c0392b':(pct>=70?'#d7a23a':'#5196B8')):'#54B204');}   // classic fallback = main's flat green; yatharth = the unified pair (ctx-color.ts)
+// a calendar date the kernel serves as YYYY-MM-DD, read as 'Nov 1'
+function fmtDay(s){var p=String(s||'').split('-');return p.length===3?['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+p[1]-1]+' '+(+p[2]):'';}
 function winDet(u,det){var nowS=Math.floor(Date.now()/1000);
-if(u.acctLabel)det._acct=u.acctLabel;   // WHICH login the windows belong to (the user 2026-08-09) — hover-only
+if(u.acctName)det._acct=u.acctName;   // WHICH login the windows belong to (the user 2026-08-09) — hover-only, by its kind since 2026-10-01
+if(u.noWindows)det._noWin=true;      // the account answered that it has no usage windows (an enterprise seat meters a monthly spend limit)
+// …and that spend limit, its monthly allowance (2026-10-01): one bar the hover draws in place of the windows; a reading from
+// before its reset arrives as stale, a date and no figure
+var mo=u.noWindows&&u.monthly;
+if(mo)det._monthly=mo.stale?{stale:true,reset:fmtDay(mo.resetsOn)}
+:{pct:Math.max(0,Math.min(100,mo.pct||0)),col:segCol(mo,mo.pct||0),tp:null,unk:false,reset:fmtDay(mo.resetsOn)};
 WINS.forEach(function(w){var seg=u[w[0]];if(!seg)return;
 // A ROLLED window (its reset passed since the last report) is UNKNOWN, not 0 (the user 2026-07-31: a
 // remote whose kernel had no live session to ask sat on a days-old snapshot, and the rail drew a
 // confident 0% beside a live account's real bars). The last-known number renders in the hover,
 // labelled as such; the rail's aggregate never counts an unknown as a value.
 var rolled=!!(seg.resetsAt&&nowS>seg.resetsAt),pct=Math.max(0,Math.min(100,seg.pct||0));
-var nc=document.body.classList.contains('chat-theme-yatharth');   // dual palette (PR #763): the yatharth themes take seg.tone, classic keeps seg.color verbatim
-var csrc=(nc&&seg.tone&&seg.tone.length===3)?seg.tone:seg.color;
-var col=(csrc&&csrc.length===3)?('rgb('+csrc.join(',')+')'):(nc?(pct>=88?'#c0392b':(pct>=70?'#d7a23a':'#5196B8')):'#54B204');   // classic fallback = main's flat green; yatharth = the unified pair (ctx-color.ts)
+var col=segCol(seg,pct);
 var tp=(!rolled&&seg.resetsAt&&w[1])?Math.max(0,Math.min(100,Math.round((nowS-(seg.resetsAt-w[1]))/w[1]*100))):null;
 det[w[0]]={name:w[2],pct:pct,col:col,tp:tp,unk:rolled,ago:(rolled?fmtAgo(seg.resetsAt):null),reset:(!rolled&&seg.resetsAt)?fmtR(seg.resetsAt):null};});}
 // ONE aggregated set of bars for every account at once (the user 2026-08-08: never repeat the windows
@@ -67212,10 +67575,11 @@ if(tr>tb)best=r;});
 g.forEach(function(r){if(r===best)return;var v={},u=r.usage,b=best.usage,k;
 // a member whose OWN reading differs from the freshest is LAGGING (the user 2026-09-19): the account's block shows the
 // freshest, and the machine is named as lagging beside its name, with its own report's age
-r.lag=['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];
+// (none beside an account that answered it has no windows: a member's older reading is not a figure the block shows)
+r.lag=!b.noWindows&&['fiveHour','sevenDay','fable'].some(function(w){var x=u[w],y=b[w];
 return JSON.stringify(x?[x.pct,x.resetsAt]:null)!==JSON.stringify(y?[y.pct,y.resetsAt]:null);});
 for(k in u)v[k]=u[k];
-['fiveHour','sevenDay','fable','t','limited','acctLabel'].forEach(function(w){
+['fiveHour','sevenDay','fable','t','limited','acctName','noWindows','monthly'].forEach(function(w){
 if(b[w]!==undefined)v[w]=b[w];else delete v[w];});
 r.usage=v;});});}
 var RAIL_HOME=(function(){var c=document.getElementById('rail-api');return c?c.parentNode:null;})();   // where the dot lives with no readout
@@ -67227,7 +67591,7 @@ function moveApiCell(c,into){var had=document.activeElement===c,mv=window.__romp
 into();if(had){try{c.focus({preventScroll:true});}catch(e){}}if(mv)mv(false);}
 function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)moveApiCell(c,function(){RAIL_HOME.insertBefore(c,el.nextSibling);});}
 function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();
-var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage);});
+var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage)||!!(r.usage&&r.usage.noWindows);});
 if(!live.length){el.innerHTML='';tip.style.display='none';return;}
 shareFreshest(live);
 LAST=live.map(function(r){var det={};det._t=(typeof r.usage.t==='number')?r.usage.t:null;
@@ -67317,17 +67681,26 @@ return keys.map(function(k){var v=d[k];
 return '<div class=ru-tip-win><div class=ru-tip-name><span>'+esc(v.name)+'</span>'
 +(v.unk?'<span class=ru-tip-reset>window reset '+esc(v.ago)+'; no reading since</span>'
 :(v.reset?'<span class=ru-tip-reset>resets in '+esc(v.reset)+'</span>':''))+'</div>'+barRows(v)+'</div>';}).join('');}
+// THE SEAT'S MONTHLY ALLOWANCE (2026-10-01): an enterprise seat has no 5-hour or weekly window; it is metered by a monthly
+// spend limit, drawn as the windows are (the percent used, the date it resets). A reading from before that reset is not
+// this month's figure: no bar, the reset and that nothing has been read since.
+function monthlyHTML(d){var m=d._monthly;if(!m)return '';
+return '<div class=ru-tip-win><div class=ru-tip-name><span>Monthly allowance</span><span class=ru-tip-reset>'
++(m.stale?'reset '+esc(m.reset)+'; no reading since':'resets '+esc(m.reset))+'</span></div>'+(m.stale?'':barRows(m))+'</div>';}
 function machineHTML(name){return '<span class="ru-tip-machine host-prefix">'+esc(name)+'</span>';}
 function acctBlocksHTML(sets,manyMachines){var groups=[],by={};
-sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];}))return;
+sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;
 var a=e.acct||('host:'+e.host);var g=by[a];if(!g){g={members:[]};by[a]=g;groups.push(g);}g.members.push(e);});
 return groups.map(function(g){var d=g.members[0].det,h='<div class=ru-tip-block>';
 if(d._acct)h+='<div class=ru-tip-acct>'+esc(d._acct)+'</div>';
-h+=winsHTML(d);
+var wh=winsHTML(d);
+// an account with no windows shows its monthly allowance in their place, or says it has none in one line; neither carries
+// the age line (the allowance dates itself by its reset)
+h+=wh||monthlyHTML(d)||'<div class=ru-tip-nowin>no 5-hour or weekly limits on this account</div>';
 if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){return machineHTML(e.host)
 +(e.lag?'<span class=ru-tip-lag> lagging'+(e.ownT?', updated '+fmtAgo(e.ownT):'')+'</span>':'');}).join(', ')+'</div>';
 var ts=g.members.map(function(e){return e.ownT;}).filter(function(t){return typeof t==='number';});
-if(ts.length)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';
+if(ts.length&&wh)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';
 return h+'</div>';});}
 // The ONE API-spend section for the whole hover (the user 2026-08-13): every host's windows summed —
 // one shared key is one number — plus the summed $/hour over the last 7 days as an area graph. A host
@@ -67380,6 +67753,7 @@ if(rowsOnly)return h.replace('<span>API spend','<span>Totals')+'</div>';
 if(per.length>1){per.sort(function(a,b){return b.usd-a.usd;});
 h+='<div class=ru-tip-row><span class=ru-tip-k>by machine \u00b7 1 week</span><span class=ru-tip-v>'
 +per.map(function(p){return esc(p.host)+' '+fmtUsd(p.usd);}).join(' \u00b7 ')+'</span></div>';}
+h+=acctLineHTML(ACCTS,ACCTS_MISS);
 if(series){var st=Math.max(0,series.usd.length-168),wk=series.usd.slice(st),mx=0;for(var i=0;i<wk.length;i++)if(wk[i]>mx)mx=wk[i];
 // 'peak $X/h': the costliest single HOUR of the week (the user 2026-08-13 asked whether the bare
 // number was per-hour \u2014 say so). The peak rides the label row's VALUE slot and the graph gets its
@@ -67391,6 +67765,15 @@ if(mx>0)h+='<div class=ru-tip-row><span class=ru-tip-k>$/h \u00b7 7d</span>'
 +moneyGraph(wk,'#9cd2ff',series.h0+st);}
 if(sAt)h+='<div class=ru-tip-age>last charge recorded '+fmtAgo(sAt)+'</div>';
 return h+'</div>';}
+// BY ACCOUNT, one line (the user 2026-10-01, who read seat dollars summed into this card's figures, unmarked): who
+// billed the week, folded by the kernel exactly as the spend detail's By account summary folds it (_rail_accounts). The
+// rows above are the key's dollars; a subscription seat's are Claude Code's cost at API prices, an estimate, and wear
+// the approx mark as they do in the detail. Drawn only when something besides the key billed the week: a key alone is
+// already the rows above. A machine whose older build sends no routes is counted out by name.
+function acctLineHTML(accts,miss){if(!(accts||[]).some(function(a){return a.kind!=='key';}))return '';
+return '<div class=ru-tip-row><span class=ru-tip-k>by account \u00b7 1 week</span><span class=ru-tip-v>'
++accts.map(function(a){return esc(a.name)+' '+(a.est?'\u2248':'')+fmtUsd(a.usd);}).join(' \u00b7 ')
++((miss||[]).length?' \u00b7 '+miss.map(esc).join(', ')+' not counted (older build)':'')+'</span></div>';}
 function tipHTML(){var sets=LAST||[];if(!sets.length&&!NOREPORT.length)return '';
 var manyMachines=(sets.length+NOREPORT.length)>1;
 var blocks=acctBlocksHTML(sets,manyMachines);
@@ -67461,6 +67844,7 @@ var _ruBusy=false;
 // today's exact rendering \u2014 whenever every machine is signed into the same login.
 function pullFleet(){return fetch('/usage/fleet',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
 .then(function(d){var rows=(d&&d.rows)||[];SELF=(d&&d.host)||SELF;NOREPORT=(d&&Array.isArray(d.noReport))?d.noReport:[];
+ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];ACCTS_MISS=(d&&Array.isArray(d.accountsMissing))?d.accountsMissing:[];
 var local=rows.length?rows[0].usage:null;
 notices(local);renderRows(rows,SELF);});}
 function pull(ack){if(_ruBusy)return;_ruBusy=true;
@@ -71290,7 +71674,7 @@ def _landing():
             # declarations ui/webview/styles.css gives a federated tab's host; a lagging machine's note in the amber
             # the 70 percent window wears; a machine not reporting named after the blocks in the same line style.)
             ".ru-tip-block{min-width:200px}"
-            ".ru-tip-machines{margin-top:6px;font-size:11px;color:#9aa0a6}"
+            ".ru-tip-machines,.ru-tip-nowin{margin-top:6px;font-size:11px;color:#9aa0a6}"
             ".ru-tip-machines .host-prefix{color:var(--dim,#9aa0a6);font-weight:400;font-style:italic;font-size:0.86em}"
             ".ru-tip-lag{color:#d7a23a;font-size:10px}"
             # the login the window bars belong to (the user 2026-08-09) — quiet, above the sections,
@@ -71650,7 +72034,8 @@ def _landing():
             "body.theme-light .ru-tip-gy{color:#6b6560}body.theme-light .ru-tip-gx{color:#6b6560}"
             "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
             "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
-            "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"
+            # the hover's tracks too (2026-10-01): their dark wash vanished on the white card, leaving a bar with no scale
+            "body.theme-light .ru-track,body.theme-light .ru-tip-track{background:rgba(0,0,0,0.10)}"
             "body.theme-light #mtabs{background:#E7DED2;border-top-color:#DCD2C4}"
             "body.theme-light #mtabs button{color:#5D574E}"
             "body.theme-light #mtabs button.on{color:#C2410C}"
@@ -72910,7 +73295,10 @@ class Handler(BaseHTTPRequestHandler):
                         be.refresh_usage()
                 except Exception:
                     pass
-                return self._send(200, json.dumps({"rows": _fleet_usage(), "host": _self_host(), "noReport": _usage_no_report()}),
+                rows = _fleet_usage()
+                accts, accts_missing = _rail_accounts(rows)   # the hover's by-account line (2026-10-01)
+                return self._send(200, json.dumps({"rows": rows, "host": _self_host(), "noReport": _usage_no_report(),
+                                                   "accounts": accts, "accountsMissing": accts_missing}),
                                   "application/json", cache="no-cache")
             if p == "/spend/detail":                          # the usage MODAL's per-session breakdown (T247):
                 # who spent what and spend over time stacked by session, read from the ledger's bySid
@@ -74560,6 +74948,8 @@ class Handler(BaseHTTPRequestHandler):
                             err += " — queued: it applies when %s reattaches" % th
                         return self._send(200, json.dumps({"ok": False, "error": err, "queued": "queued" in err}),
                                           "application/json")
+                    if (ans or {}).get("ok", False):
+                        _carry_after_forward(th, fbody)   # a rename or delete keeps the group's place on THIS viewer
                     _mark_views_dirty()
                     return self._send(200, json.dumps(ans), "application/json")
                 live = _live_names(_live_map())
@@ -75376,6 +75766,8 @@ class Handler(BaseHTTPRequestHandler):
                 if dele:
                     body["delete"] = True
                 ans, err = _forward_tag_edit(host, body)
+                if not err and (ans or {}).get("ok", False):
+                    _carry_after_forward(host, body)   # a rename or delete keeps the group's place on THIS viewer
                 if err or not (ans or {}).get("ok", False):
                     # v2: a TRANSPORT failure (err — down/unreachable/hiccup) journals the intent so
                     # it applies at reattach; a host that ANSWERED and refused (ok=False) is the

@@ -145,12 +145,14 @@ await page.waitForFunction((t2) => Array.from(document.querySelectorAll(".turn-q
 await painted();
 const two = await measure();
 const twoPushes = [];
+// a push that never reached the page is recorded, as phase one records it (2026-09-29): swallowed here, a page that stopped
+// taking pushes after the second send left the reader at the bottom trivially, and the no-move claims below passed on nothing
 for (let k = 0; k < 6; k++) {
   const before = await page.evaluate(() => window.__frames);
   fs.appendFileSync(cfg.transcript, JSON.stringify(step(n)) + "\n"); n++;
-  try { await page.waitForFunction((b) => window.__frames > b, before, { timeout: 5000 }); } catch (e) {}
+  try { await page.waitForFunction((b) => window.__frames > b, before, { timeout: 5000 }); } catch (e) { twoPushes.push({ i: n, timeout: true }); }
   await painted();
-  twoPushes.push(await measure());
+  twoPushes.push({ i: n, ...(await measure()) });
 }
 // the ✕ on the FIRST bubble
 await page.evaluate(() => { const xs = Array.from(document.querySelectorAll(".turn-queued:not(.turn-queued-hidden) .queued-edit")); if (xs[0]) xs[0].click(); });
@@ -159,9 +161,9 @@ const afterX = await measure();
 for (let k = 0; k < 4; k++) {
   const before = await page.evaluate(() => window.__frames);
   fs.appendFileSync(cfg.transcript, JSON.stringify(step(n)) + "\n"); n++;
-  try { await page.waitForFunction((b) => window.__frames > b, before, { timeout: 5000 }); } catch (e) {}
+  try { await page.waitForFunction((b) => window.__frames > b, before, { timeout: 5000 }); } catch (e) { twoPushes.push({ i: n, timeout: true }); }
   await painted();
-  twoPushes.push(await measure());
+  twoPushes.push({ i: n, ...(await measure()) });
 }
 const rows = await page.evaluate(() => window.__rows);
 // the tool group's toggle under a bottom reader (round two, medium; LAST, since the reader's own move to the bottom is a gesture the phases before must not count): expand the tail's tool run, go to the bottom, collapse it. The
@@ -305,6 +307,7 @@ class ServedPendingBubbleStable(unittest.TestCase):
         # two sends and a ✕
         two, tp, ax = r["two"], r["twoPushes"], r["afterX"]
         self.assertEqual(two["texts"], 2, "two pending sends in the one group: %r" % two)
+        self.assertEqual([p["i"] for p in tp if p.get("timeout")], [], "every push reached the page, before and after the ✕ (the distances below are read after each): %r" % tp[:3])
         self.assertLessEqual(max(p["dist"] for p in tp), 2, "…and the reader stays at the bottom through pushes, before and after the ✕: %r" % [p["dist"] for p in tp])
         self.assertEqual(ax["texts"], 1, "the ✕ removed one bubble: %r" % ax)
         self.assertEqual(ax["dist"], 0, "the ✕ leaves the reader at the bottom: %r" % ax)

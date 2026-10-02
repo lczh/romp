@@ -3710,7 +3710,7 @@ class FileAdapter:
         return set(active) | {u for u, v in self.chain_verdicts(active).items()
                               if v in ("active", "broken", "eclipsed")}
 
-    def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index):
+    def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index, *, stats):
         """One synthesized user atom for a mid-turn splice, placed where the model READ it (T252d, the
         user 2026-09-08): its `t` is the LANDING time — the moment the CLI took the message off its
         queue, the file-order predecessor's stamp (_landing_t) — so the atom sits BELOW the steps that
@@ -3734,7 +3734,9 @@ class FileAdapter:
         The atom carries the FULL text — any whitespace-collapsed form is for MATCHING only (the user
         2026-07-08: collapsing ate the blank line between a follow-up's quoted context and the typed
         reply, so markdown folded the reply INTO the blockquote; and the kernel's optimistic echo could
-        never text-prune against the collapsed copy, so the message rendered TWICE)."""
+        never text-prune against the collapsed copy, so the message rendered TWICE).
+
+        `stats` False keeps the clamp below out of the parse stats, for a caller that is no parse (_absorbed's)."""
         blocks = [{"type": "text", "text": full}]
         arec = self.by_uuid.get(auid) or {}
         origin = _record_origin(arec)   # a queued_command attachment carries its own origin / commandMode
@@ -3767,7 +3769,8 @@ class FileAdapter:
                 # these would show up, since a silent clamp would hide a CLI write-order change. (The
                 # 2026-09-06 review: two goldens had pinned a landedT 30-40 s before the send, from a
                 # synthetic shape with no tool_result before the attachment.)
-                _asm_stat("landedT-clamp")
+                if stats:
+                    _asm_stat("landedT-clamp")
                 landed_t = t
             atom["t"] = landed_t         # placed where the model READ it (T252d); `sentAt` keeps the send
         if ROMP_AUTO_RE.search(full):   # an AUTO-nudge → flag it, mirroring the native user-record path
@@ -3791,7 +3794,7 @@ class FileAdapter:
         i = bisect.bisect_left(self._seq_ts, (seq,)) - 1
         return self._seq_ts[i][1] if i >= 0 else None
 
-    def _absorbed(self, qatts, kept, st, rompuuid, postal_index):
+    def _absorbed(self, qatts, kept, st, rompuuid, postal_index, stats=True):
         """Mid-turn prompts spliced into a running turn. The witness is the queued_command
         ATTACHMENT record: the CLI writes one per splice, uuid-bearing and parent-chained,
         carrying the FULL prompt text and stamped with the ENQUEUE timestamp — and writes
@@ -3813,7 +3816,11 @@ class FileAdapter:
         or in atoms()) changes placement identity just like an id drift — previously-invisible
         atoms become fresh plannable segments and dormant sessions replay them as new goals
         (2026-07-10). Bump jd.PLACEMENTS_V in the same commit; tests/test_placements_canary.py
-        pins both dimensions."""
+        pins both dimensions.
+
+        `stats` False: a caller that is no parse (the comment walk's fresh read, TranscriptGraph._splice_atom)
+        adds nothing to the parse stats, whose landedT-clamp count is there to show a change in the CLI's
+        write order across parses."""
         atoms, emitted = [], st["absorbed_keys"]   # dedup memory rides the carry: one set whether
         #                                            the qatts arrive in one full parse or many folds
         for q in qatts:
@@ -3828,7 +3835,7 @@ class FileAdapter:
                 continue   # this copy sits on a rewound branch — a kept twin may still emit
             emitted.add(key)
             a = self._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"],
-                                    rompuuid, postal_index)
+                                    rompuuid, postal_index, stats=stats)
             if not _author_final(a.get("author"), q["text"]):
                 st["postal_miss_att"].add(key)   # trailing marker unresolved — the heal re-checks
             atoms.append(a)
@@ -5019,19 +5026,34 @@ def _membership_of(adapter):
 # spine root to cut) plus the atom rows' byte locations, so a pre-cut record is read back alone, by offset, only when
 # the walk needs its body. A fact the entry cannot give (a pre-cut record with no row to read it by, a walk leaving the
 # spine) raises GraphMiss, and the caller reads the transcript as before: never an answer from a guess.
+# A message the CLI splices into a running turn is no user record: the CLI writes it as a queued_command attachment
+# (FileAdapter._absorbed), and writes it again when a compaction or a resume replays it. Whether an attachment is such a
+# message, and the original rather than a copy, is the display parse's own answer, the atom _absorbed emitted for the
+# record: read from the entry's atoms, or on a restored entry's pre-cut part from the atom's row.
 
 
 class GraphMiss(LookupError):
     """A restored entry's pre-cut part cannot answer what the walk asked: read the transcript instead."""
 
 
+def _splice_prompt(rec):
+    """The words of queued_command attachment record `rec` as its atom carries them: the prompt as is when it is a string,
+    else the joined text of its content blocks (FileAdapter._ingest's witness, _hydrate_one's kind "b")."""
+    p = (rec.get("attachment") or {}).get("prompt")
+    return p if isinstance(p, str) else _text_of(p or [])
+
+
 class TranscriptGraph:
     """The read surface of a walk over one session's stitched transcript graph (the comment cut, kernel
-    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, and the leaf."""
+    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, the leaf, and
+    splice_author / splice_text for a message spliced into a running turn. `atoms`: the atoms the display parse emitted
+    from those maps (its assembly entry's); None over a fresh read, where _absorbed is run on the adapter's own splices."""
 
-    def __init__(self, ad):
+    def __init__(self, ad, atoms=None):
         self._ad = ad
         self.leaf = ad.leaf_uuid
+        self._atoms = atoms
+        self._splices = None
 
     def has(self, u):
         return u in self._ad.by_uuid
@@ -5049,17 +5071,40 @@ class TranscriptGraph:
     def fsid(self, u):
         return self._ad.fsid_of.get(u)
 
+    def _splice_atom(self, u):
+        """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
+        the adapter's splices and its kept chain, from an empty dedup memory as a whole parse starts, with no postal index
+        and no count in the parse stats: this read is no parse. The map is built once per graph, so a walk across a long
+        tool turn's attachments costs one pass over the atoms."""
+        if self._splices is None:
+            atoms = self._atoms
+            if atoms is None:
+                ad = self._ad
+                atoms = ad._absorbed(ad.qatts, ad.kept_uuids(ad.active_path()), _emit_state(), None, {}, stats=False)
+            self._splices = {a["uuid"]: a for a in atoms if a.get("absorbed") and a.get("uuid")}
+        return self._splices.get(u)
+
+    def splice_author(self, u):
+        """The author (author_of's) of the atom the parse emitted for queued_command attachment `u`, a message spliced into
+        a running turn (_splice_atom: the display parse's, or over a fresh read the same emit run on it); None when it
+        emitted none, for example for a splice off the kept chain."""
+        a = self._splice_atom(u)
+        return a.get("author") if a is not None else None
+
+    def splice_text(self, u):
+        """The prompt of attachment `u`'s record (_splice_prompt)."""
+        return _splice_prompt(self._ad.by_uuid.get(u) or {})
+
 
 def _read_record_at(path, at, uuid):
     """The raw transcript record at `at` = (byte offset, byte length) in `path`, verified to be `uuid`'s; hydrate's own read
-    (one seek, one read, counted), served from the hydration memo when a reader already holds the record."""
-    with _ASM_CKPT_LOCK:
-        hit = _HYDRATED.get(uuid)
-    if hit is not None:
-        return hit[0]
+    (one seek, one read, counted). Never the hydration memo: it keeps a record's body fields alone (2026-10-01), and the cut
+    walk decides on the record's type, time and provenance. Nor the file's read stripe (2026-10-02): this read fills no
+    cache, and under the stripe the comment cut waited, inside its entry's key lock, for a whole hydrate group of the file
+    or of a file sharing its stripe, or for a record-cache read."""
     off, ln = int(at[0]), int(at[1])
     try:
-        with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
+        with open(path, "rb") as fh:
             fh.seek(off)
             raw = fh.read(ln)
     except OSError as e:
@@ -5105,10 +5150,11 @@ class _SeededGraph(TranscriptGraph):
     """TranscriptGraph over a RESTORED entry (its adapter seeded from the assembly document): the tail past the cut from the
     adapter, the pre-cut part from the seed's facts (types, the active spine root to cut) and the atom rows' locations. A
     pre-cut tool record (its row's lazy header lists tool calls or results) answers as a body-less record of its type, so a
-    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset."""
+    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset. A splice's atom is the
+    entry's (its tail's atoms) past the cut, its atom row before it."""
 
     def __init__(self, entry, rompuuid):
-        super().__init__(entry["ad"])
+        super().__init__(entry["ad"], entry["atoms"])
         seed = self._ad.seed
         self._types = seed["types"]
         sp = seed.get("_spineParent")
@@ -5195,6 +5241,34 @@ class _SeededGraph(TranscriptGraph):
         self._recs[u] = out
         return out
 
+    def splice_author(self, u):
+        """Past the cut, the tail's atoms answer; before it, the scalars of the atom row the document holds for `u`: a row
+        only for an attachment the parse made an atom of, so a hook's result or a token reminder costs no read."""
+        if u in self._ad.by_uuid or u not in self._types:
+            return super().splice_author(u)
+        form, src, got = self._locs
+        for c in got.get(u) or ():
+            if form == "index":
+                try:
+                    sc = src._row(c).get("s") or {}
+                except LazyIndexError as e:
+                    raise GraphMiss(str(e))
+            else:
+                sc = c
+            if sc.get("absorbed"):
+                return sc.get("author")
+        return None
+
+    def splice_text(self, u):
+        """Before the cut, the attachment record read back alone by the offset its atom row carries (an attachment's only
+        atom is its splice's)."""
+        if u in self._ad.by_uuid or u not in self._types:
+            return super().splice_text(u)
+        loc = self._loc(u)
+        if loc is None:
+            raise GraphMiss("record %s: no row carries its splice's location" % u)
+        return _splice_prompt(_read_record_at(loc["path"], loc["at"], u))
+
 
 def _files_witness(files):
     """{path: (size, mtime_ns, inode)} for every file in `files`, None when one cannot be stat'd: the witness _assemble stamps on
@@ -5231,7 +5305,7 @@ def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, 
         if seen is None or seen != _files_witness(candidate_files):
             return "stale", None
         if entry["ad"].seed is None:
-            return "whole", fn(TranscriptGraph(entry["ad"]))
+            return "whole", fn(TranscriptGraph(entry["ad"], entry["atoms"]))
         return "seeded", fn(_SeededGraph(entry, rompuuid))
 
     def cached():
@@ -5683,7 +5757,7 @@ def _asm_heal(entry, rompuuid, postal_index):
             if q is None:
                 st["postal_miss_att"].discard(key)
                 continue
-            a2 = ad._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"], rompuuid, postal_index)
+            a2 = ad._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"], rompuuid, postal_index, stats=True)
             if a2 != a:
                 entry["atoms"][i] = a2
             if _author_final(a2.get("author"), q["text"]):
@@ -6292,6 +6366,11 @@ def asm_index_stats():
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
+                   "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
+                   #                     entries its cap pushed out (2026-10-01): its gauge counts real bytes, so it no longer
+                   #                     equals hydratedBytes (line bytes read) while nothing is evicted; these two say it. A
+                   #                     memo hit for an atom whose body a peer had already written when this call looked is
+                   #                     not a hit: the peer's own read or hit counted that body
                    "restoreMs": {"load": 0.0, "verify": 0.0, "index": 0.0, "seed": 0.0, "total": 0.0},   # the restore's parts since boot, ms
                    #                     (`total` is the whole of _asm_restore, entry to return, so the unnamed remainder, the tail's
                    #                     parse through the seeded adapter, is total minus the four named parts)
@@ -6342,12 +6421,30 @@ def _asm_doc_memo_put(key, mkey, doc):
                 break
             _asm_doc_memo_drop(k_)
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: fallback for legacy unbound descriptors; restored bodies own their source (2026-09-17)
-_HYDRATED = {}                     # uuid -> the body fields read; dict order = LRU
-_HYDRATED_BYTES = [0]
-_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)
-#                                    the hydrated-body memo's byte cap: MemTotal / 32, never under 1 GiB (3.7 GiB on a 118 GiB
-#                                    machine; 64 MB hydrated 3.1 GB of bodies in 150 s on 2026-09-11) (a judge pass re-reading one large body every cycle
-#                                    shows in hydratedBytes; the memo keeps the common case at one read)
+_HYDRATED = {}                     # uuid -> (the body fields a fill of any kind may read, their weight); dict order = LRU
+_HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 48), 1024 * 1024)
+#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 48, never under 256 MiB
+#                                    (about 661 MiB on a 31 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
+#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
+#                                    kernel's memo held about 66,700 records from 2.7 to 9.5 hours, then grew: 77,144 records and
+#                                    302 MiB of lines (4,107 bytes a line) at 11.7 hours, nothing evicted. As decoded body fields
+#                                    that is an estimated 550 to 615 MiB, a wide band, since an entry weighs 0.55 of its line
+#                                    for a Read result and up to 4.6 for a question's answers. This cap holds that set by the
+#                                    estimate and binds as it grows; a 64th would bind within the first day to save at most 165
+#                                    MiB more. An LRU thrashes once the records read again and again outgrow it, and the size of
+#                                    that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here) thrashed on
+#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
+#                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
+#                                    memo's serves and evictions
+_HYDRATED_ENTRY_BYTES = sys.getsizeof((None, None)) + sys.getsizeof(1 << 20) + sys.getsizeof("0" * 36) + 64
+#                                    an entry's own tuple and weight beside its body, its uuid key (the memo keeps it alive once
+#                                    the atom has gone), and its slot in the memo's table: a 16-byte entry and its index, 44 to 88
+#                                    bytes at the load CPython's growth rule allows, the deleted slots an LRU's moves leave included.
+#                                    An estimate: a freshly grown table with no deleted slots costs less, and a tuple taken from the
+#                                    interpreter's free list allocates nothing, so on small records it overcounts by about a tenth
+#                                    (tests/test_hydrated_memo.py bounds it on both sides)
 _LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
 
 
@@ -8021,6 +8118,57 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     return _asm_serve(entry)
 
 
+def _decoded_size(obj):
+    """The bytes a decoded JSON value occupies in this process: sys.getsizeof over every container and scalar reachable from
+    it, each object once (the decoder shares one key string across a record's dicts). None, True, False, the small ints and
+    the empty and one-character Latin-1 strings are the interpreter's shared singletons and weigh nothing here. The hydration
+    memo's weight (2026-10-01): a record's line on disk is no measure of it, since decoded text takes one to four bytes a
+    character against one to twelve on disk, and every small block costs a dict."""
+    seen, todo, n = set(), [obj], 0
+    while todo:
+        o = todo.pop()
+        if o is None or o is True or o is False:
+            continue
+        t = type(o)
+        if (t is int and -5 <= o <= 256) or (t is str and len(o) < 2 and (not o or ord(o) < 256)):
+            continue
+        i = id(o)
+        if i in seen:
+            continue
+        seen.add(i)
+        n += sys.getsizeof(o)
+        if t is dict:
+            todo.extend(o.keys())
+            todo.extend(o.values())
+        elif t is list or t is tuple:
+            todo.extend(o)
+    return n
+
+
+def _hydrate_fields(rec, lz):
+    """What the hydration memo keeps of a record read for a lazy atom, and what the atom is filled from (2026-10-01): the
+    fields a fill of any kind may read, the record's own objects, never copies. An entry serves every atom of its record,
+    whatever kind the atom's document gave it, so the choice never depends on this atom's kind: the message stays even for
+    a command atom, whose fill rebuilds it from the marker, and whole for a skill or a command's output, whose atom keeps
+    text derived from it. The top-level tool result only when it is a dict the atom carries (lazy tur) or of a consumed
+    shape (TUR_CONSUMED_KEYS, the emit's carry rule), so every atom of the record finds it; an attachment's prompt alone.
+    Left out: the record's metadata (ids, cwd, version, branch, times) and a Read call's second copy of the file's text,
+    which no atom carries. An attachment that is not a dict is kept as it is, so the fill meets it as it did."""
+    out = {}
+    if "message" in rec:
+        out["message"] = rec["message"]
+    tur = rec.get("toolUseResult")
+    if isinstance(tur, dict) and ((lz or {}).get("tur") or not TUR_CONSUMED_KEYS.isdisjoint(tur)):
+        out["toolUseResult"] = tur
+    att = rec.get("attachment")
+    if isinstance(att, dict):
+        if "prompt" in att:
+            out["attachment"] = {"prompt": att["prompt"]}
+    elif att:
+        out["attachment"] = att
+    return out
+
+
 def _hydrate_one(a, rec):
     """Fill a lazy atom's body fields from its record, the way the emit built them. An atom another thread finished
     meanwhile (its marker gone) is left as it is (review find C)."""
@@ -8052,9 +8200,7 @@ def _hydrate_one(a, rec):
         a["skillMd"] = btext[:SKILL_MD_CAP] + ("\n\n…(skill content truncated)" if len(btext) > SKILL_MD_CAP else "")
         a["message"] = {"role": "assistant", "content": [], "stop_reason": None}
     elif k == "b":
-        att = rec.get("attachment") or {}
-        full = att.get("prompt") if isinstance(att.get("prompt"), str) else _text_of(att.get("prompt") or [])
-        a["message"] = {"role": "user", "content": [{"type": "text", "text": full or ""}]}
+        a["message"] = {"role": "user", "content": [{"type": "text", "text": _splice_prompt(rec) or ""}]}
     a.pop("lazy", None)
 
 
@@ -8110,6 +8256,10 @@ def hydrate(atoms, rompuuid=None, by=None):
             hit = _HYDRATED.get(u) if u else None
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
+                if a.get("lazy") is not None and hasattr(a.get("message"), "source_path"):
+                    _ASM_CKPT_STATS["hydratedHits"] += 1        # a serve when the body is still unfilled as this call
+                    #                                              looks; one a peer already wrote (marker gone, or its pop
+                    #                                              in flight) was counted by that peer's read or hit
         if hit is not None:
             if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
                 _hydrate_one(a, hit[0])
@@ -8119,9 +8269,11 @@ def hydrate(atoms, rompuuid=None, by=None):
         if not hasattr(msg, "source_path"):                 # another thread finished this atom between the memo miss above and
             with _ASM_CKPT_LOCK:                            #  here (2026-09-20): its body is a plain dict with no source, and the
                 hit = _HYDRATED.get(u) if u else None       #  per-session map below could name a newer document and refuse an atom
-            if hit is not None:                             #  whose body is in place, the whole call with it. Its bookkeeping (the
-                _hydrate_one(a, hit[0])                     #  popped marker) may still be in flight: finish it from the memo as the
-            filled += 1                                     #  hit branch does, or count it filled when the entry is gone already.
+                if hit is not None:                         #  whose body is in place, the whole call with it. Its bookkeeping (the
+                    _HYDRATED[u] = _HYDRATED.pop(u, hit)    #  popped marker) may still be in flight: finish it from the memo as the
+            if hit is not None:                             #  hit branch does, its entry to the LRU tail, or count it filled when
+                _hydrate_one(a, hit[0])                     #  the entry is gone already (the move, 2026-10-02: a hit uncounted here
+            filled += 1                                     #  is still a use, and the cap evicts the least recently used).
             continue                                        #  Entry gone with the marker present: the peer's pop is in flight, its
         #                                                      put having left the memo already, self-evicted under a cap the record
         #                                                      does not fit under or evicted by later puts from any thread between
@@ -8159,6 +8311,10 @@ def hydrate(atoms, rompuuid=None, by=None):
                 u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
+                    if hit is not None:
+                        _HYDRATED.pop(u, None); _HYDRATED[u] = hit    # a peer's put served here is used too: to the LRU tail
+                        if a.get("lazy") is not None and hasattr(a.get("message"), "source_path"):
+                            _ASM_CKPT_STATS["hydratedHits"] += 1      # the rule of the first loop's count
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
@@ -8172,6 +8328,16 @@ def hydrate(atoms, rompuuid=None, by=None):
                 rec = json.loads(raw.decode("utf-8", "replace"))
                 if rec.get("uuid") != a.get("uuid"):
                     raise LazyBodyRead("atom %s: the record at its offset is %s" % (a.get("uuid"), rec.get("uuid")))
+                body = _hydrate_fields(rec, lz)           # the memo's entry and this fill's source alike: a hit then fills
+                w = _decoded_size(body) + _HYDRATED_ENTRY_BYTES if u else 0   # exactly as a miss does. Weighed outside the
+                #                                           memo's lock but inside the file's read stripe, where the put must
+                #                                           land for a waiting thread to find it: the walk costs from a tenth
+                #                                           of the decode (a long file text) to several times it (many small
+                #                                           blocks), once per disk read, never on a hit. Every waiter on the
+                #                                           stripe waits for the walks too: another hydrate of this file, a
+                #                                           record-cache read that pulls its bytes (_read_jsonl_entry), and
+                #                                           both for the files whose paths share the stripe, one in 64. The
+                #                                           comment cut's by-offset read takes no stripe (_read_record_at)
                 with _ASM_CKPT_LOCK:
                     _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
                     _THREAD_BYTES.hydrated = getattr(_THREAD_BYTES, "hydrated", 0) + ln   # this thread's share (T397)
@@ -8180,11 +8346,14 @@ def hydrate(atoms, rompuuid=None, by=None):
                     hk = "%s:%s" % (_read_stage() or "none", by)
                     hbs[hk] = hbs.get(hk, 0) + ln
                     if a.get("uuid"):
-                        _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
+                        _old = _HYDRATED.pop(a["uuid"], None)     # a peer that missed it too put it first: its weight leaves
+                        if _old is not None:                      #  with it, and the entry goes to the young end
+                            _HYDRATED_BYTES[0] -= _old[1]
+                        _HYDRATED[a["uuid"]] = (body, w); _HYDRATED_BYTES[0] += w
                         while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
                             _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
-                            _HYDRATED_BYTES[0] -= _old[1]
-                _hydrate_one(a, rec); filled += 1
+                            _HYDRATED_BYTES[0] -= _old[1]; _ASM_CKPT_STATS["hydratedEvicted"] += 1
+                _hydrate_one(a, body); filled += 1
     return filled
 
 

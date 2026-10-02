@@ -65,6 +65,11 @@ await page.addInitScript(() => { window.__sends = []; const orig = WebSocket.pro
   // after a selection change holds on the followed session's NEXT answer, the page's own event (the flake of 2026-09-21 on main read the
   // rows once the bar wore the name, before the answer had landed: [] where the file was expected, on a loaded runner)
   window.__labListings = {}; window.addEventListener("romp:artifacts-listing", (e) => { const d = e.detail || {}; window.__labListings[d.sid] = ((window.__labListings[d.sid] || 0) + 1); });
+  // a chat switch's two signals as this frame receives them (2026-09-29): the shell's relay and the kernel's echo over the socket. The
+  // locked read below waits for both to reach the pane before it reads that the pane stayed (the pane's own handler has run by then:
+  // each is one dispatch)
+  window.__labRelays = []; window.__labEchoes = [];
+  window.addEventListener("message", (e) => { const m = e && e.data; if (!m) return; if (m.romp === "activeChat") window.__labRelays.push(m.id || null); else if (m.type === "activeChat") window.__labEchoes.push(m.id || null); });
   WebSocket.prototype.send = function (d) { try { const m = JSON.parse(d); if (m && m.type) window.__sends.push({ type: m.type, sid: m.sid || null }); } catch (e) {} return orig.call(this, d); }; });
 await page.goto(cfg.landing);
   await page.waitForSelector("#f-chat", { timeout: 30000 });
@@ -97,8 +102,11 @@ const closeCard = () => fr.press("body", "Escape");
 const pick = async (sid) => { await fr.click("#art-pick", { timeout: 15000 }).catch(() => {}); await fr.waitForSelector('#art-picker .ctx-item[data-sid="' + sid + '"]', { timeout: 15000 }).catch(() => {}); await fr.click('#art-picker .ctx-item[data-sid="' + sid + '"]', { timeout: 15000 }).catch(() => {}); };
 const clickTab = async (col, sid) => { await col.click('#tabs .tab[data-id="' + sid + '"] .tab-label'); };
 const activeOf = (col) => col.evaluate(() => { const a = document.querySelector("#tabs .tab.active"); return a ? a.getAttribute("data-id") : null; });
-// a SWITCH is a click on a tab that is not the column's active one (a click on the active tab announces nothing)
-const switchTo = async (col, sid) => { await clickTab(col, sid); await col.waitForFunction((t) => { const a = document.querySelector("#tabs .tab.active"); return !!a && a.getAttribute("data-id") === t; }, sid, { timeout: 15000 }).catch(() => {}); };
+// a SWITCH is a click on a tab that is not the column's active one (a click on the active tab announces nothing); it returns whether the
+// column's active tab became `sid` (2026-09-29), for the read that must know the switch happened; a failed wait of any kind is a false
+// here, as the roads that ignore the outcome always treated it
+const timedOut = (e) => { if (e && e.name === "TimeoutError") return false; throw e; };
+const switchTo = async (col, sid) => { await clickTab(col, sid); return col.waitForFunction((t) => { const a = document.querySelector("#tabs .tab.active"); return !!a && a.getAttribute("data-id") === t; }, sid, { timeout: 15000 }).then(() => true, () => false); };
 const otherIn = (active, pair) => (active === pair[0] ? pair[1] : pair[0]);
 if (fr) {
   await fr.waitForSelector("#art-pick", { timeout: 30000 }).catch(() => {});
@@ -125,9 +133,15 @@ if (fr) {
   // (3) the lock: a switch leaves the pane; a pick replaces the locked session and the lock stays on
   await fr.click("#art-lock", { timeout: 15000 }).catch(() => {});
   await fr.waitForFunction(() => { const l = document.getElementById("art-lock"); return !!l && l.getAttribute("aria-pressed") === "true"; }, null, { timeout: 10000 }).catch(() => {});
-  await switchTo(c1, f1);
-  await page.waitForTimeout(800);   // a relay that will not come cannot be awaited: the chat's switch is confirmed above, and the pane is read after it
-  out.lockedStay = { want: cfg.names[s2], ...(await shown()) };
+  // the switch, then both of its signals reaching the pane (the shell's relay and the kernel's echo), then the read (2026-09-29). The
+  // 800 ms pause this replaces stood for a relay nothing awaited, so a switch that never happened, or a signal later than the pause, read
+  // as the lock holding; a read on the relay alone would come before the echo, the other road a lock must hold on. The pane applies each
+  // in the dispatch that delivers it and writes the shown session's id there (the stored sid below), so the read after both is the answer
+  const n0 = await fr.evaluate(() => ({ relays: (window.__labRelays || []).length, echoes: (window.__labEchoes || []).length }));
+  const lockSwitched = await switchTo(c1, f1);
+  const lockRelayed = await fr.waitForFunction((a) => (window.__labRelays || []).slice(a.n0).includes(a.sid), { n0: n0.relays, sid: f1 }, { timeout: 15000 }).then(() => true, timedOut);
+  const lockEchoed = await fr.waitForFunction((a) => (window.__labEchoes || []).slice(a.n0).includes(a.sid), { n0: n0.echoes, sid: f1 }, { timeout: 15000 }).then(() => true, timedOut);
+  out.lockedStay = { want: cfg.names[s2], wantSid: s2, switched: lockSwitched, relayed: lockRelayed, echoed: lockEchoed, ...(await shown()) };
   await pick(cfg.web); out.lockedPick = { ok: await waitShown("web"), ...(await shown()) };
   // (3b) unlocking: the shown session stays until the next switch, which the pane follows again
   await fr.click("#art-lock", { timeout: 15000 }).catch(() => {});
@@ -342,7 +356,11 @@ class ArtifactsFollowServed(unittest.TestCase):
 
     def test_locked_a_switch_leaves_the_pane_and_a_pick_holds_with_the_lock_on_and_a_reload_keeps_both(self):
         r = self._result()
-        self.assertEqual((r["lockedStay"]["lock"], r["lockedStay"]["name"]), ("true", r["lockedStay"]["want"]), "locked: a switch in the first column left the pane where it was: %r" % r["lockedStay"])
+        ls = r["lockedStay"]
+        self.assertTrue(ls["switched"], "locked: the first column's tab switch happened: %r" % ls)
+        self.assertTrue(ls["relayed"], "…and the shell's relay of it reached the pane before the read: %r" % ls)
+        self.assertTrue(ls["echoed"], "…and so did the kernel's echo of it: %r" % ls)
+        self.assertEqual((ls["lock"], ls["name"], ls["sid"]), ("true", ls["want"], ls["wantSid"]), "locked: a switch in the first column left the pane where it was: %r" % ls)
         self.assertEqual((r["lockedPick"]["ok"], r["lockedPick"]["lock"], r["lockedPick"]["name"]), (True, "true", "web"), "locked: a pick replaces the session, the lock stays on: %r" % r["lockedPick"])
         fr = r["reloaded"]["frames"]
         self.assertEqual(fr.count("listArtifacts"), 1, "the reloaded pane asks ONCE: the boot's listing, and the first open's re-arm re-sends the watch alone (the reviewers of PR 1925, J): %r" % r["reloaded"])

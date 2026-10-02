@@ -23,8 +23,9 @@ classic strip (and T264's own tests) never showed it. Present since T264 (74412c
 layout in which the trail has a row of its own); a fix in the simulation (a zero-width row opener adding no
 gap) was tried and reverted here, and it lands every one of these drops under the cursor.
 
-This lab drives the real /chat page of a hermetic kernel: twenty sessions, three under one tag (the group's
-row), two under a second tag (its own row) and fifteen in no tag (the trail's row), REAL mouse drags (page.mouse
+This lab drives the real /chat page of a hermetic kernel: twenty sessions, three under one tag and two under a
+second (the groups' row: since 2026-10-01 the two open groups share it, the second behind a gutter) and fifteen in
+no tag (the trail's row), REAL mouse drags (page.mouse
 down, a run of moves across the strip, up over the target tab), the tab order read from the DOM and from the
 persisted arrangement (romp:vieworder:shared, the kernel's arrangement as this browser caches it). The classic theme
 is the control; the yatharth theme is set the way the
@@ -42,8 +43,10 @@ would read one too low and every trail drop would miss); a drop released between
 trail's head in the global order, and (since the gesture below) JOINS the first of the two, whose row that slot
 ends; a drop released ahead of the FIRST header is the strip's head, not the ungrouped row, and takes no tag off;
 a header dragged across the shared row still reorders the groups; and with one of the two opened again the folded
-one keeps a row of its own between the open group's row and the trail's. Then the same packed layout under the
-classic theme (gap 0).
+one shares the open group's row behind a gutter (the user 2026-10-01: groups flow onto rows as units). Then the same
+packed layout under the classic theme (gap 0). Before the folds, with both groups open on one row, a trail tab
+released over the left part of the second header joins the FIRST group, landing at the end of its run ahead of the
+gutter.
 
 DRAGGING A TAB INTO AND OUT OF A GROUP (the user 2026-09-23; the move, 2026-09-30): the place a tab is dropped states
 where it should appear now. A group IS a tag, so a drop inside another group's row MOVES the session there (that tag
@@ -438,7 +441,7 @@ await page.waitForFunction((n) => { const names = Array.from(document.querySelec
 //    headers pack onto ONE row and the trail is the row below; the trail's drags still land under the cursor (the
 //    virtual layout has the packed row as one row, as the strip does), a drop between the two headers lands at the
 //    trail's head, a header dragged across the shared row still reorders the groups, and with one group opened again
-//    the folded one keeps a row of its own. Then the same under the classic theme.
+//    the folded one shares its row behind a gutter. Then the same under the classic theme.
 // A HEADER'S CLICK, READ BEFORE IT IS PRESSED (2026-09-29). The header says what its click does in data-act, from the state it
 // rendered (render.ts makeGroupHead): "toggle-group" folds or opens, and "show-transcript" is THE WAY BACK, the click on an
 // open group the pane shows that holds the open session, which puts the transcript back and folds nothing (pinned by
@@ -525,6 +528,15 @@ async function dragToHead(label, fromRow, fromIdx, group, frac, opts) {
   if (!src || !tgt) { cases.push({ label, skipped: "no such tab or header: rows=" + JSON.stringify(pre.rows.map((r) => r.map((t) => t.name))) }); return; }
   await runDrag(label, pre, src, { name: "#" + group, left: tgt.left, w: tgt.w, top: tgt.top, h: tgt.h }, frac, opts);
 }
+// 3b. OPEN GROUPS SHARE A ROW (the user 2026-10-01): infra and qa, both open, fit one row at this width, qa behind a
+//     gutter (render.ts flowStripRows). The slot before qa's header (its left part, past the gutter) is the END of the
+//     group before, so a trail tab released there joins infra and lands at the end of infra's run, ahead of the gutter,
+//     never between the gutter and qa's chip (the dragover's isLead)
+L = await layout();
+out.sharedRow = shape(L);
+out.sharedGroups = L.items.filter((i) => i.group).map((h) => h.group);
+await dragToHead("shared row: trail, 3rd tab to the slot BEFORE the second group's header (left part of it)", L.rows.length - 1, 2, out.sharedGroups[1], 0.25, { tagWrite: true });
+L = await layout();
 const groups = L.items.filter((i) => i.group).map((h) => h.group);   // in strip order (tagOrder)
 await foldGroup(groups[0], true);
 await foldGroup(groups[1], true);
@@ -543,7 +555,7 @@ await dragToHead("packed: trail, 3rd tab to the slot BETWEEN the two folded head
 // is the plain reorder it has always been (the guard against a mis-aimed drop stripping a tag)
 await dragToHead("packed: trail, 3rd tab to the slot BEFORE the first folded header (the strip's head)", trail, 2, groups[0], 0.25);
 await dragHead("packed: the second header dragged onto the first (the groups swap)", groups[1], groups[0]);
-// one of the two opened again: the open group's row, the folded one's own row, the trail's
+// one of the two opened again: the open group's row, which the folded one shares behind a gutter, and the trail's
 L = await layout();
 const order = L.items.filter((i) => i.group).map((h) => h.group);
 await foldGroup(order[0], false);
@@ -615,7 +627,7 @@ L = await layout();
 const keeper = L.tabs.filter((t) => t.copy === open0[0]).map((t) => t.name)[0];
 await dragCopy("leave: a group's tab released ahead of the first header keeps its tag", keeper, open0[0],
                { head: open0[0] }, 0.25);
-// 6i. a FOLDED group's bare header (its members hidden, its own row — not a packed one): a release on it joins
+// 6i. a FOLDED group's bare header (its members hidden; beside the open group, behind a gutter): a release on it joins
 await foldGroup(open0[1], true);
 L = await layout();
 const folder = L.rows[trailRow()][4].name;
@@ -834,25 +846,30 @@ class ServedTabDragReorder(unittest.TestCase):
         self.assertGreater(c["ev"]["drop"], 0, "%s: no drop reached the strip; the browser refused the release and the drag was cancelled" % c["label"] + table)
         self.assertEqual(c["actual"], c["expected"],
                          "%s: the tab landed at index %d, the cursor was over slot %d" % (c["label"], c["actual"], c["expected"]) + table)
-        # the persisted arrangement (the global order) carries the order the strip shows within every row: the strip
-        # sections it by tag, so the rows are compared one by one
+        # the persisted arrangement (the global order) carries the order the strip shows within every group: the strip
+        # sections it by tag, so the groups are compared one by one (by group, not by row: since 2026-10-01 groups that
+        # fit share a row, in tag order, so a row can hold two groups whose members interleave in the global order)
         self.assertIsInstance(c["stored"], list, "the drop persisted an arrangement" + table)
-        for row in c["postRows"]:
-            names = [t.split("@")[0] for t in row]
-            self.assertEqual([n for n in c["stored"] if n in names], names, "the stored order and the strip's row disagree" + table)
+        for group, names in c["inGroups"].items():
+            self.assertEqual([n for n in c["stored"] if n in names], names, "the stored order and the strip's %r group disagree" % group + table)
 
     # ── the layouts ──
-    def test_both_themes_show_the_group_row_above_the_trail_row(self):
+    def test_both_themes_show_the_groups_row_above_the_trail_row(self):
+        # the two open groups fit one row at this width, so they share it (the user 2026-10-01), qa behind a gutter;
+        # the trail keeps a row of its own below
         r = self._run()
         for key, theme, gap in (("grouped", "classic", "0px"), ("yatharth", "yatharth", "3px")):
             g = r[key]
             self.assertEqual(g["theme"], theme, "%s: the body wears the theme the settings store names: %r" % (key, g))
             self.assertEqual(g["gap"], gap, "%s: the strip's column gap under that theme: %r" % (key, g["bar"]))
             rows = g["rows"]
-            self.assertGreaterEqual(len(rows), 3, "%s: the two groups and the trail wrap onto separate rows: %r" % (key, g))
-            self.assertEqual(sorted(rows[0]), sorted(TAGGED), "%s: row 0 is the infra group: %r" % (key, rows))
-            self.assertEqual(sorted(rows[1]), sorted(QA), "%s: row 1 is the qa group: %r" % (key, rows))
+            self.assertEqual(len(rows), 2, "%s: the groups' row and the trail's: %r" % (key, g))
+            self.assertEqual(rows[0], [n for n in rows[0] if n in TAGGED] + [n for n in rows[0] if n in QA], "%s: row 0 is the infra group, then the qa group: %r" % (key, rows))
+            self.assertEqual(sorted(rows[0]), sorted(TAGGED + QA), "%s: …all of both: %r" % (key, rows))
             self.assertEqual(sorted(rows[-1]), sorted(TRAIL), "%s: the last row is the trail: %r" % (key, rows))
+            heads = [i for i, it in enumerate(g["items"]) if it.startswith("[tab-group-head")]
+            self.assertEqual(len(heads), 2, "%s: two headers: %r" % (key, g["items"]))
+            self.assertTrue(g["items"][heads[1] - 1].startswith("[tab-group-gutter]"), "%s: a gutter leads the second group in mid-row: %r" % (key, g["items"]))
 
     # ── the classic theme: the control ──
     def test_classic_trail_row_drag_to_the_first_slot(self):
@@ -935,23 +952,48 @@ class ServedTabDragReorder(unittest.TestCase):
     def test_two_folded_groups_share_one_row_under_the_classic_theme(self):
         self._assert_packed("packedClassic")
 
-    def test_an_open_neighbour_keeps_its_own_row_and_so_does_the_lone_folded_group(self):
+    def test_an_open_neighbour_shares_its_row_with_the_folded_group_behind_a_gutter(self):
+        # an open group no longer takes a row to itself (the user 2026-10-01): the folded header after it fits the rest
+        # of that row, so it sits there, behind the gutter that ends the open group's run of tabs
         r = self._run()
         g = r["unfolded"]
         heads = g["heads"]
         detail = "\n  heads %r\n  breaks %r\n  rows %r\n  items %r" % (heads, g["breaks"], g["rows"], g["items"])
         self.assertEqual([h["collapsed"] for h in heads], [False, True], "the first group open, the second folded" + detail)
-        self.assertLess(heads[0]["top"], heads[1]["top"], "the folded header is on a row BELOW the open group's header: nothing to pack with" + detail)
-        self.assertEqual(len(g["breaks"]), 2, "a break ahead of the folded header and the trail's" + detail)
+        self.assertEqual(heads[0]["top"], heads[1]["top"], "the folded header shares the open group's row" + detail)
+        self.assertEqual(len(g["breaks"]), 1, "one break, the trail's: none ahead of the folded header" + detail)
+        self.assertTrue(g["breaks"][0]["sep"], "…and it is the trail's" + detail)
         self.assertEqual(len(g["rows"]), 2, "two rows of tabs: the open group's and the trail's" + detail)
         # membership as the strip reports it (see _assert_packed): the drag into and out of a group rewrites it
         open_members = g["members"].get(heads[0]["group"], [])
         self.assertEqual(sorted(g["rows"][0]), sorted(open_members), "the open group's row holds its members" + detail)
         self.assertEqual(sorted(g["rows"][1]), sorted(g["members"].get("trail", [])), "the trail's row holds the rest" + detail)
         tops = self._tab_tops(g)
-        self.assertEqual({tops[n] for n in open_members}, {heads[0]["top"]}, "the open group's members sit on their header's own row" + detail)
-        self.assertLess(heads[1]["top"], min(tops[n] for n in g["members"].get("trail", [])), "the folded header's row is above the trail's" + detail)
-        self.assertEqual([n for n, t in tops.items() if t == heads[1]["top"]], [], "the lone folded header's row holds nothing else" + detail)
+        self.assertEqual({tops[n] for n in open_members}, {heads[0]["top"]}, "the open group's members sit on their header's row" + detail)
+        gutter = next(i for i, it in enumerate(g["items"]) if it.startswith("[tab-group-gutter]"))
+        second = [i for i, it in enumerate(g["items"]) if it.startswith("[tab-group-head")][1]
+        self.assertEqual(gutter, second - 1, "a gutter right ahead of the folded header" + detail)
+        self.assertGreater(heads[1]["left"], max(float(it.split("@")[1].split(",")[0]) for it in g["items"] if it.split("@")[0] in open_members),
+                           "…after the open group's last tab" + detail)
+
+    def test_shared_row_drop_before_the_second_groups_header_joins_the_first(self):
+        # the slot before a header that shares a row is the END of the group before it (the gutter stands between): the
+        # trail tab released over the left part of the second header joins the first group, at the end of its run
+        r = self._run()
+        c = self._case("shared row: trail, 3rd tab to the slot BEFORE")
+        table = self._table(c)
+        first, second = r["sharedGroups"]
+        sr = r["sharedRow"]
+        self.assertEqual(sr["heads"][0]["top"], sr["heads"][1]["top"], "both open groups on one row before the drag" + table)
+        self.assertGreater(c["ev"]["drop"], 0, "the drop reached the strip" + table)
+        self.assertTrue(c["wrote"], "the kernel's store answered the drag's tag write" + table)
+        self.assertEqual(c["tags"]["before"], [], "an untagged trail tab was dragged" + table)
+        self.assertEqual(c["tags"]["after"], [first], "…and it moved into the first group, not the second" + table)
+        self.assertEqual(c["cue"]["ring"], [first], "that group's header wore the accent ring before the release" + table)
+        self.assertEqual(c["inGroups"][first][-1], c["from"]["name"], "it sits at the end of the first group's run" + table)
+        names = [it.split("@")[0] for it in c["items"]]
+        at = names.index(c["from"]["name"])
+        self.assertEqual(names[at + 1], "[tab-group-gutter]", "…right ahead of the gutter, never between the gutter and the second chip" + table)
 
     def test_packed_row_trail_drag_1st_to_3rd(self):
         self._assert_landed_under_cursor(self._case("packed: trail, 1st tab to the 3rd"))

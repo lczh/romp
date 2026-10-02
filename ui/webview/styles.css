@@ -536,24 +536,36 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab-group-pip.blocked { background: var(--st-blocked-bg); }
 .tab-group-pip.retrying { background: transparent; box-shadow: inset 0 0 0 1.5px var(--st-retrying-bg); }   /* HOLLOW amber ring (2026-09-24): the same shape cue as the tab dot and the overview pip, so retrying reads apart from the filled working gold header pip under a red-green deficiency (theme-parity.test.ts) */
 .tab-group-pip.ask { background: var(--st-needs-bg); }   /* the Needs you magenta: a hidden member has a card that needs you (plans/needs-you.md) */
-/* ONE GROUP PER LINE (T264, the user 2026-09-08: the grouped strip read as one long concatenation).
-   A break is a zero-height flex item spanning the whole row, so the item after it — a group's header,
-   or the untagged trail's first tab — opens a new line: the chip sits at the left edge and its tabs
-   follow, wrapping onto further rows as they need. Zero height, so it adds no rhythm of its own
-   (the Yatharth seam is a column gap only); no pointer, so it can neither take a drop nor a hover.
-   The breaks are emitted only while the gear's "One tag group per row in the tab strip" is on
-   (stripGroupRows, the default; render.ts renderTabs). Under it the untagged trail stands behind no
-   visible divider: a line of its own, with no chip, already says "in no tag" (the trail stays
-   unlabeled by the user's ruling); the element keeps the .tab-group-sep class as the boundary
-   sectionHeadOf reads. With the setting off the divider below returns. The tab drag's virtual layout
-   (dragslot.ts) opens a row at the same places (`br`), so a drag wraps where the strip wraps. The one
-   header no break precedes is a folded one right after another folded header (tab-groups.ts planStrip
-   `packed`, the user 2026-09-16): a run of folded groups, each only its header, shares one row instead
-   of a row apiece, wrapping like tabs when the run is wider than the strip; an open group and the
-   trail keep their own rows. Two packed headers sit as two tabs do — the strip's column gap apart,
-   their own 7px paddings between the labels — and each header's box is its own click target. */
+/* GROUPS AS UNITS ON THE ROWS (T264, the user 2026-09-08: the grouped strip read as one long
+   concatenation; 2026-10-01: an open group no longer takes a row to itself). A break is a zero-height
+   flex item spanning the whole row, so the item after it — a group's header, or the untagged trail's
+   first tab — opens a new line: the chip sits at the left edge and its tabs follow, wrapping onto
+   further rows as they need. Zero height, so it adds no rhythm of its own (the Yatharth seam is a column
+   gap only); no pointer, so it can neither take a drop nor a hover. The breaks are emitted only while
+   the gear's "Keep tag groups together in the tab strip" is on (stripGroupRows, the default; render.ts
+   renderTabs), one ahead of every header, and render.ts flowStripRows keeps a header's break only when
+   its group (the header and the tabs it shows) does not fit the rest of the row (tab-groups.ts
+   flowGroups): a group that fits stays on the row behind the gutter below, or, a folded header right
+   after another folded header (the user 2026-09-16), with nothing at all between, as two tabs sit —
+   the strip's column gap apart, their own 7px paddings between the labels — so dozens of folded tags
+   pack as tightly as tabs. The untagged trail keeps its own line, under no visible divider: a line of
+   its own, with no chip, already says "in no tag" (the trail stays unlabeled by the user's ruling); the
+   element keeps the .tab-group-sep class as the boundary sectionHeadOf reads. With the setting off the
+   divider below returns. The tab drag's virtual layout (dragslot.ts) opens a row at the same places
+   (`br`), so a drag wraps where the strip wraps. */
 .tab-group-break { flex: 0 0 100%; height: 0; margin: 0; padding: 0; pointer-events: none; }
-/* THE UNTAGGED TRAIL'S DIVIDER with the one-group-per-row setting off (render.ts makeTrailSep): a 1px
+/* THE GUTTER between two groups sharing a row (render.ts makeGroupGutter, the user 2026-10-01): a short
+   hairline in the strip's own border colour, half the row's height and centred, ahead of a header
+   whenever that group or the one before it shows tabs, so an open group sitting mid-row still reads as
+   one run, its header leading its tabs up to the next gutter. Flat: one 1px line drawn by a background,
+   no outline and no box of its own. Its width is the --strip-gutter the flow measures with (render.ts
+   reads it off #tabs); no margin and no padding, so the tab drag's virtual layout, which measures
+   getBoundingClientRect widths, holds what the row holds. The half-row line scales with the row, so
+   compact tabs need no rule of their own. */
+#tabs { --strip-gutter: 13px; }
+.tab-group-gutter { flex: 0 0 auto; width: var(--strip-gutter); align-self: stretch; pointer-events: none;
+  background: linear-gradient(var(--box-border), var(--box-border)) center / 1px 50% no-repeat; }
+/* THE UNTAGGED TRAIL'S DIVIDER with the keep-groups-together setting off (render.ts makeTrailSep): a 1px
    line between 6px gutters. The gutters are PADDING, not margin, and the line is the content box, so
    its box is the full 13px it occupies in the row and the tab drag's virtual layout (which measures
    getBoundingClientRect widths) wraps where the real strip wraps. Scoped off the row break above,
@@ -940,6 +952,13 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 .ctx-swatch:hover { transform: scale(1.12); }
 /* the session's current color: a white ring with a gap (the menu-bg fills the gap so it reads as a halo) */
 .ctx-swatch.sel { box-shadow: 0 0 0 2px var(--menu-bg), 0 0 0 3.5px var(--menu-ring); }   /* themed halo (T226 review): a white ring vanished on the light card */
+/* THE TAG MENU (tag-context-menu.ts, 2026-10-01): the tag's own chip names it at the top, the rows' inset; the card rides
+   above the phone picker's list (#mlist, z 200), whose heading's long press opens it */
+.ctx-menu.ctx-tagmenu { z-index: 210; }
+.ctx-tagmenu-head { padding: 3px 10px 5px; }
+/* the inline rename on a group header (.tab-rename beside it): the chip's place and colour, the tab rename's box */
+.tag-rename { color: var(--chip-bg, var(--fg)); letter-spacing: normal; }
+.tag-rename.bad { border-color: var(--err); }
 
 .tab-close { opacity: 0; font-size: 1.1em; line-height: 1; padding: 0 2px; border-radius: 3px; color: var(--dim); }
 .tab:hover .tab-close { opacity: 0.7; }

@@ -25,7 +25,7 @@ test("the loader is the romp treatment: wordmark + swirl + pulsing dots + captio
   // popover's boot both wear it, per the loading-states rule
   assert.match(RENDER, /function rompLoaderInner\(caption: string, opts\?: \{ wordmark\?: boolean; cls\?: string \}\): HTMLElement/);   // parameterized, never forked (the popover drops the wordmark; the chat placeholders pass a size class)
   assert.match(RENDER, /const word = el\("div", "rl-word"\)/, "the shared .rl-* anatomy");
-  assert.match(RENDER, /swirl\.src = mediaSrc\("romp-swirl-o\.svg"\)/);
+  assert.match(RENDER, /swirl\.src = swirlOSrc\(\);/, "the o is the inline swirl, painted with the letters (media-base.test.ts pins what swirlOSrc returns)");
   assert.match(RENDER, /const dots = el\("div", "rl-dots"\)/);
   assert.match(RENDER, /o\.appendChild\(rompLoaderInner\(`reviving “\$\{name\}”…`\)\);/);
 });
