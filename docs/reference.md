@@ -5281,12 +5281,17 @@ first message of a side conversation about it, and **Quote** puts the passage in
 instead. **Ctrl+/** (**⌘/** on a Mac, the key code editors use to toggle a comment) opens the same
 box from the keyboard, just under the selection, from anywhere in the chat including the message
 box, where it types no "/" and opens no slash-command menu; the right-click menu shows the key
-under **Comment**. The key is the "/" character, however your layout types it: on a German
-keyboard, where "/" is Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on
-selection** does the same for the passage that was selected when you opened the palette. With
-nothing selected in a message, or in a session that has not finished starting or loading, it says
-so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
-there.
+under **Comment**. If you have given that key to another command in the shortcuts dialog, the
+dashboard runs that command on it instead, and the menu shows no key. In the file viewer's code
+editor (with **Allow file editing** on), wherever the viewer opens, **Ctrl+/** (**⌘/**) is
+otherwise left to the editor. The editor toggles a comment on the line in the languages it
+highlights, except JSON; in plain text, in any file it does not highlight, and in the editor's
+search box, it does nothing with the key.
+The key is the "/" character, however your layout types it: on a German keyboard, where "/" is
+Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on selection** does the same for the
+passage that was selected when you opened the palette. With nothing selected in a message, or in a
+session that has not finished starting or loading, it says so instead of opening anything. The key
+is a command in the shortcuts dialog and can be rebound there.
 
 Selecting a passage also puts it in a quote chip above the message box, and the chip's row carries
 a **Comment** button before **Stage**, on every device. It opens the same box on the chip's passage,

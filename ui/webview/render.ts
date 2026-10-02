@@ -67,7 +67,7 @@ import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow 
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
-import { titleWithKey, keyHint, chordOf, effectiveChord, loadOverrides, saveOverride, KEYS_EVENT } from "./keybindings";
+import { titleWithKey, keyHint, chordOf, displayChord, editorKeepsKey, effectiveChord, loadOverrides, savedHolder, saveOverride, chatAnswers, CHAT_KEY_COMMANDS, KEYS_EVENT, type Bindings } from "./keybindings";
 import { hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, goneTabKeys, renamedTabKeys } from "./tab-keys";   // per-tab hot keys (2026-09-10): the set and its bookkeeping; the keycap on the tab is the T379 widget, read from the same store
 import { notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, type SessionFlag } from "./flag-pending";   // the per-session view flags' pending guard (review 2026-09-14)
 import { DEFAULT_CHORDS } from "./commands";
@@ -7481,10 +7481,12 @@ function showSelectionMenu(e: MouseEvent) {
   // Comment first, Quote second (the user 2026-08-23): Comment is the primary act — a side thread
   // about the passage — and Quote is the lighter one. Comment only when the selection sits in a real
   // transcript turn on a real session: commentAim's gate, the one the key asks too. Its sub-line names
-  // the key while one is bound (keyHint reads the live overrides), the tab menu bell row's way.
+  // the key while one is bound and no other command's saved binding takes it here (commentKeyHint reads
+  // the live overrides and asks the key handler's own stand-down), the tab menu bell row's way; a chord
+  // with no Ctrl, Alt or Meta it names on every page, though only the shell's dispatcher runs one.
   const aim = commentAim();
   if (typeof aim === "object") {
-    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), keyHint("chat.commentSelection") || undefined);
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), commentKeyHint() || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7533,18 +7535,64 @@ function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
     && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
+// The chat's own commands whose capture handler (the nav trail's or the jump moves', below) answers chord `ch`: those
+// handlers run on the chat document with or without the shell, and before the shell's dispatcher would hear the key, but
+// each reads a chord only with the modifiers it checks first (keybindings' CHAT_KEY_COMMANDS and chatAnswers: the nav
+// trail's needs Ctrl or Meta, the jump moves' Ctrl, Alt or Meta).
+function chatKeyCommands(ch: string): string[] {
+  return CHAT_KEY_COMMANDS.filter((id) => chatAnswers(id, ch));
+}
+// The command that runs on the comment key's chord `ch` on this page in place of the comment command, or null (review,
+// 2026-09-30). A binding the reader SAVED for another command outranks the comment key's default (keybindings' chordMap).
+// One of the chat's own commands saved there, when its handler below reads that chord, takes it on any page, so the
+// comment key steps aside and does not run beside it (where the chat's two handlers both run, keybindings' yieldsTo
+// lists as its store (3)). A Navigate back saved on an Alt chord does not: the nav trail's handler never reads a chord
+// without Ctrl or Meta, so the comment key keeps it (review, 2026-10-01).
+// Inside the shell the rest is the shell dispatcher's pick, asked of the shell (__rompChordPick), which holds the command
+// list: a key saved under an id no command has runs nothing there, so the comment command keeps it. On a page with no
+// shell nothing else runs a saved binding, so the comment key keeps its chord.
+function commentKeyTakenBy(ch: string, ov: Bindings, mac: boolean): string | null {
+  const own = savedHolder(ch, chatKeyCommands(ch), ov, mac);
+  if (own) return own;
+  if (!inRompShell()) return null;
+  let pick: unknown = null;
+  try { const f = (window.parent as any).__rompChordPick; if (typeof f === "function") pick = f(ch); } catch (e) { /* the shell's script has not run */ }
+  return typeof pick === "string" && pick !== "chat.commentSelection" ? pick : null;
+}
+// The key the right-click menu's Comment names: the comment key's chord, or none while another command runs on it here
+// (commentKeyTakenBy, the key handler's own stand-down), so the menu never names a key that does something else. A chord
+// with no Ctrl, Alt or Meta (the dialog records Shift+F2, say) it names as any other, though the key handler below reads
+// no such chord and only the shell's dispatcher runs one, from outside a text field: on a page with no shell the menu then
+// names a key that runs nothing (comment-key.test.ts discloses it).
+function commentKeyHint(): string {
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  const ov = loadOverrides();
+  const ch = effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], ov, mac);
+  return ch && !commentKeyTakenBy(ch, ov, mac) ? displayChord(ch, mac) : "";
+}
 // The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+/). With focus in
 // the chat this capture handler answers, reading the overrides store per press, so a rebind in the shortcuts dialog moves
 // it too (the chat.navBack pattern); with focus in the shell the command's run posts commentSelection here. It fires from
 // the message box too, as the jump cluster's keys do, and the selection it reads is the transcript's: taken in the
 // capture phase with its default prevented, the chord's "/" never reaches the box, so no "/" is typed and the slash menu
-// (which opens on the box's input) stays shut.
+// (which opens on the box's input) stays shut. Besides a chord with no Ctrl, Alt or Meta (which only the shell's
+// dispatcher runs), a held key and an input method's composition, it also leaves its chord alone in two cases the review
+// of #39 found: in the file viewer's code editor, whose own toggle comment is the same Mod+/ (keybindings'
+// editorKeepsKey; the shell's dispatcher on this document stands down there too), and when another command's SAVED
+// binding reads as the same chord and runs on this page instead (commentKeyTakenBy): one of the chat's own commands
+// whose handler below reads that chord and takes the key, or inside the shell the command the shell's dispatcher on
+// this document picks. A page with no shell (a standalone /chat, the VS Code view) has no dispatcher, so there a
+// binding saved for any other command leaves the key the comment key, as the menu's hint says, unless it is one of the
+// chat's own whose handler reads the chord.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a command
   const ch = chordOf(e);
   if (!ch || !ch.includes("+")) return;
   const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
-  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], loadOverrides(), mac)) return;
+  const ov = loadOverrides();
+  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], ov, mac)) return;
+  if (editorKeepsKey("chat.commentSelection", ch, e.target, mac)) return;   // the code editor comments its own line
+  if (commentKeyTakenBy(ch, ov, mac)) return;   // a binding saved for another command runs here instead
   e.preventDefault(); e.stopPropagation();
   commentOnSelection();
 }, true);

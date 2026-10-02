@@ -76,8 +76,9 @@ test("the defaults hold — Mod+O jump, Mod+Shift+O picker, Mod+P palette — th
   // a store change (this document or another tab) rebuilds the chord map on the next keydown
   assert.match(MAIN, /window\.addEventListener\(KEYS_EVENT, invalidate\);/);
   assert.match(MAIN, /window\.addEventListener\("storage", invalidate\);/);
-  // …and the palette chips show the EFFECTIVE binding, never a stale default
-  assert.match(MAIN, /kbdFor: \(c\) => \{ const ch = effectiveChord\(c\.id, c\.chord, loadOverrides\(\), mac\); return ch \? displayChord\(ch, mac\) : undefined; \}/);
+  // …and the palette chips show the EFFECTIVE binding, never a stale default: the palette's own kbdFor is executed in
+  // comment-key.test.ts ("the palette's chips", which fails loudly when kbdFor is gone), and the Comment chip end to end in
+  // the served comment-key lab
   assert.match(PALETTE, /commandList\(\)\.filter\(\(c\) => !c\.hidden && \(!c\.when \|\| c\.when\(\)\)\)/);
 });
 
