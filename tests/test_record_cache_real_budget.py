@@ -432,8 +432,7 @@ class BudgetRereads(_CacheCase):
         """The reader lets the cache lock go while it decodes, so another thread's insert can evict the path mid-read; the
         read's own insert then found a fresh eviction mark and counted a re-read of the whole entry, though it read only
         the append (review find, 2026-10-02). The read keeps the mark it began with; a read that begins uncached after
-        an eviction still counts, a restore from a checkpoint's cut included (it starts from an entry it builds, after
-        the hit check)."""
+        an eviction still counts, a restore from a checkpoint's cut included."""
         a, b = self._file("notes-api-web.jsonl"), self._file("notes-api-api.jsonl")
         em._JSONL_CACHE_BUDGET_BYTES = 10 ** 12
         em._read_jsonl_incremental(a)                                 # cached whole
@@ -530,6 +529,7 @@ class BudgetReleasesAssemblyEntries(_CacheCase):
         finally:
             if not tracing:
                 tracemalloc.stop()
+        print("a %d-byte leaf evicted by the budget behind a chat's entry: %d bytes freed" % (size, -delta))
         self.assertNotIn(leaf, em._JSONL_CACHE)
         self.assertEqual(self._held(leaf), [], "the chat's assembly entry went with the evicted leaf")
         self.assertGreater(-delta, size, "the eviction freed %d bytes of a %d-byte leaf's records and entry" % (-delta, size))
