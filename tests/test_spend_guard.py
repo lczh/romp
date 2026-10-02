@@ -117,7 +117,7 @@ class SpendRate(unittest.TestCase):
         self.assertEqual(km._spend_window_usd(self.leaf, NOW + 5000, 600, PRICES), 0.0)
         self.assertEqual(km._spend_window_usd(os.path.join(self.td.name, "absent.jsonl"), NOW, 600, PRICES), 0.0)
 
-    def test_the_window_reads_the_cache_entry_with_a_tail_accepted_never_the_whole_file_road(self):
+    def test_the_window_reads_the_leaf_and_a_subagent_file_with_a_tail_accepted(self):
         """After a restart the assembly checkpoint restores a transcript as a TAIL entry (the records past its cut); the
         whole-file road would upgrade every live transcript to a full re-read on the guard's first cycle (the checkpoint's
         served tests measure those bytes). The window reads the session's own transcript with tail_ok and never calls the
@@ -139,8 +139,8 @@ class SpendRate(unittest.TestCase):
              mock.patch.object(km.em, "_read_jsonl_incremental", side_effect=incremental):
             usd = km._spend_window_usd(self.leaf, NOW, 600, PRICES)
         self.assertAlmostEqual(usd, 2 * 1000 * 25e-6, places=9)
-        # each file read once by the guard, a tail accepted, and the agent file once more by the dropping fold the guard routes
-        # its agent reads through (2026-10-01), which accepts a tail too
+        # each file read once by the guard's own scan, a tail accepted, and the agent file once more by the launch-ids fold the
+        # guard runs after pricing it (2026-10-01), which accepts a tail too
         self.assertEqual(sorted(calls), sorted([(os.path.basename(self.leaf), True), ("agent-1.jsonl", True), ("agent-1.jsonl", True)]),
                          "every read accepts a tail")
 

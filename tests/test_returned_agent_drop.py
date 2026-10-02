@@ -16,16 +16,19 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     does not carry does not hold it;
   * the kernel's agent-file folds take the new policy and the parent-leaf fold does not;
   * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification
-    and a nested background launch, so the agent still drops when it returns, a close that lands while the pusher renders
-    the viewer included;
-  * the spend guard routes its agent reads through the dropping folds (never starting a steps state for a workflow agent,
-    never folding while a viewer's parse holds the records), prices a dropped file from its memo without entering it
+    and a nested background launch, and retires it from a document written while the viewer was open, so the agent still
+    drops when it returns: a close through closeSubagent or the socket going away, a close that lands while the pusher
+    renders the viewer or whose socket goes away then, and the last of two clients' closes (the first keeps the cursor);
+  * the spend guard prices agent files from a read of its own, then runs the dropping folds where they step records the
+    reader holds (never starting a steps state for a workflow agent, never folding while a viewer's parse holds the
+    records, stepping the viewer's background-task state a restart left behind), prices a dropped file from its memo without entering it
     again, prices a resumed agent from its memo and the tail without a whole read (a response split across the cut counted
     once, whichever side logged the larger usage), reads the file whole when the memo ends short of the tail or starts
     after the window, prices a file a fresh process restored as a tail (one whole read after the boot, none later, the
     drop after two quiet minutes), prices a restored tail that covers the window without a whole read and folds it out of
     memory, re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written record;
-    a raise in the drop's witness check or the guard's fold is counted and said;
+    a raise in the drop's witness check or the guard's folds (its launch-ids fold included) is counted and said with the
+    file and the frame, at the 1st, 10th, 100th and 1000th raise;
   * a lab-style run of a synthetic session (agents with cards, workflow agents without) on an advancing clock, the cards'
     folds run in lockstep, in the kernel's own pattern, or stopping before the agent returns: the entries holding records
     and their bytes return to the live set as agents return, the workflow agents' entries stop climbing, and the guard's
@@ -395,6 +398,8 @@ class ReturnedPolicy(Base):
         self.assertIs(self.entry(p), ent, "the raise holds the drop: memory, never a wrong answer")
         self.assertEqual(em.record_cache_stats()["swallowed"], {"dropWitness:RuntimeError": 2}, "counted on /perf")
         self.assertEqual(err.getvalue().count("dropWitness raised RuntimeError"), 1, "said once, at the first raise")
+        self.assertIn(" on %s: synthetic witness fault" % p, err.getvalue(), "the line names the file")
+        self.assertIn("in _document_at_witness", err.getvalue(), "and the frame that raised")
         self.fold(cache, p)
         self.assertIsNone(self.entry(p), "the fault gone, the next quiet fold drops")
 
@@ -452,7 +457,8 @@ class KernelFolds(Base):
 class ViewerClose(Base):
     """The subagent viewer's render folds the background tasks of an agent file that carries a task notification (or a nested
     background launch), and no other reader steps that cursor: once the viewer closes and the agent writes on, a cursor
-    behind the entry would hold the returned agent's quiet drop for good. Closing the viewer pops it."""
+    behind the entry would hold the returned agent's quiet drop for good. Closing the viewer pops it, and retires it from a
+    document written while the viewer was open."""
 
     AID = "a9b00000000000001"
 
@@ -563,6 +569,171 @@ class ViewerClose(Base):
         ent = self.entry(ap)
         self.assertTrue(ent is None or not ent[4], "no cursor left by the closed viewer's render holds the returned agent's drop")
 
+    def scene(self):
+        """The parent transcript and the agent file (agent_records at T0 - 60, written at T0 - 46), with the card's fold run
+        while the agent runs: (agent path, records)."""
+        ask = self.user(T0 - 201, "w-1", "check the api tests with a subagent")
+        reply = dict(rec(T0 - 200, 0), parentUuid="w-1")
+        write(self.leaf, [ask, reply], int(time.time()))         # the parent transcript (discovery reads its real mtime)
+        ap = str(self.sub / ("agent-%s.jsonl" % self.AID))
+        recs = self.agent_records(T0 - 60)
+        write(ap, recs, T0 - 46)
+        km._agent_launch_ids(ap)                                  # the card's fold while the agent runs
+        return ap, recs
+
+    def client(self, wid="w1", viewer=True):
+        c = {"app": "chat", "wid": wid, "alive": True, "sent": {}, "send": lambda s: None}
+        if viewer:
+            c["subagents"] = {(SID, self.AID): True}             # the viewer is open on this client
+        return c
+
+    def register(self, *clients):
+        saved = list(km._clients)
+        km._clients.extend(clients)
+        self.addCleanup(lambda: (km._clients.clear(), km._clients.extend(saved)))
+
+    def close(self, client):
+        km.Handler._dispatch_ws(object.__new__(km.Handler), {"type": "closeSubagent", "id": SID, "agentId": self.AID}, client)
+
+    def returns_and_drops(self, ap, recs, why):
+        """The agent writes on while its file is fresh, the card's fold steps the new records, the agent returns, and a quiet
+        fold must drop it."""
+        append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)
+        km._agent_launch_ids(ap)
+        self.clock.t = T0 + 300
+        km._agent_launch_ids(ap)
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], why)
+
+    def test_a_viewer_closed_after_a_write_recorded_its_cursor_retires_it_from_the_document(self):
+        """A document written while the viewer is open (here by a quiet pass of the card's fold; the guard's pass and the
+        checkpoint write do the same) records the background-task state at the cursor's count. Popped from memory alone,
+        that state came back from disk at the next write, the cut stayed at its count, and every quiet drop was refused
+        until the file outgrew the lag bound (64 records here). The close retires the fold from the document too."""
+        ap, recs = self.scene()
+        km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it
+        self.assertIn(ap, km._bgall_cache)
+        self.clock.t = T0 + 300                                   # a quiet spell over two minutes, the viewer still open
+        km._agent_launch_ids(ap)                                  # a quiet pass: its drop writes the document
+        self.assertEqual(self.doc(ap)["folds"]["bgAll"]["count"], len(recs), "the write recorded the open viewer's cursor")
+        append(ap, chain([rec(T0 + 301 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 + 304)   # the agent writes on
+        self.clock.t = T0 + 305
+        self.close(self.client())
+        km._agent_launch_ids(ap)                                  # the card's fold steps the new records while the file is fresh
+        self.clock.t = T0 + 700                                   # the agent returned
+        km._agent_launch_ids(ap)                                  # a quiet fold
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "the state the closed viewer left in the document no longer holds the drop")
+        self.assertNotIn("bgAll", self.doc(ap)["folds"], "the close retired the fold from the document")
+
+    def test_a_restarted_kernel_steps_the_state_a_viewer_open_at_the_exit_drain_left(self):
+        """With the viewer open at the exit drain, the document carries the background-task state behind the file's end (the
+        cut at its count), and no close runs in the next process to retire it. The guard's pass steps that state over the
+        records the reader holds, before the card's folds, so the returned agent drops in that pass."""
+        ap, recs = self.scene()
+        km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer opens on it
+        append(ap, chain([rec(T0 - 40 + i, 20 + i) for i in range(3)], recs[-1]["uuid"]), T0 - 38)   # the agent writes on
+        km._agent_launch_ids(ap)                                  # the card's fold steps the new records
+        self.assertTrue(em.checkpoint_write(ap))                  # the exit drain, the viewer still open
+        d = self.doc(ap)
+        self.assertEqual((d["count"], d["folds"]["bgAll"]["count"], d["folds"]["agentLaunchIds"]["count"]),
+                         (len(recs), len(recs), len(recs) + 3), "the cut sits at the viewer's cursor, behind the file's end")
+        self.fresh_process()                                      # a restart: no close runs in the new process
+        for c in (km._parse_cache, km._SUBAGENT_FRAMES):
+            c.clear()
+        self.clock.t = T0 + 300                                   # the agent returned
+        km._spend_window_usd(self.leaf, T0 + 300, 600, PRICES)    # the guard's pass
+        ent = self.entry(ap)
+        self.assertTrue(ent is None or not ent[4], "the guard stepped the viewer's state before the card's folds, and the agent dropped")
+        self.assertEqual(self.doc(ap)["folds"]["bgAll"]["count"], len(recs) + 3, "the document's cut follows the file's end")
+
+    def test_a_viewer_whose_socket_went_away_during_the_push_render_lets_go_of_that_renders_cursor(self):
+        """The socket's finally runs on the handler thread: it marks the client dead, takes it off the client list and closes
+        its viewers, which pops nothing when it lands before the render folds the file, and it leaves the client's viewer
+        map as it was. The pusher, finding the client dead after its render, pops the cursor that render left and sends
+        nothing."""
+        ap, recs = self.scene()
+        client = self.client()
+        self.register(client)
+        real, after_close, sent = km.build_subagent, [], []
+
+        def dying_build(sid, agent_id, now, live_map=None):
+            client["alive"] = False                               # the socket's finally, in its order
+            with km._clients_lock:
+                km._clients.remove(client)
+            for sv in list((client.get("subagents") or {}).keys()):
+                km._subagent_viewer_closed(*sv)
+            after_close.append(ap in km._bgall_cache)
+            return real(sid, agent_id, now, live_map)
+
+        with mock.patch.object(km, "build_subagent", dying_build), \
+                mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, **kw: sent.append(key)):
+            km._push_subagents([client], int(time.time()), {})
+        self.assertEqual(after_close, [False], "the socket's close ran before the render folded the file")
+        self.assertIn((SID, self.AID), client["subagents"], "the finally leaves the viewer map as it was")
+        self.assertNotIn(ap, km._bgall_cache, "the pusher let go of the cursor its render left for the dead client")
+        self.assertEqual(sent, [], "a dead client is not sent the frame")
+        self.returns_and_drops(ap, recs, "no cursor left by the dead client's render holds the returned agent's drop")
+
+    def dial(self, frames, at_close=None):
+        """The real handshake and read loop of one chat socket whose peer sends `frames` (as text) and then closes; `at_close`
+        runs as the close frame is read. Returns the client the socket registered."""
+        class FakeSelf:
+            headers = {"Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
+            path = "/ws?app=chat&delta=1&iid=page-v&wid=w1"
+            rfile = io.BytesIO(); wfile = io.BytesIO()
+            connection = type("FakeSock", (), {"sendall": lambda self, b: None, "shutdown": lambda self, how: None})()
+            close_connection = False
+            _dispatch_ws = km.Handler._dispatch_ws            # bound here, or the open frame's AttributeError is logged and swallowed
+            def send_response(self, *a): pass
+            def send_header(self, *a): pass
+            def end_headers(self): pass
+        pending = [(0x1, json.dumps(f).encode("utf-8"), True) for f in frames]
+
+        def recv(rfile):
+            if pending:
+                return pending.pop(0)
+            if at_close is not None:
+                at_close()
+            return (0x8, b"", True)
+        got, real_reg = [], km._register_ws_client
+        saved = list(km._clients)
+        try:
+            with mock.patch.object(km, "_register_ws_client", lambda c: (got.append(c), real_reg(c))), \
+                    mock.patch.object(km, "_ws_recv", recv), mock.patch("sys.stderr", new=io.StringIO()):
+                km.Handler._ws(FakeSelf())
+        finally:
+            km._clients.clear()
+            km._clients.extend(saved)
+        self.assertEqual(len(got), 1)
+        return got[0]
+
+    def test_a_socket_that_goes_away_closes_the_viewer_it_opened(self):
+        """The viewer opens through the socket's own dispatch (openSubagent: the render folds the file's background tasks),
+        and the socket's teardown closes it; a control socket with no viewer open leaves the cursor alone."""
+        ap, recs = self.scene()
+        seen = []
+        c = self.dial([{"type": "openSubagent", "id": SID, "agentId": self.AID}], at_close=lambda: seen.append(ap in km._bgall_cache))
+        self.assertIn((SID, self.AID), c.get("subagents") or {}, "the open registered the viewer on the socket's client")
+        self.assertEqual(seen, [True], "the open's render left its cursor")
+        self.assertNotIn(ap, km._bgall_cache, "the socket going away closed the viewer it had open")
+        km.build_subagent(SID, self.AID, int(time.time()), {})   # a viewer rendered for another socket
+        self.assertIn(ap, km._bgall_cache)
+        self.dial([])                                             # a control socket with no viewer goes away
+        self.assertIn(ap, km._bgall_cache, "a socket with no viewer open leaves the cursor alone")
+
+    def test_a_viewer_another_client_has_open_keeps_its_cursor_until_the_last_close(self):
+        ap, recs = self.scene()
+        one, two = self.client("w1"), self.client("w2")
+        self.register(one, two)
+        km.build_subagent(SID, self.AID, int(time.time()), {})   # the viewer, open on both clients, renders
+        self.assertIn(ap, km._bgall_cache)
+        self.close(one)
+        self.assertIn(ap, km._bgall_cache, "the other client still has the viewer open: its cursor stays")
+        self.close(two)
+        self.assertNotIn(ap, km._bgall_cache, "the last close pops it")
+        self.returns_and_drops(ap, recs, "after the last close the returned agent drops")
+
 
 class SpendGuard(Base):
     def setUp(self):
@@ -603,7 +774,45 @@ class SpendGuard(Base):
             self.assertAlmostEqual(self.window(T0 + 120), sum(map(usd, recs)), places=9)
         self.assertEqual(km.em.record_cache_stats()["swallowed"], {"spendGuardFold:RuntimeError": 2}, "counted on /perf")
         self.assertEqual(err.getvalue().count("spendGuardFold raised RuntimeError"), 1, "said once, at the first raise")
+        self.assertIn(" on %s: synthetic fold fault" % wf, err.getvalue(), "the line names the file")
+        self.assertIn("in _spend_fold_agent", err.getvalue(), "and the frame that raised")
         self.assertTrue(em.entry_whole_resident(wf), "no fold ran: the records stay, as on main")
+
+    def test_a_raise_in_the_guards_launch_ids_fold_is_counted_and_said(self):
+        """For a cardless subagent the launch-ids fold is the guard's only reader. Its kernel reader answers set() on any
+        raise, so through that reader a raise never reached the guard's handler: no count and no line while the records
+        stayed. The guard folds through the raising reader the other one wraps."""
+        wf = str(self.sub / "workflows" / "wf_1" / "agent-a9800000000000010.jsonl")
+        recs = [rec(T0 - 100 + 5 * i, i) for i in range(10)]
+        write(wf, recs, T0 - 55)
+        km.em._SWALLOWED.clear()
+        err = io.StringIO()
+        with mock.patch.object(km, "_launch_ids_step", side_effect=RuntimeError("synthetic step fault")), \
+             mock.patch("sys.stderr", new=err):
+            self.assertAlmostEqual(self.window(T0), sum(map(usd, recs)), places=9, msg="the guard's rate stands")
+            self.assertAlmostEqual(self.window(T0 + 120), sum(map(usd, recs)), places=9)
+            self.assertEqual(km._agent_launch_ids(wf), set(), "the card's reader still answers set() on a raise")
+        self.assertEqual(km.em.record_cache_stats()["swallowed"], {"spendGuardFold:RuntimeError": 2},
+                         "the guard's two raises counted on /perf, the card reader's not")
+        self.assertEqual(err.getvalue().count("spendGuardFold raised RuntimeError"), 1, "said once, at the first raise")
+        self.assertIn("in _agent_launch_ids_fold", err.getvalue(), "the traceback runs through the guard's raising reader")
+        self.assertTrue(em.entry_whole_resident(wf), "the fold never finished: the records stay")
+        self.assertAlmostEqual(self.window(T0 + 125), sum(map(usd, recs)), places=9)
+        self.assertIsNone(self.entry(wf), "the fault gone, the guard's next look drops the returned agent")
+
+    def test_the_raise_line_is_said_at_the_first_tenth_hundredth_and_thousandth_raise(self):
+        err = io.StringIO()
+        em._SWALLOWED.clear()
+        with mock.patch("sys.stderr", new=err):
+            for _ in range(1000):
+                try:
+                    raise RuntimeError("synthetic fault")
+                except RuntimeError as e:
+                    em.note_swallowed("synthSite", e, "/w/notes-api/agent-a9800000000000011.jsonl")
+        said = [int(ln.split("(")[1].split()[0]) for ln in err.getvalue().splitlines() if ln.startswith("record cache: synthSite")]
+        self.assertEqual(said, [1, 10, 100, 1000])
+        self.assertEqual(em.record_cache_stats()["swallowed"], {"synthSite:RuntimeError": 1000})
+        em._SWALLOWED.clear()
 
     def test_the_row_memo_serves_a_tail_restore_of_the_same_bytes(self):
         ap = str(self.sub / "agent-a6666666666666666.jsonl")
