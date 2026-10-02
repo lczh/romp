@@ -5086,14 +5086,13 @@ class TranscriptGraph:
 
 def _read_record_at(path, at, uuid):
     """The raw transcript record at `at` = (byte offset, byte length) in `path`, verified to be `uuid`'s; hydrate's own read
-    (one seek, one read, counted), served from the hydration memo when a reader already holds the record."""
-    with _ASM_CKPT_LOCK:
-        hit = _HYDRATED.get(uuid)
-    if hit is not None:
-        return hit[0]
+    (one seek, one read, counted). Never the hydration memo: it keeps a record's body fields alone (2026-10-01), and the cut
+    walk decides on the record's type, time and provenance. Nor the file's read stripe (2026-10-02): this read fills no
+    cache, and under the stripe the comment cut waited, inside its entry's key lock, for a whole hydrate group of the file
+    or of a file sharing its stripe, or for a record-cache read."""
     off, ln = int(at[0]), int(at[1])
     try:
-        with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
+        with open(path, "rb") as fh:
             fh.seek(off)
             raw = fh.read(ln)
     except OSError as e:
@@ -6373,6 +6372,11 @@ def asm_index_stats():
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
+                   "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
+                   #                     entries its cap pushed out (2026-10-01): its gauge counts real bytes, so it no longer
+                   #                     equals hydratedBytes (line bytes read) while nothing is evicted; these two say it. A
+                   #                     memo hit for an atom whose body a peer had already written when this call looked is
+                   #                     not a hit: the peer's own read or hit counted that body
                    "restoreMs": {"load": 0.0, "verify": 0.0, "index": 0.0, "seed": 0.0, "total": 0.0},   # the restore's parts since boot, ms
                    #                     (`total` is the whole of _asm_restore, entry to return, so the unnamed remainder, the tail's
                    #                     parse through the seeded adapter, is total minus the four named parts)
@@ -6423,12 +6427,30 @@ def _asm_doc_memo_put(key, mkey, doc):
                 break
             _asm_doc_memo_drop(k_)
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: fallback for legacy unbound descriptors; restored bodies own their source (2026-09-17)
-_HYDRATED = {}                     # uuid -> the body fields read; dict order = LRU
-_HYDRATED_BYTES = [0]
-_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)
-#                                    the hydrated-body memo's byte cap: MemTotal / 32, never under 1 GiB (3.7 GiB on a 118 GiB
-#                                    machine; 64 MB hydrated 3.1 GB of bodies in 150 s on 2026-09-11) (a judge pass re-reading one large body every cycle
-#                                    shows in hydratedBytes; the memo keeps the common case at one read)
+_HYDRATED = {}                     # uuid -> (the body fields a fill of any kind may read, their weight); dict order = LRU
+_HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 48), 1024 * 1024)
+#                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 48, never under 256 MiB
+#                                    (about 661 MiB on a 31 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
+#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
+#                                    kernel's memo held about 66,700 records from 2.7 to 9.5 hours, then grew: 77,144 records and
+#                                    302 MiB of lines (4,107 bytes a line) at 11.7 hours, nothing evicted. As decoded body fields
+#                                    that is an estimated 550 to 615 MiB, a wide band, since an entry weighs 0.55 of its line
+#                                    for a Read result and up to 4.6 for a question's answers. This cap holds that set by the
+#                                    estimate and binds as it grows; a 64th would bind within the first day to save at most 165
+#                                    MiB more. An LRU thrashes once the records read again and again outgrow it, and the size of
+#                                    that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here) thrashed on
+#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
+#                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
+#                                    memo's serves and evictions
+_HYDRATED_ENTRY_BYTES = sys.getsizeof((None, None)) + sys.getsizeof(1 << 20) + sys.getsizeof("0" * 36) + 64
+#                                    an entry's own tuple and weight beside its body, its uuid key (the memo keeps it alive once
+#                                    the atom has gone), and its slot in the memo's table: a 16-byte entry and its index, 44 to 88
+#                                    bytes at the load CPython's growth rule allows, the deleted slots an LRU's moves leave included.
+#                                    An estimate: a freshly grown table with no deleted slots costs less, and a tuple taken from the
+#                                    interpreter's free list allocates nothing, so on small records it overcounts by about a tenth
+#                                    (tests/test_hydrated_memo.py bounds it on both sides)
 _LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
 
 
@@ -8122,6 +8144,57 @@ def _asm_restore_inner(key, leaf_path, candidate_files, links, rompuuid, postal_
     return _asm_serve(entry)
 
 
+def _decoded_size(obj):
+    """The bytes a decoded JSON value occupies in this process: sys.getsizeof over every container and scalar reachable from
+    it, each object once (the decoder shares one key string across a record's dicts). None, True, False, the small ints and
+    the empty and one-character Latin-1 strings are the interpreter's shared singletons and weigh nothing here. The hydration
+    memo's weight (2026-10-01): a record's line on disk is no measure of it, since decoded text takes one to four bytes a
+    character against one to twelve on disk, and every small block costs a dict."""
+    seen, todo, n = set(), [obj], 0
+    while todo:
+        o = todo.pop()
+        if o is None or o is True or o is False:
+            continue
+        t = type(o)
+        if (t is int and -5 <= o <= 256) or (t is str and len(o) < 2 and (not o or ord(o) < 256)):
+            continue
+        i = id(o)
+        if i in seen:
+            continue
+        seen.add(i)
+        n += sys.getsizeof(o)
+        if t is dict:
+            todo.extend(o.keys())
+            todo.extend(o.values())
+        elif t is list or t is tuple:
+            todo.extend(o)
+    return n
+
+
+def _hydrate_fields(rec, lz):
+    """What the hydration memo keeps of a record read for a lazy atom, and what the atom is filled from (2026-10-01): the
+    fields a fill of any kind may read, the record's own objects, never copies. An entry serves every atom of its record,
+    whatever kind the atom's document gave it, so the choice never depends on this atom's kind: the message stays even for
+    a command atom, whose fill rebuilds it from the marker, and whole for a skill or a command's output, whose atom keeps
+    text derived from it. The top-level tool result only when it is a dict the atom carries (lazy tur) or of a consumed
+    shape (TUR_CONSUMED_KEYS, the emit's carry rule), so every atom of the record finds it; an attachment's prompt alone.
+    Left out: the record's metadata (ids, cwd, version, branch, times) and a Read call's second copy of the file's text,
+    which no atom carries. An attachment that is not a dict is kept as it is, so the fill meets it as it did."""
+    out = {}
+    if "message" in rec:
+        out["message"] = rec["message"]
+    tur = rec.get("toolUseResult")
+    if isinstance(tur, dict) and ((lz or {}).get("tur") or not TUR_CONSUMED_KEYS.isdisjoint(tur)):
+        out["toolUseResult"] = tur
+    att = rec.get("attachment")
+    if isinstance(att, dict):
+        if "prompt" in att:
+            out["attachment"] = {"prompt": att["prompt"]}
+    elif att:
+        out["attachment"] = att
+    return out
+
+
 def _hydrate_one(a, rec):
     """Fill a lazy atom's body fields from its record, the way the emit built them. An atom another thread finished
     meanwhile (its marker gone) is left as it is (review find C)."""
@@ -8211,6 +8284,10 @@ def hydrate(atoms, rompuuid=None, by=None):
             hit = _HYDRATED.get(u) if u else None
             if hit is not None:
                 _HYDRATED.pop(u, None); _HYDRATED[u] = hit      # a served body is a used one: to the LRU tail
+                if a.get("lazy") is not None and hasattr(a.get("message"), "source_path"):
+                    _ASM_CKPT_STATS["hydratedHits"] += 1        # a serve when the body is still unfilled as this call
+                    #                                              looks; one a peer already wrote (marker gone, or its pop
+                    #                                              in flight) was counted by that peer's read or hit
         if hit is not None:
             if a.get("lazy") is not None:                       # another thread may have finished it since the filter (C)
                 _hydrate_one(a, hit[0])
@@ -8220,9 +8297,11 @@ def hydrate(atoms, rompuuid=None, by=None):
         if not hasattr(msg, "source_path"):                 # another thread finished this atom between the memo miss above and
             with _ASM_CKPT_LOCK:                            #  here (2026-09-20): its body is a plain dict with no source, and the
                 hit = _HYDRATED.get(u) if u else None       #  per-session map below could name a newer document and refuse an atom
-            if hit is not None:                             #  whose body is in place, the whole call with it. Its bookkeeping (the
-                _hydrate_one(a, hit[0])                     #  popped marker) may still be in flight: finish it from the memo as the
-            filled += 1                                     #  hit branch does, or count it filled when the entry is gone already.
+                if hit is not None:                         #  whose body is in place, the whole call with it. Its bookkeeping (the
+                    _HYDRATED[u] = _HYDRATED.pop(u, hit)    #  popped marker) may still be in flight: finish it from the memo as the
+            if hit is not None:                             #  hit branch does, its entry to the LRU tail, or count it filled when
+                _hydrate_one(a, hit[0])                     #  the entry is gone already (the move, 2026-10-02: a hit uncounted here
+            filled += 1                                     #  is still a use, and the cap evicts the least recently used).
             continue                                        #  Entry gone with the marker present: the peer's pop is in flight, its
         #                                                      put having left the memo already, self-evicted under a cap the record
         #                                                      does not fit under or evicted by later puts from any thread between
@@ -8260,6 +8339,10 @@ def hydrate(atoms, rompuuid=None, by=None):
                 u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
+                    if hit is not None:
+                        _HYDRATED.pop(u, None); _HYDRATED[u] = hit    # a peer's put served here is used too: to the LRU tail
+                        if a.get("lazy") is not None and hasattr(a.get("message"), "source_path"):
+                            _ASM_CKPT_STATS["hydratedHits"] += 1      # the rule of the first loop's count
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
@@ -8273,6 +8356,16 @@ def hydrate(atoms, rompuuid=None, by=None):
                 rec = json.loads(raw.decode("utf-8", "replace"))
                 if rec.get("uuid") != a.get("uuid"):
                     raise LazyBodyRead("atom %s: the record at its offset is %s" % (a.get("uuid"), rec.get("uuid")))
+                body = _hydrate_fields(rec, lz)           # the memo's entry and this fill's source alike: a hit then fills
+                w = _decoded_size(body) + _HYDRATED_ENTRY_BYTES if u else 0   # exactly as a miss does. Weighed outside the
+                #                                           memo's lock but inside the file's read stripe, where the put must
+                #                                           land for a waiting thread to find it: the walk costs from a tenth
+                #                                           of the decode (a long file text) to several times it (many small
+                #                                           blocks), once per disk read, never on a hit. Every waiter on the
+                #                                           stripe waits for the walks too: another hydrate of this file, a
+                #                                           record-cache read that pulls its bytes (_read_jsonl_entry), and
+                #                                           both for the files whose paths share the stripe, one in 64. The
+                #                                           comment cut's by-offset read takes no stripe (_read_record_at)
                 with _ASM_CKPT_LOCK:
                     _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
                     _THREAD_BYTES.hydrated = getattr(_THREAD_BYTES, "hydrated", 0) + ln   # this thread's share (T397)
@@ -8281,11 +8374,14 @@ def hydrate(atoms, rompuuid=None, by=None):
                     hk = "%s:%s" % (_read_stage() or "none", by)
                     hbs[hk] = hbs.get(hk, 0) + ln
                     if a.get("uuid"):
-                        _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
+                        _old = _HYDRATED.pop(a["uuid"], None)     # a peer that missed it too put it first: its weight leaves
+                        if _old is not None:                      #  with it, and the entry goes to the young end
+                            _HYDRATED_BYTES[0] -= _old[1]
+                        _HYDRATED[a["uuid"]] = (body, w); _HYDRATED_BYTES[0] += w
                         while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
                             _old = _HYDRATED.pop(next(iter(_HYDRATED)))    # the least recently used body goes first
-                            _HYDRATED_BYTES[0] -= _old[1]
-                _hydrate_one(a, rec); filled += 1
+                            _HYDRATED_BYTES[0] -= _old[1]; _ASM_CKPT_STATS["hydratedEvicted"] += 1
+                _hydrate_one(a, body); filled += 1
     return filled
 
 

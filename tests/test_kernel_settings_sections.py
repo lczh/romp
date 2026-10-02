@@ -89,7 +89,7 @@ class SettingsSectionsTest(unittest.TestCase):
                         < ge.index(">This machine<") < ge.index("id=rs-conserve") < ge.index("id=rs-router") < ge.index("id=rs-updates") < ge.index(">Keyboard shortcuts<"))
         self.assertIn("<b>Allow file editing</b>", ge)
         self.assertIn("<b>Updates install automatically <span class=rs-mixed hidden></span></b>", ge)
-        # Chat (T404): Display (the transcript rows, the text scheme, the strip's one-group-per-row), Comments, Thinking, Tab widgets
+        # Chat (T404): Display (the transcript rows, the text scheme, the strip's keep-groups-together), Comments, Thinking, Tab widgets
         ch = panes["chat"]
         self.assertTrue(ch.index(">Display<") < ch.index("id=rs-compact") < ch.index("id=rs-dense") < ch.index("id=rs-chatscheme") < ch.index("id=rs-striprows") < ch.index(">Comments<")
                         < ch.index("id=rs-cmtmodel") < ch.index("id=rs-cmtfast") < ch.index(">Thinking<") < ch.index("id=rs-thinksum") < ch.index("data-section=tabstrip") < ch.index("id=rs-tablock") < ch.index("data-section=tabwidgets")
@@ -195,12 +195,14 @@ class SettingsSectionsTest(unittest.TestCase):
         self.assertIn("if (raw) this._collapseGaps = JSON.parse(raw).collapseGaps !== false;", view)   # default ON, a stored false opts out
         self.assertIn("if (raw) this._activeOnly = JSON.parse(raw).activeOnly !== false;", view)
 
-    def test_one_group_per_row_is_wired_to_the_shared_stripGroupRows_setting(self):
-        # "One tag group per row in the tab strip": a Chat-section checkbox, default ON, persisted as
-        # romp:settings.stripGroupRows. render.ts is the reader: the strip's row breaks and the trail's
-        # boundary read it, and it rides the strip's rebuild signature so a flip repaints at once.
+    def test_keep_groups_together_is_wired_to_the_shared_stripGroupRows_setting(self):
+        # "Keep tag groups together in the tab strip" (named "One tag group per row" until the groups began to share
+        # rows, 2026-10-01): a Chat-section checkbox, default ON, persisted as romp:settings.stripGroupRows. render.ts
+        # is the reader: the strip's row breaks, their flow and the trail's boundary read it, and it rides the strip's
+        # rebuild signature so a flip repaints at once.
         self.assertIn("id=rs-striprows checked", _gear_src())
-        self.assertIn("One tag group per row in the tab strip", _gear_src())
+        self.assertIn("Keep tag groups together in the tab strip", _gear_src())
+        self.assertNotIn("One tag group per row", _gear_src(), "the old name described the layout before the flow")
         self.assertEqual(_gear_src().count("stripGroupRows: true"), 2, "on in both of load()'s default literals")
         self.assertIn("s.stripGroupRows = sr.checked", _gear_src())
         self.assertIn("sr.checked = s.stripGroupRows !== false", _gear_src())

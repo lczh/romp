@@ -620,15 +620,35 @@ the per-init check above confirms each one.
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
-key-billed dollars (5-hour burn and month-to-date, numbers only). Hovering
-breaks the windows down by ACCOUNT: one block per distinct login (the account
-line as its head, the meters written once, since they are the account's
-allowance), beneath them one line naming the machines logged into it in the
-tab strip's quiet host dress, a machine whose own reading lagged the freshest
-named as lagging beside its name, and one updated-ago line per block (the
-oldest report of the group); two accounts are two blocks side by side; a
+key-billed dollars (5-hour burn and month-to-date, numbers only). On a
+machine with no sign-in of its own every turn counts as the key's, except a
+turn billed to a stored login: that spent a subscription seat, and its dollars
+are not the key's. Hovering
+breaks the windows down by ACCOUNT: one block per distinct login (headed by
+the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
+detail gives it, never its email; the meters written once, since they are the
+account's allowance), beneath them one line naming the machines logged into it
+in the tab strip's quiet host dress, a machine whose own reading lagged the
+freshest named as lagging beside its name, and one updated-ago line per block
+(the oldest report of the group); two accounts are two blocks side by side; a
 machine attached but not yet reporting is named after the blocks rather than
-given a column; the key spend stays one section for every machine. A click on the
+given a column; the key spend stays one section for every machine. An account
+that answers Claude Code's usage request with no 5-hour or weekly window (an
+enterprise seat metered by a monthly spend limit) is recorded as such and its
+block says `no 5-hour or weekly limits on this account`, with no bars, no age
+and no lagging note, even beside a machine on an older build still holding a
+reading from before; a usage request the endpoint cannot answer says nothing
+about the account and changes nothing. When that answer carries the seat's
+monthly spend limit, the block shows it instead as one `Monthly allowance`
+bar: the percent used and the date it resets, the first of the next month as
+Claude Code's own `/usage` screen dates it (the answer carries no reset date).
+A reading from before that reset shows no bar, only `reset <date>; no reading
+since`; an answer with no limit to measure against (none, or unlimited) leaves
+the one-line note. Under the spend's per-machine line, a
+`by account · 1 week` line splits the week the way the spend detail's By
+account summary does, one entry per account, a seat's dollars wearing `≈`; it
+shows only when something besides the key billed the week, and a machine whose
+older build sends no billing routes is counted out by name. A click on the
 readout opens the spend detail: a chart of spend over time stacked by session,
 and under it the list of sessions with their dollars, turns and tokens. The
 list follows the chart's range (one day by hour, seven days by hour, ninety
@@ -2365,10 +2385,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `thresholds` as lists, and `stats` (per generation: `collections`,
   `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
-  lazy bodies read on demand: `entries`, and `bytes`, the records' length on
-  disk, which `capBytes` bounds, a proxy that locates the holder without
-  sizing it: decoded bodies usually weigh more, but escaped text can make the
-  disk bytes exceed the decoded storage),
+  lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
+  memory of the body fields kept plus an estimate of each entry's own
+  overhead (its tuple, key and table slot), which `capBytes` bounds; a body an atom
+  still holds counts there too, so while that atom lives an eviction frees
+  less than `bytes` drops; the cap is a 48th of physical memory, never under
+  256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it outright),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
   lazy indexes alive, a weak count), `materializedLruSlots` (the
@@ -2926,6 +2948,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reason), and `refresh`: the document refreshes a restored entry's settle
   started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
   time); the refresh's own parse counts under `parse` as `private`.
+  Two more count what the hydrated-body memo does: `hydratedHits`, the
+  fills it served without a read, and `hydratedEvicted`, the entries its
+  cap pushed out. A memo hit for an atom whose body another thread had
+  already written when this call looked is not counted, since that
+  thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
   come from: `materialized` atoms built from the document's rows since boot,
   `materializedBy` (per consumer), `materializedByStage` (the same builds
@@ -5555,12 +5582,49 @@ sections: **Group by tag** in its Filter menu (off until you turn it on, per bro
 lanes out one section per tag in the same order, each session under every tag it carries and
 the untagged sessions behind a divider, with the tag's chip, the caret and the count on a row
 of its own; a section folded in either place is folded in both, and while grouped the lanes
-follow the tag order (dragging a lane pans, it does not reorder). A session reached from a card or the chat while its section is folded unfolds that section, in the strip too, and the arrow keys walk the rows on screen. The gear at the strip's right end, the same gear as the one at the bottom right of every romp page, opens the settings on the **Chat** tab. Its **Tab strip** section carries **Lock the tabs in place**, which freezes every tab move (a drag, a Move to, the Sessions pane's lanes) until you turn it off, and **State badge instead of the outline ring** (the state badge, above); the **Tab widgets** section next to it holds the per-widget rows. The strip's tag button, at the other end of the controls from the gear, shows no chips of its own: the tags show in the strip's sections when the tabs are grouped, and the button wears the accent while a filter is on. Every group starts on its own row; turning off
-the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
-strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
-tags stays short. Folded groups that follow one another in the tag order share one row, since each is
-only its header; an open group always starts a row of its own, and so do the untagged sessions, so a
-folded group between two open ones keeps its row too. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
+follow the tag order (dragging a lane pans, it does not reorder). A session reached from a card or the chat while its section is folded unfolds that section, in the strip too, and the arrow keys walk the rows on screen. The gear at the strip's right end, the same gear as the one at the bottom right of every romp page, opens the settings on the **Chat** tab. Its **Tab strip** section carries **Lock the tabs in place**, which freezes every tab move (a drag, a Move to, the Sessions pane's lanes) until you turn it off, and **State badge instead of the outline ring** (the state badge, above); the **Tab widgets** section next to it holds the per-widget rows. The strip's tag button, at the other end of the controls from the gear, shows no chips of its own: the tags show in the strip's sections when the tabs are grouped, and the button wears the accent while a filter is on. The groups
+share rows in the tag order while they fit: a folded group is its header alone, an open group its
+header and its tabs, and a group that does not fit the rest of a row moves to the next row whole
+rather than splitting across two (one wider than the whole strip wraps onto rows of its own). Folded
+headers side by side sit as close as tabs; a short divider stands between two groups on a row when
+either shows tabs. The untagged sessions keep a row of their own at the end, which is where a dragged
+tab goes to lose its tags. Turning off
+the gear's **Keep tag groups together in the tab strip** lets the groups run on across the strip and
+wrap wherever a row fills, with the untagged sessions behind a thin divider. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
+
+### The tag menu
+
+Right-click a tag to act on the tag itself. The menu opens on a group header in the strip, on a tag's row in a tab's
+**Tags** menu, and on the strip's filter chips; on a focused header the menu key (or Shift+F10) opens it from the keyboard,
+and on a phone a long press on a group heading in the session picker opens it over the list, where the browser reports a
+long press as a right-click (Android's does). The menu shows the tag's chip at the top, so it is clear which tag it acts on, then:
+
+- **Rename…**, and under it the session palette's swatches, the current colour ringed: a swatch recolours the tag.
+- **Fold group** or **Open group**, on a header only: the header's own fold, without the section view a header click
+  also opens. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
+  that tag). **Configure tags…** opens the tags dialog.
+- **Delete tag…**, whose sub-line counts the sessions that lose the tag.
+
+**Rename…** opened from a header turns the header's chip into a field holding the name: Enter or a click away renames,
+Escape cancels. Opened from a chip, or on a phone, where the header is hidden, it asks in a small dialog instead. A name
+another tag already has, here or on an attached kernel, is refused with the reason, since the two tags would make one
+group. A renamed tag keeps its id and its sessions. In the same write the kernel moves the new name into the old one's
+place in the tag order, so the group stays where you dragged it, and into every surface's filter that named the old one.
+Its fold and its tabs set to show when folded move with it on every device: the browser that renamed it moves them at
+once, so the group never flashes open, and every other browser follows when the renamed tag reaches it. A section the
+pane is showing at a glance goes on showing under the new name.
+
+**Delete tag…** asks first, saying how many sessions lose the tag; the sessions stay, with their other tags, and a
+session left with none moves to the ungrouped row. The kernel takes the name out of the tag order and the filters in the
+same write (a filter on that tag alone goes back to all tabs), and the group's fold and its show-when-folded tabs go with
+it, so a tag made later under the same name starts like any new one. A refused rename or delete puts the fold back.
+
+A tag is its name, so the menu acts on every tag of that name: the one on your kernel by its id, and each one kept by an
+attached kernel through that kernel, which applies it to its own store. Once it has answered yes, your kernel moves the
+name in its own order and filters too. A kernel from before this change applies the edit but not the move, and the page
+then writes the order and the filters itself, one write after the edit. Two limits: an edit for an attached kernel that
+is down is queued and lands when it comes back, without moving your order; and the feed keeps its own filter per browser
+tab, which still names the old tag after a rename until you change it.
 
 ### A tag section at a glance
 
