@@ -2772,9 +2772,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   their file's use: a leaf a /clear or a resume fork retired, and again any
   entry a later parse of that retired leaf installed, a dead timeline lane with
   a document a restore would take, the last viewer of a subagent closing),
-  and `releaseFailed` (such a release that raised and was left undone, the
-  memory as it stood, and a record-cache drop whose pin check raised, which counts
-  that entry as not pinning and goes ahead unless another entry pins it; said on
+  and `releaseFailed` (such a release that raised, stopping where it raised
+  with what ran before it still released, and once for each assembly entry
+  whose pin check raised at a record-cache drop, which counts that entry as
+  not pinning, the drop going ahead unless another entry pins it; said on
   stderr once per file); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the

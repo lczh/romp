@@ -1371,8 +1371,8 @@ def _asm_hold_of(key, ent):
     of their adapters still holds (_asm_held_bytes), which the pop cannot free before that entry's next visit replaces it (a
     restored entry; a whole one whose leaf has a document a restore would take); (None, 0) when none folds over it. Takes
     _ASM_LOCK for the snapshot alone, never under the reader's lock; the pin test's stat and sidecar read run with no lock
-    held. A pin test that raises (a stat refused other than not-found) counts as no pin, so the drop goes ahead as it did
-    before the pin existed, counted and said through release_failed (round one of the fold's review)."""
+    held. A pin test that raises (a stat refused other than not-found) counts as no pin for that entry, so the drop goes
+    ahead unless another entry pins it, counted and said through release_failed (round one of the fold's review)."""
     with _ASM_LOCK:
         entries = list(_ASM_CACHE.values())
     gen, kind, held = ent[6], None, 0
