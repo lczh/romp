@@ -2910,7 +2910,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   longer shown, and the live-merge memo, which the chat, feed and
   timeline builds fill for any alive session, shown or not, keeps it
   until a build merges a live tail over a newer parse or, at the next
-  push that serves a chat tab or the Sessions pane, the session is
+  push that serves a chat tab or the Outline pane, the session is
   neither shown nor alive (its 512-entry cap ages out the oldest first);
   a build that read the file before the
   eviction and installs after it keeps what it read, and a file evicted

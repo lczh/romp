@@ -839,7 +839,8 @@ class Surfaces(unittest.TestCase):
                   "replaces or drops that tree, a shown tab's build memos of it go and the live-merge memo lets it go "
                   "(as above), or the budget evicts",
                   "the live-merge memo, which the chat, feed and timeline builds fill for any alive session",
-                  "the session is neither shown nor alive"):
+                  "the session is neither shown nor alive",
+                  "at the next push that serves a chat tab or the Outline pane", "its 512-entry cap ages out the oldest first"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]
