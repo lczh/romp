@@ -2563,7 +2563,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   CPU, any collection inside it included, only when it ends, so take the
   tally from a read made before that job began or set such a job aside; a
   read of `/perf?stacks=1` names the job open at that read, by the `jobs`
-  row's stage mark, and a plain read names none);
+  row's stage mark, though it samples the stacks just after copying the
+  counters, so a job that ended in between shows as `null` or as the next
+  job and its CPU arrives in the next read; a plain read names none unless
+  the kernel runs with `ROMP_PERF_STACKS`);
   compare `gc.gen."2"` or the kernel samples'
   generation-2 tallies over the interval, and the ring rows only for the
   passes the ring still holds (the newest 16 on a plain read, the whole ring
@@ -2986,9 +2989,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   model and the parse family), with `count` and `bytes`; a tail read, an
   append and a restore's tail read are not whole reads and are not counted;
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
-  the stage being the pusher thread's current tick job (`jobs.<job>`) or
-  `push`, `connect` for a fresh client's full push on its handler thread (a
-  browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
+  the stage being the calling thread's stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, `connect` for a fresh client's full push on its handler
+  thread (a browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
   does the same for the hydration rows.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
@@ -3130,8 +3134,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   id.
 - `stages_ms`: `prelude` (the cycle's opening: the liveness snapshot and the
   names), `jobs` (the cycle's tick jobs outside the push) and inside it one
-  `jobs.<job>` per tick job (`jobs.interruptBlock`, `jobs.autoNudge`,
-  `jobs.convergeCheckpoints` and the rest, T398), `push`, and inside it
+  `jobs.<job>` per job the pusher runs (`jobs.convergeCheckpoints`,
+  `jobs.applyPendingOps` and the rest, T398), `jobsPass` (the jobs thread's
+  pass) and inside it `jobs.prelude` and one `jobs.<job>` per job that
+  thread runs (`jobs.interruptBlock`, `jobs.autoNudge` and the rest), `push`,
+  and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
   `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
   stages count every push, including the one a connecting page gets, so they

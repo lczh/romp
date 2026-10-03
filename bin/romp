@@ -362,8 +362,9 @@ if [[ "${1:-}" == "perf" ]]; then
     }
     if [[ "${1:-}" == "stacks" ]]; then
         # `romp perf stacks [--json]`: one GET /perf?stacks=1, the kernel's threads as they stand at the read (T401): a
-        # thread's kind, its stage mark (the pusher's tick job or push, a handler's connect push) and its frames innermost
-        # last; the read a slow boot needs to NAME the lock a thread waits on where py-spy is not available.
+        # thread's kind, its stage mark (the jobs thread's job, the pusher's own job or push, a handler's connect push)
+        # and its frames innermost last; the read a slow boot needs to NAME the lock a thread waits on where py-spy is
+        # not available.
         shift
         _json=0
         while [[ $# -gt 0 ]]; do
