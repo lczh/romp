@@ -765,8 +765,9 @@ class _PerfStats:
         (stages_ms["jobs.<job>"]), and on that thread the wall includes every wait for the interpreter lock or a kernel lock
         held by the pusher, a judge or a handler, for the disk, and for a free core (runnable, not scheduled), so wall alone
         cannot say which jobs cost CPU. The CPU includes any collection the interpreter ran on the jobs thread during the job,
-        a pause set by the heap and not by the job: before a jump in one job's cpuMs is read as its own work, compare gc.gen."2"
-        and the jobs.stageRing rows' generation-2 tallies (n2, ms2) over the same interval. A job that raised counts its run
+        a pause set by the heap and not by the job. The generation-2 tallies (gc.gen."2", a ring row's n2 and ms2) count every
+        thread's collections, so an unmoved tally over the interval rules a collection out of a job's cpuMs and a moved one
+        does not put it there; the ring rows cover only the passes the ring still holds. A job that raised counts its run
         and its CPU too (_job_stage calls this from its finally). The pusher's own jobs (_pusher_cycle_jobs) are not counted
         here: their CPU is inside the pusher's cycle_cpu_ms_sum. The names are _job_stage's literals, a fixed set."""
         with self.lock:
@@ -64913,8 +64914,8 @@ def _job_stage(name, thunk):
     The thread's stage mark is `jobs.<name>` for the job's duration (T401: the reads inside it count under it). On the jobs
     thread the job's own thread CPU and a run are counted too (jobs.cpuByJob, _PerfStats.job_cpu), read before the bookkeeping
     below, so a pass's wall can be split into the jobs that worked and the jobs that waited (for a lock, the disk or a free
-    core). That CPU includes any collection the interpreter ran on this thread during the job: before a jump is read as the
-    job's own work, compare gc.gen."2" and the ring rows' generation-2 tallies over the same interval."""
+    core). That CPU includes any collection the interpreter ran on this thread during the job; the generation-2 tallies count
+    every thread's collections, so an unmoved one rules a collection out and a moved one does not put it in the job."""
     _t = time.monotonic()
     _c = time.thread_time()
     prev = getattr(_STAGE_TL, "name", None)

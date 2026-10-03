@@ -2554,12 +2554,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   that returned early on the job's own pace or raised included, and `cpuMs`,
   the thread's own CPU inside the job, which includes any collection the
   interpreter ran on this thread during the job, a pause set by the heap and
-  not by the job, so before a jump in one job's `cpuMs` is read as its own
-  work, compare `gc.gen."2"` and the `jobs.stageRing` rows' generation-2
-  tallies (`n2`, `ms2`) over the same interval; the job's `jobs.<job>` stage
-  is its wall, which also counts its waits for a lock, the disk or a free
-  core, so the two side by side say which jobs worked and which waited; the
-  pusher's jobs are not counted). The pass's container stage is `jobsPass`,
+  not by the job. Both generation-2 tallies, `gc.gen."2"` and a ring row's
+  `n2` and `ms2`, count every thread's collections, so over an interval an
+  unmoved tally rules a collection out of a job's `cpuMs` and a moved one
+  does not put it there (the freeze controller's own collections, counted
+  under `gc.freeze.collections`, run on the pusher thread and reach a job
+  only as a wait in its wall); compare `gc.gen."2"` or the kernel samples'
+  generation-2 tallies over the interval, and the ring rows only for the
+  passes the ring still holds (the newest 16 on a plain read, the whole ring
+  with `?ring=all`); the job's `jobs.<job>` stage is its wall, which also
+  counts its waits for a lock, the disk or a free core, so the two side by
+  side say which jobs worked and which waited; the pusher's jobs are not
+  counted). The pass's container stage is `jobsPass`,
   its opening `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
   in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,
