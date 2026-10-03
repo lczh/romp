@@ -11,6 +11,7 @@ markers into real assistant atoms — dedup'd by uuid and either-way text prefix
 the CLI's own "API Error: …" texts excluded (pre-tagging markers hold that noise). SYNTHETIC only."""
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -188,6 +189,91 @@ class JudgeSeesSalvagedWork(unittest.TestCase):
         self.assertIsNotNone(node, "the ask still gets its card")
         self.assertFalse(node.get("nodeComplete"),
                          "error noise in a marker must not un-guard the fabrication hole")
+
+
+FORK = "66666666-7777-8888-9999-bbbbbbbbbbbb"   # the transcript a /clear opened under SID's session
+
+
+def _iso_ms(t, ms):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % ms
+
+
+class SalvageFloorAfterAClear(unittest.TestCase):
+    """2026-10-03: a /clear's leaf parses without the session's first transcript (the anchor), which no
+    record of the new conversation links back into. That file was also what deduped a pre-clear salvaged
+    reply whose text DID land there (landed_text_uuids over every file read), and a pre-clear reply that
+    never landed leaked into every post-clear parse already. parse_session floors the markers at the first
+    record of its own candidate files: a pre-clear marker is no reply of the conversation the parse
+    reads. Here the parse is handed the leaf alone, the input the judge's candidates hand it for a /clear."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.anchor = self.td / (SID + ".jsonl")
+        self.leaf = self.td / (FORK + ".jsonl")
+        self.addCleanup(shutil.rmtree, self.td, True)
+
+    def _write(self, p, records):
+        p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    def _world(self, leaf_head_parent=None, head_ms=0):
+        self._write(self.anchor, [
+            {"type": "user", "timestamp": iso(T0), "uuid": "u_pre", "parentUuid": None, "promptSource": "typed",
+             "message": {"role": "user", "content": "how does the notes-api page its index?"}},
+            {"type": "assistant", "timestamp": iso(T0 + 30), "uuid": "a_pre", "parentUuid": "u_pre",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "By cursor, fifty notes a page."}],
+                         "stop_reason": "end_turn"}}])
+        self._write(self.leaf, [
+            {"type": "user", "timestamp": _iso_ms(T0 + 600, head_ms), "uuid": "u_post", "parentUuid": leaf_head_parent,
+             "promptSource": "typed", "message": {"role": "user", "content": "now add a tags filter to the search route"}},
+            {"type": "assistant", "timestamp": iso(T0 + 660), "uuid": "a_post", "parentUuid": "u_post",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "Added the tags filter."}],
+                         "stop_reason": "end_turn"}}])
+
+    def _markers(self):
+        return [_marker(T0 + 30, "a_pre", "By cursor, fifty notes a page, the reply as it streamed."),   # landed in the anchor
+                _marker(T0 + 40, "lost_pre", "A pre-clear reply that never reached the transcript."),
+                _marker(T0 + 650, "lost_post", "A post-clear reply that never reached the transcript.")]
+
+    def _parse(self, path, files, markers):
+        return em.parse_session(str(path), rompuuid=SID, candidate_files=[str(f) for f in files],
+                                states=markers, postal_log=[], now=NOW)
+
+    @staticmethod
+    def _salvaged(tree):
+        return [a["uuid"] for t in tree["turns"] for a in t["atoms"] if a.get("orphaned")]
+
+    def test_a_cleared_session_synthesizes_no_pre_clear_salvaged_reply(self):
+        self._world()
+        tree = self._parse(self.leaf, [self.leaf], self._markers())
+        self.assertEqual(self._salvaged(tree), ["lost_post"],
+                         "only the post-clear salvage: the landed pre-clear reply does not come back through a parse that no "
+                         "longer reads the file it landed in, and the never-landed one belongs to the cleared conversation")
+
+    def test_a_salvaged_reply_in_the_heads_second_is_kept(self):
+        # the head's stamp carries milliseconds; a marker written in that same second (stamped by the whole second) is a
+        # reply of the new conversation, and losing a reply is the worse error
+        self._world(head_ms=700)
+        tree = self._parse(self.leaf, [self.leaf], [_marker(T0 + 600, "same_sec", "A reply salvaged in the head's own second.")])
+        self.assertEqual(self._salvaged(tree), ["same_sec"])
+
+    def test_the_floor_is_a_no_op_with_the_first_file_among_the_candidates(self):
+        # a session that never cleared (its own first file is the leaf), and a fork whose head links back into the first
+        # file (its history is the conversation): every marker the floor-free parse salvages, the floored one salvages too,
+        # a pre-fork one included, so the floor is the EARLIEST head over the candidates, never the leaf's own
+        real = em._conversation_floor
+        self.addCleanup(setattr, em, "_conversation_floor", real)
+        markers = [_marker(T0 + 40, "lost_pre", "A reply from before the fork that never reached the transcript."),
+                   _marker(T0 + 650, "lost_post", "A reply from after the fork that never reached the transcript.")]
+        for name, parent, path, files in (("never cleared", None, self.anchor, [self.anchor]),
+                                          ("back-linked", "a_pre", self.leaf, [self.leaf, self.anchor])):
+            self._world(leaf_head_parent=parent)
+            em._conversation_floor = real
+            got = self._parse(path, files, markers)
+            em._conversation_floor = lambda files: None
+            ref = self._parse(path, files, markers)
+            em._conversation_floor = real
+            self.assertEqual(self._salvaged(ref), ["lost_pre", "lost_post"], "%s: the premise, the floor-free salvage" % name)
+            self.assertEqual(self._salvaged(got), self._salvaged(ref), "%s: the floor changes nothing" % name)
 
 
 if __name__ == "__main__":

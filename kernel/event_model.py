@@ -8814,6 +8814,76 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
         return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {}), []
 
 
+_FILE_HEAD_T = {}                 # realpath -> the stamp of the file's first uuid-bearing record, once one is on disk (a head never moves)
+_FILE_HEAD_T_MAX = 4096
+
+
+def _file_head_t(path):
+    """The stamp (epoch seconds) of `path`'s first uuid-bearing record, or None while it has none, when its stamp does not
+    parse, or when the file cannot be read. The record judge.transcript_head reads (a transcript is append-only, so its head
+    never changes once written): read from the start a line at a time, normally that one record, the bytes counted like every
+    reader byte, and memoized by realpath once found."""
+    key = os.path.realpath(str(path))
+    hit = _FILE_HEAD_T.get(key)
+    if hit is not None:
+        return hit
+    t, n = None, 0
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                n += len(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("uuid"):
+                    t = parse_z(r.get("timestamp")) or None
+                    break
+    except OSError:
+        t = None
+    if n:
+        _count_read(str(path), n)
+    if t is not None:
+        if len(_FILE_HEAD_T) >= _FILE_HEAD_T_MAX:
+            _FILE_HEAD_T.pop(next(iter(_FILE_HEAD_T)), None)
+        _FILE_HEAD_T[key] = t
+    return t
+
+
+def _conversation_floor(candidate_files):
+    """When the conversation a parse reads began: the earliest head stamp over its candidate files, or None when any of them
+    has no readable head stamp yet (no floor, then: nothing is dropped on a guess)."""
+    ts = []
+    for f in candidate_files:
+        t = _file_head_t(f)
+        if t is None:
+            return None
+        ts.append(t)
+    return min(ts) if ts else None
+
+
+def _orphan_rows_from(srows, candidate_files):
+    """The states rows synthesize_orphans reads: every row, less the orphanReply markers stamped before the conversation the
+    parse reads began (_conversation_floor over `candidate_files`; None, the tail road's, is no floor). A marker from before
+    that is a reply of a conversation this parse does not hold: a /clear's new file starts after the pre-clear markers, and
+    once the pre-clear file that held what landed of them is no candidate (judge _judge_candidates leaves it out of a /clear's
+    parse, 2026-10-03) the landed-text dedup cannot see them, so they would come back as fresh replies at pre-clear times; a
+    marker that never landed leaked into every post-clear parse already. Same-second markers stay (`>=` the whole second:
+    losing a reply is the worse error). A no-op whenever the session's first file is a candidate: no marker predates the
+    conversation's first record. The heads are read only when a marker exists, and the rows themselves stay whole for idle
+    spans (synthesize_idle)."""
+    if candidate_files is None or not any(isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) for r in srows or []):
+        return srows
+    conv0 = _conversation_floor(candidate_files)
+    if conv0 is None:
+        return srows
+    floor = int(conv0)
+    return [r for r in srows if not (isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) and (r.get("t") or 0) < floor)]
+
+
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
                   candidate_files=None, states=None, postal_log=None, now=None, sdk_human=False,
                   leaf_override=None, asm_mode_out=None, private_entry_out=None, tail_records=None):
@@ -8880,7 +8950,11 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # tail alone is segmented and synthesized over below, and a span or a marker from before the tail's first atom is the
     # document's (or nothing: the whole parse put it in a pre-cut turn)
     t_tail0 = min((a["t"] for a in atoms if a.get("t")), default=None) if pre_turns else None
-    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid,
+    # salvaged replies never predate the conversation the parse reads (2026-10-03): the floor is the first record of its own
+    # candidate files, the same number whatever road served the atoms (whole, fold, restore, refresh), so it never races the
+    # kernel's episode tick. The tail road reads no candidate file and has no floor
+    orphans = synthesize_orphans(_orphan_rows_from(_srows, candidate_files if tail_records is None else None), atoms,
+                                 landed_text_uuids=landed, rompuuid=rompuuid,
                                  pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None)
     if pre_turns:
         orphans = [a for a in orphans if t_tail0 is not None and a["t"] >= t_tail0]
