@@ -2550,11 +2550,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `ring_n`, `passFailed` (a pass that raised out of the loop and was
   skipped), `splitFailed`, `firstPass` (the boot's first pass's stage split,
   the shape of `pusher.firstCycle`), `stageRing` and `cpuByJob` (per job this
-  thread ran, by its `<job>` name: `runs` and `cpuMs`, the thread's own CPU
-  inside the job, a job that raised included; the job's `jobs.<job>` stage is
-  its wall, which also counts its waits for a lock or the disk, so the two
-  side by side say which jobs worked and which waited; the pusher's jobs are
-  not counted). The pass's container stage is `jobsPass`, its opening
+  thread ran, by its `<job>` name: `runs`, one per call by the pass, a call
+  that returned early on the job's own pace or raised included, and `cpuMs`,
+  the thread's own CPU inside the job; the job's `jobs.<job>` stage is its
+  wall, which also counts its waits for a lock or the disk, so the two side
+  by side say which jobs worked and which waited; the pusher's jobs are not
+  counted). The pass's container stage is `jobsPass`, its opening
   `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
   in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,

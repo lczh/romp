@@ -967,7 +967,8 @@ class JobsCpu(unittest.TestCase):
         self.assertEqual(self.ps.snapshot()["jobs"]["cpuByJob"]["probe"]["runs"], 1, "the snapshot's rows are copies")
         json.dumps(rows)
         doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
-        self.assertIn("`cpuByJob`", doc[doc.index("- `jobs`: the jobs thread"):], "the reference's jobs block names it")
+        i = doc.index("- `jobs`: the jobs thread")
+        self.assertIn("`cpuByJob`", doc[i:doc.index("\n- `pusher`:", i)], "the reference's jobs bullet names it")
 
     def test_a_busy_job_counts_its_cpu_and_a_sleeping_job_of_the_same_wall_does_not(self):
         """Two synthetic jobs on the jobs thread: one spins for 60 ms of its own CPU, the other sleeps for as long as the
@@ -1020,12 +1021,50 @@ class JobsCpu(unittest.TestCase):
         self.assertEqual({job: row["runs"] for job, row in rows.items()}, dict.fromkeys(rows, 1))
         self.assertGreaterEqual(self.ps.stages["jobsPass"], 19.0, "the pass reached its end and closed its stage")
 
+    def test_another_threads_cpu_during_a_job_is_not_the_jobs(self):
+        """While a job on the jobs thread sleeps, a second thread spins: the job's cpuMs stays near zero, since the reading is
+        the jobs thread's own clock (time.thread_time), never the whole process's (time.process_time would charge it the
+        spinner's 100 ms). The spinner holds a core of its own on a 2-CPU node; a sleeping thread, and one waiting for the
+        interpreter lock, accrues no CPU, so the 20 ms ceiling is loose."""
+        started, stop = threading.Event(), threading.Event()
+
+        def burner():
+            started.set()
+            while not stop.is_set():
+                _burn_cpu(0.005)
+        th = threading.Thread(target=burner, name="jobs-cpu-burner")
+        th.start()
+        try:
+            self.assertTrue(started.wait(30))
+            self._on_thread(lambda: km._job_stage("waits", lambda: time.sleep(0.100)))
+        finally:
+            stop.set()
+            th.join(30)
+        row = self.ps.snapshot()["jobs"]["cpuByJob"]["waits"]
+        self.assertLess(row["cpuMs"], 20.0, "another thread's CPU is not the job's: %r" % row)
+
+    def test_runs_and_cpu_add_up_over_runs(self):
+        """One job run three times on the jobs thread: three runs, and its cpuMs is the three spins' CPU added, so the
+        difference of two snapshots is the interval's work."""
+        def body():
+            for _ in range(3):
+                km._job_stage("repeat", lambda: _burn_cpu(0.010))
+        self._on_thread(body)
+        row = self.ps.snapshot()["jobs"]["cpuByJob"]["repeat"]
+        self.assertEqual(row["runs"], 3, row)
+        self.assertGreaterEqual(row["cpuMs"], 29.0, "the three runs' CPU, added: %r" % row)
+
     def test_only_the_jobs_threads_runs_are_counted(self):
         """The pusher's own jobs (_pusher_cycle_jobs, on the thread that opened the pusher's cycle) and a call on a thread
         that opened no cycle (a handler's, a test's) still record their stage, and no cpuByJob row: the pusher's CPU is its
-        cycle_cpu_ms_sum, and the block is the jobs thread's."""
+        cycle_cpu_ms_sum, and the block is the jobs thread's. The no-cycle call runs FIRST: a joined thread's ident is reused
+        by the next thread, so a call made after the pusher thread finished reads as the pusher's and never reaches the
+        no-owner path."""
+        def handler():
+            assert self.ps._mine() is None, "this thread opened no cycle"
+            km._job_stage("onHandler", lambda: _burn_cpu(0.005))
+        self._on_thread(handler, kind=None)
         self._on_thread(lambda: km._job_stage("onPusher", lambda: _burn_cpu(0.005)), kind="pusher")
-        self._on_thread(lambda: km._job_stage("onHandler", lambda: _burn_cpu(0.005)), kind=None)
         self._on_thread(lambda: km._job_stage("onJobs", lambda: _burn_cpu(0.005)))
         snap = self.ps.snapshot()
         self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"onJobs"})
