@@ -154,6 +154,110 @@ class FeedAndTimelineSingleFlight(unittest.TestCase):
         self.assertEqual(self.builds.count("tl:live"), 4, "the two partial builds per connect, as before the change: %r" % self.builds)
 
 
+class FeedFirstWaiter(unittest.TestCase):
+    """The cold kernel's early feed frame (_feed_first) and a second caller waiting on its build (2026-10-03). After a restart
+    the pusher's push and a pane's connect push both reach _feed_first while no feed is built; one builds, the other waits on
+    the single-flight lock. The waiter used to re-check the stored build under the pusher's dirty rule, so a views mark the
+    housekeeping made DURING the build made it build the same cold feed again: three feed builds in the restart's first
+    browser cycle, the redundant one about 200 s by the counters. The waiter now serves the build it waited for, and the
+    pusher's regular feed section carries the mark. Hermetic: build_feed stubbed to count, mark and hold; fake feed panes."""
+
+    def setUp(self):
+        self.saved = (km.build_feed, list(km._built_feed), km._views_dirty[0], dict(km._VIEW_STATS), km._feed_wire,
+                      dict(km._wire_stats))
+        km._built_feed[:] = [None, None, 0.0, 0.0]
+        km._views_dirty[0] = 0.0
+        km._feed_wire = None
+        km._VIEW_STATS["feedWaited"] = 0
+        km._wire_stats["feed_first"] = 0
+        self.builds = []
+        self.inflight, self.second_in = threading.Event(), threading.Event()
+        def feed(now, live_map):
+            self.builds.append("feed")
+            self.inflight.set()
+            self.second_in.wait(5)                    # the second caller has taken its view signature, next is the lock
+            time.sleep(0.2)                           # ...where it now waits
+            km._views_dirty[0] = time.time()          # the housekeeping marks the views mid-build: newer than this build's start
+            return json.loads(json.dumps(FEED))
+        km.build_feed = feed
+        self.sigs = [0]
+        def sig(now, live_map):                       # a different view signature per caller, so only the rule decides
+            self.sigs[0] += 1
+            if self.sigs[0] == 2:
+                self.second_in.set()
+            return ("view", self.sigs[0])
+        self.sig = sig
+        km._PERF_STATS.reset()
+
+    def tearDown(self):
+        (km.build_feed, bf, km._views_dirty[0], vs, km._feed_wire, ws) = self.saved
+        km._built_feed[:] = bf
+        km._VIEW_STATS.clear(); km._VIEW_STATS.update(vs)
+        km._wire_stats.update(ws)
+        km._PERF_STATS.reset()
+
+    def _pane(self):
+        frames = []
+        return {"app": "feed", "alive": True, "sent": {}, "send": lambda s: frames.append(json.loads(s)), "_frames": frames}
+
+    def _race(self, first_connect, second_connect):
+        """`first` reaches _feed_first on a cold cache and builds; `second` arrives while that build runs. Returns the panes."""
+        now = int(time.time())
+        a, b = self._pane(), self._pane()
+        out = {}
+        with mock.patch.object(km, "_task_tracking_on", lambda: True), mock.patch.object(km, "_fleet_view_sig", self.sig):
+            ta = threading.Thread(target=lambda: out.__setitem__("a", km._feed_first(now, {}, [a], first_connect)))
+            ta.start()
+            self.assertTrue(self.inflight.wait(5), "the first caller's build started")
+            tb = threading.Thread(target=lambda: out.__setitem__("b", km._feed_first(now, {}, [b], second_connect)))
+            tb.start()
+            ta.join(20); tb.join(20)
+        self.assertEqual(out, {"a": True, "b": True}, "both callers made the early frame")
+        return a, b
+
+    def _assert_one_build_both_served(self, a, b):
+        self.assertEqual(self.builds, ["feed"], "the waiter served the build it waited for, past the mid-build mark, instead of "
+                                                "building the cold feed again: %r" % self.builds)
+        for name, pane in (("first", a), ("second", b)):
+            self.assertIn("feed", [f.get("type") for f in pane["_frames"]], "the %s caller's pane got the early frame" % name)
+        self.assertEqual(km._VIEW_STATS["feedWaited"], 1, "counted as a wait served")
+        self.assertEqual(km._wire_stats["feed_first"], 2, "two early frames, one build")
+        bs = km._PERF_STATS.snapshot()["builds"]["feed"]
+        self.assertEqual((bs["built"], bs["cached"]), (1, 1))
+
+    def test_a_connect_waiting_on_the_pushers_cold_build_serves_it_past_a_dirty_mark(self):
+        """The measured order: the pusher builds the cold feed, a pane's connect push arrives during it and waits."""
+        self._assert_one_build_both_served(*self._race(False, True))
+
+    def test_the_pusher_waiting_on_a_connects_cold_build_serves_it_too(self):
+        """The mirrored order. A fix that only handed `connect` through to the cache would still rebuild here: the waiter is the
+        pusher, whose own arm asks under the dirty rule."""
+        self._assert_one_build_both_served(*self._race(True, False))
+
+    def test_the_mark_still_rebuilds_in_the_pushers_regular_section(self):
+        """Freshness is the regular section's: after the early frame, the pusher's own ask (connect False) finds the mark that
+        landed during the build newer than its start, and builds."""
+        self._race(False, True)
+        km.build_feed = lambda now, live_map: (self.builds.append("feed"), json.loads(json.dumps(FEED)))[1]
+        with mock.patch.object(km, "_task_tracking_on", lambda: True):
+            km._cached_feed(int(time.time()), {}, ("view", 1), False)
+        self.assertEqual(self.builds, ["feed", "feed"], "the regular section rebuilt for the mid-build mark: %r" % self.builds)
+
+    def test_a_cold_early_frame_builds_for_either_caller(self):
+        """Alone on a cold cache, either role builds once and sends: the connect arm is not serve-only (the 2026-09-13 boot,
+        whose connect push made no early frame, is the regression this guards)."""
+        self.second_in.set()
+        now = int(time.time())
+        for connect in (False, True):
+            del self.builds[:]
+            km._built_feed[:] = [None, None, 0.0, 0.0]
+            pane = self._pane()
+            with mock.patch.object(km, "_task_tracking_on", lambda: True), mock.patch.object(km, "_fleet_view_sig", self.sig):
+                self.assertTrue(km._feed_first(now, {}, [pane], connect), "connect=%s" % connect)
+            self.assertEqual(self.builds, ["feed"], "connect=%s built: %r" % (connect, self.builds))
+            self.assertIn("feed", [f.get("type") for f in pane["_frames"]], "connect=%s sent" % connect)
+
+
 class ChatClaimRelease(unittest.TestCase):
     """Round two, medium 1: a raise between the claim and the store must not leave the tab claimed for the kernel's life."""
 

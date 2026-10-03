@@ -59784,15 +59784,23 @@ def _feed_first(now, live_map, targets, connect):
     """The cold kernel's first feed frame, built and sent to the feed panes among `targets` before the chat and timeline
     builds of the same push (see the CARDS FIRST note in _push). The build goes through _cached_feed, so the push's own
     feed section finds it warm; the wire tuple is built exactly as the send stage builds it and left in _feed_wire, so a
-    later frame with the same ledgers reuses it. Counted under _wire_stats feed_first and the push.feedFirst stage."""
+    later frame with the same ledgers reuses it. Counted under _wire_stats feed_first and the push.feedFirst stage; a
+    caller that waited for another thread's build and served it, under _VIEW_STATS feedWaited. `connect` is the caller's
+    role, and both roles ask the cache the same way (the note at the call)."""
     global _feed_wire
     _t0 = time.monotonic()
     fsig = _fleet_view_sig(now, live_map)
-    # ALWAYS a build here, connect or not: the realistic boot has the browser reconnecting a moment after the kernel
-    # serves, so the first push with a feed pane is the CONNECT push on the socket's thread, and _cached_feed's connect arm
-    # serves only a warmed build, which a cold kernel has not got (the 7:39 AM Pacific boot, 2026-09-13: push.feedFirst 0.0
-    # with the dashboard open). The early frame is the whole point, so the cold kernel builds it for the connect too.
-    feed_src = _cached_feed(now, live_map, fsig, False)
+    # The cache's CONNECT arm for either caller (2026-10-03). This pass runs only while the cache holds no feed (the guard
+    # in _push), so any build the cache holds when it asks was stored after this push found none: the build this push
+    # waited for on the single-flight lock (_cached_feed), and the first frame these panes want. The pusher's arm re-checked
+    # that build under the dirty rule (_feed_servable) and built the same cold feed again whenever anything marked the views
+    # during it, as the boot's housekeeping does: the 2026-10-03 restart built the feed three times in its first browser
+    # cycle, by its counters the second (about 200 s, beside the pusher's chat stage) for a pane whose first frame needed
+    # none of it.
+    # Freshness stays with the regular feed section: the pusher's own, in the same push and before its send stage, asks
+    # under the dirty rule, so a mark that landed mid-build ships there. A cold cache still BUILDS on this arm
+    # (_feed_servable holds only with a payload), so the connect push of a cold kernel still makes the early frame.
+    feed_src = _cached_feed(now, live_map, fsig, True)
     if feed_src is None:
         return False
     feed = dict(feed_src)                            # the copy the send stage would make; no ledgers yet (no session build ran)
