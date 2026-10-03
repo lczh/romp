@@ -2838,14 +2838,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   boot, in total and per file), `docConsults` (fold documents loaded through the one
   validated read that the two boot restore paths, a write's carry and a
   retirement's consult share; at boot the restore paths dominate it, one per
-  checkpointed file; a write's carry loads a document only when it could take
-  something from it, so a write over a document this process last wrote or
-  loaded, unchanged on disk since by inode, modification time and size, whose
-  stored states all belong to folds the writer holds (or stand too far behind
-  to carry), reads nothing),
+  checkpointed file; a write's carry skips the load when this process already
+  knows the document has nothing to give it: over a document this process last
+  wrote or loaded, unchanged on disk since by inode, modification time and
+  size, in which every state and over-the-cap cursor belongs to a fold the
+  writer holds or stands at a count the writer cannot record, a write reads
+  nothing),
   `docMemo` (the documents that read keeps for the write that follows, and a
-  written document that carried a state only the disk had, which the next
-  write carries again: `entries`, `bytes` as their RESIDENT weight, each file's size
+  document a write wrote with an entry it carried from the disk, a state or an
+  over-the-cap cursor, kept for the next write's carry: `entries`, `bytes` as
+  their RESIDENT weight, each file's size
   on disk times `parseMultiple`, the measured 4.5 a parsed document weighs
   against its bytes on disk, and `capBytes`, a ceiling on that resident
   weight of MemTotal / 512 floored at 64 MiB, `ROMP_DOC_MEMO_CAP_MB`; the

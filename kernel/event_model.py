@@ -1728,10 +1728,11 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     over-the-cap cursor, at a count inside this entry's held records, and only when the document's own guard still
     stands on disk (a file rewritten since voids its states); a bare or tail-only cursor is not carried: the next boot reads
     the file whole for that fold once and the write after carries its state.
-    The document is read only when it could give something: when _DOC_INDEX describes the very file on disk (its inode,
-    mtime and size, as this process last wrote or loaded it) and none of its carryable entries passes the filter below
-    (each names a fold this write holds, or stands at a count it cannot record), the answer is {} without a read, the
-    answer the read would give whatever its verdict and guard say, since those only ever withhold entries."""
+    The document is not read when this process already knows it gives nothing: when _DOC_INDEX describes the very file on
+    disk (its inode, mtime and size, as this process last wrote or loaded it) and none of its carryable entries passes the
+    filter below (each names a fold this write holds, stands at a count it cannot record, or has no integer count), the
+    answer is {} without a read, the answer the read would give whatever its verdict and guard say, since those only ever
+    withhold entries."""
     cp = _ckpt_file(key)
     if cp is None:
         return {}
@@ -1859,8 +1860,8 @@ def checkpoint_write(path, force=False):
         cp.parent.mkdir(parents=True, exist_ok=True)
         tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
         tmp.write_text(json.dumps(doc, separators=(",", ":")))
-        sig = _doc_sig(tmp.stat())                        # the rename keeps the inode, mtime and size: this is the file `cp` names
-        os.replace(tmp, cp)                               #  now, never another writer's, whichever replace lands last
+        sig = _doc_sig(tmp.stat())                        # the rename keeps the inode, mtime and size: the stat of the file this
+        os.replace(tmp, cp)                               #  write puts at `cp`, never another writer's (a later rename there: the next stat differs)
     except OSError:
         return False
     with _CKPT_LOCK:
@@ -1868,7 +1869,7 @@ def checkpoint_write(path, force=False):
         _CKPT_STATS["writes"] += 1
         _CKPT_DOC_FOLDS[key] = _doc_fold_shapes(folds)
         _doc_index_put_locked(key, sig, folds)            # what the next write's carry could take from it, known without a read
-        if any(n in folds for n in carried):              # it holds a state this process does not compute: the next carry needs it
+        if any(n in folds for n in carried):              # it holds an entry this process does not compute: the next carry needs it
             _doc_memo_put_locked(key, sig, doc)           #  again and takes it from memory (`doc` is what _ckpt_load would return)
         else:
             _doc_memo_drop(key)                           # this process's own states only: the index serves the next carry
@@ -6897,7 +6898,8 @@ def _retire_fold(path, name):
 
 _DOC_MEMO = {}                     # path -> (document file's _doc_sig, the loaded document): one read shared between the
 #                                   retirement's consult and the write's carry (T391 follow-up, low C), dropped when the file moves;
-#                                   a write keeps the document it wrote here only when it carried a state the disk alone had
+#                                   a write keeps the document it wrote here only when it carried an entry (a state or an
+#                                   over-the-cap cursor) the disk alone had
 _DOC_MEMO_PARSE_MULTIPLE = 4.5     # what a parsed fold document weighs resident against its bytes on disk (measured on the devbox's
 #                                    documents, 2026-09-12): the memo's weights and its cap are RESIDENT bytes, so the ceiling means
 #                                    what it says
