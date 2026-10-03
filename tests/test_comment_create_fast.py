@@ -1083,6 +1083,53 @@ class CutFromTheDisplayParse(Base):
                     self.assertEqual((want[0], want[2]), ("", None), "premise: over both files, a tip fork (%s)" % anchor)
                     self.assertEqual(got, want, "%s: %s" % (road, anchor))
 
+    def _linked_world(self, link):
+        """A /clear world under PARENT whose leaf links one record into the first transcript, outside the transcript model: the
+        leaf's record `link` (cn5, the token-count attachment of its sixth turn, or cu5, that turn's question) takes the first
+        transcript's last answer (ka7) as its parent, while the leaf's head stays parentless, so the leaf parses alone. Eight
+        short turns in each file. Returns (first, leaf, every uuid of both files)."""
+        old, _last, t = turns(self.now - 100000, 8, 1000)
+        first = write(self.proj / (PARENT + ".jsonl"), old)
+        new, _l2, _t2 = turns(t + 100, 8, 1000, parent=None, tag="c")
+        for r in new:
+            if r["uuid"] == link:
+                r["parentUuid"] = "ka7"
+        leaf = write(self.proj / (CLEARED + ".jsonl"), new)
+        return first, leaf, [r["uuid"] for r in old + new]
+
+    def test_a_non_prose_record_linked_into_the_first_transcript_and_the_rows_under_it_answer_as_the_walk_over_both_files(self):
+        # review round four: where the leaf's record that links into the first transcript is not prose (the token-count
+        # attachment of a turn), the walk over the leaf's own graph from it, or from the tool call, tool result and hook row
+        # under it, stops at the parent that graph lacks and refuses the comment as unable to anchor a thread, where the walk
+        # over both files reaches the first transcript's last answer and answers from the tip. Every uuid of both files now
+        # answers what the walk over both files answers, on the display road and on the read road; with the question as the
+        # linking record (the prose twin) that held already
+        real = km._comment_cut_from_parse
+        for link in ("cn5", "cu5"):
+            with self.subTest(link=link):
+                restart()
+                first, leaf, uuids = self._linked_world(link)
+                self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: the leaf parses alone (%s)" % link)
+                wide = em.TranscriptGraph(km._anchor_adapter(leaf, PARENT))      # the walk over both files, the reference
+                want = {u: km._comment_cut_walk(wide, leaf, u) for u in uuids}
+                own = em.TranscriptGraph(em.FileAdapter([leaf], leaf))         # the leaf's own graph
+                refused = sorted(u for u in uuids
+                                 if own.has(u) and "can't anchor" in (km._comment_cut_walk(own, leaf, u)[2] or ""))
+                self.assertEqual(refused, ["ch5", "cn5", "cr5", "ct5"] if link == "cn5" else [],
+                                 "premise: what the leaf's own graph refuses as unable to anchor a thread (%s)" % link)
+                self.assertEqual([(want[u][0], want[u][2]) for u in refused], [("", None)] * len(refused),
+                                 "premise: over both files, tip forks (%s)" % link)
+                km._parse(leaf, PARENT, self.now)             # the chat's whole entry, for the display road
+                display = {u: km._comment_cut_resolve(leaf, PARENT, u) for u in uuids}
+                km._comment_cut_from_parse = lambda *a, **k: None
+                try:
+                    read = {u: km._comment_cut_resolve(leaf, PARENT, u) for u in uuids}
+                finally:
+                    km._comment_cut_from_parse = real
+                differ = [(road, u, got[u][2]) for road, got in (("display", display), ("read", read)) for u in sorted(uuids)
+                          if got[u] != want[u]]
+                self.assertEqual(differ, [], "every uuid of both files, %d of them (%s)" % (len(uuids), link))
+
     def _two_creates_after_a_budget_eviction(self, path, files, anchors):
         """The chat's parse of the session whose leaf is `path` (its transcripts `files`) installs its entry; another file's
         read under a budget that holds only that file evicts the transcripts and releases the entry; the display's next

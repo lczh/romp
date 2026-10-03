@@ -18798,7 +18798,8 @@ def _precompact_context(g, path, anchor_uuid, newer):
 # Where the cut walk found its graph (2026-10-01), read by the tests and the lab: the display parse's own assembly entry,
 # whole or restored ("whole" / "seeded"), or a fresh read of the stitched transcript ("read", the walk's only road
 # before). A read names its cause on stderr once per (session, cause): it is correct, only slow. A lag answer the display
-# parse gives after a /clear is widened to the session's first file (_cut_widen_lag, review round two, 2026-10-03). The
+# parse gives after a /clear is widened to the session's first file (_cut_widen_lag, review round two, 2026-10-03), and so
+# is its no-prose refusal when its graph names a parent it lacks (_cut_widen_linked, review round four). The
 # widening counts as a read, cause "widen", only when it pulled that file's bytes (the read that builds the session's uuid
 # set, or the linked case's read for the graph over both files). One the standing set answers, or a set served from a whole
 # record cache entry standing for that file, reads nothing and counts as the display road it came from. One whose read
@@ -18850,8 +18851,9 @@ def _comment_cut_from_parse(path, sid, anchor_uuid, facts=None):
     neither ask is answered (no entry stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss),
     and the caller reads the transcript.
 
-    With `facts` (a dict), a lag answer is left to the caller to count: facts["how"] names the display road it came from
-    and facts["dangling"] the parent targets records of that graph name and it lacks (em.TranscriptGraph.dangling), so
+    With `facts` (a dict), a lag answer, or the refusal of a target with no prose record above it in that graph
+    (ANCHOR_NO_PROSE_ERR, review round four), is left to the caller to count: facts["how"] names the display road it came
+    from and facts["dangling"] the parent targets records of that graph name and it lacks (em.TranscriptGraph.dangling), so
     _comment_cut_resolve can widen it and count the widening by whether it pulled a file's bytes."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
@@ -18859,7 +18861,7 @@ def _comment_cut_from_parse(path, sid, anchor_uuid, facts=None):
 
     def walk(g):
         got = _comment_cut_walk(g, path, anchor_uuid)
-        if facts is not None and got[2] == ANCHOR_LAG_ERR:
+        if facts is not None and got[2] in (ANCHOR_LAG_ERR, ANCHOR_NO_PROSE_ERR):
             facts["dangling"] = g.dangling()
         return got
     why = "none"
@@ -18878,7 +18880,7 @@ def _comment_cut_from_parse(path, sid, anchor_uuid, facts=None):
             why = "error (%r)" % e
             break
         if how in ("whole", "seeded"):
-            if facts is not None and got[2] == ANCHOR_LAG_ERR:
+            if facts is not None and got[2] in (ANCHOR_LAG_ERR, ANCHOR_NO_PROSE_ERR):
                 facts["how"] = how                      # the caller counts it, by whether its widening pulls a file's bytes
             else:
                 _CUT_ROADS[how] += 1
@@ -18906,13 +18908,21 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     of it while the stat stands; the leaf is read only as each road reads it anyway. The one case that reads the first file
     again is a record of the leaf's graph linking into it (a CLI that writes such a link, outside the transcript model): a
     target it holds is then walked over both files (_cut_wide_walk), the first file read again outside the cache when the
-    set answered, and the leaf through the cache. A comment in the conversation a second /clear's card expands (the file
-    between the two clears) is in neither file and still parks as lag, as it did before."""
+    set answered, and the leaf through the cache. So is a target of the leaf's graph that graph's walk refuses as having no
+    prose record above it (ANCHOR_NO_PROSE_ERR) when that link is what stopped it, a non-prose record linking into the
+    first file or a row under one before the next post-clear prose: over both files the walk reaches that file's prose
+    and answers from the tip, as before the leaf parsed alone (_cut_widen_linked, review round four). A comment in the
+    conversation a second /clear's card expands (the file between the two clears) is in neither file and still parks as
+    lag, as it did before."""
     facts = {}
     got = _comment_cut_from_parse(path, sid, anchor_uuid, facts=facts)
     how = facts.get("how")
-    if got is not None and how is not None:          # the display parse's lag answer, counted here
-        wide, looked = _cut_widen_lag(path, sid, anchor_uuid, facts.get("dangling") or frozenset())
+    if got is not None and how is not None:          # the display parse's lag answer or no-prose refusal, counted here
+        dangling = facts.get("dangling") or frozenset()
+        if got[2] == ANCHOR_LAG_ERR:
+            wide, looked = _cut_widen_lag(path, sid, anchor_uuid, dangling)
+        else:                                       # ANCHOR_NO_PROSE_ERR: the walk may have stopped at a link into the first file
+            wide, looked = _cut_widen_linked(path, sid, anchor_uuid, dangling)
         if looked == "read":                        # the first file's bytes pulled: a read
             _cut_road_read(sid, "widen (a target a /clear's leaf lacks, looked up in the session's first transcript)")
         elif looked is not None and looked.startswith("unreadable"):
@@ -18929,7 +18939,13 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
             return None, 0, ANCHOR_REWOUND_ERR, ""   # off the leaf's chain: the refusal, from membership alone
         wide, _looked = _cut_wide_walk(path, sid, anchor_uuid, hit.path, hit.records)
         return wide if wide is not None else (None, 0, ANCHOR_LAG_ERR, "")
-    return _comment_cut_walk(em.TranscriptGraph(ad), path, anchor_uuid)
+    g = em.TranscriptGraph(ad)
+    got = _comment_cut_walk(g, path, anchor_uuid)
+    if got[2] == ANCHOR_NO_PROSE_ERR:                # as on the display road: a link into the first file may lead on
+        linked, _looked = _cut_widen_linked(path, sid, anchor_uuid, g.dangling())
+        if linked is not None:
+            return linked
+    return got
 
 
 def _cut_widen_lag(path, sid, anchor_uuid, dangling):
@@ -18956,9 +18972,30 @@ def _cut_widen_lag(path, sid, anchor_uuid, dangling):
     return wide, again or how
 
 
+def _cut_widen_linked(path, sid, anchor_uuid, dangling):
+    """(answer, how) for ANCHOR_NO_PROSE_ERR on `anchor_uuid`, the cut walk's refusal over the leaf's own graph after a
+    /clear of a target that graph holds with no prose record above it there (review round four). That walk stops at a
+    parent the graph lacks, and when a record of the leaf links into the session's first file (a CLI that writes such a
+    link, outside the transcript model) and is not prose, an attachment or a tool row, it and the rows under it up to the
+    next post-clear prose were refused where the walk over both files reaches the first file's prose and answers from the
+    tip. Decided as _cut_widen_lag decides its linked case: when the first file's uuid set (_cut_first_uuids) meets
+    `dangling`, the parent targets the leaf's graph names and lacks, the walk over both files answers (_cut_wide_walk);
+    else answer None and the refusal stands. (None, None), with nothing read, when that graph names no parent it lacks or
+    no first file is left out of the parse. `how` as _cut_widen_lag's."""
+    first = _cut_unread_anchor(path, sid) if dangling else None
+    if first is None:
+        return None, None
+    uuids, recs, how = _cut_first_uuids(sid, first)
+    if uuids is None or not (uuids & dangling):
+        return None, how
+    linked, again = _cut_wide_walk(path, sid, anchor_uuid, first, recs)
+    return linked, again or how
+
+
 def _cut_wide_walk(path, sid, anchor_uuid, first, recs):
-    """(answer, how): the cut walk over the leaf `path` and the session's first file `first` for a target of that file when a
-    record of the leaf links into that file, the comment cut's linked case and the one road that builds the graph over both files
+    """(answer, how): the cut walk over the leaf `path` and the session's first file `first` when a record of the leaf links
+    into that file, for a target of that file or a target of the leaf whose walk stops at that link (_cut_widen_linked,
+    review round four), the comment cut's linked case and the one road that builds the graph over both files
     (review round three). `recs`: the first file's records the lookup read, or None when the session's uuid set answered,
     and then the file is read again outside the record cache (_cut_first_records: `how` is that read's, else None). Answer
     None when that read fails (said once per session, _cut_first_unreadable) or the file moved under it."""
@@ -19007,7 +19044,7 @@ def _comment_cut_walk(g, path, anchor_uuid):
                 return "", cut_t, None, ""   # behind a restart/clear seam → tip fork (see _comment_cut_target)
             return u, cut_t, None, ""
         u = g.parent(u); hops += 1
-    return None, 0, "that message can't anchor a thread; try a passage from the conversation itself", ""
+    return None, 0, ANCHOR_NO_PROSE_ERR, ""
 
 
 _COMMENT_FRAME_HEAD = "About this part of the conversation:"
@@ -20054,6 +20091,9 @@ def _comment_markers(sid):
 # this in-memory park). The typed transient nack keeps the client's optimistic mark alive meanwhile.
 ANCHOR_LAG_ERR = "that message isn't in the transcript yet; try again in a moment"
 ANCHOR_REWOUND_ERR = "that message is on a branch that was rewound away"   # the cut walk's refusal for a record off the active chain
+# The cut walk's refusal of a record with no prose record above it before a compaction or the graph's edge, named in review
+# round four so the comment cut can tell it apart (_cut_widen_linked).
+ANCHOR_NO_PROSE_ERR = "that message can't anchor a thread; try a passage from the conversation itself"
 _parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries}]
 _PARK_MAX_TRIES = 30                       # pusher cycles (~15-90s) — past this the record isn't coming
 # A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
