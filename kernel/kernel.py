@@ -763,9 +763,12 @@ class _PerfStats:
         """One tick job's run (_job_stage) and the CPU seconds its own thread spent in it (time.thread_time), counted only when
         the calling thread is the jobs thread (the "jobs" owner), under jobs.cpuByJob. The job's wall is its stage
         (stages_ms["jobs.<job>"]), and on that thread the wall includes every wait for the interpreter lock or a kernel lock
-        held by the pusher, a judge or a handler, so wall alone cannot say which jobs cost CPU. A job that raised counts its
-        run and its CPU too (_job_stage calls this from its finally). The pusher's own jobs (_pusher_cycle_jobs) are not
-        counted here: their CPU is inside the pusher's cycle_cpu_ms_sum. The names are _job_stage's literals, a fixed set."""
+        held by the pusher, a judge or a handler, for the disk, and for a free core (runnable, not scheduled), so wall alone
+        cannot say which jobs cost CPU. The CPU includes any collection the interpreter ran on the jobs thread during the job,
+        a pause set by the heap and not by the job: before a jump in one job's cpuMs is read as its own work, compare gc.gen."2"
+        and the jobs.stageRing rows' generation-2 tallies (n2, ms2) over the same interval. A job that raised counts its run
+        and its CPU too (_job_stage calls this from its finally). The pusher's own jobs (_pusher_cycle_jobs) are not counted
+        here: their CPU is inside the pusher's cycle_cpu_ms_sum. The names are _job_stage's literals, a fixed set."""
         with self.lock:
             if self._mine() != "jobs":
                 return
@@ -64909,7 +64912,9 @@ def _job_stage(name, thunk):
     thunk (`lambda: _x_tick(now, live_map)`), so the call reads as before on its line and the tests that pin those lines hold.
     The thread's stage mark is `jobs.<name>` for the job's duration (T401: the reads inside it count under it). On the jobs
     thread the job's own thread CPU and a run are counted too (jobs.cpuByJob, _PerfStats.job_cpu), read before the bookkeeping
-    below, so a pass's wall can be split into the jobs that worked and the jobs that waited."""
+    below, so a pass's wall can be split into the jobs that worked and the jobs that waited (for a lock, the disk or a free
+    core). That CPU includes any collection the interpreter ran on this thread during the job: gc.gen."2" and the ring rows'
+    generation-2 tallies over the same interval say whether one did before a jump is read as the job's own work."""
     _t = time.monotonic()
     _c = time.thread_time()
     prev = getattr(_STAGE_TL, "name", None)
