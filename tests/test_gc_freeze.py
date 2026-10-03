@@ -89,6 +89,16 @@ class ZeroThirdGc(ThresholdGc):
         return self.thresholds[:2] + (0,)
 
 
+class ClampThirdGc(ThresholdGc):
+    """A collector that stores a third threshold other than the one set: it clamps every value above 50 to 50, so a set of
+    100 reads back 50 while a set of 20 is kept. Where the zero-reading fake starts from the 0 it reads, this one tells a
+    put-back of the replaced value from a write of 0 or of the value read back."""
+    CAP = 50
+    def set_threshold(self, *t):
+        self.calls.append(("set_threshold",) + t)
+        self.thresholds = tuple(t[:2]) + (min(t[2], self.CAP),)
+
+
 _FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
@@ -154,6 +164,18 @@ class Gen2Trigger(unittest.TestCase):
         fake.calls.clear()
         self.assertIsNone(gf.apply_gen2_threshold(c, free_threaded=False))
         self.assertEqual(fake.calls, [], "turned off afterwards, there is nothing to put back")
+
+    def test_a_decline_puts_back_the_replaced_value_not_what_the_collector_read(self):
+        """Review 2026-10-03, round two: on a collector that stores a value other than the one set (this one clamps the
+        third threshold to 50), the read-back sees 50, not 100, and declines; what goes back is the 20 it replaced, not a 0
+        and not the 50 it read. The zero-reading case above starts at 0, so it passes under either wrong put-back."""
+        fake = ClampThirdGc((2000, 10, 20))
+        c = gf.GcFreeze(enabled=True, gc=fake, clock=lambda: 0.0)
+        self.assertIsNone(gf.apply_gen2_threshold(c, value=100, free_threaded=False), "declined: 50 read back, not 100")
+        self.assertEqual(fake.thresholds, (2000, 10, 20), "the replaced 20 is back: %r" % (fake.calls,))
+        self.assertIsNone(c.gen2_threshold, "no trigger recorded")
+        self.assertIsNone(c.gen2_replaced, "and no replaced value to put back later")
+        self.assertIsNone(c.perf()["gen2Threshold"], "/perf says the stock trigger stands")
 
     def test_the_default_is_100_and_the_value_is_floored_at_the_stock_10(self):
         c, fake = self._c(thresholds=(700, 10, 10))
@@ -1058,8 +1080,9 @@ class RecordCacheIsAStat(unittest.TestCase):
 
 
 class KernelKnob(unittest.TestCase):
-    """The kernel-side knob fallback, executed at import: a bad ROMP_GC_FREEZE_LOAD_TREES falls back to the default,
-    counts an error and says one line; a 0 is floored to 1 with no error."""
+    """The kernel-side knob fallbacks, executed: a bad ROMP_GC_FREEZE_LOAD_TREES falls back to the default at import,
+    counts an error and says one line; a 0 is floored to 1 with no error. A bad ROMP_GC_GEN2_THRESHOLD falls back at
+    import too, and is said and counted by main()'s wrapper, only where it applies that default."""
     def _load_with(self, value, name, var="ROMP_GC_FREEZE_LOAD_TREES", extra=None):
         """Load the kernel with `var` set to `value` and `extra` beside it. The two knobs this class tests are cleared
         unless passed (review 2026-10-03): a value exported in the shell for one must never reach the other's case."""
@@ -1085,47 +1108,87 @@ class KernelKnob(unittest.TestCase):
                     os.environ[k] = v
         return km, err.getvalue()
 
-    def test_a_bad_gen2_knob_falls_back_and_is_said_and_the_import_applies_nothing(self):
-        """2026-10-03: a bad ROMP_GC_GEN2_THRESHOLD falls back to the default, is counted and said once, never fatal. The
-        import never touches the collector, even with the freeze ON in its environment: the trigger is applied by main()
-        alone, so a test that loads the kernel keeps its interpreter's thresholds."""
+    def _apply(self, km, collector, enabled=True, free_threaded=False):
+        """Run main()'s wrapper, km._gc_gen2_apply(), on a controller over `collector`, with the free-threaded gate read as
+        `free_threaded` (passed through apply_gen2_threshold's own injection seam, so the build running the test never
+        decides). Returns what the wrapper returned and what it said on stderr."""
+        import contextlib, functools, io
+        from unittest import mock
+        km._GC_FREEZE = km.gcf.GcFreeze(enabled=enabled, gc=collector, clock=lambda: 0.0)
+        gate = functools.partial(km.gcf.apply_gen2_threshold, free_threaded=free_threaded)
+        err = io.StringIO()
+        with mock.patch.object(km.gcf, "apply_gen2_threshold", gate), contextlib.redirect_stderr(err):
+            got = km._gc_gen2_apply()
+        return got, err.getvalue()
+
+    def test_a_bad_gen2_knob_is_said_and_counted_only_once_its_fallback_is_applied(self):
+        """2026-10-03: a bad ROMP_GC_GEN2_THRESHOLD (abc, or one past the largest C int) falls back to the default, never
+        fatal. The import never touches the collector, even with the freeze ON in its environment: the trigger is applied
+        by main() alone, so a test that loads the kernel keeps its interpreter's thresholds. Review round two: the import
+        says and counts nothing either; on a collector that keeps the value, main()'s wrapper applies the default and only
+        then says it once and counts it once."""
         before = gc.get_threshold()
         self.addCleanup(gc.set_threshold, *before)   # a regression that applied at import must not leak into later tests
-        km, err = self._load_with("abc", "romp_kernel_knob_gen2_abc", var="ROMP_GC_GEN2_THRESHOLD",
-                                  extra={"ROMP_GC_FREEZE": "on"})
-        self.assertEqual(gc.get_threshold(), before, "loading the kernel with the freeze on changed no threshold")
-        self.assertTrue(km._GC_FREEZE.enabled, "the freeze was on for this load (else the line above proves nothing)")
-        self.assertIsNone(km._GC_FREEZE.perf()["gen2Threshold"], "and its controller applied nothing at import")
-        self.assertEqual(km._GC_GEN2_THRESHOLD, km.gcf.DEFAULT_GEN2_THRESHOLD, "abc falls back to the default")
-        self.assertGreaterEqual(km._GC_FREEZE_ERRORS[0], 1, "the bad knob is counted under errors")
-        self.assertIn("ROMP_GC_GEN2_THRESHOLD", err, "and said once on stderr: %r" % err)
+        for raw, name in (("abc", "romp_kernel_knob_gen2_abc"), ("2147483648", "romp_kernel_knob_gen2_ceiling")):
+            with self.subTest(knob=raw):
+                km, err = self._load_with(raw, name, var="ROMP_GC_GEN2_THRESHOLD", extra={"ROMP_GC_FREEZE": "on"})
+                self.assertEqual(gc.get_threshold(), before, "loading the kernel with the freeze on changed no threshold")
+                self.assertTrue(km._GC_FREEZE.enabled, "the freeze was on for this load (else the line above proves nothing)")
+                self.assertIsNone(km._GC_FREEZE.perf()["gen2Threshold"], "and its controller applied nothing at import")
+                self.assertEqual(km._GC_GEN2_THRESHOLD, km.gcf.DEFAULT_GEN2_THRESHOLD, "%s falls back to the default" % raw)
+                self.assertEqual(km._GC_FREEZE_ERRORS[0], 0, "the import counts nothing: the report waits for the apply")
+                self.assertNotIn("ROMP_GC_GEN2_THRESHOLD", err, "and the import says nothing: %r" % err)
+                fake = ThresholdGc((2000, 10, 10))
+                got, said = self._apply(km, fake)
+                self.assertEqual(got, 100, "the default applied, on a collector that keeps it")
+                self.assertEqual(fake.thresholds, (2000, 10, 100), fake.calls)
+                self.assertEqual(km._GC_FREEZE_ERRORS[0], 1, "the fallback in force is counted once under errors")
+                lines = said.splitlines()
+                self.assertEqual(len(lines), 1, "said once: %r" % said)
+                self.assertIn("ROMP_GC_GEN2_THRESHOLD=%r" % raw, lines[0])
+                self.assertIn("using the default 100", lines[0])
+
+    def test_a_bad_gen2_knob_where_the_trigger_is_declined_is_neither_said_nor_counted(self):
+        """Review 2026-10-03, round two: with the freeze on, a bad knob where apply_gen2_threshold applies no trigger (a
+        collector that reads the third threshold back as 0, or a free-threaded build) names a default nothing uses, and /perf
+        would show the stock thresholds and a null gen2Threshold beside an error. Nothing is counted and nothing is said."""
+        for raw in ("abc", "2147483648"):
+            for label, collector, free_threaded in (("reads 0", ZeroThirdGc((2000, 10, 0)), False),
+                                                    ("free-threaded", ThresholdGc((2000, 10, 10)), True)):
+                with self.subTest(knob=raw, declined=label):
+                    km, err = self._load_with(raw, "romp_kernel_knob_gen2_declined", var="ROMP_GC_GEN2_THRESHOLD",
+                                              extra={"ROMP_GC_FREEZE": "on"})
+                    self.assertTrue(km._GC_FREEZE.enabled, "the freeze was on for this load")
+                    got, said = self._apply(km, collector, free_threaded=free_threaded)
+                    self.assertIsNone(got, "declined: no trigger applied")
+                    self.assertIsNone(km._GC_FREEZE.perf()["gen2Threshold"], "and none recorded")
+                    self.assertEqual(km._GC_FREEZE_ERRORS[0], 0, "no error counted for a default nothing uses")
+                    self.assertNotIn("ROMP_GC_GEN2_THRESHOLD", err + said, "and nothing said: %r" % (err + said))
 
     def test_a_gen2_knob_of_250_is_parsed_not_the_default(self):
         """Review 2026-10-03: the import keeps the PARSED knob (a substitution of the default for the parse left every other
-        case green); main() applies it, which tests/test_perf_gc_block.py pins through the kernel's wrapper."""
+        case green); main() applies it, which tests/test_perf_gc_block.py pins through the kernel's wrapper. Applied, a
+        valid knob is neither said nor counted."""
         km, err = self._load_with("250", "romp_kernel_knob_gen2_250", var="ROMP_GC_GEN2_THRESHOLD",
                                   extra={"ROMP_GC_FREEZE": "on"})
         self.assertEqual(km._GC_GEN2_THRESHOLD, 250, "the knob's value, parsed at import")
+        got, said = self._apply(km, ThresholdGc((2000, 10, 10)))
+        self.assertEqual(got, 250, "the parsed value applied")
         self.assertEqual(km._GC_FREEZE_ERRORS[0], 0, "a valid knob is no error")
-        self.assertNotIn("ROMP_GC_GEN2_THRESHOLD", err, "and nothing is said for it: %r" % err)
-
-    def test_a_gen2_knob_past_the_ceiling_falls_back_at_the_kernel(self):
-        """Review 2026-10-03: a knob past the largest C int falls back to the default, counted and said, like a non-integer,
-        so the boot never hands the collector a value it refuses."""
-        km, err = self._load_with("2147483648", "romp_kernel_knob_gen2_ceiling", var="ROMP_GC_GEN2_THRESHOLD",
-                                  extra={"ROMP_GC_FREEZE": "on"})
-        self.assertEqual(km._GC_GEN2_THRESHOLD, km.gcf.DEFAULT_GEN2_THRESHOLD, "past the ceiling: the default")
-        self.assertEqual(km._GC_FREEZE_ERRORS[0], 1, "counted once under errors")
-        self.assertIn("ROMP_GC_GEN2_THRESHOLD='2147483648'", err, "and said once on stderr: %r" % err)
+        self.assertNotIn("ROMP_GC_GEN2_THRESHOLD", err + said, "and nothing is said for it: %r" % (err + said))
 
     def test_a_bad_gen2_knob_with_the_freeze_off_is_neither_said_nor_counted(self):
         """Review 2026-10-03: with the freeze off main() applies no trigger, so a bad knob names a value nothing uses. It is
-        neither said on stderr nor counted under gc.freeze.errors there."""
+        neither said on stderr nor counted under gc.freeze.errors there, at the import or at main()'s wrapper."""
         km, err = self._load_with("abc", "romp_kernel_knob_gen2_off", var="ROMP_GC_GEN2_THRESHOLD",
                                   extra={"ROMP_GC_FREEZE": "off"})
         self.assertFalse(km._GC_FREEZE.enabled, "the freeze was off for this load (else the lines below prove nothing)")
+        fake = ThresholdGc((2000, 10, 10))
+        got, said = self._apply(km, fake, enabled=km._GC_FREEZE.enabled)
+        self.assertIsNone(got, "the freeze off: no trigger applied")
+        self.assertEqual(fake.calls, [], "and no collector call")
         self.assertEqual(km._GC_FREEZE_ERRORS[0], 0, "not counted with the freeze off")
-        self.assertNotIn("ROMP_GC_GEN2_THRESHOLD", err, "and not said: %r" % err)
+        self.assertNotIn("ROMP_GC_GEN2_THRESHOLD", err + said, "and not said: %r" % (err + said))
 
     def test_a_bad_knob_falls_back_and_is_said_a_zero_is_floored(self):
         km, err = self._load_with("abc", "romp_kernel_knob_abc")

@@ -2537,7 +2537,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   collection) restarts that count. `ROMP_GC_GEN2_THRESHOLD` sets it: a value
   that is not an integer, or is above 2147483647 (the largest C int, the most
   the collector takes), falls back to 100, said once and counted under
-  `errors` while the freeze is on; any other is floored at 10, so it can only
+  `errors` when that 100 is applied (where no trigger is raised, nothing is
+  said); any other is floored at 10, so it can only
   raise the trigger. It is not applied with the freeze off or on a
   free-threaded build, whose collector differs. After setting it the kernel
   reads the third threshold back, and where the collector does not keep the

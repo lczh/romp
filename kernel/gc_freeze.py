@@ -127,8 +127,9 @@ def load_trees_from_env(env=None):
 def gen2_threshold_from_env(env=None):
     """(threshold, bad_raw): the ROMP_GC_GEN2_THRESHOLD knob, parsed like `load_trees_from_env`: a value that is not an
     integer, or is above MAX_GEN2_THRESHOLD (the largest C int, the most gc.set_threshold takes, which raises past it),
-    falls back to DEFAULT_GEN2_THRESHOLD and comes back as `bad_raw` (the caller says it once and counts it), and any
-    other integer is floored at MIN_GEN2_THRESHOLD, the stock value, so the knob can only raise the trigger."""
+    falls back to DEFAULT_GEN2_THRESHOLD and comes back as `bad_raw` (the caller says it once and counts it, once
+    apply_gen2_threshold has applied that default), and any other integer is floored at MIN_GEN2_THRESHOLD, the stock
+    value, so the knob can only raise the trigger."""
     raw = (env if env is not None else os.environ).get("ROMP_GC_GEN2_THRESHOLD")
     if raw is None or raw.strip() == "":
         return DEFAULT_GEN2_THRESHOLD, None
