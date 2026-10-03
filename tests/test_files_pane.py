@@ -22,6 +22,7 @@ chat file-link click into it. The kernel side, pinned here:
 
 Synthetic fixtures only (the notes-api demo world, placeholder sids); nothing here mints a goal.
 """
+import inspect
 import json
 import os
 import re
@@ -82,9 +83,9 @@ class Plumbing(unittest.TestCase):
         self.assertFalse(km._feed_audience([{"app": "files"}]))
         self.assertTrue(km._feed_audience([{"app": "feed"}]))
         self.assertTrue(km._feed_audience([{"app": "files"}, {"app": "chat"}]))
-        push = SRC[SRC.index("def _push(targets"):]
-        push = push[:push.index("\ndef ")]
-        _lacks(self, '"files"', push, "_push names every app it builds for; the Files pane is not one")
+        # the feed frame's routing line sits in _send_feed_frames since 2026-10-03, so the helper is read with _push
+        push = inspect.getsource(km._send_feed_frames) + inspect.getsource(km._push)
+        _lacks(self, '"files"', push, "_push and its feed send name every app they build or send for; the Files pane is not one")
 
     def test_the_socket_accepts_any_app_name(self):
         # the handshake has no allowlist, so app=files connects on a kernel exactly as the other panes do

@@ -238,10 +238,8 @@ class FeedFirstWaiter(unittest.TestCase):
     def test_the_pusher_waiting_on_a_connects_cold_build_serves_it_too(self):
         """The mirrored order: a pane's connect push builds the cold feed and the pusher's early pass waits for it. The pusher
         serves its feed panes the pre-mark build, so its chat stage starts one cold build sooner, and those panes get the
-        post-mark build from the regular section after the chat stage, that rebuild and, with a timeline pane, the timeline
-        stage (FeedFirstWholePush reads that order). The feed-send change, PR 101, sends the feed frame at the end of
-        the feed section, before the timeline section, so that part of the delay goes with it; whichever of the two
-        lands second drops the timeline clause here. This test pins the early passes only. A fix that only handed
+        post-mark build from the regular section after the chat stage and that rebuild (FeedFirstWholePush reads that
+        order). This test pins the early passes only. A fix that only handed
         `connect` through to the cache would still rebuild here: the waiter is the pusher, whose own arm asks under the
         dirty rule."""
         self._assert_one_build_both_served(*self._race(True, False))
@@ -438,10 +436,8 @@ class FeedFirstWholePush(unittest.TestCase):
     def test_the_second_build_follows_the_chat_stage_and_each_feed_pane_gets_the_pre_mark_build_first(self):
         """Where the second build goes and the frame order it costs, in both orders. The chat stage starts right after the
         first cold build, the one the mark landed in, and the post-mark build is the regular section's, after it. So the
-        pusher's feed pane gets the pre-mark build and then the post-mark build after the chat stage and that rebuild
-        (and, with a timeline pane, which these pushes have not, after the timeline stage too, until the feed-send
-        change, PR 101, sends the feed frame at the end of the feed section, before the timeline section; whichever of
-        the two lands second drops this clause), and the connect pane's first frame is the pre-mark build (_pinned). On
+        pusher's feed pane gets the pre-mark build and then the post-mark build after the chat stage and that rebuild,
+        and the connect pane's first frame is the pre-mark build (_pinned). On
         a boot the post-mark build reaches the connect pane in the measured order from
         the next pusher cycle, after the whole first push, its cold chat stage included, so a card move predicted there
         during the first build waits that long for the frame that confirms it, with the pane's 15 s backstop behind it

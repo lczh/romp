@@ -471,7 +471,8 @@ class _PerfStats:
                                    loop and the chat sends), push.feed (the view signature,
                                    _cached_feed and the ledgers attach), push.timeline (the skeleton
                                    and _cached_timeline), push.send (the feed/bars serialization and
-                                   sends). The push.* stages are measured inside _push for EVERY
+                                   sends: the feed's before the timeline stage, the bars' after it,
+                                   2026-10-03). The push.* stages are measured inside _push for EVERY
                                    caller, connect pushes on handler threads included, so their sum
                                    can exceed `push`
       builds                       chat / feed / timeline / feedJson -> {cached, built, ms}: served
@@ -59861,7 +59862,7 @@ def _chat_sig_ok(sid):
 def _feed_first(now, live_map, targets, connect):
     """The cold kernel's first feed frame, built and sent to the feed panes among `targets` before the chat and timeline
     builds of the same push (see the CARDS FIRST note in _push). The build goes through _cached_feed, so the push's own
-    feed section finds it warm; the wire tuple is built exactly as the send stage builds it and left in _feed_wire, so a
+    feed section finds it warm; the wire tuple is built exactly as in _send_feed_frames and left in _feed_wire, so a
     later frame with the same ledgers reuses it. Counted under _wire_stats feed_first and the push.feedFirst stage; a
     caller that waited for another thread's build and served it, under _VIEW_STATS feedWaited. `connect` is the caller's
     role, and both roles ask the cache the same way (the note at the call)."""
@@ -59894,10 +59895,8 @@ def _feed_first(now, live_map, targets, connect):
     # (the measured order), a connect pane that joined after the pusher's push took its targets gets the build it waited
     # for, and the post-mark build reaches it from the next pusher cycle, after the whole first push, its cold chat stage
     # included. When the connect push builds and the pusher waits here (the mirrored order), the pusher's feed panes get
-    # the pre-mark build first and the post-mark build after the chat stage, the regular section's rebuild and, with a
-    # timeline pane among the targets, the timeline stage (the feed-send change, PR 101, sends the feed frame at the end
-    # of the feed section, before the timeline section, so that part of the delay goes with it; whichever of the two
-    # lands second drops this clause); the chat stage starts one cold build sooner. In either order a card move
+    # the pre-mark build first and the post-mark build after the chat stage and the regular section's rebuild; the chat
+    # stage starts one cold build sooner. In either order a card move
     # predicted in such a pane during the first build waits for the post-mark frame (the move's ack names the build
     # underway, ui/webview/feed.ts), and if that frame comes more than 15 s after the ack, the pane's backstop drops the
     # prediction and the card shows the pre-mark state until the frame lands. Handing the caller's role through
@@ -59915,7 +59914,7 @@ def _feed_first(now, live_map, targets, connect):
     feed_src = _cached_feed(now, live_map, fsig, True)
     if feed_src is None:
         return False
-    feed = dict(feed_src)                            # the copy the send stage would make; no ledgers yet (no session build ran)
+    feed = dict(feed_src)                            # the copy _push's feed section makes; no ledgers yet (no session build ran)
     feed_parts = _delta_parts("feed", feed)
     if feed_parts is not None:
         feed_sig = _parts_sig(feed_parts)
@@ -59934,6 +59933,44 @@ def _feed_first(now, live_map, targets, connect):
     _wire_bump("feed_first")
     _PERF_STATS.stage("push.feedFirst", time.monotonic() - _t0)
     return True
+
+
+def _send_feed_frames(targets, feed_src, feed):
+    """The push's feed frame to the Feed and Outline panes among `targets` (apps "feed" and "fleet", both on the feed
+    payload), called by _push at the end of its feed section, before the timeline section builds (2026-10-03). Sent from
+    the send stage after that section, the board's frame waited out the timeline section in every cycle with a Sessions
+    pane open: a rebuild whenever the cached build was stale, the whole cold build after a restart. The send stage sends
+    no feed; apart from _feed_first's early frame on a cold kernel, this is the push's one feed send.
+    `feed_src` is the cached build and `feed` the push's copy with the ledgers attached. The wire is the send stage's, moved
+    whole: the wire tuple (_feed_wire, keyed on the build's identity and the ledgers' content) reused while it holds, else
+    filled once here with the one per-entry encode handed down to the delta path, and the same _send_slot per pane. A fill
+    that raises stands the slot down for this push (one traceback; the other feed panes are skipped without another), a
+    send that raises skips that pane, and the next push retries both."""
+    global _feed_wire
+    feed_ms = feed_sig = feed_parts = None
+    for c in targets:
+        if c["app"] in ("feed", "fleet"):   # the Feed pane AND the Outline pane ride the feed payload (the Outline reads feed.ledgers)
+            try:
+                if feed_ms is None:
+                    w = _feed_wire                           # tuple snapshot — rebound whole, never mutated (torn reads)
+                    if w is not None and w[0] is feed_src and w[1] == feed.get("ledgers"):
+                        feed, feed_ms, feed_sig, feed_parts = w[2], w[3], w[4], w[5]
+                    else:
+                        feed_parts = _delta_parts("feed", feed)   # the one per-entry encode, handed down to the delta path
+                        if feed_parts is not None:
+                            feed_sig = _parts_sig(feed_parts)
+                            feed_ms = _LazyWire(lambda f=feed: json.dumps(f, default=_wire_default_in("_push feed")),
+                                                _parts_est(feed_parts), "feed_body")
+                        else:                                # unkeyable: whole frames and the string signature, as before
+                            s = json.dumps(feed, default=_wire_default_in("_push feed"))
+                            feed_ms, feed_sig = _LazyWire(None, len(s), text=s), _dedup_sig(feed, s)
+                            _wire_bump("feed_sig_fallback")
+                        _feed_wire = (feed_src, feed.get("ledgers"), feed, feed_ms, feed_sig, feed_parts)
+                _send_slot(c, "feed", feed, feed_ms, feed_sig, feed_parts)
+            except Exception:
+                sys.stderr.write("push send feed (%s): %s\n" % (c.get("app"), traceback.format_exc()))
+                if feed_ms is None:                          # the FILL raised (nothing assigned): stand the slot down this push
+                    return
 
 
 @_stage_marked(lambda targets, connect=False, live_map=None: "connect" if connect else "push")
@@ -59965,11 +60002,12 @@ def _push(targets, connect=False, live_map=None):
     want_tl = any(c["app"] == "timeline" for c in targets)
     chat_clients = [c for c in targets if c["app"] == "chat"]
     # CARDS FIRST on a cold kernel (the user 2026-09-12: after a restart the sessions load fast now and the cards still
-    # wait): the first push with a feed pane after a boot builds every chat page (cold parses: 55 s of a 72 s refresh
-    # for 27 tabs on the devbox, 2026-09-13 3:58 PM PT) and the timeline before the feed frame leaves at the send stage.
+    # wait): the first push with a feed pane after a boot builds every chat page (cold parses, most of the refresh)
+    # before its feed section, and until 2026-10-03 the timeline too, since the feed frame left at the send stage.
     # With no feed built since start and a feed pane among the targets, the feed is built and sent to those panes FIRST
     # (_feed_first); the regular feed section below serves the same build from the cache with the ledgers attached, and
-    # the send stage's delta path carries only what that added. A warm kernel (a feed already built) takes no extra step.
+    # its send at that section's end (2026-10-03; before then the send stage's, after the timeline) carries only what that
+    # added on the delta path. A warm kernel (a feed already built) takes no extra step.
     # ANY cold refresh, not the boot's first cycle alone (re-applied 2026-09-14, step three of the agreed order): the pusher's
     # first cycle runs before a browser reconnects (0.6 to 1.0 s after the boot since the housekeeping split), so a guard on
     # cycle zero fired on no real boot. The first cut of this guard (12:06 PM PT) made the first refresh 131 s because six
@@ -60555,6 +60593,21 @@ def _push(targets, connect=False, live_map=None):
             for c in chat_clients:                       # the working-dot list (chat reads feed["working"]);
                 #                                          awaiting rides along for the await-green dots (2026-07-13)
                 _send_client(c, ("working",), {"type": "working", "names": _dots_w, "awaiting": _dots_a})
+        _PERF_STATS.stage("push.feed", time.monotonic() - _t_stage)
+        # THE FEED FRAME LEAVES HERE (2026-10-03), before the timeline section builds, as the chat flushes each tab as it is
+        # built: from the send stage below, the Feed and Outline panes waited out the timeline section in every cycle with a
+        # Sessions pane open, a rebuild whenever the cached build was stale and the whole cold build after a restart. The
+        # frame is the one the send stage sent (the same copy with the ledgers attached, wire tuple, dedup slot and delta
+        # path), and the send stage sends no feed of its own, so a push sends it once. A timeline build that raises no
+        # longer holds it. Its time counts under push.send, as before: the stage now closes twice in a push, for the feed
+        # here and for the bars after the timeline, and the two closes add into the split's one push.send row. The wait
+        # moves to the Sessions pane, whose lanes and timeline build now start after this fill and these sends: for a feed
+        # of a few hundred cards, a few milliseconds on a rebuild, up to about twenty on a pane's first frame or with every
+        # card changed (synthetic timings, 2026-10-03), and nothing measurable on an unchanged push, where the wire tuple
+        # holds and every pane dedups.
+        _t_stage = time.monotonic()
+        _send_feed_frames(targets, feed_src, feed)
+        _PERF_STATS.stage("push.send", time.monotonic() - _t_stage)
         # TIMELINE in two messages (the user 2026-06-25): the LANES SKELETON ({type:"data"}) flushes FIRST —
         # cheap, so the lanes/status paint instantly — THEN the heavy bars+judging ride a {type:"bars"} message
         # (the ~95% of the payload). On a COLD connect the skeleton is on the wire before the expensive
@@ -60586,7 +60639,6 @@ def _push(targets, connect=False, live_map=None):
         # can be hours old when no timeline client kept it warm, when the cache is FRESH by the kernel's own
         # rule (_timeline_cache_fresh); a stale one gets its lanes built fresh instead (below).
         global _skel_wire
-        _PERF_STATS.stage("push.feed", time.monotonic() - _t_stage)
         _t_stage = time.monotonic()
         timeline = None
         tl_warming = False
@@ -60665,41 +60717,28 @@ def _push(targets, connect=False, live_map=None):
     # single slot still holding it: a connect push on a handler thread (_push([client], connect=True)
     # from the ws handler) can evict that slot between this fill and the send. An unkeyable payload
     # (said once by _delta_parts) keeps the whole dump and _dedup_sig, as before.
-    # This section runs AFTER the build try above, and nothing above it on the pusher thread catches:
-    # _push_all, _pusher_cycle_jobs, _pusher_cycle (a try/finally) and _pusher (a bare while-True) have
-    # no except, so a raise here used to end the pusher thread for the life of the process — every
+    # The bars' half of this section, which follows, runs AFTER the build try above, and nothing above it on the
+    # pusher thread catches: _push_all, _pusher_cycle_jobs, _pusher_cycle (a try/finally) and _pusher (a bare
+    # while-True) have no except, so a raise here used to end the pusher thread for the life of the process — every
     # dashboard frozen until a restart. A whole-frame dump with no `default=` met a set in a card and
     # raised; a build slot read as None by this loop raised too. Now a fill that raises stands its slot
     # down for THIS cycle (one traceback; the slot's other clients are skipped without another), a send
     # that raises skips that client, and the next cycle retries both. _pusher_cycle_jobs catches around
     # _push_all for whatever escapes _push; _pusher itself stays unwrapped, since that belt and
     # _pusher_cycle's finally cover the cycle.
-    global _feed_wire, _bars_wire
-    feed_ms = feed_sig = feed_parts = bars = bars_ms = bars_sig = bars_parts = None
-    feed_down = bars_down = False                        # this cycle's fill raised: the slot's clients are skipped
+    # The feed's half runs in _send_feed_frames (2026-10-03), at the end of the build's feed section and so INSIDE the
+    # build try: a raise there is caught first by the helper's per-pane belt, which works as this loop's does, and one
+    # that escaped it would be caught by the try's except, which logs "push build:" and ends the push before the
+    # timeline section (no lanes, no bars, no warm), not the pusher thread. So that belt still earns its place: without
+    # it, a send that raised for one feed pane would cost the feed panes after it their frame, and a raise of either
+    # kind would cost the Sessions pane its lanes and bars for the push.
+    global _bars_wire
+    bars = bars_ms = bars_sig = bars_parts = None
+    bars_down = False                                    # this cycle's fill raised: the slot's clients are skipped
     _t_stage = time.monotonic()
     for c in targets:
         try:
-            if c["app"] in ("feed", "fleet"):   # the feed pane AND the Fleet view both ride the feed payload (Fleet reads feed.ledgers)
-                if feed_down:
-                    continue
-                if feed_ms is None:
-                    w = _feed_wire                           # tuple snapshot — rebound whole, never mutated (torn reads)
-                    if w is not None and w[0] is feed_src and w[1] == feed.get("ledgers"):
-                        feed, feed_ms, feed_sig, feed_parts = w[2], w[3], w[4], w[5]
-                    else:
-                        feed_parts = _delta_parts("feed", feed)   # the one per-entry encode, handed down to the delta path
-                        if feed_parts is not None:
-                            feed_sig = _parts_sig(feed_parts)
-                            feed_ms = _LazyWire(lambda f=feed: json.dumps(f, default=_wire_default_in("_push feed")),
-                                                _parts_est(feed_parts), "feed_body")
-                        else:                                # unkeyable: whole frames and the string signature, as before
-                            s = json.dumps(feed, default=_wire_default_in("_push feed"))
-                            feed_ms, feed_sig = _LazyWire(None, len(s), text=s), _dedup_sig(feed, s)
-                            _wire_bump("feed_sig_fallback")
-                        _feed_wire = (feed_src, feed.get("ledgers"), feed, feed_ms, feed_sig, feed_parts)
-                _send_slot(c, "feed", feed, feed_ms, feed_sig, feed_parts)
-            elif c["app"] == "timeline" and timeline is not None:
+            if c["app"] == "timeline" and timeline is not None:
                 if bars_down:
                     continue
                 if bars_ms is None:
@@ -60721,13 +60760,9 @@ def _push(targets, connect=False, live_map=None):
                         _bars_wire = (timeline, tl_warming, bars, bars_ms, bars_sig, bars_parts)
                 _send_slot(c, "bars", bars, bars_ms, bars_sig, bars_parts)
         except Exception:
-            is_feed = c["app"] in ("feed", "fleet")
-            if (feed_ms if is_feed else bars_ms) is None:    # the FILL raised (nothing assigned): stand the slot down this cycle
-                if is_feed:
-                    feed_down = True
-                else:
-                    bars_down = True
-            sys.stderr.write("push send %s (%s): %s\n" % ("feed" if is_feed else "bars", c.get("app"), traceback.format_exc()))
+            if bars_ms is None:                          # the FILL raised (nothing assigned): stand the slot down this cycle
+                bars_down = True
+            sys.stderr.write("push send bars (%s): %s\n" % (c.get("app"), traceback.format_exc()))
     _PERF_STATS.stage("push.send", time.monotonic() - _t_stage)
     # the cards' windows, ahead of a click (the warming, 2026-09-11): AFTER the send stage, so the feed frame of the cycle a
     # card moves never waits for the renders; only with a board to click on (a feed or fleet client among the targets;
@@ -61407,7 +61442,8 @@ def _feed_needs_input_count_of(sid):
 # Wire-form caches for the two heavy shared payloads (the 2026-08-10 CPU fix, round three): the last
 # (source-identity key, lazy serialization, dedup sig, per-entry split) for the feed and the timeline bars,
 # so an unchanged build is never re-serialized cycle after cycle (~357KB + ~1.65MB per cycle measured with
-# every session quiet), and a rebuild is serialized once (see _push's wire section).
+# every session quiet), and a rebuild is serialized once (see _send_feed_frames for the feed and _push's wire
+# section for the bars).
 # TUPLES, rebound whole — a concurrent connect push on a WS thread snapshots the ref and can never see a
 # torn entry; the identity keys stay alive because these tuples (and the build caches above) hold them.
 _feed_wire = None   # (feed_src, ledgers, wire_feed, ms, sig, parts) — ms = a _LazyWire of json.dumps(wire_feed), made on the first whole-frame send; sig = _parts_sig(parts), or _dedup_sig over the whole dump when parts is None (unkeyable); parts = _delta_parts("feed", wire_feed), handed to _send_slot
