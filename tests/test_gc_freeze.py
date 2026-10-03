@@ -168,7 +168,8 @@ class Gen2Trigger(unittest.TestCase):
     def test_a_decline_puts_back_the_replaced_value_not_what_the_collector_read(self):
         """Review 2026-10-03, round two: on a collector that stores a value other than the one set (this one clamps the
         third threshold to 50), the read-back sees 50, not 100, and declines; what goes back is the 20 it replaced, not a 0
-        and not the 50 it read. The zero-reading case above starts at 0, so it passes under either wrong put-back."""
+        and not the 50 it read. The zero-reading case above starts at 0, so its end state is the same under either wrong
+        put-back."""
         fake = ClampThirdGc((2000, 10, 20))
         c = gf.GcFreeze(enabled=True, gc=fake, clock=lambda: 0.0)
         self.assertIsNone(gf.apply_gen2_threshold(c, value=100, free_threaded=False), "declined: 50 read back, not 100")
