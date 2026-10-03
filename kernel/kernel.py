@@ -59818,8 +59818,9 @@ def _feed_first(now, live_map, targets, connect):
     # the prediction and the card shows the pre-mark state until the frame lands. Handing the caller's role through
     # (`connect`) would put the second cold build back in front of the pusher's chat stage, the boot stall this pass
     # exists to shorten. The bells, the phone pushes and the app badge fire on each fresh build (_build_feed_locked), so
-    # in either order the post-mark build's fire with the regular section's rebuild, after the chat stage, where a waiter
-    # that rebuilt fired them before the chat stage ended. The chat stage's needs-you reads move with that rebuild too:
+    # in either order the post-mark build's bells, pushes and badge fire with the regular section's rebuild, after the
+    # chat stage, where a waiter that rebuilt fired them before the chat stage ended. The chat stage's needs-you reads
+    # move with that rebuild too:
     # for the first push after a restart, the needs-you ring, its count and the Needs you box's rows read the pre-mark
     # build, and they catch up on the next cycle, which the regular section's rebuild wakes when it moves them (the
     # needs-change wake in _build_feed_locked).
