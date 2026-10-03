@@ -59820,8 +59820,9 @@ def _feed_first(now, live_map, targets, connect):
 def _send_feed_frames(targets, feed_src, feed):
     """The push's feed frame to the Feed and Outline panes among `targets` (apps "feed" and "fleet", both on the feed
     payload), called by _push at the end of its feed section, before the timeline section builds (2026-10-03). Sent from
-    the send stage after that section, every cycle's board frame waited out the timeline build: a rebuild on a warm
-    kernel, the whole cold build after a restart. The send stage sends no feed; this is the one feed send of a push.
+    the send stage after that section, the board's frame waited out the timeline section in every cycle with a Sessions
+    pane open: a rebuild whenever the cached build was stale, the whole cold build after a restart. The send stage sends
+    no feed; apart from _feed_first's early frame on a cold kernel, this is the push's one feed send.
     `feed_src` is the cached build and `feed` the push's copy with the ledgers attached. The wire is the send stage's, moved
     whole: the wire tuple (_feed_wire, keyed on the build's identity and the ledgers' content) reused while it holds, else
     filled once here with the one per-entry encode handed down to the delta path, and the same _send_slot per pane. A fill
@@ -59882,8 +59883,8 @@ def _push(targets, connect=False, live_map=None):
     want_tl = any(c["app"] == "timeline" for c in targets)
     chat_clients = [c for c in targets if c["app"] == "chat"]
     # CARDS FIRST on a cold kernel (the user 2026-09-12: after a restart the sessions load fast now and the cards still
-    # wait): the first push with a feed pane after a boot builds every chat page (cold parses: 55 s of a 72 s refresh
-    # for 27 tabs on the devbox, 2026-09-13 3:58 PM PT) and the timeline before the feed frame leaves at the send stage.
+    # wait): the first push with a feed pane after a boot builds every chat page (cold parses, most of the refresh)
+    # before its feed section, and until 2026-10-03 the timeline too, since the feed frame left at the send stage.
     # With no feed built since start and a feed pane among the targets, the feed is built and sent to those panes FIRST
     # (_feed_first); the regular feed section below serves the same build from the cache with the ledgers attached, and
     # its send at that section's end (2026-10-03; before then the send stage's, after the timeline) carries only what that
@@ -60475,11 +60476,12 @@ def _push(targets, connect=False, live_map=None):
                 _send_client(c, ("working",), {"type": "working", "names": _dots_w, "awaiting": _dots_a})
         _PERF_STATS.stage("push.feed", time.monotonic() - _t_stage)
         # THE FEED FRAME LEAVES HERE (2026-10-03), before the timeline section builds, as the chat flushes each tab as it is
-        # built: from the send stage below, the Feed and Outline panes waited out the timeline build every cycle, a rebuild
-        # on a warm kernel and the whole cold build after a restart. The frame is the one the send stage sent (the same
-        # copy with the ledgers attached, wire tuple, dedup slot and delta path), and the send stage sends no feed of its
-        # own, so a push sends it once. A timeline build that raises no longer holds it. Its time counts under push.send,
-        # as before: the stage now closes twice in a push, for the feed here and for the bars after the timeline.
+        # built: from the send stage below, the Feed and Outline panes waited out the timeline section in every cycle with a
+        # Sessions pane open, a rebuild whenever the cached build was stale and the whole cold build after a restart. The
+        # frame is the one the send stage sent (the same copy with the ledgers attached, wire tuple, dedup slot and delta
+        # path), and the send stage sends no feed of its own, so a push sends it once. A timeline build that raises no
+        # longer holds it. Its time counts under push.send, as before: the stage now closes twice in a push, for the feed
+        # here and for the bars after the timeline, and the two closes add into the split's one push.send row.
         _t_stage = time.monotonic()
         _send_feed_frames(targets, feed_src, feed)
         _PERF_STATS.stage("push.send", time.monotonic() - _t_stage)
