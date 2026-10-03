@@ -645,5 +645,112 @@ class ARaisingSerializerLeavesThePusherAlive(unittest.TestCase):
         self.assertLess(i, jobs.index("except Exception:", i)); self.assertLess(jobs.index("except Exception:", i), jobs.index("finally:", i))
 
 
+class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
+    """The Feed and Outline panes (apps "feed" and "fleet", both on the feed payload) get the push's feed frame at the end
+    of its feed section, before the timeline section builds (2026-10-03). Sent from the send stage after that section, the
+    board's frame waited out the Sessions pane's timeline build every cycle: a rebuild on a warm kernel, the whole cold
+    build after a restart. The timeline build here blocks until the test releases it, so the frame is seen to leave while
+    the build runs. The send stage sends no feed of its own (one feed send per pane per push), and the other panes'
+    frames are the ones a push without the feed panes sends."""
+
+    def _world(self):
+        w = _World(self, feed=_feed(), timeline=_timeline())
+        km._built_feed[:] = [("sig",), w.feed, time.time(), time.time()]   # a feed built since the boot: no cards-first pass
+        return w
+
+    @staticmethod
+    def _named(**clients):
+        for name, c in clients.items():
+            c["wid"] = "w-" + name
+        return clients
+
+    def test_the_feed_panes_get_their_frame_while_the_timeline_build_runs(self):
+        w = self._world()
+        cs = self._named(tl=_client("timeline"), feed=_client("feed"), board=_client("fleet"))
+        started, release, seen = threading.Event(), threading.Event(), {}
+
+        def timeline_build(now, live_map, sig, connect=False):
+            seen.update({n: [f["type"] for f in c["frames"]] for n, c in cs.items()})   # what each pane held as the build began
+            started.set()
+            release.wait(30)                             # released by the test; the bound only ends a broken run
+            return w.timeline
+        km._cached_timeline = timeline_build             # _World restores it
+        th = threading.Thread(target=km._push, args=([cs["tl"], cs["feed"], cs["board"]],), daemon=True)   # the Sessions pane first
+        th.start()
+        try:
+            self.assertTrue(started.wait(10), "the push reached its timeline build")
+            self.assertEqual(seen, {"tl": [], "feed": ["feed"], "board": ["feed"]},
+                             "the Feed and Outline panes had their frame before the timeline build began; the Sessions pane waits for it")
+            self.assertTrue(th.is_alive(), "and the build is still running")
+        finally:
+            release.set()
+            th.join(30)
+        self.assertFalse(th.is_alive(), "the push finished once released")
+        self.assertEqual([f["type"] for f in cs["tl"]["frames"]], ["data", "bars"], "the lanes, then the bars, after the build")
+        self.assertEqual(cs["tl"]["frames"][1], _bars_of(w.timeline), "the bars frame the build makes")
+        whole = dict(w.feed, ledgers=[])                 # the push's copy: the build with its ledgers attach (an Outline pane is a target)
+        self.assertEqual(cs["feed"]["frames"], [whole], "one feed frame, whole (the first frame to a pane), as the send stage sent it")
+        self.assertEqual(cs["board"]["frames"], [whole], "the same frame to the Outline pane")
+
+    def test_each_feed_pane_is_sent_once_per_push_and_the_bars_once_per_timeline_pane(self):
+        # the send stage must not send the feed a second time: a second send of the same build dedups on the wire, so the
+        # frames alone cannot tell; the sends to _send_slot can, across a first build, an unchanged push and a rebuild
+        w = self._world()
+        cs = self._named(feed=_client("feed"), tl=_client("timeline"), legacy=_client("feed", delta=False), board=_client("fleet"))
+        by_wid = {c["wid"]: n for n, c in cs.items()}
+        calls, real = [], km._send_slot
+
+        def send_slot(c, ftype, *a, **kw):
+            calls.append((by_wid[c["wid"]], ftype))
+            return real(c, ftype, *a, **kw)
+        with mock.patch.object(km, "_send_slot", side_effect=send_slot):
+            for step in ("first build", "unchanged", "rebuild"):
+                if step == "rebuild":
+                    w.feed = _feed(build_id=2, asks=[_card(i, text="changed" if i == 1 else None) for i in range(5)])
+                    w.timeline = _timeline(nbars=3, now=2)
+                n0 = {n: len(c["frames"]) for n, c in cs.items()}
+                del calls[:]
+                km._push([cs["feed"], cs["tl"], cs["legacy"], cs["board"]])
+                self.assertEqual(sorted(calls), [("board", "feed"), ("feed", "feed"), ("legacy", "feed"), ("tl", "bars")],
+                                 "%s: one slot send per pane, the feed's from the feed section alone" % step)
+                went = {n: len(c["frames"]) - n0[n] for n, c in cs.items()}
+                self.assertEqual(went, {n: 0 if step == "unchanged" else (2 if n == "tl" and step == "first build" else 1) for n in cs},
+                                 "%s: the frames that went" % step)
+        self.assertEqual(cs["feed"]["frames"][-1]["type"], "delta", "the rebuild reached the delta pane as a delta")
+        self.assertEqual(cs["legacy"]["frames"][-1]["buildId"], 2, "and the whole-frame pane as the whole build")
+
+    def test_a_timeline_build_that_raises_no_longer_holds_the_feed_panes_frame(self):
+        # the build section's catch ends the push (one traceback, the send stage skipped): the feed panes were served before it
+        self._world()
+        cs = self._named(tl=_client("timeline"), feed=_client("feed"), board=_client("fleet"))
+
+        def timeline_build(now, live_map, sig, connect=False):
+            raise RuntimeError("synthetic timeline failure")
+        km._cached_timeline = timeline_build
+        err = io.StringIO()
+        with redirect_stderr(err):
+            km._push([cs["tl"], cs["feed"], cs["board"]])
+        self.assertEqual(err.getvalue().count("push build:"), 1); self.assertIn("synthetic timeline failure", err.getvalue())
+        self.assertEqual([f["type"] for f in cs["feed"]["frames"]], ["feed"], "the Feed pane was served")
+        self.assertEqual([f["type"] for f in cs["board"]["frames"]], ["feed"], "and the Outline pane")
+        self.assertEqual(cs["tl"]["frames"], [], "the Sessions pane, whose build raised, got nothing this push")
+
+    def test_the_other_panes_frames_are_the_ones_a_push_without_feed_panes_sends(self):
+        def frames(with_feed_panes):
+            self._world()
+            cs = self._named(chat=_client("chat"), tl=_client("timeline"))
+            extra = [_client("feed"), _client("fleet")] if with_feed_panes else []
+            err = io.StringIO()
+            with mock.patch.object(km, "_chat_tab_sessions", lambda now, live_map: []), redirect_stderr(err):
+                km._push([cs["chat"], cs["tl"]] + extra)
+            self.assertNotIn("push build:", err.getvalue(), "the push ran to its end")
+            self.assertIn("working", [f["type"] for f in cs["chat"]["frames"]], "the chat pane's dots: the feed section ran")
+            self.assertEqual([f["type"] for f in cs["tl"]["frames"]], ["data", "bars"])
+            return cs["chat"]["frames"], cs["tl"]["frames"]
+        alone, beside = frames(False), frames(True)
+        self.assertEqual(beside[0], alone[0], "the chat pane's frames, in order, as without the feed panes")
+        self.assertEqual(beside[1], alone[1], "the Sessions pane's frames, in order, as without the feed panes")
+
+
 if __name__ == "__main__":
     unittest.main()
