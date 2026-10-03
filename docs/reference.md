@@ -2789,7 +2789,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   before, counts under `ts`. A delta the gate let through that extends the
   path on a whole entry marked for its re-seat is re-seated and counts as a
   re-seat alone: under the `reseat` reason, and as a restore under `restore`
-  and `restore:afterDemote`, never under `fold:attachedPass`. The deltas
+  and `restore:afterDemote` when that restore serves (when it refuses the
+  document, under the whole parse's `full:demoted`), never under
+  `fold:attachedPass`. The deltas
   the gate let through that folded count under `fold:attachedPass`, the
   folds it saved),
   `skill-link`, `ts`, `kept`, and

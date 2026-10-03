@@ -404,8 +404,11 @@ class CompactionRestore(Harness):
                 self.assertNotIn(s, {row[0] for row in d["records"]}, "the premise: the summary is past the rewritten document's cut")
                 folds = [("the tool result past the compaction", modes2, moved2, cut2), ("the turn's end", modes3, moved3, cut3)]
                 if road == "reseat":
-                    self.assertEqual((modes2, moved2.get("full", 0), moved2.get("g:reseat", 0)), (["restore"], 0, 1),
-                                     "the next parse re-seats the whole entry on the rewritten document: %s" % moved2)
+                    counts = (moved2.get("full", 0), moved2.get("g:reseat", 0), moved2.get("restore:afterDemote", 0),
+                              moved2.get("fold:attachedPass", 0), moved2.get("g:promptid", 0))
+                    self.assertEqual((modes2, counts), (["restore"], (0, 1, 1, 0, 0)),
+                                     "the next parse re-seats the whole entry on the rewritten document, counted as a "
+                                     "re-seat alone: no attached pass, no prompt-id demotion (review round four): %s" % moved2)
                     folds = folds[1:]
                 for what, modes, moved, cut in folds:
                     self.assertEqual((modes, moved.get("full", 0), moved.get("g:promptid", 0), moved.get("fold:attachedPass", 0)),
