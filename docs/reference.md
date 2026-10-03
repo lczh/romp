@@ -2561,7 +2561,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   under `gc.freeze.collections`, run on the pusher thread and reach a job
   only as a wait in its wall; a job still open at the first read records its
   CPU, any collection inside it included, only when it ends, so take the
-  tally from a read made before that job began or set such a job aside);
+  tally from a read made before that job began or set such a job aside; a
+  read of `/perf?stacks=1` names the job open at that read, by the `jobs`
+  row's stage mark, and a plain read names none);
   compare `gc.gen."2"` or the kernel samples'
   generation-2 tallies over the interval, and the ring rows only for the
   passes the ring still holds (the newest 16 on a plain read, the whole ring
@@ -2898,8 +2900,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `sdk-boot`, `first-cycle-sampler`, `jobs` (the housekeeping loop split off the pusher), `main`; never a
   session's name, sid, host or path (the ident
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
-  sample), `stage` (the thread's current stage mark: the pusher's
-  `jobs.<job>` or `push`, a handler's `connect`, `null` outside one) and
+  sample), `stage` (the thread's current stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, a handler's `connect`, `null` outside one) and
   `frames`, "function (file:line)" strings innermost last, at most 40; no
   locals, arguments or session content. Filled when the kernel runs with
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
