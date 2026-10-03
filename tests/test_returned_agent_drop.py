@@ -666,6 +666,33 @@ class ViewerClose(Base):
         self.assertEqual([w for w, _key in sent], ["w2"], "nothing for the raising viewer; the other client's viewer is sent")
         self.assertIn((SID, self.AID), first["subagents"], "the open viewer stays registered")
 
+    def test_a_good_render_then_a_raising_one_on_one_client_sends_only_the_good_viewer_its_own_frame(self):
+        """One client with two viewers open, the second viewer's render raising after the first built: only the first
+        viewer is sent, under its own key and with its own subagent's frame. A built flag reset once per push or once
+        per client, or a frame bound before the loop and sent whenever it is set, sends the first frame again under the
+        second viewer's key, filling the client's dedup slot for that viewer (round eight of the fold's review)."""
+        self.scene()
+        other = "a9b00000000000003"                               # a second subagent with its own file
+        write(str(self.sub / ("agent-%s.jsonl" % other)), self.agent_records(T0 - 120), T0 - 106)
+        client = self.client()
+        client["subagents"][(SID, other)] = True                  # opened after the first, so rendered second
+        real, sent = km.build_subagent, []
+
+        def raising_for_other(sid, agent_id, now, live_map=None):
+            if agent_id == other:
+                raise RuntimeError("synthetic render fault")
+            return real(sid, agent_id, now, live_map)
+
+        err = io.StringIO()
+        with mock.patch.object(km, "build_subagent", raising_for_other), \
+                mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, **kw: sent.append((key, msg))), \
+                mock.patch("sys.stderr", new=err):
+            km._push_subagents([client], int(time.time()), {})
+        self.assertIn("subagent frame failed", err.getvalue(), "the second render's raise is said")
+        self.assertEqual([key for key, _msg in sent], [("subagent", SID, self.AID)], "only the good viewer is sent")
+        self.assertEqual(sent[0][1].get("agentId"), self.AID, "with its own subagent's frame")
+        self.assertIn((SID, other), client["subagents"], "the raising viewer stays registered")
+
     def asm_entries(self, ap):
         """The assembly entries over the agent file `ap` for the test's session (the viewer's parse)."""
         rp = os.path.realpath(ap)

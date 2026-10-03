@@ -4982,7 +4982,7 @@ from before the checkpoint's cut may be in the window. After pricing an agent
 file, the check runs the file's agent folds over the records it holds, first
 the background-task state an open viewer of the agent left; once the
 agent has been quiet for two minutes they write the file's checkpoint document,
-charged to the cycle's byte budget, and let its records leave memory. A
+charged to the pusher cycle's byte budget, and let its records leave memory. A
 session's own transcript restored from its assembly checkpoint is priced from
 the records past the checkpoint's cut, so for up to ten minutes after a restart
 the rate can leave out what that session spent before the cut. The ceiling is
