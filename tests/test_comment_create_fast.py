@@ -1172,6 +1172,8 @@ class CutFromTheDisplayParse(Base):
                 answers = {}
                 for road in ("whole", "seeded", "read"):
                     restart()
+                    # each world rewrites the leaf in place, before any document's cut: no earlier world's document may restore it
+                    shutil.rmtree(jd.STATE / "checkpoints", ignore_errors=True)
                     if road == "seeded":
                         self.restored(leaf)                   # the chat's parse, restored from its document at a boot
                     else:
