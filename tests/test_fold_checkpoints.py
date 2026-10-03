@@ -1707,10 +1707,11 @@ class CarryReadsOncePerChange(Base):
     """A write's carry (the document's states for folds this process never ran, _carry_forward_states) loaded the whole document
     back at EVERY write, since the write dropped from the memo the very document it had just written: a live kernel's document
     reads were mostly a write re-reading what the same process wrote one write earlier, and for a live leaf, whose every fold
-    the settle runs, only to learn there was nothing to carry. The carry now reads only when the document could give it
-    something (_DOC_INDEX: what each document can be carried from, keyed by the file's inode, mtime and size), and a written
-    document that carried a state only the disk had stays in the memo for the next write. Every document written keeps its
-    bytes. GenericFold's step over a plain JSONL file of {"n": i} records, plus a padding fold whose state is a string."""
+    the settle runs, only to learn there was nothing to carry. The carry now skips the read when this process already knows
+    the document has nothing to give it (_DOC_INDEX: what each document can be carried from, keyed by the file's inode, mtime
+    and size), and a written document that carried an entry only the disk had (a state or an over-the-cap cursor) stays in the
+    memo for the next write. Every document written keeps its bytes. GenericFold's step over a plain JSONL file of {"n": i}
+    records, plus a padding fold whose state is a string and, in one test, a fold whose state passes the size cap."""
     _step = staticmethod(GenericFold._step)
     cold = GenericFold.cold
 
@@ -1887,6 +1888,50 @@ class CarryReadsOncePerChange(Base):
         self.assertEqual(self.states(), {"t": (4, [0, 1, 2, 3])})
         with em._CKPT_LOCK:
             self.assertEqual(em._DOC_INDEX[self.p][0], em._doc_sig(self.cp().stat()), "the index describes the new document")
+
+    def test_an_over_the_cap_cursor_of_a_fold_this_process_never_ran_is_carried(self):
+        """The index lists an over-the-cap cursor (no state, only its count) as carryable, as the carry does: left out, the
+        restore's load would tell the index the document has nothing to give, the write would drop the cursor, and the next
+        boot would fold that fold over the whole file again."""
+        saved = em._CKPT_FOLD_CAP; em._CKPT_FOLD_CAP = 64
+        self.addCleanup(setattr, em, "_CKPT_FOLD_CAP", saved)
+        self.fold("t"); em.fold_records(self.caches.setdefault("big", {}), self.p, list, lambda st, o: st + ["y" * 100], ckpt="big")
+        self.assertTrue(em.checkpoint_write(self.p))
+        big = self.doc(self.p)["folds"]["big"]
+        self.assertEqual((big.get("count"), "state" in big, bool(big.get("over"))), (3, False, True), "the premise: an over-the-cap cursor")
+        self.fresh_process()
+        for k in range(2):
+            _append(self.p, {"n": 3 + k})
+            self.assertEqual(self.fold("t"), list(range(4 + k)))
+            self.assertTrue(em.checkpoint_write(self.p))
+            self.assertEqual(self.doc(self.p)["folds"].get("big"), big, "write %d carries the over-the-cap cursor" % (k + 1))
+
+    def test_a_write_after_a_restore_whose_kept_document_is_gone_reads_nothing_when_it_holds_every_fold(self):
+        """The restore's validated load fills the index, so the write after it reads nothing even when the memo has let the
+        document go (as its byte cap does when many documents restore at boot)."""
+        self.fold("t"); self.fold("u"); self.assertTrue(em.checkpoint_write(self.p))
+        self.fresh_process()
+        _append(self.p, {"n": 3})
+        self.assertEqual((self.fold("t"), self.fold("u")), ([0, 1, 2, 3], [0, 1, 2, 3]))
+        with em._CKPT_LOCK:
+            em._doc_memo_drop(self.p)                    # as the byte cap evicts it when many documents restore at boot
+        reads, n0 = self.doc_reads(), self.consults()
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (0, 0), "the restore's load filled the index: no read")
+
+    def test_a_fold_this_process_never_ran_too_far_behind_to_carry_costs_no_read(self):
+        """An entry at a count the write cannot record (here past the lag bound) is never carried; the index applies the
+        carry's count rule too, so learning that costs no read."""
+        self.fold("t"); self.fold("u"); self.assertTrue(em.checkpoint_write(self.p))
+        self.fresh_process()
+        _append(self.p, *[{"n": 3 + i} for i in range(200)])
+        self.assertEqual(self.fold("t"), list(range(203)))
+        with em._CKPT_LOCK:
+            em._doc_memo_drop(self.p)
+        reads, n0 = self.doc_reads(), self.consults()
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual(sorted(self.doc(self.p)["folds"]), ["t"], "u stands too far behind to carry, as the carry has always left it")
+        self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (0, 0), "and learning that costs no read")
 
 
 class CursorTableBound(Base):
