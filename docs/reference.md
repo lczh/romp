@@ -2544,7 +2544,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   value it puts the old one back and `gen2Threshold` stays `null`. That check
   reads the stored value, not what the collector does with it, so the
   free-threaded build stays excluded: it stores the value, but its collector
-  was not seen to follow it. A
+  was not seen to follow it. The raise was measured on a hermetic lab kernel's
+  own garbage (synthetic sessions under a load that saturates the pusher,
+  CPython 3.12, medians of four ten-minute windows per value). Raising the
+  trigger from 10 to 100 lengthened the worst automatic full collection from
+  429 to 513 ms and the worst fold-in from 310 to 451 ms, left peak memory
+  where it was (VmHWM 858 MiB at 10 and 851 at 100, inside the run-to-run
+  spread), and cut the summed generation-2 time from 118 to 37 s. A
   request that arrives during a reconcile waits that
   one collection. The idle boundary is the best moment for the frozen-heap
   walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an

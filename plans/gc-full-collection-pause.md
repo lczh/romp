@@ -26,6 +26,31 @@ Each road below is a hypothesis about the lever; none is chosen here. The rule t
 
 Measure first, off the live kernel (a lab kernel or an offline replay, since no live setting is changed): full collections an hour and the longest pause at the current threshold versus a raised one, the resident size between collections at each, and whether the total interpreter-seconds an hour spent collecting falls or merely clumps. A road that halves the frequency but leaves a 2.5 second pause has not fixed the interrupt the issue is about; a road that also drops the per-collection time only does so if the between-collection heap is not proportionally larger.
 
+**Measured (2026-10-03), and Road A ships on these figures.** While the freeze is on, the kernel raises threshold2 from the stock 10 to 100 (`ROMP_GC_GEN2_THRESHOLD`). The figures come from a hermetic lab kernel, never the live one: a synthetic notes-api state root, the freeze on with its other knobs at their defaults, CPython 3.12.11 (the classic collector), and a gc hook that logs every generation-two collection's pause and whether the controller ran it, checked against `/perf`. Memory is VmHWM, reset when each 600 second window opens. Two load shapes:
+
+- Heavy, a stress shape that saturates the pusher (median cycles of 8 to 12 seconds): 4 sessions of 2,500 turns each at boot (46 MB of transcripts), one turn appended every half second, and a dashboard of four websocket panes drained continuously (a chat, the feed, the timeline and the Sessions pane). Four windows per value: two single-value jobs, and two same-node pairs run back to back in alternating order, because node speed varied by up to 1.7 times.
+- Light: 3 sessions of 600 turns (8 MB), one turn every 1.5 seconds, the same dashboard, the kernel at about 30 percent of a core. Two same-node pairs.
+
+Heavy load, the median of four windows with the range in brackets:
+
+| per 600 s window | threshold 10 | threshold 100 |
+| --- | --- | --- |
+| automatic full collections | 597 [565–773] | 80 [70–91] |
+| summed generation-two time | 118 s [94–129] | 37 s [31–43] |
+| worst automatic pause | 429 ms [358–471] | 513 ms [460–573] |
+| worst fold-in pause | 310 ms [254–353] | 451 ms [434–494] |
+| most generation-two time inside one pusher cycle | 5.2 s [4.1–6.6] | 1.2 s [1.1–1.4] |
+| peak memory (VmHWM) | 858 MiB [833–947] | 851 MiB [840–858] |
+
+Under the light load 100 ran no automatic full collection in either window (121 at 10), so its worst pause was a fold-in: 71.5 and 48.5 ms against 54.6 and 55.0 ms at 10, the two pairs disagreeing in direction. VmHWM read 338 and 354 MiB against 335 and 349.
+
+The worst pause rises, and that is the cost. Under the heavy load the worst automatic full collection is about a fifth longer (+88 and +111 ms within the same-node pairs) and the worst fold-in about half again as long, the two values' ranges not overlapping: the garbage the skipped automatic collections used to take now waits for the next full collection, and the controller's fold-ins take their share of it. Peak memory does not rise (−11 and +4 MiB within the pairs), since the frozen decoded heap sets the peak, not the garbage waiting. So the per-collection time does not drop, which is the condition the decision below sets for this road; it rises. Road A ships anyway, because the freeze changed what a full collection costs (hundreds of milliseconds here, not the 2.8 seconds that condition was written against), and the collecting time falls rather than clumps: what a single pusher cycle waits through falls about fourfold, and the summed time by about two thirds.
+
+What bounds the rise, proposed:
+
+- **The count, in objects.** A full collection walks only unfrozen tracked objects, so what the raised trigger adds is the garbage it lets wait: what up to 101 generation-one collections promote, against 11, and every fold-in restarts that count and freezes what survived. The bound is in objects, not bytes, and the cyclic share of that garbage sets the pause. The lab's full collections found about 0.9 to 1.4 million unreachable objects per heavy window. A synthetic cyclic probe (1 million frozen containers, then builds with a share of self-referencing dicts) showed the pause rise negligible at a 1 percent cyclic share, several-fold at 10 percent over a small unfrozen remainder, and gone over a 2 million object remainder. How the live kernel's cyclic share compares is not known from the lab.
+- **The knob, read after deploy.** The rise is checked on `/perf`, not assumed: `gc.gen."2".msMax` and the largest `ms2` in `pusher.stageRing`, against the same reads before the deploy. A worst pause well past the lab's fifth is the signal to set `ROMP_GC_GEN2_THRESHOLD` lower, a setting rather than a code change (10 is the stock behavior). Only 10 and 100 were measured, so a value between them needs its own arm before it is chosen.
+
 ### Road B: freeze the decoded records after load
 
 `gc.freeze` moves the currently tracked objects into a permanent generation the collector never walks again, so a full collection after a freeze walks only what was allocated since. The decoded records are long-lived and mostly acyclic, so freezing them after load would take the bulk of the walk out of it. The lever is walk-fewer, and it is the one that targets this heap directly.
