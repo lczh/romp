@@ -2534,10 +2534,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   ones (`gc.gen."2".collections` less `freeze.collections`). Raised, an
   automatic full collection comes at most once per 101 generation-1
   collections, and every fold-in, release and backstop (each a full
-  collection) restarts that count. `ROMP_GC_GEN2_THRESHOLD` sets it (a value
-  that is not an integer falls back to 100, said once and counted under
-  `errors`; floored at 10, so it can only raise the trigger). It is not applied with the freeze off, on Python
-  3.14 and later or on a free-threaded build, where the collector differs. A
+  collection) restarts that count. `ROMP_GC_GEN2_THRESHOLD` sets it: a value
+  that is not an integer, or is above 2147483647 (the largest C int, the most
+  the collector takes), falls back to 100, said once and counted under
+  `errors` while the freeze is on; any other is floored at 10, so it can only
+  raise the trigger. It is not applied with the freeze off or on a
+  free-threaded build, whose collector differs. After setting it the kernel
+  reads the third threshold back, and where the collector does not keep the
+  value it puts the old one back and `gen2Threshold` stays `null`. That check
+  reads the stored value, not what the collector does with it, so the
+  free-threaded build stays excluded: it stores the value, but its collector
+  was not seen to follow it. A
   request that arrives during a reconcile waits that
   one collection. The idle boundary is the best moment for the frozen-heap
   walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an

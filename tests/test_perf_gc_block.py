@@ -30,7 +30,6 @@ import io
 import json
 import os
 import re
-import sys
 import sysconfig
 import tempfile
 import types
@@ -361,14 +360,32 @@ class _ThresholdGc:
         self.thresholds = tuple(t)
 
 
-_CLASSIC_GC = sys.version_info < (3, 14) and not sysconfig.get_config_var("Py_GIL_DISABLED")   # where the trigger is raised
+_FREE_THREADED = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))   # a build the trigger is never raised on
+
+
+def _collector_keeps_threshold2():
+    """Whether the raised trigger applies to the REAL collector here, asked of it the way apply_gen2_threshold asks: not a
+    free-threaded build, and a third threshold set reads back as set. The thresholds are put back as they were."""
+    if _FREE_THREADED:
+        return False
+    saved = gc.get_threshold()
+    try:
+        gc.set_threshold(saved[0], saved[1], saved[2] + 1)
+        return gc.get_threshold()[2] == saved[2] + 1
+    finally:
+        gc.set_threshold(*saved)
+
+
+_KEEPS_THRESHOLD2 = _collector_keeps_threshold2()
 
 
 class Gen2Trigger(unittest.TestCase):
     """(i) 2026-10-03: with the freeze on, main raises CPython's full-collection trigger through the kernel's wrapper. The
     block shows it twice: `thresholds` reads the collector itself, `freeze.gen2Threshold` what the controller set (None
     while the stock trigger stands). ROMP_GC_FREEZE=off makes no collector call, turning the controller off puts the stock
-    trigger back, and a failure is counted under freeze.errors, said once, and never raised into the boot."""
+    trigger back, and a failure is counted under freeze.errors, said once, and never raised into the boot. The cases on the
+    real collector expect the raise only where it keeps the value (asked of it, as the product asks); the rest drive a
+    stand-in collector, so they hold on any build that is not free-threaded."""
 
     def setUp(self):
         saved_t, saved_c, saved_e = gc.get_threshold(), km._GC_FREEZE, km._GC_FREEZE_ERRORS[0]
@@ -382,18 +399,20 @@ class Gen2Trigger(unittest.TestCase):
 
     def test_the_block_reads_the_raised_trigger_and_the_stock_one_after_the_turn_off(self):
         gc.set_threshold(self.t0, self.t1, 10)
+        stock = gc.get_threshold()[2]                              # read right after that set: 10 where the collector keeps the
+        #                                                            value, and whatever it reads instead where it does not
         km._GC_FREEZE = km.gcf.GcFreeze(enabled=True)             # the real collector, as the kernel builds it with the freeze on
-        want = km._GC_GEN2_THRESHOLD if _CLASSIC_GC else None
+        want = km._GC_GEN2_THRESHOLD if _KEEPS_THRESHOLD2 else None
         self.assertEqual(km._gc_gen2_apply(), want)
         g = km._PerfStats().snapshot()["gc"]
         self.assertEqual(g["freeze"]["gen2Threshold"], want, "the controller's trigger on /perf: %r" % g["freeze"])
-        self.assertEqual(g["thresholds"], [self.t0, self.t1, want if _CLASSIC_GC else 10],
-                         "the collector's own thresholds: the third raised, the first two kept")
+        self.assertEqual(g["thresholds"], [self.t0, self.t1, stock if want is None else want],
+                         "the collector's own thresholds: the third raised where it is kept, the first two kept")
         km._GC_FREEZE.enabled = False                              # the controller turned off: the stock trigger is back
         self.assertIsNone(km._gc_gen2_apply())
         g = km._PerfStats().snapshot()["gc"]
         self.assertIsNone(g["freeze"]["gen2Threshold"])
-        self.assertEqual(g["thresholds"], [self.t0, self.t1, 10])
+        self.assertEqual(g["thresholds"], [self.t0, self.t1, stock])
         self.assertEqual(km._GC_FREEZE_ERRORS[0], 0, "nothing raised along the way")
 
     def test_the_freeze_off_makes_no_collector_call(self):
@@ -404,9 +423,43 @@ class Gen2Trigger(unittest.TestCase):
         self.assertIsNone(km._GC_FREEZE.perf()["gen2Threshold"])
         on = _ThresholdGc((700, 10, 10))
         km._GC_FREEZE = km.gcf.GcFreeze(enabled=True, gc=on)       # the wrapper applies to the controller's own collector
-        self.assertEqual(km._gc_gen2_apply(), km._GC_GEN2_THRESHOLD if _CLASSIC_GC else None)
-        if _CLASSIC_GC:
+        self.assertEqual(km._gc_gen2_apply(), None if _FREE_THREADED else km._GC_GEN2_THRESHOLD)
+        if not _FREE_THREADED:
             self.assertEqual(on.thresholds, (700, 10, km._GC_GEN2_THRESHOLD), on.calls)
+
+    @unittest.skipIf(_FREE_THREADED, "the trigger is never raised on a free-threaded build")
+    def test_the_wrapper_applies_the_parsed_knob_not_the_default(self):
+        """Review 2026-10-03: main()'s wrapper hands the collector the knob's PARSED value (passing the default instead left
+        every other case green). A knob of 250, as ROMP_GC_GEN2_THRESHOLD=250 parses at import (tests/test_gc_freeze.py),
+        reaches the collector's third threshold."""
+        saved = km._GC_GEN2_THRESHOLD
+        self.addCleanup(setattr, km, "_GC_GEN2_THRESHOLD", saved)
+        km._GC_GEN2_THRESHOLD = 250
+        fake = _ThresholdGc((700, 10, 10))
+        km._GC_FREEZE = km.gcf.GcFreeze(enabled=True, gc=fake)
+        self.assertEqual(km._gc_gen2_apply(), 250)
+        self.assertEqual(fake.thresholds, (700, 10, 250), "the collector's third threshold is the knob's: %r" % (fake.calls,))
+        self.assertEqual(km._PerfStats().snapshot()["gc"]["freeze"]["gen2Threshold"], 250, "and /perf reads it")
+
+    @unittest.skipIf(_FREE_THREADED, "the trigger is never raised on a free-threaded build")
+    def test_a_set_the_collector_refuses_records_no_trigger_and_is_counted(self):
+        """Review 2026-10-03: the trigger is recorded only once the collector holds it. A collector whose set raises (the real
+        one raises past a C int), through the kernel's wrapper: /perf's gen2Threshold stays null, the thresholds are what
+        they were, and the failure is counted once and said once (recording first had /perf name a trigger never set)."""
+        class _RefusingGc(_ThresholdGc):
+            def set_threshold(self, *t):
+                self.calls.append(("set_threshold",) + t)
+                raise OverflowError("synthetic: the collector refuses the value")
+        fake = _RefusingGc((700, 10, 10))
+        km._GC_FREEZE = km.gcf.GcFreeze(enabled=True, gc=fake)
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertIsNone(km._gc_gen2_apply(), "a refused set leaves the stock trigger and returns None")
+        g = km._PerfStats().snapshot()["gc"]
+        self.assertIsNone(g["freeze"]["gen2Threshold"], "no trigger recorded for a set that failed: %r" % g["freeze"])
+        self.assertEqual(fake.thresholds, (700, 10, 10), "the collector's thresholds unchanged: %r" % (fake.calls,))
+        self.assertEqual(g["freeze"]["errors"], 1, "counted once under gc.freeze.errors")
+        self.assertEqual(len(err.getvalue().splitlines()), 1, err.getvalue())
 
     def test_a_failure_is_counted_said_and_never_raised(self):
         class _Unreadable:                                         # a controller whose state cannot be read, on any interpreter

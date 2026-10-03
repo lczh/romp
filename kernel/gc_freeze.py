@@ -16,11 +16,13 @@ Two operations, both at the end of a pusher cycle and keyed on events (never a t
     Keyed on the record cache's insert counter growing by a material number of trees, on ANY cycle but
     the boot's first, busy or idle (2026-09-28). It used to wait for an idle cycle, and a pusher that
     almost never idles then almost never folded in: everything loaded after the last freeze stayed in
-    the walk of every automatic full collection. Those come often after a freeze, since CPython's
-    trigger (promoted objects reaching a quarter of the oldest generation's size at the last full
-    collection) counts only unfrozen objects once one full collection has run, so each walked every
-    post-freeze load again, a pause that grew with the load. A busy fold-in walks those same unfrozen
-    objects once and takes them out. The initial freeze likewise waits for no idle cycle: the first
+    the walk of every automatic full collection. CPython's trigger for one has two conditions (THE
+    FULL-COLLECTION TRIGGER, below): more than `threshold2` generation-one collections since the last
+    full collection, and the objects promoted since reaching a quarter of what survived it. Once one
+    full collection has run after a freeze, the quarter counts only unfrozen objects and passes, so the
+    count decides; at the stock threshold2 those came often, and each walked every post-freeze load
+    again, a pause that grew with the load. A busy fold-in walks those same unfrozen objects once and
+    takes them out. The initial freeze likewise waits for no idle cycle: the first
     cycle after the boot's first with anything loaded makes it, so a pusher that never idles still freezes.
   - a RELEASE reclaim (up to the full pause), at the pusher's IDLE boundary only, where the frozen-heap
     walk is paid with no browser waiting. STAGED: `gc.collect()` with the freeze IN PLACE first (cheap,
@@ -71,17 +73,18 @@ it kept and the freeze after it leaves that count alone, so the quarter test hol
 each fold-in; on a loaded kernel most
 full collections are still the automatic ones, which /perf tells apart: gc.gen."2".collections less
 gc.freeze.collections.) So while the freeze is on, main() raises threshold2 to `DEFAULT_GEN2_THRESHOLD`
-(`ROMP_GC_GEN2_THRESHOLD`, floored at the stock 10, so the knob can only raise it): at most one automatic full
-collection per 101 generation-one collections, and each controller run (a fold-in, a release, a backstop: each a full
-collection) restarts that count. Young cycles are still taken by generations zero and one at the stock rate. Not applied
-with the freeze off (the measurement switch measures stock CPython), on 3.14 and later (an incremental collector there,
-which uses the thresholds differently; not verified against it), or on a free-threaded build (a different collector).
-Calling apply_gen2_threshold again with the controller disabled puts back the value it replaced; nothing in the kernel
-makes that call after boot today.
+(`ROMP_GC_GEN2_THRESHOLD`, floored at the stock 10, and a value past the C int the collector takes falls back to the
+default, so the knob can only raise it): at most one automatic full collection per 101 generation-one collections, and
+each controller run (a fold-in, a release, a backstop: each a full collection) restarts that count. Young cycles are
+still taken by generations zero and one at the stock rate. Not applied with the freeze off (the measurement switch
+measures stock CPython) or on a free-threaded build (a different collector), and declined where the collector does not
+keep the value: the third threshold is read back after the set, and if it does not read the new value the replaced one
+is put back and the stock trigger stands (apply_gen2_threshold says what that check can and cannot see). Calling
+apply_gen2_threshold again with the controller disabled puts back the value it replaced; nothing in the kernel makes
+that call after boot today.
 """
 import gc as _gc_mod
 import os
-import sys
 import sysconfig
 import threading
 import time
@@ -96,7 +99,7 @@ DEFAULT_BACKSTOP_FOLDINS = 1000  # a reclaim after this many load fold-ins since
 DEFAULT_GEN2_THRESHOLD = 100    # CPython's threshold2 while the freeze is on (stock 10): an automatic full collection at most
 #                                  every 101 generation-one collections since the last full one, controller runs included
 MIN_GEN2_THRESHOLD = 10          # the stock value: the knob can only raise the trigger, never make full collections more frequent
-GEN2_BEFORE = (3, 14)            # 3.14 and later run an incremental collector that uses the thresholds differently: not applied
+MAX_GEN2_THRESHOLD = 2147483647  # the largest C int, the most gc.set_threshold takes: a knob past it falls back to the default
 _OFF = ("off", "0", "false")
 
 
@@ -123,8 +126,9 @@ def load_trees_from_env(env=None):
 
 def gen2_threshold_from_env(env=None):
     """(threshold, bad_raw): the ROMP_GC_GEN2_THRESHOLD knob, parsed like `load_trees_from_env`: a value that is not an
-    integer falls back to DEFAULT_GEN2_THRESHOLD and comes back as `bad_raw` (the caller says it once and counts it), and
-    any integer is floored at MIN_GEN2_THRESHOLD, the stock value, so the knob can only raise the trigger."""
+    integer, or is above MAX_GEN2_THRESHOLD (the largest C int, the most gc.set_threshold takes, which raises past it),
+    falls back to DEFAULT_GEN2_THRESHOLD and comes back as `bad_raw` (the caller says it once and counts it), and any
+    other integer is floored at MIN_GEN2_THRESHOLD, the stock value, so the knob can only raise the trigger."""
     raw = (env if env is not None else os.environ).get("ROMP_GC_GEN2_THRESHOLD")
     if raw is None or raw.strip() == "":
         return DEFAULT_GEN2_THRESHOLD, None
@@ -132,18 +136,25 @@ def gen2_threshold_from_env(env=None):
         n = int(raw.strip())
     except (TypeError, ValueError):
         return DEFAULT_GEN2_THRESHOLD, raw
+    if n > MAX_GEN2_THRESHOLD:
+        return DEFAULT_GEN2_THRESHOLD, raw
     return max(MIN_GEN2_THRESHOLD, n), None
 
 
-def apply_gen2_threshold(controller, value=DEFAULT_GEN2_THRESHOLD, gc=None, version=None, free_threaded=None):
+def apply_gen2_threshold(controller, value=DEFAULT_GEN2_THRESHOLD, gc=None, free_threaded=None):
     """Set CPython's full-collection trigger (threshold2, the third value of `gc.set_threshold`) from the controller's
-    state, and return the trigger now applied, or None when the stock one stands. With the controller ENABLED on a
-    classic collector (before 3.14, not free-threaded) it keeps the first two thresholds and sets the third to `value`
-    (floored at MIN_GEN2_THRESHOLD), remembering the value it replaced. With the controller DISABLED it changes nothing,
-    unless this function raised the trigger earlier: then it puts back the value it replaced, provided the trigger still
-    reads what it set (a value someone set since is theirs, and stays). A disabled controller that never raised it makes
-    no collector call at all, so ROMP_GC_FREEZE=off leaves the stock thresholds. `gc` defaults to the controller's own
-    collector; `version` and `free_threaded` default to this interpreter's (injected so a test pins every gate)."""
+    state, and return the trigger this call set, or None when it set none. With the controller ENABLED on a build that
+    is not free-threaded it keeps the first two thresholds, sets the third to `value` (floored at MIN_GEN2_THRESHOLD)
+    and reads the third back: only once it reads what was set are the trigger and the value it replaced recorded. If it
+    reads anything else, the collector does not keep the value (some interpreters read it back as 0 after any set), so the
+    replaced value is put back, nothing is recorded, and /perf's gen2Threshold stays null. That check reads the STORED
+    value, not the collector's behavior: a free-threaded build stores the raised value, yet a probe there ran no
+    automatic full collection at either setting, so a read-back cannot say whether the value is honored there, and the
+    free-threaded gate stays. With the controller DISABLED it changes nothing, unless this function raised the trigger
+    earlier: then it puts back the value it replaced, provided the trigger still reads what it set (a value someone set
+    since is theirs, and stays). A disabled controller that never raised it makes no collector call at all, so
+    ROMP_GC_FREEZE=off leaves the stock thresholds. `gc` defaults to the controller's own collector; `free_threaded`
+    defaults to this interpreter's build (injected so a test pins the gate)."""
     gc = controller._gc if gc is None else gc
     applied = controller.gen2_threshold
     if not controller.enabled:
@@ -153,16 +164,18 @@ def apply_gen2_threshold(controller, value=DEFAULT_GEN2_THRESHOLD, gc=None, vers
                 gc.set_threshold(t0, t1, controller.gen2_replaced)
             controller.gen2_threshold = None
         return None
-    v = tuple(version if version is not None else sys.version_info)[:2]
     if free_threaded is None:
         free_threaded = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
-    if v >= GEN2_BEFORE or free_threaded:
+    if free_threaded:
         return None
     n = max(MIN_GEN2_THRESHOLD, int(value))
     t0, t1, t2 = gc.get_threshold()
+    gc.set_threshold(t0, t1, n)
+    if gc.get_threshold()[2] != n:               # the collector did not keep it: the replaced value back, nothing recorded
+        gc.set_threshold(t0, t1, t2)
+        return None
     if applied is None:
         controller.gen2_replaced = t2            # the stock value, put back if the controller is turned off
-    gc.set_threshold(t0, t1, n)
     controller.gen2_threshold = n
     return n
 

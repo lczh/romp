@@ -153,6 +153,7 @@ os.environ["ROMP_GC_FREEZE"] = "off"   # #1735: the freeze off in the suite, the
 #                                        never freezes the test interpreter's heap; the freeze's tests drive the controller directly
 os.environ.pop("ROMP_RECORD_CACHE_DECODED_MULTIPLE", None)   # the record cache's budget knobs unset, the twin of conftest.py's lines
 os.environ.pop("ROMP_RECORD_CACHE_BUDGET_MB", None)          #  (2026-10-01): an exported multiple or budget moves every budget fixture
+os.environ.pop("ROMP_GC_GEN2_THRESHOLD", None)   # the full-collection trigger's knob unset, the twin of conftest.py's line (2026-10-03)
 
 # `from romp_load import load_source` in a test module (tests/romp_load.py): under pytest and
 # `python -m unittest tests.test_x` the test modules are imported as members of this package, so the

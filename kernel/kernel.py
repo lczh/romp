@@ -1286,11 +1286,13 @@ if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell b
         pass
 _GC_GEN2_THRESHOLD, _gc_gen2_bad_knob = gcf.gen2_threshold_from_env()   # the full-collection trigger while the freeze is on;
 #                                                                          parsed here, APPLIED in main() (_gc_gen2_apply)
-if _gc_gen2_bad_knob is not None:       # a bad ROMP_GC_GEN2_THRESHOLD fell back to the default: said once, counted, never fatal
+if _gc_gen2_bad_knob is not None and _GC_FREEZE.enabled:   # a bad ROMP_GC_GEN2_THRESHOLD fell back to the default: said
+    #                                                          once, counted, never fatal; only with the freeze on, the one
+    #                                                          case main() applies a trigger (off, no value is used at all)
     _GC_FREEZE_ERRORS[0] += 1
     try:
-        sys.stderr.write("gc-freeze: ROMP_GC_GEN2_THRESHOLD=%r is not an integer; using the default %d\n"
-                         % (_gc_gen2_bad_knob[:80], gcf.DEFAULT_GEN2_THRESHOLD))
+        sys.stderr.write("gc-freeze: ROMP_GC_GEN2_THRESHOLD=%r is not an integer of at most %d; using the default %d\n"
+                         % (_gc_gen2_bad_knob[:80], gcf.MAX_GEN2_THRESHOLD, gcf.DEFAULT_GEN2_THRESHOLD))
     except Exception:
         pass
 
