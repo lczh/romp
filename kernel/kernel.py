@@ -18248,11 +18248,12 @@ def _seed_fork_stores(parent_sid, sid, path, cut_uuid):
     Returns an error string (the fork is aborted) or None — a fork without this seeding re-judges the
     whole copied history, so failing loudly beats creating it unprotected."""
     try:
-        cands = [path]
-        anchor = os.path.join(os.path.dirname(path), parent_sid + ".jsonl")
-        if os.path.basename(path) != parent_sid + ".jsonl" and os.path.exists(anchor):
-            cands.append(anchor)
+        cands = jd._judge_candidates(parent_sid, [path])   # the parse's own candidates: a /clear's leaf alone (2026-10-03)
         ad = em.FileAdapter(cands, path)
+        if cut_uuid and cut_uuid not in ad.by_uuid and len(cands) == 1:   # a named cut the leaf's own graph does not hold: the
+            anchor = os.path.join(os.path.dirname(path), parent_sid + ".jsonl")   # anchor's records too, read as they always were,
+            if os.path.basename(path) != parent_sid + ".jsonl" and os.path.exists(anchor):   # so the answer for it stands
+                ad = em.FileAdapter([path, anchor], path)
         u, root, hops = ad.leaf_uuid, None, 0
         while u is not None and hops < 500000:          # active chain leaf → oldest record = the root
             root = u
@@ -18452,28 +18453,44 @@ def _comment_prose_record(r):
     return has_text and not has_call
 
 
-def _anchor_adapter(path, sid):
+def _anchor_adapter(path, sid, need=None):
     """A FileAdapter over the session's whole STITCHED transcript chain — the same candidate set +
     resume-fork lineage parse_session resolves: the current leaf, the romp-sid anchor file, and
     every resumed-from file in the states lineage closure, re-chained into one walkable graph. The
     rewind/comment anchor resolvers used a bare two-file adapter, so any message the CHAT was
     showing through the stitch read as 'not in the transcript' (the user 2026-08-15, commenting on
-    a session whose history crossed a machine-cut resume fork)."""
+    a session whose history crossed a machine-cut resume fork).
+
+    With `need` (the uuid a gesture resolves) the adapter is built over the parse's own candidates
+    first (jd._judge_candidates: a /clear's leaf alone, 2026-10-03) and widened to the anchor file only
+    when `need` is not in that graph, so an edit or a comment on the conversation reads no pre-clear
+    file while a target from before the clear still gets the answer it always got (the seam refusal,
+    the tip fork). Without `need`, the wide set, as before."""
+    states = jd.STATE / "states" / (sid + ".jsonl")
+    links = em.resume_fork_links(em._load_states(str(states)) if states.exists() else [])
+
+    def closed(cands):
+        cands = list(cands)
+        if links:
+            have = {os.path.splitext(os.path.basename(f))[0] for f in cands}
+            stem, hops = os.path.splitext(os.path.basename(path))[0], 0
+            while stem in links and hops < 16:
+                stem = links[stem]; hops += 1
+                fp = os.path.join(os.path.dirname(path), stem + ".jsonl")
+                if stem not in have and os.path.exists(fp):
+                    cands.append(fp); have.add(stem)
+        return cands
     cands = [path]
     anchor = os.path.join(os.path.dirname(path), sid + ".jsonl")
     if os.path.basename(path) != sid + ".jsonl" and os.path.exists(anchor):
         cands.append(anchor)
-    states = jd.STATE / "states" / (sid + ".jsonl")
-    links = em.resume_fork_links(em._load_states(str(states)) if states.exists() else [])
-    if links:
-        have = {os.path.splitext(os.path.basename(f))[0] for f in cands}
-        stem, hops = os.path.splitext(os.path.basename(path))[0], 0
-        while stem in links and hops < 16:
-            stem = links[stem]; hops += 1
-            fp = os.path.join(os.path.dirname(path), stem + ".jsonl")
-            if stem not in have and os.path.exists(fp):
-                cands.append(fp); have.add(stem)
-    return em.FileAdapter(cands, path, resume_links=links)
+    if need is not None:
+        narrow = jd._judge_candidates(sid, [path])
+        if len(narrow) < len(cands):                   # the anchor is left out of the parse: try the leaf's own graph first
+            ad = em.FileAdapter(closed(narrow), path, resume_links=links)
+            if need in ad.by_uuid:
+                return ad
+    return em.FileAdapter(closed(cands), path, resume_links=links)
 
 
 def _comment_cut_target(path, sid, anchor_uuid):
@@ -18709,7 +18726,7 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     got = _comment_cut_from_parse(path, sid, anchor_uuid)
     if got is not None:
         return got
-    return _comment_cut_walk(em.TranscriptGraph(_anchor_adapter(path, sid)), path, anchor_uuid)
+    return _comment_cut_walk(em.TranscriptGraph(_anchor_adapter(path, sid, need=anchor_uuid)), path, anchor_uuid)
 
 
 def _comment_cut_walk(g, path, anchor_uuid):
@@ -33136,6 +33153,22 @@ def _orphan_replies(sid):
     #                                                                                  all five; oldest first
 
 
+def _conversation_floored(sid, path, rows):
+    """`rows` (durable salvaged-reply markers, oldest first) less those stamped before the conversation the live leaf's parse
+    reads begins (jd.conversation_floor, the floor parse_session puts under the same markers), the whole second kept. A /clear's
+    leaf parses without the pre-clear file since 2026-10-03, so the parse's landed-text uuids no longer hold the replies that
+    landed there, and a pre-clear marker would ghost back into the new conversation's top wherever the episode log has no
+    boundary row for the T131 floor (a session first observed after its clear). A no-op for a session whose first file the
+    parse reads, and no read at all with no marker to floor."""
+    if not rows:
+        return rows
+    c0 = jd.conversation_floor(sid, path)
+    if c0 is None:
+        return rows
+    floor = int(c0)
+    return [r for r in rows if (r.get("t") or 0) >= floor]
+
+
 def _effort_changes(sid):
     """Durable effort-applied markers from states/<sid>.jsonl — {"t":…,"effortApplied":"high"} lines the SDK
     backend writes when an /effort reconnect lands (append_effort_applied). Returns [{"t":epoch,"effort":str}, …]
@@ -37168,10 +37201,11 @@ def _parse(path, sid, now):
     # T323 stage 2 (2026-09-11): ONE parse for the kernel and the judges. jd.parsed_session keys on the same facts this
     # function keyed on (the transcript's and the states file's stat pair, the pending cut it reads through the provider
     # this kernel installs, sdk_human through the owner hook) and expands the same candidate set (the leaf plus the
-    # session's anchor file), so the tree it returns is the tree the judges walk: parsed once per file version, held
-    # once. The old per-path cache is a view over that store (_SharedParseView). The store's slot carries the leaf, so
-    # a parse of another transcript under this sid (a subagent viewer's agent file, an episode's transcript: build_session
-    # with path_override hands it here as sess["path"]) sits beside the live leaf's tree rather than evicting it.
+    # session's anchor file when the parse can reach it: jd._judge_candidates), so the tree it returns is the tree the
+    # judges walk: parsed once per file version, held once. The old per-path cache is a view over that store
+    # (_SharedParseView). The store's slot carries the leaf, so a parse of another transcript under this sid (a subagent
+    # viewer's agent file, an episode's transcript: build_session with path_override hands it here as sess["path"]) sits
+    # beside the live leaf's tree rather than evicting it.
     _mode, stats = [], {}
     states = str(jd.STATE / "states" / (sid + ".jsonl"))   # the kernel's states log path (the judges default to the same file)
     session = jd.parsed_session(sid, [path], now, asm_mode_out=_mode, stats=stats, states=states,
@@ -37214,7 +37248,7 @@ def _rewind_target(path, sid, user_uuid):
     2026-07-16), and have a real message ancestor (the conversation's first message has nothing
     before it to rewind to). Validating HERE keeps the backend's failure path (a refused reconnect)
     for genuine races only."""
-    ad = _anchor_adapter(path, sid)      # the STITCHED chain — a bare two-file adapter read any
+    ad = _anchor_adapter(path, sid, need=user_uuid)   # the STITCHED chain — a bare two-file adapter read any
     #                                      message shown through a restart-seam stitch as missing
     if user_uuid not in ad.by_uuid:
         return None, "that message isn't in the transcript yet; try again in a moment"
@@ -37484,10 +37518,7 @@ def _rewind_kept_uuids(sid):
             _rewind_kept_complain(sid, "no transcript to read the kept chain from — the rewind sweep "
                                        "degrades to the pure t-keyed selection (pre-fix behavior)")
             return None
-        cands = [sess["path"]]
-        anchor = os.path.join(os.path.dirname(sess["path"]), sid + ".jsonl")
-        if os.path.basename(sess["path"]) != sid + ".jsonl" and os.path.exists(anchor):
-            cands.append(anchor)
+        cands = jd._judge_candidates(sid, [sess["path"]])   # the display parse's own candidates (a /clear's leaf alone)
         states = jd.STATESDIR / (sid + ".jsonl")
         cut = ""
         be = _sdk()
@@ -37597,10 +37628,7 @@ def _hold_leaf_still_active(sid, leaf):
     if not sess or not leaf:
         return None                                    # no transcript to consult → unprovable
     try:
-        cands = [sess["path"]]
-        anchor = os.path.join(os.path.dirname(sess["path"]), sid + ".jsonl")
-        if os.path.basename(sess["path"]) != sid + ".jsonl" and os.path.exists(anchor):
-            cands.append(anchor)
+        cands = jd._judge_candidates(sid, [sess["path"]])   # the display parse's own candidates (a /clear's leaf alone)
         states = jd.STATESDIR / (sid + ".jsonl")
         mem = em.chain_membership(sess["path"], candidate_files=cands,
                                   states=str(states) if states.exists() else None)
@@ -42299,6 +42327,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # retry that re-replied must not double. Match exact, and either-way prefix (a partial stream vs its full
     # retry). NB: build the disk-text set from the SAME session["turns"] atoms this loop renders.
     orphans = _past_floor(_orphan_replies(sid)); _oi = 0
+    if not path_override and thread_cut is None:
+        orphans = _conversation_floored(sid, sess["path"], orphans)   # and never before the parse's own first record (2026-10-03)
     if sidechain:
         # a subagent's transcript carries none of the parent's side-store notes (see the docstring)
         recoveries, gaveups, efforts, gestures, orphans = [], [], [], [], []

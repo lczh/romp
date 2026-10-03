@@ -5118,8 +5118,9 @@ def rewound_uuids(path, drop=True):
     such and walked again next time. The leaf road with a rompuuid never comes here.
 
     `drop`: whether the walk's entry leaves the reader's cache after the memo is stored (the quiescence drop, when the file
-    has been idle past its window). True for a dead episode's file, which nothing else reads; False for a file of a LIVE
-    session's lineage (its /clear anchor, T391 round one, medium): the chain walk reads that file whole first at every pass,
+    has been idle past its window). True for a dead episode's file, which nothing else reads, and for a /clear's anchor, which
+    no parse reads since 2026-10-03; False for a file of a LIVE session's lineage (an anchor its parse reaches, T391 round
+    one, medium): the chain walk reads that file whole first at every pass,
     and a memo that popped the entry made the next pass's chain walk read it whole again, every pass, while the memo itself
     found its cursor at a moved generation and walked. Resident, the anchor is read once per process and the memo's cursor
     stays at the generation the chain walk's entry holds, so the scan reads nothing at all.
@@ -6840,9 +6841,10 @@ def _asm_refusal_stands(leaf_path):
 def asm_document_seeds(leaf_path):
     """Whether the assembly document for `leaf_path` can SEED a one-file walk of the leaf: its inputs are the leaf alone. Read
     from the sidecar's `files` (a few bytes, never the document); a sidecar without the list (an older write) answers as
-    asm_document_stands does, and the next write adds it. A cleared or resume-forked session's document is written over the
-    leaf plus its lineage, so file_rewound's load refused it on the inputs comparison and the leaf was read whole at every
-    process (T391 follow-up, round one, low 1): such a leaf takes the memo road."""
+    asm_document_stands does, and the next write adds it. A back-linked or resume-forked session's document is written over
+    the leaf plus its lineage, so file_rewound's load refused it on the inputs comparison and the leaf was read whole at every
+    process (T391 follow-up, round one, low 1): such a leaf takes the memo road. A /clear's leaf documents alone since
+    2026-10-03 (judge _judge_candidates), and takes the seeded leaf road."""
     if not asm_document_stands(leaf_path):
         return False
     cp = _asm_ckpt_file(leaf_path)
@@ -8848,7 +8850,10 @@ def _file_head_t(path):
         _count_read(str(path), n)
     if t is not None:
         if len(_FILE_HEAD_T) >= _FILE_HEAD_T_MAX:
-            _FILE_HEAD_T.pop(next(iter(_FILE_HEAD_T)), None)
+            try:
+                _FILE_HEAD_T.pop(next(iter(_FILE_HEAD_T)), None)   # the oldest entry; a racing writer's resize is harmless
+            except (StopIteration, RuntimeError):
+                pass
         _FILE_HEAD_T[key] = t
     return t
 

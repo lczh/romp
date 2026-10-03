@@ -9,7 +9,10 @@ the timeline drew the anchor's unsettled tail as an ever-growing work bar. Now t
 PATH follows lastSid (the sid stays stable — goals/captions/chat key on it), the discover
 fingerprint signs the lastSid VALUE (a registry rewrite alone must bust the cache), and the parse
 wrappers put the anchor file among the candidates so a resume-style fork that back-links across
-files keeps its history while a /clear fork (parentUuid null) starts fresh.
+files keeps its history while a /clear fork (parentUuid null) starts fresh. Since 2026-10-03 the
+anchor joins only when the parse can reach it (a back-linked head, a resume lineage through it, or
+no head to tell by yet): a /clear's leaf parses alone, reading no byte of the pre-clear file, with
+every turn, segment and verdict of the two-file parse.
 
 All fixtures are SYNTHETIC (invented text, placeholder UUIDs, hostname TESTHOST).
 """
@@ -30,6 +33,7 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+em = jd.em
 
 SID = "11111111-2222-3333-4444-555555555555"
 FORK = "66666666-7777-8888-9999-aaaaaaaaaaaa"
@@ -143,15 +147,157 @@ class ForkParseCandidates(SdkClearForkBase):
         self.assertNotIn("pre-clear", texts, "/clear cut the chain — the transcript reads brand-new")
 
     def test_a_resume_style_fork_that_backlinks_keeps_its_history(self):
-        self._write(SID, self._anchor_records())
+        anchor = self._write(SID, self._anchor_records())
         # the fork's head links to a1 IN THE ANCHOR FILE — the walk must cross files via the
         # anchor-sibling candidate parsed_session adds on its own
         leaf = self._write(FORK, [uline(self.now - 60, "post-resume ask", "u9", parent="a1"),
                                   aline(self.now - 55, "post-resume reply", "a9", parent="u9")])
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf), str(anchor)],
+                         "a head that links back keeps the anchor, in the order it always had")
         session = jd.parsed_session(SID, [str(leaf)], self.now)
         texts = self._texts(session)
         self.assertIn("post-resume ask", texts)
         self.assertIn("pre-clear ask", texts, "cross-file resume chain keeps pre-fork history")
+
+    # ── the anchor only when the parse can reach it (2026-10-03) ──
+    def _states(self, rows):
+        jd.STATESDIR.mkdir(parents=True, exist_ok=True)
+        p = jd.STATESDIR / (SID + ".jsonl")
+        p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        return p
+
+    def _closure(self, leaf, cands):
+        links = em.resume_fork_links(em._load_states(str(jd.STATESDIR / (SID + ".jsonl"))))
+        return em._lineage_closure(Path(leaf), cands, links)
+
+    def test_a_clear_fork_leaves_the_anchor_out_of_the_candidates(self):
+        self._write(SID, self._anchor_records())
+        leaf = self._write(FORK, [uline(self.now - 60, "post-clear fresh ask", "u9"),
+                                  aline(self.now - 55, "post-clear reply", "a9", parent="u9")])
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf)],
+                         "a parentless head no resume lineage runs through: the anchor is unreachable")
+
+    def test_a_clear_fork_parse_reads_no_byte_of_the_anchor(self):
+        anchor = self._write(SID, self._anchor_records())
+        leaf = self._write(FORK, [uline(self.now - 60, "post-clear fresh ask", "u9"),
+                                  aline(self.now - 55, "post-clear reply", "a9", parent="u9")])
+        with em._JSONL_CACHE_LOCK:
+            em._JSONL_CACHE.pop(str(anchor), None)
+        with em._READ_BYTES_LOCK:
+            em._READ_BYTES.pop(str(anchor), None)
+        session = jd.parsed_session(SID, [str(leaf)], self.now)
+        mem = jd._chain_membership(SID, str(leaf), "")
+        self.assertIn("post-clear fresh ask", self._texts(session))
+        self.assertIn("u9", mem["kept"])
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(str(anchor), 0), 0, "neither the parse nor the chain walk read the anchor")
+        with em._JSONL_CACHE_LOCK:
+            self.assertNotIn(str(anchor), em._JSONL_CACHE, "and no record of it is resident")
+
+    def test_a_two_hop_resume_lineage_keeps_the_anchor_in_its_place(self):
+        # anchor -> L1 -> L2 by recorded resume forks, every head fresh: the anchor IS the conversation's start, so it stays a
+        # candidate right after the leaf and the closure appends L1 after it, exactly as before
+        anchor = self._write(SID, self._anchor_records())
+        l1, l2 = "66666666-7777-8888-9999-aaaaaaaaaab1", "66666666-7777-8888-9999-aaaaaaaaaab2"
+        p1 = self._write(l1, [uline(self.now - 300, "first resumed ask", "r1u"),
+                              aline(self.now - 295, "first resumed reply", "r1a", parent="r1u")])
+        p2 = self._write(l2, [uline(self.now - 60, "second resumed ask", "r2u"),
+                              aline(self.now - 55, "second resumed reply", "r2a", parent="r2u")])
+        self._states([{"t": self.now - 310, "resumeFork": {"from": SID, "to": l1}},
+                      {"t": self.now - 70, "resumeFork": {"from": l1, "to": l2}}])
+        cands = jd._judge_candidates(SID, [str(p2)])
+        self.assertEqual(cands, [str(p2), str(anchor)])
+        self.assertEqual(self._closure(p2, cands), [str(p2), str(anchor), str(p1)], "the closure's order, as before")
+        texts = self._texts(jd.parsed_session(SID, [str(p2)], self.now))
+        for t in ("pre-clear ask about the widget", "first resumed ask", "second resumed ask"):
+            self.assertIn(t, texts, "the stitched history holds every hop")
+
+    def test_a_resume_after_a_clear_leaves_the_anchor_out(self):
+        # the anchor, a /clear to L1 (no lineage row: a fresh conversation), then a resume fork L1 -> L2: the conversation
+        # starts at L1's parentless head
+        self._write(SID, self._anchor_records())
+        l1, l2 = "66666666-7777-8888-9999-aaaaaaaaaac1", "66666666-7777-8888-9999-aaaaaaaaaac2"
+        p1 = self._write(l1, [uline(self.now - 300, "post-clear ask", "c1u"),
+                              aline(self.now - 295, "post-clear reply", "c1a", parent="c1u")])
+        p2 = self._write(l2, [uline(self.now - 60, "resumed after the clear", "c2u"),
+                              aline(self.now - 55, "resumed reply", "c2a", parent="c2u")])
+        self._states([{"t": self.now - 70, "resumeFork": {"from": l1, "to": l2}}])
+        cands = jd._judge_candidates(SID, [str(p2)])
+        self.assertEqual(cands, [str(p2)])
+        self.assertEqual(self._closure(p2, cands), [str(p2), str(p1)])
+        texts = self._texts(jd.parsed_session(SID, [str(p2)], self.now))
+        self.assertIn("post-clear ask", texts, "the resume stitch still crosses into L1")
+        self.assertNotIn("widget", texts)
+
+    def test_a_leaf_with_no_record_yet_keeps_the_anchor(self):
+        # the registry names the new file a beat before the CLI writes its first record: nothing to prove the head by
+        anchor = self._write(SID, self._anchor_records())
+        leaf = self.proj / (FORK + ".jsonl")
+        leaf.write_text(json.dumps({"type": "queue-operation", "operation": "enqueue", "timestamp": iso(self.now)}) + "\n")
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf), str(anchor)])
+        leaf.write_text("")
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf), str(anchor)], "an empty file too")
+
+    def test_a_leaf_whose_head_stamp_does_not_parse_keeps_the_anchor(self):
+        anchor = self._write(SID, self._anchor_records())
+        head = uline(self.now - 60, "post-clear ask with a broken stamp", "u9")
+        head["timestamp"] = "not-a-timestamp"
+        leaf = self._write(FORK, [head, aline(self.now - 55, "reply", "a9", parent="u9")])
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf), str(anchor)])
+
+    def test_a_clear_fork_parses_the_same_with_and_without_the_anchor(self):
+        """The parity guard: for a /clear's leaf every turn id, segment id, atom and verdict the two-file parse gave is the
+        one the leaf-alone parse gives. The anchor holds a rewound branch, a compaction and a parallel tool batch; the leaf
+        has its own of each."""
+        def batch(tag, t, parent):
+            def call(n, cmd, par):
+                return {"type": "assistant", "timestamp": iso(t), "uuid": "%sc%d" % (tag, n), "parentUuid": par,
+                        "message": {"id": "msg_" + tag, "role": "assistant", "stop_reason": "tool_use",
+                                    "content": [{"type": "tool_use", "id": "tu_%s%d" % (tag, n), "name": "Bash",
+                                                 "input": {"command": cmd}}]}}
+
+            def res(n, out):
+                return {"type": "user", "timestamp": iso(t + 1 + n), "uuid": "%sr%d" % (tag, n), "parentUuid": "%sc%d" % (tag, n),
+                        "sourceToolAssistantUUID": "%sc%d" % (tag, n),
+                        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_%s%d" % (tag, n),
+                                                                 "content": out}]}}
+            return [call(1, "ls notes_api", parent), call(2, "pwd", tag + "c1"), res(1, "notes.py"), res(2, "/w/notes-api"),
+                    aline(t + 5, "Both checks ran.", tag + "done", parent=tag + "r2")]
+
+        def body(tag, t0):
+            recs = [uline(t0, "list the notes-api files", tag + "u1"),
+                    aline(t0 + 5, "Listing them.", tag + "a1", parent=tag + "u1"),
+                    uline(t0 + 10, "and the routes too", tag + "u2", tag + "a1"),          # rewound away below
+                    aline(t0 + 15, "Routes listed.", tag + "a2", parent=tag + "u2"),
+                    uline(t0 + 20, "no, the models instead", tag + "u3", tag + "a1"),      # the rewind: u3 re-parents at a1
+                    aline(t0 + 25, "Models listed.", tag + "a3", parent=tag + "u3"),
+                    {"type": "system", "subtype": "compact_boundary", "timestamp": iso(t0 + 40), "uuid": tag + "cb",
+                     "parentUuid": None, "logicalParentUuid": tag + "a3",
+                     "compactMetadata": {"trigger": "manual", "preTokens": 9000}},
+                    uline(t0 + 50, "run both checks at once", tag + "u4", tag + "cb")]
+            return recs + batch(tag, t0 + 55, tag + "u4")
+        anchor = self._write(SID, body("x", self.now - 3000))
+        leaf = self._write(FORK, body("y", self.now - 600))
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+        two = em.parse_session(str(leaf), rompuuid=SID, candidate_files=[str(leaf), str(anchor)],
+                               states=str(jd.STATESDIR / (SID + ".jsonl")), postal_log=str(jd.MESSAGES), now=self.now,
+                               sdk_human=False)
+        two_m = em.chain_membership(str(leaf), candidate_files=[str(leaf), str(anchor)])
+        one = jd.parsed_session(SID, [str(leaf)], self.now)
+        one_m = jd._chain_membership(SID, str(leaf), "")
+
+        def shape(tree):
+            return ([t["id"] for t in tree["turns"]],
+                    [s["id"] for t in tree["turns"] for s in em.segments(t)],
+                    [a.get("uuid") for t in tree["turns"] for a in t["atoms"]])
+        self.assertEqual(shape(one), shape(two), "turn ids, segment ids and atoms are the two-file parse's")
+        self.assertIn("ydone", shape(one)[2], "premise: the leaf's batch reply is in the parse")
+        self.assertIn("yr1", shape(one)[2], "premise: the batch's first result is kept beside the spine")
+        leaf_uuids = {json.loads(ln)["uuid"] for ln in leaf.read_text().splitlines() if ln.strip()}
+        for k in ("rewind", "kept"):
+            self.assertEqual(set(one_m[k]) & leaf_uuids, set(two_m[k]) & leaf_uuids, k)
+        self.assertIn("yu2", one_m["rewind"], "premise: the leaf's own rewind is found")
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf)], "and the leaf-alone parse is the one compared")
 
 
 class KernelParseMirrors(unittest.TestCase):
@@ -162,6 +308,13 @@ class KernelParseMirrors(unittest.TestCase):
         self.assertIn('anchor = os.path.join(os.path.dirname(path), sid + ".jsonl")', src)
         self.assertIn('if os.path.basename(path) != sid + ".jsonl" and os.path.exists(anchor):', src)
         self.assertIn("candidate_files=cands", src)
+
+    def test_the_kernels_chain_checks_take_the_parses_own_candidates(self):
+        # the rewind hold's kept set and its spent-flag check walk the graph the display parse walks (2026-10-03: a /clear's
+        # leaf alone), and so does a fork's seeding, never a hand-built leaf-plus-anchor pair
+        src = (Path(BIN) / "romp-kernel").read_text()
+        self.assertEqual(src.count('cands = jd._judge_candidates(sid, [sess["path"]])'), 2)
+        self.assertIn("cands = jd._judge_candidates(parent_sid, [path])", src)
 
 
 if __name__ == "__main__":

@@ -276,5 +276,76 @@ class SalvageFloorAfterAClear(unittest.TestCase):
             self.assertEqual(self._salvaged(got), self._salvaged(ref), "%s: the floor changes nothing" % name)
 
 
+PSID = "5a1e0000-2222-4333-8444-000000000a01"     # private synthetic sids (the goal-store fixture rule: the planner run mints)
+PFORK = "5a1e0000-2222-4333-8444-000000000a02"
+PRE_TEXTS = ("how does the notes-api page its index?", "By cursor, fifty notes a page",
+             "A pre-clear reply that never reached the transcript.")
+
+
+class NoPreClearSalvageReachesTheJudges(unittest.TestCase):
+    """The judges' own road after a /clear (2026-10-03): jd.parsed_session hands the leaf alone to the parse (the anchor is
+    unreachable from a parentless head), and the floor keeps every pre-clear salvaged reply out of what the planner reads,
+    the one that landed in the pre-clear file included, so nothing from the cleared conversation is minted again."""
+
+    def setUp(self):
+        td = Path(tempfile.mkdtemp())
+        self.td = td
+        self.anchor, self.leaf = td / (PSID + ".jsonl"), td / (PFORK + ".jsonl")
+        self.anchor.write_text("\n".join(json.dumps(r) for r in [
+            {"type": "user", "timestamp": iso(T0), "uuid": "u_pre", "parentUuid": None, "promptSource": "typed",
+             "message": {"role": "user", "content": PRE_TEXTS[0]}},
+            {"type": "assistant", "timestamp": iso(T0 + 30), "uuid": "a_pre", "parentUuid": "u_pre",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "By cursor, fifty notes a page."}],
+                         "stop_reason": "end_turn"}}]) + "\n")
+        self.leaf.write_text("\n".join(json.dumps(r) for r in [
+            {"type": "user", "timestamp": iso(T0 + 600), "uuid": "u_post", "parentUuid": None, "promptSource": "typed",
+             "message": {"role": "user", "content": "now add a tags filter to the search route"}},
+            {"type": "assistant", "timestamp": iso(T0 + 660), "uuid": "a_post", "parentUuid": "u_post",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "Added the tags filter."}],
+                         "stop_reason": "end_turn"}}]) + "\n")
+        (td / "states").mkdir()
+        (td / "states" / (PSID + ".jsonl")).write_text("\n".join(json.dumps(m) for m in [
+            _marker(T0 + 30, "a_pre", "By cursor, fifty notes a page, the reply as it streamed."),
+            _marker(T0 + 40, "lost_pre", PRE_TEXTS[2]),
+            _marker(T0 + 650, "lost_post", "A post-clear reply that never reached the transcript.")]) + "\n")
+        saved = (jd.GOALDIR, jd.PCACHE, jd.STATESDIR, jd.plan_llm, jd.opener_llm, jd._group_store)
+        jd.GOALDIR, jd.PCACHE, jd.STATESDIR = td / "goals", td / "pcache", td / "states"
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+
+        def restore():
+            (jd.GOALDIR, jd.PCACHE, jd.STATESDIR, jd.plan_llm, jd.opener_llm, jd._group_store) = saved
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+            shutil.rmtree(td, ignore_errors=True)
+        self.addCleanup(restore)
+
+    @staticmethod
+    def _texts(tree):
+        return json.dumps([a.get("message") for t in tree["turns"] for a in t["atoms"]])
+
+    def test_the_judges_parse_of_a_cleared_session_holds_no_pre_clear_salvage(self):
+        texts = self._texts(jd.parsed_session(PSID, [str(self.leaf)], NOW))
+        for t in PRE_TEXTS:
+            self.assertNotIn(t, texts, "nothing of the cleared conversation: %r" % t)
+        self.assertIn("A post-clear reply that never reached the transcript.", texts, "the post-clear salvage stands")
+        self.assertEqual(jd._judge_candidates(PSID, [str(self.leaf)]), [str(self.leaf)], "the parse read the leaf alone")
+
+    def test_no_planner_call_sees_pre_clear_text_after_a_clear(self):
+        calls = []
+
+        def fake(text, *a, **k):
+            calls.append(text)
+            return '{"ops":[{"why":"asked for a filter","do":"mint","text":"Add a tags filter to the search route"}]}'
+        jd.plan_llm = jd.opener_llm = fake
+        jd._group_store = lambda *a, **k: None
+        jd._plan_session(PSID, str(self.leaf), NOW)
+        store = jd.load_goals(PSID)
+        self.assertTrue(any("tags filter" in c for c in calls), "premise: the planner read the post-clear conversation")
+        for c in calls:
+            for t in PRE_TEXTS:
+                self.assertNotIn(t, c, "a planner call carried pre-clear text: %r" % t)
+        self.assertFalse([nd for nd in store["nodes"].values() if nd.get("promptUuid") in ("u_pre", "a_pre", "lost_pre")],
+                         "no card anchored in the cleared conversation")
+
+
 if __name__ == "__main__":
     unittest.main()

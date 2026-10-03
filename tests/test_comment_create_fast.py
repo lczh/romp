@@ -758,14 +758,15 @@ class CutFromTheDisplayParse(Base):
         cur = self._seamed()
         self._two_creates_after_a_budget_eviction(cur, [cur, str(self.proj / (PARENT + ".jsonl"))], ("nr5", "oa10"))
 
-    def test_after_a_budget_eviction_a_clear_continuation_is_rebuilt_over_both_transcripts(self):
-        # after a /clear the leaf is a new transcript beside the session's first one, which the display parses with it (the
-        # anchor candidate); an entry the retry built over the leaf alone never matches the walk's candidates
+    def test_after_a_budget_eviction_a_clear_continuation_is_rebuilt_over_its_own_transcript(self):
+        # after a /clear the leaf is a new transcript beside the session's first one; its head has no parent, so the display
+        # parses it alone (2026-10-03: the first transcript is no candidate of a /clear's leaf), and the entry the retry
+        # rebuilds is over the leaf alone, matching the walk's candidates; the first transcript is read by neither
         old, _last, t = turns(self.now - 100000, 20, 20000)
         first = write(self.proj / (PARENT + ".jsonl"), old)
         new, _l2, _t2 = turns(t + 100, 10, 20000, parent=None, tag="c")
         leaf = write(self.proj / (CLEARED + ".jsonl"), new)
-        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf, first], "two files: the leaf and the first transcript")
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "one file: the /clear's leaf alone")
         self._two_creates_after_a_budget_eviction(leaf, [leaf, first], ("cr5", "ca7"))
 
     def _two_creates_after_a_budget_eviction(self, path, files, anchors):

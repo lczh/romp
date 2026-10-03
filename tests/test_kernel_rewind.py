@@ -115,6 +115,27 @@ class RewindTarget(unittest.TestCase):
         self.assertIsNone(target)
         self.assertIn("isn't in the transcript", err)
 
+    def test_a_clear_leafs_edit_reads_no_pre_clear_file_and_a_pre_clear_target_answers_as_before(self):
+        # a /clear's leaf heads fresh: the edit resolves over the leaf's own graph and reads no byte of the session's
+        # pre-clear file (2026-10-03), while a target only that file holds still gets the seam refusal it always got
+        em = km.em
+        anchor = self._transcript(self._base())
+        leaf = os.path.join(os.path.dirname(anchor), "66666666-7777-8888-9999-aaaaaaaaaaaa.jsonl")
+        with open(leaf, "w") as f:
+            for r in [_rec("user", "c1", None, "a fresh start after the clear"), _rec("assistant", "c2", "c1", "fresh reply"),
+                      _rec("user", "c3", "c2", "and the next step"), _rec("assistant", "c4", "c3", "next step done")]:
+                f.write(json.dumps(r) + "\n")
+        with em._JSONL_CACHE_LOCK:
+            em._JSONL_CACHE.pop(anchor, None)
+        with em._READ_BYTES_LOCK:
+            em._READ_BYTES.pop(anchor, None)
+        self.assertEqual(km._rewind_target(leaf, SID, "c3"), ("c2", None))
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(anchor, 0), 0, "the edit read no byte of the pre-clear file")
+        self.assertEqual(km._rewind_target(leaf, SID, "u2"),
+                         (None, "that message is from before a restart seam; the conversation can only rewind to newer messages"),
+                         "a pre-clear target: the same refusal as before")
+
 
 class DriveOpPins(unittest.TestCase):
     def test_rewind_send_is_a_drive_op(self):

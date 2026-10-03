@@ -274,5 +274,41 @@ class MovedAtomsDoNotReplay(unittest.TestCase):
                         "the moved splice's unit is sealed under its new key: %r" % sorted(store["placements"]))
 
 
+class LeadingNonOpenerAfterAClear(unittest.TestCase):
+    """The one segment identity the 2026-10-03 salvage floor moves, documented (no PLACEMENTS_V bump: no atom is added).
+    A pre-clear salvaged reply that never landed used to leak into every post-clear parse at its pre-clear time; when the
+    /clear's leaf then opens with a non-opener (an assistant record, say), segment_turns filed that head into the leaked
+    reply's turn, keyed on the leaked reply. With the floor the leak is gone and the head opens its own turn under a new id,
+    which the planner may plan once (the turn the leak keyed sat before the episode floor, so its unit was retired). Every
+    later turn keeps its id. Synthetic: the notes-api demo, placeholder ids."""
+
+    def test_a_leading_non_opener_opens_its_own_turn_once_the_leaked_salvage_is_floored(self):
+        csid = "c1ea0000-2222-4333-8444-000000000071"
+        markers = [{"t": T0 + 100, "orphanReply": {"uuid": "lost_pre", "text": "A pre-clear reply that never reached the transcript."}}]
+        with tempfile.TemporaryDirectory() as td:
+            leaf = Path(td) / "c1ea0000-2222-4333-8444-000000000072.jsonl"
+            leaf.write_text("\n".join(json.dumps(r) for r in [
+                aline(T0 + 1000, "Picking up where the cleared conversation stopped.", "h1", None),   # the head: a non-opener
+                uline(T0 + 1060, "now page the tags route by cursor", "u1", "h1"),
+                aline(T0 + 1120, "Paged it.", "a1", "u1")]) + "\n")
+
+            def turns(floor):
+                real = em._conversation_floor
+                if not floor:
+                    em._conversation_floor = lambda files: None               # the parse before the floor existed
+                try:
+                    return em.parse_session(str(leaf), rompuuid=csid, candidate_files=[str(leaf)], states=markers,
+                                            postal_log=[], now=T0 + 2000)["turns"]
+                finally:
+                    em._conversation_floor = real
+            leaked, floored = turns(False), turns(True)
+        self.assertEqual([a.get("uuid") for a in leaked[0]["atoms"]], ["lost_pre", "h1"],
+                         "before the floor: the head sat in the leaked reply's turn")
+        self.assertEqual([a.get("uuid") for a in floored[0]["atoms"]], ["h1"], "with it: the head opens its own turn")
+        self.assertNotIn("lost_pre", [a.get("uuid") for t in floored for a in t["atoms"]])
+        self.assertNotEqual(floored[0]["id"], leaked[0]["id"], "under a new id: the residual risk, planned at most once")
+        self.assertEqual([t["id"] for t in floored[1:]], [t["id"] for t in leaked[1:]], "every later turn keeps its id")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

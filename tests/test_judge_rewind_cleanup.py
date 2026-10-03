@@ -1104,14 +1104,10 @@ class ReconcileRewoundGoals(Base):
         self.assertEqual(jd.reconcile_rewound_goals(SID, str(self.path), T0 + 200), 0)
         self.assertIn(nid, jd.load_goals(SID)["nodes"])
 
-    def test_a_dead_branch_inside_a_pre_clear_episode_file_is_still_reconciled(self):
-        # The whole-graph walk can only ever call a pre-/clear file's interior branches "clear"
-        # (their chains reach the old episode's null root; the current spine never sees them), so
-        # 10 of the 28 audited live orphans — including ALL 5 live+archive dual-residents — were
-        # invisible to it. The per-file discriminator walks each dead file by itself: a branch
-        # that rejoins the file's OWN spine is a rewind wherever the graph later went. Benign
-        # pre-clear spine nodes stay (they are "clear" in the whole graph AND on their own file's
-        # spine), and so does the current branch's card.
+    def _pre_clear_world(self):
+        """The anchor holding a rewind inside it, a second dead episode the episode log names (the log names only that one:
+        a session first observed after its first /clear), and the current /clear leaf; four cards minted over it, saved.
+        Returns the leaf's path."""
         anchor = self.td / (SID + ".jsonl")            # the dead episode: a rewind INSIDE it, then /clear
         anchor.write_text("\n".join(json.dumps(r) for r in
                                     self.base_recs() + self.fork_recs()) + "\n")
@@ -1135,6 +1131,18 @@ class ReconcileRewoundGoals(Base):
         self._mint(s, "seg-c", T0, "Benign pre-clear card", "u1")
         self._mint(s, "seg-d", T0 + 300, "Current branch's card", "u9")
         jd.save_goals(SID, s)
+        return leaf
+
+    def test_a_dead_branch_inside_a_pre_clear_episode_file_is_still_reconciled(self):
+        # The whole-graph walk can only ever call a pre-/clear file's interior branches "clear"
+        # (their chains reach the old episode's null root; the current spine never sees them), so
+        # 10 of the 28 audited live orphans — including ALL 5 live+archive dual-residents — were
+        # invisible to it. The per-file discriminator walks each dead file by itself: a branch
+        # that rejoins the file's OWN spine is a rewind wherever the graph later went. Benign
+        # pre-clear spine nodes stay (they are "clear" in the whole graph AND on their own file's
+        # spine), and so does the current branch's card. The anchor is no candidate of the /clear
+        # leaf's parse (2026-10-03) and no episode row names it here: the scan walks it anyway.
+        leaf = self._pre_clear_world()
         self.assertEqual(jd.reconcile_rewound_goals(SID, str(leaf), T0 + 400), 2,
                          "both interior dead branches are caught — nothing else")
         live = jd.load_goals(SID)["nodes"]
@@ -1142,6 +1150,43 @@ class ReconcileRewoundGoals(Base):
         self.assertNotIn("%s:g2" % SID, live, "the episode-log-enumerated file's orphan archived")
         self.assertIn("%s:g3" % SID, live, "a benign pre-clear spine card is untouched")
         self.assertIn("%s:g4" % SID, live, "the current branch's card is untouched")
+        self.assertNotIn(str(self.td / (SID + ".jsonl")), jd._judge_candidates(SID, [str(leaf)]),
+                         "and the anchor was no candidate of the /clear leaf's parse: the scan walked it on its own")
+
+    def test_a_pre_clear_spine_card_stays_and_a_post_clear_card_stays(self):
+        # the same world reconciled again after the leaf moved (a new event: the transcripts' key moved, so the walks run
+        # again over the anchor's memo): nothing more is archived, nothing comes back, and an unchanged world is no event
+        leaf = self._pre_clear_world()
+        self.assertEqual(jd.reconcile_rewound_goals(SID, str(leaf), T0 + 400), 2)
+        with open(leaf, "a") as fh:
+            fh.write(json.dumps(uline(T0 + 320, "one more ask in the new conversation", "u10", "a9")) + "\n")
+        self.assertEqual(jd.reconcile_rewound_goals(SID, str(leaf), T0 + 500), 0, "no further archive")
+        self.assertEqual(jd.reconcile_rewound_goals(SID, str(leaf), T0 + 600), 0, "no event, no move")
+        live = jd.load_goals(SID)["nodes"]
+        self.assertEqual(sorted(k for k in live), ["%s:g3" % SID, "%s:g4" % SID],
+                         "the pre-clear spine card and the post-clear card stay, and the archived two stay archived")
+        self.assertEqual(sorted(jd.load_goal_archive(SID)["nodes"]), ["%s:g1" % SID, "%s:g2" % SID])
+
+    def test_the_reconciliation_key_covers_the_anchor_the_scan_walks(self):
+        # the per-file scan walks the anchor whether or not it is a candidate (2026-10-03), so the event gate's key names it
+        # too: a pre-clear file that changes under a reconciled session (a rewrite the CLI never makes, but the key must not
+        # rest on that) re-runs the scan, and a card on its new dead branch is caught, where a key over the candidates alone
+        # read the store write as a store-only event and reused the old abandoned set
+        anchor = self.td / (SID + ".jsonl")
+        anchor.write_text("\n".join(json.dumps(r) for r in self.base_recs()) + "\n")
+        leaf = self.td / ("99999999-aaaa-bbbb-cccc-dddddddddddd.jsonl")
+        leaf.write_text("\n".join(json.dumps(r) for r in [
+            uline(T0 + 300, "fresh start after clear", "u9"),
+            aline(T0 + 310, "New conversation reply.", "a9", "u9")]) + "\n")
+        jd.save_goals(SID, self._store())
+        self.assertEqual(jd.reconcile_rewound_goals(SID, str(leaf), T0 + 400), 0, "no dead branch yet")
+        anchor.write_text("\n".join(json.dumps(r) for r in self.base_recs() + self.fork_recs()) + "\n")
+        s = jd.load_goals(SID)
+        self._mint(s, "seg-a", CUT, "A card on the pre-clear file's new dead branch", "u2")
+        jd.save_goals(SID, s)
+        self.assertEqual(jd.reconcile_rewound_goals(SID, str(leaf), T0 + 500), 1, "the anchor's change re-ran the scan")
+        self.assertNotIn("%s:g1" % SID, jd.load_goals(SID)["nodes"])
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf)], "with the anchor no candidate of the parse")
 
     def test_a_user_restored_card_survives_boot_and_later_rewind_re_reconciles(self):
         # The restore pops the tombstone, but the branch stays "rewind" in the graph forever and
