@@ -2190,8 +2190,9 @@ def _read_jsonl_incremental(path, on_fail=None):
 _TAIL_OK = threading.local()      # .flag: the calling fold accepts a tail entry (set by fold_records around its read)
 _READER_TRACE = bool(os.environ.get("ROMP_READER_TRACE"))   # one stderr line per read that pulled bytes (a diagnosis aid)
 _WHOLE_READ_KINDS = ("zero", "rewrite", "guard", "shrunk", "upgrade")   # the reader's kinds that pull a file whole (T384's counter)
-_READ_STAGE_FN = [None]           # T401: the kernel's answer to "which stage is the calling thread in" (a job or push sub-stage name,
-#                                   None outside the pusher's cycle), so a whole read or a hydration is also counted per (stage, caller)
+_READ_STAGE_FN = [None]           # T401: the kernel's answer to "which stage is the calling thread in" (its stage mark: a job or push
+#                                   sub-stage, a handler's route, a judge tier and the rest; None on a thread with no mark), so a whole
+#                                   read or a hydration is also counted per (stage, caller)
 
 
 def set_read_stage_provider(fn):

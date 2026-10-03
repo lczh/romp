@@ -2563,9 +2563,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   CPU, any collection inside it included, only when it ends, so take the
   tally from a read made before that job began or set such a job aside; a
   read of `/perf?stacks=1` names the job open at that read, by the `jobs`
-  row's stage mark, though it samples the stacks just after copying the
-  counters, so a job that ended in between shows as `null` or as the next
-  job and its CPU arrives in the next read; a plain read names none unless
+  row's stage mark, though it samples the stacks after copying the counters
+  and building the rest of the snapshot, so a job that ended in between
+  shows as `null` or as a later job and its CPU arrives in the next read; a
+  plain read names none unless
   the kernel runs with `ROMP_PERF_STACKS`);
   compare `gc.gen."2"` or the kernel samples'
   generation-2 tallies over the interval, and the ring rows only for the
@@ -2905,7 +2906,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
   sample), `stage` (the thread's current stage mark: the jobs thread's
   `jobs.<job>` while that job runs, the pusher's `push` or one of its own
-  `jobs.<job>`, a handler's `connect`, `null` outside one) and
+  `jobs.<job>`, a handler's `connect`, any other mark the
+  `asmIndex.materializedByStage` list names, a job's finer part as
+  `jobs.<job>.<part>`, `null` for a thread with no mark) and
   `frames`, "function (file:line)" strings innermost last, at most 40; no
   locals, arguments or session content. Filled when the kernel runs with
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
@@ -2992,7 +2995,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the stage being the calling thread's stage mark: the jobs thread's
   `jobs.<job>` while that job runs, the pusher's `push` or one of its own
   `jobs.<job>`, `connect` for a fresh client's full push on its handler
-  thread (a browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
+  thread (a browser reload or reconnect), any other mark the
+  `asmIndex.materializedByStage` list names, a job's finer part as
+  `jobs.<job>.<part>`, and `none` for a thread with no mark (T401); `asmCheckpoint.hydratedByStage`
   does the same for the hydration rows.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
@@ -3135,9 +3140,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `stages_ms`: `prelude` (the cycle's opening: the liveness snapshot and the
   names), `jobs` (the cycle's tick jobs outside the push) and inside it one
   `jobs.<job>` per job the pusher runs (`jobs.convergeCheckpoints`,
-  `jobs.applyPendingOps` and the rest, T398), `jobsPass` (the jobs thread's
-  pass) and inside it `jobs.prelude` and one `jobs.<job>` per job that
-  thread runs (`jobs.interruptBlock`, `jobs.autoNudge` and the rest), `push`,
+  `jobs.applyPendingOps` and the rest, T398), `jobs.prelude` (the jobs
+  thread's opening: its liveness snapshot and names, timed beside its pass,
+  not inside it), `jobsPass` (the jobs thread's pass) and inside it one
+  `jobs.<job>` per job that thread runs (`jobs.interruptBlock`,
+  `jobs.autoNudge` and the rest), `push`,
   and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
   `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
