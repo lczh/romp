@@ -642,6 +642,30 @@ class ViewerClose(Base):
         self.assertEqual(sent, [], "nothing is sent")
         self.returns_and_drops(ap, recs, "nothing the raising render left holds the returned agent's drop")
 
+    def test_a_render_that_raises_for_an_open_viewer_sends_nothing_and_the_push_goes_on(self):
+        """A render that raises while its viewer stays open: the frame was never built, so nothing is sent for that viewer
+        and the push goes on to the next one (round seven of the fold's review: without the guard on the send, the push
+        raised on the unbuilt frame and the cycle's catch skipped the feed, bars and timeline frames for every client)."""
+        ap, recs = self.scene()
+        first, second = self.client("w1"), self.client("w2")
+        self.register(first, second)
+        real, calls, sent = km.build_subagent, [], []
+
+        def raising_once(sid, agent_id, now, live_map=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("synthetic render fault")
+            return real(sid, agent_id, now, live_map)
+
+        err = io.StringIO()
+        with mock.patch.object(km, "build_subagent", raising_once), \
+                mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, **kw: sent.append((c["wid"], key))), \
+                mock.patch("sys.stderr", new=err):
+            km._push_subagents([first, second], int(time.time()), {})   # returns: the raise is caught, never sent
+        self.assertIn("subagent frame failed", err.getvalue(), "the raise is said")
+        self.assertEqual([w for w, _key in sent], ["w2"], "nothing for the raising viewer; the other client's viewer is sent")
+        self.assertIn((SID, self.AID), first["subagents"], "the open viewer stays registered")
+
     def asm_entries(self, ap):
         """The assembly entries over the agent file `ap` for the test's session (the viewer's parse)."""
         rp = os.path.realpath(ap)

@@ -4917,7 +4917,7 @@ or delete.
 
 ## The spend ceiling
 
-Every pusher cycle the kernel reads each live session's spend rate: the
+Every jobs pass the kernel reads each live session's spend rate: the
 dollars its transcript and the agent transcripts beside it (the subagents and
 workflow agents it fanned out) record over the last ten minutes, priced by the
 same per-model table the cost view uses, scaled to an hour. The data is what
