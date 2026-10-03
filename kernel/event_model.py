@@ -2436,20 +2436,23 @@ def cached_whole_records(path):
     return None
 
 
-def read_records_detached(path):
+def read_records_detached(path, on_fail=None):
     """`path`'s records read whole off the disk, line by line as the reader reads a file (_scan_jsonl_stream, to the size a stat
     taken before the read saw), into a list only the caller holds: no reader entry is installed, upgraded or touched, so the
     record cache keeps exactly what it held for the file (a tail a restore left stays a tail, a file it did not hold stays
     out) and nothing stays resident once the caller lets the list go (review round two, 2026-10-03: the comment cut's look
     into a session's first file after a /clear). Nor the file's read stripe: this read fills no cache. The bytes count like
     every reader byte (read_bytes_report), and the read as a whole read on /perf, kind "detached" under its caller. None when
-    the file cannot be stat'd, opened or read."""
+    the file cannot be stat'd, opened or read, after on_fail(error) with the OSError that stopped it when given, so a caller
+    can say why (review round three); a read that failed counts no byte and no whole read."""
     path = str(path)
     try:
         st = os.stat(path)
         with open(path, "rb") as fh:
             records, _end, nread = _scan_jsonl_stream(fh, 0, None, limit=st.st_size)
-    except OSError:
+    except OSError as e:
+        if on_fail is not None:
+            on_fail(e)
         return None
     _count_read(path, nread)
     try:

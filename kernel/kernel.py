@@ -18464,13 +18464,17 @@ def _anchor_adapter(path, sid, need=None):
     With `need` (the uuid a gesture resolves) the adapter is built over the parse's own candidates
     first (jd._judge_candidates: a /clear's leaf alone, 2026-10-03), so an edit or a comment on the
     conversation reads no pre-clear file. A `need` that graph lacks is looked up in the session's
-    first file alone (_cut_first_uuids: the session's uuid set while that file's stat stands, else one
-    read of that file, which leaves its record cache entry as it found it; review round two). One
-    the first file does not hold either (a reply not flushed yet), or a first file that cannot be
-    read, gets the leaf's own graph; one it holds gets the graph over both files with the first
-    file's records handed in (_anchor_wide), so a target from before the clear gets the answer it
-    always got (the seam refusal, the tip fork). Without `need`, the wide set, read through the
-    record cache as before."""
+    first file by membership alone (_cut_first_uuids: the session's uuid set while that file's stat
+    stands, else one read of that file, which leaves its record cache entry as it found it; review
+    round two). The adapter returned is the leaf's own either way, and it reports the lookup as
+    `first_hit`: None when the leaf's graph holds `need`, or the first file lacks it (a reply not
+    flushed yet) or cannot be read; else a _FirstHit (that file's path, whether a record of the
+    leaf's graph links into it, and the records this call read, None when the set answered). No
+    graph over both files is built here (review round three): a target only the first file holds
+    is behind the clear's seam, which _rewind_target refuses from that report alone, and so does
+    the comment cut's read road, except where a record of the leaf links into the first file, the
+    one case that walks the graph over both files (_cut_wide_walk). Without `need`, the wide set,
+    read through the record cache as before, and `first_hit` None."""
     links = _anchor_links(sid)
     cands = [path]
     anchor = os.path.join(os.path.dirname(path), sid + ".jsonl")
@@ -18480,12 +18484,21 @@ def _anchor_adapter(path, sid, need=None):
         narrow = jd._judge_candidates(sid, [path])
         if len(narrow) < len(cands):                   # the anchor is left out of the parse: the leaf's own graph first
             ad = em.FileAdapter(_anchor_closed(path, narrow, links), path, resume_links=links)
-            if need in ad.by_uuid:
-                return ad
-            uuids, recs, _read = _cut_first_uuids(sid, anchor)
-            wide = _anchor_wide(path, links, anchor, recs) if uuids is not None and need in uuids else None
-            return wide if wide is not None else ad    # not in the first file either, or that file unreadable: the leaf's own
-    return em.FileAdapter(_anchor_closed(path, cands, links), path, resume_links=links)
+            ad.first_hit = None
+            if need not in ad.by_uuid:
+                uuids, recs, _how = _cut_first_uuids(sid, anchor)
+                if uuids is not None and need in uuids:   # behind the seam: reported, never resolved over both files here
+                    ad.first_hit = _FirstHit(anchor, bool(uuids & em.TranscriptGraph(ad).dangling()), recs)
+            return ad
+    ad = em.FileAdapter(_anchor_closed(path, cands, links), path, resume_links=links)
+    ad.first_hit = None
+    return ad
+
+
+# What _anchor_adapter reports for a target only the session's first file holds (review round three): that file's path, whether
+# a record of the leaf's graph names a parent in it (the dangling parent targets, as _cut_widen_lag reads the display graph's),
+# and the records the lookup read (None when the session's uuid set answered with no read).
+_FirstHit = collections.namedtuple("_FirstHit", "path linked records")
 
 
 def _anchor_links(sid):
@@ -18508,15 +18521,11 @@ def _anchor_closed(path, cands, links):
     return cands
 
 
-def _anchor_wide(path, links, first, recs=None):
-    """The graph over the leaf `path`, the session's first file `first` and the lineage, the first file's records handed in
-    (`recs`, else read by _cut_first_records) instead of read through the record cache, so the cache's entry for that file
-    stays as the widening found it (review round two, 2026-10-03). The leaf is read through the cache, as every graph over
-    it is. None when the first file cannot be read."""
-    if recs is None:
-        recs = _cut_first_records(first)[0]
-        if recs is None:
-            return None
+def _anchor_wide(path, links, first, recs):
+    """The graph over the leaf `path`, the session's first file `first` and the lineage, the first file's records `recs`
+    handed in instead of read through the record cache, so the cache's entry for that file stays as the caller's read found
+    it (review round two, 2026-10-03). The leaf is read through the cache, as every graph over it is. Built only for the
+    comment cut's linked case (_cut_wide_walk: a record of the leaf links into the first file, review round three)."""
     return em.FileAdapter(_anchor_closed(path, [path, first], links), path, resume_links=links, records={first: recs})
 
 
@@ -18524,68 +18533,87 @@ def _anchor_wide(path, links, first, recs=None):
 # 2026-10-03): sid -> ((path, inode, mtime_ns, size) of that file as read, frozenset of its record uuids). The parse of a
 # /clear's leaf leaves that file out (jd._judge_candidates), so a target the leaf's graph lacks is a record of that file (a
 # message from before the clear, selected in the expanded "Conversation cleared" card) or a record not on disk yet (a reply
-# whose flush lags). The first widening at a stat reads that file alone, once (_cut_first_records: the record cache's entry
+# whose flush lags). The first lookup at a stat reads that file alone, once (_cut_first_records: the record cache's entry
 # for it left as found, the leaf never read), and the set answers hits and misses until the stat moves: the file is frozen
 # after the clear, so a uuid it lacked at that stat it still lacks, and an append moves the stat, so the next ask reads
-# again. Kept only after a read that succeeded at a stable stat, so a file that could not be read records nothing and the
-# next ask reads again. Bounded at _CUT_FIRST_MAX = 16 sessions, the least recently consulted out (one frozenset of uuid
-# strings each, about a tenth of a kilobyte per record), under _CUT_FIRST_LOCK (create threads and the pusher).
+# again. A hit needs no graph (review round three): a record only the first file holds is behind the clear's seam, so an
+# edit, a rewind and a comment are refused from the set with no further read. The one road that reads the file again at a
+# standing stat is the comment cut's linked case, a record of the leaf linking into the first file, whose walk over both
+# files takes the records (_cut_wide_walk). Kept only after a read that succeeded at a stable stat, so a file that could
+# not be read records nothing and the next ask reads again. Bounded at _CUT_FIRST_MAX = 16 sessions, the least recently
+# consulted out (one frozenset of uuid strings each, about a tenth of a kilobyte per record), under _CUT_FIRST_LOCK (create
+# threads and the pusher).
 _CUT_FIRST_UUIDS = {}
 _CUT_FIRST_MAX = 16
 _CUT_FIRST_LOCK = threading.Lock()
 
 
-def _cut_first_stat(first):
-    """The first file's (path, inode, mtime_ns, size), the set's key; None when it cannot be stat'd."""
+def _cut_first_stat(first, fail=None):
+    """The first file's (path, inode, mtime_ns, size), the set's key; None when it cannot be stat'd, the error appended to
+    `fail` when given."""
     try:
         st = os.stat(first)
-    except OSError:
+    except OSError as e:
+        if fail is not None:
+            fail.append(e)
         return None
     return (str(first), st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 def _cut_first_records(first):
-    """(records, stat key) of the session's first file `first`, leaving the record cache's entry for it as it found it: a whole
-    entry standing at the file's stat serves them with no read and stays as it was; otherwise (a tail a restore left, or no
-    entry) the file is read whole into a list only the caller holds, installing, upgrading and touching no entry
-    (em.read_records_detached). (None, None) when the file cannot be read, or moved under the read (a stat taken before it
-    unequal to one after): nothing may be remembered from such a read."""
-    k0 = _cut_first_stat(first)
+    """(records, stat key, how) of the session's first file `first`, leaving the record cache's entry for it as it found it: a
+    whole entry standing at the file's stat serves them with no read and stays as it was (how "whole"); otherwise (a tail a
+    restore left, or no entry) the file is read whole into a list only the caller holds, installing, upgrading and touching
+    no entry (em.read_records_detached; how "read", the file's bytes pulled). Records and key None when the file moved under
+    the read (a stat taken before it unequal to one after): nothing may be remembered from such a read, though it pulled its
+    bytes (how stays "read", or "whole"). Records and key None too when the read failed, which pulled none: how is then
+    "unreadable (<the error>)", the OSError the stat, the open or the read raised (review round three, which found a failed
+    read counted and said as a read)."""
+    fail = []
+
+    def unreadable():
+        return "unreadable (%r)" % (fail[0] if fail else "no error reported",)
+    k0 = _cut_first_stat(first, fail)
     if k0 is None:
-        return None, None
-    recs = em.cached_whole_records(first)
+        return None, None, unreadable()
+    recs, how = em.cached_whole_records(first), "whole"
     if recs is None:
-        recs = em.read_records_detached(first)
-    if recs is None or _cut_first_stat(first) != k0:
-        return None, None
-    return recs, k0
+        recs, how = em.read_records_detached(first, on_fail=fail.append), "read"
+        if recs is None:
+            return None, None, unreadable()
+    if _cut_first_stat(first) != k0:
+        return None, None, how
+    return recs, k0, how
 
 
 def _cut_first_uuids(sid, first):
-    """(uuids, records, read) for the session's first file `first`. uuids: the frozenset of its record uuids, from the session's
-    set while the file's stat stands, else from one read of the file alone (_cut_first_records), which becomes the set; None
-    when the file cannot be read (nothing is remembered, so the next ask reads again). records: the list this call read (the
-    wide graph takes it, with no second read), else None. read: whether this call built the set (a read of the file, an
-    attempt at one, or a whole record cache entry standing for it), which _comment_cut_resolve counts as a read."""
+    """(uuids, records, how) for the session's first file `first`. uuids: the frozenset of its record uuids, from the session's
+    set while the file's stat stands, else from one look at the file alone (_cut_first_records), which becomes the set; None
+    when the file cannot be read or moved under the read (nothing is remembered, so the next ask reads again). records: the
+    list this call read or was served (the wide graph takes it, with no second read), else None. how: None when the session's
+    set answered, else _cut_first_records's ("whole", "read" or "unreadable (...)"), which _comment_cut_resolve counts by: a
+    read only when the file's bytes were pulled (review round three). A failed read is said on stderr once per session
+    (_cut_first_unreadable), on every road that looks."""
     key = _cut_first_stat(first)
-    if key is None:
-        return None, None, False
     sid = str(sid)
-    with _CUT_FIRST_LOCK:
-        got = _CUT_FIRST_UUIDS.get(sid)
-        if got is not None and got[0] == key:
-            _CUT_FIRST_UUIDS[sid] = _CUT_FIRST_UUIDS.pop(sid)   # a consulted entry is a used one (the LRU order)
-            return got[1], None, False
-    recs, at = _cut_first_records(first)
+    if key is not None:
+        with _CUT_FIRST_LOCK:
+            got = _CUT_FIRST_UUIDS.get(sid)
+            if got is not None and got[0] == key:
+                _CUT_FIRST_UUIDS[sid] = _CUT_FIRST_UUIDS.pop(sid)   # a consulted entry is a used one (the LRU order)
+                return got[1], None, None
+    recs, at, how = _cut_first_records(first)
     if recs is None:
-        return None, None, True
+        if how.startswith("unreadable"):
+            _cut_first_unreadable(sid, how)
+        return None, None, how
     uuids = frozenset(r["uuid"] for r in recs if isinstance(r, dict) and isinstance(r.get("uuid"), str) and r["uuid"])
     with _CUT_FIRST_LOCK:
         _CUT_FIRST_UUIDS.pop(sid, None)
         while len(_CUT_FIRST_UUIDS) >= _CUT_FIRST_MAX:
             _CUT_FIRST_UUIDS.pop(next(iter(_CUT_FIRST_UUIDS)))
         _CUT_FIRST_UUIDS[sid] = (at, uuids)
-    return uuids, recs, True
+    return uuids, recs, how
 
 
 def _cut_unread_anchor(path, sid):
@@ -18769,11 +18797,28 @@ def _precompact_context(g, path, anchor_uuid, newer):
 # Where the cut walk found its graph (2026-10-01), read by the tests and the lab: the display parse's own assembly entry,
 # whole or restored ("whole" / "seeded"), or a fresh read of the stitched transcript ("read", the walk's only road
 # before). A read names its cause on stderr once per (session, cause): it is correct, only slow. A lag answer the display
-# parse gives after a /clear is widened to the session's first file (_cut_widen_lag): a widening that reads a file (the
-# first file's uuid set, or the graph over both files) counts as a read, cause "widen"; one answered from a standing set
-# reads nothing and counts as the display road it came from (review round two, 2026-10-03).
-_CUT_ROADS = {"whole": 0, "seeded": 0, "read": 0}
+# parse gives after a /clear is widened to the session's first file (_cut_widen_lag, review round two, 2026-10-03). The
+# widening counts as a read, cause "widen", only when it pulled that file's bytes (the read that builds the session's uuid
+# set, or the linked case's read for the graph over both files). One the standing set answers, or a set served from a whole
+# record cache entry standing for that file, reads nothing and counts as the display road it came from. One whose read
+# failed pulled nothing and counts as "failed", the error named on stderr once per session under its own cause,
+# "unreadable" (_cut_first_unreadable; review round three, which found both counted and said as reads).
+_CUT_ROADS = {"whole": 0, "seeded": 0, "read": 0, "failed": 0}
 _cut_read_said = set()
+
+
+def _cut_first_unreadable(sid, how):
+    """Name a failed read of the session's first transcript (`how`, "unreadable (<the error>)") on stderr once per session,
+    under its own cause beside the cut walk's read causes. Until the file reads again, a message from before the clear is
+    answered as not on disk yet: a comment's create parks and is dropped after _PARK_MAX_TRIES pusher cycles, and an edit is
+    told to try again (review round three)."""
+    key = (str(sid), "unreadable")
+    if key not in _cut_read_said:
+        if len(_cut_read_said) > 4096:
+            _cut_read_said.clear()
+        _cut_read_said.add(key)
+        sys.stderr.write("the first transcript of session %s could not be read, so a message from before its /clear answers "
+                         "as not on disk yet: %s\n" % (str(sid)[:8], how[:200]))
 
 
 def _cut_road_read(sid, why):
@@ -18806,7 +18851,7 @@ def _comment_cut_from_parse(path, sid, anchor_uuid, facts=None):
 
     With `facts` (a dict), a lag answer is left to the caller to count: facts["how"] names the display road it came from
     and facts["dangling"] the parent targets records of that graph name and it lacks (em.TranscriptGraph.dangling), so
-    _comment_cut_resolve can widen it and count the widening by whether it read a file."""
+    _comment_cut_resolve can widen it and count the widening by whether it pulled a file's bytes."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
     human = _display_sdk_human(sid)
@@ -18833,7 +18878,7 @@ def _comment_cut_from_parse(path, sid, anchor_uuid, facts=None):
             break
         if how in ("whole", "seeded"):
             if facts is not None and got[2] == ANCHOR_LAG_ERR:
-                facts["how"] = how                      # the caller counts it, by whether its widening reads a file
+                facts["how"] = how                      # the caller counts it, by whether its widening pulls a file's bytes
             else:
                 _CUT_ROADS[how] += 1
             return got
@@ -18852,53 +18897,78 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     After a /clear the display parse reads the leaf alone (2026-10-03), so its graph holds no message from before the
     clear, and a comment on one (selected in the expanded "Conversation cleared" card) answered ANCHOR_LAG_ERR: parked as
     lag with nothing said, dropped by the pusher after _PARK_MAX_TRIES cycles (review round one). Such a lag answer is
-    decided from the session's first file alone (_cut_widen_lag, review round two): a target that file holds gets
-    ANCHOR_REWOUND_ERR, the refusal it always got, with no graph built (the graph over both files only when a record of
-    the display graph links into that file); a target it lacks, a reply not flushed yet, keeps the lag answer and stays
-    parked. The first such widening at the file's stat reads that file once and leaves its record cache entry as it found
-    it; later ones read nothing while the stat stands, and the leaf is not read, except where a record of the display
-    graph links into that file: each target it holds then reads it again outside the cache, and the leaf through the
-    cache, for the graph over both files. A comment in the
-    conversation a second /clear's card expands (the file between the two clears) is in neither file and still parks as
-    lag, as it did before."""
+    decided from the session's first file by membership (_cut_widen_lag, review round two): a target that file holds gets
+    ANCHOR_REWOUND_ERR, the refusal it always got, with no graph built; a target it lacks, a reply not flushed yet, keeps
+    the lag answer and stays parked. The read road (no display entry answers) decides the same from what _anchor_adapter
+    reports (its `first_hit`, review round three), building only the leaf's own graph. On both roads the first lookup at
+    the first file's stat reads that file once, leaving its record cache entry as it found it, and later ones read nothing
+    of it while the stat stands; the leaf is read only as each road reads it anyway. The one case that reads the first file
+    again is a record of the leaf's graph linking into it (a CLI that writes such a link, outside the transcript model): a
+    target it holds is then walked over both files (_cut_wide_walk), the first file read again outside the cache when the
+    set answered, and the leaf through the cache. A comment in the conversation a second /clear's card expands (the file
+    between the two clears) is in neither file and still parks as lag, as it did before."""
     facts = {}
     got = _comment_cut_from_parse(path, sid, anchor_uuid, facts=facts)
     how = facts.get("how")
     if got is not None and how is not None:          # the display parse's lag answer, counted here
-        wide, read = _cut_widen_lag(path, sid, anchor_uuid, facts.get("dangling") or frozenset())
-        if read:
+        wide, looked = _cut_widen_lag(path, sid, anchor_uuid, facts.get("dangling") or frozenset())
+        if looked == "read":                        # the first file's bytes pulled: a read
             _cut_road_read(sid, "widen (a target a /clear's leaf lacks, looked up in the session's first transcript)")
+        elif looked is not None and looked.startswith("unreadable"):
+            _CUT_ROADS["failed"] += 1                # said on stderr by _cut_first_unreadable, once per session
         else:
             _CUT_ROADS[how] += 1
         return wide if wide is not None else got
     if got is not None:
         return got
-    return _comment_cut_walk(em.TranscriptGraph(_anchor_adapter(path, sid, need=anchor_uuid)), path, anchor_uuid)
+    ad = _anchor_adapter(path, sid, need=anchor_uuid)
+    hit = ad.first_hit
+    if hit is not None:                              # only the session's first file holds it: behind the clear's seam
+        if not hit.linked:
+            return None, 0, ANCHOR_REWOUND_ERR, ""   # off the leaf's chain: the refusal, from membership alone
+        wide, _looked = _cut_wide_walk(path, sid, anchor_uuid, hit.path, hit.records)
+        return wide if wide is not None else (None, 0, ANCHOR_LAG_ERR, "")
+    return _comment_cut_walk(em.TranscriptGraph(ad), path, anchor_uuid)
 
 
 def _cut_widen_lag(path, sid, anchor_uuid, dangling):
-    """(answer, read) for the display parse's lag answer on `anchor_uuid` (review round two, 2026-10-03). The parse of a
+    """(answer, how) for the display parse's lag answer on `anchor_uuid` (review round two, 2026-10-03). The parse of a
     /clear's leaf leaves the session's first file out (_cut_unread_anchor), so its graph holds no message from before the
-    clear. Decided from that file alone (_cut_first_uuids), the leaf never read: a target it does not hold (a reply not
-    flushed yet), or a file that cannot be read, keeps the lag answer (answer None: parked, its retries reading no byte
+    clear. Decided from that file by membership (_cut_first_uuids), the leaf never read: a target it does not hold (a reply
+    not flushed yet), or a file that cannot be read, keeps the lag answer (answer None: parked, its retries reading no byte
     while the file's stat stands). A target it holds is off the leaf's chain when no record of the display graph links into
     that file (`dangling`, the parent targets the display graph names and lacks, meets none of its uuids), and gets
     ANCHOR_REWOUND_ERR, the refusal the walk over both files gave before the leaf parsed alone, with no graph built. When one
     does (a CLI that links a post-clear record into the old file, outside the transcript model), the walk over both files
-    answers (_anchor_wide), for the linked record and every record behind it alike. `read`: whether a file was read, the
-    set's read or the wide graph's. (None, False) with no first file left out of the parse."""
+    answers (_cut_wide_walk), for the linked record and every record behind it alike. `how`: how the first file was looked
+    at (_cut_first_uuids: None when the set answered; "whole", "read" or "unreadable (...)"), the linked case's own read
+    standing in when the set answered. (None, None) with no first file left out of the parse."""
     first = _cut_unread_anchor(path, sid)
     if first is None:
-        return None, False
-    uuids, recs, read = _cut_first_uuids(sid, first)
+        return None, None
+    uuids, recs, how = _cut_first_uuids(sid, first)
     if uuids is None or anchor_uuid not in uuids:
-        return None, read
+        return None, how
     if not (uuids & dangling):
-        return (None, 0, ANCHOR_REWOUND_ERR, ""), read
-    ad = _anchor_wide(path, _anchor_links(sid), first, recs)
-    if ad is None:
-        return None, True
-    return _comment_cut_walk(em.TranscriptGraph(ad), path, anchor_uuid), True
+        return (None, 0, ANCHOR_REWOUND_ERR, ""), how
+    wide, again = _cut_wide_walk(path, sid, anchor_uuid, first, recs)
+    return wide, again or how
+
+
+def _cut_wide_walk(path, sid, anchor_uuid, first, recs):
+    """(answer, how): the cut walk over the leaf `path` and the session's first file `first` for a target of that file that a
+    record of the leaf links into, the comment cut's linked case and the one road that builds the graph over both files
+    (review round three). `recs`: the first file's records the lookup read, or None when the session's uuid set answered,
+    and then the file is read again outside the record cache (_cut_first_records: `how` is that read's, else None). Answer
+    None when that read fails (said once per session, _cut_first_unreadable) or the file moved under it."""
+    how = None
+    if recs is None:
+        recs, _at, how = _cut_first_records(first)
+        if recs is None:
+            if how.startswith("unreadable"):
+                _cut_first_unreadable(sid, how)
+            return None, how
+    return _comment_cut_walk(em.TranscriptGraph(_anchor_wide(path, _anchor_links(sid), first, recs)), path, anchor_uuid), how
 
 
 def _comment_cut_walk(g, path, anchor_uuid):
@@ -37421,12 +37491,18 @@ def _rewind_target(path, sid, user_uuid):
     post-boundary records; a pre-boundary target exits 1 with "No message found" — verified live
     2026-07-16), and have a real message ancestor (the conversation's first message has nothing
     before it to rewind to). Validating HERE keeps the backend's failure path (a refused reconnect)
-    for genuine races only."""
+    for genuine races only.
+
+    After a /clear the adapter is the leaf's own graph, and a target only the session's first file
+    holds is reported by membership (_anchor_adapter's `first_hit`): behind the clear's seam, so it
+    gets the seam refusal with no graph over both files, which gave the same refusal and read that
+    file whole at every attempt (review round three)."""
     ad = _anchor_adapter(path, sid, need=user_uuid)   # the STITCHED chain — a bare two-file adapter read any
     #                                      message shown through a restart-seam stitch as missing
-    if user_uuid not in ad.by_uuid:
+    behind = ad.first_hit is not None              # only the first file holds it: refused below from membership alone
+    if not behind and user_uuid not in ad.by_uuid:
         return None, "that message isn't in the transcript yet; try again in a moment"
-    if ad.fsid_of.get(user_uuid) != os.path.splitext(os.path.basename(path))[0]:
+    if behind or ad.fsid_of.get(user_uuid) != os.path.splitext(os.path.basename(path))[0]:
         # found, but behind a restart/clear seam: the CLI's --resume-session-at only addresses
         # records in the CURRENT transcript, so this rewind is genuinely impossible — say why
         # instead of the false "isn't in the transcript" (the user 2026-08-15)

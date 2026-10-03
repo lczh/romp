@@ -163,6 +163,28 @@ class RewindTarget(unittest.TestCase):
                          (None, "that message is from before a restart seam; the conversation can only rewind to newer messages"),
                          "a pre-clear target: the same refusal as before")
 
+    def test_an_edit_of_a_pre_clear_message_is_refused_from_the_first_files_uuids_and_reads_it_once(self):
+        # review round three: an edit of a message only the session's first file holds built the graph over both files at
+        # every attempt, reading that file whole each time, for the seam refusal its membership alone gives. The first
+        # attempt reads it once, for the session's uuid set; the second reads none of it; neither leaves a record cache
+        # entry for it
+        em = km.em
+        first = self._transcript(self._base())
+        leaf = _clear_leaf(os.path.dirname(first))
+        km._CUT_FIRST_UUIDS.pop(SID, None)
+        read = _first_file_untouched(first)
+        seam = (None, "that message is from before a restart seam; the conversation can only rewind to newer messages")
+        answers = [km._rewind_target(leaf, SID, "u2")]
+        once = read()
+        answers.append(km._rewind_target(leaf, SID, "u2"))
+        rp = os.path.realpath(first)
+        with em._JSONL_CACHE_LOCK:
+            held = [k for k in em._JSONL_CACHE if os.path.realpath(str(k)) == rp]
+        self.assertEqual({"answers": answers, "the first attempt's bytes of the first file": once,
+                          "the second attempt's": read() - once, "record cache entries for it": held},
+                         {"answers": [seam, seam], "the first attempt's bytes of the first file": os.path.getsize(first),
+                          "the second attempt's": 0, "record cache entries for it": []})
+
 
 class DriveOpPins(unittest.TestCase):
     def test_rewind_send_is_a_drive_op(self):
