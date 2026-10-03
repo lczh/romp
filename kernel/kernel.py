@@ -18565,7 +18565,8 @@ def _cut_first_uuids(sid, first):
     """(uuids, records, read) for the session's first file `first`. uuids: the frozenset of its record uuids, from the session's
     set while the file's stat stands, else from one read of the file alone (_cut_first_records), which becomes the set; None
     when the file cannot be read (nothing is remembered, so the next ask reads again). records: the list this call read (the
-    wide graph takes it, with no second read), else None. read: whether this call read the file, or tried to."""
+    wide graph takes it, with no second read), else None. read: whether this call built the set (a read of the file, an
+    attempt at one, or a whole record cache entry standing for it), which _comment_cut_resolve counts as a read."""
     key = _cut_first_stat(first)
     if key is None:
         return None, None, False
@@ -18855,7 +18856,9 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     ANCHOR_REWOUND_ERR, the refusal it always got, with no graph built (the graph over both files only when a record of
     the display graph links into that file); a target it lacks, a reply not flushed yet, keeps the lag answer and stays
     parked. The first such widening at the file's stat reads that file once and leaves its record cache entry as it found
-    it; later ones, for any target, read nothing while the stat stands; the leaf is never read. A comment in the
+    it; later ones read nothing while the stat stands, and the leaf is not read, except where a record of the display
+    graph links into that file: each target it holds then reads it again outside the cache, and the leaf through the
+    cache, for the graph over both files. A comment in the
     conversation a second /clear's card expands (the file between the two clears) is in neither file and still parks as
     lag, as it did before."""
     facts = {}

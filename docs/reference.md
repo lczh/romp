@@ -2967,9 +2967,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
   `shrunk` and `upgrade`, or `detached` for a whole read that leaves the
-  cache as it was, the comment cut's look into a session's first file after
-  a /clear, and the first calling function outside the event
-  model and the parse family), with `count` and `bytes`; a tail read, an
+  cache as it was, which is how a comment, edit or rewind after a /clear
+  reads the session's first file; and the first calling function outside
+  the event model and the parse family), with `count` and `bytes`; a tail read, an
   append and a restore's tail read are not whole reads and are not counted;
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
   the stage being the pusher thread's current tick job (`jobs.<job>`) or
