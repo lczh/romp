@@ -59796,13 +59796,14 @@ def _feed_first(now, live_map, targets, connect):
     # that build under the dirty rule (_feed_servable) and built the same cold feed again whenever anything marked the views
     # during it, as the boot's housekeeping does, so the waiter's early frame waited for a second cold build (and, when the
     # waiter was the pusher, so did its chat stage).
-    # WHERE THE SECOND BUILD GOES: freshness stays with the pusher's regular feed section, later in the same push, after
-    # its chat stage and before its send stage, which asks under the dirty rule, so a mark that landed mid-build is built
+    # WHERE THE SECOND BUILD GOES: freshness stays with the pusher's regular feed section, which asks under the dirty rule
+    # later in the same push, after its chat stage and before its send stage, so a mark that landed mid-build is built
     # there and ships with that push. So the early passes count one build and one cached serve, and the second build moves
     # to that section; the whole push builds one fewer only where that section would have rebuilt over the waiter's rebuild
     # anyway: a later mark, any time from the start of the waiter's rebuild to the regular ask, or a view signature that
     # moved across a chat stage longer than REBUILD_MIN_S. With one mark during the first build, and an unchanged signature
-    # or a regular ask within REBUILD_MIN_S of the waiter's rebuild, the push built twice under the pusher's arm here too.
+    # or a regular ask within REBUILD_MIN_S of the waiter's rebuild, the push builds twice, as it did when this call asked
+    # on the pusher's arm.
     # THE TRADE is a frame order, not a lost update. A connect pane that waited here and joined after the pusher's push took
     # its targets gets the build it waited for, and such a mark reaches it at the next pusher cycle, as a connect's warm
     # serve already does. When the connect push builds and the pusher waits here (the mirrored order), the pusher's feed
@@ -61476,8 +61477,9 @@ def _cached_feed(now, live_map, sig, connect=False):
     # connect (a fresh client) serves any stored build without the dirty or signature test, and builds only
     # when none is stored (a cold kernel), so startup is instant; the pusher refreshes it within a tick. The
     # cold kernel's early frame asks this arm for either caller (_feed_first). Else: reuse on an unchanged
-    # sig OR a recent rebuild — UNLESS an optimistic kernel-side mutation postdates the build (_views_dirty): that state is invisible
-    # to the sig AND must not wait out REBUILD_MIN_S, or the push meant to show it serves the stale payload.
+    # sig OR a recent rebuild — UNLESS an optimistic kernel-side mutation postdates the build (_views_dirty):
+    # that state is invisible to the sig AND must not wait out REBUILD_MIN_S, or the push meant to show it
+    # serves the stale payload.
     if _feed_servable(sig, connect):
         _VIEW_STATS["feedServe"] += 1
         _PERF_STATS.build("feed", True)

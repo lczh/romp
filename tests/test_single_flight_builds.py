@@ -160,7 +160,7 @@ class FeedFirstWaiter(unittest.TestCase):
     the pusher's push and a pane's connect push both reach _feed_first while no feed is built; one builds, the other waits on
     the single-flight lock. The waiter used to re-check the stored build under the pusher's dirty rule, so a views mark the
     housekeeping made DURING the build made it build the same cold feed again. The waiter now serves the build it waited
-    for, and the second build moves to the pusher's regular feed section, after its chat stage, which carries the mark. The
+    for, and the second build moves to the pusher's regular feed section (after its chat stage), which carries the mark. The
     built 1 / cached 1 read here counts the two early passes only. Over the whole push the count falls only where that
     section would have rebuilt over the waiter's rebuild anyway: a later mark, any time from the start of that rebuild to
     the regular ask, or a view signature that moved across a chat stage longer than REBUILD_MIN_S. FeedFirstWholePush below
