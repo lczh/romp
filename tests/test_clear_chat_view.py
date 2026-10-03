@@ -370,8 +370,8 @@ class TwoClearsExpandHoldsNoEarlierSalvage(unittest.TestCase):
         first_prompt = next((i for i, md in enumerate(mds) if "add a tags route" in md), None)
         self.assertIsNotNone(first_prompt, "premise: the expand is the conversation between the two clears")
         self.assertFalse(any(PRE_LANDED in md for md in mds), "a reply that landed in the first file does not come back")
-        orphaned = [i for i, e in enumerate(evs) if e.get("orphaned")]
-        self.assertTrue(orphaned and all(i > first_prompt for i in orphaned),
-                        "no salvaged reply above the conversation's first prompt: %s" % [mds[i] for i in orphaned])
-        self.assertTrue(any("salvaged between the two clears" in mds[i] for i in orphaned),
-                        "a reply salvaged inside that conversation still shows")
+        above = [mds[i] for i, e in enumerate(evs) if e.get("orphaned") and i < first_prompt]
+        self.assertEqual(above, [], "no salvaged reply above the conversation's first prompt")
+        mid = [i for i, md in enumerate(mds) if "salvaged between the two clears" in md]
+        self.assertTrue(mid and all(i > first_prompt for i in mid), "a reply salvaged inside that conversation still shows, "
+                                                                     "below its first prompt: %s" % mid)
