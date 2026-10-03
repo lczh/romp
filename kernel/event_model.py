@@ -6476,8 +6476,8 @@ class LazyAtoms(list):
                 a = list.__getitem__(self, i)
                 if a is _UNMAT:
                     out |= self._index.tool_ids(r)        # a turn's list is minted over a LazyIndex (_pre_turns_of); the one
-                    #                                       stand-in index in tests carries build alone and serves lane tests,
-                    #                                       which never ask a list for its tool ids
+                    #                                       stand-in index in tests (build and uuid_of, no tool_ids) serves
+                    #                                       lane tests, which never ask a list for its tool ids
                 else:
                     out |= atom_tool_ids(a)
             got = self._tool_ids = frozenset(out)
