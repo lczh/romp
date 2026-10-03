@@ -1328,6 +1328,40 @@ if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell b
                          % (_gc_freeze_bad_knob[:80], gcf.DEFAULT_LOAD_TREES))
     except Exception:
         pass
+_GC_GEN2_THRESHOLD, _gc_gen2_bad_knob = gcf.gen2_threshold_from_env()   # the full-collection trigger while the freeze is on;
+#                                                                          parsed here, APPLIED in main() (_gc_gen2_apply), which
+#                                                                          also reports a bad value, once its fallback is in force
+
+
+def _gc_gen2_apply():
+    """main()'s one call (2026-10-03): with the freeze on, raise CPython's full-collection trigger, so an automatic full
+    collection comes at most once per 101 generation-one collections, each controller run restarting the count, rather
+    than as often as every eleventh (gc_freeze's module docstring says why, apply_gen2_threshold where it is not
+    applied). At boot, never at import: a test that loads the kernel keeps its interpreter's thresholds.
+    ROMP_GC_FREEZE=off leaves the stock trigger. A bad ROMP_GC_GEN2_THRESHOLD (the parse fell back to the default) is said
+    once and counted under /perf gc.freeze.errors HERE, and only once apply_gen2_threshold has returned a trigger, so the
+    default the line names is the trigger in force. Where no trigger is applied (the freeze off, a free-threaded build, a
+    collector that does not keep the value) the knob names a value nothing uses, and nothing is said or counted (review
+    2026-10-03, round two: said at import with the freeze on, it named a default the gate then never applied). A failure
+    never stops the boot: counted under /perf gc.freeze.errors, said once, and the stock trigger stands."""
+    try:
+        applied = gcf.apply_gen2_threshold(_GC_FREEZE, value=_GC_GEN2_THRESHOLD)
+    except Exception as e:
+        _GC_FREEZE_ERRORS[0] += 1
+        try:
+            sys.stderr.write("gc-freeze: raising the full-collection trigger raised %s; the stock trigger stands (counted "
+                             "under /perf gc.freeze.errors): %s\n" % (type(e).__name__, repr(e)[:200]))
+        except Exception:
+            pass
+        return None
+    if applied is not None and _gc_gen2_bad_knob is not None:   # the fallback is the trigger in force: said once, counted
+        _GC_FREEZE_ERRORS[0] += 1
+        try:
+            sys.stderr.write("gc-freeze: ROMP_GC_GEN2_THRESHOLD=%r is not an integer of at most %d; using the default %d\n"
+                             % (_gc_gen2_bad_knob[:80], gcf.MAX_GEN2_THRESHOLD, gcf.DEFAULT_GEN2_THRESHOLD))
+        except Exception:
+            pass
+    return applied
 
 
 def _gc_freeze_tick(idle, first):
@@ -77872,6 +77906,8 @@ def main():
     signal.signal(signal.SIGTERM, _graceful_term)             # drain, don't die mid-flight (see _graceful_term)
     _PERF_STATS.install_gc_hook()                             # the collector's pauses on /perf (2026-09-16): before the boot warm and
     #                                                           the loops, so the boot's own full collections count (see gc_event)
+    _gc_gen2_apply()                                          # with the freeze on, the raised full-collection trigger, before the
+    #                                                           boot warm's loads (2026-10-03; ROMP_GC_FREEZE=off keeps the stock one)
     # romp holds no API key (credentials.py, 2026-09-08). A retired provider line in service.env, the marker
     # beside it, or a key in this process's environment stops the kernel HERE, before the bundler, the
     # postal bus or the SDK backend spawn anything that could inherit it. RuntimeError: the
