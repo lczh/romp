@@ -33224,12 +33224,13 @@ def _orphan_replies(sid):
 
 
 def _conversation_floored(sid, path, rows):
-    """`rows` (durable salvaged-reply markers, oldest first) less those stamped before the conversation the live leaf's parse
+    """`rows` (durable salvaged-reply markers, oldest first) less those stamped before the conversation the parse of `path`
     reads begins (jd.conversation_floor, the floor parse_session puts under the same markers), the whole second kept. A /clear's
     leaf parses without the pre-clear file since 2026-10-03, so the parse's landed-text uuids no longer hold the replies that
     landed there, and a pre-clear marker would ghost back into the new conversation's top wherever the episode log has no
-    boundary row for the T131 floor (a session first observed after its clear). A no-op for a session whose first file the
-    parse reads, and no read at all with no marker to floor."""
+    boundary row for the T131 floor (a session first observed after its clear), and into the top of the first clear's
+    conversation when a second /clear's card expands it (an episode render, which has no T131 floor). A no-op for a session
+    whose first file the parse reads, and no read at all with no marker to floor."""
     if not rows:
         return rows
     c0 = jd.conversation_floor(sid, path)
@@ -42397,8 +42398,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # retry that re-replied must not double. Match exact, and either-way prefix (a partial stream vs its full
     # retry). NB: build the disk-text set from the SAME session["turns"] atoms this loop renders.
     orphans = _past_floor(_orphan_replies(sid)); _oi = 0
-    if not path_override and thread_cut is None:
-        orphans = _conversation_floored(sid, sess["path"], orphans)   # and never before the parse's own first record (2026-10-03)
+    if thread_cut is None and not sidechain:
+        # and never before the parse's own first record (2026-10-03). An episode render too (path_override): after a second
+        # /clear the card expands the first clear's file, whose parse no longer reads the anchor, so a reply that landed
+        # there would stand above that conversation's first prompt (review round one); a subagent's render carries no notes
+        orphans = _conversation_floored(sid, sess["path"], orphans)
     if sidechain:
         # a subagent's transcript carries none of the parent's side-store notes (see the docstring)
         recoveries, gaveups, efforts, gestures, orphans = [], [], [], [], []
