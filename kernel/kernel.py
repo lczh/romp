@@ -59794,13 +59794,26 @@ def _feed_first(now, live_map, targets, connect):
     # in _push), so any build the cache holds when it asks was stored after this push found none: the build this push
     # waited for on the single-flight lock (_cached_feed), and the first frame these panes want. The pusher's arm re-checked
     # that build under the dirty rule (_feed_servable) and built the same cold feed again whenever anything marked the views
-    # during it, as the boot's housekeeping does, so a restart with panes open built the cold feed a second time for a pane
-    # whose first frame needed none of it.
-    # Freshness stays with the regular feed section: the pusher's own, in the same push and before its send stage, asks
-    # under the dirty rule, so a mark that landed mid-build ships there. The trade: a connect pane that waited here and joined
-    # after the pusher's push took its targets gets the build it waited for, and such a mark reaches it at the next pusher
-    # cycle, as a connect's warm serve already does. A cold cache still BUILDS on this arm
-    # (_feed_servable holds only with a payload), so the connect push of a cold kernel still makes the early frame.
+    # during it, as the boot's housekeeping does, so the waiter's early frame waited for a second cold build (and, when the
+    # waiter was the pusher, so did its chat stage).
+    # WHERE THE SECOND BUILD GOES: freshness stays with the pusher's regular feed section, later in the same push, after
+    # its chat stage and before its send stage, which asks under the dirty rule, so a mark that landed mid-build is built
+    # there and ships with that push. So the early passes count one build and one cached serve, and the second build moves
+    # to that section; the whole push builds one fewer only where that section would have rebuilt over the waiter's rebuild
+    # anyway: a later mark, any time from the start of the waiter's rebuild to the regular ask, or a view signature that
+    # moved across a chat stage longer than REBUILD_MIN_S. With one mark during the first build, and an unchanged signature
+    # or a regular ask within REBUILD_MIN_S of the waiter's rebuild, the push built twice under the pusher's arm here too.
+    # THE TRADE is a frame order, not a lost update. A connect pane that waited here and joined after the pusher's push took
+    # its targets gets the build it waited for, and such a mark reaches it at the next pusher cycle, as a connect's warm
+    # serve already does. When the connect push builds and the pusher waits here (the mirrored order), the pusher's feed
+    # panes get the pre-mark build first and the post-mark build from the regular section one chat stage later, and the
+    # chat stage starts one cold build sooner. Handing the caller's role through (`connect`) would put that second cold
+    # build back in front of the pusher's chat stage, the boot stall this pass exists to shorten. The chat stage's own
+    # needs-you reads move with it: for the first push after a restart, the needs-you ring, its count and the Needs you
+    # box's rows read the pre-mark build, and they catch up on the next cycle, which the regular section's rebuild wakes
+    # when it moves them (the needs-change wake in _build_feed_locked).
+    # A cold cache still BUILDS on this arm (a connect serves any stored build without the dirty or signature test, and
+    # builds only when none is stored), so the connect push of a cold kernel still makes the early frame.
     feed_src = _cached_feed(now, live_map, fsig, True)
     if feed_src is None:
         return False
@@ -59833,7 +59846,8 @@ def _push(targets, connect=False, live_map=None):
     Drives both the periodic pusher (all clients) and a fresh connect (one client): a new/reconnecting
     client (empty dedup) gets the full state; steady-state sends only diffs. Builds only the apps the
     targets actually need (no timeline parse with no timeline client). connect=True (a fresh client) serves
-    the pusher-warmed feed/timeline WITHOUT rebuilding, so a reload is instant (the user 2026-06-25).
+    any stored feed build without the dirty or signature test, and builds only when none is stored, so a
+    reload is instant (the user 2026-06-25); the timeline's connect path is described at its section.
     `live_map` lets the periodic pusher hand down its cycle's ONE liveness snapshot (see _pusher_cycle);
     other callers (connect pushes, ad-hoc _push_all) leave it None and pay their own read."""
     if not targets:
@@ -61459,9 +61473,10 @@ def _chat_dots_off(now, live_map):
 
 
 def _cached_feed(now, live_map, sig, connect=False):
-    # connect (a fresh client) NEVER triggers a rebuild — it serves whatever the pusher has warmed, so startup
-    # is instant; the pusher refreshes it within a tick. Else: reuse on an unchanged sig OR a recent rebuild —
-    # UNLESS an optimistic kernel-side mutation postdates the build (_views_dirty): that state is invisible
+    # connect (a fresh client) serves any stored build without the dirty or signature test, and builds only
+    # when none is stored (a cold kernel), so startup is instant; the pusher refreshes it within a tick. The
+    # cold kernel's early frame asks this arm for either caller (_feed_first). Else: reuse on an unchanged
+    # sig OR a recent rebuild — UNLESS an optimistic kernel-side mutation postdates the build (_views_dirty): that state is invisible
     # to the sig AND must not wait out REBUILD_MIN_S, or the push meant to show it serves the stale payload.
     if _feed_servable(sig, connect):
         _VIEW_STATS["feedServe"] += 1
@@ -61477,9 +61492,9 @@ def _cached_feed(now, live_map, sig, connect=False):
 
 
 def _feed_servable(sig, connect):
-    """Whether the built feed stands for this caller: a connect serves any warmed build (never rebuilds); the pusher
-    serves it while the view signature holds or within REBUILD_MIN_S, and never past a dirty mark that is not older than its
-    start (_dirty_since)."""
+    """Whether the built feed stands for this caller: a connect serves any stored build without the dirty or signature
+    test, and builds only when none is stored (False here, so _cached_feed builds); the pusher serves it while the view
+    signature holds or within REBUILD_MIN_S, and never past a dirty mark that is not older than its start (_dirty_since)."""
     e = _built_feed
     # The dirty mark compares against build START, not finish (the user 2026-07-28): a build takes
     # ~1-1.6s and reads the stores one session at a time, so a mutation landing MID-build may or may
