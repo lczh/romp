@@ -18565,8 +18565,9 @@ def _cut_first_records(first):
     whole entry standing at the file's stat serves them with no read and stays as it was (how "whole"); otherwise (a tail a
     restore left, or no entry) the file is read whole into a list only the caller holds, installing, upgrading and touching
     no entry (em.read_records_detached; how "read", the file's bytes pulled). Records and key None when the file moved under
-    the read (a stat taken before it unequal to one after): nothing may be remembered from such a read, though it pulled its
-    bytes (how stays "read", or "whole"). Records and key None too when the read failed, which pulled none: how is then
+    the read (a stat taken before it unequal to one after): nothing may be remembered from such a look (how "read" when it
+    pulled the file's bytes, "whole" when a standing entry served them). Records and key None too when the read failed, which
+    pulled none: how is then
     "unreadable (<the error>)", the OSError the stat, the open or the read raised (review round three, which found a failed
     read counted and said as a read)."""
     fail = []
@@ -18956,8 +18957,8 @@ def _cut_widen_lag(path, sid, anchor_uuid, dangling):
 
 
 def _cut_wide_walk(path, sid, anchor_uuid, first, recs):
-    """(answer, how): the cut walk over the leaf `path` and the session's first file `first` for a target of that file that a
-    record of the leaf links into, the comment cut's linked case and the one road that builds the graph over both files
+    """(answer, how): the cut walk over the leaf `path` and the session's first file `first` for a target of that file when a
+    record of the leaf links into that file, the comment cut's linked case and the one road that builds the graph over both files
     (review round three). `recs`: the first file's records the lookup read, or None when the session's uuid set answered,
     and then the file is read again outside the record cache (_cut_first_records: `how` is that read's, else None). Answer
     None when that read fails (said once per session, _cut_first_unreadable) or the file moved under it."""
