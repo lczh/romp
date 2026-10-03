@@ -2035,7 +2035,7 @@ def _bg_records():
 
 
 class PreCutToolIds(Harness):
-    """lag-1003 (2026-10-03): the settle gate's background hold (the judge's _awaiting_bg_hold) looks for the newest turn
+    """2026-10-03: the settle gate's background hold (the judge's _awaiting_bg_hold) looks for the newest turn
     naming a running launch. A pre-cut turn answers from the tool ids its atom list carries (LazyAtoms.tool_ids): a built
     slot read where it sits, an unbuilt row from its lazy scalars after one decode, an inline or synthesized row built for
     the read and dropped. So the hold builds no atom, and once a list has answered it decodes no row again."""
@@ -2120,16 +2120,20 @@ class PreCutToolIds(Harness):
         self.assertEqual(modes, ["restore"])
         self.assertIn(launch[0], [t["id"] for t in tree["turns"] if t.get("pre")], "the launch's turn is a pre-cut turn")
         self.assertNotEqual(tree["turns"][-1]["id"], launch[0], "newer turns lie between it and the walk's start")
-        st0, h0 = em.asm_index_stats(), jd.bg_hold_stats()
+        st0 = em.asm_index_stats()
         got = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
-        st1, h1 = em.asm_index_stats(), jd.bg_hold_stats()
+        st1 = em.asm_index_stats()
         self.assertEqual(got, want, "the restored tree answers as the whole parse")
         self.assertEqual(st1["materialized"], st0["materialized"], "no pre-cut atom built")
-        self.assertEqual((h1["walks"] - h0["walks"], h1["exhausted"] - h0["exhausted"]), (2, 0))
-        self.assertGreater(h1["preTurns"] - h0["preTurns"], 0, "pre-cut turns answered from their lists' ids")
         again = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
         self.assertEqual(again, want)
         self.assertEqual(em.asm_index_stats()["rowDecodes"], st1["rowDecodes"], "the lists kept their ids: no row decoded again")
+        h0 = jd.bg_hold_stats()                                   # the counters last: the pre-change code reds on the builds above
+        for s in stores:
+            jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW)
+        h1 = jd.bg_hold_stats()
+        self.assertEqual((h1["walks"] - h0["walks"], h1["exhausted"] - h0["exhausted"]), (2, 0))
+        self.assertGreater(h1["preTurns"] - h0["preTurns"], 0, "pre-cut turns answered from their lists' ids")
 
 
 class EventModelReaders(Harness):

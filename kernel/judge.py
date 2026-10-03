@@ -10048,11 +10048,8 @@ def _bg_hold_note(walked, turns, pre, plain, exhausted):
         s = _BG_HOLD_STATS
         s["calls"] += 1
         if walked:
-            s["walks"] += 1
-            s["turns"] += turns
-            s["preTurns"] += pre
-            s["atoms"] += plain
-            s["exhausted"] += 1 if exhausted else 0
+            for k, n in (("walks", 1), ("turns", turns), ("preTurns", pre), ("atoms", plain), ("exhausted", int(exhausted))):
+                s[k] += n
 
 
 def bg_hold_stats():
