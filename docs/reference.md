@@ -2777,10 +2777,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   through, because every summary wearing its id hangs off a boundary on the
   conversation's path that
   adoption did not splice, as an automatic compaction's does, and which a
-  compaction in it, the descent or a parallel batch's kept check then
-  refused: it parses whole, as it did before the gate let such records
-  through, and never takes the restore road; the deltas the gate let through
-  that folded count under `fold:attachedPass`, the folds it saved),
+  compaction in it, the descent (a rewind and an api_error retry alike) or
+  a parallel batch's kept check then refused: it parses whole, as it did before the gate let such records
+  through, and never takes the restore road (nor the re-seat, when it
+  passed on a batch's link, so the kept check rules). A compaction
+  summary does not count as such a record in its own delta, so a later
+  compaction alone in its append restores as any compaction does. A delta
+  the gate let through that the stamp, Skill-link or known-uuid gate then
+  takes counts under that gate's reason alone: a live manual /compact's
+  raw twin, which `promptid` counted before, counts under `ts`. The deltas
+  the gate let through that folded count under `fold:attachedPass`, the
+  folds it saved),
   `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
