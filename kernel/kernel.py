@@ -59830,29 +59830,28 @@ def _send_feed_frames(targets, feed_src, feed):
     global _feed_wire
     feed_ms = feed_sig = feed_parts = None
     for c in targets:
-        if c["app"] not in ("feed", "fleet"):
-            continue
-        try:
-            if feed_ms is None:
-                w = _feed_wire                           # tuple snapshot — rebound whole, never mutated (torn reads)
-                if w is not None and w[0] is feed_src and w[1] == feed.get("ledgers"):
-                    feed, feed_ms, feed_sig, feed_parts = w[2], w[3], w[4], w[5]
-                else:
-                    feed_parts = _delta_parts("feed", feed)   # the one per-entry encode, handed down to the delta path
-                    if feed_parts is not None:
-                        feed_sig = _parts_sig(feed_parts)
-                        feed_ms = _LazyWire(lambda f=feed: json.dumps(f, default=_wire_default_in("_push feed")),
-                                            _parts_est(feed_parts), "feed_body")
-                    else:                                # unkeyable: whole frames and the string signature, as before
-                        s = json.dumps(feed, default=_wire_default_in("_push feed"))
-                        feed_ms, feed_sig = _LazyWire(None, len(s), text=s), _dedup_sig(feed, s)
-                        _wire_bump("feed_sig_fallback")
-                    _feed_wire = (feed_src, feed.get("ledgers"), feed, feed_ms, feed_sig, feed_parts)
-            _send_slot(c, "feed", feed, feed_ms, feed_sig, feed_parts)
-        except Exception:
-            sys.stderr.write("push send feed (%s): %s\n" % (c.get("app"), traceback.format_exc()))
-            if feed_ms is None:                          # the FILL raised (nothing assigned): stand the slot down this push
-                return
+        if c["app"] in ("feed", "fleet"):   # the Feed pane AND the Outline pane ride the feed payload (the Outline reads feed.ledgers)
+            try:
+                if feed_ms is None:
+                    w = _feed_wire                           # tuple snapshot — rebound whole, never mutated (torn reads)
+                    if w is not None and w[0] is feed_src and w[1] == feed.get("ledgers"):
+                        feed, feed_ms, feed_sig, feed_parts = w[2], w[3], w[4], w[5]
+                    else:
+                        feed_parts = _delta_parts("feed", feed)   # the one per-entry encode, handed down to the delta path
+                        if feed_parts is not None:
+                            feed_sig = _parts_sig(feed_parts)
+                            feed_ms = _LazyWire(lambda f=feed: json.dumps(f, default=_wire_default_in("_push feed")),
+                                                _parts_est(feed_parts), "feed_body")
+                        else:                                # unkeyable: whole frames and the string signature, as before
+                            s = json.dumps(feed, default=_wire_default_in("_push feed"))
+                            feed_ms, feed_sig = _LazyWire(None, len(s), text=s), _dedup_sig(feed, s)
+                            _wire_bump("feed_sig_fallback")
+                        _feed_wire = (feed_src, feed.get("ledgers"), feed, feed_ms, feed_sig, feed_parts)
+                _send_slot(c, "feed", feed, feed_ms, feed_sig, feed_parts)
+            except Exception:
+                sys.stderr.write("push send feed (%s): %s\n" % (c.get("app"), traceback.format_exc()))
+                if feed_ms is None:                          # the FILL raised (nothing assigned): stand the slot down this push
+                    return
 
 
 @_stage_marked(lambda targets, connect=False, live_map=None: "connect" if connect else "push")

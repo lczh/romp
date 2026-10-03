@@ -645,7 +645,8 @@ class ARaisingSerializerLeavesThePusherAlive(unittest.TestCase):
                         "the feed's send, called before the timeline section")
         feed = src[src.index("def _send_feed_frames("):]; feed = feed[:feed.index("\ndef ")]
         j = feed.index("for c in targets:")
-        self.assertIn("        try:\n            if feed_ms is None:", feed[j:], "the feed's belt, per pane, as the send stage's was")
+        self.assertIn('        if c["app"] in ("feed", "fleet"):', feed[j:], "the feed's routing line, moved whole from the send stage")
+        self.assertIn("            try:\n                if feed_ms is None:", feed[j:], "the feed's belt, per pane, as the send stage's was")
         self.assertIn('sys.stderr.write("push send feed (%s): %s\\n"', feed[j:])
         jobs = src[src.index("def _pusher_cycle_jobs("):]; jobs = jobs[:jobs.index("\ndef ")]
         i = jobs.index("_push_all(live_map=live_map)")
