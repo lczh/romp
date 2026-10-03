@@ -2114,8 +2114,9 @@ class PreCutToolIds(Harness):
 
     def test_marker_rows_answer_from_their_scalars_and_restore_no_atom(self):
         """A row with a lazy marker answers from the marker's tu and tr, never through _restore_prefix_atoms. Building it
-        instead would store nothing and register nothing, so neither `materialized` nor `rowDecodes` would move: a spy on the
-        restore is what sees such a build, and the index's own build through the spy shows the spy is in the road."""
+        instead would store nothing and register nothing, so `materialized` would not move and `rowDecodes` would count
+        the same one decode per row: a spy on the restore is what sees such a build, and the index's own build through the
+        spy shows the spy is in the road."""
         rows = [_ix_row(0, lz=_ix_marker(tu=[["tu-a", "Bash"]])),                 # a call
                 _ix_row(1, lz=_ix_marker(k="u", tr=["tu-a"])),                    # its result
                 _ix_row(2, lz=_ix_marker(tu=[["tu-b", "Read"]]))]                 # another call
