@@ -59804,26 +59804,34 @@ def _feed_first(now, live_map, targets, connect):
     # with the regular ask more than REBUILD_MIN_S after the waiter's rebuild finished. A waiter that was the pusher
     # rebuilt ahead of its chat stage, so this needs a chat stage longer than the floor; one that was a connect push
     # rebuilt during the pusher's chat stage, so there it needs a chat stage longer than the floor plus that rebuild.
-    # Within a push only inputs read at the ask can move the signature, such as a transcript append, a state or names
-    # write or a judge pass. With one mark during the first build, and an unchanged signature or a regular ask within
-    # REBUILD_MIN_S of the waiter's rebuild, the push builds twice, as it did when this call asked on the pusher's arm.
+    # What moves the signature depends on the order. When the pusher waited (the mirrored order), both compared
+    # signatures come from its own push, so only inputs read at the ask can move it, such as a transcript append, a
+    # state or names write or a judge pass. When a connect push waited (the measured order), its rebuild carried that
+    # push's signature, so the two pushes' clocks (the 5 s bucket in _fleet_view_sig) and liveness reads count too: a
+    # connect push that arrives 5 s or more into the first build is always in another bucket than the pusher's, so there
+    # only the timing condition applies. With one mark during the first build, and an unchanged signature or a regular
+    # ask within REBUILD_MIN_S of the waiter's rebuild, the push builds twice, as it did when this call asked on the
+    # pusher's arm.
     # THE TRADE is a frame order and its timing, not a lost update. When the pusher builds and a connect push waits here
     # (the measured order), a connect pane that joined after the pusher's push took its targets gets the build it waited
     # for, and the post-mark build reaches it from the next pusher cycle, after the whole first push, its cold chat stage
     # included. When the connect push builds and the pusher waits here (the mirrored order), the pusher's feed panes get
     # the pre-mark build first and the post-mark build after the chat stage, the regular section's rebuild and, with a
-    # timeline pane among the targets, the timeline stage; the chat stage starts one cold build sooner. In either order a
-    # card move predicted in such a pane during the first build waits for the post-mark frame (the move's ack names the
-    # build underway, ui/webview/feed.ts), and if that frame comes more than 15 s after the ack, the pane's backstop drops
-    # the prediction and the card shows the pre-mark state until the frame lands. Handing the caller's role through
+    # timeline pane among the targets, the timeline stage (the feed-send change, PR 101, sends the feed frame at the end
+    # of the feed section, before the timeline section, so that part of the delay goes with it; whichever of the two
+    # lands second drops this clause); the chat stage starts one cold build sooner. In either order a card move
+    # predicted in such a pane during the first build waits for the post-mark frame (the move's ack names the build
+    # underway, ui/webview/feed.ts), and if that frame comes more than 15 s after the ack, the pane's backstop drops the
+    # prediction and the card shows the pre-mark state until the frame lands. Handing the caller's role through
     # (`connect`) would put the second cold build back in front of the pusher's chat stage, the boot stall this pass
     # exists to shorten. The bells, the phone pushes and the app badge fire on each fresh build (_build_feed_locked), so
     # in either order the post-mark build's bells, pushes and badge fire with the regular section's rebuild, after the
-    # chat stage, where a waiter that rebuilt fired them before the chat stage ended. The chat stage's needs-you reads
-    # move with that rebuild too:
-    # for the first push after a restart, the needs-you ring, its count and the Needs you box's rows read the pre-mark
-    # build, and they catch up on the next cycle, which the regular section's rebuild wakes when it moves them (the
-    # needs-change wake in _build_feed_locked).
+    # chat stage. A waiter that rebuilt fired them when its rebuild ended: before the chat stage in the mirrored order;
+    # in the measured order that rebuild ran beside the chat stage, so they came before the chat stage's end only when
+    # the rebuild was the shorter of the two. The chat stage's needs-you reads move with the regular section's rebuild
+    # too: for the first push after a restart, the needs-you ring, its count and the Needs you box's rows read the
+    # pre-mark build, and they catch up on the next cycle, which the regular section's rebuild wakes when it moves them
+    # (the needs-change wake in _build_feed_locked).
     # A cold cache still BUILDS on this arm (a connect serves any stored build without the dirty or signature test, and
     # builds only when none is stored), so the connect push of a cold kernel still makes the early frame.
     feed_src = _cached_feed(now, live_map, fsig, True)
