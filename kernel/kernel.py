@@ -64913,8 +64913,8 @@ def _job_stage(name, thunk):
     The thread's stage mark is `jobs.<name>` for the job's duration (T401: the reads inside it count under it). On the jobs
     thread the job's own thread CPU and a run are counted too (jobs.cpuByJob, _PerfStats.job_cpu), read before the bookkeeping
     below, so a pass's wall can be split into the jobs that worked and the jobs that waited (for a lock, the disk or a free
-    core). That CPU includes any collection the interpreter ran on this thread during the job: gc.gen."2" and the ring rows'
-    generation-2 tallies over the same interval say whether one did before a jump is read as the job's own work."""
+    core). That CPU includes any collection the interpreter ran on this thread during the job: before a jump is read as the
+    job's own work, compare gc.gen."2" and the ring rows' generation-2 tallies over the same interval."""
     _t = time.monotonic()
     _c = time.thread_time()
     prev = getattr(_STAGE_TL, "name", None)
