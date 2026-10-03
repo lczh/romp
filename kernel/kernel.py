@@ -60482,9 +60482,9 @@ def _push(targets, connect=False, live_map=None):
         # path), and the send stage sends no feed of its own, so a push sends it once. A timeline build that raises no
         # longer holds it. Its time counts under push.send, as before: the stage now closes twice in a push, for the feed
         # here and for the bars after the timeline, and the two closes add into the split's one push.send row. The wait
-        # moves to the Sessions pane, whose lanes and timeline build now start after this fill and these sends: a few
-        # milliseconds per rebuild of a feed of a few hundred cards (synthetic timings, 2026-10-03), more when every card
-        # changed or a pane takes its first whole frame, and nothing measurable on an unchanged push, where the wire tuple
+        # moves to the Sessions pane, whose lanes and timeline build now start after this fill and these sends: for a feed
+        # of a few hundred cards, a few milliseconds on a rebuild, up to about twenty on a pane's first frame or with every
+        # card changed (synthetic timings, 2026-10-03), and nothing measurable on an unchanged push, where the wire tuple
         # holds and every pane dedups.
         _t_stage = time.monotonic()
         _send_feed_frames(targets, feed_src, feed)
