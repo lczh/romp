@@ -3150,10 +3150,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `jobs.<job>` per job that thread runs (`jobs.interruptBlock`,
   `jobs.autoNudge` and the rest), and inside a job its finer parts as
   `jobs.<job>.<part>` (such as the nudge job's snapshot, looks and parse),
-  which that job's own stage already covers, `push`,
+  which that job's own stage already covers on the jobs thread (the pass
+  the dashboard's auto-nudge and compaction-suggestion toggles run at once,
+  on the socket's thread, records its parts with no job stage around
+  them), `push`,
   and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
-  `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
+  `push.feedFirst`; a fresh snapshot lists every one at zero except a job's
+  finer parts, which appear once the part has run. The `push.*`
   stages count every push, including the one a connecting page gets, so they
   can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
