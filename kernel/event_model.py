@@ -1128,6 +1128,7 @@ def set_checkpoint_dir(fn):
         _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear()
         _RETIRED_FOLDS.clear()                            # a retirement never outlives a state rebind (round two, low 2)
         _DOC_MEMO.clear(); _DOC_MEMO_BYTES[0] = 0         # nor does a memoized document (the harnesses' fresh process is this setter)
+        _DOC_INDEX.clear()                                # nor what a write's carry knows of a document without reading it
         _CKPT_CYCLE["cap"] = _ckpt_cycle_default_cap(); _CKPT_CYCLE["spent"] = 0
 
 
@@ -1150,6 +1151,7 @@ def _ckpt_fallback(path, reason, detail=""):
         _CKPT_STATS["fallbacks"][reason] = _CKPT_STATS["fallbacks"].get(reason, 0) + 1
         _CKPT_PENDING.pop(str(path), None)
         _CKPT_DOC_FOLDS.pop(str(path), None)              # the document is gone: the converge pass must not believe it whole
+        _DOC_INDEX.pop(str(path), None); _doc_memo_drop(str(path))   # nor may a write's carry or a consult serve it from memory
     try:
         sys.stderr.write("checkpoint fallback (%s) for %s%s\n" % (reason, path, (": " + detail) if detail else ""))
     except Exception:
@@ -1725,10 +1727,23 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     converge pass an idle session's document was never rewritten, so they survived). Only entries with a state, or an
     over-the-cap cursor, at a count inside this entry's held records, and only when the document's own guard still
     stands on disk (a file rewritten since voids its states); a bare or tail-only cursor is not carried: the next boot reads
-    the file whole for that fold once and the write after carries its state."""
+    the file whole for that fold once and the write after carries its state.
+    The document is read only when it could give something: when _DOC_INDEX describes the very file on disk (its inode,
+    mtime and size, as this process last wrote or loaded it) and none of its carryable entries passes the filter below
+    (each names a fold this write holds, or stands at a count it cannot record), the answer is {} without a read, the
+    answer the read would give whatever its verdict and guard say, since those only ever withhold entries."""
     cp = _ckpt_file(key)
-    if cp is None or not cp.exists():
+    if cp is None:
         return {}
+    try:
+        sig = _doc_sig(cp.stat())
+    except OSError:
+        return {}                                         # no document (a missing file is the common case: a first write)
+    with _CKPT_LOCK:
+        idx = _DOC_INDEX.get(key)
+    if idx is not None and idx[0] == sig and not any(
+            n not in folds and c is not None and _count_recordable(base, count, c) for n, c in idx[1].items()):
+        return {}                                         # nothing in it this write could carry: no read
     doc = _ckpt_doc_shared(key)                           # one read, shared with a retirement's consult of the same document (low C)
     if not isinstance(doc, dict) or doc.get("v") != _CKPT_V or doc.get("path") != os.path.realpath(key):
         return {}
@@ -1802,7 +1817,8 @@ def checkpoint_write(path, force=False):
                 _CKPT_STATS["skippedFolds"] += 1
     if not folds and not force:
         return False
-    folds.update(_carry_forward_states(key, folds, base, count, size, mtime))   # the disk document's states for folds this process never ran
+    carried = _carry_forward_states(key, folds, base, count, size, mtime)
+    folds.update(carried)                                 # the disk document's states for folds this process never ran
     with _CKPT_LOCK:
         retired = set(_RETIRED_FOLDS.get(key, ()))        # taken AFTER the cursor snapshot and the carry: a forget that raced the
     for n in retired:                                     #  snapshot still omits its fold here; every name taken is honoured by
@@ -1843,14 +1859,19 @@ def checkpoint_write(path, force=False):
         cp.parent.mkdir(parents=True, exist_ok=True)
         tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
         tmp.write_text(json.dumps(doc, separators=(",", ":")))
-        os.replace(tmp, cp)
+        sig = _doc_sig(tmp.stat())                        # the rename keeps the inode, mtime and size: this is the file `cp` names
+        os.replace(tmp, cp)                               #  now, never another writer's, whichever replace lands last
     except OSError:
         return False
     with _CKPT_LOCK:
         _CKPT_SEQ[key] = seq
         _CKPT_STATS["writes"] += 1
         _CKPT_DOC_FOLDS[key] = _doc_fold_shapes(folds)
-        _doc_memo_drop(key)                               # the document moved under the memo: the next consult reads the new one
+        _doc_index_put_locked(key, sig, folds)            # what the next write's carry could take from it, known without a read
+        if any(n in folds for n in carried):              # it holds a state this process does not compute: the next carry needs it
+            _doc_memo_put_locked(key, sig, doc)           #  again and takes it from memory (`doc` is what _ckpt_load would return)
+        else:
+            _doc_memo_drop(key)                           # this process's own states only: the index serves the next carry
         if omitted:                                       # the retirements this document honoured are done; any that arrived
             rem = _RETIRED_FOLDS.get(key)                 #  after the check above stay, and keep the path dirty for the next write
             if rem is not None:
@@ -6874,8 +6895,9 @@ def _retire_fold(path, name):
         _FOLD_DIRTY.add(key)
 
 
-_DOC_MEMO = {}                     # path -> (document file's (mtime_ns, size), the loaded document): one read shared between the
-#                                   retirement's consult and the write's carry (T391 follow-up, low C), dropped when the file moves
+_DOC_MEMO = {}                     # path -> (document file's _doc_sig, the loaded document): one read shared between the
+#                                   retirement's consult and the write's carry (T391 follow-up, low C), dropped when the file moves;
+#                                   a write keeps the document it wrote here only when it carried a state the disk alone had
 _DOC_MEMO_PARSE_MULTIPLE = 4.5     # what a parsed fold document weighs resident against its bytes on disk (measured on the devbox's
 #                                    documents, 2026-09-12): the memo's weights and its cap are RESIDENT bytes, so the ceiling means
 #                                    what it says
@@ -6884,11 +6906,43 @@ _DOC_MEMO_CAP = _env_or("ROMP_DOC_MEMO_CAP_MB", max(64 * 1024 ** 2, _machine_mem
 #                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (236 MiB on a 118 GiB machine; a count
 #                                    cap said nothing about bytes and held whole documents for files no writer touched again), reported
 #                                    under checkpoints.docMemo
+_DOC_INDEX = {}                    # path -> (document file's _doc_sig, {fold name: count, or None when unreadable}) for every entry
+#                                   with a state or an over-the-cap cursor, as this process last WROTE or LOADED the document: what a
+#                                   write's carry could take from it, so a write after a write that changed nothing carryable reads
+#                                   no document byte (_carry_forward_states)
+_DOC_INDEX_MAX = 4096              # paths; over it the oldest is let go (its next carry reads the document once)
+
+
+def _doc_sig(st_):
+    """What identifies a fold document's bytes from its stat: (inode, mtime_ns, size). Every writer replaces a document by a
+    rename (a new inode), so a document another writer replaced at the same size within one clock tick still differs."""
+    return (st_.st_ino, st_.st_mtime_ns, st_.st_size)
+
+
+def _doc_carryable(folds):
+    """{fold name: count} of the entries a write's carry could take from a document's `folds` (the carry's own shape test: a
+    dict with a state or an over-the-cap cursor; the count None when it does not read as an integer, which the carry skips)."""
+    out = {}
+    for n, f in (folds or {}).items():
+        if isinstance(f, dict) and ("state" in f or f.get("over")):
+            try:
+                out[n] = int(f["count"])
+            except (KeyError, TypeError, ValueError):
+                out[n] = None
+    return out
+
+
+def _doc_index_put_locked(key, sig, folds):
+    """Record (under _CKPT_LOCK) what `key`'s document, the file with stat `sig`, can give a write's carry."""
+    _DOC_INDEX.pop(key, None)
+    _DOC_INDEX[key] = (sig, _doc_carryable(folds))
+    while len(_DOC_INDEX) > _DOC_INDEX_MAX:
+        _DOC_INDEX.pop(next(iter(_DOC_INDEX)), None)
 
 
 def _doc_memo_weight(sig):
     """A memoized document's resident weight from its file stat: the size on disk times the parse multiple."""
-    return int(sig[1] * _DOC_MEMO_PARSE_MULTIPLE)
+    return int(sig[-1] * _DOC_MEMO_PARSE_MULTIPLE)
 
 
 def _doc_memo_drop(key):
@@ -6898,17 +6952,27 @@ def _doc_memo_drop(key):
         _DOC_MEMO_BYTES[0] -= _doc_memo_weight(old[0])
 
 
+def _doc_memo_put_locked(key, sig, doc):
+    """Memoize (under _CKPT_LOCK) `key`'s document, the file with stat `sig`: bounded in bytes (the caches rule), the oldest
+    documents go and the newest stays for the read it shares."""
+    _doc_memo_drop(key)
+    _DOC_MEMO[key] = (sig, doc); _DOC_MEMO_BYTES[0] += _doc_memo_weight(sig)
+    while _DOC_MEMO_BYTES[0] > _DOC_MEMO_CAP and len(_DOC_MEMO) > 1:
+        _doc_memo_drop(next(iter(_DOC_MEMO)))
+
+
 def _ckpt_doc_shared(key):
     """`key`'s fold document as _ckpt_load verifies it (version, path, shape; a corrupt one counted and removed), or None; the
     read shared with the write's carry through _DOC_MEMO, keyed by the document file's stat, so a consult and the write that
-    follows read the document once (low C). Counted under checkpoints.docConsults."""
+    follows read the document once (low C). Counted under checkpoints.docConsults. A validated load also records what the
+    document can give a write's carry (_DOC_INDEX)."""
     cp = _ckpt_file(key)
-    if cp is None or not cp.exists():
+    if cp is None:
         return None
     try:
-        st_ = cp.stat(); sig = (st_.st_mtime_ns, st_.st_size)
+        sig = _doc_sig(cp.stat())
     except OSError:
-        return None
+        return None                                       # no document
     with _CKPT_LOCK:
         hit = _DOC_MEMO.get(key)
         if hit is not None and hit[0] == sig:
@@ -6916,11 +6980,11 @@ def _ckpt_doc_shared(key):
     doc = _ckpt_load(key)                                 # the validated read: version, path and shape (low A: a raw read raised
     with _CKPT_LOCK:                                      #  on a folds that is not a dict, retired from another path's or an old
         _CKPT_STATS["docConsults"] += 1                   #  version's document, re-read a corrupt one forever)
-        _doc_memo_drop(key)
         if doc is not None:
-            _DOC_MEMO[key] = (sig, doc); _DOC_MEMO_BYTES[0] += _doc_memo_weight(sig)
-            while _DOC_MEMO_BYTES[0] > _DOC_MEMO_CAP and len(_DOC_MEMO) > 1:   # bounded in bytes (the caches rule): the oldest
-                _doc_memo_drop(next(iter(_DOC_MEMO)))                          #  documents go; the newest stays for the write it shares
+            _doc_memo_put_locked(key, sig, doc)
+            _doc_index_put_locked(key, sig, doc.get("folds"))
+        else:
+            _doc_memo_drop(key); _DOC_INDEX.pop(key, None)
     return doc
 
 

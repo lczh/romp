@@ -1703,6 +1703,192 @@ class ReviewProbes(Base):
         self.assertIn("state", self.doc(self.p)["folds"]["t"], "and written whole")
 
 
+class CarryReadsOncePerChange(Base):
+    """A write's carry (the document's states for folds this process never ran, _carry_forward_states) loaded the whole document
+    back at EVERY write, since the write dropped from the memo the very document it had just written: a live kernel's document
+    reads were mostly a write re-reading what the same process wrote one write earlier, and for a live leaf, whose every fold
+    the settle runs, only to learn there was nothing to carry. The carry now reads only when the document could give it
+    something (_DOC_INDEX: what each document can be carried from, keyed by the file's inode, mtime and size), and a written
+    document that carried a state only the disk had stays in the memo for the next write. Every document written keeps its
+    bytes. GenericFold's step over a plain JSONL file of {"n": i} records, plus a padding fold whose state is a string."""
+    _step = staticmethod(GenericFold._step)
+    cold = GenericFold.cold
+
+    def setUp(self):
+        super().setUp()
+        self.p = str(self.td / "t.jsonl")
+        self.caches = {}
+        _write(self.p, [{"n": i} for i in range(3)])
+
+    def fold(self, name, path=None):
+        return em.fold_records(self.caches.setdefault(name, {}), path or self.p, list, self._step, ckpt=name)
+
+    def fold_pad(self, path=None):
+        return em.fold_records(self.caches.setdefault("pad", {}), path or self.p, str, lambda st, o: st + "x" * 64, ckpt="pad")
+
+    def cp(self, path=None):
+        return em._ckpt_file(path or self.p)
+
+    def doc_reads(self, path=None):
+        return em.read_bytes_report().get(str(self.cp(path)), 0)
+
+    def consults(self):
+        return em.checkpoint_stats()["docConsults"]
+
+    def memo(self, path=None):
+        with em._CKPT_LOCK:
+            hit = em._DOC_MEMO.get(path or self.p)
+        return None if hit is None else hit[1]
+
+    def states(self, path=None):
+        return {n: (f["count"], em._ckpt_decode(f["state"])) for n, f in self.doc(path or self.p)["folds"].items() if "state" in f}
+
+    def carrying_process(self, path=None):
+        """Process one folds t and u and writes; process two (a fresh process) folds only t over an append, restoring from the
+        document (its one read), and writes, carrying u. Returns the first document's size; self.n_boot is the load count at
+        process two's start (the counter is the module's, never reset)."""
+        p = path or self.p
+        self.fold("t", p); self.fold("u", p)
+        self.assertTrue(em.checkpoint_write(p))
+        size = self.cp(p).stat().st_size
+        self.fresh_process()
+        self.n_boot = self.consults()
+        _append(p, {"n": 3})
+        self.assertEqual(self.fold("t", p), [0, 1, 2, 3])
+        self.assertTrue(em.checkpoint_write(p))
+        self.assertEqual(self.states(p)["u"], (3, [0, 1, 2]), "the write carries the fold this process never ran")
+        return size
+
+    def test_a_second_write_reads_no_document_when_every_fold_it_holds_is_current(self):
+        self.fold("t"); self.fold("u")
+        self.assertTrue(em.checkpoint_write(self.p))                     # the first write: no document yet
+        _append(self.p, {"n": 3})
+        self.fold("t"); self.fold("u")
+        reads, n0 = self.doc_reads(), self.consults()
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (0, 0),
+                         "every fold the document holds is one this write holds: nothing to carry, no document byte read")
+        self.assertEqual(self.states(), {"t": (4, [0, 1, 2, 3]), "u": (4, [0, 1, 2, 3])})
+        self.assertEqual(self.states()["t"][1], self.cold(), "the document holds what a cold fold gives")
+        self.assertIsNone(self.memo(), "a document of this process's own states is not kept in memory")
+
+    def test_a_fold_this_process_never_ran_is_carried_from_memory_at_every_write(self):
+        size = self.carrying_process()
+        self.assertEqual((self.doc_reads(), self.consults() - self.n_boot), (size, 1),
+                         "the restore read the document once and the first write's carry shared that read")
+        for k in range(2):                                               # two more appends, folds and writes
+            _append(self.p, {"n": 4 + k})
+            self.assertEqual(self.fold("t"), list(range(5 + k)))
+            self.assertTrue(em.checkpoint_write(self.p))
+            self.assertEqual(self.states(), {"t": (5 + k, list(range(5 + k))), "u": (3, [0, 1, 2])},
+                             "write %d carries u with process one's count and state" % (k + 2))
+            self.assertEqual(self.memo(), json.loads(self.cp().read_text()), "the document kept in memory is the one on disk")
+        self.assertEqual((self.doc_reads(), self.consults() - self.n_boot), (size, 1), "one document read and one load in the whole sequence")
+
+    def test_a_needed_carry_the_memory_no_longer_holds_reads_the_document_and_carries(self):
+        q = str(self.td / "q.jsonl")
+        _write(q, [{"n": i} for i in range(3)])
+        self.fold("t", q); self.fold("u", q); self.assertTrue(em.checkpoint_write(q))   # process one's other file
+        self.carrying_process()                                          # (its fresh process forgets q's cursors too)
+        saved = em._DOC_MEMO_CAP; em._DOC_MEMO_CAP = 1                   # room for one document: the newest
+        self.addCleanup(setattr, em, "_DOC_MEMO_CAP", saved)
+        _append(q, {"n": 3}); self.fold("t", q)                          # q's restore loads q's document: p's leaves the memory
+        self.assertIsNone(self.memo())
+        _append(self.p, {"n": 4}); self.fold("t")
+        size, reads, n0 = self.cp().stat().st_size, self.doc_reads(), self.consults()
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (size, 1), "the carry needs u, so it reads the document")
+        self.assertEqual(self.states()["u"], (3, [0, 1, 2]), "and carries it")
+
+    def rewrite_as_another_writer(self, add, in_place):
+        """Rewrite the document as another writer would, adding the folds `add` at the file's own size (the padding fold's
+        string shortened, trailing spaces after): by a tmp file and a rename (a new inode) under the old modification time,
+        or in place (the same inode) under a new one."""
+        cp = self.cp(); st = cp.stat()
+        d = json.loads(cp.read_text()); d["folds"].update(add)
+        over = len(json.dumps(d, separators=(",", ":"))) - st.st_size
+        if over > 0:
+            self.assertGreater(len(d["folds"]["pad"]["state"]), over)
+            d["folds"]["pad"]["state"] = d["folds"]["pad"]["state"][:-over]
+        text = json.dumps(d, separators=(",", ":"))
+        text += " " * (st.st_size - len(text))
+        if in_place:
+            cp.write_text(text)
+            os.utime(cp, ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+        else:
+            tmp = cp.with_name(cp.name + ".other.tmp")
+            tmp.write_text(text)
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.replace(tmp, cp)
+        st2 = cp.stat()
+        self.assertEqual(st2.st_size, st.st_size)
+        if in_place:
+            self.assertEqual(st2.st_ino, st.st_ino); self.assertNotEqual(st2.st_mtime_ns, st.st_mtime_ns)
+        else:
+            self.assertNotEqual(st2.st_ino, st.st_ino); self.assertEqual(st2.st_mtime_ns, st.st_mtime_ns)
+
+    def test_a_document_another_writer_replaced_is_read_again_at_the_same_size(self):
+        """Over a document of this process's own states (the index's case): a rename at the same size and modification time,
+        and an in-place rewrite at the same size under a new time, each read and carried at the next write."""
+        for in_place in (False, True):
+            with self.subTest(in_place=in_place):
+                self.p = str(self.td / ("own-%d.jsonl" % in_place))
+                _write(self.p, [{"n": i} for i in range(3)])
+                self.fresh_process()
+                self.fold("t"); self.fold_pad()
+                self.assertTrue(em.checkpoint_write(self.p))
+                self.rewrite_as_another_writer({"v": {"count": 3, "state": em._ckpt_encode([7])}}, in_place)
+                _append(self.p, {"n": 3}); self.fold("t"); self.fold_pad()
+                n0 = self.consults()
+                self.assertTrue(em.checkpoint_write(self.p))
+                self.assertEqual(self.consults() - n0, 1, "the other writer's document is read")
+                self.assertEqual(self.states().get("v"), (3, [7]), "and its fold carried")
+
+    def test_a_document_another_writer_replaced_under_a_kept_one_is_read_again_at_the_same_size(self):
+        """The same over a document a carrying write kept in memory (the memo's case)."""
+        for in_place in (False, True):
+            with self.subTest(in_place=in_place):
+                self.p = str(self.td / ("kept-%d.jsonl" % in_place))
+                _write(self.p, [{"n": i} for i in range(3)])
+                self.fresh_process()
+                self.fold("t"); self.fold("u"); self.fold_pad()
+                self.assertTrue(em.checkpoint_write(self.p))
+                self.fresh_process()
+                _append(self.p, {"n": 3}); self.fold("t"); self.fold_pad()
+                self.assertTrue(em.checkpoint_write(self.p))
+                self.assertIsNotNone(self.memo(), "the carrying write kept its document")
+                self.rewrite_as_another_writer({"v": {"count": 3, "state": em._ckpt_encode([7])}}, in_place)
+                _append(self.p, {"n": 4}); self.fold("t"); self.fold_pad()
+                n0 = self.consults()
+                self.assertTrue(em.checkpoint_write(self.p))
+                self.assertEqual(self.consults() - n0, 1, "the other writer's document is read, not the kept one served")
+                self.assertEqual((self.states().get("u"), self.states().get("v")), ((3, [0, 1, 2]), (3, [7])), "both carried")
+
+    def test_a_retirement_after_a_carrying_write_leaves_the_fold_and_the_memory(self):
+        self.carrying_process()
+        em._retire_fold(self.p, "u")
+        _append(self.p, {"n": 4}); self.fold("t")
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertNotIn("u", self.doc(self.p)["folds"], "the retired fold is left out after the carry")
+        self.assertIsNone(self.memo(), "nothing the write carried survived the retirement: the document is not kept")
+        _append(self.p, {"n": 5}); self.fold("t")
+        reads, n0 = self.doc_reads(), self.consults()
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (0, 0), "and the next write reads nothing")
+        self.assertEqual(self.states(), {"t": (6, list(range(6)))})
+
+    def test_a_document_spoiled_between_writes_still_falls_back(self):
+        self.fold("t"); self.assertTrue(em.checkpoint_write(self.p))
+        self.cp().write_text("{not json")
+        _append(self.p, {"n": 3}); self.fold("t")
+        n0 = self.consults()
+        self.assertTrue(em.checkpoint_write(self.p), "the write succeeds over it")
+        self.assertEqual((em.checkpoint_stats()["fallbacks"], self.consults() - n0), ({"corrupt": 1}, 1), "read, refused and counted")
+        self.assertEqual(self.states(), {"t": (4, [0, 1, 2, 3])})
+        with em._CKPT_LOCK:
+            self.assertEqual(em._DOC_INDEX[self.p][0], em._doc_sig(self.cp().stat()), "the index describes the new document")
+
+
 class CursorTableBound(Base):
     """fold_records' cursor dicts past 256 keys (2026-09-17). A fold dict is keyed per FILE, and the chat build's agent-gist dict
     holds one cursor per agent transcript the board shows, finished ones included (a live board: 315), so its stepping folds (a
