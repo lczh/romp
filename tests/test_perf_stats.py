@@ -917,6 +917,122 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(s1[("delta", "chat")] - s0.get(("delta", "chat"), 0), 1, "the tail is the chat's delta")
 
 
+class JobsCpu(unittest.TestCase):
+    """Per-job CPU on the jobs thread (/perf jobs.cpuByJob). The jobs thread runs its housekeeping jobs one after another and
+    starts the next pass half a second after the last one ends, so each job's stage (stages_ms["jobs.<job>"]) is wall time,
+    and that wall includes every wait for a lock the pusher, a judge or a handler holds: it cannot say which jobs cost CPU.
+    _job_stage now also reads the thread's own CPU (time.thread_time) around each job it runs on that thread and counts the
+    run. Each test runs on a fresh collector patched in as km._PERF_STATS, on a thread of its own that opens the jobs cycle
+    the way _jobs_cycle does (cycle_begin("jobs")). Synthetic job names only."""
+
+    JOBS_KEYS = {"passes", "pass_ms_sum", "pass_ms_max", "pass_ms_last", "pass_cpu_ms_sum", "passFailed", "splitFailed",
+                 "firstPass", "stageRing", "stageRingLen", "ring_n", "pass_ms_p50", "pass_ms_p90", "pass_ms_ring_max",
+                 "cpuByJob"}   # cpuByJob: per job on the jobs thread, {runs, cpuMs}
+
+    def setUp(self):
+        self.ps = km._PerfStats()
+        patch = mock.patch.object(km, "_PERF_STATS", self.ps)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _on_thread(self, body, kind="jobs"):
+        """body() on a fresh thread that first opened `kind`'s cycle ("jobs", "pusher"; None: a thread that opened none, as a
+        handler's); its exception, if any, re-raised here."""
+        failed = []
+
+        def run():
+            try:
+                if kind:
+                    self.ps.cycle_begin(kind)
+                body()
+            except BaseException as e:      # carried to the test's thread
+                failed.append(e)
+        th = threading.Thread(target=run, name="jobs-cpu-test")
+        th.start()
+        th.join(30)
+        self.assertFalse(th.is_alive(), "the thread finished")
+        if failed:
+            raise failed[0]
+
+    def test_the_jobs_block_carries_cpu_by_job_beside_every_pass_counter(self):
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]), self.JOBS_KEYS, "every existing jobs key kept, cpuByJob added beside them")
+        self.assertEqual(snap["jobs"]["cpuByJob"], {}, "no job has run")
+        self._on_thread(lambda: km._job_stage("probe", lambda: None))
+        rows = self.ps.snapshot()["jobs"]["cpuByJob"]
+        self.assertEqual(set(rows), {"probe"}, "keyed by the job's name, the <job> of its jobs.<job> stage")
+        self.assertEqual(set(rows["probe"]), {"runs", "cpuMs"})
+        self.assertEqual(rows["probe"]["runs"], 1)
+        rows["probe"]["runs"] = 99
+        self.assertEqual(self.ps.snapshot()["jobs"]["cpuByJob"]["probe"]["runs"], 1, "the snapshot's rows are copies")
+        json.dumps(rows)
+        doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
+        self.assertIn("`cpuByJob`", doc[doc.index("- `jobs`: the jobs thread"):], "the reference's jobs block names it")
+
+    def test_a_busy_job_counts_its_cpu_and_a_sleeping_job_of_the_same_wall_does_not(self):
+        """Two synthetic jobs on the jobs thread: one spins for 60 ms of its own CPU, the other sleeps for as long as the
+        first took on the wall clock. Their walls (the stages) match; only the busy one's cpuMs is large. The bounds hold on
+        a loaded 2-CPU node: the spin is measured in thread CPU, so being descheduled lengthens its wall and never its CPU;
+        the sleep is sized from that measured wall, so the two walls match however slow the node is (the upper bound only
+        allows a late wakeup); and a sleeping thread accrues no CPU, so the 20 ms ceiling covers the bracket's own reads and a
+        collection that might run on that thread, with the busy job's 60 ms still three times above it."""
+        def body():
+            km._job_stage("busy", lambda: _burn_cpu(0.060))
+            wall = self.ps.stages["jobs.busy"] / 1000.0
+            km._job_stage("sleepy", lambda: time.sleep(wall))
+        self._on_thread(body)
+        snap = self.ps.snapshot()
+        rows, stages = snap["jobs"]["cpuByJob"], snap["stages_ms"]
+        busy_wall, sleepy_wall = stages["jobs.busy"], stages["jobs.sleepy"]
+        self.assertGreaterEqual(busy_wall, 59.0, "the spin took at least its CPU on the wall clock")
+        self.assertGreaterEqual(sleepy_wall, busy_wall - 1.0, "the sleep's wall is the busy job's: %r" % ((busy_wall, sleepy_wall),))
+        self.assertLess(sleepy_wall, busy_wall + 500.0, "and not much more: %r" % ((busy_wall, sleepy_wall),))
+        self.assertEqual((rows["busy"]["runs"], rows["sleepy"]["runs"]), (1, 1))
+        self.assertGreaterEqual(rows["busy"]["cpuMs"], 59.0, "the spin's own CPU: %r" % rows)
+        self.assertLess(rows["sleepy"]["cpuMs"], 20.0, "a sleep is a wait, not work: %r" % rows)
+        self.assertGreater(rows["busy"]["cpuMs"], 3 * rows["sleepy"]["cpuMs"], rows)
+
+    def test_a_job_that_raises_counts_its_run_and_cpu_and_the_pass_goes_on(self):
+        """The REAL _jobs_pass with every job stubbed (the names read off its own source), the death sweep spinning 20 ms of
+        CPU and then raising: the sweep counts its run and its CPU (the record sits in _job_stage's finally), the exception
+        reaches the pass's own catch as before (its stderr line), and every later job still runs and is counted. The spend
+        guard alone is absent: it skips a collector's first pass, and this collector is fresh."""
+        fns = re.findall(r"_job_stage\('(\w+)', lambda: (_\w+)\(", inspect.getsource(km._jobs_pass))
+        self.assertGreater(len(fns), 15, fns)
+        stubs = {fn: (lambda *a, **k: None) for _job, fn in fns}
+
+        def dies(*a, **k):
+            _burn_cpu(0.020)
+            raise RuntimeError("synthetic sweep fault")
+        stubs["_death_sweep_tick"] = dies
+        stubs["_files_stat_pass_open"] = lambda live_map: False      # the pass's shared stat snapshot: not this test's subject
+        stubs["_files_stat_pass_close"] = lambda opened: None
+        err = io.StringIO()
+        with mock.patch.multiple(km, **stubs), redirect_stderr(err):
+            self._on_thread(lambda: km._jobs_pass(int(time.time()), {}))
+        self.assertIn("death-sweep: ", err.getvalue())
+        self.assertIn("RuntimeError: synthetic sweep fault", err.getvalue(), "the pass's own catch named the fault")
+        rows = self.ps.snapshot()["jobs"]["cpuByJob"]
+        self.assertEqual(rows.get("deathSweep", {}).get("runs"), 1, "the raising job's run is counted: %r" % rows)
+        self.assertGreaterEqual(rows["deathSweep"]["cpuMs"], 19.0, "with the CPU it spent before it raised")
+        jobs = [job for job, _fn in fns]
+        self.assertEqual(set(rows), set(jobs) - {"spendGuard"}, "every other job ran, the ones after the fault included")
+        self.assertEqual({job: row["runs"] for job, row in rows.items()}, dict.fromkeys(rows, 1))
+        self.assertGreaterEqual(self.ps.stages["jobsPass"], 19.0, "the pass reached its end and closed its stage")
+
+    def test_only_the_jobs_threads_runs_are_counted(self):
+        """The pusher's own jobs (_pusher_cycle_jobs, on the thread that opened the pusher's cycle) and a call on a thread
+        that opened no cycle (a handler's, a test's) still record their stage, and no cpuByJob row: the pusher's CPU is its
+        cycle_cpu_ms_sum, and the block is the jobs thread's."""
+        self._on_thread(lambda: km._job_stage("onPusher", lambda: _burn_cpu(0.005)), kind="pusher")
+        self._on_thread(lambda: km._job_stage("onHandler", lambda: _burn_cpu(0.005)), kind=None)
+        self._on_thread(lambda: km._job_stage("onJobs", lambda: _burn_cpu(0.005)))
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"onJobs"})
+        for name in ("onPusher", "onHandler", "onJobs"):
+            self.assertGreater(snap["stages_ms"]["jobs." + name], 0.0, "every thread's stage still records its wall: " + name)
+
+
 class PushStages(unittest.TestCase):
     """_push driven for real (the test_tab_meta_push.py pattern) with builders stubbed to sleep 5 ms
     each: every push.* stage grows by at least its builder's sleep, the chat build counts as built on

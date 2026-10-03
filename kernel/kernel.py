@@ -556,6 +556,9 @@ class _PerfStats:
             self.jobs = {"passes": 0, "pass_ms_sum": 0.0, "pass_ms_max": 0.0, "pass_ms_last": 0.0, "pass_cpu_ms_sum": 0.0,
                          "passFailed": 0, "splitFailed": 0}
             self.jobs_ring = collections.deque(maxlen=self.RING)
+            # per job run on the jobs thread: job name -> [runs, thread CPU ms] (see job_cpu), copied into the snapshot's jobs as
+            # cpuByJob; its own attribute for the reason chat_full_why_stats is one (dict(self.jobs) is a shallow copy)
+            self.job_cpu_stats = {}
             self.first_pass = None
             self.pass_ring = None
             self._owners = {}                         # owner kind -> the thread ident whose stages that owner's split records
@@ -755,6 +758,22 @@ class _PerfStats:
         """A jobs pass that raised out of its loop and was skipped (the loop's guard), the jobs thread's cycleFailed."""
         with self.lock:
             self.jobs["passFailed"] = self.jobs.get("passFailed", 0) + 1
+
+    def job_cpu(self, name, cpu_dt):
+        """One tick job's run (_job_stage) and the CPU seconds its own thread spent in it (time.thread_time), counted only when
+        the calling thread is the jobs thread (the "jobs" owner), under jobs.cpuByJob. The job's wall is its stage
+        (stages_ms["jobs.<job>"]), and on that thread the wall includes every wait for the interpreter lock or a kernel lock
+        held by the pusher, a judge or a handler, so wall alone cannot say which jobs cost CPU. A job that raised counts its
+        run and its CPU too (_job_stage calls this from its finally). The pusher's own jobs (_pusher_cycle_jobs) are not
+        counted here: their CPU is inside the pusher's cycle_cpu_ms_sum. The names are _job_stage's literals, a fixed set."""
+        with self.lock:
+            if self._mine() != "jobs":
+                return
+            row = self.job_cpu_stats.get(name)
+            if row is None:
+                row = self.job_cpu_stats[name] = [0, 0.0]
+            row[0] += 1
+            row[1] += cpu_dt * 1000.0
 
     @staticmethod
     def _byte_marks():
@@ -1129,6 +1148,7 @@ class _PerfStats:
             pr = list(self.pass_ring) if self.pass_ring is not None else []
             jobs["stageRing"] = pr if ring_all else pr[-self.STAGE_RING_SERVED:]
             jobs["stageRingLen"] = len(pr)
+            jobs["cpuByJob"] = {k: {"runs": r[0], "cpuMs": r[1]} for k, r in self.job_cpu_stats.items()}   # per job on this thread
             stages = dict(self.stages)
             builds = {k: dict(v) for k, v in self.builds.items()}
             builds["chat"]["bg_miss"] = dict(self.builds["chat"]["bg_miss"])   # the nested map: a copy too
@@ -64887,15 +64907,20 @@ def _job_stage(name, thunk):
     """One tick job as a sub-stage of `jobs` in the cycle's split (T398): the boot's first split said jobs 25 s with 224 MB read
     and nothing finer, so each job here closes its own `jobs.<name>` stage and the row names the job that read. The job is a
     thunk (`lambda: _x_tick(now, live_map)`), so the call reads as before on its line and the tests that pin those lines hold.
-    The thread's stage mark is `jobs.<name>` for the job's duration (T401: the reads inside it count under it)."""
+    The thread's stage mark is `jobs.<name>` for the job's duration (T401: the reads inside it count under it). On the jobs
+    thread the job's own thread CPU and a run are counted too (jobs.cpuByJob, _PerfStats.job_cpu), read before the bookkeeping
+    below, so a pass's wall can be split into the jobs that worked and the jobs that waited."""
     _t = time.monotonic()
+    _c = time.thread_time()
     prev = getattr(_STAGE_TL, "name", None)
     _set_stage("jobs." + name)
     try:
         return thunk()
     finally:
+        _cpu = time.thread_time() - _c
         _set_stage(prev)
         _PERF_STATS.stage("jobs." + name, time.monotonic() - _t)
+        _PERF_STATS.job_cpu(name, _cpu)
 
 
 def _pusher_cycle_jobs(now, live_map, any_client):
