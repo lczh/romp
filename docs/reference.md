@@ -2941,7 +2941,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entry, a whole one whose leaf has a document a restore would take, or a whole
   one whose pin check raised, and the
   bytes of those records: `bytes` fell by them while the memory stayed, so the
-  memory drops freed is about `droppedBytes` less `droppedHeldBytes`), `budgetRereads` and
+  drops freed about `droppedBytes` less `droppedHeldBytes` of file bytes, that times
+  `decodedMultiple` in memory), `budgetRereads` and
   `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
   the last `countCap` it evicted, each counted once, and the file bytes
   they read again, a tail restored first and the whole read that upgrades

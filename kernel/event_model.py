@@ -1538,7 +1538,8 @@ def _drop_unless_pinned_locked(key, ent, hold):
     """_drop_unless_pinned's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and `hold`
     _asm_hold_of's answer for it, taken before the lock. A pop of records an assembly entry's adapter still holds without
     pinning them is counted again under droppedHeld, and the bytes it holds under droppedHeldBytes: recordCache.bytes falls
-    by the entry's whole weight while that much memory stays until the holding entry's next visit replaces it, so the fall is
+    by the entry's whole weight (file bytes; times the decoded multiple in memory) while that much stays until the holding
+    entry's next visit replaces it, so the fall is
     not read as memory freed (round one of the review: a restored entry that folded an append over a whole reader's upgrade
     holds the reader's whole list, pre-cut records included, and a pop of it freed nothing)."""
     kind, held = hold
