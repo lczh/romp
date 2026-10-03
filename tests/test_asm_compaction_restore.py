@@ -34,6 +34,9 @@ settle wrote after the compaction, while a prompt id only the document's seed na
 A delta the narrowed gate let through that a compaction or the descent then refuses parses whole, as before the narrowing,
 never on the restore road (round one of that review: a result rewinding onto the pre-compaction leaf restored a turn the cold
 parse does not build), and a turn compacted twice still demotes on the seed after a restart.
+The re-seat steps aside for such a delta that passed on a parallel batch's link, so the kept check rules: a result of a
+parallel call an automatic compaction was anchored on parses whole, on an entry marked for its re-seat and on one without
+the mark, and a turn's later compaction alone in its append restores, its own summary marking nothing (round two).
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
 import json
 import os
@@ -497,7 +500,9 @@ class CompactionRestore(Harness):
     def test_a_compaction_in_a_delta_the_arm_let_through_parses_whole(self):
         """The compaction's filing obeys the same rule (review of 2026-10-03, round one): one append holding a tool result that
         wears the attached summary's prompt id and the turn's second automatic compaction parses whole under promptid
-        (`g:promptid:passedDemote`), not on the restore road the compaction alone takes; the served tree equals a cold parse."""
+        (`g:promptid:passedDemote`): the result marks the delta. Without the result, the compaction alone in its append takes
+        the restore road, since its own summary does not mark the delta (the next test). The served tree equals a cold
+        parse."""
         path, recs = self._documented("pid-second")
         self._restart(path)
         t = self.after(recs, 60)
@@ -522,6 +527,127 @@ class CompactionRestore(Harness):
         self.assertEqual((modes, moved.get("g:promptid", 0), moved.get("g:promptid:passedDemote", 0), moved.get("g:boundary", 0),
                           moved.get("restore:afterDemote", 0)), (["full"], 1, 1, 0, 0),
                          "the compaction in a passed delta parses whole under promptid: counters moved %s" % moved)
+
+    def test_a_turns_later_compaction_alone_in_its_append_restores(self):
+        """A compaction summary does not mark its own delta (review of 2026-10-03, round two). The turn's second automatic
+        compaction lands alone in its append (the boundary, the summary and the model's next call), its summary wearing the
+        turn's prompt id, which the first summary already put on record, so the narrowed arm lets the summary through. When
+        the summary marked its own delta, the compaction parsed whole under `g:promptid:passedDemote`; it takes the restore
+        road (`g:boundary`, `restore:afterDemote`), as every compaction does, and the served tree equals a cold parse."""
+        path, recs = self._documented("pid-second-alone")
+        self._restart(path)
+        t = self.after(recs, 60)
+        opener = dict(G.uline(t, "rebuild the notes-api search index", "px_u", recs[-1]["uuid"]), promptId="px")
+        call1 = G.aline(t + 10, "rebuilding the index", "px_a1", "px_u", tools=("Bash",), stop="tool_use")
+        res1 = dict(G.trline(t + 20, "tu_px_a1_0", "px_r1", "px_a1", content="rebuilt shard 1 of 12"), promptId="px")
+        self._append(path, [opener, call1, res1])
+        self._parse_counted(path)                                            # the turn opens: a fold onto the restored entry
+        pair1, s1 = compaction(t + 30, "px1", "px_r1")
+        pair1[1]["promptId"] = "px"                                          # the summary wears the prompt id of the turn
+        call2 = G.aline(t + 40, "checking the rebuilt index", "px_a2", s1, tools=("Bash",), stop="tool_use")
+        self._append(path, pair1 + [call2])
+        _tree1, modes1, moved1 = self._parse_counted(path)                  # the first compaction: the restore road
+        self._append(path, [dict(G.trline(t + 50, "tu_px_a2_0", "px_r2", "px_a2", content="12 shards, 0 errors"), promptId="px")])
+        _tree2, modes2, moved2 = self._parse_counted(path)                  # a result wearing the id: the fold the arm saves
+        pair2, s2 = compaction(t + 60, "px2", "px_r2")
+        pair2[1]["promptId"] = "px"
+        self._append(path, pair2 + [G.aline(t + 70, "one more query against it", "px_a3", s2, tools=("Bash",), stop="tool_use")])
+        tree, modes, moved = self._parse_counted(path)
+        got, cut = self._served(tree)
+        self.assertSameTree(got, self.cold(path), "after the second compaction alone in its append")
+        self.assertRestored(modes1, moved1, "boundary", "the premise: the first compaction")
+        self.assertEqual((modes2, moved2.get("fold:attachedPass", 0)), (["fold"], 1),
+                         "the premise: a result wearing the id folds on the arm's pass: %s" % moved2)
+        self.assertEqual((moved.get("g:promptid", 0), moved.get("g:promptid:passedDemote", 0)), (0, 0),
+                         "the summary wearing the id does not mark its own delta: counters moved %s" % moved)
+        self.assertRestored(modes, moved, "boundary", "the second compaction alone in its append")
+        self.assertGreater(cut, 0, "the restored shape")
+
+    def _parallel_call_compaction(self, name):
+        """The shape of the review's second round, parsed whole and documented: a long session, then a turn whose model message
+        makes two tool calls in one record, and an automatic compaction anchored on that record before either result lands,
+        its summary wearing the turn's prompt id. The settle writes the document from that whole entry, cut at the
+        compaction's turn, so its pre-cut spine ends at the call record, and marks the entry for its re-seat. Returns the
+        path and a time past every record."""
+        recs = episode(NOW - 86400)
+        t = self.after(recs, 60)
+        opener = dict(G.uline(t, "rebuild the notes-api search index", "pk_u", recs[-1]["uuid"]), promptId="pk")
+        calls = G.aline(t + 10, "rebuilding two shards at once", "pk_a1", "pk_u", tools=("Bash", "Bash"), stop="tool_use")
+        pair, s = compaction(t + 20, "pk", "pk_a1")
+        pair[1]["promptId"] = "pk"                                           # the summary wears the prompt id of the turn it compacted in
+        path = self.write(name, recs + [opener, calls] + pair)
+        self.fresh()
+        self.parse(path)
+        self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
+        d = _doc(path)
+        self.assertEqual((d["records"][d["spine"][-1]][0], s in {row[0] for row in d["records"]}), ("pk_a1", False),
+                         "the premise: the cut is the compaction's turn, the pre-cut spine's tip the call record")
+        self.assertIs((self._entry(path) or {}).get("reseat"), True, "the premise: the writer marked the whole entry for its re-seat")
+        return path, t + 30
+
+    def test_a_result_of_a_parallel_call_a_compaction_was_anchored_on_is_not_re_seated(self):
+        """The re-seat steps aside for a delta the narrowed arm let through that passed on a parallel batch's link (review of
+        2026-10-03, round two). A result of the first call lands, wearing the turn's prompt id and parented at the call record:
+        the arm lets it through (the pair is attached), and the gates pass it on the batch link. The settle had marked the
+        whole entry for its re-seat when it wrote the document, so the delta was re-seated onto the restore road, whose chain
+        proof accepted the result as a child of the document's tip: the restore served one turn more than the cold parse (the
+        result as a turn of its own), and the settle, which writes nothing for a restored entry, left that tree for the next
+        record and every boot. Now the fold's kept check rules (the result moves the leaf off the pair), the delta parses
+        whole under `g:promptid:passedDemote`, and the settle writes a document from that whole entry. A parse with nothing
+        new then re-seats on it: the thread bits that result's delta left speak for no other parse. Each served tree equals a
+        cold parse: at the result, at the re-seat, at the call's second result, and at the restart."""
+        path, t = self._parallel_call_compaction("pid-parallel-reseat")
+        self._append(path, [dict(G.trline(t, "tu_pk_a1_0", "pk_r0", "pk_a1", content="rebuilt shard 1 of 12"), promptId="pk")])
+        tree1, modes1, moved1 = self._parse_counted(path)
+        got1, _cut1 = self._served(tree1)
+        ref1 = self._snapshot(path, "parallel-reseat-result")
+        wrote = self.doc(path)                                               # the settle after the step
+        marked = (self._entry(path) or {}).get("reseat")
+        tree2, modes2, moved2 = self._parse_counted(path)                   # nothing new: the re-seat on the rewritten document
+        got2, _cut2 = self._served(tree2)
+        self._append(path, [dict(G.trline(t + 10, "tu_pk_a1_1", "pk_r1", "pk_a1", content="rebuilt shard 2 of 12"), promptId="pk")])
+        tree3, modes3, moved3 = self._parse_counted(path)
+        got3, _cut3 = self._served(tree3)
+        ref3 = self._snapshot(path, "parallel-reseat-second")
+        self.doc(path)
+        self.fresh()                                                         # the restart
+        boot_modes = []
+        boot, _cut = self._served(self.parse(path, boot_modes))
+        self.assertSameTree(got1, self.cold(ref1), "the result of the parallel call, parented at the call record")
+        self.assertSameTree(got2, self.cold(ref1), "the parse with nothing new after the settle")
+        self.assertSameTree(got3, self.cold(ref3), "the call's second result (road %s)" % modes3)
+        self.assertSameTree(boot, self.cold(path), "the restart (road %s)" % boot_modes)
+        self.assertEqual((modes1, moved1.get("g:promptid", 0), moved1.get("g:promptid:passedDemote", 0), moved1.get("g:reseat", 0),
+                          moved1.get("g:kept", 0), moved1.get("restore", 0), moved1.get("fold:attachedPass", 0)),
+                         (["full"], 1, 1, 0, 0, 0, 0),
+                         "the re-seat steps aside and the kept check's rejection parses whole: counters moved %s" % moved1)
+        self.assertEqual((wrote, marked), (True, True), "the premise: the settle writes a document from the whole entry and marks it")
+        self.assertEqual((modes2, moved2.get("g:reseat", 0)), (["restore"], 1),
+                         "with nothing new, the marked entry re-seats on the rewritten document: counters moved %s" % moved2)
+
+    def test_a_result_of_a_parallel_call_a_compaction_was_anchored_on_parses_whole_at_the_kept_check(self):
+        """The kept check's own branch for a passed batch delta (review of 2026-10-03, round two): the same shape over a whole
+        entry whose document stands without the re-seat mark (the writer leaves it off when the tail is at the churn share or
+        a postal author waits on the log; cleared here by hand). The result folds, the kept check rejects it, and the
+        rejection parses whole under `g:promptid:passedDemote` instead of filing `kept` and taking the restore road a batch's
+        rejection takes, where the restore served the result as a turn of its own at the parse and at every boot. Each served
+        tree equals a cold parse, at the parse and at the restart."""
+        path, t = self._parallel_call_compaction("pid-parallel-kept")
+        self._entry(path)["reseat"] = False
+        self._append(path, [dict(G.trline(t, "tu_pk_a1_0", "pk_r0", "pk_a1", content="rebuilt shard 1 of 12"), promptId="pk")])
+        tree1, modes1, moved1 = self._parse_counted(path)
+        got1, _cut1 = self._served(tree1)
+        ref1 = self._snapshot(path, "parallel-kept-result")
+        self.doc(path)                                                       # the settle after the step
+        self.fresh()                                                         # the restart
+        boot_modes = []
+        boot, _cut = self._served(self.parse(path, boot_modes))
+        self.assertSameTree(got1, self.cold(ref1), "the result of the parallel call, parented at the call record")
+        self.assertSameTree(boot, self.cold(path), "the restart (road %s)" % boot_modes)
+        self.assertEqual((modes1, moved1.get("g:promptid", 0), moved1.get("g:promptid:passedDemote", 0), moved1.get("g:kept", 0),
+                          moved1.get("g:reseat", 0), moved1.get("restore", 0), moved1.get("fold:attachedPass", 0)),
+                         (["full"], 1, 1, 0, 0, 0, 0),
+                         "the kept check rejects the passed batch delta, which parses whole under promptid: counters moved %s" % moved1)
 
     def test_a_turn_compacted_twice_demotes_on_the_seed_after_a_restart(self):
         """The limit the narrowed arm keeps (review of 2026-10-03, round one): a turn whose two automatic compactions both wear
