@@ -264,6 +264,31 @@ class HoldReadsOnlyTheTurnThatDecides(_Harness):
         store["closedTurns"] = ["tNew", "tOld"]
         self.assertFalse(jd._awaiting_bg_hold(SID, self.path, session, store, NOW), "both placed in swept turns")
 
+    def test_a_newer_unswept_turn_making_an_ordinary_call_does_not_hold(self):
+        """Only the running launches' ids count as hits. The launch t1 sits in turn A, which the closer swept; the newer,
+        unswept turn B makes an ordinary call. B names no running launch, so it decides nothing, and A, swept, answers: no
+        hold. One subtest per way a plain turn carries the call's id (a tool_use block, its tool_result block, and each as
+        a lazy atom's scalars), since each has a lookup of its own. Green on the pre-change code, whose whole-session map
+        gave the same answer; tests/test_asm_checkpoint.py PreCutToolIds holds the same case with B a pre-cut list."""
+        self._transcript([_prompt(T0), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1), _end(ENDED)])
+        call = {"type": "assistant", "uuid": "r1", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu-read", "name": "Read"}], "stop_reason": "tool_use"}}
+        result = {"type": "user", "uuid": "r2", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu-read", "content": "the notes-api README"}]}}
+        shapes = {"a tool_use block": [call], "its tool_result block": [result],
+                  "a lazy atom's call": [{"type": "assistant", "uuid": "r3", "lazy": {"k": "a", "tu": [["tu-read", "Read"]]}}],
+                  "a lazy atom's result": [{"type": "user", "uuid": "r4", "lazy": {"k": "u", "tr": ["tu-read"]}}]}
+        for name, b_atoms in shapes.items():
+            with self.subTest(shape=name):
+                session = {"turns": [{"id": "tA", "atoms": [_prompt(T0), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1)]},
+                                     {"id": "tB", "atoms": [_prompt(ENDED + 10, uuid="p2", text="read the notes-api README")]
+                                      + b_atoms}]}
+                store = self._store()
+                self.assertTrue(jd._awaiting_bg_hold(SID, self.path, session, store, NOW), "nothing swept: A holds")
+                store["closedTurns"] = ["tA"]
+                self.assertFalse(jd._awaiting_bg_hold(SID, self.path, session, store, NOW),
+                                 "A swept; B names only an ordinary call, no running launch: no hold")
+
     def _unnamed(self):
         """The transcript runs a launch the tree does not hold, and the tree's one turn is swept."""
         self._transcript([_prompt(T0), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1), _end(ENDED)])

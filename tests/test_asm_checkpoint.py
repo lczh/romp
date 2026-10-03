@@ -2034,11 +2034,25 @@ def _bg_records():
             G.aline(t + 110, "Tidied the README.", "bg_a3", "bg_u2")]
 
 
+def _ix_row(k, **kw):
+    """A synthetic document row for a LazyIndex: identity scalars under `s`, plus whatever the case adds (a lazy marker `lz`,
+    an inline message `m`, `syn`)."""
+    r = {"i": k, "s": {"uuid": "11111111-2222-3333-4444-%012d" % k, "type": "assistant", "t": 1000 + k}}
+    r.update(kw)
+    return json.dumps(r, separators=(",", ":"))
+
+
+def _ix_marker(**kw):
+    """A lazy marker: an assistant atom's by default, with the tool scalars (`tu`, `tr`) the case gives."""
+    return dict({"k": "a", "h": "00000000", "nt": False}, **kw)
+
+
 class PreCutToolIds(Harness):
     """2026-10-03: the settle gate's background hold (the judge's _awaiting_bg_hold) looks for the newest turn
     naming a running launch. A pre-cut turn answers from the tool ids its atom list carries (LazyAtoms.tool_ids): a built
     slot read where it sits, an unbuilt row from its lazy scalars after one decode, an inline or synthesized row built for
-    the read and dropped. So the hold builds no atom, and once a list has answered it decodes no row again."""
+    the read and dropped. So the hold stores no atom in a slot and registers none, and once a list has answered it decodes
+    no row again."""
 
     @classmethod
     def setUpClass(cls):
@@ -2075,13 +2089,7 @@ class PreCutToolIds(Harness):
         self.assertGreater(checked, 0, "some pre-cut turn carries tool ids")
 
     def test_the_list_reads_built_slots_in_place_and_each_unbuilt_row_once_and_stores_nothing(self):
-        def row(k, **kw):
-            r = {"i": k, "s": {"uuid": "11111111-2222-3333-4444-%012d" % k, "type": "assistant", "t": 1000 + k}}
-            r.update(kw)
-            return json.dumps(r, separators=(",", ":"))
-
-        def marker(**kw):
-            return dict({"k": "a", "h": "00000000", "nt": False}, **kw)
+        row, marker = _ix_row, _ix_marker
         rows = [row(0, lz=marker(tu=[["tu-a", "Bash"]])),                    # a call, from the marker's scalars
                 row(1, lz=marker(k="u", tr=["tu-z"])),                       # a result whose call sits in an older turn
                 row(2, i=-1, syn=1, m={"role": "assistant", "content": [     # a synthesized atom: its message inline, built
@@ -2104,7 +2112,47 @@ class PreCutToolIds(Harness):
         self.assertIs(atoms.tool_ids(), got, "the set is kept on the list")
         self.assertEqual(em.asm_index_stats()["rowDecodes"], st1["rowDecodes"], "the second call decodes nothing")
 
-    def test_the_hold_over_a_restored_tree_answers_as_the_whole_parse_and_builds_nothing(self):
+    def test_marker_rows_answer_from_their_scalars_and_restore_no_atom(self):
+        """A row with a lazy marker answers from the marker's tu and tr, never through _restore_prefix_atoms. Building it
+        instead would store nothing and register nothing, so neither `materialized` nor `rowDecodes` would move: a spy on the
+        restore is what sees such a build, and the index's own build through the spy shows the spy is in the road."""
+        rows = [_ix_row(0, lz=_ix_marker(tu=[["tu-a", "Bash"]])),                 # a call
+                _ix_row(1, lz=_ix_marker(k="u", tr=["tu-a"])),                    # its result
+                _ix_row(2, lz=_ix_marker(tu=[["tu-b", "Read"]]))]                 # another call
+        ix = em.LazyIndex({"atoms": rows, "records": [], "fsids": []}, SID, self.td / "markers.jsonl")
+        atoms = em.LazyAtoms(ix, range(len(rows)))
+        calls, real = [], em._restore_prefix_atoms
+
+        def spy(*a, **kw):
+            calls.append(len(a[0]))
+            return real(*a, **kw)
+        with mock.patch.object(em, "_restore_prefix_atoms", spy):
+            got = atoms.tool_ids()
+            restored = len(calls)
+            ix.build(0)
+        self.assertEqual(got, frozenset({"tu-a", "tu-b"}))
+        self.assertEqual(restored, 0, "marker rows answer from their scalars: no atom restored")
+        self.assertEqual(len(calls), 1, "the index's own build restores through the spy")
+
+    def test_a_newer_unswept_pre_cut_turn_making_an_ordinary_call_does_not_hold(self):
+        """Only the running launches' ids count as hits. The launch's turn A is swept; the newer turn B, unswept and a pre-cut
+        list over a synthetic index, makes an ordinary call and gets its result. B names no running launch, so it decides
+        nothing, and A, swept, answers: no hold. Green on the pre-change code, whose whole-session map gave the same answer;
+        tests/test_settle_awaits_background_tasks.py holds the same case with B a plain turn."""
+        jd = self.jd
+        path = self.write("bgread", _bg_records())
+        self.assertEqual([t["id"] for t in jd._bg_unresolved(path, NOW)], [BG_TID], "the load test still runs at NOW")
+        launch_turn = {"id": "tA", "atoms": _bg_records()[1:3]}                   # the launch and its ack, a plain turn
+        rows = [_ix_row(0, lz=_ix_marker(tu=[["tu-read", "Read"]])),              # B's ordinary call
+                _ix_row(1, lz=_ix_marker(k="u", tr=["tu-read"]))]                 # and its result
+        ix = em.LazyIndex({"atoms": rows, "records": [], "fsids": []}, SID, self.td / "read.jsonl")
+        session = {"turns": [launch_turn, {"id": "tB", "atoms": em.LazyAtoms(ix, range(len(rows)))}]}
+        self.assertTrue(jd._awaiting_bg_hold(BG_FSID, path, session, {"nodes": {}, "closedTurns": []}, now=NOW),
+                        "nothing swept: the launch's turn A holds")
+        self.assertFalse(jd._awaiting_bg_hold(BG_FSID, path, session, {"nodes": {}, "closedTurns": ["tA"]}, now=NOW),
+                         "A swept; B names only an ordinary call, no running launch: no hold")
+
+    def test_the_hold_over_a_restored_tree_answers_as_the_whole_parse_and_stores_no_atom(self):
         jd = self.jd
         path = self.write("bghold", compacting_variant(_bg_records(), "bg"))
         self.fresh(); whole = self.parse(path)
@@ -2124,7 +2172,7 @@ class PreCutToolIds(Harness):
         got = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
         st1 = em.asm_index_stats()
         self.assertEqual(got, want, "the restored tree answers as the whole parse")
-        self.assertEqual(st1["materialized"], st0["materialized"], "no pre-cut atom built")
+        self.assertEqual(st1["materialized"] - st0["materialized"], 0, "no pre-cut atom built through the list and registered")
         again = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
         self.assertEqual(again, want)
         self.assertEqual(em.asm_index_stats()["rowDecodes"], st1["rowDecodes"], "the lists kept their ids: no row decoded again")
