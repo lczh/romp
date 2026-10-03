@@ -2485,7 +2485,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the
+  `loadTrees` and `backstopFoldins` (the two thresholds), `gen2Threshold` (the
+  full-collection trigger the controller set, below, or `null` while the
+  stock one stands), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
   backstop), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
@@ -2521,7 +2523,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every cycle). A request that arrives during a reconcile waits that
+  fire every cycle). While the freeze is on, the kernel also raises CPython's
+  full-collection trigger (the third of `thresholds`, stock 10) to 100 at boot,
+  and `gen2Threshold` reads it. CPython runs an automatic full collection once
+  generation 2 has seen more than that many generation-1 collections and the
+  objects promoted since the last full collection reach a quarter of what
+  survived it; after a freeze what survived is small, so the count alone
+  decides, and with the stock 10 a full collection came every eleventh
+  generation-1 collection (about 781 automatic ones, 409.5 s, in a live
+  kernel's first hour, beside the controller's 84). Every fold-in, release and
+  backstop is a full collection and resets that count, so the controller's own
+  events set the cadence and the raised trigger catches only a stretch with no
+  load. `ROMP_GC_GEN2_THRESHOLD` sets it (a value that is not an integer falls
+  back to 100, said once and counted under `errors`; floored at 10, so it can
+  only raise the trigger). It is not applied with the freeze off, on Python
+  3.14 and later or on a free-threaded build, where the collector differs. A
+  request that arrives during a reconcile waits that
   one collection. The idle boundary is the best moment for the frozen-heap
   walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an
   automatic full collection would have walked anyway. To read a slow cycle: find

@@ -15,6 +15,7 @@ import gc
 import json
 import os
 import sys
+import sysconfig
 import tempfile
 import threading
 import time
@@ -64,6 +65,99 @@ class TakingGc(FakeGc):
         if self.take is not None:
             self.take.clear()
             self.take = None
+
+
+class ThresholdGc(FakeGc):
+    """A FakeGc that carries the collector's thresholds and records every read and write, so the full-collection trigger's
+    gates are pinned without touching the interpreter's own collector."""
+    def __init__(self, thresholds=(2000, 10, 10)):
+        super().__init__()
+        self.thresholds = tuple(thresholds)
+    def get_threshold(self):
+        self.calls.append("get_threshold")
+        return self.thresholds
+    def set_threshold(self, *t):
+        self.calls.append(("set_threshold",) + t)
+        self.thresholds = tuple(t)
+
+
+_CLASSIC_GC = sys.version_info < (3, 14) and not sysconfig.get_config_var("Py_GIL_DISABLED")   # gc_freeze.GEN2_BEFORE, spelled
+#                                                                  out so this module still imports against a tree without it
+
+
+class Gen2Trigger(unittest.TestCase):
+    """2026-10-03: with the freeze on, CPython's full-collection trigger (threshold2, stock 10) is raised, so the controller's
+    fold-ins, not a full collection every eleventh young-generation collection, set when full collections run. Pinned on a
+    recording fake: applied only with the controller enabled on a classic collector (before 3.14, not free-threaded), the
+    first two thresholds kept, floored at the stock 10, put back when the controller is turned off, and the knob's safe
+    parse. ROMP_GC_FREEZE=off makes no collector call at all."""
+
+    def _c(self, enabled=True, thresholds=(2000, 10, 10)):
+        fake = ThresholdGc(thresholds)
+        return gf.GcFreeze(enabled=enabled, gc=fake, clock=lambda: 0.0), fake
+
+    def test_the_trigger_is_raised_only_with_the_freeze_on_a_classic_collector(self):
+        for version in ((3, 10), (3, 12), (3, 13, 5)):
+            c, fake = self._c()
+            self.assertEqual(gf.apply_gen2_threshold(c, value=100, version=version, free_threaded=False), 100, version)
+            self.assertEqual(fake.calls, ["get_threshold", ("set_threshold", 2000, 10, 100)],
+                             "the third threshold raised, the first two kept (%r): %r" % (version, fake.calls))
+            self.assertEqual(c.gen2_threshold, 100)
+            self.assertEqual(c.perf()["gen2Threshold"], 100, "/perf names the trigger the controller set")
+        c, fake = self._c(enabled=False)
+        self.assertIsNone(gf.apply_gen2_threshold(c, value=100, version=(3, 12), free_threaded=False))
+        self.assertEqual(fake.calls, [], "the freeze off: no collector call at all, so the stock thresholds stand")
+        self.assertIsNone(c.perf()["gen2Threshold"], "and /perf says the stock trigger stands")
+        for version, ft in (((3, 14), False), ((3, 15, 1), False), ((3, 13), True)):
+            c, fake = self._c()
+            self.assertIsNone(gf.apply_gen2_threshold(c, value=100, version=version, free_threaded=ft), (version, ft))
+            self.assertEqual(fake.calls, [], "not applied on %r free_threaded=%r, a different collector: %r" % (version, ft, fake.calls))
+            self.assertIsNone(c.perf()["gen2Threshold"])
+
+    def test_the_default_is_100_and_the_value_is_floored_at_the_stock_10(self):
+        c, fake = self._c(thresholds=(700, 10, 10))
+        self.assertEqual(gf.DEFAULT_GEN2_THRESHOLD, 100)
+        self.assertEqual(gf.apply_gen2_threshold(c, version=(3, 12), free_threaded=False), 100, "the default value")
+        self.assertEqual(fake.thresholds, (700, 10, 100))
+        c, fake = self._c(thresholds=(700, 10, 10))
+        self.assertEqual(gf.apply_gen2_threshold(c, value=5, version=(3, 12), free_threaded=False), 10,
+                         "floored at the stock 10: the trigger can only be raised, never made more frequent")
+        self.assertEqual(fake.thresholds, (700, 10, 10))
+
+    def test_turning_the_controller_off_puts_back_the_trigger_it_replaced(self):
+        c, fake = self._c(thresholds=(700, 10, 10))
+        gf.apply_gen2_threshold(c, value=100, version=(3, 12), free_threaded=False)
+        gf.apply_gen2_threshold(c, value=150, version=(3, 12), free_threaded=False)   # a second raise keeps the STOCK value to put back
+        self.assertEqual(fake.thresholds, (700, 10, 150))
+        c.enabled = False
+        fake.calls.clear()
+        self.assertIsNone(gf.apply_gen2_threshold(c, value=150, version=(3, 12), free_threaded=False))
+        self.assertEqual(fake.thresholds, (700, 10, 10), "turned off, the stock trigger is back, not the first raise: %r" % (fake.calls,))
+        self.assertIsNone(c.gen2_threshold)
+        self.assertIsNone(c.perf()["gen2Threshold"], "and /perf says the stock trigger stands")
+        fake.calls.clear()
+        self.assertIsNone(gf.apply_gen2_threshold(c, version=(3, 12), free_threaded=False))
+        self.assertEqual(fake.calls, [], "a second call while off has nothing to put back and touches nothing")
+        # a trigger someone else set after the raise is theirs: turning the controller off leaves it
+        c, fake = self._c(thresholds=(700, 10, 10))
+        gf.apply_gen2_threshold(c, value=100, version=(3, 12), free_threaded=False)
+        fake.thresholds = (700, 10, 40)
+        c.enabled = False
+        self.assertIsNone(gf.apply_gen2_threshold(c, version=(3, 12), free_threaded=False))
+        self.assertEqual(fake.thresholds, (700, 10, 40), "a trigger set since the raise stays: %r" % (fake.calls,))
+        self.assertIsNone(c.gen2_threshold)
+
+    def test_the_gen2_knob_parses_safely_and_floors_at_the_stock_value(self):
+        k = "ROMP_GC_GEN2_THRESHOLD"
+        self.assertEqual(gf.gen2_threshold_from_env({}), (100, None), "absent: the default, no complaint")
+        self.assertEqual(gf.gen2_threshold_from_env({k: ""}), (100, None), "empty: the default")
+        self.assertEqual(gf.gen2_threshold_from_env({k: "  "}), (100, None), "whitespace: the default")
+        self.assertEqual(gf.gen2_threshold_from_env({k: "abc"}), (100, "abc"), "a bad value falls back and is named")
+        self.assertEqual(gf.gen2_threshold_from_env({k: "250"}), (250, None))
+        self.assertEqual(gf.gen2_threshold_from_env({k: " 16 "}), (16, None))
+        self.assertEqual(gf.gen2_threshold_from_env({k: "5"}), (10, None), "floored at the stock 10, a valid integer: no complaint")
+        self.assertEqual(gf.gen2_threshold_from_env({k: "0"}), (10, None))
+        self.assertEqual(gf.gen2_threshold_from_env({k: "-3"}), (10, None))
 
 
 class TriggerLogic(unittest.TestCase):
@@ -756,6 +850,57 @@ class RealCollector(unittest.TestCase):
         self.assertGreater(gc.get_freeze_count(), 20000, "the frozen count shows the cold cycles left the collector's walk")
 
 
+@unittest.skipUnless(_CLASSIC_GC, "the raised trigger applies to the classic collector only (before 3.14, not free-threaded)")
+class RealTrigger(unittest.TestCase):
+    """The premise on the REAL collector, through apply_gen2_threshold itself (2026-10-03). Over a frozen heap, the kernel's
+    state once the controller runs, what survived the last full collection is small, so CPython's quarter test passes and
+    threshold2 alone decides when an automatic full collection runs. Builds of short-lived containers (alive while the
+    build runs, then dropped, as a pusher build's temporaries are) then drive a full collection every eleventh
+    generation-one collection at the stock trigger, and the raised trigger runs at least four times fewer. A scaled-down
+    copy of the design's probe, and a mechanism pin across the CI matrix (3.10 to 3.13): if the quarter test, not
+    threshold2, bound here, both runs would count about the same. The thresholds are restored and the heap unfrozen
+    whatever happens."""
+
+    def setUp(self):
+        self.assertTrue(gc.isenabled(), "the automatic collector is what this measures")
+        saved = gc.get_threshold()
+        self.addCleanup(gc.set_threshold, *saved)
+
+    def tearDown(self):
+        gc.unfreeze()                                # never leak a freeze to another test
+        gc.collect()
+
+    @staticmethod
+    def _full_collections(builds=20, size=50000):
+        n = [0]
+        def hook(phase, info):
+            if phase == "stop" and info.get("generation") == 2:
+                n[0] += 1
+        gc.collect(); gc.freeze(); gc.collect()     # the heap frozen, and what survived the last full collection small
+        gc.callbacks.append(hook)
+        try:
+            for _ in range(builds):
+                build = [[i] for i in range(size)]   # a build's temporaries: tracked containers, alive while it runs
+                del build
+        finally:
+            gc.callbacks.remove(hook)
+            gc.unfreeze()
+        return n[0]
+
+    def test_a_raised_trigger_cuts_automatic_full_collections(self):
+        gc.set_threshold(700, 10, 10)                # 3.12's stock thresholds, set the same on every interpreter of the matrix
+        stock = self._full_collections()
+        c = gf.GcFreeze(enabled=True, gc=gc)
+        self.assertEqual(gf.apply_gen2_threshold(c, value=100), 100, "applied on this classic interpreter")
+        self.assertEqual(gc.get_threshold(), (700, 10, 100), "the real collector's third threshold raised, the first two kept")
+        raised = self._full_collections()
+        self.assertGreaterEqual(stock, 6, "the stock trigger ran full collections over the builds (the premise): %d" % stock)
+        self.assertLessEqual(raised * 4, stock, "the raised trigger ran at least four times fewer: stock %d, raised %d" % (stock, raised))
+        c.enabled = False
+        self.assertIsNone(gf.apply_gen2_threshold(c))
+        self.assertEqual(gc.get_threshold(), (700, 10, 10), "turned off, the stock trigger is back on the real collector")
+
+
 def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -850,20 +995,37 @@ class RecordCacheIsAStat(unittest.TestCase):
 class KernelKnob(unittest.TestCase):
     """The kernel-side knob fallback, executed at import: a bad ROMP_GC_FREEZE_LOAD_TREES falls back to the default,
     counts an error and says one line; a 0 is floored to 1 with no error."""
-    def _load_with(self, value, name):
+    def _load_with(self, value, name, var="ROMP_GC_FREEZE_LOAD_TREES", extra=None):
         import contextlib, io
-        saved = os.environ.get("ROMP_GC_FREEZE_LOAD_TREES")
-        os.environ["ROMP_GC_FREEZE_LOAD_TREES"] = value
+        env = dict(extra or {}, **{var: value})
+        saved = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
         err = io.StringIO()
         try:
             with contextlib.redirect_stderr(err):
                 km = load_source(name, os.path.join(BIN, "romp-kernel"))
         finally:
-            if saved is None:
-                os.environ.pop("ROMP_GC_FREEZE_LOAD_TREES", None)
-            else:
-                os.environ["ROMP_GC_FREEZE_LOAD_TREES"] = saved
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
         return km, err.getvalue()
+
+    def test_a_bad_gen2_knob_falls_back_and_is_said_and_the_import_applies_nothing(self):
+        """2026-10-03: a bad ROMP_GC_GEN2_THRESHOLD falls back to the default, is counted and said once, never fatal. The
+        import never touches the collector, even with the freeze ON in its environment: the trigger is applied by main()
+        alone, so a test that loads the kernel keeps its interpreter's thresholds."""
+        before = gc.get_threshold()
+        self.addCleanup(gc.set_threshold, *before)   # a regression that applied at import must not leak into later tests
+        km, err = self._load_with("abc", "romp_kernel_knob_gen2_abc", var="ROMP_GC_GEN2_THRESHOLD",
+                                  extra={"ROMP_GC_FREEZE": "on"})
+        self.assertEqual(gc.get_threshold(), before, "loading the kernel with the freeze on changed no threshold")
+        self.assertTrue(km._GC_FREEZE.enabled, "the freeze was on for this load (else the line above proves nothing)")
+        self.assertIsNone(km._GC_FREEZE.perf()["gen2Threshold"], "and its controller applied nothing at import")
+        self.assertEqual(km._GC_GEN2_THRESHOLD, km.gcf.DEFAULT_GEN2_THRESHOLD, "abc falls back to the default")
+        self.assertGreaterEqual(km._GC_FREEZE_ERRORS[0], 1, "the bad knob is counted under errors")
+        self.assertIn("ROMP_GC_GEN2_THRESHOLD", err, "and said once on stderr: %r" % err)
 
     def test_a_bad_knob_falls_back_and_is_said_a_zero_is_floored(self):
         km, err = self._load_with("abc", "romp_kernel_knob_abc")

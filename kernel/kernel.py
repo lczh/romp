@@ -1284,6 +1284,33 @@ if _gc_freeze_bad_knob is not None:     # a bad ROMP_GC_FREEZE_LOAD_TREES fell b
                          % (_gc_freeze_bad_knob[:80], gcf.DEFAULT_LOAD_TREES))
     except Exception:
         pass
+_GC_GEN2_THRESHOLD, _gc_gen2_bad_knob = gcf.gen2_threshold_from_env()   # the full-collection trigger while the freeze is on;
+#                                                                          parsed here, APPLIED in main() (_gc_gen2_apply)
+if _gc_gen2_bad_knob is not None:       # a bad ROMP_GC_GEN2_THRESHOLD fell back to the default: said once, counted, never fatal
+    _GC_FREEZE_ERRORS[0] += 1
+    try:
+        sys.stderr.write("gc-freeze: ROMP_GC_GEN2_THRESHOLD=%r is not an integer; using the default %d\n"
+                         % (_gc_gen2_bad_knob[:80], gcf.DEFAULT_GEN2_THRESHOLD))
+    except Exception:
+        pass
+
+
+def _gc_gen2_apply():
+    """main()'s one call (2026-10-03): with the freeze on, raise CPython's full-collection trigger so the controller's
+    fold-ins, not the stock every-eleventh-young-collection trigger, set the cadence of full collections
+    (gcf.apply_gen2_threshold says why and where it is not applied). At boot, never at import: a test that loads the
+    kernel keeps its interpreter's thresholds. ROMP_GC_FREEZE=off leaves the stock trigger. A failure never stops the
+    boot: counted under /perf gc.freeze.errors, said once, and the stock trigger stands."""
+    try:
+        return gcf.apply_gen2_threshold(_GC_FREEZE, value=_GC_GEN2_THRESHOLD)
+    except Exception as e:
+        _GC_FREEZE_ERRORS[0] += 1
+        try:
+            sys.stderr.write("gc-freeze: raising the full-collection trigger raised %s; the stock trigger stands (counted "
+                             "under /perf gc.freeze.errors): %s\n" % (type(e).__name__, repr(e)[:200]))
+        except Exception:
+            pass
+        return None
 
 
 def _gc_freeze_tick(idle, first):
@@ -77778,6 +77805,8 @@ def main():
     signal.signal(signal.SIGTERM, _graceful_term)             # drain, don't die mid-flight (see _graceful_term)
     _PERF_STATS.install_gc_hook()                             # the collector's pauses on /perf (2026-09-16): before the boot warm and
     #                                                           the loops, so the boot's own full collections count (see gc_event)
+    _gc_gen2_apply()                                          # with the freeze on, the raised full-collection trigger, before the
+    #                                                           boot warm's loads (2026-10-03; ROMP_GC_FREEZE=off keeps the stock one)
     # romp holds no API key (credentials.py, 2026-09-08). A retired provider line in service.env, the marker
     # beside it, or a key in this process's environment stops the kernel HERE, before the bundler, the
     # postal bus or the SDK backend spawn anything that could inherit it. RuntimeError: the
