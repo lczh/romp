@@ -1055,11 +1055,13 @@ class JobsCpu(unittest.TestCase):
         self.assertGreaterEqual(row["cpuMs"], 29.0, "the three runs' CPU, added: %r" % row)
 
     def test_only_the_jobs_threads_runs_are_counted(self):
-        """The pusher's own jobs (_pusher_cycle_jobs, on the thread that opened the pusher's cycle) and a call on a thread
-        that opened no cycle (a handler's, a test's) still record their stage, and no cpuByJob row: the pusher's CPU is its
-        cycle_cpu_ms_sum, and the block is the jobs thread's. The no-cycle call runs FIRST: a joined thread's ident is reused
-        by the next thread, so a call made after the pusher thread finished reads as the pusher's and never reaches the
-        no-owner path."""
+        """Before the jobs thread opens its first cycle (the boot's window: the pusher thread starts first), the pusher's own
+        jobs (_pusher_cycle_jobs, on the thread that opened the pusher's cycle) and a call on a thread that opened no cycle (a
+        handler's, a test's) still record their stage, and no cpuByJob row: the pusher's CPU is its cycle_cpu_ms_sum, and the
+        block is the jobs thread's. test_with_the_jobs_thread_alive_only_its_own_runs_are_counted makes the same calls with
+        the jobs thread alive, the state after the window.
+        The no-cycle call runs FIRST: a joined thread's ident is reused by the next thread, so a call made after the pusher
+        thread finished reads as the pusher's and never reaches the no-owner path."""
         def handler():
             assert self.ps._mine() is None, "this thread opened no cycle"
             km._job_stage("onHandler", lambda: _burn_cpu(0.005))
@@ -1070,6 +1072,67 @@ class JobsCpu(unittest.TestCase):
         self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"onJobs"})
         for name in ("onPusher", "onHandler", "onJobs"):
             self.assertGreater(snap["stages_ms"]["jobs." + name], 0.0, "every thread's stage still records its wall: " + name)
+
+    def test_with_the_jobs_thread_alive_only_its_own_runs_are_counted(self):
+        """The state the kernel is in after the boot's window: the jobs loop opens its cycle on every pass, and a thread's
+        owner entry goes only when that thread opens a cycle of another kind, so a jobs owner is registered, its pass open or
+        not, whenever the pusher's jobs or a handler's call run. Here the jobs thread opens its cycle and waits; while it is
+        alive, a call on a thread with no cycle and then one on a pusher-owned thread record their stage and no row; then
+        the jobs thread runs its own job, the only row. A check that counted any thread once a jobs owner exists, or any
+        thread while a jobs pass is open, passes test_only_the_jobs_threads_runs_are_counted and fails here. The no-cycle
+        call still goes before the pusher's, for that test's reason; a live thread's ident is never reused, so the order
+        against the jobs thread is free."""
+        opened, release, failed = threading.Event(), threading.Event(), []
+
+        def jobs_thread():
+            try:
+                self.ps.cycle_begin("jobs")
+                opened.set()
+                if not release.wait(30):
+                    raise AssertionError("the jobs thread was never released")
+                km._job_stage("onJobs", lambda: _burn_cpu(0.005))
+            except BaseException as e:      # carried to the test's thread
+                failed.append(e)
+        th = threading.Thread(target=jobs_thread, name="jobs-cpu-jobs")
+        th.start()
+        try:
+            self.assertTrue(opened.wait(30), "the jobs thread opened its cycle")
+
+            def handler():
+                assert self.ps._mine() is None, "this thread opened no cycle"
+                km._job_stage("onHandler", lambda: _burn_cpu(0.005))
+            self._on_thread(handler, kind=None)
+            self._on_thread(lambda: km._job_stage("onPusher", lambda: _burn_cpu(0.005)), kind="pusher")
+            self.assertIn("jobs", self.ps._owners, "a jobs owner was registered through both calls")
+            self.assertIsNotNone(self.ps._cycle_state["jobs"]["mark"], "and its pass was open")
+        finally:
+            release.set()
+            th.join(30)
+        self.assertFalse(th.is_alive(), "the jobs thread finished")
+        if failed:
+            raise failed[0]
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"onJobs"})
+        for name in ("onPusher", "onHandler", "onJobs"):
+            self.assertGreater(snap["stages_ms"]["jobs." + name], 0.0, "every thread's stage still records its wall: " + name)
+
+    def test_the_cpu_is_read_before_the_stage_bookkeeping(self):
+        """_job_stage reads the job's CPU before its closing bookkeeping (the stage mark's reset and the collector's stage()),
+        so that bookkeeping is never charged to the job. The real bookkeeping costs microseconds, under this class's 20 ms
+        resolution, so here the collector's stage() spins 30 ms of CPU before it records: a no-op job on the jobs thread
+        still reads under 20 ms, where a read after the stage call would carry the spin."""
+        record = self.ps.stage
+
+        def slow_stage(name, dt):
+            _burn_cpu(0.030)
+            record(name, dt)
+        with mock.patch.object(self.ps, "stage", slow_stage):
+            self._on_thread(lambda: km._job_stage("noop", lambda: None))
+        snap = self.ps.snapshot()
+        self.assertIn("jobs.noop", snap["stages_ms"], "the wrapped stage() still recorded the job's wall")
+        row = snap["jobs"]["cpuByJob"]["noop"]
+        self.assertEqual(row["runs"], 1, row)
+        self.assertLess(row["cpuMs"], 20.0, "the stage's bookkeeping is not the job's CPU: %r" % row)
 
 
 class PushStages(unittest.TestCase):
