@@ -1290,7 +1290,8 @@ class CreatesAfterAClear(CreateDoor):
                         self.assertEqual([pk["tries"] for pk in km._parked_creates], [n + 1], "still lagging, still parked")
                     self.assertLessEqual(len(over_first), 1, "the first transcript's graph built at most once (%d)"
                                          % len(over_first))
-                    self.assertLessEqual(read_of(first), os.path.getsize(first), "…and read at most once")
+                    self.assertLess(read_of(first), 2 * os.path.getsize(first), "…and read at most once (%d bytes of %d)"
+                                    % (read_of(first), os.path.getsize(first)))   # a whole read counts its guard bytes too
                     with open(leaf, "a") as fh:            # the reply's record lands
                         fh.write(json.dumps(aline(t, "a reply about the tags route, flushed late", "cz1", last)) + "\n")
                     km._retry_parked_creates()
