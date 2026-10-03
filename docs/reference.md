@@ -2528,15 +2528,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   and `gen2Threshold` reads it. CPython runs an automatic full collection once
   generation 2 has seen more than that many generation-1 collections and the
   objects promoted since the last full collection reach a quarter of what
-  survived it; after a freeze what survived is small, so the count alone
-  decides, and with the stock 10 a full collection came every eleventh
-  generation-1 collection (about 781 automatic ones, 409.5 s, in a live
-  kernel's first hour, beside the controller's 84). Every fold-in, release and
-  backstop is a full collection and resets that count, so the controller's own
-  events set the cadence and the raised trigger catches only a stretch with no
-  load. `ROMP_GC_GEN2_THRESHOLD` sets it (a value that is not an integer falls
-  back to 100, said once and counted under `errors`; floored at 10, so it can
-  only raise the trigger). It is not applied with the freeze off, on Python
+  survived it. Over a frozen heap what an automatic full collection leaves is
+  small, so with the stock 10 one can come every eleventh generation-1
+  collection, and on a loaded kernel most full collections are these automatic
+  ones (`gc.gen."2".collections` less `freeze.collections`). Raised, an
+  automatic full collection comes at most once per 101 generation-1
+  collections, and every fold-in, release and backstop (each a full
+  collection) restarts that count. `ROMP_GC_GEN2_THRESHOLD` sets it (a value
+  that is not an integer falls back to 100, said once and counted under
+  `errors`; floored at 10, so it can only raise the trigger). It is not applied with the freeze off, on Python
   3.14 and later or on a free-threaded build, where the collector differs. A
   request that arrives during a reconcile waits that
   one collection. The idle boundary is the best moment for the frozen-heap

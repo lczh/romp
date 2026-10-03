@@ -98,7 +98,7 @@ class Shape(unittest.TestCase):
         self.assertEqual(km._perf_walks(snap)["gc"]["frozen"], gc.get_freeze_count())
         self.assertEqual(g["errors"], 0)
         self.assertEqual(set(g["freeze"]), FREEZE_KEYS, "the #1735 freeze sub-block carries its state and reconcile counters")
-        self.assertIsNone(g["freeze"]["gen2Threshold"], "nothing raised the full-collection trigger at import: main() alone does")
+        self.assertIsNone(g["freeze"]["gen2Threshold"], "the freeze is off under the test floor, so no trigger is raised")
         self.assertFalse(g["hooked"], "a collector's hook is installed only when asked")
         json.dumps(g)
 
@@ -340,8 +340,8 @@ class Wiring(unittest.TestCase):
 
     def test_main_raises_the_trigger_once_after_the_hook_and_before_the_boot_warm(self):
         """(i) 2026-10-03: main applies the full-collection trigger once, after the hook (so the boot's collections count
-        either way) and before the boot warm's loads; never at import (Shape's gen2Threshold None, and the kernel-import
-        pin in tests/test_gc_freeze.py)."""
+        either way) and before the boot warm's loads; never at import (the kernel-import pin in tests/test_gc_freeze.py,
+        which loads the kernel with the freeze on)."""
         src = inspect.getsource(km.main)
         self.assertEqual(src.count("_gc_gen2_apply()"), 1)
         self.assertLess(src.index("_PERF_STATS.install_gc_hook()"), src.index("_gc_gen2_apply()"))

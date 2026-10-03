@@ -852,14 +852,14 @@ class RealCollector(unittest.TestCase):
 
 @unittest.skipUnless(_CLASSIC_GC, "the raised trigger applies to the classic collector only (before 3.14, not free-threaded)")
 class RealTrigger(unittest.TestCase):
-    """The premise on the REAL collector, through apply_gen2_threshold itself (2026-10-03). Over a frozen heap, the kernel's
-    state once the controller runs, what survived the last full collection is small, so CPython's quarter test passes and
-    threshold2 alone decides when an automatic full collection runs. Builds of short-lived containers (alive while the
-    build runs, then dropped, as a pusher build's temporaries are) then drive a full collection every eleventh
-    generation-one collection at the stock trigger, and the raised trigger runs at least four times fewer. A scaled-down
-    copy of the design's probe, and a mechanism pin across the CI matrix (3.10 to 3.13): if the quarter test, not
-    threshold2, bound here, both runs would count about the same. The thresholds are restored and the heap unfrozen
-    whatever happens."""
+    """The premise on the REAL collector, through apply_gen2_threshold itself (2026-10-03). The setup freezes the heap and
+    then runs one more full collection (one the controller never runs), so what survived the last full collection is
+    small and CPython's quarter test is held open: this pins that the collector honors threshold2, the state after an
+    automatic full collection over a frozen heap, not how often the quarter test holds a collection back after a
+    fold-in. Builds of short-lived containers (alive while the build runs, then dropped, as a pusher build's temporaries
+    are) then drive a full collection every eleventh generation-one collection at the stock trigger, and the raised
+    trigger runs at least four times fewer. A scaled-down copy of the design's probe, across the CI matrix (3.10 to
+    3.13). The thresholds are restored and the heap unfrozen whatever happens."""
 
     def setUp(self):
         self.assertTrue(gc.isenabled(), "the automatic collector is what this measures")

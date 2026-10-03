@@ -1296,11 +1296,12 @@ if _gc_gen2_bad_knob is not None:       # a bad ROMP_GC_GEN2_THRESHOLD fell back
 
 
 def _gc_gen2_apply():
-    """main()'s one call (2026-10-03): with the freeze on, raise CPython's full-collection trigger so the controller's
-    fold-ins, not the stock every-eleventh-young-collection trigger, set the cadence of full collections
-    (gcf.apply_gen2_threshold says why and where it is not applied). At boot, never at import: a test that loads the
-    kernel keeps its interpreter's thresholds. ROMP_GC_FREEZE=off leaves the stock trigger. A failure never stops the
-    boot: counted under /perf gc.freeze.errors, said once, and the stock trigger stands."""
+    """main()'s one call (2026-10-03): with the freeze on, raise CPython's full-collection trigger, so an automatic full
+    collection comes at most once per 101 generation-one collections, each controller run restarting the count, rather
+    than as often as every eleventh (gc_freeze's module docstring says why, apply_gen2_threshold where it is not
+    applied). At boot, never at import: a test that loads the kernel keeps its interpreter's thresholds.
+    ROMP_GC_FREEZE=off leaves the stock trigger. A failure never stops the boot: counted under /perf gc.freeze.errors,
+    said once, and the stock trigger stands."""
     try:
         return gcf.apply_gen2_threshold(_GC_FREEZE, value=_GC_GEN2_THRESHOLD)
     except Exception as e:

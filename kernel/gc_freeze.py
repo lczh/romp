@@ -63,19 +63,21 @@ automatic full collection would have walked anyway. Default on; `ROMP_GC_FREEZE=
 
 THE FULL-COLLECTION TRIGGER (2026-10-03, `apply_gen2_threshold`). CPython starts an automatic full collection when
 generation two has seen more than `threshold2` (stock 10) young-generation collections AND the objects promoted since
-the last full collection reach a quarter of what survived it. Once the heap is frozen, what survived the last full
-collection is small, so the quarter test nearly always passes and threshold2 alone decides: a full collection every
-eleventh generation-one collection, each walking whatever was promoted since the last fold-in, often mid-build with
-the build's temporaries alive. A live kernel at 62 minutes had run 865 full collections for 444.9 s (11.9 percent of
-wall); the controller ran 84 of them (35.4 s), so about 781 automatic ones took about 409.5 s. So while the freeze is
-on, main() raises threshold2 to `DEFAULT_GEN2_THRESHOLD` (`ROMP_GC_GEN2_THRESHOLD`, floored at the stock 10, so the
-knob can only raise it). Every fold-in, release and backstop is a full collection and resets that counter, so the
-cadence of full collections becomes the controller's own events; the trigger stays finite because a stretch with no
-load has no fold-in, and the automatic collection is then its only collector. Young cycles are still taken by
-generations zero and one at the stock rate. Not applied with the freeze off (the measurement switch measures stock
-CPython), on 3.14 and later (an incremental collector there, which uses the thresholds differently; not verified
-against it), or on a free-threaded build (a different collector). A controller turned off after the raise puts back
-the value it replaced.
+the last full collection reach a quarter of what survived it. After an automatic full collection over a frozen heap,
+what survived it is only the unfrozen part, which is small, so the quarter test passes and threshold2 decides: an
+automatic full collection can come every eleventh generation-one collection, each walking whatever was promoted since,
+often mid-build with the build's temporaries alive. (A fold-in's collection sets CPython's survivor count to everything
+it kept and the freeze after it leaves that count alone, so the quarter test holds the next one back for a while after
+each fold-in; on a loaded kernel most
+full collections are still the automatic ones, which /perf tells apart: gc.gen."2".collections less
+gc.freeze.collections.) So while the freeze is on, main() raises threshold2 to `DEFAULT_GEN2_THRESHOLD`
+(`ROMP_GC_GEN2_THRESHOLD`, floored at the stock 10, so the knob can only raise it): at most one automatic full
+collection per 101 generation-one collections, and each controller run (a fold-in, a release, a backstop: each a full
+collection) restarts that count. Young cycles are still taken by generations zero and one at the stock rate. Not applied
+with the freeze off (the measurement switch measures stock CPython), on 3.14 and later (an incremental collector there,
+which uses the thresholds differently; not verified against it), or on a free-threaded build (a different collector).
+Calling apply_gen2_threshold again with the controller disabled puts back the value it replaced; nothing in the kernel
+makes that call after boot today.
 """
 import gc as _gc_mod
 import os
@@ -92,8 +94,7 @@ DEFAULT_BACKSTOP_FOLDINS = 1000  # a reclaim after this many load fold-ins since
 #                                  cycles it fired about once in ten hours; busy-cycle fold-ins (2026-09-28) come more often,
 #                                  and the bound stays on fold-ins because a fold-in is what can freeze a live cycle
 DEFAULT_GEN2_THRESHOLD = 100    # CPython's threshold2 while the freeze is on (stock 10): an automatic full collection at most
-#                                  every 101 generation-one collections since the last full one, about 23 s at the 4.4 a second
-#                                  a live kernel ran in its first hour
+#                                  every 101 generation-one collections since the last full one, controller runs included
 MIN_GEN2_THRESHOLD = 10          # the stock value: the knob can only raise the trigger, never make full collections more frequent
 GEN2_BEFORE = (3, 14)            # 3.14 and later run an incremental collector that uses the thresholds differently: not applied
 _OFF = ("off", "0", "false")
