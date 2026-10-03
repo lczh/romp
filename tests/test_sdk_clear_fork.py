@@ -260,6 +260,66 @@ class ForkParseCandidates(SdkClearForkBase):
         self.assertIn("post-clear ask", texts, "the resume stitch still crosses into L1")
         self.assertNotIn("widget", texts)
 
+    def _resume_after_a_clear(self, tag, l2_records):
+        """The anchor, a /clear to L1 (a fresh head, no lineage row), then a resume fork L1 -> L2 whose file holds
+        `l2_records`. Returns (anchor, L1, L2) paths."""
+        anchor = self._write(SID, self._anchor_records())
+        l1, l2 = "66666666-7777-8888-9999-aaaaaaaaa%s01" % tag, "66666666-7777-8888-9999-aaaaaaaaa%s02" % tag
+        p1 = self._write(l1, [uline(self.now - 300, "post-clear ask", tag + "1u"),
+                              aline(self.now - 295, "post-clear reply", tag + "1a", parent=tag + "1u")])
+        p2 = self.proj / (l2 + ".jsonl")
+        p2.write_text("".join(json.dumps(r) + "\n" for r in l2_records))
+        self._states([{"t": self.now - 70, "resumeFork": {"from": l1, "to": l2}}])
+        return anchor, p1, p2
+
+    def test_a_resume_after_a_clear_whose_new_file_has_no_record_yet_keeps_the_anchor(self):
+        # review round one: the floor under salvaged replies is the earliest head over the lineage, and with no head in L2
+        # yet it cannot be told, so a landed pre-clear reply came back as an orphan in the chat until L2's head was written.
+        # As for a /clear's leaf with no record yet, the anchor stays meanwhile, and leaves once the head is written
+        anchor, p1, p2 = self._resume_after_a_clear("e", [{"type": "queue-operation", "operation": "enqueue",
+                                                           "timestamp": iso(self.now)}])
+        self.assertEqual(jd._judge_candidates(SID, [str(p2)]), [str(p2), str(anchor)])
+        self.assertIsNone(jd.conversation_floor(SID, str(p2)), "premise: the floor cannot be told yet")
+        with open(p2, "a") as fh:
+            fh.write(json.dumps(uline(self.now - 60, "resumed after the clear", "e2u")) + "\n")
+        self.assertEqual(jd._judge_candidates(SID, [str(p2)]), [str(p2)], "the head is written: the anchor is unreachable")
+
+    def test_a_resume_after_a_clear_whose_new_files_head_stamp_does_not_parse_keeps_the_anchor(self):
+        head = uline(self.now - 60, "resumed after the clear, a broken stamp", "f2u")
+        head["timestamp"] = "not-a-timestamp"
+        anchor, p1, p2 = self._resume_after_a_clear("f", [head, aline(self.now - 55, "resumed reply", "f2a", parent="f2u")])
+        self.assertEqual(jd._judge_candidates(SID, [str(p2)]), [str(p2), str(anchor)])
+
+    def test_a_seventeen_hop_resume_lineage_keeps_the_anchor(self):
+        # the walk stops where the lineage closure stops, at sixteen hops: a lineage it cannot finish walking keeps the anchor,
+        # here one that does run back to it (anchor -> F1 -> ... -> F17, every head fresh)
+        anchor = self._write(SID, self._anchor_records())
+        rows, prev, leaf = [], SID, None
+        for i in range(1, 18):
+            stem = "66666666-7777-8888-9999-aaaaaaaa%04d" % i
+            leaf = self._write(stem, [uline(self.now - 3000 + 100 * i, "resumed ask %d" % i, "h%du" % i),
+                                      aline(self.now - 2995 + 100 * i, "resumed reply %d" % i, "h%da" % i, parent="h%du" % i)])
+            rows.append({"t": self.now - 3010 + 100 * i, "resumeFork": {"from": prev, "to": stem}})
+            prev = stem
+        self._states(rows)
+        self.assertEqual(jd._judge_candidates(SID, [str(leaf)]), [str(leaf), str(anchor)])
+
+    def test_a_two_hop_resume_after_a_clear_keeps_the_leaf_alone(self):
+        # the anchor, a /clear to L1, then resumes L1 -> L2 -> L3: the walk crosses both hops to L1's parentless head
+        self._write(SID, self._anchor_records())
+        l1, l2, l3 = ("66666666-7777-8888-9999-aaaaaaaaag%02d" % i for i in (1, 2, 3))
+        p1 = self._write(l1, [uline(self.now - 500, "post-clear ask", "g1u"),
+                              aline(self.now - 495, "post-clear reply", "g1a", parent="g1u")])
+        p2 = self._write(l2, [uline(self.now - 300, "first resume", "g2u"),
+                              aline(self.now - 295, "first resumed reply", "g2a", parent="g2u")])
+        p3 = self._write(l3, [uline(self.now - 60, "second resume", "g3u"),
+                              aline(self.now - 55, "second resumed reply", "g3a", parent="g3u")])
+        self._states([{"t": self.now - 310, "resumeFork": {"from": l1, "to": l2}},
+                      {"t": self.now - 70, "resumeFork": {"from": l2, "to": l3}}])
+        cands = jd._judge_candidates(SID, [str(p3)])
+        self.assertEqual(cands, [str(p3)])
+        self.assertEqual(self._closure(p3, cands), [str(p3), str(p2), str(p1)])
+
     def test_a_leaf_with_no_record_yet_keeps_the_anchor(self):
         # the registry names the new file a beat before the CLI writes its first record: nothing to prove the head by
         anchor = self._write(SID, self._anchor_records())

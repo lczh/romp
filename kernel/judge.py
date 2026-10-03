@@ -3695,11 +3695,15 @@ def _anchor_reachable(fsid, leaf, anchor):
     (a /clear's file has fresh uuids and no back-link, a resume fork links only to its recorded predecessor, a compaction
     stitches within its file). That is the predicate the kernel's episode boundary check settles cards on. Anything else
     (a head that back-links, a lineage through the anchor, no head yet, an unparseable stamp, the hop cap, a states log
-    that cannot be read) answers True: the anchor stays a candidate, as it always was."""
+    that cannot be read) answers True: the anchor stays a candidate, as it always was. So does a lineage whose leaf, or
+    a file resumed into on the way from R that is on disk, has no stamped head yet (a resume's new file holding only a
+    queue-operation line, a first record whose stamp does not parse): the floor parse_session and the chat put under
+    salvaged replies is the earliest head over those files and cannot be told without it, and the anchor's landed text
+    is then what keeps a pre-clear reply that landed there from coming back (review round one, 2026-10-03)."""
     links = _resume_links(fsid)
     if links is None:
         return True
-    stem, first, hops = leaf.stem, leaf, 0
+    stem, first, hops, after = leaf.stem, leaf, 0, []
     while stem in links:
         if hops >= 16:
             return True                            # the closure's own cap: a lineage it cannot finish walking
@@ -3707,9 +3711,18 @@ def _anchor_reachable(fsid, leaf, anchor):
         hops += 1
         if stem == anchor.stem:
             return True                            # a resume lineage through the anchor: it IS the conversation's history
+        after.append(first)
         first = leaf.with_name(stem + ".jsonl")
     head = transcript_head(first)
-    return not (head and head.get("root") and head.get("t"))
+    if not (head and head.get("root") and head.get("t")):
+        return True
+    for fp in after:                               # the leaf, and each file resumed into after R that is on disk
+        if fp != leaf and not fp.exists():
+            continue                               # the closure skips a missing file, and so does its floor
+        h = transcript_head(fp)
+        if not (h and h.get("t")):
+            return True                            # no stamped head yet: the floor cannot be told, the anchor stays
+    return False
 
 
 def _judge_candidates(fsid, files):
