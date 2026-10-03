@@ -55,7 +55,10 @@ export type CommentThread = {
 export const CMT_SENT_GIST = "What romp sent with your comment";
 export const CMT_SENT_GIST_PRIOR = "What romp sent with your comment, including the turns around it (from before the summary)";
 
-export type CommentsFrame = { type: "comments"; id: string; threads: CommentThread[] };
+// A frame whose store the kernel could not read carries `error` in place of `threads`.
+export type CommentsFrame =
+  | { type: "comments"; id: string; threads: CommentThread[] }
+  | { type: "comments"; id: string; error: string };
 
 /** Threads grouped by the turn they anchor to — what the mark/badge pass walks per rendered view. */
 export function threadsByAnchor(threads: CommentThread[]): Map<string, CommentThread[]> {

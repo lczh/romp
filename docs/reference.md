@@ -3889,8 +3889,12 @@ re-send once a reconnecting page's listeners are up. A create's answer (`comment
 the new thread's row itself, built as the frame builds it, so the page lists and opens the thread
 before the next frame; a frame built from the store as it stood before a write is dropped at the
 send (each store write bumps a generation the pusher reads before it builds the frame), so it can
-never follow that answer and take the thread away again. A document write over a session's parse,
-which only reads it, does not hold the comment's walk.
+never follow that answer and take the thread away again. The frame's read of the store, when it
+fails (a descriptor shortage, a read error, a truncated file or one that is not JSON), is never
+remembered as empty: the frame carries `error` in place of `threads`, the page keeps the threads it
+holds and says once that the read failed, until a readable frame ends the failure, and the next cycle
+reads the store again. A document write over a session's parse, which only reads it, does not hold
+the comment's walk.
 
 Creating a comment runs off the page's socket thread, so the page's other messages are read while
 it runs. The cut is found on the session's own parse (the chat's assembly entry, whole or restored
