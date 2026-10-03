@@ -2760,7 +2760,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `descent` when the new leaf does not chain to the old through the delta
   (a parallel tool batch's results, each parented at its own call, fold instead;
   one that then moves an old record's kept membership counts under `kept` and
-  takes the restore road a descent takes),
+  takes the restore road a descent takes, unless the `promptid` gate let a
+  record of it through, counted under `g:promptid:passedDemote` below),
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
   `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
@@ -2772,8 +2773,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   those whose id a restored entry's document names (a document names the
   prompt ids of the summaries before its cut), where the entry cannot tell
   whether that boundary is attached, and `g:promptid:passedDemote` for a
-  delta in which the gate let such a record through, because every summary
-  wearing its id hangs off a boundary on the conversation's path that
+  delta in which the gate let a record wearing a summary's prompt id
+  through, because every summary wearing its id hangs off a boundary on the
+  conversation's path that
   adoption did not splice, as an automatic compaction's does, and which a
   compaction in it, the descent or a parallel batch's kept check then
   refused: it parses whole, as it did before the gate let such records
