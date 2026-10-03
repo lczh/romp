@@ -8,7 +8,9 @@ it wouldn't: a stale click on an already-abandoned branch): a missing record, a 
 record ("No message found" — verified live 2026-07-16), and the conversation's first message.
 Exercised HERE against synthetic transcripts, so the backend's failure path stays reserved for
 genuine races. Plus source pins on the drive-op arm (SDK-only gate, busy gate, warn toasts)."""
+import contextlib
 import inspect
+import io
 import json
 import os
 import tempfile
@@ -184,6 +186,33 @@ class RewindTarget(unittest.TestCase):
                           "the second attempt's": read() - once, "record cache entries for it": held},
                          {"answers": [seam, seam], "the first attempt's bytes of the first file": os.path.getsize(first),
                           "the second attempt's": 0, "record cache entries for it": []})
+
+    def test_an_unreadable_first_file_leaves_an_edit_of_an_unwritten_message_to_try_again_and_says_why(self):
+        # review round four: an edit of a uuid the leaf lacks is decided from the first file's uuid set alone, so with that
+        # file unreadable (mode 0, restored in the finally) the lookup reports no membership, and an edit of a post-clear
+        # message not on disk yet is told to try again, never the seam refusal, which would refuse it for good once it lands;
+        # and the edit road says why on stderr, one line naming the error
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file: the unreadable first file cannot be staged")
+        first = self._transcript(self._base())
+        leaf = _clear_leaf(os.path.dirname(first))
+        km._CUT_FIRST_UUIDS.pop(SID, None)
+        km._cut_read_said.discard((SID, "unreadable"))
+        _first_file_untouched(first)                     # no whole entry to serve the set without a read
+        err, mode = io.StringIO(), os.stat(first).st_mode & 0o777
+        os.chmod(first, 0)
+        try:
+            with self.assertRaises(PermissionError, msg="premise: the first file cannot be opened"):
+                open(first, "rb").close()
+            with contextlib.redirect_stderr(err):
+                got = km._rewind_target(leaf, SID, "c9")
+        finally:
+            os.chmod(first, mode)
+        lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+        self.assertEqual({"answer": got, "stderr lines": len(lines)},
+                         {"answer": (None, "that message isn't in the transcript yet; try again in a moment"), "stderr lines": 1},
+                         "stderr: %s" % lines)
+        self.assertIn("PermissionError", lines[0], "the line names the error")
 
 
 class DriveOpPins(unittest.TestCase):

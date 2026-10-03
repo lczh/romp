@@ -853,6 +853,33 @@ class CutFromTheDisplayParse(Base):
                          {"answers": [want, want], "the first attempt's bytes of the first transcript": os.path.getsize(first),
                           "the second attempt's": 0, "record cache entries for it": []})
 
+    def test_an_unreadable_first_transcript_leaves_a_read_road_comment_on_an_unwritten_reply_lagging_and_says_why(self):
+        # review round four: on the read road, a target the leaf lacks is decided from the first transcript's uuid set alone,
+        # so with that file unreadable (mode 0, restored in the finally) the lookup reports no membership, and a comment on a
+        # reply not on disk yet keeps the lag answer, parked until it lands, never ANCHOR_REWOUND_ERR, which parks nothing
+        # and would refuse it for good; and the read road says why on stderr, one line naming the error
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file: the unreadable transcript cannot be staged")
+        first, leaf, _last, _t = cleared(self)
+        drop_reader(first)                                    # no whole entry to serve the set without a read
+        km._CUT_FIRST_UUIDS.pop(PARENT, None)
+        km._cut_read_said.discard((PARENT, "unreadable"))
+        real, err, mode = km._comment_cut_from_parse, io.StringIO(), os.stat(first).st_mode & 0o777
+        km._comment_cut_from_parse = lambda *a, **k: None    # no display entry answers: the read road
+        os.chmod(first, 0)
+        try:
+            with self.assertRaises(PermissionError, msg="premise: the first transcript cannot be opened"):
+                open(first, "rb").close()
+            with contextlib.redirect_stderr(err):
+                got = km._comment_cut_resolve(leaf, PARENT, "cz1")
+        finally:
+            os.chmod(first, mode)
+            km._comment_cut_from_parse = real
+        lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+        self.assertEqual({"answer": got[2], "stderr lines": len(lines)}, {"answer": km.ANCHOR_LAG_ERR, "stderr lines": 1},
+                         "stderr: %s" % lines)
+        self.assertIn("PermissionError", lines[0], "the line names the error")
+
     def test_the_first_transcripts_read_leaves_its_record_cache_entry_as_it_found_it(self):
         # review round two: the widening read the session's first transcript through the record cache's whole road, which
         # installed its records, or upgraded in place the tail a restore left, and nothing let them go. Its read now leaves the
@@ -1048,7 +1075,10 @@ class CutFromTheDisplayParse(Base):
         # so the leaf parses alone, but a record of its graph names a parent in the first transcript. Only then is the graph
         # over both files built, and the walk over it answers, for the linked record and the records behind it alike, on the
         # read road too (review round three: the one road that still builds that graph there). Its first-file records are
-        # handed in, so no record cache entry for that file is left behind, whether the set's read or a read again gave them
+        # handed in, so no record cache entry for that file is left behind, whether the set's read or a read again gave them.
+        # Since review round four, what each resolve reads of that file and how it counts: one read of the file's size at
+        # each, the first for the set and the graph alike (its records handed in, never read twice), the second again, as
+        # the set keeps only uuids; and the second, which pulled the file's bytes, counts as a read, not as its display road
         old, _last, t = turns(self.now - 100000, 20, 20000)
         first = write(self.proj / (PARENT + ".jsonl"), old)
         new, _l2, _t2 = turns(t + 100, 10, 20000, parent=None, tag="c")
@@ -1058,6 +1088,7 @@ class CutFromTheDisplayParse(Base):
         leaf = write(self.proj / (CLEARED + ".jsonl"), new)
         self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: a parentless head, so the leaf parses alone")
         rp = os.path.realpath(first)
+        size = os.path.getsize(first)
 
         def held():
             with em._JSONL_CACHE_LOCK:
@@ -1072,12 +1103,22 @@ class CutFromTheDisplayParse(Base):
                     km._parse(leaf, PARENT, self.now)
                 for anchor in ("ka19", "ka18"):               # the linked answer, and one behind it (the set answers it)
                     drop_reader(first)                        # the cold walk below reads it through the record cache
+                    zero_reads()                              # so the bytes below are this resolve's alone
                     if road == "read":
                         km._comment_cut_from_parse = lambda *a, **k: None
+                    r0 = self.roads()
                     try:
                         got = km._comment_cut_resolve(leaf, PARENT, anchor)
                     finally:
                         km._comment_cut_from_parse = real
+                    r1 = self.roads()
+                    pulled, counted = read_of(first), {k: r1[k] - r0[k] for k in r1}
+                    if road in ("whole", "read"):             # before the cold walk below reads that file
+                        self.assertEqual(pulled, size, "one read of the first transcript (%s: %s)" % (road, anchor))
+                    if road in ("whole", "seeded") and anchor == "ka18":
+                        self.assertEqual({"counted": counted, "bytes": pulled},
+                                         {"counted": {"whole": 0, "seeded": 0, "read": 1, "failed": 0}, "bytes": size},
+                                         "the read again counts as a read (%s)" % road)
                     self.assertEqual(held(), [], "no record cache entry for the first transcript (%s: %s)" % (road, anchor))
                     want = self.cold(leaf, anchor)
                     self.assertEqual((want[0], want[2]), ("", None), "premise: over both files, a tip fork (%s)" % anchor)
