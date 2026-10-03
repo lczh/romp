@@ -1736,9 +1736,8 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     cp = _ckpt_file(key)
     if cp is None:
         return {}
-    try:
-        sig = _doc_sig(cp.stat())
-    except OSError:
+    sig = _doc_stat_sig(cp, key)
+    if sig is None:
         return {}                                         # no document (a missing file is the common case: a first write)
     with _CKPT_LOCK:
         idx = _DOC_INDEX.get(key)
@@ -1766,7 +1765,7 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
             continue
         try:
             c = int(f["count"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):   # no integer count (infinity among them): not carried
             continue
         if _count_recordable(base, count, c):                 # a carried count too far behind would drag the cut (the bound above)
             out[name] = f
@@ -6921,6 +6920,22 @@ def _doc_sig(st_):
     return (st_.st_ino, st_.st_mtime_ns, st_.st_size)
 
 
+def _doc_stat_sig(cp, key):
+    """The _doc_sig of `key`'s fold document `cp`, or None when there is none to read. A missing file (or directory) is the
+    quiet common case, a first write. Any other stat error (a checkpoints directory this account cannot search, a failing
+    disk) answers None too and never raises, but is said once, naming the document and the error: the file is then read
+    whole and its write carries nothing (a lasting one can fail the write as well, and every boot reads the file whole), and
+    that line is what says why."""
+    try:
+        return _doc_sig(cp.stat())
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as e:
+        _say_once("checkpoint: the fold document %s of %s could not be checked (%s); read as no document, so the file is "
+                  "read whole and its write carries nothing" % (cp, key, e.strerror or e))
+        return None
+
+
 def _doc_carryable(folds):
     """{fold name: count} of the entries a write's carry could take from a document's `folds` (the carry's own shape test: a
     dict with a state or an over-the-cap cursor; the count None when it does not read as an integer, which the carry skips)."""
@@ -6929,7 +6944,7 @@ def _doc_carryable(folds):
         if isinstance(f, dict) and ("state" in f or f.get("over")):
             try:
                 out[n] = int(f["count"])
-            except (KeyError, TypeError, ValueError):
+            except (KeyError, TypeError, ValueError, OverflowError):   # OverflowError: a count json read as infinity
                 out[n] = None
     return out
 
@@ -6971,9 +6986,8 @@ def _ckpt_doc_shared(key):
     cp = _ckpt_file(key)
     if cp is None:
         return None
-    try:
-        sig = _doc_sig(cp.stat())
-    except OSError:
+    sig = _doc_stat_sig(cp, key)
+    if sig is None:
         return None                                       # no document
     with _CKPT_LOCK:
         hit = _DOC_MEMO.get(key)

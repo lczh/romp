@@ -10,6 +10,8 @@ a cold fold; the bytes the reader pulls after a restore are the tail plus the gu
 out and cold-folds; the boot sweep removes checkpoints of vanished files; the kernel writes at a session's settle or
 states-log move and never otherwise; /perf carries the counters. Hermetic: synthetic records under a temp root."""
 import contextlib
+import errno
+import io
 import json
 import os
 import tempfile
@@ -1932,6 +1934,56 @@ class CarryReadsOncePerChange(Base):
         self.assertTrue(em.checkpoint_write(self.p))
         self.assertEqual(sorted(self.doc(self.p)["folds"]), ["t"], "u stands too far behind to carry, as the carry has always left it")
         self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (0, 0), "and learning that costs no read")
+
+    def test_an_entry_whose_count_reads_as_infinity_is_one_no_write_carries(self):
+        """A count json reads as float infinity (`Infinity`, or `1e999`) is one int() refuses with OverflowError, not
+        ValueError. The index and the carry read it as no integer count, an entry nothing carries, so the load that fills the
+        index (a retirement's consult in a fresh process, the restore of another entry) and the write return, and the write
+        leaves that entry out. Before, the load raised on the first read of that transcript in each process, and the carry
+        at every write. No writer produces such a count; it takes a hand edit."""
+        self.fold("t"); self.fold("u"); self.fold("v"); self.assertTrue(em.checkpoint_write(self.p))
+        cp = self.cp(); d = json.loads(cp.read_text()); d["folds"]["u"]["count"] = float("inf")
+        cp.write_text(json.dumps(d))
+        self.assertEqual(json.loads(cp.read_text())["folds"]["u"]["count"], float("inf"), "the premise: json writes and reads it")
+        self.fresh_process()
+        n0 = self.consults()
+        em.rewound_memo_forget(self.p)                   # a retirement's consult before any load in the process: it asks the disk
+        self.assertEqual(self.consults() - n0, 1, "the consult loaded the document")
+        self.assertNotIn(self.p, em._RETIRED_FOLDS, "and found nothing to retire")
+        self.fresh_process()
+        _append(self.p, {"n": 3})
+        self.assertEqual(self.fold("t"), [0, 1, 2, 3])
+        self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("t"), 1, "the restore of another entry")
+        self.assertTrue(em.checkpoint_write(self.p), "the write proceeds")
+        self.assertEqual(self.states(), {"t": (4, [0, 1, 2, 3]), "v": (3, [0, 1, 2])}, "carrying v")
+        self.assertNotIn("u", self.doc(self.p)["folds"], "and leaving out the entry with no integer count")
+
+    def test_a_document_whose_stat_fails_reads_as_none_and_is_said_once(self):
+        """A stat of the document that fails for a reason other than a missing file (here a checkpoints directory without its
+        search bit) reads as no document at the restore and at the write's carry, as a missing one does, and never raises.
+        Unlike a missing one it is said once on stderr, naming the document and the error: the file is read whole and the
+        write fails, and nothing else would say why. No fallback is counted, and the document is not removed."""
+        self.fold("t"); self.assertTrue(em.checkpoint_write(self.p))
+        d, cp = jd.STATE / "checkpoints", self.cp()
+        self.assertEqual(cp.parent, d)
+        before, mode = cp.read_bytes(), d.stat().st_mode
+        os.chmod(d, 0o600)                               # readable and writable, not searchable: a stat of any file in it fails
+        self.addCleanup(os.chmod, d, mode)
+        if os.access(d, os.X_OK):
+            self.skipTest("this account searches a directory whatever its mode (root)")
+        self.fresh_process()
+        _append(self.p, {"n": 3})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(self.fold("t"), [0, 1, 2, 3], "the restore reads the file whole")
+            self.assertFalse(em.checkpoint_write(self.p), "the carry reads no document, and the write's own tmp file fails")
+        said = [ln for ln in err.getvalue().splitlines() if str(cp) in ln]
+        self.assertEqual(len(said), 1, "said once across the restore and the write: %r" % err.getvalue())
+        self.assertIn(os.strerror(errno.EACCES), said[0])
+        self.assertEqual((em.checkpoint_stats()["fallbacks"], em.checkpoint_stats()["restoredFolds"]), ({}, {}),
+                         "no fallback counted, nothing restored")
+        os.chmod(d, mode)
+        self.assertEqual(cp.read_bytes(), before, "and the document stays as it was")
 
 
 class CursorTableBound(Base):

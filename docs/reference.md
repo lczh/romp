@@ -1615,7 +1615,10 @@ cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
 reads only the bytes past the offset and resumes each fold from its recorded
 state; a checkpoint that does not verify (its version, its path, a file that
 shrank, a rewrite under the guard, a corrupt document) falls back to a whole
-read, is counted per reason in `/perf` and said once on stderr. Every fold
+read, is counted per reason in `/perf` and said once on stderr. A document
+whose stat fails for any reason but its absence (a `checkpoints/` directory
+the kernel cannot search) reads as no document, so the file is read whole,
+and is said once on stderr with the error, its file left in place. Every fold
 holding a cursor inside the entry's held records is recorded at its own count
 (a fold stepped by builds rather than by the settle may lag the leaf), and the
 document's cut is the lowest of them, so the next kernel's tail read holds what
