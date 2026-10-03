@@ -8885,7 +8885,9 @@ def _file_head_t(path):
     """The stamp (epoch seconds) of `path`'s first uuid-bearing record, or None while it has none, when its stamp does not
     parse, or when the file cannot be read. The record judge.transcript_head reads (a transcript is append-only, so its head
     never changes once written): read from the start a line at a time, normally that one record, the bytes counted like every
-    reader byte, and memoized by realpath once found."""
+    reader byte, and memoized by realpath once found. Each line is decoded as transcript_head and the reader decode it, with
+    bad bytes replaced, so a head record holding an invalid byte is the head here too, as it is to the candidate rule (review
+    round two, 2026-10-03: raw bytes made json.loads refuse it and the floor fell to the next record's stamp)."""
     key = os.path.realpath(str(path))
     hit = _FILE_HEAD_T.get(key)
     if hit is not None:
@@ -8899,7 +8901,7 @@ def _file_head_t(path):
                 if not line:
                     continue
                 try:
-                    r = json.loads(line)
+                    r = json.loads(line.decode("utf-8", "replace"))
                 except ValueError:
                     continue
                 if isinstance(r, dict) and r.get("uuid"):

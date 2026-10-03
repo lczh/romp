@@ -275,6 +275,27 @@ class SalvageFloorAfterAClear(unittest.TestCase):
             self.assertEqual(self._salvaged(ref), ["lost_pre", "lost_post"], "%s: the premise, the floor-free salvage" % name)
             self.assertEqual(self._salvaged(got), self._salvaged(ref), "%s: the floor changes nothing" % name)
 
+    def test_a_head_record_holding_an_invalid_byte_is_the_floor_the_candidate_rule_reads(self):
+        # review round two: the candidate rule reads a head with bad bytes replaced (judge.transcript_head), and the floor read
+        # raw bytes, so with one invalid UTF-8 byte inside the head record's text (a byte the CLI never writes) the rule left
+        # the first file out while the floor skipped that record. With a record after it, the floor fell to that record's
+        # stamp and dropped the first turn's salvaged reply; with none, there was no floor, and the reply that landed in the
+        # first file came back as salvage. The floor decodes as the rule does, and finds the same head
+        for later in (True, False):
+            with self.subTest(record_after_the_head=later):
+                self._world()
+                raw = self.leaf.read_bytes().split(b"\n")
+                self.assertIn(b"tags filter", raw[0], "premise: the head is the first line")
+                raw[0] = raw[0].replace(b"tags filter", b"tags \xff filter")
+                self.leaf.write_bytes(b"\n".join(raw if later else [raw[0], b""]))
+                em._FILE_HEAD_T.pop(os.path.realpath(str(self.leaf)), None)
+                jd._head_memo.pop(str(self.leaf), None)
+                self.assertEqual(jd._judge_candidates(SID, [str(self.leaf)]), [str(self.leaf)],
+                                 "premise: the rule reads that head and leaves the first file out")
+                tree = self._parse(self.leaf, [self.leaf], self._markers())
+                self.assertEqual(self._salvaged(tree), ["lost_post"],
+                                 "floored at the head: the first turn's salvaged reply stays, nothing from before the clear")
+
 
 PSID = "5a1e0000-2222-4333-8444-000000000a01"     # private synthetic sids (the goal-store fixture rule: the planner run mints)
 PFORK = "5a1e0000-2222-4333-8444-000000000a02"
