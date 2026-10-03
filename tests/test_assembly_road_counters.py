@@ -653,22 +653,41 @@ class AssemblyRoadCounters(Harness):
     def test_the_chain_rule_runs_for_a_rewrite_demotion_after_the_caches_own_eviction(self):
         """Round two, medium 1: the rule ran for descent only, and a plain LRU eviction of the leaf's record entry (the cache's byte
         budget) makes the next parse's reason g:rewrite, which reached the restore unguarded. The entry is evicted through the
-        cache's own loop (a budget of one byte and a read of another file), never popped by hand."""
+        cache's own loop (a count cap of one and a read of another file), never popped by hand. A BYTE-budget eviction releases
+        the assembly entry with the file (2026-10-02), so the parse after it takes the boot road, the rule's other door: both
+        causes are driven, each against a cold whole parse. The budget's release also gives the restored entry's lazy index
+        back (asm_index_stats `released`, review round two); the count cap's eviction releases nothing."""
         for name in ("a_rewind_pre_interior", "b_clear_fork", "c_api_error_spur_at_opener"):
-            with self.subTest(shape=name):
-                tail, road = self.SHAPES[name]
-                path, t0 = self._documented("evict-" + name)
-                self._append(path, tail(t0))
-                other = self.write("evict-other-" + name, [G.uline(t0, "another file", "o1")])
-                saved = em._JSONL_CACHE_BUDGET_BYTES; em._JSONL_CACHE_BUDGET_BYTES = 1
-                try:
-                    em._read_jsonl_entry(other, tail_ok=False)             # the insert evicts the leaf's entry: the cache's own loop
-                finally:
-                    em._JSONL_CACHE_BUDGET_BYTES = saved
-                with em._JSONL_CACHE_LOCK:
-                    self.assertNotIn(path, em._JSONL_CACHE, "the leaf's record entry evicted")
-                tree, parse, reads = self._served(path)
-                self._check(name, tree, parse, reads, road, path, reason="rewrite")
+            for cause in ("countCap", "budget"):
+                with self.subTest(shape=name, cause=cause):
+                    tail, road = self.SHAPES[name]
+                    path, t0 = self._documented("evict-%s-%s" % (cause, name))
+                    self._append(path, tail(t0))
+                    other = self.write("evict-other-%s-%s" % (cause, name), [G.uline(t0, "another file", "o1")])
+                    built = sum(len([dict(a) for a in t["atoms"]]) for t in self._trees[path]["turns"]
+                                if isinstance(t["atoms"], em.LazyAtoms))      # the restored pre-turns' atoms, built
+                    self.assertGreater(built, 0, "%s: the restored tree builds through the entry's lazy index" % name)
+                    r0 = em.asm_index_stats()["released"]
+                    knob = "_JSONL_CACHE_BUDGET_BYTES" if cause == "budget" else "_JSONL_CACHE_MAX"
+                    saved = getattr(em, knob); setattr(em, knob, 1)
+                    try:
+                        em._read_jsonl_entry(other, tail_ok=False)         # the insert evicts the leaf's entry: the cache's own loop
+                    finally:
+                        setattr(em, knob, saved)
+                    with em._JSONL_CACHE_LOCK:
+                        self.assertNotIn(path, em._JSONL_CACHE, "the leaf's record entry evicted")
+                    held = [e for e in em._ASM_CACHE.values() if isinstance(e, dict) and e.get("path") == path]
+                    self.assertEqual(len(held), 0 if cause == "budget" else 1, "%s: the assembly entry after a %s eviction" % (name, cause))
+                    released = em.asm_index_stats()["released"] - r0
+                    if cause == "budget":
+                        self.assertGreaterEqual(released, built, "%s: the released entry's index gave its built atoms back" % name)
+                    else:
+                        self.assertEqual(released, 0, "%s: a count-cap eviction releases nothing" % name)
+                    tree, parse, reads = self._served(path)
+                    if cause == "budget":
+                        self._check(name, tree, parse, reads, road, path, reason=None, boot=True)
+                    else:
+                        self._check(name, tree, parse, reads, road, path, reason="rewrite")
 
     def test_a_nonleaf_demotion_is_refused_by_the_loads_lineage_witness_before_any_chain_rule(self):
         """Round two: the nonleaf demotion driven. A lineage file that grew (or was touched) demotes the entry as nonleaf; the

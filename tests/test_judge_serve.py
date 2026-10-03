@@ -290,7 +290,7 @@ class OnePass(Harness):
                     yield from numbers(v, path + k + ".")
                 elif isinstance(v, (int, float)) and not isinstance(v, bool):
                     yield path + k, v
-        gauges = {"recordCache": ("entries", "bytes", "budgetBytes", "countCap"), "asmCheckpoint": ("asmDocMemo",), "tierGate": ("stamps",)}
+        gauges = {"recordCache": ("entries", "bytes", "realBytes", "decodedMultiple", "budgetBytes", "countCap"), "asmCheckpoint": ("asmDocMemo",), "tierGate": ("stamps",)}
         # the tiers' gate counters ride the line too (2026-09-18: a flip's call count per pass had no gate figure to explain it): per tier,
         # ran/skipped/stamped/bypassed/incomplete/due_clock as deltas, the working first pass with runs, the idle second with none
         STAGES = ["close", "consolidate", "distill", "group", "plan", "unblock"]
