@@ -149,7 +149,6 @@ class Collector(unittest.TestCase):
             self.assertIsInstance(v, int, k)
         self.assertEqual(set(snap["memos"]["bgHold"]), {"calls", "walks", "turns", "preTurns", "atoms", "exhausted"},
                          "the settle gate's background hold (_awaiting_bg_hold): its calls, its walks and what they read")
-        self.assertEqual(snap["memos"]["bgHold"], km.jd.bg_hold_stats())
         self.assertEqual(set(snap["memos"]["liftGate"]), {"skip", "load", "shared", "writer", "noop", "entries"},
                          "the awaiting-lift gate: session-cycles skipped vs read, the probes the shared cache "
                          "answered, the writer loads and the ones that filed nothing, plus its occupancy")
@@ -196,6 +195,22 @@ class Collector(unittest.TestCase):
         self.assertGreaterEqual(snap["process"]["rss_kb"], 0)
         self.assertGreaterEqual(snap["uptime_s"], 0)
         json.dumps(snap)                                     # the whole thing serializes as-is
+
+    def test_the_background_hold_block_is_the_judges_live_counters(self):
+        """memos.bgHold is the judge's counters read at the snapshot (jd.bg_hold_stats), not a fixed block of zeros. The calls
+        counter is raised first, so the comparison holds a nonzero value whatever ran earlier in the process; the raise is
+        taken back after."""
+        jd = km.jd
+        with jd._BG_HOLD_LOCK:
+            jd._BG_HOLD_STATS["calls"] += 3
+
+        def take_back():
+            with jd._BG_HOLD_LOCK:
+                jd._BG_HOLD_STATS["calls"] -= 3
+        self.addCleanup(take_back)
+        want = jd.bg_hold_stats()
+        self.assertGreaterEqual(want["calls"], 3)
+        self.assertEqual(self.st.snapshot()["memos"]["bgHold"], want, "the snapshot carries the raised count")
 
     def test_the_asm_checkpoint_block_names_the_restore_parts(self):
         """1606 low 4: nothing pinned restoreMs on /perf. The block's restoreMs sub-keys: the four named parts and the total."""

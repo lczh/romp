@@ -2101,12 +2101,23 @@ class PreCutToolIds(Harness):
         ix = em.LazyIndex({"atoms": rows, "records": [], "fsids": []}, SID, self.td / "ids.jsonl")
         atoms = em.LazyAtoms(ix, range(len(rows)))
         self.assertEqual(em.atom_tool_uses(atoms[5]), [("tu-b", "Edit")], "slot 5 built through the list, as a reader builds it")
+        enters, real = [], em._MAT_LOCK
+
+        class Counting:                                    # the index lock, counted: a read through _at takes it for the LRU touch
+            def __enter__(self):
+                enters.append(1)
+                return real.__enter__()
+
+            def __exit__(self, *a):
+                return real.__exit__(*a)
         st0 = em.asm_index_stats()
-        got = atoms.tool_ids()
+        with mock.patch.object(em, "_MAT_LOCK", Counting()):
+            got = atoms.tool_ids()
         st1 = em.asm_index_stats()
         self.assertEqual(got, frozenset({"tu-a", "tu-z", "tu-s", "tu-m", "tu-b"}))
         self.assertEqual(st1["materialized"], st0["materialized"], "nothing built through the list")
         self.assertEqual(st1["rowDecodes"] - st0["rowDecodes"], 5, "each unbuilt row decoded once, the built slot read in place")
+        self.assertEqual(len(enters), 5, "the lock taken once per row decode (its counter) and never for the built slot")
         self.assertEqual([list.__getitem__(atoms, i) is em._UNMAT for i in range(len(rows))], [True] * 5 + [False],
                          "no slot stored")
         self.assertIs(atoms.tool_ids(), got, "the set is kept on the list")
@@ -2183,6 +2194,36 @@ class PreCutToolIds(Harness):
         h1 = jd.bg_hold_stats()
         self.assertEqual((h1["walks"] - h0["walks"], h1["exhausted"] - h0["exhausted"]), (2, 0))
         self.assertGreater(h1["preTurns"] - h0["preTurns"], 0, "pre-cut turns answered from their lists' ids")
+
+    def test_the_hold_over_an_atoms_only_restore_answers_as_the_whole_parse(self):
+        """The production shape of a plain turn holding lazy atoms: a settle over a session no build has parsed writes the
+        document with no turns section (the atoms-only form), and its restore leaves every turn a plain list whose pre-cut
+        atoms carry their tool ids as scalars. The launch's turn names the launch in one lazy atom's `tu` and its ack in
+        another's `tr`, so this case needs both of the judge's lazy-atom lookups gone to go red;
+        tests/test_settle_awaits_background_tasks.py pins each lookup alone."""
+        jd = self.jd
+        path = self.write("bgatoms", compacting_variant(_bg_records(), "bga"))
+        self.fresh(); whole = self.parse(path)
+        self.assertTrue(em.asm_checkpoint_write(path, SID), "a document is written with no tree: %s" % em.asm_checkpoint_stats())
+        self.assertFalse(_doc(path).get("turns"), "no turns section: the atoms-only form")
+        self.assertEqual([t["id"] for t in jd._bg_unresolved(path, NOW)], [BG_TID], "the load test still runs at NOW")
+        stores = ({"nodes": {}, "closedTurns": []}, {"nodes": {}, "closedTurns": [t["id"] for t in whole["turns"]]})
+        want = [jd._awaiting_bg_hold(BG_FSID, path, whole, s, now=NOW) for s in stores]
+        self.assertEqual(want, [True, False], "the whole parse: held while the launch's turn is unswept, not once it is")
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"])
+        self.assertEqual([t["id"] for t in tree["turns"]], [t["id"] for t in whole["turns"]], "the same turns")
+        launch = [t for t in tree["turns"] if BG_TID in self._ids(t["atoms"])]
+        self.assertEqual(len(launch), 1, "one turn names the launch")
+        self.assertIs(type(launch[0]["atoms"]), list, "a plain list: the atoms-only restore mints no LazyAtoms")
+        naming = [a for a in launch[0]["atoms"] if BG_TID in self._ids([a])]
+        self.assertTrue(naming and all(a.get("lazy") is not None for a in naming), "every atom naming the launch is lazy")
+        self.assertEqual(sorted("tu" if BG_TID in [x for x, _n in em.atom_tool_uses(a)] else "tr" for a in naming), ["tr", "tu"],
+                         "the launch in one lazy atom's tu, its ack in another's tr")
+        self.assertNotEqual(tree["turns"][-1]["id"], launch[0]["id"], "newer turns lie between it and the walk's start")
+        got = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
+        self.assertEqual(got, want, "the atoms-only restore answers as the whole parse")
 
 
 class EventModelReaders(Harness):
