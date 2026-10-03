@@ -18799,9 +18799,9 @@ def _precompact_context(g, path, anchor_uuid, newer):
 # whole or restored ("whole" / "seeded"), or a fresh read of the stitched transcript ("read", the walk's only road
 # before). A read names its cause on stderr once per (session, cause): it is correct, only slow. A lag answer the display
 # parse gives after a /clear is widened to the session's first file (_cut_widen_lag, review round two, 2026-10-03), and so
-# is its no-prose refusal when its graph names a parent it lacks (_cut_widen_linked, review round four). The
-# widening counts as a read, cause "widen", only when it pulled that file's bytes (the read that builds the session's uuid
-# set, or the linked case's read for the graph over both files). One the standing set answers, or a set served from a whole
+# is its no-prose refusal when the walk stopped at a parent its graph lacks (_cut_widen_linked, review rounds four and
+# five). The widening counts as a read, cause "widen", only when it pulled that file's bytes (the read that builds the
+# session's uuid set, or the linked case's read for the graph over both files). One the standing set answers, or a set served from a whole
 # record cache entry standing for that file, reads nothing and counts as the display road it came from. One whose read
 # failed pulled nothing and counts as "failed", the error named on stderr once per session under its own cause,
 # "unreadable" (_cut_first_unreadable; review round three, which found both counted and said as reads).
@@ -18813,14 +18813,16 @@ def _cut_first_unreadable(sid, how):
     """Name a failed read of the session's first transcript (`how`, "unreadable (<the error>)") on stderr once per session,
     under its own cause beside the cut walk's read causes. Until the file reads again, a message from before the clear is
     answered as not on disk yet: a comment's create parks and is dropped after _PARK_MAX_TRIES pusher cycles, and an edit is
-    told to try again (review round three)."""
+    told to try again (review round three). A row of the leaf behind a record linking into that file keeps the refusal
+    that it cannot anchor a thread, at once (_cut_widen_linked), so the line names both effects (review round five)."""
     key = (str(sid), "unreadable")
     if key not in _cut_read_said:
         if len(_cut_read_said) > 4096:
             _cut_read_said.clear()
         _cut_read_said.add(key)
         sys.stderr.write("the first transcript of session %s could not be read, so a message from before its /clear answers "
-                         "as not on disk yet: %s\n" % (str(sid)[:8], how[:200]))
+                         "as not on disk yet, and a row behind a link into it cannot anchor a thread: %s\n"
+                         % (str(sid)[:8], how[:200]))
 
 
 def _cut_road_read(sid, why):
@@ -18853,16 +18855,21 @@ def _comment_cut_from_parse(path, sid, anchor_uuid, facts=None):
 
     With `facts` (a dict), a lag answer, or the refusal of a target with no prose record above it in that graph
     (ANCHOR_NO_PROSE_ERR, review round four), is left to the caller to count: facts["how"] names the display road it came
-    from and facts["dangling"] the parent targets records of that graph name and it lacks (em.TranscriptGraph.dangling), so
-    _comment_cut_resolve can widen it and count the widening by whether it pulled a file's bytes."""
+    from; for a lag answer facts["dangling"] holds the parent targets records of that graph name and it lacks
+    (em.TranscriptGraph.dangling), and for the refusal facts["stop"] holds what the walk stopped at that another file could
+    lead on from (_comment_cut_walk's `stop`, review round five), so _comment_cut_resolve can widen it and count the
+    widening by whether it pulled a file's bytes."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
     human = _display_sdk_human(sid)
 
     def walk(g):
-        got = _comment_cut_walk(g, path, anchor_uuid)
-        if facts is not None and got[2] in (ANCHOR_LAG_ERR, ANCHOR_NO_PROSE_ERR):
+        stop = {}
+        got = _comment_cut_walk(g, path, anchor_uuid, stop=stop)
+        if facts is not None and got[2] == ANCHOR_LAG_ERR:
             facts["dangling"] = g.dangling()
+        elif facts is not None and got[2] == ANCHOR_NO_PROSE_ERR:
+            facts["stop"] = stop.get("links", frozenset())
         return got
     why = "none"
     for attempt in range(2):
@@ -18912,18 +18919,22 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     no prose record above it (ANCHOR_NO_PROSE_ERR) in such a session: where that link is what stopped the walk (a
     non-prose record linking into the first file, or a row under one before the next post-clear prose), the walk over
     both files reaches that file's prose and answers from the tip, as before the leaf parsed alone, and any other such
-    target keeps the refusal (_cut_widen_linked, review round four). A comment in the
+    target keeps the refusal (_cut_widen_linked, review round four). Only a walk that stopped at a parent the leaf's graph
+    lacks looks, and it reads on only when the first file holds that parent; a walk stopped by a compaction boundary, the
+    hop cap or a parentless root keeps the refusal reading nothing of the first file, since no other file can change it
+    (review round five). The one exception is the root of a restored entry's pre-cut spine, which reads as parentless
+    there even when its record links into the first file: a walk that ends there looks as before, by every parent the
+    leaf's graph names and lacks. A comment in the
     conversation a second /clear's card expands (the file between the two clears) is in neither file and still parks as
     lag, as it did before."""
     facts = {}
     got = _comment_cut_from_parse(path, sid, anchor_uuid, facts=facts)
     how = facts.get("how")
     if got is not None and how is not None:          # the display parse's lag answer or no-prose refusal, counted here
-        dangling = facts.get("dangling") or frozenset()
         if got[2] == ANCHOR_LAG_ERR:
-            wide, looked = _cut_widen_lag(path, sid, anchor_uuid, dangling)
+            wide, looked = _cut_widen_lag(path, sid, anchor_uuid, facts.get("dangling") or frozenset())
         else:                                       # ANCHOR_NO_PROSE_ERR: the walk may have stopped at a link into the first file
-            wide, looked = _cut_widen_linked(path, sid, anchor_uuid, dangling)
+            wide, looked = _cut_widen_linked(path, sid, anchor_uuid, facts.get("stop") or frozenset())
         if looked == "read":                        # the first file's bytes pulled: a read
             _cut_road_read(sid, "widen (a target a /clear's leaf lacks or cannot anchor, looked up in the session's first transcript)")
         elif looked is not None and looked.startswith("unreadable"):
@@ -18940,10 +18951,10 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
             return None, 0, ANCHOR_REWOUND_ERR, ""   # off the leaf's chain: the refusal, from membership alone
         wide, _looked = _cut_wide_walk(path, sid, anchor_uuid, hit.path, hit.records)
         return wide if wide is not None else (None, 0, ANCHOR_LAG_ERR, "")
-    g = em.TranscriptGraph(ad)
-    got = _comment_cut_walk(g, path, anchor_uuid)
+    g, stop = em.TranscriptGraph(ad), {}
+    got = _comment_cut_walk(g, path, anchor_uuid, stop=stop)
     if got[2] == ANCHOR_NO_PROSE_ERR:                # as on the display road: a link into the first file may lead on
-        linked, _looked = _cut_widen_linked(path, sid, anchor_uuid, g.dangling())
+        linked, _looked = _cut_widen_linked(path, sid, anchor_uuid, stop.get("links", frozenset()))
         if linked is not None:
             return linked
     return got
@@ -18973,21 +18984,23 @@ def _cut_widen_lag(path, sid, anchor_uuid, dangling):
     return wide, again or how
 
 
-def _cut_widen_linked(path, sid, anchor_uuid, dangling):
+def _cut_widen_linked(path, sid, anchor_uuid, links):
     """(answer, how) for ANCHOR_NO_PROSE_ERR on `anchor_uuid`, the refusal the cut walk over a /clear's leaf alone gives
     a target that graph holds with no prose record above it there (review round four). That walk stops at a parent the
     graph lacks, and when a record of the leaf links into the session's first file (a CLI that writes such a link,
     outside the transcript model) and is not prose (an attachment or a tool row), it and the rows under it up to the
     next post-clear prose were refused where the walk over both files reaches the first file's prose and answers from the
-    tip. Decided as _cut_widen_lag decides its linked case: when the first file's uuid set (_cut_first_uuids) meets
-    `dangling`, the parent targets the leaf's graph names and lacks, the walk over both files answers (_cut_wide_walk);
-    else answer None and the refusal stands. (None, None), with nothing read, when that graph names no parent it lacks or
-    no first file is left out of the parse. `how` as _cut_widen_lag's."""
-    first = _cut_unread_anchor(path, sid) if dangling else None
+    tip. `links`: what the walk left in its `stop` (_comment_cut_walk), the parent it stopped at when the leaf's graph
+    lacks it, or at the root of a restored entry's spine, which reads as parentless there, every parent that graph names
+    and lacks; empty after a compaction boundary, the hop cap or a parentless root, refusals the first file cannot change
+    (review round five). When the first file's uuid set (_cut_first_uuids) meets `links`, the walk over both files
+    answers (_cut_wide_walk); else answer None and the refusal stands. (None, None), with nothing read, when `links` is
+    empty or no first file is left out of the parse. `how` as _cut_widen_lag's."""
+    first = _cut_unread_anchor(path, sid) if links else None
     if first is None:
         return None, None
     uuids, recs, how = _cut_first_uuids(sid, first)
-    if uuids is None or not (uuids & dangling):
+    if uuids is None or not (uuids & links):
         return None, how
     linked, again = _cut_wide_walk(path, sid, anchor_uuid, first, recs)
     return linked, again or how
@@ -19010,11 +19023,17 @@ def _cut_wide_walk(path, sid, anchor_uuid, first, recs):
     return _comment_cut_walk(em.TranscriptGraph(_anchor_wide(path, _anchor_links(sid), first, recs)), path, anchor_uuid), how
 
 
-def _comment_cut_walk(g, path, anchor_uuid):
+def _comment_cut_walk(g, path, anchor_uuid, stop=None):
     """The cut walk over transcript graph `g` (em.TranscriptGraph): the anchor must exist and sit on the active chain; a
     compaction between it and the leaf makes the thread a tip fork carrying what surrounded the passage; else the nearest
     prose record at or above it is the cut, unless that record lives behind a restart seam (a tip fork too). A record's
-    body is read only where its type alone cannot decide (g.kind first: only a user or assistant record is prose)."""
+    body is read only where its type alone cannot decide (g.kind first: only a user or assistant record is prose).
+
+    With `stop` (a dict), a refusal for want of a prose record above the anchor (ANCHOR_NO_PROSE_ERR) leaves in
+    stop["links"] the parents another file could lead the walk on from (review round five, read by _cut_widen_linked):
+    the record it stopped at when `g` lacks it; at the root of a restored entry's spine, which `g` gives no parent even
+    when its record names one (em._SeededGraph.root_may_link), every parent `g` names and lacks (g.dangling()); else, after
+    a compaction boundary, at the hop cap or at a root with no parent, an empty set, since no other file can change those."""
     if not g.has(anchor_uuid):
         return None, 0, ANCHOR_LAG_ERR, ""
 
@@ -19032,7 +19051,7 @@ def _comment_cut_walk(g, path, anchor_uuid):
     if not on_active:
         return None, 0, ANCHOR_REWOUND_ERR, ""
     cur_fsid = os.path.splitext(os.path.basename(path))[0]
-    u, hops = anchor_uuid, 0
+    u, hops, last = anchor_uuid, 0, None
     while u is not None and hops < 500000:
         if not g.has(u) or is_boundary(u):
             break
@@ -19044,7 +19063,15 @@ def _comment_cut_walk(g, path, anchor_uuid):
             if g.fsid(u) != cur_fsid:
                 return "", cut_t, None, ""   # behind a restart/clear seam → tip fork (see _comment_cut_target)
             return u, cut_t, None, ""
+        last = u
         u = g.parent(u); hops += 1
+    if stop is not None:
+        if u is not None and hops < 500000 and not g.has(u):
+            stop["links"] = frozenset((u,))          # the parent the graph lacks: the record the walk stopped at
+        elif u is None and last is not None and g.root_may_link(last):
+            stop["links"] = g.dangling()             # a restored entry's spine root: the seed keeps no parent of it
+        else:
+            stop["links"] = frozenset()              # a compaction boundary, the hop cap or a parentless root
     return None, 0, ANCHOR_NO_PROSE_ERR, ""
 
 

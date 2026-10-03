@@ -5318,6 +5318,12 @@ class TranscriptGraph:
         graph over both files only when one of these is a record of the session's first file)."""
         return frozenset(u for u in self._ad.dangling if not self.has(u))
 
+    def root_may_link(self, u):
+        """Whether `u`, a record this graph gives no parent, may still name one outside it. Never over a whole adapter, whose
+        parent map is its records' own links; a restored entry's spine root may (_SeededGraph, review round five,
+        2026-10-03)."""
+        return False
+
     def _splice_atom(self, u):
         """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
         the adapter's splices and its kept chain, from an empty dedup memory as a whole parse starts, with no postal index
@@ -5429,6 +5435,12 @@ class _SeededGraph(TranscriptGraph):
         if u in self._types:
             raise GraphMiss("record %s is before the document's cut and off its active spine" % u)
         return None
+
+    def root_may_link(self, u):
+        """True for the root of the pre-cut spine: the seed keeps the spine, root to cut, and no parent of its root, so that
+        root reads as parentless here even when its record links into a file the parse left out, a session's first
+        transcript after a /clear among them (the comment cut, review round five, 2026-10-03)."""
+        return u not in self._ad.by_uuid and u in self._spine_parent and self._spine_parent[u] is None
 
     def _loc(self, u):
         form, src, got = self._locs
