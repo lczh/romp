@@ -9981,8 +9981,9 @@ def _awaiting_bg_hold(fsid, path, session, store, now=None):
     newest first, looks up only the running launches' ids, and stops at the turn that decides: the first unswept
     turn naming one of them holds; once every one is placed in a swept turn, nothing holds. A running launch no
     turn names holds while None is not a swept turn id (always, in practice). A turn restored from an assembly
-    document (a pre-cut turn) answers from the ids its atom list carries (em.LazyAtoms.tool_ids), so its atoms
-    are neither built nor touched; a plain turn's atoms are read here. Counted under /perf memos.bgHold."""
+    document (a pre-cut turn) answers from the ids its atom list carries (em.LazyAtoms.tool_ids), so none of its
+    atoms is stored in a slot or registered (a row without a marker is built for the read and dropped); a plain
+    turn's atoms are read here. Counted under /perf memos.bgHold."""
     walked, turns, pre, plain, exhausted = False, 0, 0, 0, False
     try:
         tasks = _bg_unresolved(path, now)

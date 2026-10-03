@@ -3478,14 +3478,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   per store object asked, a writer's private copy included) and the gauge
   `entries` (sessions holding a map). `bgHold` is the settle gate's
   background hold, which keeps a card from settling while the session waits
-  on a background task it launched: `calls`, `walks` (calls that had a
-  running launch to place, so looked for the newest turn naming it),
+  on a background task it launched: `calls`, `walks` (the calls that reached
+  the walk, the search for the newest turn naming a running launch),
   `turns` (turns those walks read, newest first, stopping at the turn that
   decides), `preTurns` (the read turns restored from an assembly document,
-  answered from the ids their rows carry, no atom built), `atoms` (atoms of
-  the other read turns) and `exhausted` (walks that met no turn naming some
-  running launch, which then holds). A launch in the turn that just ended
-  costs its walk one turn. `intrMarks` is the interrupt-marks
+  answered from the ids their rows carry: no atom is stored in a slot or
+  registered, and a row without a marker is built for the read and
+  dropped), `atoms` (atoms of the other read turns) and `exhausted` (walks
+  that met no turn naming some running launch, which then holds). A launch
+  in the turn that just ended costs its walk one turn. `intrMarks` is the
+  interrupt-marks
   memo behind the interrupt tick, the nudge tick and the feed's badge, one
   entry per (session, parse family) keyed on the parse object's identity and
   the machine-cut stamp (`hit`, `miss`, `evict` for entries released when a
