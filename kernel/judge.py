@@ -3723,8 +3723,8 @@ def _judge_candidates(fsid, files):
     saw while every whole road read it, indexed it and kept it resident, and documents carried a row per
     record of it (2026-10-03). It is left out there; the per-file dead-branch scan still walks it
     (_per_file_rewound), and parse_session floors the salvaged replies at the first record the parse
-    reads, which the anchor's landed text used to do. A back-linked or resume-forked leaf keeps exactly
-    [leaf, anchor], in that order."""
+    reads, which the anchor's landed text used to do. A leaf whose head links back, or whose recorded
+    resume lineage runs through the anchor, keeps exactly [leaf, anchor], in that order."""
     leaf = Path(files[0])
     anchor = leaf.with_name(fsid + ".jsonl")
     if anchor.name != leaf.name and anchor.exists() and _anchor_reachable(fsid, leaf, anchor):
@@ -3885,10 +3885,11 @@ def _sdk_owned(fsid):
 def _own_file_in_use(fp):
     """Whether `fp` is a registered session's own file (<sid>.jsonl with a reg) that the session's CURRENT parse reads: the
     session has not forked away from it (no diverged lastSid), its lastSid file is not on disk yet (discover hands out the
-    own file meanwhile), or it is among the candidates of the lastSid file's parse (a back-linked or resume-forked leaf). The
-    residency rules keep such a file's records (the episode scan's drop, the leaf flip's release); a bare _sdk_owned kept
-    every registered session's first file for the process's life, a /clear's anchor that no parse reads included
-    (2026-10-03). A lineage that cannot be read answers True: nothing is dropped on a guess."""
+    own file meanwhile), or it is among the candidates of the lastSid file's parse (a leaf whose head links back, or whose
+    recorded resume lineage runs through the anchor). The residency rules keep such a file's records (the episode scan's
+    drop, the leaf flip's release); a bare _sdk_owned kept every registered session's first file for the process's life, a
+    /clear's anchor that no parse reads included (2026-10-03). A lineage that cannot be read answers True: nothing is
+    dropped on a guess."""
     fp = Path(fp)
     sid = fp.stem
     if not _sdk_owned(sid):
@@ -7152,8 +7153,9 @@ def _per_file_rewound(fsid, files):
             #       it: a fork's episode log names its parent's anchor, and the fork's scan dropping it made the parent's chain walk
             #       read it whole once more per process, by pass order (round two, low 2). An anchor no parse reads (a /clear's,
             #       2026-10-03) drops after its walk like a dead episode's file, its memo written first
-            #     ^ the one-file walk asks for the leaf's document quietly: a lineage document (a /clear's anchor, a
-            #       resume fork) is not this walk's and stays the display's
+            #     ^ the one-file walk asks for the leaf's document quietly: a lineage document (a resume fork's, over its
+            #       from-file, or a back-linked leaf's, over the anchor beside it) is not this walk's and stays the display's.
+            #       A /clear's leaf documents alone since 2026-10-03, so its document is the leaf road's
         except Exception as e:
             fails += 1
             _log_judge_error("romp", fsid, "rewound-reconcile-file",

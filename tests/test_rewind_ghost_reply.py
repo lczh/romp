@@ -209,10 +209,10 @@ POST_LOST = "A post-clear reply the transcript never kept."
 class BuildSessionAfterAClearHoldsNoPreClearSalvage(unittest.TestCase):
     """The kernel door after a /clear (2026-10-03): the leaf parses without the pre-clear file, so the parse's
     landedTextUuids no longer carry the uuid of a pre-clear reply that landed there, and build_session's own marker
-    interleave deduped such a marker by that uuid. Where the episode log holds no boundary row (a session first observed
-    after its clear: the log's one row is the seed), the T131 floor is off, and the marker came back at the top of the new
-    conversation. The interleave is floored where the parse floors it, at the conversation's first record; a pre-clear
-    reply that never landed (which leaked there already) goes with it, and a post-clear one stays."""
+    interleave deduped such a marker by that uuid. Where the episode log holds no boundary row (this fixture's log holds
+    no rows at all, and the T131 floor needs two or more), the T131 floor is off, and the marker came back at the top of
+    the new conversation. The interleave is floored where the parse floors it, at the conversation's first record; a
+    pre-clear reply that never landed (which leaked there already) goes with it, and a post-clear one stays."""
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
