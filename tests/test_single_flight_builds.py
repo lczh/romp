@@ -163,8 +163,10 @@ class FeedFirstWaiter(unittest.TestCase):
     for, and the second build moves to the pusher's regular feed section (after its chat stage), which carries the mark. The
     built 1 / cached 1 read here counts the two early passes only. Over the whole push the count falls only where that
     section would have rebuilt over the waiter's rebuild anyway: a later mark, any time from the start of that rebuild to
-    the regular ask, or a view signature that moved across a chat stage longer than REBUILD_MIN_S. FeedFirstWholePush below
-    reads the whole push. Hermetic: build_feed stubbed to count, mark and hold; fake feed panes."""
+    the regular ask, or a moved view signature with the regular ask more than REBUILD_MIN_S after that rebuild finished (a
+    chat stage longer than the floor when the pusher waited, longer than the floor plus the rebuild when a connect push
+    did). FeedFirstWholePush below reads the whole push. Hermetic: build_feed stubbed to count, mark and hold; fake feed
+    panes."""
 
     def setUp(self):
         self.saved = (km.build_feed, list(km._built_feed), km._views_dirty[0], dict(km._VIEW_STATS), km._feed_wire,
@@ -236,9 +238,9 @@ class FeedFirstWaiter(unittest.TestCase):
     def test_the_pusher_waiting_on_a_connects_cold_build_serves_it_too(self):
         """The mirrored order: a pane's connect push builds the cold feed and the pusher's early pass waits for it. The pusher
         serves its feed panes the pre-mark build, so its chat stage starts one cold build sooner, and those panes get the
-        post-mark build from the regular section one chat stage later (FeedFirstWholePush reads that order). This test pins
-        the early passes only. A fix that only handed `connect` through to the cache would still rebuild here: the waiter is
-        the pusher, whose own arm asks under the dirty rule."""
+        post-mark build from the regular section after the chat stage, that rebuild and, with a timeline pane, the timeline
+        stage (FeedFirstWholePush reads that order). This test pins the early passes only. A fix that only handed `connect`
+        through to the cache would still rebuild here: the waiter is the pusher, whose own arm asks under the dirty rule."""
         self._assert_one_build_both_served(*self._race(True, False))
 
     def test_the_pushers_arm_still_rebuilds_for_a_mark_that_landed_during_the_build(self):
@@ -374,6 +376,16 @@ class FeedFirstWholePush(unittest.TestCase):
         return [self.bids.index(f.get("buildId")) + 1 if f.get("buildId") in self.bids else f.get("buildId")
                 for f in pane["_frames"] if f.get("type") == "feed"]
 
+    @staticmethod
+    def _pinned(frames):
+        """The frames the tests pin, by build: all of the pusher's feed pane's, and the connect pane's FIRST. Whether the
+        connect pane also gets the post-mark build within these pushes is timing, not this change: its push's regular ask,
+        on the connect arm, serves whichever build is stored, and the pusher's rebuild stores about one chat stage and one
+        build after the first build, so a connect push slower than that to reach its ask (a loaded runner) gets build 2
+        too. What the change decides is that pane's first frame: the build it waited for, where a waiter that rebuilt sent
+        it the post-mark build first in the measured order."""
+        return {"pusher": frames["pusher"], "connect": frames["connect"][:1]}
+
     def _run(self, order):
         """One cold boot: the pusher's push (feed pane a, chat pane c) and a pane's connect push (feed pane b) on an empty
         cache, `order` naming the push that builds first. Returns each feed pane's feed frames by build, the whole push's
@@ -420,14 +432,19 @@ class FeedFirstWholePush(unittest.TestCase):
     def test_the_second_build_follows_the_chat_stage_and_each_feed_pane_gets_the_pre_mark_build_first(self):
         """Where the second build goes and the frame order it costs, in both orders. The chat stage starts right after the
         first cold build, the one the mark landed in, and the post-mark build is the regular section's, after it. So the
-        pusher's feed pane gets the pre-mark build and then the post-mark build one chat stage later, and the connect pane
-        gets the pre-mark build (the mark reaches it at the next pusher cycle). A waiter that rebuilt sent the connect pane
-        the post-mark build first in the measured order, and in the mirrored order the pusher's pane, with that rebuild
-        ahead of the chat stage; handing the caller's role through to the cache would bring the mirrored one back."""
+        pusher's feed pane gets the pre-mark build and then the post-mark build after the chat stage and that rebuild (and,
+        with a timeline pane, which these pushes have not, after the timeline stage too), and the connect pane's first frame
+        is the pre-mark build (_pinned). On a boot the post-mark build reaches the connect pane in the measured order from
+        the next pusher cycle, after the whole first push, its cold chat stage included, so a card move predicted there
+        during the first build waits that long for the frame that confirms it, with the pane's 15 s backstop behind it
+        (ui/webview/feed.ts; read, not run here). A waiter that rebuilt sent the connect pane the post-mark build first in
+        the measured order, and in the mirrored order the pusher's pane, with that rebuild ahead of the chat stage; handing
+        the caller's role through to the cache would bring the mirrored one back."""
         runs = self._both()
-        self.assertEqual({o: (r[2], r[0]) for o, r in runs.items()},
+        self.assertEqual({o: (r[2], self._pinned(r[0])) for o, r in runs.items()},
                          {o: (["feed", "chat", "chat", "feed"], {"pusher": [1, 2], "connect": [1]}) for o in self.ORDERS},
-                         "by who built first: the order of the feed and chat builds, and each feed pane's frames by build")
+                         "by who built first: the order of the feed and chat builds, and each feed pane's frames by build "
+                         "(the connect pane's first; all of them: %r)" % {o: r[0] for o, r in runs.items()})
 
     def test_a_mark_in_every_build_costs_two_builds_where_a_rebuilding_waiter_made_three(self):
         """The first case where the count falls: a mark lands in every build, so the regular section rebuilds over whatever
@@ -435,21 +452,25 @@ class FeedFirstWholePush(unittest.TestCase):
         orders, with the frames of the single mark."""
         self.mark_every = True
         runs = self._both()
-        self.assertEqual({o: (r[1], r[0]) for o, r in runs.items()},
+        self.assertEqual({o: (r[1], self._pinned(r[0])) for o, r in runs.items()},
                          {o: ((2, 2), {"pusher": [1, 2], "connect": [1]}) for o in self.ORDERS},
-                         "by who built first: built, cached over the whole push, and each feed pane's frames by build")
+                         "by who built first: built, cached over the whole push, and each feed pane's frames by build "
+                         "(the connect pane's first; all of them: %r)" % {o: r[0] for o, r in runs.items()})
 
     def test_a_signature_moved_past_the_floor_costs_two_builds_where_a_rebuilding_waiter_made_three(self):
-        """The second case: one mark, a view signature that moves between asks (any live input moves it, and so does its
-        5 s bucket), and a regular ask later than REBUILD_MIN_S after the waiter's build (the floor patched to 0 here,
-        standing for a chat stage longer than its 2 s), so the regular section rebuilds whatever the early passes stored.
-        With the waiter rebuilding too that was built 3, cached 1; now built 2, cached 2 in both orders."""
+        """The second case: one mark, a view signature that moves between asks (within a push only inputs read at the ask
+        move it, such as a transcript append, a state or names write or a judge pass), and a regular ask more than
+        REBUILD_MIN_S after the waiter's rebuild finished: a chat stage longer than the floor in the mirrored order, and
+        longer than the floor plus that rebuild in the measured order, where the waiter rebuilt during the pusher's chat
+        stage (the floor patched to 0 here stands for both). So the regular section rebuilds whatever the early passes
+        stored. With the waiter rebuilding too that was built 3, cached 1; now built 2, cached 2 in both orders."""
         self.moved_sig = True
         with mock.patch.object(km, "REBUILD_MIN_S", 0.0):
             runs = self._both()
-        self.assertEqual({o: (r[1], r[0]) for o, r in runs.items()},
+        self.assertEqual({o: (r[1], self._pinned(r[0])) for o, r in runs.items()},
                          {o: ((2, 2), {"pusher": [1, 2], "connect": [1]}) for o in self.ORDERS},
-                         "by who built first: built, cached over the whole push, and each feed pane's frames by build")
+                         "by who built first: built, cached over the whole push, and each feed pane's frames by build "
+                         "(the connect pane's first; all of them: %r)" % {o: r[0] for o, r in runs.items()})
 
     def test_the_first_pushs_needs_you_reads_trail_one_build_and_the_rebuild_wakes_the_push_that_catches_up(self):
         """The chat stage's needs-you reads for the first push after a restart, in the mirrored order (where a waiter that
@@ -468,11 +489,13 @@ class FeedFirstWholePush(unittest.TestCase):
         self.assertIn((S1, True, 1, ["g1"]), self.reads, "its chat stage rebuilt S1's tab on the post-mark set: %r" % self.reads)
 
     def test_a_rebuild_that_leaves_the_needs_you_set_alone_wakes_nothing_after_the_chat_stage(self):
-        """The control for the wake above: both builds carry the card, so the regular section's rebuild moves no needs-you
-        read and nothing after the chat stage wakes the pusher. The wake is the set's change, not the push's."""
+        """The control for the wake above: both builds carry the card, so the regular section's rebuild (asserted: without
+        it there is nothing to wake on) moves no needs-you read and nothing after the chat stage wakes the pusher. The wake
+        is the set's change, not the push's."""
         self.needs_from = 1
         self._run("connect")
         self.assertEqual(sorted(self.reads), [(S1, True, 1, ["g1"]), (S2, False, 0, [])], "the chat stage read the card")
+        self.assertEqual(len(self.bids), 2, "the regular section rebuilt for the mid-build mark: %r" % self.events)
         self.assertFalse(km._pusher_wake.is_set(), "no needs-you change after the chat stage, no wake")
 
 
