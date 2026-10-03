@@ -1477,28 +1477,35 @@ class CreatesAfterAClear(CreateDoor):
         self.assertTrue(tail(first), "premise: scan two restored a tail of the first transcript from its document")
         self.assertTrue(tail(leaf), "premise: the leaf's entry is the tail its restore left")
         f0, l0 = read_of(first), read_of(leaf)
-        failed = self._job("ka5", "g-pre")                # a message from before the clear: refused, nothing parked
-        self.assertEqual([f.get("transient") for f in failed], [False], self.sent)
-        self.assertIn("rewound away", failed[0].get("text") or "")
+        refused = self._job("ka5", "g-pre")               # a message from before the clear: refused, nothing parked
         f1 = read_of(first)
-        self.assertLessEqual(f1 - f0, size, "the first transcript read alone, once: %d bytes of %d" % (f1 - f0, size))
-        failed = self._job("cz1", "g-lag")                # a post-clear reply not flushed yet: parked as lag
-        self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
+        lagging = self._job("cz1", "g-lag")               # a post-clear reply not flushed yet: parked as lag
         km._retry_parked_creates()
-        failed = self._job("cz2", "g-lag-2")              # a second distinct lagging target
-        self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
-        self.assertEqual([pk["createId"] for pk in km._parked_creates], ["g-lag", "g-lag-2"])
-        self.assertEqual(read_of(first) - f1, 0, "the lagging targets and the retry read no byte of the first transcript")
+        lagging += self._job("cz2", "g-lag-2")            # a second distinct lagging target
+        f2 = read_of(first)
         scan()                                            # the pass after the gestures
-        ent = entry(first)
-        self.assertFalse(ent is not None and ent[5] == 0, "no whole entry for the first transcript")
-        self.assertTrue(tail(leaf), "the leaf's entry is still the tail its restore left")
-        self.assertLessEqual(read_of(leaf) - l0, 4 * em._JSONL_TAIL_GUARD,
-                             "the leaf's reads stay within the guard bytes: %d of %d" % (read_of(leaf) - l0, lsize))
-        self.assertLessEqual(read_of(first), 2 * size + 4 * em._JSONL_TAIL_GUARD,
-                             "the first transcript read whole twice in all, scan one's walk and the widening's one read: %d of %d"
-                             % (read_of(first), size))
-        self.assertEqual(self.be.calls, [], "no fork")
+        ent, leaf_read = entry(first), read_of(leaf) - l0
+        got = {"refused, not transient": [(f.get("transient"), "rewound away" in (f.get("text") or "")) for f in refused],
+               "lagging, parked": ([f.get("transient") for f in lagging], [pk["createId"] for pk in km._parked_creates]),
+               "the first transcript's entry whole": ent is not None and ent[5] == 0,
+               "the leaf's entry a tail": tail(leaf),
+               "the leaf read within the guard bytes": leaf_read <= 4 * em._JSONL_TAIL_GUARD,
+               "the refusal read the first transcript at most once": f1 - f0 <= size,
+               "bytes of it the lagging targets read": f2 - f1,
+               "at most two whole reads of it in all (scan one's walk, the widening's)":
+                   read_of(first) <= 2 * size + 4 * em._JSONL_TAIL_GUARD,
+               "forks": self.be.calls}
+        self.assertEqual(got, {"refused, not transient": [(False, True)],
+                               "lagging, parked": ([True, True], ["g-lag", "g-lag-2"]),
+                               "the first transcript's entry whole": False,
+                               "the leaf's entry a tail": True,
+                               "the leaf read within the guard bytes": True,
+                               "the refusal read the first transcript at most once": True,
+                               "bytes of it the lagging targets read": 0,
+                               "at most two whole reads of it in all (scan one's walk, the widening's)": True,
+                               "forks": []},
+                         "the leaf: %d of %d bytes read; the first transcript: %d bytes by the refusal, %d in all, of %d"
+                         % (leaf_read, lsize, f1 - f0, read_of(first), size))
 
     def test_a_first_transcript_that_could_not_be_read_records_nothing_and_the_next_create_is_refused(self):
         # review round two: a miss was remembered after a failed read, so a comment on a pre-clear message made while the
@@ -1519,7 +1526,7 @@ class CreatesAfterAClear(CreateDoor):
         self.assertEqual((st1.st_ino, st1.st_mtime_ns, st1.st_size), (st0.st_ino, st0.st_mtime_ns, st0.st_size),
                          "premise: the stat the set keys on is unchanged")
         self.assertEqual([f.get("transient") for f in failed], [True], "the first create could not tell: lag, parked")
-        self.assertNotIn(PARENT, getattr(km, "_CUT_FIRST_UUIDS", {}), "nothing remembered from the failed read")
+        remembered = PARENT in getattr(km, "_CUT_FIRST_UUIDS", {})
         failed = self._job("ka5", "g-pre-2")
         self.assertEqual([f.get("transient") for f in failed], [False], self.sent)
         self.assertIn("rewound away", failed[0].get("text") or "")
@@ -1527,6 +1534,8 @@ class CreatesAfterAClear(CreateDoor):
         km._retry_parked_creates()
         self.assertEqual(km._parked_creates, [], "the first create, retried, is refused too and leaves the park")
         self.assertEqual(self.be.calls, [], "no fork")
+        self.assertFalse(remembered, "nothing was remembered from the failed read")
+        self.assertIn(PARENT, getattr(km, "_CUT_FIRST_UUIDS", {}), "the set is kept from the read that succeeded")
 
     def test_a_parked_create_whose_record_lands_in_the_first_transcript_leaves_the_park_at_the_next_retry(self):
         # the set is keyed on the first transcript's inode, mtime and size, never on its presence: a record that lands there

@@ -323,7 +323,6 @@ class ForkParseCandidates(SdkClearForkBase):
                                                             "text": "A post-clear reply that never reached the transcript."}}):
                 fh.write(json.dumps(m) + "\n")
         self._write_reg(p2.stem)
-        self.assertEqual(jd._judge_candidates(SID, [str(p2)]), [str(p2), str(anchor)], "premise: the anchor stays meanwhile")
         built = km.build_session(SID, self.now)
         self.assertIsNotNone(built, "the session must be discoverable")
         orphans = [e.get("md") or "" for e in built["events"] if e.get("orphaned")]
@@ -331,6 +330,7 @@ class ForkParseCandidates(SdkClearForkBase):
                          % orphans)
         self.assertTrue([md for md in orphans if "never reached the transcript" in md], "premise: the post-clear salvage shows: "
                         "%r" % orphans)
+        self.assertEqual(jd._judge_candidates(SID, [str(p2)]), [str(p2), str(anchor)], "the mechanism: the anchor stays meanwhile")
 
     def test_a_resume_after_a_clear_whose_new_files_head_stamp_does_not_parse_keeps_the_anchor(self):
         head = uline(self.now - 60, "resumed after the clear, a broken stamp", "f2u")
