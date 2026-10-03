@@ -638,8 +638,15 @@ class ARaisingSerializerLeavesThePusherAlive(unittest.TestCase):
         src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
         push = src[src.index("def _push(targets"):]; push = push[:push.index("\ndef ")]
         i = push.index("for c in targets:")
-        self.assertIn("        try:\n            if c[\"app\"] in (\"feed\", \"fleet\"):", push[i:])
-        self.assertIn('sys.stderr.write("push send %s (%s): %s\\n"', push[i:])
+        self.assertIn('        try:\n            if c["app"] == "timeline" and timeline is not None:', push[i:],
+                      "the send stage's belt, around the bars alone since the feed's send moved (2026-10-03)")
+        self.assertIn('sys.stderr.write("push send bars (%s): %s\\n"', push[i:])
+        self.assertLess(push.index("_send_feed_frames(targets, feed_src, feed)"), push.index("        timeline = None\n"),
+                        "the feed's send, called before the timeline section")
+        feed = src[src.index("def _send_feed_frames("):]; feed = feed[:feed.index("\ndef ")]
+        j = feed.index("for c in targets:")
+        self.assertIn("        try:\n            if feed_ms is None:", feed[j:], "the feed's belt, per pane, as the send stage's was")
+        self.assertIn('sys.stderr.write("push send feed (%s): %s\\n"', feed[j:])
         jobs = src[src.index("def _pusher_cycle_jobs("):]; jobs = jobs[:jobs.index("\ndef ")]
         i = jobs.index("_push_all(live_map=live_map)")
         self.assertLess(i, jobs.index("except Exception:", i)); self.assertLess(jobs.index("except Exception:", i), jobs.index("finally:", i))

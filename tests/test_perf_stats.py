@@ -1058,11 +1058,14 @@ class PushStages(unittest.TestCase):
         self.assertEqual(after["bg_miss"].get("targeted", 0), before["bg_miss"].get("targeted", 0), "no background attribution for the watched tab")
 
     def test_the_seams_stay_where_the_stages_are_defined(self):
-        # the order of the four stage records in _push is the definition of the split; pinned beside the
+        # the order of the stage records in _push is the definition of the split; pinned beside the
         # behavioural test above so a re-ordering is caught even when every stage still grows
         push = inspect.getsource(km._push)
-        idx = [push.index('_PERF_STATS.stage("%s"' % st) for st in ("push.chat", "push.feed", "push.timeline", "push.send")]
-        self.assertEqual(idx, sorted(idx))
+        chat, feed, tl = [push.index('_PERF_STATS.stage("%s"' % st) for st in ("push.chat", "push.feed", "push.timeline")]
+        send = '_PERF_STATS.stage("push.send"'
+        self.assertEqual(push.count(send), 2, "the send stage closes twice: the feed's send, then the bars' (2026-10-03)")
+        self.assertTrue(chat < feed < push.index(send) < tl < push.rindex(send),
+                        "the feed's send between the feed and the timeline stages, the bars' after the timeline")
         self.assertIn("_PERF_STATS.judge_pass(", inspect.getsource(km._producer))
         loop = inspect.getsource(km._pusher)
         self.assertIn("_woke = _pusher_wake.wait(0.5)", loop)
