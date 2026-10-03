@@ -1659,10 +1659,12 @@ catching up a card's cursor that stopped short of the file's end, and ahead of
 them the background-task state an open viewer of the agent left, which closing
 that viewer retires so a later write does not carry it forward): there a fold
 that finds nothing new also pops an entry holding records once the file's
-document stands at the entry's witness with every current fold's state and no
-parse rebuilt since the file's last append holds the same records, so a
+document stands at the entry's witness with every current fold's state, so a
 returned agent whose last record was folded while its file was fresh leaves
-memory too. The
+memory too. An open viewer's parse keeps the entry either way: a parse rebuilt
+since the file's last append holds the very records list, so the pop waits,
+and an older one is a whole assembly entry, which the assembly pin keeps
+(counted `recordCache.pinnedKept`) until the viewer closes. The
 write is charged to the pusher cycle's byte budget, which the kernel begins at
 each cycle's start and the pass shares near its end; over the budget the write
 and the drop wait with the entry held (`converge.dropDeferred`), the drop then

@@ -11,17 +11,18 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     zero-byte tail, never a whole read; the restored empty tail stays, so later folds are stat-cost hits; "quiescent" (the
     leaf's policy) is unchanged. Nothing pops, and nothing is re-read after, when the document cannot stand for the entry:
     with checkpoints off, with a sibling cursor behind the entry, a fold recorded without its state, a cut behind the entry,
-    a dirty path while the drop write is off, or a parse holding the very records list; over the cycle's budget the drop
-    waits unowed, and under the converge hold it is paid without its pop; a cursor of another generation that the document
-    does not carry does not hold it;
+    a dirty path while the drop write is off, or a parse holding the very records list; a parse built before the file's
+    last append is a whole assembly entry, which the assembly pin keeps until the parse is released; over the cycle's
+    budget the drop waits unowed, and under the converge hold it is paid without its pop; a cursor of another generation
+    that the document does not carry does not hold it;
   * the kernel's agent-file folds take the new policy and the parent-leaf fold does not;
   * closing the subagent viewer pops the background-task cursor its render left on an agent file with a task notification
     and a nested background launch, and retires it from a document written while the viewer was open, so the agent still
-    drops when it returns: a close through closeSubagent or the socket going away, a close that lands while the pusher
-    renders the viewer or whose socket goes away then, the last of two clients' closes (the first keeps the cursor), a
-    close in a new process before any render (the state a viewer open at the exit drain left, read from the document on
-    disk) and a close inside a document write, before any document exists; a close with nothing to retire leaves the path
-    clean;
+    drops when it returns: a close through closeSubagent or the socket going away (which releases the viewer's parse too),
+    a close that lands while the pusher renders the viewer (a render that raises included) or whose socket goes away then,
+    the last of two clients' closes (the first keeps the cursor), a close in a new process before any render (the state a
+    viewer open at the exit drain left, read from the document on disk) and a close inside a document write, before any
+    document exists; a close with nothing to retire leaves the path clean;
   * the spend guard prices agent files from a read of its own, then runs the dropping folds where they step records the
     reader holds (never starting a steps state for a workflow agent, never folding while a viewer's parse holds the
     records, stepping the viewer's background-task state a restart left behind), prices a dropped file from its memo without entering it
@@ -375,6 +376,7 @@ class ReturnedPolicy(Base):
         with em._ASM_LOCK:
             held = [e for e in em._ASM_CACHE.values() if getattr(e.get("ad"), "_src", {}).get(str(p)) is ent[4]]
         self.assertEqual(len(held), 1, "the parse's assembly entry holds the reader's very list")
+        k0 = em.record_cache_stats().get("pinnedKept", 0)
         self.fold(cache, p)                                       # quiet: the document is written, the entry stays
         self.assertIs(self.entry(p), ent, "a pop would free nothing the parse holds")
         r0 = self.read_of(p)
@@ -383,6 +385,8 @@ class ReturnedPolicy(Base):
             self.fold(cache, p)
             self.assertIs(self.entry(p), ent)
         self.assertEqual(self.read_of(p), r0, "no rebuild read the file whole again")
+        self.assertEqual(em.record_cache_stats().get("pinnedKept", 0) - k0, 0,
+                         "the witness's identity test held each quiet drop, never reaching the assembly pin (round six)")
         with em._ASM_LOCK:
             gone = list(em._ASM_CACHE.values())
             em._ASM_CACHE.clear()
@@ -390,6 +394,41 @@ class ReturnedPolicy(Base):
             em._asm_release(e)
         self.fold(cache, p)
         self.assertIsNone(self.entry(p), "the parse gone, the next quiet fold drops")
+        self.assertEqual(em.record_cache_stats().get("pinnedKept", 0) - k0, 0, "and no pass counted a pin")
+
+    def test_a_parse_built_before_the_last_append_is_a_whole_entry_the_pin_keeps_until_it_is_released(self):
+        """The viewer's parse of a returned agent's file, built before the agent's last records were read, holds an older
+        records list at the same generation. The witness's identity test passes it, and the assembly pin keeps the entry
+        (a whole assembly entry whose next parse would be whole again) until the parse is released, as the viewer's close
+        releases it (round six of the fold's review)."""
+        p = self.sub / "agent-a9600000000000016.jsonl"
+        write(p, [rec(T0 - 30 + i, i) for i in range(20)], T0 - 20)
+        cache = {}
+        self.assertEqual(len(self.fold(cache, p)), 20)            # the card's fold reads the twenty while the file is fresh
+        em.parse_session(str(p), rompuuid=SID, name="api", dir="/w/notes-api", candidate_files=[str(p)], states=None,
+                         postal_log=[], now=T0)                   # the viewer's parse: a whole assembly entry over them
+        append(p, [rec(T0 - 9 + i, 20 + i) for i in range(3)], T0 - 7)   # the agent writes on
+        kinds = []
+        self.assertEqual(len(self.fold(cache, p, kinds=kinds)), 23)
+        self.assertEqual(kinds[-1], "append", "three more read while the file is fresh")
+        ent = self.entry(p)
+        with em._ASM_LOCK:
+            srcs = [getattr(e.get("ad"), "_src", {}).get(str(p)) for e in em._ASM_CACHE.values()]
+        srcs = [s for s in srcs if s is not None]
+        self.assertEqual([len(s) for s in srcs], [20], "the premise: one parse, over the twenty records it read")
+        self.assertIsNot(srcs[0], ent[4], "an older list than the reader's, so the witness's identity test passes it")
+        self.clock.t = T0 + 300                                   # the agent returned
+        st0 = dict(em.record_cache_stats())
+        self.fold(cache, p)                                       # a quiet pass: the witness approves, the pin keeps
+        st1 = em.record_cache_stats()
+        self.assertIs(self.entry(p), ent, "the whole assembly entry folds over this generation: the pin keeps the records")
+        self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (1, 0),
+                         "counted as kept for the pin, not as a drop")
+        self.assertEqual(em.release_assembly(str(p), rompuuid=SID), 1, "the viewer's close releases the parse")
+        self.fold(cache, p)
+        self.assertIsNone(self.entry(p), "the parse released, the next quiet pass drops")
+        st2 = em.record_cache_stats()
+        self.assertEqual((st2.get("pinnedKept", 0) - st1.get("pinnedKept", 0), st2["dropped"] - st1["dropped"]), (0, 1))
 
     def test_a_raise_in_the_witness_check_holds_the_drop_and_is_counted_and_said(self):
         p, cache, ent = self.returned("agent-a9800000000000008.jsonl")
@@ -577,6 +616,38 @@ class ViewerClose(Base):
         ent = self.entry(ap)
         self.assertTrue(ent is None or not ent[4], "no cursor left by the closed viewer's render holds the returned agent's drop")
 
+    def test_a_viewer_closed_while_a_render_that_raises_runs_lets_go_of_what_that_render_left(self):
+        """As above, but the render raises after it folded the file's background tasks and parsed the file (logged as a
+        failed frame). The pusher's re-check after a render runs on that path too: the cursor and the parse go, nothing is
+        sent, and the returned agent drops (round six of the fold's review)."""
+        ap, recs = self.scene()
+        client = self.client()
+        real, left, sent = km.build_subagent, [], []
+
+        def closing_raising_build(sid, agent_id, now, live_map=None):
+            self.close(client)                                    # the close lands while the render runs
+            real(sid, agent_id, now, live_map)
+            left.append((ap in km._bgall_cache, bool(self.asm_entries(ap))))
+            raise RuntimeError("synthetic render fault")
+
+        err = io.StringIO()
+        with mock.patch.object(km, "build_subagent", closing_raising_build), \
+                mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, **kw: sent.append(key)), \
+                mock.patch("sys.stderr", new=err):
+            km._push_subagents([client], int(time.time()), {})
+        self.assertEqual(left, [(True, True)], "the premise: the render left its cursor and its parse before it raised")
+        self.assertIn("subagent frame failed", err.getvalue(), "the raise is said, as before")
+        self.assertNotIn(ap, km._bgall_cache, "the pusher let go of the cursor the raising render left for the closed viewer")
+        self.assertEqual(self.asm_entries(ap), [], "and of the parse it rebuilt, which would pin the records")
+        self.assertEqual(sent, [], "nothing is sent")
+        self.returns_and_drops(ap, recs, "nothing the raising render left holds the returned agent's drop")
+
+    def asm_entries(self, ap):
+        """The assembly entries over the agent file `ap` for the test's session (the viewer's parse)."""
+        rp = os.path.realpath(ap)
+        with em._ASM_LOCK:
+            return [k for k in em._ASM_CACHE if k[0] == rp and k[1] == SID]
+
     def scene(self):
         """The parent transcript and the agent file (agent_records at T0 - 60, written at T0 - 46), with the card's fold run
         while the agent runs: (agent path, records)."""
@@ -658,9 +729,9 @@ class ViewerClose(Base):
 
     def test_a_viewer_whose_socket_went_away_during_the_push_render_lets_go_of_that_renders_cursor(self):
         """The socket's finally runs on the handler thread: it marks the client dead, takes it off the client list and closes
-        its viewers, which pops nothing when it lands before the render folds the file, and it leaves the client's viewer
-        map as it was. The pusher, finding the client dead after its render, pops the cursor that render left and sends
-        nothing."""
+        its viewers (the cursor, then the parse), which frees nothing when it lands before the render folds and parses the
+        file, and it leaves the client's viewer map as it was. The pusher, finding the client dead after its render, lets go
+        of the cursor and the parse that render left and sends nothing."""
         ap, recs = self.scene()
         client = self.client()
         self.register(client)
@@ -672,6 +743,7 @@ class ViewerClose(Base):
                 km._clients.remove(client)
             for sv in list((client.get("subagents") or {}).keys()):
                 km._subagent_viewer_closed(*sv)
+                km._release_subagent_view(*sv)
             after_close.append(ap in km._bgall_cache)
             return real(sid, agent_id, now, live_map)
 
@@ -681,6 +753,7 @@ class ViewerClose(Base):
         self.assertEqual(after_close, [False], "the socket's close ran before the render folded the file")
         self.assertIn((SID, self.AID), client["subagents"], "the finally leaves the viewer map as it was")
         self.assertNotIn(ap, km._bgall_cache, "the pusher let go of the cursor its render left for the dead client")
+        self.assertEqual(self.asm_entries(ap), [], "and of the parse that render rebuilt")
         self.assertEqual(sent, [], "a dead client is not sent the frame")
         self.returns_and_drops(ap, recs, "no cursor left by the dead client's render holds the returned agent's drop")
 
@@ -730,6 +803,18 @@ class ViewerClose(Base):
         self.assertIn(ap, km._bgall_cache)
         self.dial([])                                             # a control socket with no viewer goes away
         self.assertIn(ap, km._bgall_cache, "a socket with no viewer open leaves the cursor alone")
+
+    def test_a_socket_that_goes_away_releases_the_parse_of_the_viewer_it_opened(self):
+        """The same socket, opened and closed through its own dispatch and teardown: the teardown releases the viewer's
+        parse as well as its cursor, so a returned agent's records are not left under the assembly pin (a closed tab, a
+        reload, a dropped connection; round six of the fold's review)."""
+        ap, recs = self.scene()
+        seen = []
+        c = self.dial([{"type": "openSubagent", "id": SID, "agentId": self.AID}], at_close=lambda: seen.append(bool(self.asm_entries(ap))))
+        self.assertIn((SID, self.AID), c.get("subagents") or {}, "the open registered the viewer on the socket's client")
+        self.assertEqual(seen, [True], "the premise: the open's render parsed the agent's file")
+        self.assertEqual(self.asm_entries(ap), [], "the socket going away released the viewer's parse")
+        self.returns_and_drops(ap, recs, "no parse the gone socket's viewer built holds the returned agent's drop")
 
     def test_a_viewer_another_client_has_open_keeps_its_cursor_until_the_last_close(self):
         ap, recs = self.scene()
