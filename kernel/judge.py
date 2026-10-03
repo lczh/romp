@@ -3670,10 +3670,14 @@ def _resume_links(fsid):
     hit = _RESUME_LINKS_MEMO.get(fsid)
     if hit is not None and hit[0] == k:
         return hit[1]
+    errs = []
     try:
-        links = em.resume_fork_links(em._load_states(str(p)))
+        links = em.resume_fork_links(list(em._read_jsonl_incremental(str(p), on_fail=errs.append)))
     except Exception:                              # noqa: BLE001 — unreadable: unknown, never "no lineage"
         return None
+    if errs:                                       # the reader answers [] for a log it could not open or read, as for an empty
+        return None                                #  one, and only on_fail tells the two apart. Not memoized: the stat is the
+        #                                            same once the log reads again, and the blind read's {} would be served
     if len(_RESUME_LINKS_MEMO) >= _RESUME_LINKS_MAX:
         try:
             _RESUME_LINKS_MEMO.pop(next(iter(_RESUME_LINKS_MEMO)), None)   # the oldest entry; a racing writer's resize is harmless

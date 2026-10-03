@@ -10,9 +10,9 @@ PATH follows lastSid (the sid stays stable — goals/captions/chat key on it), t
 fingerprint signs the lastSid VALUE (a registry rewrite alone must bust the cache), and the parse
 wrappers put the anchor file among the candidates so a resume-style fork that back-links across
 files keeps its history while a /clear fork (parentUuid null) starts fresh. Since 2026-10-03 the
-anchor joins only when the parse can reach it (a back-linked head, a resume lineage through it, or
-no head to tell by yet): a /clear's leaf parses alone, reading no byte of the pre-clear file, with
-every turn, segment and verdict of the two-file parse.
+anchor joins only when the parse can reach it (a back-linked head, a resume lineage through it, no
+head to tell by yet, or a states log that cannot be read): a /clear's leaf parses alone, reading no
+byte of the pre-clear file, with every turn, segment and verdict of the two-file parse.
 
 All fixtures are SYNTHETIC (invented text, placeholder UUIDs, hostname TESTHOST).
 """
@@ -211,6 +211,37 @@ class ForkParseCandidates(SdkClearForkBase):
         texts = self._texts(jd.parsed_session(SID, [str(p2)], self.now))
         for t in ("pre-clear ask about the widget", "first resumed ask", "second resumed ask"):
             self.assertIn(t, texts, "the stitched history holds every hop")
+
+    def test_an_unreadable_states_log_keeps_the_anchor_and_is_never_memoized(self):
+        # the two-hop lineage above with its states log unreadable: the reader answers [] for it as for an empty log, so the
+        # lineage through the anchor cannot be seen and the anchor stays a candidate. A chmod moves neither the mtime nor the
+        # size the links memo keys on, so once the log reads again a memo of the blind read would still be served (the anchor
+        # dropped, the closure reordered) until the log next grew
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file: the unreadable log cannot be staged")
+        anchor = self._write(SID, self._anchor_records())
+        l1, l2 = "66666666-7777-8888-9999-aaaaaaaaaad1", "66666666-7777-8888-9999-aaaaaaaaaad2"
+        p1 = self._write(l1, [uline(self.now - 300, "first resumed ask", "d1u"),
+                              aline(self.now - 295, "first resumed reply", "d1a", parent="d1u")])
+        p2 = self._write(l2, [uline(self.now - 60, "second resumed ask", "d2u"),
+                              aline(self.now - 55, "second resumed reply", "d2a", parent="d2u")])
+        log = self._states([{"t": self.now - 310, "resumeFork": {"from": SID, "to": l1}},
+                            {"t": self.now - 70, "resumeFork": {"from": l1, "to": l2}}])
+        st0 = os.stat(log)
+        log.chmod(0)
+        try:
+            with self.assertRaises(PermissionError, msg="premise: the log cannot be opened"):
+                open(log, "rb").close()
+            self.assertEqual(jd._judge_candidates(SID, [str(p2)]), [str(p2), str(anchor)],
+                             "a lineage that cannot be read keeps the anchor")
+        finally:
+            log.chmod(0o644)
+        st1 = os.stat(log)
+        self.assertEqual((st1.st_mtime_ns, st1.st_size), (st0.st_mtime_ns, st0.st_size), "premise: the memo's key is unchanged")
+        self.assertEqual(jd._resume_links(SID), {l1: SID, l2: l1}, "the readable log's links, not the blind read's")
+        cands = jd._judge_candidates(SID, [str(p2)])
+        self.assertEqual(cands, [str(p2), str(anchor)])
+        self.assertEqual(self._closure(p2, cands), [str(p2), str(anchor), str(p1)], "the closure's order, as before")
 
     def test_a_resume_after_a_clear_leaves_the_anchor_out(self):
         # the anchor, a /clear to L1 (no lineage row: a fresh conversation), then a resume fork L1 -> L2: the conversation
