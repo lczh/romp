@@ -78,8 +78,9 @@ def _demotes(stats):
     """The demotion counters of a road block as the report lists them: each `g:<reason>` with its count, and the
     `g:<reason>:<part>` counters that break that count down (the prompt-id gate's arms) in parentheses after it. Listed
     flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03). A part
-    that is a share of another part (_DEMOTE_SHARES) is listed inside it, `boundary 3 (seed 2)`, so the parts in each pair of
-    parentheses add up to the count before them; beside the arms, the seed's demotions were counted twice (review round two)."""
+    that is a share of another part (_DEMOTE_SHARES) is listed inside it, `boundary 3 (seed 2)`: the parts in a reason's
+    parentheses add up to the reason's count, and the pair inside a part is a share of that part, not a breakdown of it;
+    beside the arms, the seed's demotions were counted twice (review round two)."""
     tops, parts = {}, {}
     for g, n in stats.items():
         if not (isinstance(g, str) and g.startswith("g:")) or not n:

@@ -2786,7 +2786,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   compaction does. A delta the gate let through that the stamp (`ts`),
   `skill-link` or `uuid-known` gate then takes counts under that gate's
   reason alone: a live manual /compact's raw twin, which `promptid` counted
-  before, counts under `ts`. The deltas
+  before, counts under `ts`. A delta the gate let through that extends the
+  path on a whole entry marked for its re-seat is re-seated and counts as a
+  re-seat alone: under the `reseat` reason, and as a restore under `restore`
+  and `restore:afterDemote`, never under `fold:attachedPass`. The deltas
   the gate let through that folded count under `fold:attachedPass`, the
   folds it saved),
   `skill-link`, `ts`, `kept`, and

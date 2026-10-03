@@ -5649,8 +5649,9 @@ def _asm_pid_adoptable(ad, pid):
     prompt id names that turn's records, none of them a /compact; the fold's recompute and kept check rule on the rest, and a
     record wearing the id after that finds the pair off the path and demotes (review of 2026-10-03, round one). The records
     after the pair already fold on the carried state (the restore dedup, the summaries map) when they wear another prompt's
-    id. A delta this lets through that a compaction, the descent or a batch's kept check then refuses parses whole
-    (_asm_demote_passed), and a fold of one counts under fold:attachedPass. Before, every summary's pid
+    id. A delta in which this lets through a record other than a compaction summary, and which a compaction, the descent
+    or a batch's kept check then refuses, parses whole (_asm_demote_passed), and a fold of one counts under
+    fold:attachedPass. Before, every summary's pid
     demoted: if the CLI stamps an automatic compaction's summary with the prompt id of the turn it compacted in (not yet
     checked on live transcripts; the fixtures give it none), every later tool result of that turn wears it, and each append
     was a whole parse of the transcript until the next prompt.
