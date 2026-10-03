@@ -34194,8 +34194,9 @@ def _subagent_viewer_closed(sid, agent_id):
     """A subagent viewer closed (closeSubagent, its socket went away, or the pusher found it closed after its render, one
     that raised included; 2026-10-02): the background-task cursor its render left on the agent's own file
     (_bg_scan_all_cached, run for a task notification or a nested background launch in that file) is popped, unless
-    another client still has the same viewer open. No card reader steps that cursor. The spend guard, where it passes the file (a live session, a ceiling above 0,
-    the file in the window, no parse keeping the records: _spend_fold_agent), steps it where it stands at the entry's
+    another client still has the same viewer open. No card reader steps that cursor. The spend guard, where it passes
+    the file (a live session, a ceiling above 0, the file in the window, no parse keeping the records:
+    _spend_fold_agent), steps it where it stands at the entry's
     generation or where the file's document restores it after a restart, and a close that lands inside the guard's step
     can leave the cursor that step stores, which the guard then keeps current. Where the guard does not pass the file,
     once the agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good
@@ -34230,8 +34231,8 @@ def _release_subagent_view(sid, agent_id):
     """The release at a subagent viewer's close, called from the three places a close lands: closeSubagent (2026-10-01),
     the socket's teardown for every viewer it had open, and the pusher's re-check after a render (one that raised
     included) for a viewer that closed, or whose socket went away, while that render ran (_push_subagents; 2026-10-02,
-    and round six of the fold's review). When no client still views this agent, its file's parse slot for this session and its
-    assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
+    and round six of the fold's review). When no client still views this agent, its file's parse slot for this session
+    and its assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
     until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
     memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records. A release that
     raises, the agent file's path lookup included, is noted once per file (em.release_failed; once per agent id when the
