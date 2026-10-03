@@ -759,14 +759,21 @@ class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
             return w.timeline
         km._cached_timeline = timeline_build             # _World restores it
         early0 = km._wire_stats.get("feed_first", 0)
+        by_wid = {c["wid"]: n for n, c in cs.items()}
+        calls, real = [], km._send_slot
+
+        def send_slot(c, ftype, *a, **kw):              # the sends, not the frames: a second send of a build dedups on the wire
+            calls.append((by_wid.get(c.get("wid")), ftype, started.is_set()))
+            return real(c, ftype, *a, **kw)
         th = threading.Thread(target=km._push, args=([cs["tl"], cs["feed"], cs["outline"]],), daemon=True)
-        th.start()
-        try:
-            self.assertTrue(started.wait(10), "the push reached its timeline build")
-            self.assertTrue(th.is_alive(), "and the build is still running")
-        finally:
-            release.set()
-            th.join(30)
+        with mock.patch.object(km, "_send_slot", side_effect=send_slot):
+            th.start()
+            try:
+                self.assertTrue(started.wait(10), "the push reached its timeline build")
+                self.assertTrue(th.is_alive(), "and the build is still running")
+            finally:
+                release.set()
+                th.join(30)
         self.assertFalse(th.is_alive(), "the push finished once released")
         self.assertEqual(km._wire_stats.get("feed_first", 0) - early0, 1, "the cold kernel's early pass ran")
         self.assertEqual({n: [f["type"] for f in frames] for n, frames in seen.items()},
@@ -781,7 +788,9 @@ class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
         self.assertEqual({k: v for k, v in outline.items() if k != "ledgers"}, w.feed, "and is otherwise the whole build")
         self.assertEqual(delta.get("rest", {}).get("ledgers"), rows, "the delta adds the same rows to the Feed pane")
         self.assertEqual([f["type"] for f in cs["tl"]["frames"]], ["data", "bars"], "the Sessions pane's lanes and bars, after the build")
-        self.assertEqual((len(cs["feed"]["frames"]), len(cs["outline"]["frames"])), (2, 1), "and no second feed send after it")
+        self.assertEqual((len(cs["feed"]["frames"]), len(cs["outline"]["frames"])), (2, 1), "and no further feed frame after it")
+        self.assertEqual([(n, t) for n, t, after in calls if after and t == "feed"], [],
+                         "and no feed send once the timeline build began (the sends, which a frame count cannot see): %r" % calls)
 
     def test_each_feed_pane_is_sent_once_per_push_and_the_bars_once_per_timeline_pane(self):
         # the send stage must not send the feed a second time: a second send of the same build dedups on the wire, so the
