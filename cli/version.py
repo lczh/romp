@@ -68,6 +68,28 @@ def _probe_kernel():
     return ("down", None)
 
 
+def _demotes(stats):
+    """The demotion counters of a road block as the report lists them: each `g:<reason>` with its count, and the
+    `g:<reason>:<part>` counters that break that count down (the prompt-id gate's arms) in parentheses after it. Listed
+    flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03)."""
+    tops, parts = {}, {}
+    for g, n in stats.items():
+        if not (isinstance(g, str) and g.startswith("g:")) or not n:
+            continue
+        name, _, part = g[2:].partition(":")
+        if part:
+            parts.setdefault(name, []).append((part, n))
+        else:
+            tops[name] = n
+    out = []
+    for name in sorted(set(tops) | set(parts)):
+        s = "%s %d" % (name, tops.get(name, 0))
+        if name in parts:
+            s += " (%s)" % ", ".join("%s %d" % pn for pn in sorted(parts[name]))
+        out.append(s)
+    return ", ".join(out)
+
+
 def report():
     lines = ["romp     sha=%s  (working tree the kernel loads from)" % (_git_sha() or "?")]
     kind, k = _probe_kernel()
@@ -82,18 +104,17 @@ def report():
             # fallback term keeps an all-fallback kernel VISIBLE: _asm_full counts "full" as its
             # last act, so a kernel whose every parse errors into fallback has fold+full == 0.
             rate = 100.0 * pa.get("fold", 0) / max(1, pa.get("fold", 0) + pa.get("full", 0))
-            gates = ", ".join("%s %d" % (g[2:], n) for g, n in sorted(pa.items())
-                              if g.startswith("g:") and n)
-            lines.append("parse    fold %.0f%% (%d fold / %d full / %d served)%s%s%s"
+            gates = _demotes(pa)
+            lines.append("parse    fold %.0f%% (%d fold / %d full / %d served)%s%s%s%s"
                          % (rate, pa.get("fold", 0), pa.get("full", 0), pa.get("serve", 0),
                             "  fallbacks=%d" % pa["fallback"] if pa.get("fallback") else "",
                             ("  demotes: " + gates) if gates else "",
+                            "  attachedPass=%d" % pa["fold:attachedPass"] if pa.get("fold:attachedPass") else "",
                             "  ts-repair=%d" % pa["ts-repair"] if pa.get("ts-repair") else ""))
         cf = k.get("chatfold") or {}                     # absent on kernels older than the chat fold
         if cf.get("fold", 0) + cf.get("full", 0) + cf.get("fallback", 0) > 0:
             rate = 100.0 * cf.get("fold", 0) / max(1, cf.get("fold", 0) + cf.get("full", 0))
-            gates = ", ".join("%s %d" % (g[2:], n) for g, n in sorted(cf.items())
-                              if g.startswith("g:") and n)
+            gates = _demotes(cf)
             lines.append("chat     fold %.0f%% (%d fold / %d full)%s%s"
                          % (rate, cf.get("fold", 0), cf.get("full", 0),
                             "  fallbacks=%d" % cf["fallback"] if cf.get("fallback") else "",

@@ -43,6 +43,28 @@ def test_report_shows_the_live_fold_rate():
     assert "fallbacks" not in out                 # zero fallbacks stay quiet
 
 
+def test_report_lists_a_prompt_id_demotion_once_with_its_arm_as_a_breakdown():
+    # the promptid gate counts each demotion under g:promptid and again under the arm that fired (g:promptid:wrapper,
+    # g:promptid:boundary); listed flat, every such demotion read twice under "demotes". The folds the narrowed arm saved
+    # (fold:attachedPass) are no demotion and stay out of that list (2026-10-03)
+    ver._git_sha = lambda: "abc1234"
+    ver._disk_bundles = lambda: {}
+    ver._probe_kernel = lambda: ("version", {"kernel_sha": "abc1234", "pid": 9, "uptime_s": 65,
+                                             "dist_ver": 100, "url": "http://127.0.0.1:29855",
+                                             "bundles": {},
+                                             "parse": {"full": 10, "fold": 90, "serve": 5,
+                                                       "bypass": 0, "fallback": 0,
+                                                       "g:descent": 1, "g:promptid": 3, "g:promptid:wrapper": 2,
+                                                       "g:promptid:boundary": 1, "g:promptid:boundarySeed": 0,
+                                                       "fold:attachedPass": 7}})
+    out = ver.report()
+    line = next(ln for ln in out.splitlines() if ln.startswith("parse"))
+    demotes = line.split("  demotes: ", 1)[1].split("  ")[0]
+    assert demotes == "descent 1, promptid 3 (boundary 1, wrapper 2)", line   # each demotion once; its arms a breakdown
+    assert "attachedPass=7" in line, line                                      # the saved folds shown beside, not as a demote
+    assert "attachedPass" not in demotes, line
+
+
 def test_report_shows_an_all_fallback_kernel():
     # _asm_full counts "full" as its LAST act — a kernel whose every parse errors into the
     # fallback has fold+full == 0 but the loudest possible story; it must render (T210 review)

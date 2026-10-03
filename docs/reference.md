@@ -2665,7 +2665,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   are process-wide, so a collection inside both windows is in both deltas and
   a sum would count it twice; the key is absent when neither split has one.
   The row also carries `parse`, the assembly's road counters at
-  the first cycle's end (T398): `serve`, `fold`, `restore` (with
+  the first cycle's end (T398): `serve`, `fold` (with `fold:attachedPass`,
+  the folds of a delta the `promptid` gate let through, described under
+  `full:demoted` below), `restore` (with
   `restore:afterDemote`, the restores taken over an entry the gates demoted
   instead of a whole parse, `restore:pastShare`, a compaction whose tail past
   the cut had reached an eighth of the pre-cut bytes, parsed whole so the
@@ -2769,13 +2771,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   adoption could still move, with `g:promptid:boundarySeed` the part of
   those whose id a restored entry's document names (a document names the
   prompt ids of the summaries before its cut), where the entry cannot tell
-  whether that boundary is attached; and
-  `g:promptid:attachedPass`, which is not a demotion, for a delta in which
-  the gate let a record through because every summary wearing its id hangs
-  off a boundary on the conversation's path that adoption did not splice, as
-  an automatic compaction's does; it is counted once per delta, before the
-  later gates and the kept check rule, so a delta it counts can still
-  demote),
+  whether that boundary is attached, and `g:promptid:passedDemote` for a
+  delta in which the gate let such a record through, because every summary
+  wearing its id hangs off a boundary on the conversation's path that
+  adoption did not splice, as an automatic compaction's does, and which a
+  compaction in it, the descent or a parallel batch's kept check then
+  refused: it parses whole, as it did before the gate let such records
+  through, and never takes the restore road; the deltas the gate let through
+  that folded count under `fold:attachedPass`, the folds it saved),
   `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
