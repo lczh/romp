@@ -314,8 +314,9 @@ class TwoTabAttribution(unittest.TestCase):
 
     def test_only_a_push_to_a_chat_tab_or_the_outline_drops_a_dead_sessions_merge_sets(self):
         # the sweep that drops a session neither shown nor alive runs inside the block a chat client or an Outline client
-        # (app "fleet") opens; a push to the timeline alone keeps the entry. The record cache's release text names that
-        # condition (docs/reference.md, recordCache), so the behavior it states is pinned here, not only its wording
+        # (the app id that block tests for) opens; a push to the timeline alone keeps the entry. The record cache's
+        # release text names that condition (docs/reference.md, recordCache), so the behavior it states is pinned here,
+        # not only its wording
         stray = "66666666-7777-8888-9999-aaaaaaaaaaa9"
         outline = {"app": "fleet", "alive": True, "sent": {}, "send": lambda s: None}
         km._merge_sets_memo[stray] = ({"turns": []}, ())

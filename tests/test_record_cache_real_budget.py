@@ -840,7 +840,8 @@ class Surfaces(unittest.TestCase):
                   "(as above), or the budget evicts",
                   "the live-merge memo, which the chat, feed and timeline builds fill for any alive session",
                   "the session is neither shown nor alive",
-                  "at the next push that serves a chat tab or the Outline pane", "its 512-entry cap ages out the oldest first"):
+                  "at the next push that serves a chat tab or the Outline pane", "its 512-entry cap ages out the oldest first",
+                  "`droppedHeldBytes` of file bytes, that times `decodedMultiple` in memory"):
             self.assertIn(k, " ".join(para.split()), k)
         heap = doc[doc.index("- `heap`:"):]
         heap = heap[:heap.index("\n- `", 10)]
