@@ -59794,11 +59794,12 @@ def _feed_first(now, live_map, targets, connect):
     # in _push), so any build the cache holds when it asks was stored after this push found none: the build this push
     # waited for on the single-flight lock (_cached_feed), and the first frame these panes want. The pusher's arm re-checked
     # that build under the dirty rule (_feed_servable) and built the same cold feed again whenever anything marked the views
-    # during it, as the boot's housekeeping does: the 2026-10-03 restart built the feed three times in its first browser
-    # cycle, by its counters the second (about 200 s, beside the pusher's chat stage) for a pane whose first frame needed
-    # none of it.
+    # during it, as the boot's housekeeping does, so a restart with panes open built the cold feed a second time for a pane
+    # whose first frame needed none of it.
     # Freshness stays with the regular feed section: the pusher's own, in the same push and before its send stage, asks
-    # under the dirty rule, so a mark that landed mid-build ships there. A cold cache still BUILDS on this arm
+    # under the dirty rule, so a mark that landed mid-build ships there. The trade: a connect pane that waited here and joined
+    # after the pusher's push took its targets gets the build it waited for, and such a mark reaches it at the next pusher
+    # cycle, as a connect's warm serve already does. A cold cache still BUILDS on this arm
     # (_feed_servable holds only with a payload), so the connect push of a cold kernel still makes the early frame.
     feed_src = _cached_feed(now, live_map, fsig, True)
     if feed_src is None:

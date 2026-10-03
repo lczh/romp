@@ -158,9 +158,8 @@ class FeedFirstWaiter(unittest.TestCase):
     """The cold kernel's early feed frame (_feed_first) and a second caller waiting on its build (2026-10-03). After a restart
     the pusher's push and a pane's connect push both reach _feed_first while no feed is built; one builds, the other waits on
     the single-flight lock. The waiter used to re-check the stored build under the pusher's dirty rule, so a views mark the
-    housekeeping made DURING the build made it build the same cold feed again: three feed builds in the restart's first
-    browser cycle, the redundant one about 200 s by the counters. The waiter now serves the build it waited for, and the
-    pusher's regular feed section carries the mark. Hermetic: build_feed stubbed to count, mark and hold; fake feed panes."""
+    housekeeping made DURING the build made it build the same cold feed again. The waiter now serves the build it waited
+    for, and the pusher's regular feed section carries the mark. Hermetic: build_feed stubbed to count, mark and hold; fake feed panes."""
 
     def setUp(self):
         self.saved = (km.build_feed, list(km._built_feed), km._views_dirty[0], dict(km._VIEW_STATS), km._feed_wire,
@@ -234,9 +233,10 @@ class FeedFirstWaiter(unittest.TestCase):
         pusher, whose own arm asks under the dirty rule."""
         self._assert_one_build_both_served(*self._race(True, False))
 
-    def test_the_mark_still_rebuilds_in_the_pushers_regular_section(self):
-        """Freshness is the regular section's: after the early frame, the pusher's own ask (connect False) finds the mark that
-        landed during the build newer than its start, and builds."""
+    def test_the_pushers_arm_still_rebuilds_for_a_mark_that_landed_during_the_build(self):
+        """Freshness is the regular section's, which asks on the pusher's arm (connect False; that it does is pinned in
+        tests/test_feed_first_cold_push.py): after the early frame, that arm finds the mark that landed during the build newer
+        than its start, and builds. This pins the arm's dirty rule, not which arm the regular section asks."""
         self._race(False, True)
         km.build_feed = lambda now, live_map: (self.builds.append("feed"), json.loads(json.dumps(FEED)))[1]
         with mock.patch.object(km, "_task_tracking_on", lambda: True):
@@ -244,8 +244,9 @@ class FeedFirstWaiter(unittest.TestCase):
         self.assertEqual(self.builds, ["feed", "feed"], "the regular section rebuilt for the mid-build mark: %r" % self.builds)
 
     def test_a_cold_early_frame_builds_for_either_caller(self):
-        """Alone on a cold cache, either role builds once and sends: the connect arm is not serve-only (the 2026-09-13 boot,
-        whose connect push made no early frame, is the regression this guards)."""
+        """Alone on a cold cache, either role builds once and sends: this guards a connect arm made serve-only. (The
+        2026-09-13 boot's missing early frame came from a cycle-zero guard in _push, which test_feed_first_cold_push's
+        later-cycle tests pin.)"""
         self.second_in.set()
         now = int(time.time())
         for connect in (False, True):

@@ -91,8 +91,9 @@ class FeedFirstColdPush(unittest.TestCase):
         first_build = kinds.index(("build", S1)) if ("build", S1) in kinds else kinds.index(("build", S2))
         self.assertLess(first_feed, first_build, "the feed frame leaves before the first chat page is built: %r" % kinds)
         self.assertEqual(km._wire_stats["feed_first"], 1)
-        self.assertEqual(self.feed_calls[0], True, "the early frame asks the cache's connect arm, for the pusher too: any build the "
-                         "cache holds then was stored after this push found none (the build it waited for, 2026-10-03)")
+        self.assertEqual(self.feed_calls, [True, False], "the early frame asks the cache's connect arm, for the pusher too (any build "
+                         "the cache holds then was stored after this push found none: the build it waited for, 2026-10-03), and the "
+                         "push's own regular feed section asks the pusher's arm, whose dirty rule carries a mark that landed mid-build")
 
     def test_a_connect_push_during_the_first_cycle_builds_the_feed_too(self):
         # the realistic boot: the browser reconnects a moment after the kernel serves, so the first push with a feed pane is the
