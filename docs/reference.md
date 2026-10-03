@@ -2762,7 +2762,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
   `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
-  `boundary`, `summary`, `promptid`, `skill-link`, `ts`, `kept`, and
+  `boundary`, `summary`, `promptid` (a record repeating a prompt id in a way
+  that can re-classify records already read, its arm counted beside it:
+  `g:promptid:wrapper` for a command-wrapper record, `g:promptid:boundary`
+  for a record wearing a compaction summary's prompt id whose boundary an
+  adoption could still move, with `g:promptid:boundarySeed` the part of
+  those whose id a restored entry's document names (a document names the
+  prompt ids of the summaries before its cut), where the entry cannot tell
+  whether that boundary is attached; and
+  `g:promptid:attachedPass`, which is not a demotion, for a delta in which
+  the gate let a record through because every summary wearing its id hangs
+  off a boundary on the conversation's path that adoption did not splice, as
+  an automatic compaction's does; it is counted once per delta, before the
+  later gates and the kept check rule, so a delta it counts can still
+  demote),
+  `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
   here only when that restore refused the document),

@@ -28,6 +28,9 @@ wrote that document and has healed since or was restored from it: the document c
 state. A document with no `postalWait` at all, written before the writer recorded the wait, counts as one written while an
 author waited. The writer keeps that record on the entry as soon as it replaces the document, so a sidecar write that fails
 after the replace leaves no stale record.
+And past an automatic compaction in the middle of a turn whose summary wears the turn's prompt id, the turn's later tool
+results, which wear it too, fold onto the restored entry, whether it was restored from the standing document or from one a
+settle wrote after the compaction, while a prompt id only the document's seed names still parses whole (2026-10-03).
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
 import json
 import os
@@ -283,6 +286,155 @@ class CompactionRestore(Harness):
         self.assertSameTree(got, self.cold(path), "after the manual compact")
         self.assertRestored(modes, moved, "boundary", "the manual compact")
         self.assertGreater(cut, 0, "the restored shape")
+
+    def test_tool_results_after_an_auto_compaction_in_the_same_prompt_fold_onto_the_restored_entry(self):
+        """The road a long turn takes through an automatic compaction (2026-10-03). The compaction's delta demotes and the restore
+        road serves it from the standing document (`g:boundary`, `restore:afterDemote`); every later tool result of the same turn
+        wears the turn's prompt id, and here the summary wears it too (the shape the narrowed gate assumes the CLI can write).
+        The gate's boundary arm demoted each of those appends to a whole parse until the next prompt. The pair is attached (the
+        conversation chains through the boundary and its summary), so no such record can re-seat it: the appends fold onto the
+        restored entry (`g:promptid:attachedPass`), and each served tree equals a cold parse. From an entry a restart restored,
+        and from the whole entry the document was written from (re-seated on it by the turn's first parse)."""
+        ran = []
+        for entry in ("restored", "whole"):
+            with self.subTest(entry=entry):
+                name = "pid-" + entry
+                path, recs = self._documented(name)
+                if entry == "restored":
+                    self._restart(path)
+                t = self.after(recs, 60)
+                opener = dict(G.uline(t, "rebuild the notes-api search index", "pz_u", recs[-1]["uuid"]), promptId="pz")
+                call1 = G.aline(t + 10, "rebuilding the index", "pz_a1", "pz_u", tools=("Bash",), stop="tool_use")
+                res1 = dict(G.trline(t + 20, "tu_pz_a1_0", "pz_r1", "pz_a1", content="rebuilt shard 1 of 12"), promptId="pz")
+                self._append(path, [opener, call1, res1])
+                self._parse_counted(path)                                    # the turn opens: a fold, or the whole entry's re-seat
+                pair, s = compaction(t + 30, "pz", "pz_r1")
+                pair[1]["promptId"] = "pz"                                   # the summary wears the prompt id of the turn it compacted in
+                call2 = G.aline(t + 40, "checking the rebuilt index", "pz_a2", s, tools=("Bash",), stop="tool_use")
+                self._append(path, pair + [call2])
+                tree1, modes1, moved1 = self._parse_counted(path)
+                got1, _cut1 = self._served(tree1)
+                ref1 = self._snapshot(path, name + "-compaction")
+                res2 = dict(G.trline(t + 50, "tu_pz_a2_0", "pz_r2", "pz_a2", content="12 shards, 0 errors"), promptId="pz")
+                self._append(path, [res2])
+                tree2, modes2, moved2 = self._parse_counted(path)
+                got2, cut2 = self._served(tree2)
+                ref2 = self._snapshot(path, name + "-result")
+                call3 = G.aline(t + 60, "one more query against it", "pz_a3", "pz_r2", tools=("Bash",), stop="tool_use")
+                res3 = dict(G.trline(t + 70, "tu_pz_a3_0", "pz_r3", "pz_a3", content="the search answers from the new index"),
+                            promptId="pz")
+                done = G.aline(t + 80, "the index is rebuilt and answering", "pz_a4", "pz_r3", stop="end_turn")
+                self._append(path, [call3, res3, done])
+                tree3, modes3, moved3 = self._parse_counted(path)
+                got3, cut3 = self._served(tree3)
+                self.assertSameTree(got1, self.cold(ref1), "after the compaction")
+                self.assertSameTree(got2, self.cold(ref2), "after the first tool result past it")
+                self.assertSameTree(got3, self.cold(path), "after the turn's end")
+                self.assertRestored(modes1, moved1, "boundary", "the compaction")
+                for what, modes, moved, cut in (("the tool result past the compaction", modes2, moved2, cut2),
+                                                ("the turn's end", modes3, moved3, cut3)):
+                    self.assertEqual((modes, moved.get("full", 0), moved.get("g:promptid", 0), moved.get("g:promptid:attachedPass", 0)),
+                                     (["fold"], 0, 0, 1), "%s folds onto the restored entry: counters moved %s" % (what, moved))
+                    self.assertGreater(cut, 0, "%s: still the restored shape, the render floor at the cut" % what)
+                ran.append(entry)
+        self.assertEqual(ran, ["restored", "whole"])
+
+    def test_tool_results_fold_on_an_entry_restored_from_a_document_written_after_the_compaction(self):
+        """The same turn when a settle rewrites the document after its compaction (2026-10-03). Here the compaction lands with
+        the tail past the churn bound's share, so it parses whole, and the settle writes a document whose cut is before the
+        compaction, its summary in the tail. The entry then comes back from that document, by the re-seat at the next parse or
+        by a restart. The document's gates named every summary's prompt id at the write, so that entry's seed carried the
+        turn's id, and every later tool result of the turn demoted to a whole parse. The gates name only the summaries before
+        the cut, the restore reads this one from the tail, and the tool results fold onto the restored entry
+        (`g:promptid:attachedPass`); each served tree equals a cold parse."""
+        ran = []
+        for road in ("reseat", "restart"):
+            with self.subTest(road=road):
+                name = "pid-rewrite-" + road
+                path, recs = self._documented(name)
+                pre0, cut0 = doc_cut(path)
+                grow = filler(self.after(recs, 60), road, recs[-1]["uuid"],
+                              pre0 // em._ASM_TAIL_SHARE - (os.path.getsize(path) - cut0) + 1)
+                t = self.after(recs + grow, 60)
+                opener = dict(G.uline(t, "rebuild the notes-api search index", "pw_u", grow[-1]["uuid"]), promptId="pw")
+                call1 = G.aline(t + 10, "rebuilding the index", "pw_a1", "pw_u", tools=("Bash",), stop="tool_use")
+                res1 = dict(G.trline(t + 20, "tu_pw_a1_0", "pw_r1", "pw_a1", content="rebuilt shard 1 of 12"), promptId="pw")
+                self._append(path, grow + [opener, call1, res1])
+                self._parse_counted(path)                                    # the growth and the turn's opening: the re-seat
+                pair, s = compaction(t + 30, "pw", "pw_r1")
+                pair[1]["promptId"] = "pw"                                   # the summary wears the prompt id of the turn it compacted in
+                call2 = G.aline(t + 40, "checking the rebuilt index", "pw_a2", s, tools=("Bash",), stop="tool_use")
+                self._append(path, pair + [call2])
+                tail = os.path.getsize(path) - cut0
+                tree1, modes1, moved1 = self._parse_counted(path)
+                got1, _cut1 = self._served(tree1)
+                ref1 = self._snapshot(path, name + "-compaction")
+                em._ASM_CKPT_STATS["skipped"] = {}
+                wrote = self.doc(path)                                       # the settle after the compaction's whole parse
+                skipped = dict(em.asm_checkpoint_stats()["skipped"])
+                d = _doc(path)
+                _pre1, cut1 = doc_cut(path)
+                if road == "restart":
+                    self._restart(path)
+                res2 = dict(G.trline(t + 50, "tu_pw_a2_0", "pw_r2", "pw_a2", content="12 shards, 0 errors"), promptId="pw")
+                self._append(path, [res2])
+                tree2, modes2, moved2 = self._parse_counted(path)
+                got2, cut2 = self._served(tree2)
+                ref2 = self._snapshot(path, name + "-result")
+                call3 = G.aline(t + 60, "one more query against it", "pw_a3", "pw_r2", tools=("Bash",), stop="tool_use")
+                res3 = dict(G.trline(t + 70, "tu_pw_a3_0", "pw_r3", "pw_a3", content="the search answers from the new index"),
+                            promptId="pw")
+                done = G.aline(t + 80, "the index is rebuilt and answering", "pw_a4", "pw_r3", stop="end_turn")
+                self._append(path, [call3, res3, done])
+                tree3, modes3, moved3 = self._parse_counted(path)
+                got3, cut3 = self._served(tree3)
+                self.assertSameTree(got1, self.cold(ref1), "after the compaction")
+                self.assertSameTree(got2, self.cold(ref2), "after the first tool result past it")
+                self.assertSameTree(got3, self.cold(path), "after the turn's end")
+                self.assertGreaterEqual(tail * em._ASM_TAIL_SHARE, pre0, "the premise: the compaction lands with the tail at the share")
+                self.assertEqual((modes1, moved1.get("full", 0)), (["full"], 1), "the premise: the compaction parses whole: %s" % moved1)
+                self.assertTrue(wrote, "the premise: the settle rewrites the document: %s" % skipped)
+                self.assertGreater(cut1, cut0, "the premise: the rewritten document's cut advanced")
+                self.assertNotIn(s, {row[0] for row in d["records"]}, "the premise: the summary is past the rewritten document's cut")
+                folds = [("the tool result past the compaction", modes2, moved2, cut2), ("the turn's end", modes3, moved3, cut3)]
+                if road == "reseat":
+                    self.assertEqual((modes2, moved2.get("full", 0), moved2.get("g:reseat", 0)), (["restore"], 0, 1),
+                                     "the next parse re-seats the whole entry on the rewritten document: %s" % moved2)
+                    folds = folds[1:]
+                for what, modes, moved, cut in folds:
+                    self.assertEqual((modes, moved.get("full", 0), moved.get("g:promptid", 0), moved.get("g:promptid:attachedPass", 0)),
+                                     (["fold"], 0, 0, 1), "%s folds onto the entry restored from the rewritten document: counters "
+                                     "moved %s" % (what, moved))
+                    self.assertGreater(cut, 0, "%s: still the restored shape, the render floor at the cut" % what)
+                self.assertNotIn("pw", d["gates"]["boundary_pids"], "the rewritten document's gates name the summaries before its cut")
+                ran.append(road)
+        self.assertEqual(ran, ["reseat", "restart"])
+
+    def test_a_prompt_id_only_the_documents_seed_names_still_demotes(self):
+        """The narrowed arm's other side: a restored entry holds the tail's records alone, and the document's gates name the
+        prompt ids of the summaries before its cut, for which the entry cannot see whether the boundary is attached. A tail
+        record wearing such an id demotes as before (`g:promptid:boundary`, and `boundarySeed` for the seed's part) and parses
+        whole; the served tree equals a cold parse."""
+        recs = episode(NOW - 86400)
+        i = next(j for j, r in enumerate(recs) if r.get("uuid") == "s160")
+        recs[i] = dict(recs[i], promptId="pp")                      # turn 160's compaction summary, before the document's cut
+        path = self.write("seed-pid", recs)
+        self.fresh()
+        self.parse(path)
+        self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
+        d = _doc(path)
+        self.assertIn("s160", {row[0] for row in d["records"]}, "the premise: the summary is a pre-cut record")
+        self.assertIn("pp", d["gates"]["boundary_pids"], "the premise: the document's gates name its prompt id")
+        self._restart(path)
+        t = self.after(recs, 60)
+        ask = dict(G.uline(t, "and the notes-api search cursor?", "xu_pp", recs[-1]["uuid"]), promptId="pp")
+        self._append(path, [ask, G.aline(t + 20, "the cursor pages the index", "xa_pp", "xu_pp", stop="end_turn")])
+        tree, modes, moved = self._parse_counted(path)
+        got, _cut = self._served(tree)
+        self.assertSameTree(got, self.cold(path), "after a record wearing the pre-cut summary's prompt id")
+        self.assertEqual((modes, moved.get("g:promptid", 0), moved.get("g:promptid:boundary", 0), moved.get("g:promptid:boundarySeed", 0),
+                          moved.get("g:promptid:attachedPass", 0), moved.get("full:demoted", 0)), (["full"], 1, 1, 1, 0, 1),
+                         "the restored entry cannot vouch for the pre-cut summary: the boundary arm demotes, a whole parse: %s" % moved)
 
     def test_a_compaction_anchored_before_the_cut_is_refused_by_the_chain_proof_and_parsed_whole(self):
         """The guard the restore road brings with it: a compaction anchored on a pre-cut record (a rewind, then a compaction)

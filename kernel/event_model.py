@@ -3108,6 +3108,9 @@ class FileAdapter:
         # would rebind repaired stitches, so it forces full).
         self.prompt_ids = set()
         self.boundary_pids = set()
+        self.summary_pids = {}   # compaction summary promptId -> the uuids of the summaries THIS adapter ingested wearing it (a
+        #                          restored adapter's tail alone; the seed's boundary_pids stands for the rest): what the fold's
+        #                          promptid gate reads to tell an attached pair's pid from an adoptable one (_asm_pid_adoptable)
         self.skill_use_ids = set()
         self.src_tool_links = set()
         self.dangling = set()
@@ -3227,6 +3230,7 @@ class FileAdapter:
                             # a compaction summary's promptId is the designed link the boundary
                             # ADOPTION keys on — episode records wearing it can re-seat a card
                             self.boundary_pids.add(r["promptId"])
+                            self.summary_pids.setdefault(r["promptId"], []).append(u)
                     if r.get("sourceToolUseID"):
                         self.src_tool_links.add(r["sourceToolUseID"])
                 elif t == "assistant":
@@ -5526,8 +5530,9 @@ def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, 
 #   - the new leaf does not descend from the old leaf through the delta, unless the
 #     delta is a parallel tool batch landing (FileAdapter._batch_delta)               -> full
 #   - the delta contains: a compact boundary or summary; a uuid already in the graph
-#     or among its recorded dangling parent targets; a promptId already seen; a Skill
-#     tool_use an old payload record already references; an unparseable or
+#     or among its recorded dangling parent targets; a promptId already seen, on a
+#     command-wrapper record or wearing an adoptable compaction's summary pid
+#     (_asm_pid_adoptable); a Skill tool_use an old payload record already references; an unparseable or
 #     watermark-regressing conversational timestamp                                   -> full
 #   - after the fold's graph recompute, ANY old record's kept-membership changed      -> full
 #     (a batch landing's delta: the restore road first, as its descent demotion took)
@@ -5594,6 +5599,70 @@ def _asm_demote(reason):
     _asm_stat(k)
     _ASM_DEMOTE_TL.reason = reason
     return None
+
+
+def _asm_on_path(ad, u):
+    """Whether `u` sits on the adapter's active path as the last parse or fold left it: a walk back over ad.parent_of (the
+    graph after the repair passes, adoption's splices included) from ad.leaf_uuid, stopping at `u`. For a compaction in the
+    current turn the walk is the records since it, never the whole chain; the seen set is the cycle guard, as in
+    active_path."""
+    cur, seen = ad.leaf_uuid, set()
+    while cur is not None and cur not in seen:
+        if cur == u:
+            return True
+        seen.add(cur)
+        cur = ad.parent_of.get(cur)
+    return False
+
+
+def _asm_pid_adoptable(ad, pid):
+    """Whether a delta record wearing `pid`, a compaction summary's promptId, could re-seat a boundary adoption, the one thing
+    such a record can change that the fold's kept check cannot see (2026-10-03). False only when every summary on record wearing
+    it hangs off a compact_boundary on the entry's active path that adoption did not splice: an ATTACHED pair, which an
+    automatic compaction writes, and which _adopt_detached_compactions skips (`if b in active: continue`). A delta that the
+    descent gate passes only extends that path, so the pair stays attached, and the records after it already fold on the
+    carried state (the restore dedup, the summaries map) when they wear another prompt's id. Before, every summary's pid
+    demoted: if the CLI stamps an automatic compaction's summary with the prompt id of the turn it compacted in (not yet
+    checked on live transcripts; the fixtures give it none), every later tool result of that turn wears it, and each append
+    was a whole parse of the transcript until the next prompt.
+
+    True, the demotion as before, for a pid the entry cannot vouch for: one the restore seed carries (the document's gates name
+    the pids of the summaries before its cut, whose attachment is not on record here: _asm_doc_boundary_pids; a document
+    written before that names every summary's pid, which only demotes more), one with no summary in the graph, a summary whose
+    record a later copy replaced or whose parent is not a compact_boundary, a boundary adoption spliced (a live manual
+    /compact, whose episode a later record can move), and a boundary off the path."""
+    if pid in ((ad.seed or {}).get("boundary_pids") or ()):
+        return True
+    sums = getattr(ad, "summary_pids", {}).get(pid)
+    if not sums:
+        return True
+    for s in sums:
+        sr = ad.by_uuid.get(s)
+        if not (sr and sr.get("isCompactSummary") is True and sr.get("promptId") == pid):
+            return True                                  # a later copy of the uuid replaced the summary (last write wins)
+        b = ad.parent_of.get(s)                          # the summary's own link: adoption rewrites the boundary's and its child's
+        br = ad.by_uuid.get(b) if b else None
+        if not (br and br.get("type") == "system" and br.get("subtype") == "compact_boundary"):
+            return True
+        if b in ad._adopted or not _asm_on_path(ad, b):
+            return True
+    return False
+
+
+def _asm_doc_boundary_pids(ad, all_recs, cut_seq):
+    """The prompt ids a document's gates name as boundary_pids (2026-10-03): those of the compaction summaries before the cut,
+    every copy the pre-cut bytes carry (`all_recs`, the writer's (seq, record) pairs; _ingest adds each copy's), plus, on a
+    seeded adapter, the seed's own, which stand for the records before that adapter's cut that it never read. Every restore
+    re-ingests the tail, its summaries included, so the adapter it seeds holds the same boundary_pids a whole parse does,
+    while the seed names only the summaries the restored entry cannot see, which is what _asm_pid_adoptable's seed check
+    asks. The gates named every summary's pid until then, so a restore from any document written after a compaction past its
+    cut (a restart in the turn, the re-seat after a later whole parse) demoted every record wearing that summary's pid for
+    the rest of the turn. A document written before then still restores, and its wider set only demotes more."""
+    out = set((ad.seed or {}).get("boundary_pids") or ())
+    for sq, r in all_recs:
+        if sq < cut_seq and r.get("type") == "user" and r.get("promptId") and r.get("isCompactSummary") is True:
+            out.add(r["promptId"])
+    return out
 
 
 def _asm_compaction_under_share(entry, leaf_path):
@@ -5912,6 +5981,9 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         return _asm_demote("empty-graph")
     parent_d, new_leaf = {}, old_leaf
     compaction = None      # the delta's compaction reason, filed only once every record has met the other gates (below)
+    adoptable = {}         # a summary pid -> _asm_pid_adoptable's answer, asked once per delta
+    attached_pass = False  # the narrowed boundary arm let a record through: counted once per delta, where the arm demoted before
+    #                        (a later gate or the kept check can still demote that delta)
     for r in delta:
         t, u = r.get("type"), r.get("uuid")
         if u:
@@ -5936,11 +6008,30 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             # retroactively) and any record wearing an adoptable boundary's episode pid (it can
             # re-seat the adopted card's splice without changing kept — invisible to the
             # invariance check). Everything else folds: the carried twins map serves the DELTA
-            # record's own classification record-locally.
+            # record's own classification record-locally. A summary pid counts as adoptable
+            # unless the entry vouches that every summary wearing it hangs off an attached
+            # boundary (_asm_pid_adoptable, 2026-10-03: an automatic compaction's summary, when it
+            # wears its turn's prompt id, demoted every later tool result of that turn). The two arms count apart
+            # (g:promptid:boundary, g:promptid:wrapper; boundarySeed, the boundary demotions whose
+            # pid the restore seed named), beside g:promptid, and attachedPass counts, once per
+            # delta, a delta in which the narrowed boundary arm let a record through where it
+            # demoted before; it counts before the later gates and the kept check rule, so a delta
+            # it counts can still demote.
             _wtxt = _text_of(_content(r.get("message"))) or ""
-            if r["promptId"] in ad.boundary_pids or \
-                    (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
-                return _asm_demote("promptid")                                        #   re-classifies nothing (T333)
+            _pid = r["promptId"]
+            _bnd = False
+            if _pid in ad.boundary_pids:
+                if _pid not in adoptable:
+                    adoptable[_pid] = _asm_pid_adoptable(ad, _pid)
+                _bnd = adoptable[_pid]
+            if _bnd or (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
+                _asm_stat("g:promptid:" + ("boundary" if _bnd else "wrapper"))          #   re-classifies nothing (T333)
+                if _bnd and _pid in ((ad.seed or {}).get("boundary_pids") or ()):
+                    _asm_stat("g:promptid:boundarySeed")
+                return _asm_demote("promptid")
+            if _pid in ad.boundary_pids and not attached_pass:
+                attached_pass = True
+                _asm_stat("g:promptid:attachedPass")
         if t == "assistant":
             for b in _content(r.get("message")) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use" and \
@@ -7682,7 +7773,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                #                                             (absorbed attachments, shadowed copies): the restore's reuse check reads
                #                                             rows and these, so a tail record reusing any of them refuses (round two)
                "turns": turns_doc, "treeIdentity": _tree_identity_of_doc(turns_doc, identity) if turns_doc else None,
-               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
+               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(_asm_doc_boundary_pids(ad, all_recs, cut_seq)),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
                "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless)}
