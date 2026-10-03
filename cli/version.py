@@ -68,24 +68,39 @@ def _probe_kernel():
     return ("down", None)
 
 
+# A part that counts a share of another part's demotions, listed inside that part under the short name: (reason, part) ->
+# (the part it is a share of, the name it is listed under). The prompt-id gate counts boundarySeed only for a boundary
+# demotion whose prompt id a restored entry's seed named, so it is part of the boundary count, never beside it.
+_DEMOTE_SHARES = {("promptid", "boundarySeed"): ("boundary", "seed")}
+
+
 def _demotes(stats):
     """The demotion counters of a road block as the report lists them: each `g:<reason>` with its count, and the
     `g:<reason>:<part>` counters that break that count down (the prompt-id gate's arms) in parentheses after it. Listed
-    flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03)."""
+    flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03). A part
+    that is a share of another part (_DEMOTE_SHARES) is listed inside it, `boundary 3 (seed 2)`, so the parts in each pair of
+    parentheses add up to the count before them; beside the arms, the seed's demotions were counted twice (review round two)."""
     tops, parts = {}, {}
     for g, n in stats.items():
         if not (isinstance(g, str) and g.startswith("g:")) or not n:
             continue
         name, _, part = g[2:].partition(":")
         if part:
-            parts.setdefault(name, []).append((part, n))
+            parts.setdefault(name, {})[part] = n
         else:
             tops[name] = n
     out = []
     for name in sorted(set(tops) | set(parts)):
         s = "%s %d" % (name, tops.get(name, 0))
-        if name in parts:
-            s += " (%s)" % ", ".join("%s %d" % pn for pn in sorted(parts[name]))
+        arms, shares = dict(parts.get(name) or {}), {}
+        for part in sorted(arms):
+            within = _DEMOTE_SHARES.get((name, part))
+            if within is not None:
+                shares.setdefault(within[0], []).append("%s %d" % (within[1], arms.pop(part)))
+                arms.setdefault(within[0], 0)
+        if arms:
+            s += " (%s)" % ", ".join("%s %d%s" % (p, n, " (%s)" % ", ".join(shares[p]) if p in shares else "")
+                                     for p, n in sorted(arms.items()))
         out.append(s)
     return ", ".join(out)
 

@@ -44,8 +44,10 @@ def test_report_shows_the_live_fold_rate():
 
 
 def test_report_lists_a_prompt_id_demotion_once_with_its_arm_as_a_breakdown():
-    # the promptid gate counts each demotion under g:promptid and again under the arm that fired (g:promptid:wrapper,
-    # g:promptid:boundary); listed flat, every such demotion read twice under "demotes". The folds the narrowed arm saved
+    # the promptid gate counts each demotion under g:promptid and again under the part that filed it (g:promptid:wrapper,
+    # g:promptid:boundary, g:promptid:passedDemote); listed flat, every such demotion read twice under "demotes". The seed's
+    # count (g:promptid:boundarySeed) is a share of the boundary arm's, so it is listed inside that arm and the parts add up
+    # to the reason's count (review round two: listed beside the arms they added to 7 of 5). The folds the narrowed arm saved
     # (fold:attachedPass) are no demotion and stay out of that list (2026-10-03)
     ver._git_sha = lambda: "abc1234"
     ver._disk_bundles = lambda: {}
@@ -54,13 +56,13 @@ def test_report_lists_a_prompt_id_demotion_once_with_its_arm_as_a_breakdown():
                                              "bundles": {},
                                              "parse": {"full": 10, "fold": 90, "serve": 5,
                                                        "bypass": 0, "fallback": 0,
-                                                       "g:descent": 1, "g:promptid": 3, "g:promptid:wrapper": 2,
-                                                       "g:promptid:boundary": 1, "g:promptid:boundarySeed": 0,
-                                                       "fold:attachedPass": 7}})
+                                                       "g:descent": 1, "g:promptid": 5, "g:promptid:wrapper": 1,
+                                                       "g:promptid:boundary": 3, "g:promptid:boundarySeed": 2,
+                                                       "g:promptid:passedDemote": 1, "fold:attachedPass": 7}})
     out = ver.report()
     line = next(ln for ln in out.splitlines() if ln.startswith("parse"))
     demotes = line.split("  demotes: ", 1)[1].split("  ")[0]
-    assert demotes == "descent 1, promptid 3 (boundary 1, wrapper 2)", line   # each demotion once; its arms a breakdown
+    assert demotes == "descent 1, promptid 5 (boundary 3 (seed 2), passedDemote 1, wrapper 1)", line   # once each; parts add up
     assert "attachedPass=7" in line, line                                      # the saved folds shown beside, not as a demote
     assert "attachedPass" not in demotes, line
 
