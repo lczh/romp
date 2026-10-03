@@ -52,7 +52,9 @@ km = load_source("romp_kernel_perf_heap", os.path.join(BIN, "romp-kernel"))
 em, jd = km.em, km.jd
 
 HEAP_KEYS = {"allocatedBlocks", "gc", "tracing", "hydrated", "assemblyEntries", "parseSlots", "lazyIndexes",
-             "materializedLruSlots", "judgeUsageRows", "builtChat", "imgCache"}
+             "materializedLruSlots", "judgeUsageRows", "builtChat", "imgCache",
+             # the estimates in memory units beside the counts (the memory diagnosis, 2026-10-01; tests/test_perf_resident_gauges.py)
+             "recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes"}
 SID = "11111111-2222-3333-4444-%012d"       # placeholder uuids, one per synthetic tab
 IMG_URL = "data:image/png;base64,"           # the image cache holds data URLs; the payload here is invented
 
@@ -355,6 +357,32 @@ class AbsentSupport(_Caches):
         self.assertIsInstance(h["gc"]["stats"], list)
         self.assertEqual(err2.getvalue(), "", "nothing more to say once the reads succeed")
 
+    def test_an_event_model_lacking_the_estimates_yields_none_for_each_said_once(self):
+        """The four estimates in memory units (2026-10-01) beside an older event model that has not got them: each key is None,
+        said once over three snapshots, and the snapshot still serves. Each read sits inside its lambda, so the lookup of the
+        missing function happens under the guard; one evaluated outside it would fail the whole snapshot."""
+        new = ("recordCacheResident", "pinnedByAssembly", "builtAtoms", "restoredIndexes")
+        err = io.StringIO()
+        with _em_lacking("record_cache_resident", "asm_pinned_records", "built_atoms_estimate", "restored_index_estimate"), \
+             redirect_stderr(err):
+            snaps = [self.st.snapshot() for _ in range(3)]
+        for snap in snaps:
+            json.dumps(snap)
+            h = snap["heap"]
+            self.assertEqual(set(h), HEAP_KEYS)
+            for k in new:
+                self.assertIsNone(h[k], k)
+            self.assertIsInstance(h["assemblyEntries"], int, "the other gauges still answer")
+            self.assertIsInstance(snap["recordCache"]["bytes"], int)
+        lines = [l for l in err.getvalue().splitlines() if l.startswith("perf: heap.")]
+        self.assertEqual(sorted(l.split()[1] for l in lines), sorted("heap." + k for k in new),
+                         "one line per missing estimate over three snapshots, none twice: %r" % lines)
+        self.assertTrue(all("AttributeError" in l for l in lines), lines)
+        with redirect_stderr(io.StringIO()):
+            h = self.st.snapshot()["heap"]
+        for k in new:
+            self.assertIsInstance(h[k], dict, "the event model restored, %s is back" % k)
+
     def test_a_runtime_lacking_an_accessor_yields_none_for_that_key_alone(self):
         """A bare attribute passed to _heap_read is evaluated before the guard runs; the lookups sit inside lambdas so a
         runtime without sys.getallocatedblocks, gc.isenabled or tracemalloc.is_tracing answers None for that key and the
@@ -546,7 +574,8 @@ class ShapeChange(_Caches):
 class Documented(unittest.TestCase):
     """docs/reference.md's GET /perf section names the block, every gauge in it, and the two caveats: gauge against
     counter (gc.stats is cumulative) and slots against atoms (materializedLruSlots is an upper bound under weak ownership),
-    and points at the record cache, the largest resident holder, which is not a heap gauge but rides the same response."""
+    and points at the record cache, the largest resident holder, whose file-byte occupancy rides the same response under
+    recordCache beside the heap block's recordCacheResident estimate."""
 
     def test_the_reference_names_every_gauge_and_both_caveats(self):
         doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()

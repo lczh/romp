@@ -169,7 +169,7 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
         k2, p2, log2 = self._boot()
         try:
             c2, f2, dt2 = self._open(p2, 2)
-            perf = self._get(p2, "/perf"); asm = perf["asmCheckpoint"]
+            perf = self._get(p2, "/perf?paths=all"); asm = perf["asmCheckpoint"]
             self.assertEqual(asm["fallbacks"], {}); self.assertGreaterEqual(asm["restored"], 1)
             self.assertEqual((f2["proto"], f2["headKnown"], f2["headTotal"]), (2, False, None))
             self.assertEqual(f2["firstUuid"], f2["events"][0]["uuid"]); self.assertEqual(f2["lastUuid"], f2["events"][-1]["uuid"])
@@ -262,7 +262,7 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
             self.assertIsNotNone(f4b, "the floor climbed back after the index client left and c4 got the frame")
             self.assertEqual(f4b.get("proto"), 2)
             self.assertFalse(f4b.get("headKnown"), "…and the head is unknown again to the proto-2 client")
-            perf = self._get(p2, "/perf")
+            perf = self._get(p2, "/perf?paths=all")   # ?paths=all: the whole per-file read table (a plain GET carries the 50 largest)
             by = perf["checkpoints"]["readByPath"]
             leaf_read = by.get(os.path.realpath(self.leaf), by.get(self.leaf, 0))
             hyd = perf["asmCheckpoint"]["hydratedBytes"]

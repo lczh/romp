@@ -967,7 +967,8 @@ class OwedDrops(Episode):
     """A record drop the cycle's budget defers is owed, and paid through the quiet drop's path (round one of the fold's review:
     three of its paths had no test). A release takes an earlier owed mark of its file and leaves its own deferral owed; the
     payment waits for the file's quiet; an owed file since deleted is popped though a whole entry with no document folds over
-    it; and a first document of a file over four cycle caps fits a fresh cycle."""
+    it, its weight counted under droppedBytes and the records the entry holds on the pinned gauge; and a first document of a
+    file over four cycle caps fits a fresh cycle."""
 
     def test_a_release_the_budget_defers_stays_owed_and_is_paid_once_the_file_is_quiet(self):
         p = str(self.td / "dq.jsonl")
@@ -1010,13 +1011,26 @@ class OwedDrops(Episode):
         _cycle(self, 1, spent=1)
         self.assertEqual(em.release_records([self.leaf]), 0)
         self.assertIn(self.leaf, em._DROP_OWED, "the premise: owed")
+        held = _reader_entry(self.leaf)
+        w, n = em._entry_weight(held), len(held[4])                  # what the pop lets go of, taken while the file stands
+        self.assertGreater(w, 0, "the premise: the entry has a weight to book")
+        p0, s0 = em.asm_pinned_records(), em.record_cache_stats()
         os.unlink(self.leaf)
-        d0 = em.record_cache_stats()["dropped"]
         em.checkpoint_cycle_begin(1 << 40)
         em.checkpoint_pay_owed_drops()
         self.assertIsNone(_reader_entry(self.leaf), "the gone file's entry is popped: nothing to restore, no generation to keep")
         self.assertNotIn(self.leaf, em._DROP_OWED)
-        self.assertEqual(em.record_cache_stats()["dropped"] - d0, 1)
+        p1, s1 = em.asm_pinned_records(), em.record_cache_stats()
+        # Review rounds nine and ten (2026-10-03): the owed drop's bytes go under droppedBytes beside its count, the pop is
+        # counted under released as every pop is, and the records the whole entry still holds go to the pinned gauge;
+        # evictions, evictedBytes, droppedHeld and droppedHeldBytes stay put.
+        counters = ("dropped", "droppedBytes", "released", "evictions", "evictedBytes", "droppedHeld", "droppedHeldBytes")
+        self.assertEqual({k: s1[k] - s0[k] for k in counters},
+                         {"dropped": 1, "droppedBytes": w, "released": 1, "evictions": 0, "evictedBytes": 0, "droppedHeld": 0,
+                          "droppedHeldBytes": 0},
+                         "the owed drop's weight under droppedBytes alone, its pop counted once")
+        self.assertEqual({k: p1[k] - p0[k] for k in ("lists", "records", "fileBytes")}, {"lists": 1, "records": n, "fileBytes": w},
+                         "the whole entry's records, on the pinned gauge by the leaf's list, records and weight")
 
     def test_a_first_document_of_a_file_over_four_cycle_caps_is_written_in_a_fresh_cycle(self):
         """A drop of a file with no document yet estimates the write from the file (an eighth of its size, taken twice for the
