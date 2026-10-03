@@ -14377,11 +14377,16 @@ def _ws_act_now_tick():
     to the client would have to let its socket errors through). Skips the dead-wait sweep: the death
     transition has ONE observer, the pusher's tick (see _auto_nudge_tick), and this thread racing its
     prev-swap could spend a transition uncorroborated. Single-flight against the pusher's pass through
-    _AUTO_NUDGE_TICK_LOCK, inside the call."""
+    _AUTO_NUDGE_TICK_LOCK, inside the call. The pass sets the nudge job's stage marks on this thread and restores none, so
+    the socket's own mark (its GET route's) is put back after it, however the pass ends: else the socket's later reads and
+    stacks rows count under jobs.autoNudge until the connection closes (review round nine of the per-job CPU change)."""
+    prev = getattr(_STAGE_TL, "name", None)
     try:
         _auto_nudge_tick(int(time.time()), _live_map(), run_dead_wait=False)
     except Exception:
         sys.stderr.write("auto-nudge (ws act-now): %s\n" % traceback.format_exc())
+    finally:
+        _set_stage(prev)
 
 
 _auto_nudge_paused = [None]   # the fault the tick is standing down on; None = the ledger reads, nudging runs

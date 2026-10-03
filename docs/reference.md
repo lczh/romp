@@ -3153,7 +3153,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   which that job's own stage already covers on the jobs thread (the pass
   the dashboard's auto-nudge and compaction-suggestion toggles run at once,
   on the socket's thread, records its parts with no job stage around
-  them), `push`,
+  them, and that thread carries the nudge job's marks only until the pass
+  returns, when its own route's mark is put back), `push`,
   and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
   `push.feedFirst`; a fresh snapshot lists every one at zero except a job's

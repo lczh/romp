@@ -1135,6 +1135,45 @@ class JobsCpu(unittest.TestCase):
         self.assertLess(row["cpuMs"], 20.0, "the stage's bookkeeping is not the job's CPU: %r" % row)
 
 
+class ActNowStageMark(unittest.TestCase):
+    """The dashboard's auto-nudge and compaction-suggestion toggles run the nudge pass at once on the socket's handler
+    thread (_ws_act_now_tick). The pass sets the nudge job's stage marks and restores none, so the socket kept
+    jobs.autoNudge (or jobs.autoNudge.snapshot, after an early return) as its mark until the connection closed, and its
+    later whole reads and stacks rows counted under that job (review round nine). The wrapper puts the socket's own mark
+    back however the pass ends; the jobs thread never calls it, so nothing the jobs thread records moves."""
+
+    def _after(self, body):
+        saved = km._auto_nudge_pass, km._live_map
+        km._auto_nudge_pass, km._live_map = body, (lambda: {})
+        try:
+            km._set_stage("http.GET.ws")                  # the mark the GET handler gives the socket's thread
+            with redirect_stderr(io.StringIO()):
+                km._ws_act_now_tick()
+            return km._current_read_stage(), km._STAGE_BY_TID.get(threading.get_ident())
+        finally:
+            km._auto_nudge_pass, km._live_map = saved
+            km._set_stage(None)
+
+    def test_a_pass_that_runs_the_job_leaves_the_sockets_mark(self):
+        def body(now, live_map, run_dead_wait):
+            km._set_stage("jobs.autoNudge.snapshot")
+            km._set_stage("jobs.autoNudge")
+        self.assertEqual(self._after(body), ("http.GET.ws", "http.GET.ws"),
+                         "the read stage and the stacks row are the socket's again after the pass")
+
+    def test_a_pass_that_returns_early_leaves_the_sockets_mark(self):
+        def body(now, live_map, run_dead_wait):
+            km._set_stage("jobs.autoNudge.snapshot")      # an unproved ledger snapshot: the pass stands down here
+        self.assertEqual(self._after(body), ("http.GET.ws", "http.GET.ws"))
+
+    def test_a_pass_that_raises_leaves_the_sockets_mark(self):
+        def body(now, live_map, run_dead_wait):
+            km._set_stage("jobs.autoNudge.snapshot")
+            raise OSError("a synthetic store read failure")
+        self.assertEqual(self._after(body), ("http.GET.ws", "http.GET.ws"),
+                         "the wrapper logs the failure and still restores the mark")
+
+
 class PushStages(unittest.TestCase):
     """_push driven for real (the test_tab_meta_push.py pattern) with builders stubbed to sleep 5 ms
     each: every push.* stage grows by at least its builder's sleep, the chat build counts as built on
