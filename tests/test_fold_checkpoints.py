@@ -20,6 +20,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -1913,6 +1914,8 @@ class CarryReadsOncePerChange(Base):
         document go (as its byte cap does when many documents restore at boot)."""
         self.fold("t"); self.fold("u"); self.assertTrue(em.checkpoint_write(self.p))
         self.fresh_process()
+        with em._CKPT_LOCK:
+            self.assertNotIn(self.p, em._DOC_INDEX, "the premise: the rebind forgot what the first write told the index")
         _append(self.p, {"n": 3})
         self.assertEqual((self.fold("t"), self.fold("u")), ([0, 1, 2, 3], [0, 1, 2, 3]))
         with em._CKPT_LOCK:
@@ -1926,6 +1929,8 @@ class CarryReadsOncePerChange(Base):
         carry's count rule too, so learning that costs no read."""
         self.fold("t"); self.fold("u"); self.assertTrue(em.checkpoint_write(self.p))
         self.fresh_process()
+        with em._CKPT_LOCK:
+            self.assertNotIn(self.p, em._DOC_INDEX, "the premise: the rebind forgot what the first write told the index")
         _append(self.p, *[{"n": 3 + i} for i in range(200)])
         self.assertEqual(self.fold("t"), list(range(203)))
         with em._CKPT_LOCK:
@@ -1984,6 +1989,48 @@ class CarryReadsOncePerChange(Base):
                          "no fallback counted, nothing restored")
         os.chmod(d, mode)
         self.assertEqual(cp.read_bytes(), before, "and the document stays as it was")
+
+    def test_another_writers_rename_right_after_this_writes_is_read_at_the_next_write(self):
+        """The write takes its index entry's stat from its own tmp file before the rename (a rename keeps the inode, the
+        modification time and the size), never from the document's path after it: another writer's rename landing between
+        this write's rename and such a stat would file that writer's document under this write's entry, and the next carry
+        would drop that writer's entries. Here another writer renames in a copy with one more entry right after this
+        write's rename."""
+        cp, real, landed = self.cp(), os.replace, []
+
+        def replace(src, dst):
+            real(src, dst)
+            if str(dst) == str(cp) and not landed:       # this write's rename; the other writer's lands right after it
+                d = json.loads(cp.read_text()); d["folds"]["v"] = {"count": d["count"], "state": em._ckpt_encode([7])}
+                tmp = cp.with_name(cp.name + ".other.tmp"); tmp.write_text(json.dumps(d, separators=(",", ":")))
+                real(tmp, cp); landed.append(1)
+        self.fold("t")
+        with mock.patch.object(em.os, "replace", replace):
+            self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual((landed, sorted(self.doc(self.p)["folds"])), ([1], ["t", "v"]), "the premise: the other writer's document stands")
+        _append(self.p, {"n": 3}); self.fold("t")
+        n0 = self.consults()
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertEqual(self.consults() - n0, 1, "the next write's carry loads the other writer's document")
+        self.assertEqual(self.states().get("v"), (3, [7]), "and carries its entry")
+
+    def test_the_index_holds_at_most_its_bound_and_the_oldest_path_reads_once_after(self):
+        """_DOC_INDEX is bounded in paths (_DOC_INDEX_MAX): over it the oldest path is let go, and that path's next carry reads
+        its document once, as a carry with no index entry does. Here the bound is 2 and three files are written."""
+        saved = em._DOC_INDEX_MAX; em._DOC_INDEX_MAX = 2
+        self.addCleanup(setattr, em, "_DOC_INDEX_MAX", saved)
+        paths = [str(self.td / ("bound-%d.jsonl" % i)) for i in range(3)]
+        for q in paths:
+            _write(q, [{"n": i} for i in range(3)])
+            self.fold("t", q); self.assertTrue(em.checkpoint_write(q))
+        with em._CKPT_LOCK:
+            self.assertEqual(list(em._DOC_INDEX), paths[1:], "over the bound the oldest path goes")
+        _append(paths[0], {"n": 3}); self.assertEqual(self.fold("t", paths[0]), [0, 1, 2, 3])
+        size, reads, n0 = self.cp(paths[0]).stat().st_size, self.doc_reads(paths[0]), self.consults()
+        self.assertTrue(em.checkpoint_write(paths[0]))
+        self.assertEqual((self.doc_reads(paths[0]) - reads, self.consults() - n0), (size, 1), "its next carry reads its document once")
+        with em._CKPT_LOCK:
+            self.assertEqual(list(em._DOC_INDEX), [paths[2], paths[0]], "and the write files it again as the newest")
 
 
 class CursorTableBound(Base):
