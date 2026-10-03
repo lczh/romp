@@ -320,6 +320,22 @@ class ForkParseCandidates(SdkClearForkBase):
         self.assertEqual(cands, [str(p3)])
         self.assertEqual(self._closure(p3, cands), [str(p3), str(p2), str(p1)])
 
+    def test_a_resume_lineage_whose_middle_files_head_stamp_does_not_parse_keeps_the_anchor(self):
+        # the floor is the earliest head over the whole closure, so a file resumed into on the way back whose first record's
+        # stamp does not parse leaves it untold, as the leaf's own would: the anchor stays (review round one)
+        anchor = self._write(SID, self._anchor_records())
+        l1, l2, l3 = ("66666666-7777-8888-9999-aaaaaaaaam%02d" % i for i in (1, 2, 3))
+        self._write(l1, [uline(self.now - 500, "post-clear ask", "m1u"),
+                         aline(self.now - 495, "post-clear reply", "m1a", parent="m1u")])
+        head = uline(self.now - 300, "first resume, a broken stamp", "m2u")
+        head["timestamp"] = "not-a-timestamp"
+        self._write(l2, [head, aline(self.now - 295, "first resumed reply", "m2a", parent="m2u")])
+        p3 = self._write(l3, [uline(self.now - 60, "second resume", "m3u"),
+                              aline(self.now - 55, "second resumed reply", "m3a", parent="m3u")])
+        self._states([{"t": self.now - 310, "resumeFork": {"from": l1, "to": l2}},
+                      {"t": self.now - 70, "resumeFork": {"from": l2, "to": l3}}])
+        self.assertEqual(jd._judge_candidates(SID, [str(p3)]), [str(p3), str(anchor)])
+
     def test_a_leaf_with_no_record_yet_keeps_the_anchor(self):
         # the registry names the new file a beat before the CLI writes its first record: nothing to prove the head by
         anchor = self._write(SID, self._anchor_records())
