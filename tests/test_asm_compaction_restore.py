@@ -45,6 +45,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from romp_load import load_source  # noqa: F401  the direct run's floor lands at this import (tests/romp_load.py)
 
@@ -148,6 +149,13 @@ def postal_episode():
 def author_of(tree, uuid="u30"):
     """The served author of the atom `uuid` in a stripped tree."""
     return next((a.get("author") for t in tree["turns"] for a in t["atoms"] if a.get("uuid") == uuid), None)
+
+
+def _refused_restore(key, leaf_path, *a, **k):
+    """A restore that refuses the leaf's document, as tests/test_asm_reseat.py's _refused_with_its_document does: noted
+    (which removes the document from disk) and not served."""
+    em._asm_ckpt_note(leaf_path, "identity")
+    return None
 
 
 class CompactionRestore(Harness):
@@ -352,9 +360,10 @@ class CompactionRestore(Harness):
         by a restart. The document's gates named every summary's prompt id at the write, so that entry's seed carried the
         turn's id, and every later tool result of the turn demoted to a whole parse. The gates name only the summaries before
         the cut, the restore reads this one from the tail, and the tool results fold onto the restored entry
-        (`fold:attachedPass`); each served tree equals a cold parse."""
+        (`fold:attachedPass`); each served tree equals a cold parse. A re-seat whose restore refuses the document parses
+        whole and counts as a re-seat alone, with no restore and no attached pass (review round five)."""
         ran = []
-        for road in ("reseat", "restart"):
+        for road in ("reseat", "reseat-refused", "restart"):
             with self.subTest(road=road):
                 name = "pid-rewrite-" + road
                 path, recs = self._documented(name)
@@ -384,7 +393,11 @@ class CompactionRestore(Harness):
                     self._restart(path)
                 res2 = dict(G.trline(t + 50, "tu_pw_a2_0", "pw_r2", "pw_a2", content="12 shards, 0 errors"), promptId="pw")
                 self._append(path, [res2])
-                tree2, modes2, moved2 = self._parse_counted(path)
+                if road == "reseat-refused":                                 # the re-seat's restore refuses the document
+                    with mock.patch.object(em, "_asm_restore", _refused_restore):
+                        tree2, modes2, moved2 = self._parse_counted(path)
+                else:
+                    tree2, modes2, moved2 = self._parse_counted(path)
                 got2, cut2 = self._served(tree2)
                 ref2 = self._snapshot(path, name + "-result")
                 call3 = G.aline(t + 60, "one more query against it", "pw_a3", "pw_r2", tools=("Bash",), stop="tool_use")
@@ -410,6 +423,13 @@ class CompactionRestore(Harness):
                                      "the next parse re-seats the whole entry on the rewritten document, counted as a "
                                      "re-seat alone: no attached pass, no prompt-id demotion (review round four): %s" % moved2)
                     folds = folds[1:]
+                if road == "reseat-refused":
+                    counts = (moved2.get("full", 0), moved2.get("full:demoted", 0), moved2.get("g:reseat", 0), moved2.get("restore", 0),
+                              moved2.get("restore:afterDemote", 0), moved2.get("fold:attachedPass", 0), moved2.get("g:promptid", 0))
+                    self.assertEqual((modes2, counts), (["full"], (1, 1, 1, 0, 0, 0, 0)),
+                                     "a re-seat its restore refuses parses whole, counted as a re-seat alone: no restore, no "
+                                     "attached pass, no prompt-id demotion (review round five): %s" % moved2)
+                    folds = []                                               # the whole parse's entry, not a restored one
                 for what, modes, moved, cut in folds:
                     self.assertEqual((modes, moved.get("full", 0), moved.get("g:promptid", 0), moved.get("fold:attachedPass", 0)),
                                      (["fold"], 0, 0, 1), "%s folds onto the entry restored from the rewritten document: counters "
@@ -417,7 +437,7 @@ class CompactionRestore(Harness):
                     self.assertGreater(cut, 0, "%s: still the restored shape, the render floor at the cut" % what)
                 self.assertNotIn("pw", d["gates"]["boundary_pids"], "the rewritten document's gates name the summaries before its cut")
                 ran.append(road)
-        self.assertEqual(ran, ["reseat", "restart"])
+        self.assertEqual(ran, ["reseat", "reseat-refused", "restart"])
 
     def test_a_prompt_id_only_the_documents_seed_names_still_demotes(self):
         """The narrowed arm's other side: a restored entry holds the tail's records alone, and the document's gates name the
