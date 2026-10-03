@@ -6235,11 +6235,11 @@ class LazyIndex:
             _LIVE_INDEXES.add(self)                       #  "set changed size during iteration" and /perf answered 500 (1597 low 1)
 
     def _row(self, k):
-        """The one row decode every accessor uses (build, text_flags, uuid_of, user_facts; uuids through uuid_of): a row that
-        does not decode to a JSON object refuses the DOCUMENT to the truth (1610 round three, mediums 1 and 2): noted `rows`
-        once (counted, said once per leaf, the document unlinked by the note), the leaf's assembly entry dropped so the next
-        parse is the whole parse, and this read alone raises LazyIndexError. A checkpoint is a cache: every road that decodes
-        a row can find it corrupt, and none of them may crash its reader twice or answer from one row fewer."""
+        """The one row decode every accessor uses (build, text_flags, uuid_of, user_facts, tool_ids; uuids through uuid_of): a
+        row that does not decode to a JSON object refuses the DOCUMENT to the truth (1610 round three, mediums 1 and 2):
+        noted `rows` once (counted, said once per leaf, the document unlinked by the note), the leaf's assembly entry dropped
+        so the next parse is the whole parse, and this read alone raises LazyIndexError. A checkpoint is a cache: every road
+        that decodes a row can find it corrupt, and none of them may crash its reader twice or answer from one row fewer."""
         with _MAT_LOCK:
             _ASM_INDEX_STATS["rowDecodes"] += 1
         try:
@@ -6471,12 +6471,13 @@ class LazyAtoms(list):
         store equal sets."""
         got = self.__dict__.get("_tool_ids")
         if got is None:
-            of_row = getattr(self._index, "tool_ids", None)   # a stand-in index in tests may carry build alone
             out = set()
             for i, r in enumerate(self._rows):
                 a = list.__getitem__(self, i)
                 if a is _UNMAT:
-                    out |= of_row(r) if of_row is not None else atom_tool_ids(self._index.build(r))
+                    out |= self._index.tool_ids(r)        # a turn's list is minted over a LazyIndex (_pre_turns_of); the one
+                    #                                       stand-in index in tests carries build alone and serves lane tests,
+                    #                                       which never ask a list for its tool ids
                 else:
                     out |= atom_tool_ids(a)
             got = self._tool_ids = frozenset(out)
