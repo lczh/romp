@@ -8,8 +8,10 @@
 // The rows (tagMenuSections, pure, so the model executes in node tests):
 //   - the tag's own chip at the top, so the menu names the tag it acts on (the flyout lists several);
 //   - Rename…, then the identity palette's swatches (the tab menu's colour row), the current colour ringed;
-//   - Fold group / Open group on a group header (the strip's fold, the header's own click without the pane);
-//     Show only this tag (the chat filter set to it) unless the filter already is exactly that; Configure tags…;
+//   - Fold group / Open group on a group header (the strip's fold, as the header's own click does), then Show overview
+//     (the section at a glance in the pane, which a header's click no longer opens since 2026-10-02) or, while that
+//     tag's overview shows, Close overview; Show only this tag (the chat filter set to it) unless the filter already
+//     is exactly that; Configure tags…;
 //   - Delete tag…, which asks first and says how many sessions lose the tag (the sessions stay).
 // Nothing here is a new concept: every row is an edit the Tags dialog makes, or a fold, a filter or a route the
 // strip already has.
@@ -30,12 +32,13 @@ import { tagChip } from "./tag-menu";
 /** The longest name the store keeps (the kernel's _VIEWS_MAX_NAME): the inputs stop there. */
 export const TAG_NAME_MAX = 40;
 
-export type TagMenuAct = "rename" | "fold" | "open" | "only" | "configure" | "delete";
+export type TagMenuAct = "rename" | "fold" | "open" | "overview" | "closeOverview" | "only" | "configure" | "delete";
 export interface TagMenuRow { act: TagMenuAct; label: string; sub?: string; danger?: boolean }
 /** What the menu is opened on. `folded`: the group header's RENDERED fold, null off a header (a chip has no fold).
  *  `only`: whether the surface's filter is already exactly this tag, null where the surface has no filter to set.
- *  `configure`: the surface has the route to the Tags dialog. */
-export interface TagMenuState { name: string; members: number; folded: boolean | null; only: boolean | null; configure: boolean }
+ *  `configure`: the surface has the route to the Tags dialog. `overview`: whether the pane is showing this tag's
+ *  overview (the section at a glance), null or absent where none can show (off a header, on the phone). */
+export interface TagMenuState { name: string; members: number; folded: boolean | null; only: boolean | null; configure: boolean; overview?: boolean | null }
 
 const sessions = (n: number) => `${n} session${n === 1 ? "" : "s"}`;
 
@@ -46,6 +49,10 @@ export function tagMenuSections(s: TagMenuState): TagMenuRow[][] {
   const view: TagMenuRow[] = [];
   if (s.folded === true) view.push({ act: "open", label: "Open group", sub: "show its tabs on the strip" });
   else if (s.folded === false) view.push({ act: "fold", label: "Fold group", sub: "the header stands in for its tabs" });
+  // the overview's one door from the strip (a header's click only folds, the user 2026-10-02), named as its heading is
+  // ("Overview of <tag>"), and its way back while it shows
+  if (s.overview === false) view.push({ act: "overview", label: "Show overview", sub: "what each of its sessions is doing" });
+  else if (s.overview === true) view.push({ act: "closeOverview", label: "Close overview", sub: "back to the session you were reading" });
   if (s.only === false) view.push({ act: "only", label: "Show only this tag", sub: `filter the tabs to its ${sessions(s.members)}` });
   if (s.configure) view.push({ act: "configure", label: "Configure tags…" });
   const del: TagMenuRow[] = [{ act: "delete", label: "Delete tag…", danger: true,

@@ -1566,9 +1566,11 @@ class KernelFolds(Base):
         self.assertIn("_cursor_recordable(", inspect.getsource(em.checkpoint_write))
         self.assertIn("_count_recordable(", inspect.getsource(em._carry_forward_states))
         self.assertIn("_path_needs_write(", inspect.getsource(em.checkpoint_converge_candidates))
-        self.assertIn("_path_needs_write(", inspect.getsource(em._drop_quiescent_entry))
+        self.assertIn("_path_needs_write(", inspect.getsource(em._write_then_drop))
         self.assertIn("_cursor_recordable(", inspect.getsource(em._path_needs_write))
-        src = inspect.getsource(em._drop_quiescent_entry)
+        for caller in (em._drop_quiescent_entry, em.release_records):   # the quiet drop and the release at the end of a file's use
+            self.assertIn("_write_then_drop(", inspect.getsource(caller), "%s takes the drop's one write half" % caller.__name__)
+        src = inspect.getsource(em._write_then_drop)
         self.assertLess(src.index("checkpoint_write("), src.index("with _JSONL_CACHE_LOCK"), "the write before the reader's lock")
         self.assertIn("checkpoint_cycle_take(", src); self.assertNotIn("checkpoint_cycle_room(", src)   # the room check and the charge are one step
 

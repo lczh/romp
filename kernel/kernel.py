@@ -246,7 +246,8 @@ def _heap_stats():
     capBytes bounds (2026-10-01; it was the whole records' length on disk, which a decoded record can exceed several times
     or fall well short of); a body an atom also holds is counted there as well, the memo and the atom sharing the one copy,
     so while that atom lives an eviction frees less than the gauge drops
-    (asmCheckpoint.hydratedEvicted counts the evictions). builtChat.events counts
+    (asmCheckpoint.hydratedEvicted counts the evictions; a released leaf's bodies leave the memo uncounted).
+    builtChat.events counts
     the cached payloads' events, a count and not bytes, the occupancy measure of that cache; serializedBytes sums the cached
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
@@ -13195,7 +13196,8 @@ CKPT_CONVERGE_MS = em._CKPT_CONVERGE_MS_DEFAULT   # the converge pass's wall bud
 ASM_CONVERGE = os.environ.get("ROMP_ASM_CONVERGE", "1") != "0"   # the pass writes idle leaves' ASSEMBLY documents from the boot's own
 #                                                                    parse (T376); 0 turns that off (the pass's own switch covers it too)
 CKPT_CONVERGE_BYTES = em._CKPT_CYCLE_CAP_DEFAULT   # ...and its bytes (documents written plus leaves read for a heal), the cycle budget the
-#                                                     quiescence drop's writes share (T362); 0 turns those writes off too (the drop then pops as before)
+#                                                     quiescence drop's writes share (T362); 0 turns those writes off too (the drop then pops as before,
+#                                                     unless a whole assembly entry pins it: recordCache.pinnedKept)
 
 
 def _session_fold_files(sid, leaf):
@@ -13307,7 +13309,8 @@ def _begin_checkpoint_cycle():
     builds' quiescence-drop writes and the converge pass near the cycle's end (the boot's first builds are capped where the
     volume is; before, the pass began the cycle and the first cycle's drops ran uncapped), and the drops an earlier cycle
     deferred are paid with this cycle's room, oldest first, no fold over their files needed. The pass's off switch
-    (ROMP_CKPT_CONVERGE_MS=0) covers the drop write: the cycle begins with no budget, and the drop pops as before T362."""
+    (ROMP_CKPT_CONVERGE_MS=0) covers the drop write: the cycle begins with no budget, and the drop pops as before T362, unless
+    a whole assembly entry pins it (recordCache.pinnedKept)."""
     em.checkpoint_cycle_begin(CKPT_CONVERGE_BYTES if CKPT_CONVERGE_MS > 0 else 0)
     em.checkpoint_pay_owed_drops()
 
@@ -18564,10 +18567,12 @@ _PRECOMPACT_EXCERPT_CAP = 1200     # characters per side: enough to place the pa
 
 
 def _comment_said(r, is_nudge):
-    """("me" | "you", text) when raw transcript record `r` is something one side of the conversation SAID — a prose
-    user/assistant record's visible text, "me" for the person (a user record), "you" for the agent — else None: tool
-    traffic, thinking, a compaction summary, the CLI's own settle, harness wrappers and romp's own injections are
-    nobody talking (the filter _thread_messages applies to the side conversation)."""
+    """("me" | "you", text) when raw transcript record `r` is a prose user or assistant record that one side of the
+    conversation said: its visible text, "me" for the person's user record, "you" for the agent's; else None. Tool
+    traffic, thinking, a compaction summary, the CLI's own settle, an API error and a synthetic reply are nobody
+    talking, and so is a user record stamped with an injected origin (any kind but the person's own) or whose text
+    _comment_persons_words refuses. A user record is judged by that stamp and those screens, not by the author its
+    atom carries. A message the CLI spliced into the running turn is no user record: _comment_spliced reads it."""
     if not _comment_prose_record(r) or r.get("isApiErrorMessage"):
         return None
     if (r.get("message") or {}).get("model") == "<synthetic>":
@@ -18575,11 +18580,39 @@ def _comment_said(r, is_nudge):
     txt = _comment_msg_text(r)
     if r.get("type") != "user":
         return ("you", txt) if txt else None
+    if (em._record_origin(r) or {}).get("kind") not in (None, "human"):
+        return None
+    return _comment_persons_words(txt, is_nudge)
+
+
+def _comment_persons_words(txt, is_nudge):
+    """("me", the person's words) from `txt`, the text of a user record or of a message spliced into a running turn,
+    else None. Harness reminders are peeled off (_split_reminders), and what is left is nobody's when it is empty, opens
+    with a harness or slash-command wrapper, is romp's resume nudge, or contains "<!-- romp-". These screens read text
+    only: _comment_said reads a user record's origin stamp, and a spliced message's stamp is already in its atom's
+    author (_comment_spliced)."""
     txt = _split_reminders(txt)[0].strip()
     if (not txt or em.SYSTEM_WRAPPER_RE.match(txt) or em.CMD_WRAP_RE.match(txt) or is_nudge(txt)
-            or "<!-- romp-" in txt or (em._record_origin(r) or {}).get("kind") not in (None, "human")):
+            or "<!-- romp-" in txt):
         return None
     return "me", txt
+
+
+def _comment_spliced(g, u, is_nudge):
+    """("me", text) when attachment `u` on transcript graph `g` is a message spliced into the running turn whose atom
+    names the person and whose words pass the screens a user record's text passes (_comment_persons_words), else None.
+    The CLI records such a message as a queued_command attachment, and writes the record again when a compaction
+    or a resume replays it.
+
+    Whether `u` is a message spliced into the turn, the original and not a copy, and who sent it, is the parse's atom
+    for it (g.splice_author: the display parse's, or on a fresh read the event model's _absorbed run over that read).
+    Its words are read only when that atom names the person. Known cases whose atom names the person and that the
+    context walk does not quote: a reply sent from a card or with its Continue button (romp's markers), text that opens
+    with a slash command's wrapper, and a message whose atom the parse made from a record off the spine, which the walk
+    does not follow. The cut walk still passes over the attachment (_comment_cut_walk)."""
+    if g.splice_author(u) != "human":
+        return None
+    return _comment_persons_words(g.splice_text(u), is_nudge)
 
 
 def _precompact_excerpt(text, tail):
@@ -18628,12 +18661,17 @@ def _precompact_context(g, path, anchor_uuid, newer):
     """_precompact_block for a pre-compaction anchor on the stitched chain `g` (an em.TranscriptGraph: the display parse's
     graph, or a fresh read's). `newer` is the active chain from the leaf down to the record just after the anchor (leaf
     first), as the cut walk collected it. The passage's TURN is the anchor's side (the person's message, or the agent's
-    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it. Only a
-    user or assistant record can be something said (_comment_said), so the walks read no other record's body."""
+    reply with its tool traffic); the excerpts are the nearest thing the OTHER side said before it and after it.
+    Only a user or assistant record (_comment_said) or a message the CLI spliced into the agent's turn
+    (_comment_spliced) can be something said, so the walks read no other record's body, and a spliced message's only
+    when the parse's atom for it names the person as its author."""
     is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
 
     def said_of(u):
-        return _comment_said(g.rec(u) or {}, is_nudge) if g.kind(u)[0] in ("user", "assistant") else None
+        kind = g.kind(u)[0]
+        if kind == "attachment":
+            return _comment_spliced(g, u, is_nudge)
+        return _comment_said(g.rec(u) or {}, is_nudge) if kind in ("user", "assistant") else None
     said = said_of(anchor_uuid)
     side = "me" if said and said[0] == "me" else "you"
     before, u, hops = None, g.parent(anchor_uuid), 0
@@ -18666,10 +18704,17 @@ _cut_read_said = set()
 def _comment_cut_from_parse(path, sid, anchor_uuid):
     """_comment_cut_walk over the parent's DISPLAY parse (em.with_display_graph): the graph the chat's own parse already
     holds, so a create reads none of the transcript the chat build has read, and on a restored entry only the few pre-cut
-    records the walk needs a body of. The entry must stand for this session's inputs and be current; when it is not, the
-    parse is brought current (_parse: a serve, a fold of the appended records, or a restore) and asked again. None when
-    neither ask is answered (no entry stands, or a pre-cut fact the restored entry cannot give: em.GraphMiss), and the
-    caller reads the transcript."""
+    records the walk needs a body of. The entry must stand for this session's inputs and be current; when it is stale, the
+    parse is brought current (_parse: a serve, a fold of the appended records, or a restore) and asked again. When no
+    entry stands (a record cache budget eviction released it, 2026-10-02, and an idle session's _parse is then a
+    parse-store hit that rebuilds nothing), the parse is brought current the same way and then, unless its road was
+    "fallback" (an assembly that installs nothing), the event model's parse over the inputs jd.parsed_session hands it,
+    with no cut, installs the entry once, so later creates answer from it; when that parse itself falls back (a rebuild
+    whose restore or whole parse raises after a release), it installs nothing and each create parses again until the
+    files change (review round four: an induced state, disclosed rather than remembered; pinned both ways by
+    test_a_rebuild_that_falls_back_after_a_release_parses_again_at_each_create_until_the_file_changes). None when
+    neither ask is answered (no entry stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss),
+    and the caller reads the transcript."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
     human = _display_sdk_human(sid)
@@ -18681,6 +18726,9 @@ def _comment_cut_from_parse(path, sid, anchor_uuid):
         try:
             if attempt:
                 _parse(path, sid, int(time.time()))
+                if why == "none" and _parse_mode.get(path) != "fallback":
+                    em.parse_session(path, rompuuid=sid, candidate_files=list(cands), states=states,
+                                     postal_log=str(jd.MESSAGES), now=int(time.time()), sdk_human=human)
             how, got = em.with_display_graph(path, sid, human, cands, states, walk)
         except em.GraphMiss as e:
             why = "miss (%s)" % e
@@ -18820,7 +18868,14 @@ def _comment_opener_split(text):
     pointer) and the _COMMENT_ASK_HEAD label are romp's; what follows is the comment. A thread opened before the
     identity line existed starts at the quote head and splits the same way. A message romp added nothing to (an
     unframed send, or a dispatched thread from before the fork line) is ("", text), and so is one that would leave
-    no comment at all."""
+    no comment at all.
+
+    Romp's quote is one run of ">" lines. The stored message has a blank line after it, so its split keeps a
+    comment's leading markdown quote. Romp's part takes a pre-compaction context block only when nothing but blank
+    lines comes between it and the quote.
+
+    The events view splits the chat build's text of the message (_thread_opener_shown), not the stored one. That
+    text can end inside the quote, so no step reads past the last line."""
     if not text:
         return "", text
     pos = 0
@@ -18833,10 +18888,15 @@ def _comment_opener_split(text):
     if text.startswith(_COMMENT_FRAME_HEAD, pos):
         lines = text[pos:].splitlines(keepends=True)
         off, i = len(lines[0]), 1
-        while i < len(lines) and (not lines[i].strip() or lines[i].lstrip().startswith(">")):
+        while i < len(lines) and not lines[i].strip():                  # blank lines under the head
             off += len(lines[i]); i += 1
-        if i < len(lines) and lines[i].startswith(_PRECOMPACT_LEAD):
-            end = next((k for k in range(i, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
+        while i < len(lines) and lines[i].lstrip().startswith(">"):      # romp's quote: one run of ">" lines
+            off += len(lines[i]); i += 1
+        lead = i
+        while lead < len(lines) and not lines[lead].strip():            # blank lines, stepped over only before the lead
+            lead += 1
+        if lead < len(lines) and lines[lead].startswith(_PRECOMPACT_LEAD):
+            end = next((k for k in range(lead, len(lines)) if lines[k].startswith(_PRECOMPACT_FILE_LEAD)), None)
             if end is not None:
                 k = end + 1
                 while k < len(lines) and not lines[k].strip():
@@ -34180,6 +34240,29 @@ def _push_subagents(clients, now, live_map):
                 sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
                 continue
             _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
+
+
+def _release_subagent_view(sid, agent_id):
+    """closeSubagent (2026-10-01): when no client still views this agent, its file's parse slot for this session and its
+    assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
+    until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
+    memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records. A release that
+    raises, the agent file's path lookup included, is noted once per file (em.release_failed; once per agent id when the
+    lookup itself raised) and the close goes on."""
+    if any((c.get("subagents") or {}).get((sid, agent_id)) for c in list(_clients)):
+        return
+    try:
+        ppath = _path_of(sid)
+        apath = _subagent_file(ppath, agent_id) if ppath else None
+    except Exception as e:                        # noqa: BLE001 — a trim never fails the viewer's close, nor goes unsaid
+        em.release_failed("viewer close", agent_id, e, sid=sid)
+        return
+    if apath is not None:
+        try:
+            jd.parse_cache_drop_leaf(str(apath), sid)
+            em.release_assembly(str(apath), rompuuid=sid)
+        except Exception as e:                    # noqa: BLE001 — a trim never fails the viewer's close
+            em.release_failed("viewer close", apath, e, sid=sid)
 
 
 # The MONTHLY SPEND CAP error (the user 2026-07-14): a billing limit ("You've hit your monthly spend
@@ -51840,6 +51923,50 @@ def _dead_lane_key(sid, path, branch):
             tuple(_downtime))
 
 
+_dead_lane_released = {}  # sid -> the transcript stat key its dead lane last released at (_release_dead_lane), bounded like the memo
+
+
+def _release_dead_lane(sid, path, tk, alive, live_map):
+    """The rest of the RSS lever (2026-10-01): when a dead lane is cached, its session's assembly entry (an adapter over every
+    record of the leaf, its atoms and maps) and the record entries of its leaf and anchor were left resident while the
+    parse slot went. They go too, under two rules that keep the release from costing more than it frees. Only while the
+    leaf has a document a restore would take (em.asm_document_restores: the file stands, no refusal mark stands at the leaf's
+    stat, and no entry of the session was kept whole because a restore here refused it): a later parse (the session revived,
+    its chat opened, a keyed input moving the lane) then restores from the document and reads the tail from its cut, never
+    the whole transcript; the judges' episode scan still reads the leaf whole once on a revived session's first turn, while
+    the anchor is not read whole. And once per transcript version (`tk`, the transcript's stat key): the lane is derived again
+    whenever a keyed input moves (a caption, a goals write, any session's flags, the archive, recorded downtime), and a
+    release at every such miss would trade every serve of the entry for a restore. So the end state is a downgrade, not
+    nothing: the first miss after the release restores, and the restored entry (the document's lazy rows and the tail past
+    its cut) and the reader's tail entry stay until the transcript moves or the caches' bounds reach them. The record entries
+    that go are the leaf's and its anchor's, less every live lane's leaf and anchor in this build; a file a whole assembly
+    entry still folds over stays (em.release_records), and each one's fold document is written first when it lacks what
+    this process holds, so the next named fold over the leaf restores rather than reading it whole. This is the one step of
+    the lane loop that reports through no complaint of its own: a raise in it is noted once per file and outcome
+    (em.release_failed) and the frame is built as before. It runs only in the full timeline build, so only while a
+    timeline client is connected, and only for a dead lane inside the build's window: a session that ends while no timeline
+    is open is released when a timeline build next sees its dead lane. The version is recorded before either release runs,
+    so a release that raises is not retried until the transcript moves or the session leaves _dead_lane_released (bounded
+    like the lane memo), and its line says so; what the release had not reached when it raised stays meanwhile, still under
+    the caches' bounds. A raise at the document check comes before the version is recorded, so the lane's next miss asks
+    again, and its line claims no wait."""
+    try:
+        if _dead_lane_released.get(sid) == tk or not em.asm_document_restores(path, rompuuid=sid):
+            return
+        if len(_dead_lane_released) > _DEAD_LANE_MEMO_MAX:
+            _dead_lane_released.pop(next(iter(_dead_lane_released)))
+        _dead_lane_released[sid] = tk
+        em.release_assembly(path, rompuuid=sid)
+        keep = set()
+        for o in alive:
+            if live_map.get(o["sid"]) is not None:
+                keep.update((str(o["path"]), os.path.join(os.path.dirname(str(o["path"])), o["sid"] + ".jsonl")))
+        em.release_records({str(path), os.path.join(os.path.dirname(str(path)), sid + ".jsonl")}, keep=keep)
+    except Exception as e:                        # noqa: BLE001 — a trim never drops a timeline frame
+        em.release_failed("dead lane", path, e, sid=sid, outcome=em.RELEASE_FAILED_OUTCOME + (
+            "; not retried until the transcript moves" if _dead_lane_released.get(sid) == tk else ""))   # recorded: a release raised
+
+
 def _dead_lane_marks(marks, t0):
     """The cached marks a build at horizon `t0` would have derived: filtered on the stamped compare value
     and handed out without it, as fresh dicts (the frame is serialized and the memo's are shared)."""
@@ -53187,6 +53314,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
                 _parse_cache.pop(s["path"], None)
                 with _LANES_LOCK:
                     _lanes_memo.pop(sid, None)
+                _release_dead_lane(sid, s["path"], lane_key[0], alive, live_map)   # and its assembly entry and records (2026-10-01)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
         # chip), keyed on the DERIVED chip `state` computed above, not the raw row state. The old form read
         # the row's vocabulary and counted "waiting" as active — but "waiting" IS the post-turn idle state, so
@@ -75544,6 +75672,7 @@ class Handler(BaseHTTPRequestHandler):
                 client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
             if msg["type"] == "closeSubagent":
                 (client.get("subagents") or {}).pop((sid, aid), None)
+                _release_subagent_view(sid, aid)          # the last viewer closed: the agent file's parse goes (2026-10-01)
                 return
             client.setdefault("subagents", {})[(sid, aid)] = True
             try:

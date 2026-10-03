@@ -643,45 +643,136 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
                                   # the assembly cache's identity gate to a full parse.
 # A BYTE budget beside the count (the kernel memory work, 2026-09-11): the count bounded slots, never memory, and the
 # working set is files of every size (a 177 MB leaf and a 2 KB states log take one slot each), so the kernel climbed to
-# 5 to 8 GB between restarts holding every live and subagent transcript's records (about 1.7 bytes resident per file
-# byte). Each entry weighs the bytes it holds (the file size less a tail entry's offset); past the budget the least
+# 5 to 8 GB between restarts holding every live and subagent transcript's records. Each entry weighs the bytes it
+# holds (the file size less a tail entry's offset), and the budget counts those bytes DECODED, times
+# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 31 GiB machine meant about 48 GB of
+# records, so it never bound, while the kernel grew to 16.4 GB resident plus swap); past the budget the least
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
-# never refused, the budget then holds that one entry. Counters under /perf recordCache.
-# The default is HALF of the machine's memory (the user's direction, 2026-09-11: use the memory we have), never under 4 GiB (2026-09-11, the day the budget shipped at 1 GiB):
-# the working set of a devbox running 50 sessions is their live leaves, read by every build in every pusher cycle, and
-# a budget below it does not save memory, it thrashes: 18 entries filled the 1 GiB, every build re-read whole
-# transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one pusher cycle of 132 s, chat builds of 3 s
-# each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. What is not needed until looked at
-# (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
-# mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
-RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
+# never refused, the budget then holds that one entry. Counters under /perf recordCache, where `bytes` stays file
+# bytes and `realBytes` is the figure the budget compares.
+# A budget eviction also releases every assembly entry that read the evicted file (_asm_drop_holding, the owner's call,
+# 2026-10-02): an entry's adapter keeps the very list it read (FileAdapter._src), so an eviction behind a chat's entry
+# freed 0.4% of the leaf's memory (review probe, 2026-10-01) and the budget bounded only this cache's books. Released
+# with it, the records' lists go; an idle session's tree in the judges' parse store shares their strings, so the text
+# stays until the store replaces or drops that slot and a shown tab's build memos of the tree go, at that tab's next
+# build (its goal-tree memo at the next build that walks its goals) or when the tab is no longer shown, and the
+# live-merge memo (the kernel's _merge_sets_memo), which the chat, feed and timeline builds fill for any alive session,
+# shown or not, keeps it until a build merges a live tail over a newer parse or, at the next push that serves a chat
+# tab or the Outline pane, the session is neither shown nor alive (its 512-entry cap ages out the oldest first). Two
+# windows keep records: a build that read the file before the
+# eviction and installs after it keeps what it read, and a path evicted during its own read is left out of the release
+# (_READ_IN_FLIGHT: an append read re-inserts the records it began from; a read from zero or a tail's upgrade builds new
+# ones). While the file is unchanged the display's next build is a parse-store hit that rebuilds nothing; a comment
+# create rebuilds the entry once (_comment_cut_from_parse; for a session parsed whole, with no usable document, beside
+# the tree the store keeps, a second copy until the budget evicts the file again or the old tree goes: the store
+# replaces or drops its slot, and a shown tab's build memos of it go at that tab's next build (its goal-tree memo at
+# the next build that walks its goals: a build that merges a live tail, runs while a rewind is armed or reads an empty
+# goal store keeps it), or when the tab is no longer shown, and the live-merge memo as above; a session whose stored
+# parse fell back installs nothing and its creates read the transcript, and one whose rebuild itself falls back after a
+# release parses again at each create until its files change), as does the first build after an append (a restore from
+# the document, or a whole parse), and near the limit busy sessions may rebuild repeatedly. Counted under
+# recordCache.budgetReleased. LRU order does not follow need: a display walk the assembly entry serves by a stat check
+# never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
+# machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
+# memory we have; kept, in real units, on 2026-10-01), never under 4 GiB of FILE bytes (2026-09-11, the day the budget
+# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running 50 sessions is their live
+# leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: 18 entries
+# filled the 1 GiB, every build re-read whole transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one
+# pusher cycle of 132 s, chat builds of 3 s each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache.
+# An LRU under reads that cycle through more than it holds misses on EVERY read; it does not degrade partway. So the
+# floor is a working-set bound and stays in the working set's unit, file bytes (in memory, the floor times the
+# multiple): wherever it binds (a machine under about 23 GiB, or one without /proc/meminfo, such as macOS) the cache
+# still holds 4 GiB of file bytes, what the floor has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which
+# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 31 GiB machine in real units
+# binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of file bytes at 12.2 hours of uptime, after
+# a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine the budget can bind after about a day,
+# later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus 2.9 bytes per cached file byte), past the
+# point where the machine it ran on began swapping it (about 14 GB, at 11.8 hours): half of memory caps this cache only
+# past swap there, and a budget tight enough to bind before swap sits at the working set, the thrash above. Once it
+# binds it evicts the least recently used entries, cold ones first, which is safe while the files read every cycle (live
+# leaves and their lineage) stay under the binding point; past it the thrash returns, and budgetRereads (an evicted path
+# read back) shows it on /perf. What is not needed until looked at (subagent transcripts) leaves through
+# drop_after="quiescent" folds instead; the budget is the backstop, not the mechanism. ROMP_RECORD_CACHE_BUDGET_MB still
+# sets it outright, in megabytes of memory, floor or not.
+RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budget is never under this times the multiple
 RECORD_CACHE_BUDGET_FRACTION = 0.5
+RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
+#                                        a lab process decoded to 2.86 live heap bytes per source byte (_scan_jsonl_stream's
+#                                        docstring). The old kernel's 147 samples, 5 minutes to 145 hours of uptime (ending
+#                                        2026-10-01), agree: resident size in millions of kB = 3.44 + 2.85 x the cache's
+#                                        file GB, R^2 0.92, about 2.92 bytes of memory per file byte, a slope that also
+#                                        carries whatever grew beside the cache (the kernel at 5f3569d39 fit 2.94 in the
+#                                        same units over its first 11.5 hours). One figure for every entry: it fits the
+#                                        bulk, whole live leaves; content moves it, 1.44 to 7.7 by shape as measured (long
+#                                        text rows low, small metadata rows high; tests/test_record_cache_real_budget.py
+#                                        pins two mixes). ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, over 0 and at
+#                                        most 1000; 1 restores the file-byte budget.
+
+
+def _record_cache_decoded_multiple(value=None):
+    """The decoded multiple in force: `value` (ROMP_RECORD_CACHE_DECODED_MULTIPLE's text) when it is a number over 0 and
+    at most 1000, else RECORD_CACHE_DECODED_MULTIPLE. The cap keeps every product finite (from about 4.2e298 the floor's
+    int() raised OverflowError at import). A value set but refused is said on stderr, never dropped silently, and
+    /perf recordCache.decodedMultiple reads the multiple in force either way."""
+    if value is None or not str(value).strip():
+        return RECORD_CACHE_DECODED_MULTIPLE
+    try:
+        m = float(value)
+    except (TypeError, ValueError):
+        m = float("nan")
+    if 0 < m <= 1000:
+        return m
+    sys.stderr.write("romp: ROMP_RECORD_CACHE_DECODED_MULTIPLE=%r is not a number over 0 and at most 1000; the record "
+                     "cache weighs entries at %s\n" % (value, RECORD_CACHE_DECODED_MULTIPLE))
+    return RECORD_CACHE_DECODED_MULTIPLE
+
+
+_RECORD_CACHE_MULTIPLE = _record_cache_decoded_multiple(os.environ.get("ROMP_RECORD_CACHE_DECODED_MULTIPLE"))
+
+
+def _real_bytes(file_bytes) -> int:
+    """`file_bytes` of held entries as memory, decoded: the unit of the budget and of /perf recordCache.realBytes."""
+    return int(file_bytes * _RECORD_CACHE_MULTIPLE)
 
 
 def _record_cache_default_budget_bytes(meminfo_text=None):
-    """Half of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
-    is unreadable (macOS, a container without procfs)."""
+    """The default budget in memory units (the budget weighs held entries decoded): half of MemTotal (from /proc/meminfo,
+    or the text given), never under the floor's 4 GiB of FILE bytes (RECORD_CACHE_BUDGET_FLOOR_BYTES times the multiple
+    in force); the floor alone when the file is unreadable (macOS, a container without procfs), so such a machine holds
+    the 4 GiB of file bytes it held before 2026-10-01."""
+    floor = int(RECORD_CACHE_BUDGET_FLOOR_BYTES * _RECORD_CACHE_MULTIPLE)
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
         for line in text.splitlines():
             if line.startswith("MemTotal:"):
                 kb = int(line.split()[1])
-                return max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+                return max(floor, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
     except Exception:
         pass
-    return RECORD_CACHE_BUDGET_FLOOR_BYTES
+    return floor
 
 
 _JSONL_CACHE_BUDGET_BYTES = (int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]) * 1024 * 1024)
                              if os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB") else _record_cache_default_budget_bytes())
 _JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
 _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0,
+                       "budgetRereads": 0, "budgetRereadBytes": 0,   # inserts of a path the byte budget had evicted, and the
+                       #                   file bytes they read again (a tail restored first, then the whole read that
+                       #                   upgrades it): the thrash signal (2026-10-01). Near zero while the budget evicts
+                       #                   only cold entries; level with budgetEvictions once the files read every cycle
+                       #                   outgrow it, every read then a miss
+                       "budgetReleased": 0,   # assembly entries a budget eviction released (_asm_drop_holding): one evicted
+                       #                   lineage file read by several chats releases each of them (review, 2026-10-02)
                        "released": 0,   # #1735: EVERY pop that removed an entry, whatever the cause (eviction, a re-read
                        #                   replacement, an OSError pop, a quiescent drop). A /perf STATISTIC only, never a
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
                        #                   whether frozen or not, so an unfreeze reclaim on a pop would collect nothing (the
                        #                   2026-09-21 review's correction)
+                       "pinnedKept": 0,   # drops that kept an entry a whole assembly entry folds over (_drop_unless_pinned)
+                       "droppedHeld": 0, "droppedHeldBytes": 0,   # the drops (of `dropped`) whose records an assembly entry folding
+                       #                   over that generation still holds, and those records' bytes, held until its next visit:
+                       #                   counted bytes gone, memory kept (_drop_unless_pinned_locked, 2026-10-01)
                        "wholeReads": {}}   # "kind<-caller" -> {"count", "bytes"}: every read that pulled a file WHOLE (from zero, or a
 #                                          tail entry upgraded to the whole file), named by the reader's kind and the first frame
 #                                          outside this module (T384: the way hydratedBy named the planner; the 0.8 GB of whole
@@ -689,10 +780,24 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
 #                                          and an append are not whole reads and are not counted here.
 _DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT_S", "120"))   # a file this long unchanged
 #                                   is one whose writer has finished (a subagent that returned): its records are not kept
+_BUDGET_EVICTED = {}              # path -> True or "tail": the paths the byte budget evicted, oldest first, the last
+#                                   _JSONL_CACHE_MAX of them; the first insert of one is a budget re-read (budgetRereads). A
+#                                   whole insert takes it off; a tail insert (a checkpoint restore came back first) leaves it
+#                                   as "tail" while that tail is held, so the whole read upgrading it adds its bytes to the
+#                                   same re-read (review find, 2026-10-01: the judges' upgrade went uncounted). Keyed on the
+#                                   eviction and the read back, the two events a thrash is made of, never on a time window. A
+#                                   file shrunk, rewritten or replaced after its eviction counts as a re-read too (no writer
+#                                   in kernel/ does that to a cache tenant)
+_READ_IN_FLIGHT = set()           # paths whose read is under way, under _JSONL_CACHE_LOCK: marked at the read's hit
+#                                   check and cleared at its insert and in a finally. A budget eviction leaves them out
+#                                   of the paths it releases: an append read re-inserts the very records it began from,
+#                                   so a release there freed nothing and cost the chat a rebuild (review find,
+#                                   2026-10-02); a read from zero or a tail's upgrade builds new records, and the chat's
+#                                   entry keeps the old ones until it is rebuilt
 
 
 def _entry_weight(ent) -> int:
-    """The bytes an entry holds, the unit the byte budget and recordCache.bytes count: a whole entry (base 0) the
+    """The bytes an entry holds, the unit recordCache.bytes counts and the byte budget weighs decoded: a whole entry (base 0) the
     file's size; a TAIL entry (base > 0, the records past a checkpoint's cut) the file's size less the offset its
     FIRST held record sits at, offs[0], and nothing while it holds no record (a checkpoint's bare cut before its
     first read, a tail of blank lines); a tail that holds records but carries no offsets to say where they start
@@ -729,27 +834,58 @@ def _cache_pop_locked(path):
     return w
 
 
-def _cache_insert_locked(path, ent):
+def _cache_insert_locked(path, ent, began=None):
     """Under _JSONL_CACHE_LOCK: insert `ent` at the LRU tail, evicting the least recently used entries past the count cap
-    and past the byte budget (the new entry's own weight counted; an entry larger than the budget alone still inserts)."""
+    and past the byte budget (the new entry's own weight counted, the held file bytes weighed decoded; an entry larger
+    than the budget alone still inserts). The first insert of a path the budget evicted counts under budgetRereads; when
+    it comes back as a tail, the whole read that upgrades that tail adds its bytes to the same re-read. `began`: the
+    (cached entry or None, budget mark) the read saw at its hit check; a path the budget evicted WHILE a read ran from its
+    cached entry (another thread's insert, the reader holds no lock while it decodes) read nothing again for that
+    eviction, so the read keeps the mark it began with (review find, 2026-10-02); a read that began uncached, a restore
+    included, counts. Returns the paths the budget evicted, for _asm_drop_holding once the caller has let this lock go,
+    less any whose own read is under way (_READ_IN_FLIGHT)."""
+    prev = _JSONL_CACHE.get(path)
     _cache_pop_locked(path)
     w = _entry_weight(ent)
+    mark = _BUDGET_EVICTED.pop(path, None)
+    if mark is True and began is not None and began[0] is not None:
+        prev, mark = began
+    if mark is not None:
+        whole = not ent[5]
+        if mark is True:                         # the first insert back after a budget eviction: one re-read
+            _RECORD_CACHE_STATS["budgetRereads"] += 1; _RECORD_CACHE_STATS["budgetRereadBytes"] += w
+        elif prev is None:                       # "tail", but that tail left by another road (the count cap, a drop)
+            mark = None
+        elif whole:                              # "tail": the whole read upgrading the tail it came back as
+            _RECORD_CACHE_STATS["budgetRereadBytes"] += w
+        if mark is not None and not whole:
+            _BUDGET_EVICTED[path] = "tail"       # back as a tail, or that tail grown: a whole read may still follow
     while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
         _RECORD_CACHE_STATS["evictions"] += 1
         _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
-    while _JSONL_CACHE and _JSONL_CACHE_BYTES[0] + w > _JSONL_CACHE_BUDGET_BYTES:
+    gone = []
+    while _JSONL_CACHE and _real_bytes(_JSONL_CACHE_BYTES[0] + w) > _JSONL_CACHE_BUDGET_BYTES:
+        old = next(iter(_JSONL_CACHE))
         _RECORD_CACHE_STATS["evictions"] += 1; _RECORD_CACHE_STATS["budgetEvictions"] += 1
-        _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(next(iter(_JSONL_CACHE)))
+        _RECORD_CACHE_STATS["evictedBytes"] += _cache_pop_locked(old)
+        _BUDGET_EVICTED.pop(old, None); _BUDGET_EVICTED[old] = True   # newest: a fresh eviction is a fresh re-read
+        if len(_BUDGET_EVICTED) > _JSONL_CACHE_MAX:
+            del _BUDGET_EVICTED[next(iter(_BUDGET_EVICTED))]
+        if old not in _READ_IN_FLIGHT:           # its own read is under way (an append re-inserts the entry's records)
+            gone.append(old)
     _JSONL_CACHE[path] = ent
     _JSONL_CACHE_BYTES[0] += w
     _RECORD_CACHE_STATS["inserts"] += 1
+    return gone
 
 
 def record_cache_stats() -> dict:
-    """The record cache for /perf: entries, held bytes, the budget, and the counters (inserts, evictions by count and by
-    budget, evicted bytes, drop-after-fold drops)."""
+    """The record cache for /perf: entries, held bytes (file bytes, as the kernel's samples read them), the same held
+    bytes decoded (realBytes, the budget's unit) and the multiple, the budget, and the counters (inserts, evictions by
+    count and by budget, evicted bytes, budget re-reads, drop-after-fold drops)."""
     with _JSONL_CACHE_LOCK:
-        out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
+        out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "realBytes": _real_bytes(_JSONL_CACHE_BYTES[0]),
+               "decodedMultiple": _RECORD_CACHE_MULTIPLE, "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
                "countCap": _JSONL_CACHE_MAX, **_RECORD_CACHE_STATS}
         table = _RECORD_CACHE_STATS.get("wholeReads")
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
@@ -903,10 +1039,13 @@ def _ckpt_cycle_default_cap():
 
 _CKPT_CYCLE = {"cap": _ckpt_cycle_default_cap(), "spent": 0}   # the cycle in progress: the kernel begins each pusher cycle at
 #                                   its START (so the boot's first builds are capped where the volume is); before any cycle the
-#                                   default above stands; a cap of 0 turns the drop write off (the drop pops as before T362)
+#                                   default above stands; a cap of 0 turns the drop write off (the drop pops as before T362,
+#                                   unless a whole assembly entry pins it: recordCache.pinnedKept)
 _DROP_OWED = {}                   # path -> when its quiescence drop was deferred for the cycle's budget (T362): paid at the next
 #                                   cycle's start with the room it has, oldest first, or by the next fold over the file
-_DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwritten (its memory released), never the table cleared
+_DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwritten (its memory released), never the table
+#                                   cleared; one a whole assembly entry pins stays, no longer owed, until the file's next quiet
+#                                   drop retries it
 _DROP_HOLD = threading.local()    # the converge pass holds this thread's quiescence drops while it heals and primes a leaf, then pays
 #                                   them once (T362 follow-up review, low 2): {path: pop} of the drops held, or absent
 _CKPT_LOCK = threading.Lock()
@@ -1266,7 +1405,8 @@ def _path_needs_write(key, ent, at_drop=False):
 def checkpoint_cycle_begin(cap):
     """The pusher's cycle begins: the checkpoint byte budget `cap` (documents written and read, leaves read for a heal) is
     whole again; the converge pass and the quiescence drop's writes charge it (T362). A cap of 0 (the pass off, or a zero
-    byte knob) turns the drop write off: the drop pops as before, holding nothing."""
+    byte knob) turns the drop write off: the drop pops as before, holding nothing, unless a whole assembly entry pins it
+    (recordCache.pinnedKept)."""
     with _CKPT_LOCK:
         _CKPT_CYCLE["cap"] = int(cap); _CKPT_CYCLE["spent"] = 0
 
@@ -1288,12 +1428,226 @@ def checkpoint_drop_writes_on():
 
 
 def _pop_owed_entry(key):
-    """Release `key`'s cached entry unwritten (an owed drop paid by the pop alone), under the reader's lock only."""
+    """Release `key`'s cached entry unwritten (an owed drop paid by the pop alone), under the reader's lock only. A file still
+    on disk goes through _drop_unless_pinned, so an entry a whole assembly entry folds over stays (2026-10-01); a file that is
+    gone is popped."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(key)
+    if ent is not None and os.path.exists(key):
+        _drop_unless_pinned(key, ent)
+        return
     with _JSONL_CACHE_LOCK:
         w = _cache_pop_locked(key)
         if w:
             _RECORD_CACHE_STATS["dropped"] += 1
             _RECORD_CACHE_STATS["droppedBytes"] += w
+
+
+def _asm_entry_pins(e, key):
+    """Whether assembly entry `e`, which folds over `key`'s reader entry at its generation, holds a drop of that entry back:
+    a WHOLE entry whose next visit after the drop would parse whole again (2026-10-01). Its adapter holds the very records
+    list (_src), so the drop frees nothing; it retires the generation, so that next visit demotes (g:rewrite, g:nonleaf) to
+    the restore road, and with no document a restore would take it parses whole, while a whole reader in between decodes a
+    second copy. That is a whole entry whose leaf has no document a restore would take (none stands, or a refusal mark stands
+    at the leaf's stat; a restore that refuses a document without marking it removes it), or one kept whole because a
+    restore in this process refused its leaf's document (keepWhole: the document it then wrote is offered to the same
+    restore). Every other entry is popped as before, since its next visit restores from a document and the restore that
+    replaces it frees what it held: a RESTORED entry (round one of the review: a reader entry kept, or trimmed to its cut,
+    under a restored entry held a whole reader's second decoding of the tail next to the restore's own until the entry next
+    demoted), and a whole entry with a document a restore would take, whether marked to re-seat on it or not (the converge
+    pass writes an idle leaf's document from its whole entry and then pops, so that entry leaves memory at its next visit;
+    its tail past the cut may already meet the churn bound's share). The document asked about is the entry's LEAF's (`path`),
+    whichever of its files `key` is: a lineage file's drop demotes the entry under g:nonleaf, and that demotion restores from
+    the leaf's document."""
+    if getattr(e.get("ad"), "seed", None) is not None:
+        return False
+    return bool(e.get("keepWhole")) or not _asm_document_would_restore(e.get("path") or key)
+
+
+def _asm_held_bytes(e, key, ent):
+    """The bytes of reader entry `ent`'s records that assembly entry `e`'s adapter still holds through its source list for
+    `key` (FileAdapter._src): the run of the reader's list that the adapter's list shares by identity, weighed by the reader's
+    offsets. The adapter's list starts either at the reader's first record (a whole entry, or a restored entry that folded over
+    a whole reader's upgrade and took the reader's whole list) or at the record its row's base names (a restored entry over a
+    tail entry that has since grown by appends), and it ends where the adapter's own read ended (an append since made the
+    reader a longer list over the same records). 0 when neither start is shared (a whole reader's upgrade decodes every record
+    afresh, so a restored entry that has not folded since holds none of the upgraded list), or no offsets say where the run
+    ends."""
+    try:
+        src = (getattr(e.get("ad"), "_src", None) or {}).get(key)
+        recs, base = ent[4], int(ent[5])
+        if not src or not recs:
+            return 0
+        row = (e.get("recs") or {}).get(key)
+        i0 = None
+        for c in (0, int(row[1]) - base if row and len(row) == 3 else -1):
+            if 0 <= c < len(recs) and src[0] is recs[c]:
+                i0 = c
+                break
+        if i0 is None:
+            return 0
+        i1 = min(len(recs), i0 + len(src))
+        offs = ent[7] if len(ent) > 7 else None           # flat (start, length) pairs, one pair per held record
+        if not offs or len(offs) < 2 * len(recs):
+            return _entry_weight(ent) if i0 == 0 and i1 == len(recs) else 0
+        end = int(ent[1]) if i1 >= len(recs) else int(offs[2 * i1])
+        return max(0, end - int(offs[2 * i0]))
+    except Exception:
+        return 0
+
+
+def _asm_hold_of(key, ent):
+    """What the assembly entries folding over `key`'s reader entry `ent` at its generation (their recs row, the (gen, base,
+    count) the fold's gate compares) make of a drop of that entry: ("pin", 0) when one of them holds it back
+    (_asm_entry_pins); ("held", bytes) when some fold over it without pinning, `bytes` being the most of its records any one
+    of their adapters still holds (_asm_held_bytes), which the pop cannot free before that entry's next visit replaces it (a
+    restored entry; a whole one whose leaf has a document a restore would take); (None, 0) when none folds over it. Takes
+    _ASM_LOCK for the snapshot alone, never under the reader's lock; the pin test's stat and sidecar read run with no lock
+    held. A pin test that raises (a stat refused other than not-found) counts as no pin for that entry, so the drop goes
+    ahead unless another entry pins it, counted and said through release_failed (round one of the fold's review)."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    gen, kind, held = ent[6], None, 0
+    for e in entries:
+        row = (e.get("recs") or {}).get(key) if e else None
+        if row is not None and len(row) == 3 and row[0] == gen:
+            try:
+                pins = _asm_entry_pins(e, key)
+            except Exception as exc:                      # noqa: BLE001 — the pin never fails the drop it guards
+                release_failed("record drop's pin check", key, exc, outcome="the check raised, so the entry counts as not pinning")
+                pins = False
+            if pins:
+                return "pin", 0
+            kind, held = "held", max(held, _asm_held_bytes(e, key, ent))
+    return kind, held
+
+
+def _drop_unless_pinned(key, ent):
+    """Let `key`'s reader entry `ent` go (that very entry, never a newer one another thread stored), the way every drop of
+    the record cache does: popped, unless a whole assembly entry folding over its generation pins it (_asm_entry_pins,
+    2026-10-01), in which case it is kept as it stands, at the same generation and in its place in the LRU, counted
+    recordCache.pinnedKept. Returns "dropped", "kept", or None when the cache no longer holds `ent`."""
+    hold = _asm_hold_of(key, ent)
+    with _JSONL_CACHE_LOCK:
+        if _JSONL_CACHE.get(key) is not ent:
+            return None
+        return _drop_unless_pinned_locked(key, ent, hold)
+
+
+def _drop_unless_pinned_locked(key, ent, hold):
+    """_drop_unless_pinned's step under _JSONL_CACHE_LOCK, `ent` being the entry the cache holds for `key` and `hold`
+    _asm_hold_of's answer for it, taken before the lock. A pop of records an assembly entry's adapter still holds without
+    pinning them is counted again under droppedHeld, and the bytes it holds under droppedHeldBytes: recordCache.bytes falls
+    by the entry's whole weight (file bytes; times the decoded multiple in memory) while that much stays until the holding
+    entry's next visit replaces it, so the fall is
+    not read as memory freed (round one of the review: a restored entry that folded an append over a whole reader's upgrade
+    holds the reader's whole list, pre-cut records included, and a pop of it freed nothing)."""
+    kind, held = hold
+    if kind == "pin":
+        _RECORD_CACHE_STATS["pinnedKept"] = _RECORD_CACHE_STATS.get("pinnedKept", 0) + 1
+        return "kept"
+    w = _cache_pop_locked(key)
+    _RECORD_CACHE_STATS["dropped"] += 1
+    _RECORD_CACHE_STATS["droppedBytes"] += w
+    if kind == "held" and held > 0:
+        _RECORD_CACHE_STATS["droppedHeld"] = _RECORD_CACHE_STATS.get("droppedHeld", 0) + 1
+        _RECORD_CACHE_STATS["droppedHeldBytes"] = _RECORD_CACHE_STATS.get("droppedHeldBytes", 0) + min(w, held)
+    return "dropped"
+
+
+def _write_then_drop(key, ent, pop=True):
+    """The quiescence drop's T362 half, shared by the quiet fold's drop (_drop_quiescent_entry, after its age gate) and the
+    explicit release at the end of a file's use (release_records, with no age gate): if the file's fold document lacks
+    something this process holds (_path_needs_write, the one rule), it is written NOW, before any pop, from the entry the
+    process already read, so the folds' cursors (the judges' rewound memo, the kernel's named folds) restore from it at
+    their next visit, reading the guard bytes, rather than reading the whole file again under a generation that no longer
+    exists. The write runs with neither lock held (checkpoint_write takes _CKPT_LOCK and _JSONL_CACHE_LOCK itself); it
+    charges the pusher cycle's byte budget shared with the converge pass, and over the budget the write AND the drop are
+    deferred (the entry stays; the read is not lost), the drop owed (paid at the next cycle's start, or at the
+    next quiet fold over the file, once the file is _DROP_AFTER_QUIESCENT_S old: both pay through _drop_quiescent_entry and
+    its age gate, so a release's deferred drop waits for the file's quiet too), counted under
+    checkpoints.converge.dropDeferred. A file whose standing document is over half the cycle's cap never fits a fresh cycle
+    (the take is twice the document's size), so its drop stays owed at every cycle until the reader's bounds or the owed
+    table's bound evict the entry, a limit the quiet drop already had before the release existed. Then, with `pop`, the
+    very entry `ent` goes through the pin (_drop_unless_pinned_locked).
+    Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the cache no longer holds `ent`, or
+    "stayed" without `pop`."""
+    try:
+        needs = checkpoint_drop_writes_on() and _path_needs_write(key, ent, at_drop=True)   # off (a cap of 0): the pop alone
+    except Exception:
+        needs = False
+    wrote = False
+    if needs:
+        cp = _ckpt_file(key)
+        try:
+            est = cp.stat().st_size if cp is not None and cp.exists() else 0
+        except OSError:
+            est = 0
+        if est <= 0:                                      # no previous document (a first write, or one the fallback removed): an
+            est = max(4096, int(ent[1]) // 8)             #  estimate from the file, never a free pass against the budget, and at
+            with _CKPT_LOCK:                              #  most half the cycle's cap, so a file over four caps fits a fresh cycle
+                est = min(est, max(1, _CKPT_CYCLE["cap"] // 2))   # instead of deferring at every one (the true-up below charges
+            #                                                   what was written; round one of the fold's review)
+        if not checkpoint_cycle_take(2 * est):           # the previous document read for the carry, and about as much written:
+            oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
+            with _CKPT_LOCK:
+                _CKPT_STATS["converge"]["dropDeferred"] += 1
+                if pop:
+                    _DROP_OWED[key] = time.time()
+                    if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
+                        oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
+                        _DROP_OWED.pop(oldest, None)
+            if oldest is not None:
+                _pop_owed_entry(oldest)                   # outside _CKPT_LOCK: the reader's lock alone
+            return False, "deferred"
+        if checkpoint_write(key):
+            try:
+                written = cp.stat().st_size if cp is not None else 0
+            except OSError:
+                written = 0
+            checkpoint_cycle_charge(written - est)       # the true-up: what was written against the estimate taken above
+            wrote = True
+            with _CKPT_LOCK:
+                _CKPT_STATS["converge"]["dropWrites"] += 1
+    if not pop:
+        return wrote, "stayed"
+    hold = _asm_hold_of(key, ent)                         # a whole assembly entry folding over it keeps it (_drop_unless_pinned,
+    with _JSONL_CACHE_LOCK:                               #  2026-10-01)
+        if _JSONL_CACHE.get(key) is not ent:
+            return wrote, None
+        return wrote, _drop_unless_pinned_locked(key, ent, hold)
+
+
+def release_records(paths, keep=()):
+    """The record side of the events that end a file's use (2026-10-01): each of `paths` outside `keep` (the files a live
+    session still reads) leaves the reader's cache the way the quiet fold's drop lets a file go (_write_then_drop): the file's
+    fold document is written first when it lacks something this process holds, so the next fold or walk over the file, while
+    the file is unchanged, restores from it at the guard bytes' cost instead of reading the whole file again (round one of the
+    review: a pop with no write sent the judges' episode scan after a second /clear, and the next named fold over a dead
+    lane's leaf, back to the whole file); over the cycle's budget the drop is deferred and owed (a file whose document is over
+    half the cycle's cap stays owed at every cycle until the reader's bounds or the owed table's bound evict the entry, a
+    limit the quiet drop already had: _write_then_drop); and a file a whole assembly entry still folds over stays
+    (_drop_unless_pinned_locked). There is no age gate: the event, not the file's quiet, says the use ended. Counted under
+    dropped and droppedBytes. Returns how many entries were dropped now. A process that never begins a cycle (the judges
+    child, with judges-process on, off by default) keeps the default cap for its life: once that is spent, a drop that needs a
+    write stays owed until the reader's bounds or the owed table's bound evict the entry, as that process's quiet drops
+    already did before this release existed."""
+    keep = {str(p) for p in keep}
+    n = 0
+    for p in paths:
+        key = str(p)
+        if key in keep:
+            continue
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(key)
+        if ent is None:
+            continue
+        with _CKPT_LOCK:
+            _DROP_OWED.pop(key, None)                     # an earlier deferral of this file's drop is taken here (re-owed if this
+        #                                                   one is deferred too)
+        if _write_then_drop(key, ent, pop=True)[1] == "dropped":
+            n += 1
+    return n
 
 
 class hold_quiescent_drops:
@@ -1935,7 +2289,11 @@ def _read_jsonl_entry(path, on_fail=None, tail_ok=False, tail_from=None):
             _JSONL_CACHE[path] = hit
             return hit
     with _read_stripe(path):
-        return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        try:
+            return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        finally:
+            with _JSONL_CACHE_LOCK:
+                _READ_IN_FLIGHT.discard(path)      # marked at the read's hit check: cleared whatever road it left by
 
 
 def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None):
@@ -1962,6 +2320,9 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
             _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
             _JSONL_CACHE[path] = hit
             return hit
+        began = (hit, _BUDGET_EVICTED.get(path))   # what this read starts from, before `hit` is reassigned below and
+        #                                            before another thread's insert can evict the path mid-read
+        _READ_IN_FLIGHT.add(path)                  # a budget eviction meanwhile releases no entry over it (_cache_insert_locked)
     restored = None
     if tail_from is not None and (hit is None or hit[5] > tail_from[1]):
         # the assembly checkpoint's cut: an entry from its offset, when the guard before it stands (else whole)
@@ -2053,7 +2414,10 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
         return None
     ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs)
     with _JSONL_CACHE_LOCK:
-        _cache_insert_locked(path, ent)      # the count cap and the byte budget, LRU order (hot entries survive any cold flood)
+        _READ_IN_FLIGHT.discard(path)                   # done reading: an eviction from here on releases as any other
+        gone = _cache_insert_locked(path, ent, began)   # the count cap and the byte budget, LRU order (hot entries survive
+    if gone:                                            #  any cold flood)
+        _asm_drop_holding(gone)              # AFTER the cache lock: the assembly entries over what the budget evicted go too
     return ent
 
 
@@ -2275,52 +2639,9 @@ def _drop_quiescent_entry(key, ent, pop=True):
     # T362: the entry a quiescent-drop fold ends over is a read that already happened (the boot's, by whichever fold read the
     # file whole); if the file's document lacks something this process holds (the one rule), it is written NOW, before any
     # pop, from that read: the idle sessions' documents converge here, where no settle reaches them and the converge pass must
-    # refuse them (a heal on the cycle re-read them whole). The write runs with neither lock held (checkpoint_write takes
-    # _CKPT_LOCK and _JSONL_CACHE_LOCK itself); it charges the pusher cycle's byte budget shared with the pass, and over the
-    # budget the write AND the drop are deferred by one cycle (the entry stays; the read is not lost), counted under
-    # checkpoints.converge.dropDeferred.
-    try:
-        needs = checkpoint_drop_writes_on() and _path_needs_write(key, ent, at_drop=True)   # off (a cap of 0): the pop alone
-    except Exception:
-        needs = False
-    wrote = False
-    if needs:
-        cp = _ckpt_file(key)
-        try:
-            est = cp.stat().st_size if cp is not None and cp.exists() else 0
-        except OSError:
-            est = 0
-        if est <= 0:                                      # no previous document (a first write, or one the fallback removed): an
-            est = max(4096, int(ent[1]) // 8)             #  estimate from the file, never a free pass against the budget
-        if not checkpoint_cycle_take(2 * est):           # the previous document read for the carry, and about as much written:
-            oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
-            with _CKPT_LOCK:
-                _CKPT_STATS["converge"]["dropDeferred"] += 1
-                if pop:
-                    _DROP_OWED[key] = time.time()
-                    if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
-                        oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
-                        _DROP_OWED.pop(oldest, None)
-            if oldest is not None:
-                _pop_owed_entry(oldest)                   # outside _CKPT_LOCK: the reader's lock alone
-            return False
-        if checkpoint_write(key):
-            try:
-                written = cp.stat().st_size if cp is not None else 0
-            except OSError:
-                written = 0
-            checkpoint_cycle_charge(written - est)       # the true-up: what was written against the estimate taken above
-            wrote = True
-            with _CKPT_LOCK:
-                _CKPT_STATS["converge"]["dropWrites"] += 1
-    if not pop:
-        return wrote
-    with _JSONL_CACHE_LOCK:
-        if _JSONL_CACHE.get(key) is ent:
-            w = _cache_pop_locked(key)
-            _RECORD_CACHE_STATS["dropped"] += 1
-            _RECORD_CACHE_STATS["droppedBytes"] += w
-    return wrote
+    # refuse them (a heal on the cycle re-read them whole). The write, its budget and its deferral, and the pop through the
+    # assembly pin are _write_then_drop's, shared with the explicit release at the end of a file's use (release_records).
+    return _write_then_drop(key, ent, pop=pop)[0]
 
 
 _UNPINNED = object()
@@ -3571,7 +3892,7 @@ class FileAdapter:
         return set(active) | {u for u, v in self.chain_verdicts(active).items()
                               if v in ("active", "broken", "eclipsed")}
 
-    def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index):
+    def _absorbed_atom(self, full, t, seq, auid, rompuuid, postal_index, *, stats):
         """One synthesized user atom for a mid-turn splice, placed where the model READ it (T252d, the
         user 2026-09-08): its `t` is the LANDING time — the moment the CLI took the message off its
         queue, the file-order predecessor's stamp (_landing_t) — so the atom sits BELOW the steps that
@@ -3595,7 +3916,9 @@ class FileAdapter:
         The atom carries the FULL text — any whitespace-collapsed form is for MATCHING only (the user
         2026-07-08: collapsing ate the blank line between a follow-up's quoted context and the typed
         reply, so markdown folded the reply INTO the blockquote; and the kernel's optimistic echo could
-        never text-prune against the collapsed copy, so the message rendered TWICE)."""
+        never text-prune against the collapsed copy, so the message rendered TWICE).
+
+        `stats` False keeps the clamp below out of the parse stats, for a caller that is no parse (_absorbed's)."""
         blocks = [{"type": "text", "text": full}]
         arec = self.by_uuid.get(auid) or {}
         origin = _record_origin(arec)   # a queued_command attachment carries its own origin / commandMode
@@ -3628,7 +3951,8 @@ class FileAdapter:
                 # these would show up, since a silent clamp would hide a CLI write-order change. (The
                 # 2026-09-06 review: two goldens had pinned a landedT 30-40 s before the send, from a
                 # synthetic shape with no tool_result before the attachment.)
-                _asm_stat("landedT-clamp")
+                if stats:
+                    _asm_stat("landedT-clamp")
                 landed_t = t
             atom["t"] = landed_t         # placed where the model READ it (T252d); `sentAt` keeps the send
         if ROMP_AUTO_RE.search(full):   # an AUTO-nudge → flag it, mirroring the native user-record path
@@ -3652,7 +3976,7 @@ class FileAdapter:
         i = bisect.bisect_left(self._seq_ts, (seq,)) - 1
         return self._seq_ts[i][1] if i >= 0 else None
 
-    def _absorbed(self, qatts, kept, st, rompuuid, postal_index):
+    def _absorbed(self, qatts, kept, st, rompuuid, postal_index, stats=True):
         """Mid-turn prompts spliced into a running turn. The witness is the queued_command
         ATTACHMENT record: the CLI writes one per splice, uuid-bearing and parent-chained,
         carrying the FULL prompt text and stamped with the ENQUEUE timestamp — and writes
@@ -3674,7 +3998,11 @@ class FileAdapter:
         or in atoms()) changes placement identity just like an id drift — previously-invisible
         atoms become fresh plannable segments and dormant sessions replay them as new goals
         (2026-07-10). Bump jd.PLACEMENTS_V in the same commit; tests/test_placements_canary.py
-        pins both dimensions."""
+        pins both dimensions.
+
+        `stats` False: a caller that is no parse (the comment walk's fresh read, TranscriptGraph._splice_atom)
+        adds nothing to the parse stats, whose landedT-clamp count is there to show a change in the CLI's
+        write order across parses."""
         atoms, emitted = [], st["absorbed_keys"]   # dedup memory rides the carry: one set whether
         #                                            the qatts arrive in one full parse or many folds
         for q in qatts:
@@ -3689,7 +4017,7 @@ class FileAdapter:
                 continue   # this copy sits on a rewound branch — a kept twin may still emit
             emitted.add(key)
             a = self._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"],
-                                    rompuuid, postal_index)
+                                    rompuuid, postal_index, stats=stats)
             if not _author_final(a.get("author"), q["text"]):
                 st["postal_miss_att"].add(key)   # trailing marker unresolved — the heal re-checks
             atoms.append(a)
@@ -4880,19 +5208,34 @@ def _membership_of(adapter):
 # spine root to cut) plus the atom rows' byte locations, so a pre-cut record is read back alone, by offset, only when
 # the walk needs its body. A fact the entry cannot give (a pre-cut record with no row to read it by, a walk leaving the
 # spine) raises GraphMiss, and the caller reads the transcript as before: never an answer from a guess.
+# A message the CLI splices into a running turn is no user record: the CLI writes it as a queued_command attachment
+# (FileAdapter._absorbed), and writes it again when a compaction or a resume replays it. Whether an attachment is such a
+# message, and the original rather than a copy, is the display parse's own answer, the atom _absorbed emitted for the
+# record: read from the entry's atoms, or on a restored entry's pre-cut part from the atom's row.
 
 
 class GraphMiss(LookupError):
     """A restored entry's pre-cut part cannot answer what the walk asked: read the transcript instead."""
 
 
+def _splice_prompt(rec):
+    """The words of queued_command attachment record `rec` as its atom carries them: the prompt as is when it is a string,
+    else the joined text of its content blocks (FileAdapter._ingest's witness, _hydrate_one's kind "b")."""
+    p = (rec.get("attachment") or {}).get("prompt")
+    return p if isinstance(p, str) else _text_of(p or [])
+
+
 class TranscriptGraph:
     """The read surface of a walk over one session's stitched transcript graph (the comment cut, kernel
-    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, and the leaf."""
+    _comment_cut_walk), over a whole FileAdapter's maps: has, rec, kind (type, subtype), parent, fsid, the leaf, and
+    splice_author / splice_text for a message spliced into a running turn. `atoms`: the atoms the display parse emitted
+    from those maps (its assembly entry's); None over a fresh read, where _absorbed is run on the adapter's own splices."""
 
-    def __init__(self, ad):
+    def __init__(self, ad, atoms=None):
         self._ad = ad
         self.leaf = ad.leaf_uuid
+        self._atoms = atoms
+        self._splices = None
 
     def has(self, u):
         return u in self._ad.by_uuid
@@ -4909,6 +5252,30 @@ class TranscriptGraph:
 
     def fsid(self, u):
         return self._ad.fsid_of.get(u)
+
+    def _splice_atom(self, u):
+        """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
+        the adapter's splices and its kept chain, from an empty dedup memory as a whole parse starts, with no postal index
+        and no count in the parse stats: this read is no parse. The map is built once per graph, so a walk across a long
+        tool turn's attachments costs one pass over the atoms."""
+        if self._splices is None:
+            atoms = self._atoms
+            if atoms is None:
+                ad = self._ad
+                atoms = ad._absorbed(ad.qatts, ad.kept_uuids(ad.active_path()), _emit_state(), None, {}, stats=False)
+            self._splices = {a["uuid"]: a for a in atoms if a.get("absorbed") and a.get("uuid")}
+        return self._splices.get(u)
+
+    def splice_author(self, u):
+        """The author (author_of's) of the atom the parse emitted for queued_command attachment `u`, a message spliced into
+        a running turn (_splice_atom: the display parse's, or over a fresh read the same emit run on it); None when it
+        emitted none, for example for a splice off the kept chain."""
+        a = self._splice_atom(u)
+        return a.get("author") if a is not None else None
+
+    def splice_text(self, u):
+        """The prompt of attachment `u`'s record (_splice_prompt)."""
+        return _splice_prompt(self._ad.by_uuid.get(u) or {})
 
 
 def _read_record_at(path, at, uuid):
@@ -4965,10 +5332,11 @@ class _SeededGraph(TranscriptGraph):
     """TranscriptGraph over a RESTORED entry (its adapter seeded from the assembly document): the tail past the cut from the
     adapter, the pre-cut part from the seed's facts (types, the active spine root to cut) and the atom rows' locations. A
     pre-cut tool record (its row's lazy header lists tool calls or results) answers as a body-less record of its type, so a
-    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset."""
+    walk past a long tool turn reads nothing; any other pre-cut message is read back alone by offset. A splice's atom is the
+    entry's (its tail's atoms) past the cut, its atom row before it."""
 
     def __init__(self, entry, rompuuid):
-        super().__init__(entry["ad"])
+        super().__init__(entry["ad"], entry["atoms"])
         seed = self._ad.seed
         self._types = seed["types"]
         sp = seed.get("_spineParent")
@@ -5055,6 +5423,34 @@ class _SeededGraph(TranscriptGraph):
         self._recs[u] = out
         return out
 
+    def splice_author(self, u):
+        """Past the cut, the tail's atoms answer; before it, the scalars of the atom row the document holds for `u`: a row
+        only for an attachment the parse made an atom of, so a hook's result or a token reminder costs no read."""
+        if u in self._ad.by_uuid or u not in self._types:
+            return super().splice_author(u)
+        form, src, got = self._locs
+        for c in got.get(u) or ():
+            if form == "index":
+                try:
+                    sc = src._row(c).get("s") or {}
+                except LazyIndexError as e:
+                    raise GraphMiss(str(e))
+            else:
+                sc = c
+            if sc.get("absorbed"):
+                return sc.get("author")
+        return None
+
+    def splice_text(self, u):
+        """Before the cut, the attachment record read back alone by the offset its atom row carries (an attachment's only
+        atom is its splice's)."""
+        if u in self._ad.by_uuid or u not in self._types:
+            return super().splice_text(u)
+        loc = self._loc(u)
+        if loc is None:
+            raise GraphMiss("record %s: no row carries its splice's location" % u)
+        return _splice_prompt(_read_record_at(loc["path"], loc["at"], u))
+
 
 def _files_witness(files):
     """{path: (size, mtime_ns, inode)} for every file in `files`, None when one cannot be stat'd: the witness _assemble stamps on
@@ -5091,7 +5487,7 @@ def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, 
         if seen is None or seen != _files_witness(candidate_files):
             return "stale", None
         if entry["ad"].seed is None:
-            return "whole", fn(TranscriptGraph(entry["ad"]))
+            return "whole", fn(TranscriptGraph(entry["ad"], entry["atoms"]))
         return "seeded", fn(_SeededGraph(entry, rompuuid))
 
     def cached():
@@ -5303,6 +5699,40 @@ def _asm_whole_entry(leaf_path, candidate_files, links, rompuuid, postal_index, 
             "path": str(leaf_path)}   # as handed: the reader's key for the same leaf (asm_whole_entries hands it back)
 
 
+def _asm_drop_where(holds):
+    """Pop every assembly entry `holds(entry)` is true of under _ASM_LOCK, then release each popped entry OUTSIDE it
+    (_asm_release takes _MAT_LOCK, never nested with _ASM_LOCK). Returns the popped entries. evict_document's assembly
+    half, shared with the byte budget's release (_asm_drop_holding)."""
+    popped = []
+    with _ASM_LOCK:
+        for k in [k for k, e in _ASM_CACHE.items() if isinstance(e, dict) and holds(e)]:
+            e = _ASM_CACHE.pop(k, None)
+            if e is not None:
+                popped.append(e)
+    for e in popped:
+        _asm_release(e)
+    return popped
+
+
+def _asm_drop_holding(paths):
+    """The byte budget's release (the owner's call, 2026-10-02): drop every assembly entry that read one of `paths`, the
+    files a budget eviction just took (a file before a restore's cut, read by no one, is skipped), so the eviction lets
+    go of the records the entry's adapter held: for a chat still using the file, their lists go at once and their text
+    when the parse store's slot, a shown tab's build memos and the live-merge memo of the tree go; each entry dropped
+    counts under recordCache.budgetReleased. The next parse that is not a parse-store hit (a comment create, the first
+    build after an append) restores the entry from its document or parses whole, adding the records again (a session
+    whose stored parse fell back installs nothing; one whose rebuild itself falls back after this release parses again
+    at each create until its files change). Called by the reader after it lets _JSONL_CACHE_LOCK go, never under it:
+    it takes _ASM_LOCK, then _MAT_LOCK, then _JSONL_CACHE_LOCK for the count, one at a time (the last as the reader's
+    own insert takes it), and no holder of the first two waits on any other lock."""
+    gone = set(paths)
+    popped = _asm_drop_where(lambda e: any(k in gone and v != ("skip",) for k, v in (e.get("recs") or {}).items()))
+    if popped:
+        with _JSONL_CACHE_LOCK:
+            _RECORD_CACHE_STATS["budgetReleased"] += len(popped)
+    return popped
+
+
 def evict_document(leaf_path):
     """Drop one leaf document's entries from BOTH parse caches: the record cache (_JSONL_CACHE) and the assembly cache
     (_ASM_CACHE). Neither cache's own bound helps a loop that parses many ONE-SHOT documents (the judge experiment's
@@ -5313,15 +5743,9 @@ def evict_document(leaf_path):
     _ASM_LOCK and release through _asm_release OUTSIDE the lock, so a lazy index gives its materialized atoms back (a bare dict
     clear skips both, as _asm_full's comment notes). Absent entries are no-ops. Returns (asm_dropped, record_dropped)."""
     leaf = str(leaf_path)
-    popped, files = [], {leaf}
-    with _ASM_LOCK:
-        for k in [k for k, e in _ASM_CACHE.items() if e.get("path") == leaf]:
-            e = _ASM_CACHE.pop(k, None)
-            if e is not None:
-                popped.append(e)
-                files.update(e.get("cands") or ())
+    popped, files = _asm_drop_where(lambda e: e.get("path") == leaf), {leaf}
     for e in popped:
-        _asm_release(e)                              # OUTSIDE _ASM_LOCK: release takes _MAT_LOCK, never nested with it
+        files.update(e.get("cands") or ())
     dropped = 0
     with _JSONL_CACHE_LOCK:
         for f in files:
@@ -5329,6 +5753,95 @@ def evict_document(leaf_path):
                 _cache_pop_locked(f)
                 dropped += 1
     return len(popped), dropped
+
+
+def _asm_lazy_uuids(e):
+    """The uuids of the pre-cut records assembly entry `e` serves as lazy atoms, whose bodies the hydrated memo holds, one at a
+    time: its lazy index's record rows, or the atoms-only form's prefix atoms (read without materializing any). Nothing for a
+    whole entry."""
+    ix = e.get("index") if e else None
+    if ix is not None:
+        for r in ix.records or ():
+            if r:
+                yield r[0]
+    pre = e.get("prefix") if e else None
+    if isinstance(pre, list):
+        for a in list.__iter__(pre):
+            if isinstance(a, dict) and a.get("uuid"):
+                yield a["uuid"]
+
+
+def release_assembly(leaf_path, rompuuid=None):
+    """Drop a leaf's assembly entries at an event that ends its use (2026-10-01): a /clear or a resume fork retiring the
+    leaf (the judges' _note_leaf), a dead timeline lane, the last viewer of a subagent closing. Before, nothing left at
+    those events: the entry (an adapter holding every record it read, its atoms and maps, a restored entry's lazy index)
+    stayed until the cache's count cap reached it. Only the assembly cache and the hydrated-body memo are touched: the
+    record cache is the reader's (a /clear's anchor is still the new leaf's candidate; a caller drops the files no live
+    session reads with release_records), and evict_document, which pops every candidate's record entry, is the scripts'.
+    With `rompuuid`, only that session's entries go (a fork child's flip leaves the parent's entry of the same file). Each
+    popped entry's lazy index gives its memo back outside _ASM_LOCK (_asm_release), and the hydrated bodies of its pre-cut
+    records leave the memo: nothing serves that entry's atoms again, and the session parsed again restores and hydrates
+    afresh, as after an eviction. The memo is keyed by uuid alone, and other live entries can name the same records (an SDK
+    fork child's transcript carries its parent's history verbatim, a resume fork's leaf walks through the old one's): those
+    bodies go too, and such an entry's next read of one is a seek read from disk. No other entry's rows are read here (round
+    one of the fold's review: subtracting what every other entry named read every peer's rows, under the timeline build's
+    lock at a dead lane, to spare reads that cost one seek each). Returns how many entries went, counted `released` among
+    the parse's road counters."""
+    rp = os.path.realpath(str(leaf_path))
+    with _ASM_LOCK:
+        keys = [k for k in _ASM_CACHE if k[0] == rp and (rompuuid is None or k[1] == str(rompuuid))]
+        popped = [e for e in (_ASM_CACHE.pop(k, None) for k in keys) if e is not None]
+    uuids = set()
+    for e in popped:
+        _asm_release(e)                              # OUTSIDE _ASM_LOCK: release takes _MAT_LOCK, never nested with it
+        uuids.update(_asm_lazy_uuids(e))
+    if uuids:
+        with _ASM_CKPT_LOCK:
+            for u in uuids:
+                hit = _HYDRATED.pop(u, None)
+                if hit is not None:
+                    _HYDRATED_BYTES[0] -= hit[1]
+    if popped:
+        _asm_stat("released", len(popped))
+    return len(popped)
+
+
+_RELEASE_FAILED = set()            # (where, path, outcome) whose release at the end of a file's use, or whose record drop's
+#                                    pin check, raised: said once each, a release's line saying it stopped where it raised and that what
+#                                    ran before it stays released (RELEASE_FAILED_OUTCOME), the pin check's that the entry
+#                                    counts as not pinning
+RELEASE_FAILED_OUTCOME = "the release stopped where it raised and what ran before it stays released"
+
+
+def release_failed(where, path, exc, sid=None, outcome=RELEASE_FAILED_OUTCOME):
+    """A release at the end of a file's use raised (a stat or a sidecar read refused, a lineage that does not resolve), and
+    the caller's event goes on, since a trim must never fail the event it rides (discover's leaf flip, under every pane; a
+    timeline frame; a viewer's close); or a record drop's pin check raised, and that entry counts as not pinning, so the
+    drop goes ahead unless another entry pins it. Counted `releaseFailed` among the parse's
+    road counters at every failure, said on stderr once per (where, path, outcome) (2026-10-01; the outcome since round four
+    of the fold's review, so the dead lane's two outcomes for one leaf are each said), with the session `sid` when the
+    caller has one; the memo keys on the event, the path and the outcome, so of several sessions failing on a shared leaf
+    only the first is named. The default `outcome` says only that the release stopped where it raised and that what ran before it
+    stays released, true at every caller, one where nothing had run yet included: the leaf flip's record drop and its
+    lineage read run after its assembly release, and a dead lane's record release after its own. A caller adds what holds
+    at it alone (the dead lane, once it has recorded the transcript's version: not retried until the transcript moves; the
+    leaf flip: its record drop is not retried), and the pin check's words replace the default, saying only that the entry
+    counts as not pinning (round three of the fold's review: the old default said the memory was left as it stood, false
+    wherever a release had popped an entry before the raise)."""
+    _asm_stat("releaseFailed")
+    k = (str(where), str(path), str(outcome))
+    if k in _RELEASE_FAILED:
+        return
+    if len(_RELEASE_FAILED) >= 4096:
+        _RELEASE_FAILED.clear()                      # re-arm past the bound: a repeated line beats a silence that never lifts
+    _RELEASE_FAILED.add(k)
+    try:
+        sys.stderr.write("romp event-model: releasing the caches of %s%s at %s failed (%s; said once per file and outcome): "
+                         "%s\n"
+                         % (path, " for session %s" % sid if sid else "", where, outcome,
+                            ("%s: %s" % (type(exc).__name__, exc))[:200]))
+    except Exception:
+        pass
 
 
 def _asm_gates(entry, leaf_path, candidate_files, links):
@@ -5514,7 +6027,7 @@ def _asm_heal(entry, rompuuid, postal_index):
             if q is None:
                 st["postal_miss_att"].discard(key)
                 continue
-            a2 = ad._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"], rompuuid, postal_index)
+            a2 = ad._absorbed_atom(q["text"], q["ts"], q["seq"], q["uuid"], rompuuid, postal_index, stats=True)
             if a2 != a:
                 entry["atoms"][i] = a2
             if _author_final(a2.get("author"), q["text"]):
@@ -6447,6 +6960,26 @@ def asm_document_stands(leaf_path):
     existence half of asm_document_seeds, the predicate the judges' incident scan asks before taking the leaf road."""
     cp = _asm_ckpt_file(leaf_path)
     return cp is not None and cp.exists()
+
+
+def _asm_document_would_restore(leaf_path):
+    """Whether a restore of `leaf_path` would take its document, as far as a stat and the sidecar's few bytes can tell (never
+    the document, so not the load's proof): the file stands and no refusal mark stands at the leaf's current stat."""
+    return asm_document_stands(leaf_path) and not _asm_refusal_stands(leaf_path)
+
+
+def asm_document_restores(leaf_path, rompuuid=None):
+    """Whether the next parse of `leaf_path` would restore from its document rather than parse whole, as far as a cheap check
+    can tell (_asm_document_would_restore), and no assembly entry of the session (`rompuuid`; any session's when None) was
+    kept whole because a restore in this process refused that document (keepWhole). The release at a dead timeline lane asks
+    it before letting the session's entry and records go (2026-10-01): with no document a restore would take, the next parse
+    after the release would be a whole one."""
+    if not _asm_document_would_restore(leaf_path):
+        return False
+    rp = os.path.realpath(str(leaf_path))
+    with _ASM_LOCK:
+        entries = [e for k, e in _ASM_CACHE.items() if k[0] == rp and (rompuuid is None or k[1] == str(rompuuid))]
+    return not any(e.get("keepWhole") for e in entries)
 
 
 def _asm_ckpt_file(leaf_path):
@@ -7957,9 +8490,7 @@ def _hydrate_one(a, rec):
         a["skillMd"] = btext[:SKILL_MD_CAP] + ("\n\n…(skill content truncated)" if len(btext) > SKILL_MD_CAP else "")
         a["message"] = {"role": "assistant", "content": [], "stop_reason": None}
     elif k == "b":
-        att = rec.get("attachment") or {}
-        full = att.get("prompt") if isinstance(att.get("prompt"), str) else _text_of(att.get("prompt") or [])
-        a["message"] = {"role": "user", "content": [{"type": "text", "text": full or ""}]}
+        a["message"] = {"role": "user", "content": [{"type": "text", "text": _splice_prompt(rec) or ""}]}
     a.pop("lazy", None)
 
 

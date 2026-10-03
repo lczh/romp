@@ -67,7 +67,7 @@ import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow 
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
-import { titleWithKey, keyHint, chordOf, effectiveChord, loadOverrides, saveOverride, KEYS_EVENT } from "./keybindings";
+import { titleWithKey, keyHint, chordOf, displayChord, editorKeepsKey, effectiveChord, loadOverrides, savedHolder, saveOverride, chatAnswers, CHAT_KEY_COMMANDS, KEYS_EVENT, type Bindings } from "./keybindings";
 import { hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, goneTabKeys, renamedTabKeys } from "./tab-keys";   // per-tab hot keys (2026-09-10): the set and its bookkeeping; the keycap on the tab is the T379 widget, read from the same store
 import { notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, type SessionFlag } from "./flag-pending";   // the per-session view flags' pending guard (review 2026-09-14)
 import { DEFAULT_CHORDS } from "./commands";
@@ -1153,8 +1153,8 @@ function tabInView(id: string): boolean { return (id === peekId || chatVisible(i
 // header. Keyboard cycling walks the VISIBLE order, and a folded tab is not visible. The active tab's
 // section folds like any other, so the active id can be folded away too: its header is then its
 // stand-in (focusActiveTab lands there, the arrows step from its position through neighborOfFolded over
-// the last plan's items, kept here for both), and the pane shows the section at a glance
-// (renderSnapshot) instead of a transcript whose tab is nowhere on the strip.
+// the last plan's items, kept here for both) and wears the selected tab's box, while the pane goes on
+// showing that session's transcript (a header's click only folds, 2026-10-02).
 let collapsedTabIds = new Set<string>();
 // the strip plan the last render painted (planStrip's items): what the stand-in rules and the section view
 // read between renders (which header holds a folded-away id, which tab is next to it, which section a
@@ -6404,7 +6404,8 @@ function releaseTabStrip(): void {
 // (aria-hidden — the caret glyph was read aloud before the name), the header's name is an aria-label
 // in words (name and count, plus the pip's phrase when it wears one), so nothing runs into it
 // unplanned; and the header holding the active tab is the same button as the rest, marked current: it
-// folds like any other, and folded it is the hidden tab's stand-in.
+// folds like any other, and folded it is the hidden tab's stand-in. A click folds or opens and does
+// nothing else (the user 2026-10-02): the section at a glance opens from the tag menu (showOverview).
 function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean, hidden: readonly string[]): HTMLElement {
   // the untagged trail (unlabeled by the user's ruling): a row of its own under the one-group-per-row
   // setting, else behind a divider
@@ -6413,35 +6414,31 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   const head = el("div", "tab-group-head" + (collapsed ? " collapsed" : "") + (holdsActive ? " holds-active" : ""));
   head.dataset.group = name;
   // Every header folds, the one holding the ACTIVE tab too: folded, that header is the hidden tab's stand-in
-  // (focusActiveTab lands on it, the arrows step from it) and the pane shows the section at a glance, so no
-  // keyboard focus lands on a hidden node. The click derives the next fold state from the one it RENDERED
-  // (data-folded), never from the store, and the delegate (toggle-group) also shows the section in the pane.
+  // (focusActiveTab lands on it, the arrows step from it), so no keyboard focus lands on a hidden node, and the
+  // transcript stays on screen. The click derives the next fold state from the one it RENDERED (data-folded), never
+  // from the store, and the delegate (toggle-group) folds or opens and nothing else (the user 2026-10-02).
   head.dataset.act = "toggle-group";
   head.dataset.folded = collapsed ? "1" : "0";
-  // `shown`: the pane is showing this section, whatever the fold: the one bit the header's mark, its words
-  // (headWords) and its own way back are derived from
-  const shown = snapView === name;
-  if (shown) head.classList.add("snap-shown");
+  // the pane is showing this section's overview (the tag menu's Show overview, the palette's Show tag overview),
+  // whatever the fold: the header wears the mark
+  if (snapView === name) head.classList.add("snap-shown");
+  // THE STAND-IN's box (2026-10-02): the active tab folded away under THIS header (planStrip marked it and hid the
+  // tab), while the pane shows that session's transcript, not an overview or a file tab. A click that folds the
+  // group keeps the transcript, so the header is the one place on the strip that says where the session on
+  // screen lives, and it wears the selected tab's box as the shown row does (styles.css .tab-group-head.stand-in)
+  if (!snapView && !fileTabOpen && collapsed && holdsActive && !!activeId && hidden.includes(activeId)) head.classList.add("stand-in");
   // the tag's colour as the row's --chip-bg (the tab sets the same variable from its identity colour): the shown
-  // row's box wears the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
+  // row's box and the stand-in's wear the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
   if (sec.color) head.style.setProperty("--chip-bg", sec.color);
-  // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
-  // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
-  // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
-  // the title says which click this is. Escape does the same from anywhere.
-  const back = shown && !collapsed && holdsActive;
-  if (back) head.dataset.act = "show-transcript";
   const total = sec.ids.length;
-  const words = headWords(name, total, hidden.length, collapsed, holdsActive, back, shown);
+  const words = headWords(name, total, hidden.length, collapsed, holdsActive);
   head.title = words.title;
   let spoken = words.label;
   // a label the keyboard can fold: Enter or Space go through the same click → delegate path as the pointer
   head.setAttribute("role", "button");
-  // not a disclosure while its press puts the transcript back (`back`): "expanded" would promise a fold that
-  // press never does, so the state is left off and the label (headWords) names the action instead
-  if (!back) head.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  // the header holding the tab being read says so to assistive tech as well as by its mark (the chip
-  // accent-underlined): the tab itself may be folded out of the tree
+  head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // the header holding the tab being read says so to assistive tech (and, as the folded stand-in, by its box):
+  // the tab itself may be folded out of the tree
   if (holdsActive) head.setAttribute("aria-current", "true");
   head.tabIndex = 0;
   head.addEventListener("keydown", (e) => {
@@ -6452,9 +6449,8 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
     // the window's arrows do the same when focus is elsewhere). Enter drops back into the message box while
     // the transcript shows and the box takes input (the mirror of the box's Escape, which lands here); with
     // the box disabled (the section view up, a closed session) Enter presses the header as Space does. Space
-    // always presses: fold or open with the section in the pane (toggle-group), or the transcript back
-    // (show-transcript). Any other header: the arrows bubble to the window's handler (they step the ACTIVE
-    // tab, focus staying put) and Enter presses, as on any button.
+    // always presses: fold or open (toggle-group). Any other header: the arrows bubble to the window's handler
+    // (they step the ACTIVE tab, focus staying put) and Enter presses, as on any button.
     // the menu key (or Shift+F10) opens the tag menu under the header, as the Sessions pane's rows do (2026-10-01)
     if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
       e.preventDefault(); e.stopPropagation();
@@ -7033,8 +7029,8 @@ function renderTabs() {
   // divider with the keep-groups-together setting off (tab-groups.ts owns the rule). A folded section
   // renders its header alone, with the count and a pip when a member is working or blocked, so the
   // gist survives the fold (progressive disclosure). The ACTIVE tab's section folds like any other: its
-  // header is then the hidden tab's stand-in (focus, the arrows) and the pane shows the section at a
-  // glance (renderSnapshot); the keyboard walk (visibleOrder()) drops the folded ids so ←/→
+  // header is then the hidden tab's stand-in (focus, the arrows, the selected box) and the pane keeps
+  // the transcript; the keyboard walk (visibleOrder()) drops the folded ids so ←/→
   // skip them. On the phone layout (phoneLayout — the kernel page's own media rule) the plan sections
   // the same way, so the phone's session list, scraped from the strip's children in order, reads as the
   // desktop strip does (the user 2026-09-16), and since 2026-09-23 it folds the same way too, from the
@@ -7481,10 +7477,12 @@ function showSelectionMenu(e: MouseEvent) {
   // Comment first, Quote second (the user 2026-08-23): Comment is the primary act — a side thread
   // about the passage — and Quote is the lighter one. Comment only when the selection sits in a real
   // transcript turn on a real session: commentAim's gate, the one the key asks too. Its sub-line names
-  // the key while one is bound (keyHint reads the live overrides), the tab menu bell row's way.
+  // the key while one is bound and no other command's saved binding takes it here (commentKeyHint reads
+  // the live overrides and asks the key handler's own stand-down), the tab menu bell row's way; a chord
+  // with no Ctrl, Alt or Meta it names on every page, though only the shell's dispatcher runs one.
   const aim = commentAim();
   if (typeof aim === "object") {
-    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), keyHint("chat.commentSelection") || undefined);
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), commentKeyHint() || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7533,18 +7531,64 @@ function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
     && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
+// The chat's own commands whose capture handler (the nav trail's or the jump moves', below) answers chord `ch`: those
+// handlers run on the chat document with or without the shell, and before the shell's dispatcher would hear the key, but
+// each reads a chord only with the modifiers it checks first (keybindings' CHAT_KEY_COMMANDS and chatAnswers: the nav
+// trail's needs Ctrl or Meta, the jump moves' Ctrl, Alt or Meta).
+function chatKeyCommands(ch: string): string[] {
+  return CHAT_KEY_COMMANDS.filter((id) => chatAnswers(id, ch));
+}
+// The command that runs on the comment key's chord `ch` on this page in place of the comment command, or null (review,
+// 2026-09-30). A binding the reader SAVED for another command outranks the comment key's default (keybindings' chordMap).
+// One of the chat's own commands saved there, when its handler below reads that chord, takes it on any page, so the
+// comment key steps aside and does not run beside it (where the chat's two handlers both run, keybindings' yieldsTo
+// lists as its store (3)). A Navigate back saved on an Alt chord does not: the nav trail's handler never reads a chord
+// without Ctrl or Meta, so the comment key keeps it (review, 2026-10-01).
+// Inside the shell the rest is the shell dispatcher's pick, asked of the shell (__rompChordPick), which holds the command
+// list: a key saved under an id no command has runs nothing there, so the comment command keeps it. On a page with no
+// shell nothing else runs a saved binding, so the comment key keeps its chord.
+function commentKeyTakenBy(ch: string, ov: Bindings, mac: boolean): string | null {
+  const own = savedHolder(ch, chatKeyCommands(ch), ov, mac);
+  if (own) return own;
+  if (!inRompShell()) return null;
+  let pick: unknown = null;
+  try { const f = (window.parent as any).__rompChordPick; if (typeof f === "function") pick = f(ch); } catch (e) { /* the shell's script has not run */ }
+  return typeof pick === "string" && pick !== "chat.commentSelection" ? pick : null;
+}
+// The key the right-click menu's Comment names: the comment key's chord, or none while another command runs on it here
+// (commentKeyTakenBy, the key handler's own stand-down), so the menu never names a key that does something else. A chord
+// with no Ctrl, Alt or Meta (the dialog records Shift+F2, say) it names as any other, though the key handler below reads
+// no such chord and only the shell's dispatcher runs one, from outside a text field: on a page with no shell the menu then
+// names a key that runs nothing (comment-key.test.ts discloses it).
+function commentKeyHint(): string {
+  const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
+  const ov = loadOverrides();
+  const ch = effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], ov, mac);
+  return ch && !commentKeyTakenBy(ch, ov, mac) ? displayChord(ch, mac) : "";
+}
 // The key (desktop): chat.commentSelection in the shell's registry (commands.ts DEFAULT_CHORDS, Mod+/). With focus in
 // the chat this capture handler answers, reading the overrides store per press, so a rebind in the shortcuts dialog moves
 // it too (the chat.navBack pattern); with focus in the shell the command's run posts commentSelection here. It fires from
 // the message box too, as the jump cluster's keys do, and the selection it reads is the transcript's: taken in the
 // capture phase with its default prevented, the chord's "/" never reaches the box, so no "/" is typed and the slash menu
-// (which opens on the box's input) stays shut.
+// (which opens on the box's input) stays shut. Besides a chord with no Ctrl, Alt or Meta (which only the shell's
+// dispatcher runs), a held key and an input method's composition, it also leaves its chord alone in two cases the review
+// of #39 found: in the file viewer's code editor, whose own toggle comment is the same Mod+/ (keybindings'
+// editorKeepsKey; the shell's dispatcher on this document stands down there too), and when another command's SAVED
+// binding reads as the same chord and runs on this page instead (commentKeyTakenBy): one of the chat's own commands
+// whose handler below reads that chord and takes the key, or inside the shell the command the shell's dispatcher on
+// this document picks. A page with no shell (a standalone /chat, the VS Code view) has no dispatcher, so there a
+// binding saved for any other command leaves the key the comment key, as the menu's hint says, unless it is one of the
+// chat's own whose handler reads the chord.
 window.addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.altKey || e.metaKey) || e.repeat || e.isComposing) return;   // plain typing is never a command
   const ch = chordOf(e);
   if (!ch || !ch.includes("+")) return;
   const mac = /Mac|iP(hone|ad|od)/.test(navigator.platform || "");
-  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], loadOverrides(), mac)) return;
+  const ov = loadOverrides();
+  if (ch !== effectiveChord("chat.commentSelection", DEFAULT_CHORDS["chat.commentSelection"], ov, mac)) return;
+  if (editorKeepsKey("chat.commentSelection", ch, e.target, mac)) return;   // the code editor comments its own line
+  if (commentKeyTakenBy(ch, ov, mac)) return;   // a binding saved for another command runs here instead
   e.preventDefault(); e.stopPropagation();
   commentOnSelection();
 }, true);
@@ -8353,7 +8397,10 @@ function showTagMenu(x: number, y: number, name: string, folded: boolean | null,
   if (!g) return;   // gone, or a create still in flight: no id to address yet (the flyout's rule)
   const lens = surfaceLens(effViews(), "chat");
   const only = !lensAll(lens) && !lens.none && (lens.tags || []).length === 1 && (lens.tags || [])[0] === name;
-  ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true }, g.color || "", paletteColors,
+  // the overview's row on a group header alone (its section is on the strip, where renderSnapshot finds it), never on the
+  // phone (no overview there): Close overview while this tag's shows, Show overview otherwise
+  const overview = folded === null || phoneLayout() ? null : snapView === name;
+  ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true, overview }, g.color || "", paletteColors,
     { pick: (act) => tagMenuPick(act, name, folded !== null), recolor: (c) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { color: c }); } },
     { viaKeyboard, onClose: onTabMenuClosed });
 }
@@ -8371,7 +8418,11 @@ function tagMenuPick(act: TagMenuAct, name: string, fromHead: boolean): void {
       openTagRenamePrompt(name, (raw) => tagRenameVerdict(viewTagUnion(effViews()), name, raw),
         (to) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { rename: to }); });
   } else if (act === "fold" || act === "open") {
-    writeTabGroups(setSectionCollapsed(tabGroups(), name, act === "fold"));   // the header's fold, without the pane's view
+    writeTabGroups(setSectionCollapsed(tabGroups(), name, act === "fold"));   // the header's fold, as its click does
+  } else if (act === "overview") {
+    showOverview(name);   // the section at a glance (a header's click only folds, 2026-10-02)
+  } else if (act === "closeOverview") {
+    leaveSnapshot();
   } else if (act === "only") {
     postLens({ actives: Object.assign({}, (effViews() || {}).actives, { chat: { tags: [name] } }) });
   } else if (act === "configure") {
@@ -13886,7 +13937,7 @@ function silentActivate(id: string): void {
   renderTabs();                // mark the shown tab active in this column's strip
   // deliberately NO unfoldSectionOf (unlike setActive, which unfolds a collapsed tab it activates): silentActivate is
   // a SILENT non-gesture adoption, so it leaves any fold to the user. A folded active tab is a designed state (its
-  // section header stands in and showActive renders the section snapshot, tabInView admits a folded tab), and the
+  // section header stands in while showActive renders the transcript, tabInView admits a folded tab), and the
   // persist + relay re-arm carry the tab to the kernel regardless of the strip fold (round three, low d)
   showActive();                // reveal the transcript on its own, and re-arm the relay via notifyActive; NO focus
   //                              hop (no focusActiveTab), no nav/anchor/landing (round two, medium 1)
@@ -14294,8 +14345,9 @@ function dropFileTab(dragged: HTMLElement, id: string): boolean {
 (window as any).__rompFileTabList = () => fileTabsNow().map((t) => ({ id: t.id, path: t.path, sid: t.sid, host: fileHost(t.sid) }));   // the shell's session switcher lists the open files too (palette-main.ts)
 
 // A SECTION AT A GLANCE (tab-snapshot.ts owns the model). `snapView` is the section the pane is showing:
-// page state like the peek, never stored. A header click sets it (the #tabs delegate's toggle-group), any
-// session pick clears it (setActive), Escape and the header's second click leave it (leaveSnapshot). The
+// page state like the peek, never stored. The tag menu's Show overview and the palette's Show tag overview set it
+// (showOverview; a header's click only folds since 2026-10-02), any session pick clears it (setActive), Escape and
+// the tag menu's Close overview leave it (leaveSnapshot). The
 // host is ONE stable node under #content, made once with its delegate installed once (the click-safe rule:
 // the rows are rebuilt from every push that changes one), and `snapModel` is the last model painted:
 // snapshotModel hands it back unchanged when no row differs, and then only the "ago" texts are refreshed
@@ -14371,8 +14423,7 @@ function snapshotHoldsFocus(): boolean {
   return !!host && !!document.activeElement && host.contains(document.activeElement);
 }
 /** Back to the active session's transcript without picking a session. Two gestures land here: Escape while
- *  the view shows (below), and a click on the header whose section the pane shows when the section is open
- *  and holds the tab being read (show-transcript: the click that put the section in the pane, undone).
+ *  the view shows (below), and the tag menu's Close overview on the header whose section the pane shows.
  *  Nothing about "active" moves: renderTabs drops the header's snap-shown mark, showActive puts the
  *  transcript back and re-enables the composer. A row that held focus is hidden with the host, so focus goes
  *  to the active tab (snapshotHoldsFocus, read before the hide). */
@@ -14384,6 +14435,22 @@ function leaveSnapshot(): void {
   showActive();
   if (held) focusActiveTab();
 }
+/** The view's way IN: a section's overview in the transcript's place. Two gestures land here, the tag menu's Show
+ *  overview on a group header and the palette's Show tag overview (the user 2026-10-02: a header's click only folds
+ *  now, and the overview moved where it is asked for by name). Never on the phone, whose picker is a list over the
+ *  pane rather than a strip beside it. A file tab up is left first (its discard ask; a no keeps the file and shows
+ *  nothing). renderTabs puts the mark on the header (the strip's signature reads snapView) and showActive paints the
+ *  view; a name the strip no longer shows puts the transcript back there (renderSnapshot: the absence is the event). */
+function showOverview(name: string): void {
+  if (!name || phoneLayout() || !leaveFileTab()) return;
+  snapView = name;
+  renderTabs();
+  showActive();
+}
+// the tag groups this column's strip shows, for the palette's Show tag overview (palette-main.ts): each group's tag, colour and
+// member count in strip order; null on the phone layout, which has no overview
+(window as any).__rompTagSections = () => phoneLayout() ? null
+  : lastStripItems.flatMap((it) => ("head" in it && it.head.name !== null ? [{ name: it.head.name, color: it.head.color || "", count: it.head.ids.length }] : []));
 // ESCAPE LEAVES THE VIEW, and yields to every layer that owns its own Escape: two phases on the window
 // (tab-snapshot-view.ts installSnapshotEscape). Armed at capture, while this page's layers are still on the
 // page to be seen: the menus (the tab menu's closer, registered before this one, runs first and marks the
@@ -21216,6 +21283,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   // the shell's palette / shell-focus chords: the chat owns the nav trail, the shell just asks
   if (m.romp === "chatNav") { navHist.go(m.dir === 1 ? 1 : -1); return; }
+  // the shell's palette: "Show tag overview" picked a tag group of this column's strip (palette-main.ts), the tag menu's path
+  if (m.romp === "showOverview") { if (typeof m.tag === "string") showOverview(m.tag); return; }
   // the shell's palette / shell-focus chords for the jump cluster's moves (palette-main.ts chat.prevMine and the rest)
   if (m.romp === "chatJump") { if ((MOVES as readonly string[]).includes(m.move)) runJump(m.move as Move); return; }
   // the shell's palette / shell-focus key for "Comment on selection" (palette-main.ts chat.commentSelection); a palette run
@@ -23619,26 +23688,19 @@ setupSettings();
     // focus to the body — so Enter afterward did nothing). Now focus the (rebuilt) active tab, so the model
     // is consistent: tab focused → Enter drops into the message box; Escape there returns to the tabs.
     select: (el) => { const id = el.dataset.id; if (id) { selectStripTab(id); focusActiveTab(); } },   // a session, or a file tab (2026-09-30)
-    // a section header (tab groups): fold or open that group — the new state is the opposite of the
-    // one the header RENDERED (data-folded), never a toggle of the stored bit (a header can render a
-    // state the store does not hold). The write notifies (TABGROUPS_EVENT) and the listener re-renders:
-    // one render path for a local toggle and a sibling pane's alike. The same click shows the section at
-    // a glance in the transcript's place (snapView; showActive paints it), open or folded: the user
-    // looks at the group they just folded or opened, and a session pick puts a transcript back. On the
-    // PHONE the picker's heading folds through this same handler (kernel.py _CHAT_MOBILE_JS clicks the
-    // hidden header, 2026-09-23) and the tap folds and nothing else: the picker is a list over the pane,
-    // not a strip beside it, and the transcript under it stays where the reader left it.
+    // a section header (tab groups): fold or open that group, and NOTHING ELSE (the user 2026-10-02, who found the
+    // overview a click also opened confusing and wanted to stay where they were): the pane keeps what it shows, the
+    // active session's transcript included when its tab folds away under this header (the header then stands in for
+    // it), and the section at a glance opens from the tag menu and the palette instead (showOverview). The new state
+    // is the opposite of the one the header RENDERED (data-folded), never a toggle of the stored bit (a header can
+    // render a state the store does not hold). The write notifies (TABGROUPS_EVENT) and the listener re-renders:
+    // one render path for a local toggle and a sibling pane's alike. The PHONE picker's heading folds through this
+    // same handler (kernel.py _CHAT_MOBILE_JS clicks the hidden header, 2026-09-23), which never opened a view there.
     "toggle-group": (el) => {
       const name = el.dataset.group;
       if (!name) return;
-      const phone = phoneLayout();
-      if (!phone && leaveFileTab()) snapView = name;   // the view takes the pane from a file tab too (its discard ask first; a no folds and shows nothing)
       writeTabGroups(setSectionCollapsed(tabGroups(), name, el.dataset.folded !== "1"));
-      if (!phone) showActive();
     },
-    // the header whose section the pane shows, open and holding the tab being read (makeGroupHead): a
-    // second click puts the transcript back
-    "show-transcript": () => leaveSnapshot(),
     close: (el) => {
       const id = el.dataset.id;
       if (id && isFileTabId(id)) { closeFileTab(id); return; }   // a file tab (2026-09-30): nothing to end, the tab goes

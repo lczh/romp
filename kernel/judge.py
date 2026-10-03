@@ -3148,9 +3148,15 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
     session's new leaf, drops the previous leaf's slots (_note_leaf), so one tree per session holds across clears;
     a parse stored under that retired leaf afterwards (a pass working from rows it snapshotted before the flip, an
     episode render of the pre-clear transcript) is handed back to its caller and not stored, since the release is
-    a one-shot and nothing would drop it again. A leaf discover never handed out (a subagent's agent file) is
-    never retired and stores as an override slot."""
+    a one-shot and nothing would drop it again. For the same reason the assembly entry such a parse installed for
+    this sid is released here as well (2026-10-01): the flip released the retired leaf's entry once, and a parse
+    after it put one back that nothing would release again before the cache's count cap. A leaf discover never
+    handed out (a subagent's agent file) is never retired and stores as an override slot."""
     if _leaf_retired(fsid, leaf):
+        try:
+            em.release_assembly(leaf, rompuuid=fsid)
+        except Exception as e:                    # noqa: BLE001 — a trim never fails the parse it rides
+            em.release_failed("retired parse", leaf, e, sid=fsid)
         return
     slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
@@ -9072,7 +9078,11 @@ def _note_leaf(sid, path_str):
     parent's live slot is not the child's to drop. The retired leaf is remembered so a parse stored under it AFTER
     the flip (a pass that snapshotted its rows before a mid-pass /clear) is refused by _parse_store rather than
     kept as a live slot; a leaf handed out again (the anchor, while a fresh lastSid names a file not yet on disk)
-    is current again and stores as before."""
+    is current again and stores as before. With the slots go this sid's assembly entry of the retired leaf and, when no
+    live lineage reads the file, its record entry (_release_retired_records, 2026-10-01). Those two do file I/O (a stat, a
+    sidecar read, a states read, a document write) inside discover, which every pane rides: a raise there is noted once per
+    file (em.release_failed) and the flip goes on: the release stops where it raised, what ran before it stays released (the
+    slots, and the assembly entry when the record drop or its lineage read raised), and the record drop is not retried."""
     with _LEAF_LOCK:
         prev = _LEAF_SEEN.get(sid)
         _LEAF_SEEN[sid] = path_str
@@ -9082,6 +9092,41 @@ def _note_leaf(sid, path_str):
             retired.add(prev)
     if prev is not None and prev != path_str:
         parse_cache_drop_leaf(prev, sid)
+        try:
+            em.release_assembly(prev, rompuuid=sid)   # and this sid's assembly entry of it (2026-10-01), which held every record
+            #                                           of the retired leaf until the cache's count cap
+            _release_retired_records(sid, prev, path_str)
+        except Exception as e:                        # noqa: BLE001 — a trim never fails discover
+            em.release_failed("leaf flip", prev, e, sid=sid,
+                              outcome=em.RELEASE_FAILED_OUTCOME + "; the record drop is not retried")
+
+
+def _release_retired_records(sid, prev, leaf):
+    """The record side of a leaf flip (2026-10-01): the retired leaf's reader entry goes when no live lineage of the session
+    reads it. After a first /clear the retired leaf is the session's anchor, a candidate of the new leaf's parse, and stays.
+    After a second one it is the first clear's file: neither the new leaf's candidates nor its lineage closure name it, and
+    its whole entry (the judges read the leaf whole while it was current) stayed until the reader's LRU reached it. The
+    judges' episode scan still walks that file (the session's episode rows name it), and the flip runs inside discover,
+    BEFORE that scan: so the drop writes the file's fold document first when it lacks what this process holds, the scan's
+    rewound memo among it (em.release_records takes the quiet drop's write half), and the scan restores the memo from the
+    document at the guard bytes' cost (round one of the review: a pop with no write sent the scan back to the whole file,
+    and the entry it re-read stayed). A file discover hands out as ANY session's current leaf stays (a fork child's first
+    leaf is its parent's live transcript), so does a registered session's own file, as the episode scan keeps it
+    (_per_file_rewound), and so does a file a whole assembly entry still folds over (em.release_records). A lineage that
+    cannot be read drops nothing, and the undone drop is counted and said (em.release_failed), never skipped in silence."""
+    try:
+        cands = _judge_candidates(sid, [leaf])
+        links = em.resume_fork_links(em._load_states(str(STATESDIR / (sid + ".jsonl"))))
+        keep = {str(f) for f in em._lineage_closure(Path(leaf), cands, links)}
+    except Exception as e:                         # noqa: BLE001 — the lineage could not be read: nothing is dropped on a guess
+        em.release_failed("leaf flip lineage", prev, e, sid=sid,
+                          outcome=em.RELEASE_FAILED_OUTCOME + "; the record drop is not retried")   # the assembly release ran
+        return
+    with _LEAF_LOCK:
+        keep.update(str(p) for p in _LEAF_SEEN.values())
+    if str(prev) in keep or _sdk_owned(Path(prev).stem):
+        return
+    em.release_records([str(prev)], keep=keep)
 
 
 def _leaf_retired(sid, leaf):
@@ -20046,8 +20091,8 @@ def _dump_goals():
 # run_pass, the SAME function the in-process producer calls (round two: a copy of the producer had drifted three ways before
 # it ever ran). Every counter on the done line is a PER-PASS figure: wallMs, tierCpuMs and workerCpuMs are the pass's own,
 # and the recordCache, asmCheckpoint, parses, goalIo and tierGate blocks are the differences against the previous pass's snapshot (the
-# kernel feeds its /perf counters per pass) except their GAUGES (_SERVE_GAUGES: recordCache's entries, bytes, budgetBytes and
-# countCap; asmCheckpoint's asmDocMemo; tierGate's stamps), which ride as current values (restoreMs accumulates since boot and is differenced like
+# kernel feeds its /perf counters per pass) except their GAUGES (_SERVE_GAUGES: recordCache's entries, bytes, realBytes,
+# decodedMultiple, budgetBytes and countCap; asmCheckpoint's asmDocMemo; tierGate's stamps), which ride as current values (restoreMs accumulates since boot and is differenced like
 # every counter, so the line carries the pass's own restore time); `recovered` is this process's judge-module
 # recovery flag, consumed by the child
 # and acted on by the kernel (the give-up re-arm after a rate-limit storm ends). One pass at a time: a `pass` arriving before the previous `done` is answered `busy` and
@@ -20241,7 +20286,7 @@ def _serve_counter_blocks():
 
 
 _SERVE_GAUGES = {                                 # the keys of each block that are GAUGES (a current size, a cap), not counters:
-    "recordCache": ("entries", "bytes", "budgetBytes", "countCap"),   #  they ride as their current values, never as a difference
+    "recordCache": ("entries", "bytes", "realBytes", "decodedMultiple", "budgetBytes", "countCap"),   #  they ride as their current values, never as a difference
     "asmCheckpoint": ("asmDocMemo",),             # (round three); restoreMs is NOT one: _restore_ms accumulates since boot, so its
     "parses": (), "goalIo": (),                   #  per-pass difference is the pass's own restore time (round four)
     "tierGate": ("stamps",)}                      # the stamps held is a size, the per-tier counters are counters

@@ -1664,8 +1664,18 @@ document over a tail read instead of reading the file whole, provided the
 document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
+The record drops at the events that end a file's use (a leaf a second /clear
+retired, a dead timeline lane's leaf and anchor) take the same write, budget
+and deferral with no two-minute wait, since the event says the file's use
+ended (a drop the budget defers is paid later through the quiet drop's own
+path, after that wait): the judges' episode scan after the second /clear, and
+the next named fold over a dead lane's leaf, restore from the document instead
+of reading the file whole again, while the file is unchanged. A session revived
+after its dead lane let go has its leaf read whole once on its first turn, by
+the judges' episode scan, while its anchor is not read whole.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
-it (the drop then pops as it did before the write existed, except under the
+it (the drop then pops as it did before the write existed, unless a whole
+assembly entry pins it, counted `recordCache.pinnedKept`, and except under the
 incident scan's memo, which keeps a walked file's records resident when the
 document write is off, since its memo cannot reach the disk); `ROMP_CKPT_CONVERGE_MB`
 is the cycle budget both charge, and `0` turns the drop write off the same way
@@ -1695,7 +1705,9 @@ judges' flag is skipped and counted (`flagMismatch`), since the reader would
 delete a document under the wrong flag. A leaf with no compaction boundary has
 no cut and no document: it is read whole at every boot by design. `ROMP_ASM_CONVERGE=0` turns that step off, and so do the pass's
 own switch and a zero byte budget, as for the drop write. The owed table
-is bounded: over it the oldest owed drop is paid by its pop alone, and an owed
+is bounded: over it the oldest owed drop is paid by its pop alone (unless a
+whole assembly entry pins it: that entry stays, no longer owed, until the
+file's next quiet drop retries it), and an owed
 file since deleted has its entry popped when the cycle pays. A leaf unchanged for longer than the reader keeps a quiescent
 file's whole entry (two minutes) is refused by the pass and counted under
 `quiescent`: its heal would read the file whole every cycle and the write
@@ -2399,8 +2411,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   zero bytes). These occupancy gauges attribute a resident size to its
   holders; they do not sum to it. The transcript record cache, the largest
   resident holder when the kernel is large, is not among them: its occupancy
-  already rides this response under `recordCache` (`entries` and `bytes`
-  against `budgetBytes`), so a resident size these gauges leave unaccounted
+  already rides this response under `recordCache` (`entries`, and
+  `realBytes` against `budgetBytes`), so a resident size these gauges leave unaccounted
   for is read there first. The block reads a length or a counter per
   cache, under the cache's own lock where its readers take one and over a
   copied value list otherwise; on a plain read it walks neither the
@@ -2755,8 +2767,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   pass has written, re-seated on it by the restore road, where it lands
   here only when that restore refused the document),
   `full:noDocument`, `full:noDir` (no checkpoint directory), `full:refused` (a document that stood but did not verify,
-  its fallback reason counted), `bypass` (a pending cut armed on the session)
-  and `fallback`; the same block rides `asmCheckpoint.parse` on GET /perf,
+  its fallback reason counted), `bypass` (a pending cut armed on the session),
+  `fallback`, and `released` (assembly entries dropped at an event that ended
+  their file's use: a leaf a /clear or a resume fork retired, and again any
+  entry a later parse of that retired leaf installed, a dead timeline lane with
+  a document a restore would take, the last viewer of a subagent closing),
+  and `releaseFailed` (such a release that raised, stopping where it raised
+  with what ran before it still released, and once for each assembly entry
+  whose pin check raised at a record-cache drop, which counts that entry as
+  not pinning, the drop going ahead unless another entry pins it; said on
+  stderr once per file and outcome); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar
@@ -2804,7 +2824,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `docReadBytes`, the documents the pass's writes read for their carry,
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
-  for the documents written at the reader's quiescence drop and the drops
+  for the documents written at the reader's quiescence drop (and at the record
+  drops of the events that end a file's use) and the drops
   deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
@@ -2866,9 +2887,75 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   nobody can log into) or when the request says `?stacks=1` (`romp perf
   stacks`, T401); `null` otherwise.
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
-  `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
-  `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
+  `entries`; `bytes`, the held entries' file bytes; `realBytes`, the same
+  entries decoded, `bytes` times `decodedMultiple` (bytes of memory per file
+  byte: 2.85 by default, what a transcript measured decoded in a lab, which
+  the kernel's resident size over its cached file bytes agrees with; content
+  moves it, 1.44 to 7.7 by shape as measured;
+  `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, over 0 and at most 1000, and
+  1 weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget
+  in memory, per process, which `realBytes` is weighed against, the least
+  recently used entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  which is 4 GiB times `decodedMultiple` in memory, so a machine under about
+  23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
+  bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
+  in file bytes); `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright in
+  megabytes of memory). A budget eviction also releases every assembly
+  entry (a chat's copy) that read the evicted file, so the records' lists
+  go, though an idle session's parsed tree shares their text until the
+  parse store replaces or drops it and a shown tab's build memos of it go
+  at that tab's next build (its goal-tree memo at the next build that
+  walks its goals: a build that merges a live tail, runs while a rewind
+  is armed or reads an empty goal store keeps it), or when the tab is no
+  longer shown, and the live-merge memo, which the chat, feed and
+  timeline builds fill for any alive session, shown or not, keeps it
+  until a build merges a live tail over a newer parse or, at the next
+  push that serves a chat tab or the Outline pane, the session is
+  neither shown nor alive (its 512-entry cap ages out the oldest first);
+  a build that read the file before the
+  eviction and installs after it keeps what it read, and a file evicted
+  during its own read is not released. While the file is unchanged that
+  chat's display build is served from its parsed tree and rebuilds
+  nothing; a comment create rebuilds the entry once (for a chat parsed
+  whole, beside the parsed tree, so two copies stand until the parse
+  store replaces or drops that tree, a shown tab's build memos of it go
+  and the live-merge memo lets it go (as above), or the budget evicts
+  the file again; a chat whose stored parse fell
+  back to a plain parse installs nothing, and its creates read the
+  transcript, while one whose rebuild itself falls back after a release
+  parses again at each create until its files change), as does the first
+  build after an append (a restore from its document or a whole parse,
+  under `asmCheckpoint.parse`), and near the limit busy sessions may
+  rebuild repeatedly; `countCap`,
+  `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
+  `droppedBytes` (the quiescence drop, the files a dead timeline lane
+  releases, and a leaf a second /clear retired), `pinnedKept` (drops that kept an entry because a whole assembly
+  entry still folds over its generation and its next parse after a drop would be
+  whole again: its leaf has no document a restore would take, or a restore here
+  refused it; the drop would have freed nothing that entry does not hold, so the
+  bytes stay counted; a restored entry, or a whole one whose leaf has a document a
+  restore would take, never holds a drop back, and neither does a whole entry
+  whose pin check raised, counted under `asmCheckpoint.parse.releaseFailed`), `droppedHeld` and
+  `droppedHeldBytes` (the drops, of `dropped`, whose records an assembly entry
+  folding over that generation still holds until its next visit, a restored
+  entry, a whole one whose leaf has a document a restore would take, or a whole
+  one whose pin check raised, and the
+  bytes of those records: `bytes` fell by them while the memory stayed, so the
+  drops freed about `droppedBytes` less `droppedHeldBytes` of file bytes, that times
+  `decodedMultiple` in memory), `budgetRereads` and
+  `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
+  the last `countCap` it evicted, each counted once, and the file bytes
+  they read again, a tail restored first and the whole read that upgrades
+  it both counted, and a file rewritten after its eviction counted too:
+  near zero while the budget evicts only cold entries,
+  level with `budgetEvictions` once the files read every cycle no longer
+  fit and every read misses; after a change that lets the budget bind, read
+  them beside `budgetEvictions`, `wholeReads` and the restores and whole
+  parses under `asmCheckpoint.parse`), `budgetReleased` (the assembly
+  entries budget evictions released, several when one evicted lineage file
+  was read by several chats),
+  every byte counter in file bytes,
+  `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
@@ -2923,7 +3010,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   time); the refresh's own parse counts under `parse` as `private`.
   Two more count what the hydrated-body memo does: `hydratedHits`, the
   fills it served without a read, and `hydratedEvicted`, the entries its
-  cap pushed out. A memo hit for an atom whose body another thread had
+  cap pushed out; a released leaf's bodies leave the memo uncounted. A memo
+  hit for an atom whose body another thread had
   already written when this call looked is not counted, since that
   thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
@@ -3714,7 +3802,7 @@ the pass's own, `failures` its tier crashes, and the five blocks (`recordCache` 
 gate counters per stage (`plan`, `group`, `close`, `distill`, `unblock`, `consolidate`): `ran`, `skipped`, `stamped`,
 `bypassed`, `incomplete`, `due_clock`, the admittance the pass ran under) are the DIFFERENCES against the previous pass's snapshot for every counter, so the kernel can feed its `/perf`
 counters per pass, while each block's GAUGES ride as their current values: in `recordCache` the keys `entries`, `bytes`
-(the cache's contents now), `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
+and `realBytes` (the cache's contents now), `decodedMultiple`, `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
 memo's size and cap); in `tierGate` the key `stamps` (the stage stamps held now); `parses` and `goalIo` carry counters only. `asmCheckpoint.restoreMs` is a counter like its neighbours (the restore's parts
 since boot, as described above), so the line carries the pass's own restore time. A non-numeric value (a name) rides as
 current too. `recovered` is the child's judge-module recovery flag (the once-per-storm
@@ -5285,12 +5373,17 @@ first message of a side conversation about it, and **Quote** puts the passage in
 instead. **Ctrl+/** (**⌘/** on a Mac, the key code editors use to toggle a comment) opens the same
 box from the keyboard, just under the selection, from anywhere in the chat including the message
 box, where it types no "/" and opens no slash-command menu; the right-click menu shows the key
-under **Comment**. The key is the "/" character, however your layout types it: on a German
-keyboard, where "/" is Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on
-selection** does the same for the passage that was selected when you opened the palette. With
-nothing selected in a message, or in a session that has not finished starting or loading, it says
-so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
-there.
+under **Comment**. If you have given that key to another command in the shortcuts dialog, the
+dashboard runs that command on it instead, and the menu shows no key. In the file viewer's code
+editor (with **Allow file editing** on), wherever the viewer opens, **Ctrl+/** (**⌘/**) is
+otherwise left to the editor. The editor toggles a comment on the line in the languages it
+highlights, except JSON; in plain text, in any file it does not highlight, and in the editor's
+search box, it does nothing with the key.
+The key is the "/" character, however your layout types it: on a German keyboard, where "/" is
+Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on selection** does the same for the
+passage that was selected when you opened the palette. With nothing selected in a message, or in a
+session that has not finished starting or loading, it says so instead of opening anything. The key
+is a command in the shortcuts dialog and can be rebound there.
 
 Selecting a passage also puts it in a quote chip above the message box, and the chip's row carries
 a **Comment** button before **Stage**, on every device. It opens the same box on the chip's passage,
@@ -5510,9 +5603,9 @@ the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
-group is renamed. The section of the tab you are reading folds like any other; its header marks
-that it holds the tab (the tag's name is underlined), and folded, the header stands in for the tab:
-focus lands on it, and the left and right arrows step from there. The `archived` section starts
+group is renamed. The section of the tab you are reading folds like any other, and the transcript stays on
+screen; folded, its header stands in for the tab: it wears the selected tab's box, focus lands on it,
+and the left and right arrows step from there. The `archived` section starts
 folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
@@ -5577,8 +5670,9 @@ and on a phone a long press on a group heading in the session picker opens it ov
 long press as a right-click (Android's does). The menu shows the tag's chip at the top, so it is clear which tag it acts on, then:
 
 - **Rename…**, and under it the session palette's swatches, the current colour ringed: a swatch recolours the tag.
-- **Fold group** or **Open group**, on a header only: the header's own fold, without the section view a header click
-  also opens. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
+- **Fold group** or **Open group**, on a header only: the same fold as a click on the header. **Show overview**, on a
+  header only, shows the section at a glance (below); while it shows, the row reads **Close overview** and puts back the
+  session you were reading. The phone's menu has no overview row. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
   that tag). **Configure tags…** opens the tags dialog.
 - **Delete tag…**, whose sub-line counts the sessions that lose the tag.
 
@@ -5605,8 +5699,8 @@ tab, which still names the old tag after a rename until you change it.
 
 ### A tag section at a glance
 
-Clicking a tag section's header also shows the section in the transcript's place: one
-row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
+**Show overview** in a group header's tag menu, or **Show tag overview** in the command palette, shows the
+section in the transcript's place: one row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
 API error only you can clear, amber retrying an API error on its own, teal compacting, green waiting
 on background work, none while it is idle), a state chip when the state is worth a word, what it is
 doing now in a few words, and how long ago it last did anything. The chip is the one the bar under
@@ -5621,8 +5715,9 @@ working on shows the note as a quieter second line. Hover a row for its last mes
 its formatting; click one to open that session, which also opens its section if the section is
 folded (with several tags, the first folded group of them). The rows update as the sessions work and
 change only when something about a session changes; the **Needs you** chip follows the feed, one
-refresh behind it at most. The transcript comes back when you pick a session, press Escape, or click
-that header again while its section is open and holds the tab you are reading.
+refresh behind it at most. The transcript comes back when you pick a session, press Escape, or pick **Close overview** in the
+tag's menu. A click on a group header only folds or opens the group, and never changes what the pane
+shows (until 2026-10-02 it also opened this view).
 
 ### Coming back after a dropped connection
 
