@@ -3061,6 +3061,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   first segment, or its first two under `/push`, `/tunnels` and `/usage`,
   whose roads differ by the second), `warm.parse`, `warm.boot`,
   `producer`, `revive`, `rewind.migration`, `rewind.holds`, `move`,
+  `asm.refresh` (the assembly document refresh's thread), `comment.create`
+  (the thread a comment's create runs on), `restart` (the restart and Apply
+  now doors), `judge.end` (the thread that reaps a judge child; not a tier's
+  mark, and it builds and hydrates nothing),
   `remote-ws`, `federation.push`, `federation.pull`, `federation.ask`,
   `ask-poll`; `none` means the build ran on a thread with no mark, which
   should not happen: the kernel's thread census (every Thread, Timer and
@@ -3144,7 +3148,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   thread's opening: its liveness snapshot and names, timed beside its pass,
   not inside it), `jobsPass` (the jobs thread's pass) and inside it one
   `jobs.<job>` per job that thread runs (`jobs.interruptBlock`,
-  `jobs.autoNudge` and the rest), `push`,
+  `jobs.autoNudge` and the rest), and inside a job its finer parts as
+  `jobs.<job>.<part>` (such as the nudge job's snapshot, looks and parse),
+  which that job's own stage already covers, `push`,
   and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
   `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
