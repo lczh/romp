@@ -2559,7 +2559,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   unmoved tally rules a collection out of a job's `cpuMs` and a moved one
   does not put it there (the freeze controller's own collections, counted
   under `gc.freeze.collections`, run on the pusher thread and reach a job
-  only as a wait in its wall); compare `gc.gen."2"` or the kernel samples'
+  only as a wait in its wall; a job still open at the first read records its
+  CPU, any collection inside it included, only when it ends, so take the
+  tally from a read made before that job began or set such a job aside);
+  compare `gc.gen."2"` or the kernel samples'
   generation-2 tallies over the interval, and the ring rows only for the
   passes the ring still holds (the newest 16 on a plain read, the whole ring
   with `?ring=all`); the job's `jobs.<job>` stage is its wall, which also

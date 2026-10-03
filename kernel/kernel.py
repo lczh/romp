@@ -767,7 +767,8 @@ class _PerfStats:
         cannot say which jobs cost CPU. The CPU includes any collection the interpreter ran on the jobs thread during the job,
         a pause set by the heap and not by the job. The generation-2 tallies (gc.gen."2", a ring row's n2 and ms2) count every
         thread's collections, so an unmoved tally over the interval rules a collection out of a job's cpuMs and a moved one
-        does not put it there; the ring rows cover only the passes the ring still holds. A job that raised counts its run
+        does not put it there (a job open at the first read records its CPU, that collection included, when it ends); the
+        ring rows cover only the passes the ring still holds. A job that raised counts its run
         and its CPU too (_job_stage calls this from its finally). The pusher's own jobs (_pusher_cycle_jobs) are not counted
         here: their CPU is inside the pusher's cycle_cpu_ms_sum. The names are _job_stage's literals, a fixed set."""
         with self.lock:
@@ -64915,7 +64916,8 @@ def _job_stage(name, thunk):
     thread the job's own thread CPU and a run are counted too (jobs.cpuByJob, _PerfStats.job_cpu), read before the bookkeeping
     below, so a pass's wall can be split into the jobs that worked and the jobs that waited (for a lock, the disk or a free
     core). That CPU includes any collection the interpreter ran on this thread during the job; the generation-2 tallies count
-    every thread's collections, so an unmoved one rules a collection out and a moved one does not put it in the job."""
+    every thread's collections, so an unmoved one rules a collection out (for a job begun after the first read: an open job's
+    CPU, a collection inside it included, reaches cpuByJob when it ends) and a moved one does not put it in the job."""
     _t = time.monotonic()
     _c = time.thread_time()
     prev = getattr(_STAGE_TL, "name", None)
