@@ -18908,10 +18908,11 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     of it while the stat stands; the leaf is read only as each road reads it anyway. The one case that reads the first file
     again is a record of the leaf's graph linking into it (a CLI that writes such a link, outside the transcript model): a
     target it holds is then walked over both files (_cut_wide_walk), the first file read again outside the cache when the
-    set answered, and the leaf through the cache. So is a target of the leaf's graph that graph's walk refuses as having no
-    prose record above it (ANCHOR_NO_PROSE_ERR) when that link is what stopped it, a non-prose record linking into the
-    first file or a row under one before the next post-clear prose: over both files the walk reaches that file's prose
-    and answers from the tip, as before the leaf parsed alone (_cut_widen_linked, review round four). A comment in the
+    set answered, and the leaf through the cache. So is any target of the leaf's graph that graph's walk refuses as having
+    no prose record above it (ANCHOR_NO_PROSE_ERR) in such a session: where that link is what stopped the walk (a
+    non-prose record linking into the first file, or a row under one before the next post-clear prose), the walk over
+    both files reaches that file's prose and answers from the tip, as before the leaf parsed alone, and any other such
+    target keeps the refusal (_cut_widen_linked, review round four). A comment in the
     conversation a second /clear's card expands (the file between the two clears) is in neither file and still parks as
     lag, as it did before."""
     facts = {}
@@ -18924,7 +18925,7 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
         else:                                       # ANCHOR_NO_PROSE_ERR: the walk may have stopped at a link into the first file
             wide, looked = _cut_widen_linked(path, sid, anchor_uuid, dangling)
         if looked == "read":                        # the first file's bytes pulled: a read
-            _cut_road_read(sid, "widen (a target a /clear's leaf lacks, looked up in the session's first transcript)")
+            _cut_road_read(sid, "widen (a target a /clear's leaf lacks or cannot anchor, looked up in the session's first transcript)")
         elif looked is not None and looked.startswith("unreadable"):
             _CUT_ROADS["failed"] += 1                # said on stderr by _cut_first_unreadable, once per session
         else:
@@ -18973,10 +18974,10 @@ def _cut_widen_lag(path, sid, anchor_uuid, dangling):
 
 
 def _cut_widen_linked(path, sid, anchor_uuid, dangling):
-    """(answer, how) for ANCHOR_NO_PROSE_ERR on `anchor_uuid`, the cut walk's refusal over the leaf's own graph after a
-    /clear of a target that graph holds with no prose record above it there (review round four). That walk stops at a
-    parent the graph lacks, and when a record of the leaf links into the session's first file (a CLI that writes such a
-    link, outside the transcript model) and is not prose, an attachment or a tool row, it and the rows under it up to the
+    """(answer, how) for ANCHOR_NO_PROSE_ERR on `anchor_uuid`, the refusal the cut walk over a /clear's leaf alone gives
+    a target that graph holds with no prose record above it there (review round four). That walk stops at a parent the
+    graph lacks, and when a record of the leaf links into the session's first file (a CLI that writes such a link,
+    outside the transcript model) and is not prose (an attachment or a tool row), it and the rows under it up to the
     next post-clear prose were refused where the walk over both files reaches the first file's prose and answers from the
     tip. Decided as _cut_widen_lag decides its linked case: when the first file's uuid set (_cut_first_uuids) meets
     `dangling`, the parent targets the leaf's graph names and lacks, the walk over both files answers (_cut_wide_walk);

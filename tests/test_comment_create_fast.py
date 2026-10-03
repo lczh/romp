@@ -1171,6 +1171,40 @@ class CutFromTheDisplayParse(Base):
                           if got[u] != want[u]]
                 self.assertEqual(differ, [], "every uuid of both files, %d of them (%s)" % (len(uuids), link))
 
+    def test_the_no_prose_widening_reads_the_first_transcript_once_per_answer_and_nothing_without_a_dangling_parent(self):
+        # review round four's widening (_cut_widen_linked): in the linked world its first answer reads the first transcript
+        # once, the set's read with its records handed to the graph over both files, and counts a read; the next, which the
+        # set answers, reads it once again and counts a read; and in a cleared leaf whose graph names no parent it lacks, a
+        # row it cannot anchor keeps the refusal, reads none of that file and counts as the display road
+        first, leaf, _uuids = self._linked_world("cn5")
+        size = os.path.getsize(first)
+        km._parse(leaf, PARENT, self.now)
+        for anchor in ("ct5", "cr5"):
+            drop_reader(first)
+            zero_reads()
+            r0 = self.roads()
+            got = km._comment_cut_resolve(leaf, PARENT, anchor)
+            r1 = self.roads()
+            self.assertEqual({"answer": (got[0], got[2]), "bytes": read_of(first), "counted": {k: r1[k] - r0[k] for k in r1}},
+                             {"answer": ("", None), "bytes": size,
+                              "counted": {"whole": 0, "seeded": 0, "read": 1, "failed": 0}}, anchor)
+        restart()
+        old, _last, t = turns(self.now - 100000, 8, 1000)
+        first = write(self.proj / (PARENT + ".jsonl"), old)
+        head = attachment(t + 100, "czh", None, type="total_tokens_reminder")    # a parentless head that is not prose
+        new, _l, _t = turns(t + 101, 8, 1000, parent="czh", tag="c", compact_after=5)
+        leaf = write(self.proj / (CLEARED + ".jsonl"), [head] + new)
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: the leaf parses alone")
+        km._parse(leaf, PARENT, self.now)
+        drop_reader(first)
+        zero_reads()
+        r0 = self.roads()
+        got = km._comment_cut_resolve(leaf, PARENT, "czh")
+        r1 = self.roads()
+        self.assertEqual({"answer": got[2], "bytes": read_of(first), "counted": {k: r1[k] - r0[k] for k in r1}},
+                         {"answer": km.ANCHOR_NO_PROSE_ERR, "bytes": 0,
+                          "counted": {"whole": 1, "seeded": 0, "read": 0, "failed": 0}})
+
     def _two_creates_after_a_budget_eviction(self, path, files, anchors):
         """The chat's parse of the session whose leaf is `path` (its transcripts `files`) installs its entry; another file's
         read under a budget that holds only that file evicts the transcripts and releases the entry; the display's next
