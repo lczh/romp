@@ -252,6 +252,18 @@ def _heap_stats():
     JSON strings, which only the index wire (a proto-1 client) stores, so under the shipped wire it reads 0. These gauges
     attribute a resident size to its holders; they do not sum to it.
 
+    Four of them are ESTIMATES in memory units (the memory diagnosis, 2026-10-01: the kernel's resident size grew with about
+    2.85 times the record cache's file bytes, and the counts above, their three byte gauges aside (hydrated.bytes,
+    builtChat.serializedBytes and imgCache.bytes), sized nothing): recordCacheResident (the record cache's entries by class, whole leaf, tail, subagent and logs under the state root except the Codex and Claude
+    transcripts, their file bytes and those times the decoded multiple), pinnedByAssembly (records an assembly entry's adapter
+    holds that the record cache no longer does), builtAtoms (the live materialized atoms times an atom's measured size, the dead
+    slots times an LRU entry's) and restoredIndexes (the live lazy indexes' rows, record rows and light facts). Each is O(entries)
+    over its own container (the record cache's entries, the assembly entries' files, the live indexes), reads lengths, identities
+    and numbers the holders keep, and never iterates a records list or an index's rows. They overlap where the holders share
+    objects, so they are not meant to be summed. The assembly entries' own atoms and lookup maps are still the count
+    assemblyEntries alone: pinnedByAssembly weighs only the records an entry holds after the record cache let them go, so it reads
+    0 while the cache holds them, and that 0 never says the entries are free.
+
     What it never does: walk an object graph or the allocator's pools, collect, evict, fill a cache, read a file, build
     anything. Each gauge is O(1) or O(entries) over a copied value list: the built tabs (bounded by the open tabs) and the
     image entries, whose cache has no cap, so that gauge is O(entries) over whatever it has grown to, a refused file counting
@@ -319,7 +331,15 @@ def _heap_stats():
             "materializedLruSlots": _heap_read("materializedLruSlots", materialized_slots),
             "judgeUsageRows": _heap_read("judgeUsageRows", lambda: len(_JUDGE_USAGE_CACHE["rows"])),
             "builtChat": _heap_read("builtChat", built_chat),
-            "imgCache": _heap_read("imgCache", img_cache)}
+            "imgCache": _heap_read("imgCache", img_cache),
+            # estimates in MEMORY units beside the counts (the memory diagnosis, 2026-10-01): the record cache by class (its
+            # recordCache.bytes counts bytes on disk, and the decoded records weigh about 2.85 times that), the records assembly
+            # entries hold after the record cache let them go, the materialized atoms, the live lazy indexes
+            "recordCacheResident": _heap_read("recordCacheResident",
+                                              lambda: em.record_cache_resident(jd.STATE, (jd.CODEXDIR / "projects", jd.PROJECTS))),
+            "pinnedByAssembly": _heap_read("pinnedByAssembly", lambda: em.asm_pinned_records()),
+            "builtAtoms": _heap_read("builtAtoms", lambda: em.built_atoms_estimate()),
+            "restoredIndexes": _heap_read("restoredIndexes", lambda: em.restored_index_estimate())}
 
 
 def _perf_walks(snap):
@@ -331,9 +351,31 @@ def _perf_walks(snap):
     across object shapes at one version on one machine; on 2-CPU nodes one shape read 3.6 at one million and 6.3 to 7.7
     at four under 3.10, 3.12 and 3.13 alike). Each is one C call that holds the interpreter lock, so where the operating
     system has paged out or compressed the heap one read faults it back in while every kernel thread waits. On request
-    they read what they always read, through the same per-key guards."""
+    they read what they always read, through the same per-key guards. The same request carries the whole per-file read table
+    as well (_perf_paths, which ?paths=all runs alone)."""
     snap["heap"]["allocatedBlocks"] = _heap_read("allocatedBlocks", lambda: sys.getallocatedblocks())
     snap["gc"]["frozen"] = _gc_read("frozen", lambda: gc.get_freeze_count())
+    return _perf_paths(snap)
+
+
+def _perf_paths(snap):
+    """GET /perf?paths=all (and ?walk=1): the WHOLE per-file read table, checkpoints.readByPath, where the plain read carries
+    the READ_BY_PATH_TOP paths with the most bytes (2026-10-01: one row per path ever read, most of the snapshot's bytes).
+    Its own flag, so a reader of the whole table (an hourly snapshot diffed for re-reads) pays the table's copy under the
+    reader's lock and nothing else, never the two whole-heap walks ?walk=1 adds (review of 2026-10-01). `readBytes` and
+    `documentBytes` are replaced from the same copy, so the rows sum to the first and the checkpoint directory's rows to the
+    second (reviews of 2026-10-02). The document figure is summed inside the same guard, so a failed read, of the table or
+    of that figure, leaves the plain read's rows and its three figures (review of 2026-10-02)."""
+    def whole():
+        table, total = em.read_by_path()
+        return table, total, em.checkpoint_document_bytes(table.items())
+    full = _heap_read("readByPath", whole, block="checkpoints")
+    if full is not None and isinstance(snap.get("checkpoints"), dict):
+        table, total, documents = full
+        snap["checkpoints"]["readByPath"] = table
+        snap["checkpoints"]["readPaths"] = len(table)
+        snap["checkpoints"]["readBytes"] = total
+        snap["checkpoints"]["documentBytes"] = documents
     return snap
 
 
@@ -398,7 +440,9 @@ class _PerfStats:
                                    the collector's gauges, and the occupancy of every cache that holds session
                                    content (hydrated bodies, assembly entries, parse slots, live indexes,
                                    materialized-atom LRU slots, judge-usage rows, built chat tabs and their
-                                   serialized bytes, preview images); gauges, not counters
+                                   serialized bytes, preview images); gauges, not counters; and four
+                                   estimates in memory units (recordCacheResident, pinnedByAssembly,
+                                   builtAtoms, restoredIndexes)
       gc                           the collector's collections and their pauses (gc_event, a gc.callbacks hook
                                    main installs once): per generation, collections, msSum / msMax / msLast
                                    (wall on the collecting thread) and collectedLast; thresholds and counts
@@ -73160,6 +73204,8 @@ class Handler(BaseHTTPRequestHandler):
                     snap["stacks"] = _thread_stacks()      # ?stacks=1: one frame list per thread with its stage mark (T401)
                 if (q.get("walk") or [""])[0] == "1":
                     _perf_walks(snap)                      # ?walk=1: the two heap-wide gauges, on request alone (2026-09-29)
+                elif (q.get("paths") or [""])[0] == "all":
+                    _perf_paths(snap)                      # ?paths=all: the whole per-file read table, no heap walk (2026-10-01)
                 return self._send(200, json.dumps(snap), "application/json", cache="no-cache")
             if p == "/commands":                              # slash-command list for the composer's "/" autocomplete (SDK get_server_info, per-cwd cached)
                 sid = (q.get("sid") or [""])[0]

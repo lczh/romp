@@ -33,7 +33,7 @@ These are for scripting and for agents rather than daily use:
 |---|---|
 | `romp url` | Print only the tokened dashboard URL, for piping |
 | `romp sessions [--json]` | The fleet with each session's state, identity colours, directory and backend |
-| `romp perf [--interval <s>] [--json [--walk]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, and `--walk` fills its two heap-wide gauges; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
+| `romp perf [--interval <s>] [--json [--walk] [--paths]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, `--walk` fills its two heap-wide gauges, and `--paths` adds the whole per-file read table without them; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
 | `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
@@ -2354,11 +2354,15 @@ goal-store loads and writes per second, judge passes and their durations,
 memory and thread count. `romp perf --json` prints one raw snapshot. Two
 fields cost time in proportion to the whole heap, `heap.allocatedBlocks` and
 `gc.frozen`, so a plain read leaves them `null` and only `GET /perf?walk=1`
-fills them; the plain read no longer walks the whole heap.
-`romp perf --json --walk` prints the snapshot with both filled. If the kernel
-restarted between the two snapshots the counters have started over, so the
-command says so and exits non-zero instead of printing negative rates; a
-refused token is reported as such, not as a dead kernel.
+fills them; the plain read no longer walks the whole heap. A plain read also
+cuts the per-file read table, `checkpoints.readByPath`, to the 50 paths with
+the most bytes. `GET /perf?paths=all` carries the whole table and walks
+nothing, and `?walk=1` carries it as well.
+`romp perf --json --walk` prints the snapshot with both filled and the whole
+table; `romp perf --json --paths` prints it with the whole table alone, so a
+sampler that diffs the table pays only its copy. If the kernel restarted between the two snapshots the counters have
+started over, so the command says so and exits non-zero instead of printing
+negative rates; a refused token is reported as such, not as a dead kernel.
 
 The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 
@@ -2409,17 +2413,79 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   of the preview data URLs; the cache has no cap, so this gauge is
   O(entries) over whatever it holds, a refused file counting as an entry of
   zero bytes). These occupancy gauges attribute a resident size to its
-  holders; they do not sum to it. The transcript record cache, the largest
-  resident holder when the kernel is large, is not among them: its occupancy
-  already rides this response under `recordCache` (`entries`, and
-  `realBytes` against `budgetBytes`), so a resident size these gauges leave unaccounted
-  for is read there first. The block reads a length or a counter per
-  cache, under the cache's own lock where its readers take one and over a
-  copied value list otherwise; on a plain read it walks neither the
-  allocator nor any object graph, collects nothing, evicts nothing, fills
-  nothing and reads no file. A gauge this process cannot read (an accessor
-  the runtime lacks, a container the source has not got, a cached entry of
-  a shape the gauge does not know) is `null`, said once on stderr.
+  holders; they do not sum to it. Four more are estimates in memory units,
+  each with a `bytes` figure (the memory diagnosis, 2026-10-01: the
+  kernel's resident size grew with about 2.85 times the record cache's
+  file bytes, and nothing on this response said so).
+  They overlap where their holders share objects, so they are not meant to
+  be summed either. `recordCacheResident` is the transcript record cache,
+  the largest resident holder when the kernel is large, whose occupancy also
+  rides this response under `recordCache` (`entries`, `bytes` on disk, and
+  `realBytes` against `budgetBytes`): here its entries are split into `classes`
+  (`wholeLeaf`, a transcript held from its first record; `tail`, a leaf's
+  records past a checkpoint's or an assembly document's cut; `subagent`;
+  `logs`, the files under the state root, where files under the Codex
+  backend's session transcripts or the Claude projects root are never logs
+  and fall into the three classes above), each with `entries`,
+  `fileBytes` (summing to `recordCache.bytes`) and `bytes`, the file bytes
+  times `multiple`, the decoded weight per byte on disk, the record cache's
+  own `decodedMultiple` (2.85 unless `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets
+  it: a lab read of
+  a real transcript measured 2.86 for the records alone, and a fit of the
+  kernel's resident size agrees, though that slope also takes in every holder that
+  grows with the same transcripts; a synthetic plain-ASCII transcript of
+  6,000 records read 3.01. Content moves it: one long plain-ASCII string,
+  such as a large tool result, weighs about 1.1 per byte, and emoji and
+  small metadata-heavy records about 4 to 5. The `logs` class is mixed:
+  states-log rows weigh about 9 per byte and body-heavy postal rows under 2,
+  so 2.85 under-reads the first and over-reads the second). `pinnedByAssembly` is the records an
+  assembly entry still holds after the record cache let them go (a drop, an
+  eviction by the count cap, a re-read that decoded a second copy, or a tail the reader
+  upgraded to the whole file, whose records the entry keeps after a fold
+  moves it onto the whole list): `lists`, `records`, `fileBytes` and
+  `bytes`. When the record cache drops a list the entry took or a fold moved
+  it onto, `recordCache.bytes` falls and this rises by the same file bytes
+  (by the list's bytes per record when the fold could not weigh it), the
+  drop's own counters being `recordCache.droppedHeldBytes` for those records
+  and `recordCache.pinnedKept` for a drop the assembly pin kept, which moves
+  neither figure, while an eviction by the count cap counts
+  its share only under `recordCache.evictedBytes`, never split into the drop
+  counters. A byte-budget eviction releases the assembly entries that read
+  the file (`recordCache.budgetReleased`), so it raises this only for a file
+  evicted during its own read or a build that read the file before the
+  eviction and installs after. A pop of a file that vanished or could not be
+  read (the record reader's, or an owed drop paid after its file went)
+  raises this too; its bytes go to no record-cache byte counter, except an
+  owed drop's, which go under `dropped` and `droppedBytes`, and
+  `recordCache.released` counts the pop as it counts every pop. A tail
+  left behind by an upgrade counts here while `recordCache.bytes` rises to
+  the whole file. It weighs records alone: the assembly entries' own atoms
+  and lookup maps are still only the count `assemblyEntries` (a whole
+  entry measured about 0.9 to 1.1 KB per record of its leaf on two
+  synthetic leaves, 0.3 to 4 bytes per file byte as the records run long
+  or short), so a `pinnedByAssembly` of 0 does not mean the entries are
+  free.
+  `builtAtoms` is the materialized atoms: `slots` (the LRU's length),
+  `live` (the atoms the live lazy indexes count as built in the LRU),
+  `overSlots` (how far `live` runs past `slots`, 0 unless a count drifted)
+  and `bytes`, the live atoms, at most one per slot, times `atomBytes`
+  (1,700, the middle of the 1.3 to 2.1 KB an atom measured) plus the slots
+  beyond them times `slotBytes` (220, the LRU entry a collected list leaves
+  until it expires). It weighs atoms as built: a
+  hydrated atom also holds its body, which `hydrated` counts only while its
+  memo holds it. `restoredIndexes` is the live lazy indexes: `indexes`,
+  `rows` and `rowBytes` (the encoded atom rows), `records` (the document's
+  record rows, counted once when several indexes share one document's list,
+  and also counted by the assembly document memo while it holds the
+  document) and `userFacts`. The block reads a length,
+  a counter or a number a holder keeps per cache, under the cache's own lock
+  where its readers take one and over a copied value list otherwise, and
+  the estimates never iterate a records list or an index's rows; on a plain
+  read it walks neither the allocator nor any object graph, collects
+  nothing, evicts nothing, fills nothing and reads no file. A gauge this
+  process cannot read (an accessor the runtime lacks, a container the source
+  has not got, a cached entry of a shape the gauge does not know) is `null`,
+  said once on stderr.
 - `gc`: the interpreter's garbage collections, counted and timed (2026-09-16:
   pusher cycles stalled for 9-33 s and a profile of the process caught a 9.2 s
   generation-2 collection charged to whichever stage happened to be running,
@@ -2831,11 +2897,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
-  (what reading the checkpoint documents themselves cost since boot),
+  (what reading the checkpoint documents themselves cost since boot: a
+  running counter of bytes read, never memory held, so it climbs with every
+  re-read of a document),
   `fallbacks` per reason (`version`, `path`, `shrunk`, `guard`, `rewrite`,
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
-  boot, in total and per file), `docConsults` (fold documents loaded through the one
+  boot, in total and per file: running counters of bytes read; a plain read
+  carries the 50 paths with the most bytes, `readPaths` says how many paths
+  the whole table has, and `GET /perf?paths=all` carries every path, with
+  `readBytes` and `documentBytes` from the same copy, as `?walk=1` also
+  does), `docConsults` (fold documents loaded through the one
   validated read that the two boot restore paths, a write's carry and a
   retirement's consult share; at boot the restore paths dominate it, one per
   checkpointed file), `docMemo` (the documents that read keeps for the write
@@ -2942,7 +3014,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   one whose pin check raised, and the
   bytes of those records: `bytes` fell by them while the memory stayed, so the
   drops freed about `droppedBytes` less `droppedHeldBytes` of file bytes, that times
-  `decodedMultiple` in memory), `budgetRereads` and
+  `decodedMultiple` in memory, and less again where an owed drop popped a file
+  that was gone while an assembly entry still holds its records, which only
+  `heap.pinnedByAssembly` shows), `budgetRereads` and
   `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
   the last `countCap` it evicted, each counted once, and the file bytes
   they read again, a tail restored first and the whole read that upgrades
@@ -2989,7 +3063,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   place at equal length plus an append passes the 64-byte guard, like a
   same-size same-mtime rewrite),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
-  a cut), `hydratedBy` (those bytes per calling function), `restoreMs`, the
+  a cut: running counters since boot, which keep rising while the memo that
+  holds the bodies, `heap.hydrated`, sits at its cap), `hydratedBy` (those bytes per calling function), `restoreMs`, the
   restore's parts since boot in milliseconds to three decimals, each added on the
   return it names (`load`: the document read, decompressed, decoded and its
   file checks; `verify`: the turns section's identity and coverage, or the
@@ -3053,7 +3128,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   dead one held, no slot touched either way), `released` (entries popped the moment the
   assembly entry that owned their index was dropped or replaced, rather than
   a million entries later at the cap), `rowDecodes` (document rows decoded,
-  a build's or a light read's), `userFacts` (below), and `restoredTurns`.
+  a build's or a light read's, a running counter since boot), `userFacts`
+  (below), and `restoredTurns` (pre-cut turns restored from documents, a
+  running counter since boot; what the live indexes hold is
+  `heap.restoredIndexes`).
 - `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and

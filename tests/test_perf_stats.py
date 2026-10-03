@@ -1182,6 +1182,61 @@ class PerfRoutes(unittest.TestCase):
         self.assertIsInstance(walked["gc"]["frozen"], int)
         self.assertEqual(set(walked), TOP_KEYS, "the same document, two slots filled")
 
+    def test_get_perf_paths_all_carries_the_whole_read_table_and_walks_nothing(self):
+        """The per-file read table on its own flag (review of 2026-10-01): a plain GET carries the 50 paths with the most bytes
+        (em.READ_BY_PATH_TOP) and `readPaths`, the whole table's size; ?paths=all carries every path and leaves the two
+        whole-heap gauges null, so a reader of the table never pays the allocator's walk or the frozen count that ?walk=1
+        pays; a refused token gets neither."""
+        keys = ["/TESTDIR/notes-api/read-%03d.jsonl" % i for i in range(120)]
+        with km.em._READ_BYTES_LOCK:
+            for i, k in enumerate(keys):
+                km.em._READ_BYTES[k] = 10 ** 12 + i      # larger than anything a real read left, and distinct
+        try:
+            with mock.patch.object(sys, "getallocatedblocks", wraps=sys.getallocatedblocks) as blocks, \
+                 mock.patch.object(km.gc, "get_freeze_count", wraps=km.gc.get_freeze_count) as frozen:
+                st, plain = self._req("GET", "/perf")
+                st2, whole = self._req("GET", "/perf?paths=all")
+                st3, body = self._req("GET", "/perf?paths=all", token=False)
+        finally:
+            with km.em._READ_BYTES_LOCK:
+                for k in keys:
+                    km.em._READ_BYTES.pop(k, None)
+        planted = {k: 10 ** 12 + i for i, k in enumerate(keys)}
+        self.assertEqual((st, st2, st3), (200, 200, 403))
+        self.assertNotIn("readByPath", str(body))
+        self.assertEqual((blocks.call_count, frozen.call_count), (0, 0), "neither GET walked the heap")
+        top = dict(sorted(planted.items(), key=lambda kv: -kv[1])[:km.em.READ_BY_PATH_TOP])
+        self.assertEqual(plain["checkpoints"]["readByPath"], top, "the plain read: the 50 largest, here the planted ones")
+        self.assertGreaterEqual(plain["checkpoints"]["readPaths"], len(planted))
+        by = whole["checkpoints"]["readByPath"]
+        self.assertEqual({k: by.get(k) for k in planted}, planted, "every path, with its bytes")
+        self.assertEqual(whole["checkpoints"]["readPaths"], len(by), "the table's size beside it")
+        self.assertIsNone(whole["heap"]["allocatedBlocks"])
+        self.assertIsNone(whole["gc"]["frozen"])
+        self.assertEqual(set(whole), TOP_KEYS, "the same document, the one table whole")
+
+    def test_get_perf_walk_carries_the_whole_read_table(self):
+        """The served ?walk=1 twin of the test above (review of 2026-10-02): the route discards what _perf_walks returns, so the
+        table must land in the snapshot it serves, and the in-process test, which reads the return value, passed a version
+        that filled a fresh dict while this route served 50 rows. 120 rows are planted, past the 50 a plain read carries."""
+        keys = ["/TESTDIR/notes-api/walk-%03d.jsonl" % i for i in range(120)]
+        with km.em._READ_BYTES_LOCK:
+            for i, k in enumerate(keys):
+                km.em._READ_BYTES[k] = 10 ** 12 + i      # larger than anything a real read left, and distinct
+        try:
+            st, walked = self._req("GET", "/perf?walk=1")
+        finally:
+            with km.em._READ_BYTES_LOCK:
+                for k in keys:
+                    km.em._READ_BYTES.pop(k, None)
+        planted = {k: 10 ** 12 + i for i, k in enumerate(keys)}
+        self.assertEqual(st, 200)
+        by = walked["checkpoints"]["readByPath"]
+        self.assertEqual({k: by.get(k) for k in planted}, planted, "every path, with its bytes")
+        self.assertEqual(walked["checkpoints"]["readPaths"], len(by), "the table's size beside it")
+        self.assertIsInstance(walked["heap"]["allocatedBlocks"], int)
+        self.assertIsInstance(walked["gc"]["frozen"], int)
+
     def test_get_perf_stacks_carries_one_frame_list_per_thread_with_its_stage_mark(self):
         """T401 (2)'s proof instrument: `?stacks=1` adds one row per live thread (name, ident, self, stage, frames innermost
         last); a thread inside a tick job shows `jobs.<job>` and the frame it waits in; the plain snapshot carries no `stacks`;

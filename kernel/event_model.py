@@ -882,7 +882,9 @@ def _cache_insert_locked(path, ent, began=None):
 def record_cache_stats() -> dict:
     """The record cache for /perf: entries, held bytes (file bytes, as the kernel's samples read them), the same held
     bytes decoded (realBytes, the budget's unit) and the multiple, the budget, and the counters (inserts, evictions by
-    count and by budget, evicted bytes, budget re-reads, drop-after-fold drops)."""
+    count and by budget, evicted bytes, budget re-reads, drop-after-fold drops). What the entries weigh by class is
+    record_cache_resident's (the heap block). Called by the pusher's gc-freeze tick every cycle and by the judge child's
+    done line, so it stays O(1) beyond the wholeReads tables."""
     with _JSONL_CACHE_LOCK:
         out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "realBytes": _real_bytes(_JSONL_CACHE_BYTES[0]),
                "decodedMultiple": _RECORD_CACHE_MULTIPLE, "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
@@ -892,6 +894,59 @@ def record_cache_stats() -> dict:
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
         out["wholeReadsByStage"] = {k: dict(v) for k, v in bys.items()} if isinstance(bys, dict) else {}
         return out
+
+
+# What a held record weighs in memory against its bytes on disk (the kernel memory diagnosis, 2026-10-01): the lab's records-only
+# measurement, 2.86 live-heap bytes per source byte on a real 37.7 MB transcript by tracemalloc (_scan_jsonl_stream's docstring),
+# and 3.01 on a synthetic plain-ASCII transcript of 6,000 records, 5.57 MB (tracemalloc, Python 3.12, 2026-10-01); the default,
+# RECORD_CACHE_DECODED_MULTIPLE (above), is 2.85, within 0.01 of the lab's, and a fit of the kernel's resident size against
+# recordCache.bytes gives about the same slope, but that slope is the whole process's: it also takes in every holder that
+# grows with the same transcripts (assembly entries, built atoms, the hydrated memo), which the heap block weighs beside this one,
+# so the block's estimates are not meant to be summed. Content moves it: about 1.1 for one long plain-ASCII string, such as a
+# large tool result, and about 4 to 5 for text with emoji or for small, metadata-heavy records (synthetic tests, 2026-10-01), so
+# subagent files likely weigh more than this says. The logs class is mixed: rows shaped like the per-session states log weigh
+# about 9 traced bytes per file byte, and body-heavy postal rows under 2 (a review's tracemalloc probe, 2026-10-02), so 2.85
+# under-reads the first and over-reads the second. The heap block publishes it beside every estimate built on it. It is the
+# record cache's multiple in force (_RECORD_CACHE_MULTIPLE above: RECORD_CACHE_DECODED_MULTIPLE, 2.85, unless
+# ROMP_RECORD_CACHE_DECODED_MULTIPLE sets it), so the budget and these gauges weigh a file byte alike. The gauges read it
+# when they run, as the budget does; RECORD_DECODED_MULTIPLE is the same figure under this name, taken at load, which only
+# a test that rebinds _RECORD_CACHE_MULTIPLE can leave behind (review, 2026-10-03).
+RECORD_DECODED_MULTIPLE = _RECORD_CACHE_MULTIPLE
+RECORD_CACHE_CLASSES = ("wholeLeaf", "tail", "subagent", "logs")
+_SUBAGENT_SEGMENT = os.sep + "subagents" + os.sep
+
+
+def record_cache_resident(logs_root=None, transcript_roots=()) -> dict:
+    """The record cache in memory units for /perf's heap block. The entries are copied under the cache's lock (tuples a read
+    replaces, never changes in place), then weighed and classed after it, so a reader's hit never waits on the weighing.
+    Each is classed by its path and base: `logs` (a file under `logs_root`, the state root the kernel passes: the states logs, the
+    captions, the postal and nudge logs; never a file under one of `transcript_roots`, the Codex backend's session
+    transcripts and the Claude projects root, which the kernel passes because either can sit under the state root, the
+    first always and the second when the Claude config directory is placed there; their files are never logs and fall into
+    the three classes below by the same rules as any other), `subagent` (a `subagents` path segment), `tail` (any other
+    entry with base above zero: a leaf's records past a checkpoint's or an assembly document's cut), `wholeLeaf` (the rest:
+    transcripts held from record 0). Per class `entries`, `fileBytes` (each entry's _entry_weight, the unit of
+    recordCache.bytes, so the classes sum to it at the read) and `bytes`, the file bytes times the multiple in force
+    (_RECORD_CACHE_MULTIPLE, read at the call), an estimate; the totals beside them. O(entries): a weight and a few prefix
+    tests per entry, never a walk over records."""
+    m = _RECORD_CACHE_MULTIPLE
+    prefix = (str(logs_root).rstrip(os.sep) + os.sep) if logs_root else None
+    leaves = tuple(str(r).rstrip(os.sep) + os.sep for r in transcript_roots or () if r)
+    with _JSONL_CACHE_LOCK:
+        held = list(_JSONL_CACHE.items())
+    rows = [(p, _entry_weight(e), e[5]) for p, e in held]
+    classes = {c: {"entries": 0, "fileBytes": 0, "bytes": 0} for c in RECORD_CACHE_CLASSES}
+    for p, w, base in rows:
+        p = str(p)
+        log = prefix is not None and p.startswith(prefix) and not p.startswith(leaves)
+        cls = ("logs" if log else "subagent" if _SUBAGENT_SEGMENT in p
+               else "tail" if int(base or 0) > 0 else "wholeLeaf")
+        classes[cls]["entries"] += 1
+        classes[cls]["fileBytes"] += w
+    for row in classes.values():
+        row["bytes"] = int(round(row["fileBytes"] * m))
+    return {"multiple": m, "entries": len(rows), "fileBytes": sum(r["fileBytes"] for r in classes.values()),
+            "bytes": sum(r["bytes"] for r in classes.values()), "classes": classes}
 
 
 _JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
@@ -2044,7 +2099,49 @@ def checkpoint_sweep():
     return gone
 
 
+READ_BY_PATH_TOP = 50             # rows of readByPath a plain /perf read carries: the paths with the most bytes (2026-10-01: the whole
+#                                   table, one row per path ever read, was most of the snapshot's bytes within minutes of
+#                                   a boot, on every poll); GET /perf?paths=all carries the whole table, and so does ?walk=1 (the
+#                                   kernel's _perf_paths)
+
+
+def _top_paths(items, top):
+    """{path: bytes} of the `top` (path, bytes) pairs with the most bytes, or all of them when `top` is None: one pass with a
+    bounded heap, never a sort of every path."""
+    if top is None or len(items) <= top:
+        return dict(items)
+    import heapq
+    return dict(heapq.nlargest(top, items, key=lambda kv: kv[1]))
+
+
+def read_by_path(top=None):
+    """({path: bytes the reader pulled off it since boot}, the running total): the `top` paths with the most bytes, or every
+    path when `top` is None (the whole table GET /perf?paths=all carries), and the total taken in the same lock acquisition,
+    so the rows never run ahead of the total beside them (review of 2026-10-02: a total from the snapshot's earlier copy
+    trailed the table by the reads between the two)."""
+    with _READ_BYTES_LOCK:
+        items = list(_READ_BYTES.items())
+        total = _READ_BYTES_TOTAL[0]
+    return _top_paths(items, top), total
+
+
+def checkpoint_document_bytes(items):
+    """documentBytes from a copy of the read table, its (path, bytes) pairs: the rows under the checkpoint directory, 0 with
+    no directory. checkpoint_stats and the kernel's whole-table read (_perf_paths) both take it from the copy their readBytes
+    comes from, so the table's checkpoint rows never run ahead of it (review of 2026-10-02)."""
+    d = _ckpt_dir()
+    if d is None:
+        return 0
+    prefix = str(d) + os.sep
+    return sum(n for p_, n in items if p_.startswith(prefix))
+
+
 def checkpoint_stats():
+    """The fold checkpoints for /perf. Most fields count events since boot (restored, writes, swept, fallbacks and the other
+    per-reason tables), and `documentBytes` (the checkpoint documents' own reads) and `readBytes` (every byte the JSONL reader
+    pulled off disk) are running counters of bytes READ since boot, never memory held. The gauges are `dirty`, `docMemo`
+    and `readPaths`. `readByPath` is the per-file split of readBytes, cut to the READ_BY_PATH_TOP paths with the most bytes
+    (`readPaths` says how many paths the whole table has; GET /perf?paths=all carries it whole, and so does ?walk=1)."""
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
         out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
@@ -2053,13 +2150,14 @@ def checkpoint_stats():
         out["rewoundMemo"] = dict(_REWOUND_STATS)
         out["docMemo"] = {"entries": len(_DOC_MEMO), "bytes": _DOC_MEMO_BYTES[0], "capBytes": _DOC_MEMO_CAP,
                           "parseMultiple": _DOC_MEMO_PARSE_MULTIPLE}
-    d = _ckpt_dir()
     with _READ_BYTES_LOCK:
-        out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
         out["dirty"] = len(_FOLD_DIRTY)
-    rb = read_bytes_report()
-    out["readBytes"] = rb.pop("total")
-    out["readByPath"] = rb                            # per file, so a boot can be read as tails versus whole files
+    with _READ_BYTES_LOCK:                            # the total and the table from one copy, as read_bytes_report takes them
+        items = list(_READ_BYTES.items())
+        out["readBytes"] = _READ_BYTES_TOTAL[0]
+    out["documentBytes"] = checkpoint_document_bytes(items)   # and the documents' share, from that same copy
+    out["readPaths"] = len(items)
+    out["readByPath"] = _top_paths(items, READ_BY_PATH_TOP)   # per file, so a boot can be read as tails versus whole files
     return out
 
 
@@ -3120,6 +3218,11 @@ class FileAdapter:
         self._src_keys = {}      # path -> the reader's (gen, base, count) the records came from (the fold's identity gate)
         self._src_stat = {}      # path -> the (size, mtime) of the file AS READ for those records: the witness a document row
         #                          carries for a file wholly before the cut, never the write-time stat (T396 round one)
+        self._src_bytes = {}     # path -> (the reader entry's weight, its record count) when the list was taken or a fold
+        #                          re-seated it: what the heap block weighs a list by once the record cache no longer holds it
+        #                          (asm_pinned_records)
+        self._src_superseded = {}   # path -> [(first record, records, file bytes)] for each list a fold moved the leaf off without
+        #                             sharing its records (_asm_reseat_src): by_uuid still holds them, so the heap block counts them
         if seed is not None:
             self._seq = int(seed["seq_base"])
             self.prompt_ids |= seed["prompt_ids"]; self.boundary_pids |= seed["boundary_pids"]
@@ -3153,6 +3256,7 @@ class FileAdapter:
             self._src_keys[str(fp)] = (ent[6], ent[5], ent[5] + len(recs)) if ent is not None else (None, 0, 0)
             if ent is not None:
                 self._src_stat[str(fp)] = (ent[1], ent[0])    # the reader's (size, mtime) for this very read
+                self._src_bytes[str(fp)] = (_entry_weight(ent), len(recs))
             if cut is not None and ent is not None and ent[5] < cut[1]:
                 recs = recs[cut[1] - ent[5]:]            # the entry holds records before the cut (a whole reader came
             #                                              first): the seed stands for those, ingest from the cut on
@@ -5755,6 +5859,71 @@ def evict_document(leaf_path):
     return len(popped), dropped
 
 
+def _records_shared(held, recs):
+    """Whether the reader's held list `held` holds the records of `recs` (a list an adapter took from the reader): the same
+    list, or the same first and last record objects at the list's start. Only an append shares records, and it stores
+    records + new under the same base; every read that changes an entry's base (a tail upgraded to the whole file, a read
+    from zero, a tail restored from an earlier start) decodes new objects, so the start is the one place to look. Two
+    identity checks, never a walk."""
+    if held is recs:
+        return True
+    n = len(recs)
+    return 0 < n <= len(held) and held[0] is recs[0] and held[n - 1] is recs[-1]
+
+
+def _list_file_bytes(size, n):
+    """The file bytes of an n-record list an adapter holds, from the (weight, count) it recorded for its list (_src_bytes):
+    the weight itself for the list it was recorded for, else the same bytes per record."""
+    w, n0 = size if size else (0, 0)
+    return int(w) if n0 == n else (int(w * n / n0) if n0 else 0)
+
+
+def asm_pinned_records() -> dict:
+    """The records an assembly entry's adapter holds that the record cache no longer does, for /perf's heap block (the memory
+    diagnosis, 2026-10-01: the record cache let go of a leaf, its counted bytes fell, and the entry's adapter still held the very
+    same list, so the memory did not; the next whole read decoded a second copy). For every installed entry, each file list the
+    adapter took from the reader (its _src, a private or skipped file aside) whose records the reader's current entry for that
+    path does not hold (_records_shared) is pinned, and so is every list a fold superseded (_src_superseded: a tail the reader
+    upgraded to the whole file, whose records the adapter's maps keep after the fold re-seated the leaf on the whole list):
+    `lists`, `records`, `fileBytes` (the reader entry's weight when the adapter took or re-seated the list, scaled by record
+    count when the adapter could not weigh its current list: the leaf's own bytes per record) and `bytes` (times the multiple
+    in force, _RECORD_CACHE_MULTIPLE, read at the call). A list two entries share counts once. It weighs records alone: an
+    entry's own atoms and lookup maps (by_uuid, the graph), about 0.9 to 1.1 KB per record of the leaf a whole entry parsed
+    (tracemalloc on two synthetic leaves, 2026-10-01: 0.31 bytes per file byte where records carry long tool results, 4.0
+    where they are short), stay a count (assemblyEntries), so a 0 here never says the entries are free. O(entries x their files):
+    one record-cache lookup per file, taken under the cache's lock with nothing else, then two identities each after it, so a
+    reader's hit never waits on the checks; no list is iterated; the two locks are taken one after the other."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    cands, pinned = [], {}
+
+    def pin(key, n, fb):                                  # the same records, whichever list carries them: the longest counts
+        if key not in pinned or pinned[key][0] < n:
+            pinned[key] = (n, fb)
+    for entry in entries:
+        ad = entry.get("ad") if isinstance(entry, dict) else None
+        if ad is None:
+            continue
+        keys, sizes = getattr(ad, "_src_keys", None) or {}, getattr(ad, "_src_bytes", None) or {}
+        for p, recs in list((getattr(ad, "_src", None) or {}).items()):
+            k = keys.get(p)
+            if not recs or not (isinstance(k, tuple) and len(k) == 3):   # an empty list, a ("private",) or ("skip",) row
+                continue
+            cands.append((p, recs, sizes.get(p)))
+        for p, gone in list((getattr(ad, "_src_superseded", None) or {}).items()):
+            for first, n, fb in list(gone):
+                pin((p, id(first)), n, fb)
+    with _JSONL_CACHE_LOCK:                               # the reader's entries as they stand (a tuple whose list a read replaces,
+        held = [_JSONL_CACHE.get(p) for p, _, _ in cands]  #  never extends in place); the identities are checked after the lock
+    for (p, recs, size), ent in zip(cands, held):
+        if ent is not None and _records_shared(ent[4], recs):
+            continue
+        pin((p, id(recs[0])), len(recs), _list_file_bytes(size, len(recs)))
+    fb_total = sum(fb for _, fb in pinned.values())
+    return {"lists": len(pinned), "records": sum(n for n, _ in pinned.values()), "fileBytes": fb_total,
+            "bytes": int(round(fb_total * _RECORD_CACHE_MULTIPLE))}
+
+
 def _asm_lazy_uuids(e):
     """The uuids of the pre-cut records assembly entry `e` serves as lazy atoms, whose bodies the hydrated memo holds, one at a
     time: its lazy index's record rows, or the atoms-only form's prefix atoms (read without materializing any). Nothing for a
@@ -6078,10 +6247,33 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     entry["n_qatts"] = len(ad.qatts)
     ogen, obase, ocount = entry["recs"][leaf_key]
     entry["recs"][leaf_key] = (ogen, obase, ocount + len(delta))   # commit LAST: a bail above re-slices the same
-    ad._src[leaf_key] = leaf_recs                 #  delta next visit and the uuid gate demotes it
+    _asm_reseat_src(ad, leaf_key, leaf_recs)      #  delta next visit and the uuid gate demotes it
     ad._src_keys[leaf_key] = entry["recs"][leaf_key]
     _asm_stat("fold")
     return _asm_serve(entry)
+
+
+def _asm_reseat_src(ad, path, recs):
+    """The fold's re-seat of the adapter's leaf list on `recs`, the reader's list the delta came from. When that list does not
+    hold the old one's records (a tail the reader upgraded to the whole file under the same generation, then an append that
+    folds: the judges' road over a restored live leaf), the adapter's maps still hold the old records, so the old list joins
+    _src_superseded and the heap block keeps weighing it for as long as the adapter lives (asm_pinned_records; review of
+    2026-10-01: the gauge said the copy had gone while the memory stayed). The new list is weighed by the reader's entry when
+    the cache still holds this very list (the entry the gates read), so a later drop is weighed by real bytes. O(1): two
+    identities and one cache lookup, never a walk."""
+    old = ad._src.get(path)
+    sizes = getattr(ad, "_src_bytes", None)
+    if old and not _records_shared(recs, old):
+        gone = getattr(ad, "_src_superseded", None)
+        if gone is None:
+            gone = ad._src_superseded = {}
+        gone.setdefault(path, []).append((old[0], len(old), _list_file_bytes((sizes or {}).get(path), len(old))))
+    ad._src[path] = recs
+    if sizes is not None:
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(path)
+            if ent is not None and ent[4] is recs:
+                sizes[path] = (_entry_weight(ent), len(recs))
 
 
 # ═══════════════════════ THE ASSEMBLY CHECKPOINT (T323 stage 4, 2026-09-11) ═══════════════════════
@@ -6189,6 +6381,16 @@ def _mat_register(la, i):
     _MAT_LRU[key] = (weakref.ref(la), i)
 
 
+def _mat_count(la, d):
+    """Under _MAT_LOCK: the index behind `la` holds `d` more (or fewer) materialized atoms that the LRU registers, the live
+    count the heap block's builtAtoms sums over the live indexes: a build adds one (LazyAtoms._at), an eviction takes one off
+    (_mat_trim) and a release takes off what it popped (LazyIndex.release). A stand-in index without the counter is skipped."""
+    ix = getattr(la, "_index", None)
+    n = getattr(ix, "_built", None)
+    if n is not None:
+        ix._built = max(0, n + d)
+
+
 def _mat_trim():
     """Under _MAT_LOCK: the LRU back within _MAT_CAP from its old end. A live entry is evicted as ever (its slot back to the
     placeholder, counted `evictions`); an entry whose list has been collected is dropped and counted `expired`, and no slot is
@@ -6204,6 +6406,7 @@ def _mat_trim():
             _ASM_INDEX_STATS["expired"] += 1
         else:
             list.__setitem__(lz, j, _UNMAT)
+            _mat_count(lz, -1)
             _ASM_INDEX_STATS["evictions"] += 1
             # #1735: no gc-freeze note here. A materialized atom is decoded json (a dict), acyclic: it dies by
             # reference counting when the slot drops it, frozen or not, so an unfreeze reclaim would collect nothing.
@@ -6225,12 +6428,17 @@ class LazyIndex:
         #                                                   under _MAT_LOCK; release() walks and prunes them): plain refs, no WeakSet, since
         #                                                   a LazyAtoms is unhashable and a ref callback may fire under the lock
         self.rowb = [r.encode("utf-8") for r in doc["atoms"]]   # v6: the document's rows are JSON strings already (T401 (4))
+        self.row_bytes = sum(map(len, self.rowb))         # the rows' encoded bytes, summed once here (rowb never changes), so the
+        #                                                   heap block's estimate reads a number, never the rows (restored_index_estimate)
         self.records = doc["records"]
         self.fsids = list(doc.get("fsids") or [])
         files = doc.get("files")
         self.source_files = None if files is None else _source_files(files)   # the held view's own document, not the last
         #                                                                         restore's (_restore_prefix_atoms, 2026-09-17)
         self._user_facts = {}                             # the interrupt-marks tally's light facts by row (user_facts), bounded by _USER_FACTS_CAP
+        self._built = 0                                   # the atoms of this index's lists the LRU registers, kept under _MAT_LOCK (_mat_count):
+        #                                                   the heap block's live atoms, where the LRU's length also counts the dead slots of
+        #                                                   collected lists until they expire
         with _MAT_LOCK:                                   # the add under the lock the userFacts gauge sums under: an add beside the sum raised
             _LIVE_INDEXES.add(self)                       #  "set changed size during iteration" and /perf answered 500 (1597 low 1)
 
@@ -6302,6 +6510,7 @@ class LazyIndex:
                         n += 1                                        #  id was popped at the build), so the count is this list's
                     list.__setitem__(la, i, _UNMAT)
             self._minted[:] = live                        # in place: a constructor holding this list appends to the one list
+            self._built = max(0, self._built - n)
             _ASM_INDEX_STATS["released"] += n
             _ASM_INDEX_STATS["resident"] = len(_MAT_LRU)
         # #1735: no gc-freeze note here, as in _mat_trim. The slots reset to _UNMAT release materialized atoms, which
@@ -6398,7 +6607,8 @@ class LazyAtoms(list):
                     _MAT_LRU.move_to_end(key)
                 elif list.__getitem__(self, i) is not _UNMAT:   # built and not registered (a dead entry under a reused id, or none):
                     _mat_register(self, i)                      #  registered now; an eviction or release between the read above and
-                    _mat_trim()                                 #  this lock left the slot unbuilt, and then `a` is the caller's value
+                    _mat_count(self, 1)                         #  this lock left the slot unbuilt, and then `a` is the caller's value
+                    _mat_trim()
             return a
         a = self._index.build(self._rows[i])
         by = _materialize_caller()
@@ -6408,6 +6618,7 @@ class LazyAtoms(list):
                 return cur
             list.__setitem__(self, i, a)
             _mat_register(self, i)
+            _mat_count(self, 1)
             _ASM_INDEX_STATS["materialized"] += 1
             _ASM_INDEX_STATS["materializedBy"][by] = _ASM_INDEX_STATS["materializedBy"].get(by, 0) + 1
             bs = "%s:%s" % (_read_stage() or "none", by)      # the calling thread's stage mark beside the caller (T401 (5a))
@@ -6624,6 +6835,11 @@ def plain_tree(session):
 
 
 def asm_index_stats():
+    """The lazy index for /perf. `materialized` (atoms built from document rows), `restoredTurns` (pre-cut turns restored from
+    documents) and `rowDecodes` (document rows decoded, a build's or a light read's) are running counters since boot, never
+    what is held, and so are `evictions`, `released` and `expired`. The gauges are `resident` (the LRU's slots, an upper bound
+    on the live atoms), `cap` and `userFacts`; what the slots and the live indexes weigh is the heap block's builtAtoms and
+    restoredIndexes."""
     with _MAT_LOCK:
         return {"materialized": _ASM_INDEX_STATS["materialized"], "materializedBy": dict(_ASM_INDEX_STATS["materializedBy"]),
                 "materializedByStage": dict(_ASM_INDEX_STATS["materializedByStage"]),
@@ -6634,6 +6850,67 @@ def asm_index_stats():
 #                                                                                       live indexes (a dropped index takes its cache with it)
 #   resident is len(_MAT_LRU) with the entries of collected lists included until they expire at the cap (_mat_trim) or are released;
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
+MAT_ATOM_BYTES = 1700                 # what one materialized pre-cut atom weighs: the middle of the 1.3 to 2.1 KB tracemalloc measured
+#                                       per atom over real indexes (2026-09-15, see _MAT_LRU); a synthesized atom with a short message,
+#                                       its LRU entry included, read 1,531 (Python 3.12, 2026-10-01). An atom as built, with no body:
+#                                       hydrate() writes a body into the atom in place, and that body is not in this figure
+MAT_SLOT_BYTES = 220                  # what one LRU entry weighs once its list has been collected (a dead slot, until it expires at the
+#                                       old end): its key and value tuples, the id's int and its share of the ordered dict's tables
+#                                       (218.6 by tracemalloc over 20,000 entries of 50-atom lists collected without a release, 234.1
+#                                       with 500-atom lists, whose slot numbers past 256 are ints of their own; Python 3.12, 2026-10-01)
+INDEX_ROW_OVERHEAD_BYTES = 42         # beyond its encoded bytes, what one atom row costs a LazyIndex: the bytes object's header and its
+#                                       list slot (41.7 by tracemalloc over 20,000 rows of a synthetic document, Python 3.12, 2026-10-01)
+INDEX_RECORD_ROW_BYTES = 430          # one decoded record row of a document, a list of ten (two uuids, a seq, a stamp, small codes) and
+#                                       its slot in the records list (429.4 by tracemalloc over 20,000 rows, the same probe); structural,
+#                                       so a synthetic document measures it as a real one would
+USER_FACT_BYTES = 447                 # one cached light fact (about 447 bytes a row measured, _USER_FACTS_CAP)
+
+
+def built_atoms_estimate() -> dict:
+    """The materialized pre-cut atoms for /perf's heap block: `slots` (the LRU's length, the same read as asmIndex.resident),
+    `live` (the slots whose list is alive: the atoms the live indexes count as built, _mat_count), `overSlots` (how far `live`
+    runs past `slots`, 0 unless a count drifted) and `bytes`: the live atoms, at most one per slot, x `atomBytes`
+    (MAT_ATOM_BYTES) plus the other slots x `slotBytes` (MAT_SLOT_BYTES), since a collected list's slots stay in the LRU,
+    holding only their entries, until they expire. An estimate of the atoms as built: a hydrated atom also holds its body,
+    which this leaves out (heap.hydrated counts the bodies only while its memo holds them). A list collected while its index
+    lives keeps its slots in `live` until the index goes, so `live` is the indexes' own sum, never cut to `slots` (a cut
+    would hide the counter's every miscount whenever the LRU held little else), while `bytes` never prices more atoms than
+    the LRU has slots (review of 2026-10-01: an over-count priced atoms nothing held); such a drift shows as `overSlots`
+    rather than as bytes. The dead slots are what `slots` leaves over `live`, never fewer than none. O(live indexes): one
+    counter per index."""
+    with _MAT_LOCK:                                   # the WeakSet is read under the lock its adds take (the userFacts gauge's rule)
+        n = len(_MAT_LRU)
+        live = sum(int(getattr(ix, "_built", 0) or 0) for ix in list(_LIVE_INDEXES))
+    atoms = min(live, n)                              # the LRU registers every built atom, so it cannot hold more than its slots
+    return {"slots": n, "live": live, "overSlots": max(0, live - n), "atomBytes": MAT_ATOM_BYTES, "slotBytes": MAT_SLOT_BYTES,
+            "bytes": atoms * MAT_ATOM_BYTES + max(0, n - live) * MAT_SLOT_BYTES}
+
+
+def restored_index_estimate() -> dict:
+    """The live lazy indexes for /perf's heap block (a restored session's pre-cut rows, T323 stage 4c): `indexes`, `rows` and
+    `rowBytes` (the atom rows' encoded bytes, which each index summed once when it was built), `records` (the document's record
+    rows, counted once per list: indexes restored from one memoized document share its list) and `userFacts` (the light facts
+    cached), and `bytes`: rowBytes plus rows x INDEX_ROW_OVERHEAD_BYTES plus records x INDEX_RECORD_ROW_BYTES plus userFacts x
+    USER_FACT_BYTES, an estimate. The record rows are the decoded document's own, so while the assembly document memo holds
+    that document (asmCheckpoint.asmDocMemo) the two gauges both count them. O(live indexes): lengths and the stored sum,
+    never a walk over rows."""
+    with _MAT_LOCK:                                   # the WeakSet is read under the lock its adds take (the userFacts gauge's rule)
+        live = list(_LIVE_INDEXES)
+    out = {"indexes": len(live), "rows": 0, "rowBytes": 0, "records": 0, "userFacts": 0}
+    seen = set()                                      # the record lists already counted, by identity (every list is alive here: the
+    for ix in live:                                   #  indexes in `live` hold them, so no id is reused during the loop)
+        out["rows"] += len(ix.rowb)                   # each index encodes its own rows, so those count per index
+        out["rowBytes"] += int(getattr(ix, "row_bytes", 0) or 0)
+        recs = ix.records
+        if recs is not None and id(recs) not in seen:
+            seen.add(id(recs))
+            out["records"] += len(recs)
+        out["userFacts"] += len(ix._user_facts)
+    out["bytes"] = (out["rowBytes"] + out["rows"] * INDEX_ROW_OVERHEAD_BYTES + out["records"] * INDEX_RECORD_ROW_BYTES
+                    + out["userFacts"] * USER_FACT_BYTES)
+    return out
+
+
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
@@ -7041,6 +7318,10 @@ def _restore_ms(part, t0):
 
 
 def asm_checkpoint_stats():
+    """The assembly documents for /perf. Almost everything here counts since boot (written, restored, the per-reason tables,
+    restoreMs), and `hydratedBytes` (the bytes of pre-cut bodies read on demand) and `hydratedAtoms` (those bodies) are
+    running counters too, so they keep rising while the memo that holds the bodies sits at its cap (what the memo holds is
+    the heap block's hydrated). The one gauge is asmDocMemo."""
     with _ASM_CKPT_LOCK:
         out = dict(_ASM_CKPT_STATS); out["fallbacks"] = dict(out["fallbacks"]); out["skipped"] = dict(out["skipped"])
         out["restoreMs"] = {k: round(v, 3) for k, v in (out.get("restoreMs") or {}).items()}   # microsecond resolution (a fast
