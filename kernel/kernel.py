@@ -1185,6 +1185,7 @@ class _PerfStats:
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
                           ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
                           ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report),
+                          ("bgHold", jd.bg_hold_stats),   # the settle gate's background hold: its walks and the turns they read
                           ("intrMarks", _intr_marks_memo_report), ("deadWait", lambda: dict(_DEAD_WAIT_STATS)),
                           ("tickSeen", _tick_seen_report),
                           ("statesOverlay", _states_overlay_report),

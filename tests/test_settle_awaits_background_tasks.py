@@ -48,9 +48,9 @@ def _iso(ep):
     return datetime.datetime.fromtimestamp(ep, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _prompt(t, uuid="p1"):
+def _prompt(t, uuid="p1", text="run the comparison batch and report"):
     return {"type": "user", "timestamp": _iso(t), "uuid": uuid, "parentUuid": None,
-            "message": {"role": "user", "content": "run the comparison batch and report"}}
+            "message": {"role": "user", "content": text}}
 
 
 def _launch(tid, t):
@@ -83,7 +83,16 @@ def _notification(tid, t):
             "message": {"role": "user", "content": body}}
 
 
-class SettleAwaitsBackgroundTasks(unittest.TestCase):
+class _Untouchable(list):
+    """A turn's atoms that fail the test when read: the hold's walk must stop at the turn that decides."""
+
+    def _refuse(self, *a):
+        raise AssertionError("read a turn older than the one that decides")
+
+    __iter__ = __reversed__ = __getitem__ = _refuse
+
+
+class _Harness(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         jd._rebind_state(Path(self.td.name))
@@ -115,6 +124,8 @@ class SettleAwaitsBackgroundTasks(unittest.TestCase):
         return {"rompUuid": SID, "seq": 1, "placementsV": jd.PLACEMENTS_V,
                 "nodes": {self.gid: nd}, "placements": {}, "status": {}, "lastNode": self.gid}
 
+
+class SettleAwaitsBackgroundTasks(_Harness):
     def _mid_wait(self):
         """Turn ended, launch unresolved — the live incident's 57-second gap."""
         self._transcript([_prompt(T0), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1), _end(ENDED)])
@@ -184,6 +195,90 @@ class SettleAwaitsBackgroundTasks(unittest.TestCase):
         store["seq"] = 2
         store["closedTurns"] = [t["id"] for t in session["turns"]]
         self.assertFalse(jd._session_settled(SID, self.path, session, store))
+
+
+class HoldReadsOnlyTheTurnThatDecides(_Harness):
+    """lag-1003 (2026-10-03): the hold mapped every tool id of the whole session to its turn before it looked up the few
+    running launches, so a boot's triage threads walked every atom of every session with a running launch, one locked
+    read per atom. It now walks newest first, looks up only the running launches' ids and stops at the turn that
+    decides. The verdict is today's: a launch's turn is the NEWEST turn naming its id, as a tool_use or as its
+    tool_result; an unswept such turn holds; a launch no turn names holds. The counters are /perf memos.bgHold."""
+
+    def _delta(self, before):
+        after = jd.bg_hold_stats()
+        return {k: after[k] - before[k] for k in after}
+
+    def test_the_walk_stops_at_the_turn_that_decides_on_both_answers(self):
+        """The incident's shape: thirty finished turns, then the turn that launched the batch and ended. Every older turn
+        refuses to be read, so the walk must decide at the newest turn whether it holds or not."""
+        recs = []
+        for k in range(30):
+            recs += [_prompt(T0 - 900 + 20 * k, uuid="p%d" % k, text="clean up step %d of the notes-api handlers" % k),
+                     _end(T0 - 890 + 20 * k, uuid="e%d" % k, text="Step %d of the notes-api cleanup is done." % k)]
+        recs += [_prompt(T0, uuid="pL"), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1), _end(ENDED, uuid="eL")]
+        self._transcript(recs)
+        session = jd.parsed_session(SID, [self.path], NOW)
+        turns = session["turns"]
+        named = [i for i, t in enumerate(turns) for a in t["atoms"] if "t1" in [x for x, _n in jd.em.atom_tool_uses(a)]]
+        self.assertEqual(named, [len(turns) - 1], "the launch sits in the newest turn")
+        self.assertGreaterEqual(len(turns), 31, "the thirty older turns are there to refuse")
+        n_atoms = len(turns[-1]["atoms"])
+        for t in turns[:-1]:
+            t["atoms"] = _Untouchable(t["atoms"])
+        store = self._store()
+        before = jd.bg_hold_stats()
+        self.assertTrue(jd._awaiting_bg_hold(SID, self.path, session, store, NOW), "the launch's turn is unswept: hold")
+        store["closedTurns"] = [t["id"] for t in turns]
+        self.assertFalse(jd._awaiting_bg_hold(SID, self.path, session, store, NOW),
+                         "the launch's turn is swept and names the only running launch: nothing older can hold")
+        self.assertEqual(self._delta(before), {"calls": 2, "walks": 2, "turns": 2, "preTurns": 0, "atoms": 2 * n_atoms,
+                                               "exhausted": 0}, "each walk read the newest turn alone")
+
+    def test_the_newest_turn_naming_a_launch_decides_and_a_tool_result_names_it(self):
+        """The launch in turn A, its ack (a tool_result naming the launch) in the newer turn B: B decides."""
+        self._transcript([_prompt(T0), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1), _end(ENDED)])
+        session = {"turns": [{"id": "tA", "atoms": [_prompt(T0), _launch("t1", LAUNCH)]},
+                             {"id": "tB", "atoms": [_ack("t1", LAUNCH + 1), _end(ENDED)]}]}
+        store = self._store()
+        store["closedTurns"] = ["tA"]
+        self.assertTrue(jd._awaiting_bg_hold(SID, self.path, session, store, NOW),
+                        "B is the newest turn naming the launch and nothing swept it: hold")
+        store["closedTurns"] = ["tB"]
+        self.assertFalse(jd._awaiting_bg_hold(SID, self.path, session, store, NOW),
+                         "B is swept: the older unswept launch turn A decides nothing")
+
+    def test_every_running_launch_is_placed_before_the_walk_answers_no_hold(self):
+        """Two running launches: t1 in the newest turn, t2 in an older one. Placing t1 in a swept turn answers nothing
+        about t2, whose turn is unswept."""
+        self._transcript([_prompt(T0), _launch("t2", LAUNCH), _ack("t2", LAUNCH + 1), _end(ENDED, uuid="e0"),
+                          _prompt(ENDED + 10, uuid="p2", text="and start the second batch"), _launch("t1", ENDED + 20),
+                          _ack("t1", ENDED + 21),
+                          _end(ENDED + 30, uuid="e2")])
+        self.assertEqual(sorted(t["id"] for t in jd._bg_unresolved(self.path, NOW)), ["t1", "t2"], "both launches run")
+        session = {"turns": [{"id": "tOld", "atoms": [_launch("t2", LAUNCH), _ack("t2", LAUNCH + 1)]},
+                             {"id": "tNew", "atoms": [_launch("t1", ENDED + 20), _ack("t1", ENDED + 21)]}]}
+        store = self._store()
+        store["closedTurns"] = ["tNew"]
+        self.assertTrue(jd._awaiting_bg_hold(SID, self.path, session, store, NOW), "t2's turn is unswept: hold")
+        store["closedTurns"] = ["tNew", "tOld"]
+        self.assertFalse(jd._awaiting_bg_hold(SID, self.path, session, store, NOW), "both placed in swept turns")
+
+    def test_a_running_launch_no_turn_names_holds_with_every_turn_swept(self):
+        """The transcript runs a launch the tree does not hold: its turn is unknown, so it holds, as before."""
+        self._transcript([_prompt(T0), _launch("t1", LAUNCH), _ack("t1", LAUNCH + 1), _end(ENDED)])
+        session = {"turns": [{"id": "tA", "atoms": [_prompt(T0), _end(ENDED)]}]}
+        store = self._store()
+        store["closedTurns"] = ["tA"]
+        before = jd.bg_hold_stats()
+        self.assertTrue(jd._awaiting_bg_hold(SID, self.path, session, store, NOW), "no turn names the launch: hold")
+        self.assertEqual(self._delta(before), {"calls": 1, "walks": 1, "turns": 1, "preTurns": 0, "atoms": 2, "exhausted": 1})
+
+    def test_a_call_that_returns_before_the_walk_counts_no_walk(self):
+        self._transcript([_prompt(T0), _end(ENDED)])
+        session = jd.parsed_session(SID, [self.path], NOW)
+        before = jd.bg_hold_stats()
+        self.assertFalse(jd._awaiting_bg_hold(SID, self.path, session, self._store(), NOW), "nothing runs: no hold")
+        self.assertEqual(self._delta(before), {"calls": 1, "walks": 0, "turns": 0, "preTurns": 0, "atoms": 0, "exhausted": 0})
 
 
 if __name__ == "__main__":

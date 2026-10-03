@@ -128,7 +128,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes", "carryBase", "carryNoBase"}, "read through jd.goal_io_stats (the two carry counters since the field carry of 2026-09-23)")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "nudgeWalk", "convergeDeclined", "sessionsListing", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip", "ghostDropped",
-                                              "bgTops", "liftGate", "intrMarks", "deadWait", "tickSeen", "statesOverlay", "lanes", "spendTree", "summaryAnchor",
+                                              "bgTops", "bgHold", "liftGate", "intrMarks", "deadWait", "tickSeen", "statesOverlay", "lanes", "spendTree", "summaryAnchor",
                                               "parkedHandoffs",   # the feed's parked-handoff fold over the postal log (2026-09-18)
                                               "judgingBand",   # the judging band's per-row memo and horizon cursor (2026-09-16)
                                               "subagentTree",   # the subagents directory walk memo (2026-09-16): served vs walked, roots held
@@ -147,6 +147,9 @@ class Collector(unittest.TestCase):
                          "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
         for k, v in snap["memos"]["bgTops"].items():
             self.assertIsInstance(v, int, k)
+        self.assertEqual(set(snap["memos"]["bgHold"]), {"calls", "walks", "turns", "preTurns", "atoms", "exhausted"},
+                         "the settle gate's background hold (_awaiting_bg_hold): its calls, its walks and what they read")
+        self.assertEqual(snap["memos"]["bgHold"], km.jd.bg_hold_stats())
         self.assertEqual(set(snap["memos"]["liftGate"]), {"skip", "load", "shared", "writer", "noop", "entries"},
                          "the awaiting-lift gate: session-cycles skipped vs read, the probes the shared cache "
                          "answered, the writer loads and the ones that filed nothing, plus its occupancy")

@@ -9975,37 +9975,90 @@ def _awaiting_bg_hold(fsid, path, session, store, now=None):
         same placed-unstamped-is-a-service rule as the kernel's _bg_split, translated to judge-native
         events. A live awaitingWhy stamp re-affirms the hold past that audit; its lift releases it.
     Pre-verdict the hold is conservative (a launch whose turn nothing has swept always holds), matching
-    _bg_split's PENDING→awaited prior. `now`: the pass's clock for the expiry view (see _bg_unresolved)."""
-    tasks = _bg_unresolved(path, now)
-    if not tasks:
-        return False
-    sp = _cli_epoch(fsid)
-    tasks = [t for t in tasks if not (sp and t.get("t") and t["t"] < sp)]
-    if not tasks:
-        return False
-    nodes = store.get("nodes") or {}
-    if any(nd.get("awaitingWhy") and not nd.get("cleared") and not nd.get("nodeComplete")
-           for nd in nodes.values()):
-        return True                       # the closer affirmed a wait somewhere open — hold
-    swept = set(store.get("closedTurns") or [])
-    launch_turn = {}                      # tool_use id -> the turn that dispatched it (launch or its ack)
-    for turn in reversed(session.get("turns") or []):
-        for a in turn["atoms"]:
-            if a.get("lazy") is not None:         # an atom before the assembly cut carries its tool ids as scalars (T323 stage 4a)
-                for tid, _name in em.atom_tool_uses(a):
-                    launch_turn.setdefault(tid, turn.get("id"))
-                for tid in em.atom_tool_results(a):
-                    launch_turn.setdefault(tid, turn.get("id"))
-                continue
-            blocks = (a.get("message") or {}).get("content")
-            if not isinstance(blocks, list):
-                continue
-            for b in blocks:
-                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
-                    launch_turn.setdefault(b["id"], turn.get("id"))
-                elif isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
-                    launch_turn.setdefault(b["tool_use_id"], turn.get("id"))
-    return any(launch_turn.get(t["id"]) not in swept for t in tasks)
+    _bg_split's PENDING→awaited prior. `now`: the pass's clock for the expiry view (see _bg_unresolved).
+
+    A launch's turn is the NEWEST turn naming its id, as a tool_use or as a tool_result (its ack). The walk goes
+    newest first, looks up only the running launches' ids, and stops at the turn that decides: the first unswept
+    turn naming one of them holds; once every one is placed in a swept turn, nothing holds. A running launch no
+    turn names holds while None is not a swept turn id (always, in practice). A turn restored from an assembly
+    document (a pre-cut turn) answers from the ids its atom list carries (em.LazyAtoms.tool_ids), so its atoms
+    are neither built nor touched; a plain turn's atoms are read here. Counted under /perf memos.bgHold."""
+    walked, turns, pre, plain, exhausted = False, 0, 0, 0, False
+    try:
+        tasks = _bg_unresolved(path, now)
+        if not tasks:
+            return False
+        sp = _cli_epoch(fsid)
+        tasks = [t for t in tasks if not (sp and t.get("t") and t["t"] < sp)]
+        if not tasks:
+            return False
+        nodes = store.get("nodes") or {}
+        if any(nd.get("awaitingWhy") and not nd.get("cleared") and not nd.get("nodeComplete")
+               for nd in nodes.values()):
+            return True                       # the closer affirmed a wait somewhere open — hold
+        swept = set(store.get("closedTurns") or [])
+        need = {t["id"] for t in tasks}       # the running launches not yet placed in a turn
+        walked = True
+        for turn in reversed(session.get("turns") or []):
+            turns += 1
+            atoms = turn["atoms"]
+            ids_of = getattr(atoms, "tool_ids", None)    # a pre-cut turn's lazy list (duck-typed: a test load rebinds the class)
+            if ids_of is not None:
+                pre += 1
+                hits = need.intersection(ids_of())
+            else:
+                hits = set()
+                for a in atoms:
+                    plain += 1
+                    if a.get("lazy") is not None:         # a lazy atom carries its tool ids as scalars (T323 stage 4a)
+                        hits.update(tid for tid, _name in em.atom_tool_uses(a) if tid in need)
+                        hits.update(tid for tid in em.atom_tool_results(a) if tid in need)
+                        continue
+                    blocks = (a.get("message") or {}).get("content")
+                    if not isinstance(blocks, list):
+                        continue
+                    for b in blocks:
+                        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                            if b["id"] in need:
+                                hits.add(b["id"])
+                        elif isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
+                            if b["tool_use_id"] in need:
+                                hits.add(b["tool_use_id"])
+            if hits:
+                if turn.get("id") not in swept:
+                    return True                   # the newest turn naming a running launch is unswept: hold
+                need -= hits                      # placed in a swept turn: an older turn naming them decides nothing
+                if not need:
+                    return False
+        exhausted = True
+        return None not in swept                  # a running launch no turn names
+    finally:
+        _bg_hold_note(walked, turns, pre, plain, exhausted)
+
+
+_BG_HOLD_STATS = {"calls": 0, "walks": 0, "turns": 0, "preTurns": 0, "atoms": 0, "exhausted": 0}
+_BG_HOLD_LOCK = threading.Lock()     # the triage pool calls the hold from several threads at once
+
+
+def _bg_hold_note(walked, turns, pre, plain, exhausted):
+    """One call's tallies into the hold's counters, once per call: `walks` the calls that reached the walk, `turns`
+    the turns they visited, `preTurns` those answered from a pre-cut list's ids, `atoms` the plain atoms read,
+    `exhausted` the walks that ran out of turns with a running launch no turn names."""
+    with _BG_HOLD_LOCK:
+        s = _BG_HOLD_STATS
+        s["calls"] += 1
+        if walked:
+            s["walks"] += 1
+            s["turns"] += turns
+            s["preTurns"] += pre
+            s["atoms"] += plain
+            s["exhausted"] += 1 if exhausted else 0
+
+
+def bg_hold_stats():
+    """A copy of the background hold's counters for /perf (memos.bgHold)."""
+    with _BG_HOLD_LOCK:
+        return dict(_BG_HOLD_STATS)
 
 
 def _session_settled(fsid, path, session, store, now=None):
