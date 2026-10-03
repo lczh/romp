@@ -405,14 +405,17 @@ class FeedFirstWholePush(unittest.TestCase):
         bs = km._PERF_STATS.snapshot()["builds"]["feed"]
         return {"pusher": self._by_build(a), "connect": self._by_build(b)}, (bs["built"], bs["cached"]), list(self.events)
 
+    def _both(self):
+        """_run in each order, the measured one first; every test asserts once over both, so a failure shows both."""
+        return {order: self._run(order) for order in self.ORDERS}
+
     def test_one_mid_build_mark_and_a_stable_signature_build_twice_in_either_order(self):
         """The regression guard, green before this change too. With one mark during the first build and an unchanged view
         signature, a waiter that re-checked under the pusher's arm rebuilt and the regular section served that rebuild;
         now the waiter serves and the regular section rebuilds. The second build moves; the count stays at two."""
-        for order in self.ORDERS:
-            with self.subTest(order=order):
-                frames, counts, _ = self._run(order)
-                self.assertEqual(counts, (2, 2), "%s first: built, cached over the whole push (frames %r)" % (order, frames))
+        runs = self._both()
+        self.assertEqual({o: r[1] for o, r in runs.items()}, {o: (2, 2) for o in self.ORDERS},
+                         "built, cached over the whole push, by who built first (frames %r)" % {o: r[0] for o, r in runs.items()})
 
     def test_the_second_build_follows_the_chat_stage_and_each_feed_pane_gets_the_pre_mark_build_first(self):
         """Where the second build goes and the frame order it costs, in both orders. The chat stage starts right after the
@@ -421,22 +424,20 @@ class FeedFirstWholePush(unittest.TestCase):
         gets the pre-mark build (the mark reaches it at the next pusher cycle). A waiter that rebuilt sent the connect pane
         the post-mark build first in the measured order, and in the mirrored order the pusher's pane, with that rebuild
         ahead of the chat stage; handing the caller's role through to the cache would bring the mirrored one back."""
-        for order in self.ORDERS:
-            with self.subTest(order=order):
-                frames, _counts, events = self._run(order)
-                self.assertEqual(events, ["feed", "chat", "chat", "feed"], "%s first: the chat stage between the two builds" % order)
-                self.assertEqual(frames, {"pusher": [1, 2], "connect": [1]}, "%s first: each feed pane's frames by build" % order)
+        runs = self._both()
+        self.assertEqual({o: (r[2], r[0]) for o, r in runs.items()},
+                         {o: (["feed", "chat", "chat", "feed"], {"pusher": [1, 2], "connect": [1]}) for o in self.ORDERS},
+                         "by who built first: the order of the feed and chat builds, and each feed pane's frames by build")
 
     def test_a_mark_in_every_build_costs_two_builds_where_a_rebuilding_waiter_made_three(self):
         """The first case where the count falls: a mark lands in every build, so the regular section rebuilds over whatever
         the early passes stored. With the waiter rebuilding too that was built 3, cached 1; now built 2, cached 2 in both
         orders, with the frames of the single mark."""
         self.mark_every = True
-        for order in self.ORDERS:
-            with self.subTest(order=order):
-                frames, counts, _ = self._run(order)
-                self.assertEqual(counts, (2, 2), "%s first: built, cached over the whole push (frames %r)" % (order, frames))
-                self.assertEqual(frames, {"pusher": [1, 2], "connect": [1]}, "%s first: each feed pane's frames by build" % order)
+        runs = self._both()
+        self.assertEqual({o: (r[1], r[0]) for o, r in runs.items()},
+                         {o: ((2, 2), {"pusher": [1, 2], "connect": [1]}) for o in self.ORDERS},
+                         "by who built first: built, cached over the whole push, and each feed pane's frames by build")
 
     def test_a_signature_moved_past_the_floor_costs_two_builds_where_a_rebuilding_waiter_made_three(self):
         """The second case: one mark, a view signature that moves between asks (any live input moves it, and so does its
@@ -445,11 +446,10 @@ class FeedFirstWholePush(unittest.TestCase):
         With the waiter rebuilding too that was built 3, cached 1; now built 2, cached 2 in both orders."""
         self.moved_sig = True
         with mock.patch.object(km, "REBUILD_MIN_S", 0.0):
-            for order in self.ORDERS:
-                with self.subTest(order=order):
-                    frames, counts, _ = self._run(order)
-                    self.assertEqual(counts, (2, 2), "%s first: built, cached over the whole push (frames %r)" % (order, frames))
-                    self.assertEqual(frames, {"pusher": [1, 2], "connect": [1]}, "%s first: each feed pane's frames by build" % order)
+            runs = self._both()
+        self.assertEqual({o: (r[1], r[0]) for o, r in runs.items()},
+                         {o: ((2, 2), {"pusher": [1, 2], "connect": [1]}) for o in self.ORDERS},
+                         "by who built first: built, cached over the whole push, and each feed pane's frames by build")
 
     def test_the_first_pushs_needs_you_reads_trail_one_build_and_the_rebuild_wakes_the_push_that_catches_up(self):
         """The chat stage's needs-you reads for the first push after a restart, in the mirrored order (where a waiter that
