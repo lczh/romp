@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# `romp perf [--interval <s>] [--json [--walk]]` and `romp perf log on|off` — the kernel's performance counters
+# `romp perf [--interval <s>] [--json [--walk] [--paths]]` and `romp perf log on|off` — the kernel's performance counters
 # for a terminal: two GET /perf snapshots printed as rates, one raw snapshot, or the POST that flips the
 # romp-perf stderr log without a restart.
 #
@@ -232,8 +232,48 @@ json.dump(d, open(sys.argv[2], "w"))' "${!src}" "$TEST_DIR/old-$s.json"
 @test "romp perf --walk: refused without --json, before any read (the rates never use the walked gauges)" {
     run "$ROMP_SCRIPT" perf --walk
     [ "$status" -eq 2 ]
-    [[ "$output" == *"usage: romp perf [--interval <s>] [--json [--walk]]"* ]]
+    [[ "$output" == *"usage: romp perf [--interval <s>] [--json [--walk] [--paths]]"* ]]
     run "$ROMP_SCRIPT" perf --walk --interval 0
+    [ "$status" -eq 2 ]
+    [ ! -f "$CURL_LOG" ]                                 # nothing reached the kernel
+}
+
+@test "romp perf --json --paths: reads GET /perf?paths=all once, in either order, and never asks for the heap walk" {
+    # the whole per-file read table (checkpoints.readByPath, which a plain read cuts to its 50 largest rows) on its own flag,
+    # so a reader of the table never pays the two whole-heap walks ?walk=1 adds (2026-10-01)
+    run "$ROMP_SCRIPT" perf --json --paths
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -F "127.0.0.1:29855/perf?paths=all" "$CURL_LOG")" -eq 1 ]
+    [ "$(grep -c -F "walk=1" "$CURL_LOG")" -eq 0 ]
+    grep -q "X-Romp-Token: TESTTOKEN123" "$CURL_STDIN"
+    echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["process"]["pid"] == 4242'
+    [ "$(cat "$CURL_CALLS")" -eq 1 ]
+    run "$ROMP_SCRIPT" perf --paths --json
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -F "127.0.0.1:29855/perf?paths=all" "$CURL_LOG")" -eq 2 ]
+    [ "$(grep -c -F "walk=1" "$CURL_LOG")" -eq 0 ]
+}
+
+@test "romp perf --json --walk --paths: one GET /perf?walk=1, in either order, since the walk carries the whole table too" {
+    # with both flags the walk wins: a ?paths=all read would leave the two walked gauges null, read as a failed walk
+    run "$ROMP_SCRIPT" perf --json --walk --paths
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -F "127.0.0.1:29855/perf?walk=1" "$CURL_LOG")" -eq 1 ]
+    [ "$(grep -c -F "paths=all" "$CURL_LOG")" -eq 0 ]
+    [ "$(cat "$CURL_CALLS")" -eq 1 ]
+    rm -f "$CURL_LOG" "$CURL_CALLS"
+    run "$ROMP_SCRIPT" perf --json --paths --walk
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -F "127.0.0.1:29855/perf?walk=1" "$CURL_LOG")" -eq 1 ]
+    [ "$(grep -c -F "paths=all" "$CURL_LOG")" -eq 0 ]
+    [ "$(cat "$CURL_CALLS")" -eq 1 ]
+}
+
+@test "romp perf --paths: refused without --json, before any read (the rates never use the per-file table)" {
+    run "$ROMP_SCRIPT" perf --paths
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp perf [--interval <s>] [--json [--walk] [--paths]]"* ]]
+    run "$ROMP_SCRIPT" perf --paths --interval 0
     [ "$status" -eq 2 ]
     [ ! -f "$CURL_LOG" ]                                 # nothing reached the kernel
 }

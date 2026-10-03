@@ -91,15 +91,18 @@ class FeedFirstColdPush(unittest.TestCase):
         first_build = kinds.index(("build", S1)) if ("build", S1) in kinds else kinds.index(("build", S2))
         self.assertLess(first_feed, first_build, "the feed frame leaves before the first chat page is built: %r" % kinds)
         self.assertEqual(km._wire_stats["feed_first"], 1)
-        self.assertEqual(self.feed_calls[0], False, "the early build is the cycle's own, not a connect serve")
+        self.assertEqual(self.feed_calls, [True, False], "the early frame asks the cache's connect arm, for the pusher too (any build "
+                         "the cache holds then was stored after this push found none: the build it waited for, 2026-10-03), and the "
+                         "push's own regular feed section asks the pusher's arm, whose dirty rule carries a mark that landed mid-build")
 
     def test_a_connect_push_during_the_first_cycle_builds_the_feed_too(self):
         # the realistic boot: the browser reconnects a moment after the kernel serves, so the first push with a feed pane is the
-        # connect push; the connect arm of the cache serves only a warmed build, which a cold kernel has not got
+        # connect push. The stubbed cache here cannot tell a build from a serve; that a cold connect arm still BUILDS is pinned
+        # against the real cache in tests/test_single_flight_builds.py (FeedFirstWaiter)
         feed_c = self._client("feed")
         km._push([feed_c], connect=True)
         self.assertEqual(km._wire_stats["feed_first"], 1, "the early pass ran on the connect push")
-        self.assertEqual(self.feed_calls[0], False, "and it BUILT (connect False to the cache), rather than serving a warmed build it has not got")
+        self.assertEqual(self.feed_calls[0], True, "the connect arm, as for the pusher: a build stored after this push looked is the one it waited for")
         self.assertIn(("feed", "feed"), self.seq)
 
     def test_a_warm_kernel_takes_no_extra_step(self):
@@ -129,7 +132,7 @@ class FeedFirstColdPush(unittest.TestCase):
             km._PERF_STATS.pusher["cycles"] = 12
         km._push([self._client("feed")], connect=True)
         self.assertEqual(km._wire_stats["feed_first"], 1)
-        self.assertEqual(self.feed_calls[0], False, "and it built, rather than serving a warmed build a cold kernel has not got")
+        self.assertEqual(self.feed_calls[0], True, "the connect arm, which builds on a cold cache (tests/test_single_flight_builds.py)")
 
     def test_no_feed_pane_means_no_early_pass(self):
         chat_c = self._client("chat")
