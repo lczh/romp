@@ -979,7 +979,9 @@ class ReleasesKeepTheJudgesVerdicts(unittest.TestCase):
                 self.assertLessEqual(a["bytes"]["L3"], b["bytes"]["L3"] + (size - lf["cut"]) + size + guard,
                                      "the revived session read %d bytes of its %d-byte leaf, cut at %d (stubbed: %d)"
                                      % (a["bytes"]["L3"], size, lf["cut"], b["bytes"]["L3"]))
-                want["L3"] = a["bytes"]["L3"]              # and its anchor not at all: C stays as the stubbed run read it
+                want["L3"] = a["bytes"]["L3"]              # its anchor C is not read whole: from the first clear on, revive
+                #                                            included, C's expected bytes are the live run's own, which the
+                #                                            guard bound above holds to the fold document's restore
             else:
                 self.assertEqual(a["whole"], b["whole"], "%s: the same whole reads with the releases as without" % name)
             self.assertEqual(a["bytes"], want, "%s: every transcript read the bytes it read with the releases stubbed out" % name)

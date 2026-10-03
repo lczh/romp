@@ -347,5 +347,61 @@ class NoPreClearSalvageReachesTheJudges(unittest.TestCase):
                          "no card anchored in the cleared conversation")
 
 
+RSID = "5a1e0000-2222-4333-8444-000000000b01"     # private synthetic sids: a session, its /clear's file, and the file a
+RL1 = "5a1e0000-2222-4333-8444-000000000b02"      #  resume of that file forked to
+RL2 = "5a1e0000-2222-4333-8444-000000000b03"
+MID_TEXT = "A reply salvaged after the clear and before the resume."
+
+
+class SalvageFloorOverTheResumeLineage(unittest.TestCase):
+    """The salvage floor is the earliest head over the lineage CLOSURE of the parse's candidates, on the parse's side
+    (parse_session) and on the chat's (jd.conversation_floor), never over the candidates alone (review round one,
+    2026-10-03). After a /clear to L1 and a resume fork from L1 to L2 the candidates are L2 alone, the anchor being
+    unreachable, but the parse reads L1 through the lineage: a reply salvaged between L1's head and L2's head belongs to
+    the conversation it reads and stays, while one from before the clear still goes."""
+
+    def setUp(self):
+        td = Path(tempfile.mkdtemp())
+        self.anchor, self.l1, self.l2 = (td / (s + ".jsonl") for s in (RSID, RL1, RL2))
+
+        def write(p, rows):
+            p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        def turn(t, u, a, ask, reply):
+            return [{"type": "user", "timestamp": iso(t), "uuid": u, "parentUuid": None, "promptSource": "typed",
+                     "message": {"role": "user", "content": ask}},
+                    {"type": "assistant", "timestamp": iso(t + 60), "uuid": a, "parentUuid": u,
+                     "message": {"role": "assistant", "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn"}}]
+        write(self.anchor, turn(T0, "u_pre", "a_pre", "how does the notes-api page its index?", "By cursor."))
+        write(self.l1, turn(T0 + 600, "u_l1", "a_l1", "now add a tags filter to the search route", "Added the tags filter."))
+        write(self.l2, turn(T0 + 1200, "u_l2", "a_l2", "and cache the tag counts", "Cached them."))   # the resume's fresh head
+        (td / "states").mkdir()
+        (td / "states" / (RSID + ".jsonl")).write_text("\n".join(json.dumps(m) for m in [
+            _marker(T0 + 40, "lost_pre", "A pre-clear reply that never reached the transcript."),
+            _marker(T0 + 700, "lost_mid", MID_TEXT),
+            {"t": T0 + 1190, "resumeFork": {"from": RL1, "to": RL2}}]) + "\n")
+        saved = jd.STATESDIR
+        jd.STATESDIR = td / "states"
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._RESUME_LINKS_MEMO.clear()
+
+        def restore():
+            jd.STATESDIR = saved
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._RESUME_LINKS_MEMO.clear()
+            shutil.rmtree(td, ignore_errors=True)
+        self.addCleanup(restore)
+
+    def test_the_judges_parse_keeps_a_reply_salvaged_between_the_clear_and_the_resume(self):
+        self.assertEqual(jd._judge_candidates(RSID, [str(self.l2)]), [str(self.l2)], "premise: the anchor is unreachable")
+        tree = jd.parsed_session(RSID, [str(self.l2)], NOW)
+        texts = json.dumps([a.get("message") for t in tree["turns"] for a in t["atoms"]])
+        self.assertIn("Added the tags filter.", texts, "premise: the parse reads L1 through the resume lineage")
+        self.assertEqual([a["uuid"] for t in tree["turns"] for a in t["atoms"] if a.get("orphaned")], ["lost_mid"],
+                         "floored at L1's head: the reply after the clear stays, the one before it goes")
+
+    def test_the_chats_floor_is_the_head_of_the_clears_file(self):
+        self.assertEqual(jd.conversation_floor(RSID, str(self.l2)), T0 + 600,
+                         "the earliest head over the closure (L2 and L1), not L2's own")
+
+
 if __name__ == "__main__":
     unittest.main()

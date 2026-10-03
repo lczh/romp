@@ -34,6 +34,33 @@ km = load_source("romp_kernel_rw", os.path.join(BIN, "romp-kernel"))
 km._limit_hold = lambda sid: None
 
 SID = "11111111-2222-3333-4444-555555555555"
+CLEARED = "66666666-7777-8888-9999-aaaaaaaaaaab"     # the transcript a /clear opened under SID's session
+
+
+def _first_file_untouched(path):
+    """Drop the reader's records of `path` and its byte count, and return a function answering the bytes read from it since."""
+    em, rp = km.em, os.path.realpath(str(path))
+    with em._JSONL_CACHE_LOCK:
+        for k in [k for k in em._JSONL_CACHE if os.path.realpath(str(k)) == rp]:
+            em._cache_pop_locked(k)
+    with em._READ_BYTES_LOCK:
+        for k in [k for k in em._READ_BYTES if os.path.realpath(str(k)) == rp]:
+            em._READ_BYTES.pop(k, None)
+
+    def read():
+        with em._READ_BYTES_LOCK:
+            return sum(n for k, n in em._READ_BYTES.items() if os.path.realpath(str(k)) == rp)
+    return read
+
+
+def _clear_leaf(directory):
+    """A /clear's leaf beside the session's first file in `directory`: a parentless head and three records after it."""
+    p = os.path.join(str(directory), CLEARED + ".jsonl")
+    with open(p, "w") as f:
+        for r in [_rec("user", "c1", None, "a fresh start after the clear"), _rec("assistant", "c2", "c1", "fresh reply"),
+                  _rec("user", "c3", "c2", "and the next step"), _rec("assistant", "c4", "c3", "next step done")]:
+            f.write(json.dumps(r) + "\n")
+    return p
 
 
 def _rec(typ, uuid, parent, text="x", **extra):
@@ -696,6 +723,19 @@ class HoldLeafEclipsedFlip(unittest.TestCase):
         self.assertIs(km._hold_leaf_still_active(SID, "a2"), True,
                       "a machine-eclipsed leaf is live content, not a taken rewind")
 
+    def test_a_clear_leafs_check_reads_no_byte_of_the_first_file(self):
+        # the check walks the display parse's own candidates, a /clear's leaf alone (2026-10-03); before review round one
+        # only a source-text count pinned that, and a line putting the first file back passed it
+        first = self.td / (SID + ".jsonl")
+        with open(first, "w") as f:
+            for r in [_rec("user", "u1", None, "first ask"), _rec("assistant", "a1", "u1", "first reply")]:
+                f.write(json.dumps(r) + "\n")
+        leaf = _clear_leaf(self.td)
+        km._sessions = lambda now: [{"sid": SID, "path": leaf}]
+        read = _first_file_untouched(first)
+        self.assertIs(km._hold_leaf_still_active(SID, "c4"), True, "the leaf's tip is live")
+        self.assertEqual(read(), 0, "no byte of the session's first file")
+
 
 class RewindKeptLookupEconomy(unittest.TestCase):
     """_rewind_kept_uuids runs on EVERY feed/chat build of a held session, for the whole armed
@@ -767,6 +807,17 @@ class RewindKeptLookupEconomy(unittest.TestCase):
             return real(*a, **k)
         km.em.chain_membership = counting
         return calls
+
+    def test_a_clear_leafs_kept_walk_reads_no_byte_of_the_first_file(self):
+        # the kept walk takes the display parse's own candidates, a /clear's leaf alone (2026-10-03): pinned by behavior,
+        # not by the source-text count alone, since review round one
+        first = self._transcript(register=False)
+        leaf = _clear_leaf(self.td)
+        km._sessions = lambda now: [{"sid": SID, "path": leaf}]
+        read = _first_file_untouched(first)
+        kept = km._rewind_kept_uuids(SID)
+        self.assertTrue({"c1", "c2", "c3", "c4"} <= set(kept or ()), kept)
+        self.assertEqual(read(), 0, "no byte of the session's first file")
 
     def test_the_kept_walk_memoizes_on_the_fileset_and_busts_on_change(self):
         p = self._transcript()
