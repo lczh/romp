@@ -16,11 +16,13 @@ import collections
 import io
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from romp_load import load_source
 from unittest import mock
 
@@ -514,11 +516,15 @@ class ANonJsonValueOnTheWireIsCountedAndSaidOnce(unittest.TestCase):
 
 
 class ARaisingSerializerLeavesThePusherAlive(unittest.TestCase):
-    """The wire section of _push runs after its build try, and _push_all, _pusher_cycle_jobs, _pusher_cycle and
-    _pusher have no except around it: a raise there used to end the pusher thread for the life of the process,
+    """The bars' half of _push's wire section runs after its build try, and _push_all, _pusher_cycle_jobs, _pusher_cycle
+    and _pusher have no except around it: a raise there used to end the pusher thread for the life of the process,
     every dashboard frozen until a restart. A fill that raises now stands its slot down for the cycle (one
     traceback; the slot's other clients skipped without another), a send that raises skips that client, and the
-    next cycle retries; _pusher_cycle_jobs catches whatever escapes _push_all. Every raise here is synthetic and
+    next cycle retries; _pusher_cycle_jobs catches whatever escapes _push_all. The feed's half runs in
+    _send_feed_frames (2026-10-03), at the end of the build's feed section and so inside the build try: a raise there is
+    caught first by the helper's per-pane belt, the same as the bars', and one that escaped it by the try's except,
+    which ends the push before the timeline section (no lanes, no bars, no warm). So the feed tests here with a Sessions
+    pane among the targets also assert that it still gets its lanes and bars. Every raise here is synthetic and
     asserted on its own marker text, never the interpreter's."""
 
     TICK_JOBS = ("_apply_pending_ops", "_turn_notify_tick", "_lift_spent_awaiting", "_death_sweep_tick",
@@ -658,8 +664,10 @@ class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
     of its feed section, before the timeline section builds (2026-10-03). Sent from the send stage after that section, the
     board's frame waited out the Sessions pane's timeline section in every cycle: a rebuild whenever the cached build was
     stale, the whole cold build after a restart. The timeline build here blocks until the test releases it, so the frame
-    is seen to leave while the build runs. The send stage sends no feed of its own (one feed send per pane per push), the
-    other panes' frames are the ones a push without the feed panes sends, and the feed's send time counts under push.send."""
+    is seen to leave while the build runs, on a warm kernel and on a cold one, where the Outline pane's first frame carries
+    the session rows the Feed pane's early frame lacks. The send stage sends no feed of its own (one feed send per pane per
+    push), the other panes' frames are the ones a push without the feed panes sends, and the feed's send time and the
+    bars' both count under push.send."""
 
     def _world(self):
         w = _World(self, feed=_feed(), timeline=_timeline())
@@ -699,6 +707,81 @@ class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
         whole = dict(w.feed, ledgers=[])                 # the push's copy: the build with its ledgers attach (an Outline pane is a target)
         self.assertEqual(cs["feed"]["frames"], [whole], "one feed frame, whole (the first frame to a pane), as the send stage sent it")
         self.assertEqual(cs["outline"]["frames"], [whole], "the same frame to the Outline pane")
+
+    def _one_session_tab(self):
+        """One synthetic chat tab, the notes-api world's `web`, so the push's session build runs and the feed section
+        attaches its row to the ledgers (the Outline pane's rows): the builder recipe of tests/test_feed_first_cold_push.py,
+        every stub and the chat caches restored after."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, SID + ".jsonl")
+        with open(path, "w") as f:
+            f.write("x" * 10)
+        (Path(tmp) / "names").mkdir(); (Path(tmp) / "state").mkdir()
+        session = {"type": "session", "id": SID, "name": "web", "events": [{"kind": "assistant", "uuid": "u0", "md": "m0"}],
+                   "status": {"state": "idle", "sinceEpoch": None}, "ledger": None}
+
+        def forget():
+            with km._chat_baseline_lock:
+                for memo in (km._built_chat, km._prev_chat_events, km._prev_chat_ledger, km._chat_baseline_raced):
+                    memo.pop(SID, None)
+        self.addCleanup(forget)
+        for target, name, value in (
+                (km, "_chat_tab_sessions", lambda now, live_map: [{"sid": SID, "name": "web", "path": path, "anchor": SID}]),
+                (km, "build_session", lambda sid, now, live_map=None, **kw: json.loads(json.dumps(session))),
+                (km, "_comments_frame", lambda sid, live_map: None),
+                (km, "_push_subagents", lambda clients, now, live_map: None),
+                (km, "NAMES", Path(tmp) / "names"),
+                (km.jd, "STATE", Path(tmp) / "state")):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_after_a_restart_the_outline_pane_gets_the_session_rows_before_the_timeline_build(self):
+        # the class's first test on a cold kernel: no feed built since the boot, the kernel serving, so _feed_first sends the Feed
+        # pane its early frame, built before any session build ran and so without the session rows. The regular frame still
+        # leaves at the end of the feed section, before the timeline build: the Outline pane's first frame, whole and with
+        # the rows, and the Feed pane's delta that adds them. Its wire tuple is filled anew, since the early one has no rows;
+        # a helper that reused the early tuple would send the Outline pane, after a restart, a frame without them
+        w = self._world()
+        km._built_feed[:] = [None, None, 0.0, 0.0]       # no feed built since the boot (_World restores the slot)
+        marks = dict(km._BOOT_MARKS)
+        km._BOOT_MARKS["firstServe"] = 1.0               # a kernel that is serving
+        self.addCleanup(lambda: (km._BOOT_MARKS.clear(), km._BOOT_MARKS.update(marks)))
+        self._one_session_tab()
+        cs = self._named(tl=_client("timeline"), feed=_client("feed"), outline=_client("fleet"))
+        started, release, seen = threading.Event(), threading.Event(), {}
+
+        def timeline_build(now, live_map, sig, connect=False):
+            seen.update({n: [dict(f) for f in c["frames"]] for n, c in cs.items()})   # what each pane held as the build began
+            started.set()
+            release.wait(30)                             # released by the test; the bound only ends a broken run
+            return w.timeline
+        km._cached_timeline = timeline_build             # _World restores it
+        early0 = km._wire_stats.get("feed_first", 0)
+        th = threading.Thread(target=km._push, args=([cs["tl"], cs["feed"], cs["outline"]],), daemon=True)
+        th.start()
+        try:
+            self.assertTrue(started.wait(10), "the push reached its timeline build")
+            self.assertTrue(th.is_alive(), "and the build is still running")
+        finally:
+            release.set()
+            th.join(30)
+        self.assertFalse(th.is_alive(), "the push finished once released")
+        self.assertEqual(km._wire_stats.get("feed_first", 0) - early0, 1, "the cold kernel's early pass ran")
+        self.assertEqual({n: [f["type"] for f in frames] for n, frames in seen.items()},
+                         {"tl": [], "feed": ["feed", "delta"], "outline": ["feed"]},
+                         "as the timeline build began: the Feed pane held its early frame and the delta, the Outline pane its first frame")
+        early, delta = seen["feed"]
+        outline = seen["outline"][0]
+        self.assertNotIn("ledgers", early, "the early frame was built before any session build ran")
+        self.assertEqual(early, w.feed, "and is otherwise the build, whole")
+        rows = outline.get("ledgers") or []
+        self.assertEqual([(r["sid"], r["name"]) for r in rows], [(SID, "web")], "the Outline pane's frame carries the session's row")
+        self.assertEqual({k: v for k, v in outline.items() if k != "ledgers"}, w.feed, "and is otherwise the whole build")
+        self.assertEqual(delta.get("rest", {}).get("ledgers"), rows, "the delta adds the same rows to the Feed pane")
+        self.assertEqual([f["type"] for f in cs["tl"]["frames"]], ["data", "bars"], "the Sessions pane's lanes and bars, after the build")
+        self.assertEqual((len(cs["feed"]["frames"]), len(cs["outline"]["frames"])), (2, 1), "and no second feed send after it")
 
     def test_each_feed_pane_is_sent_once_per_push_and_the_bars_once_per_timeline_pane(self):
         # the send stage must not send the feed a second time: a second send of the same build dedups on the wire, so the
@@ -759,17 +842,19 @@ class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
         self.assertEqual(beside[0], alone[0], "the chat pane's frames, in order, as without the feed panes")
         self.assertEqual(beside[1], alone[1], "the Sessions pane's frames, in order, as without the feed panes")
 
-    def test_the_feed_send_is_booked_under_push_send(self):
-        # the feed's send time still counts under push.send, as it did from the send stage: a slowed feed send shows which
-        # stage holds it, never push.feed (the build and the ledgers attach) nor push.timeline. The stage closes twice in a
-        # push, for the feed and then for the bars, and the two closes add into the split's one push.send row
+    def test_the_feed_send_and_the_bars_send_are_both_booked_under_push_send(self):
+        # the feed's send time still counts under push.send, as it did from the send stage, and so does the bars': each send
+        # is slowed by one delay, and push.send holds both, while push.feed (the build and the ledgers attach) and
+        # push.timeline each stay under one. The stage closes twice in a push, for the feed and then for the bars, and the
+        # two closes add into the split's one push.send row. Both sends are slowed and the bound is both delays, so neither
+        # close can go missing unseen: with the feed's send alone slowed, the stage read one delay without the bars' close
         slow_s = 0.1
         self._world()
         ps = km._PerfStats()                             # a private stats object: the module's own is left as it was
         real = km._send_slot
 
         def slow(c, ftype, *a, **kw):
-            if ftype == "feed":
+            if ftype in ("feed", "bars"):
                 time.sleep(slow_s)
             return real(c, ftype, *a, **kw)
         with mock.patch.object(km, "_PERF_STATS", ps), mock.patch.object(km, "_send_slot", side_effect=slow):
@@ -777,7 +862,8 @@ class TheFeedLeavesBeforeTheTimelineBuild(unittest.TestCase):
             km._push([_client("feed"), _client("timeline")])
             ps.cycle(0.1)
         split = ps.stage_ring[-1]["stages"]
-        self.assertGreaterEqual(split["push.send"]["ms"], slow_s * 1000, "the feed's send is booked under push.send")
+        self.assertGreaterEqual(split["push.send"]["ms"], 2 * slow_s * 1000,
+                                "both sends are booked under push.send, the feed's before the timeline and the bars' after it")
         self.assertLess(split["push.feed"]["ms"], slow_s * 1000, "not under push.feed")
         self.assertLess(split["push.timeline"]["ms"], slow_s * 1000, "nor under push.timeline")
 
