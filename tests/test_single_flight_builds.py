@@ -7,6 +7,7 @@ timeline build in flight on one thread is the build every later caller serves (o
 timeline runs outside any lock (a pane's first frame is never behind another pane's build), and a chat tab in flight on another
 thread is waited for and re-read from the cache, the claim released by the thread's scope close whatever raised. Hermetic: the
 builders are stubbed to sleep and count; two threads race each call."""
+import contextlib
 import inspect
 import json
 import os
@@ -266,6 +267,213 @@ class FeedFirstWaiter(unittest.TestCase):
                 self.assertTrue(km._feed_first(now, {}, [pane], connect), "connect=%s" % connect)
             self.assertEqual(self.builds, ["feed"], "connect=%s built: %r" % (connect, self.builds))
             self.assertIn("feed", [f.get("type") for f in pane["_frames"]], "connect=%s sent" % connect)
+
+
+TICK = 0.2                                            # each stubbed feed build's hold, once the other caller is in
+CHAT_S = 0.15                                         # each stubbed chat tab's build: two tabs make the chat stage
+NEEDS_CARD = {"itemId": "g1", "sid": S1, "text": "a card", "category": "needs_input"}   # in the feed board's needs-you category
+
+
+class FeedFirstWholePush(unittest.TestCase):
+    """The whole cold push around the early frame (2026-10-03, the first review of FeedFirstWaiter). Two real _push calls,
+    the pusher's (a feed pane and a chat pane) and a pane's connect push (one feed pane), race over the real feed cache and
+    its lock: synthetic sessions, a views mark during the first build once the other caller waits, and a sleep as the chat
+    stage. Each feed pane's frames are read by build (1 is the build the mark landed in, 2 the next), and builds and cached
+    serves are counted over both pushes. The waiter serves the build it waited for, so the second build moves to the
+    pusher's regular feed section, after its chat stage, and the count falls only where that section would have rebuilt
+    over the waiter's rebuild anyway. Hermetic: build_feed and build_session stubbed; fake panes; a temp state root."""
+
+    ORDERS = ("pusher", "connect")                    # who builds first: the measured order, then the mirrored one
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.paths = {}
+        for sid in (S1, S2):
+            p = os.path.join(self.tmp, sid + ".jsonl"); open(p, "w").write("x" * 100); self.paths[sid] = p
+        self._saved = (km._chat_tab_sessions, km._live_map, km.build_session, km.build_feed, km._comments_frame,
+                       km._push_subagents, km.NAMES, km.jd.STATE, list(km._clients), list(km._built_feed), km._views_dirty[0],
+                       dict(km._VIEW_STATS), km._feed_wire, dict(km._wire_stats), dict(km._BOOT_MARKS),
+                       km._feed_needs_input[0], km._feed_needs_input_count[0], km._feed_needs_rows[0],
+                       km._NOTIFY_PREV[0], km._NOTIFY_PREV_DISK[0], km._BADGE_LAST[0], km._pusher_wake.is_set())
+        km._chat_tab_sessions = lambda now, live_map: [{"sid": s, "name": NAMES[s], "path": self.paths[s], "anchor": s}
+                                                       for s in (S1, S2)]
+        km._live_map = lambda: {}
+        km._comments_frame = lambda sid, live_map: None
+        km._push_subagents = lambda clients, now, live_map: None
+        km.NAMES = Path(self.tmp) / "names"; km.NAMES.mkdir()
+        km.jd.STATE = Path(self.tmp) / "state"; km.jd.STATE.mkdir(parents=True, exist_ok=True)
+        km._BOOT_MARKS["firstServe"] = 1.0                # a kernel that is serving
+        km.build_feed, km.build_session = self._feed, self._chat
+        self.mark_every, self.moved_sig, self.needs_from = False, False, None
+
+    def tearDown(self):
+        (km._chat_tab_sessions, km._live_map, km.build_session, km.build_feed, km._comments_frame, km._push_subagents,
+         km.NAMES, km.jd.STATE, clients, bf, km._views_dirty[0], vs, km._feed_wire, ws, marks,
+         km._feed_needs_input[0], km._feed_needs_input_count[0], km._feed_needs_rows[0],
+         km._NOTIFY_PREV[0], km._NOTIFY_PREV_DISK[0], km._BADGE_LAST[0], woke) = self._saved
+        del km._clients[:]; km._clients.extend(clients)
+        km._built_feed[:] = bf
+        km._VIEW_STATS.clear(); km._VIEW_STATS.update(vs)
+        km._wire_stats.update(ws)
+        km._BOOT_MARKS.clear(); km._BOOT_MARKS.update(marks)
+        km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear()
+        km._CHAT_INFLIGHT.clear()
+        if woke:
+            km._pusher_wake.set()
+        else:
+            km._pusher_wake.clear()
+        km._PERF_STATS.reset()
+
+    def _feed(self, now, live_map):
+        """build_feed: counts, holds until the other caller is in, and marks the views mid-build (the first build, or every
+        build with mark_every). Each build's payload differs (`stamp`), so no frame of one build dedups against another's."""
+        n = len(self.bids) + 1                            # under the single-flight lock: one build at a time
+        self.bids.append(km._feed_build_id[0])            # the id _build_feed_locked claimed for this build just before the call
+        self.events.append("feed")
+        self.inflight.set()
+        self.second_in.wait(5)                            # the other caller has taken its view signature, next is the lock
+        time.sleep(TICK)                                  # ...where it now waits
+        if n == 1 or self.mark_every:
+            km._views_dirty[0] = time.time()              # the housekeeping marks the views mid-build: newer than this build's start
+        out = json.loads(json.dumps(FEED))
+        out["stamp"] = n
+        if self.needs_from is not None and n >= self.needs_from:
+            out["asks"] = [dict(NEEDS_CARD)]              # a card that needs the user, in S1's session
+        return out
+
+    def _chat(self, sid, now, live_map=None, **kw):
+        """build_session, the chat stage: records the three needs-you reads build_session makes (the ring, its count and
+        the Needs you box's rows), then sleeps."""
+        self.events.append("chat")
+        self.reads.append((sid, km._feed_needs_input_of(sid), km._feed_needs_input_count_of(sid),
+                           [r.get("itemId") for r in (km._chat_notices(sid) or [])]))
+        time.sleep(CHAT_S)
+        km._pusher_wake.clear()                           # the early pass's wake: only one after the chat stage counts below
+        return {"type": "session", "id": sid, "name": NAMES[sid], "events": [{"kind": "assistant", "uuid": "u1", "md": "m1"}],
+                "status": {"state": "working", "sinceEpoch": None}, "ledger": None}
+
+    def _sig(self, now, live_map):
+        """The view signature: constant, or a new value per ask with moved_sig. The second ask is the second caller's
+        early pass, about to wait on the lock."""
+        self.nsig += 1
+        if self.nsig == 2:
+            self.second_in.set()
+        return ("view", self.nsig if self.moved_sig else 0)
+
+    def _patches(self):
+        st = contextlib.ExitStack()
+        st.enter_context(mock.patch.object(km, "_task_tracking_on", lambda: True))
+        st.enter_context(mock.patch.object(km, "_fleet_view_sig", self._sig))
+        return st
+
+    def _pane(self, app):
+        frames = []
+        return {"app": app, "alive": True, "sent": {}, "send": lambda s: frames.append(json.loads(s)), "_frames": frames}
+
+    def _by_build(self, pane):
+        return [self.bids.index(f.get("buildId")) + 1 if f.get("buildId") in self.bids else f.get("buildId")
+                for f in pane["_frames"] if f.get("type") == "feed"]
+
+    def _run(self, order):
+        """One cold boot: the pusher's push (feed pane a, chat pane c) and a pane's connect push (feed pane b) on an empty
+        cache, `order` naming the push that builds first. Returns each feed pane's feed frames by build, the whole push's
+        (built, cached), and the order of the feed and chat builds."""
+        km._built_feed[:] = [None, None, 0.0, 0.0]
+        km._views_dirty[0] = 0.0
+        km._feed_wire = None
+        km._VIEW_STATS["feedWaited"] = 0
+        km._wire_stats["feed_first"] = 0
+        km._feed_needs_input[0] = km._feed_needs_input_count[0] = km._feed_needs_rows[0] = None
+        km._NOTIFY_PREV[0] = None
+        km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear()
+        km._CHAT_INFLIGHT.clear()
+        km._push_first.clear()                            # no session named ahead of the chat stage's order
+        km._PERF_STATS.reset()
+        self.events, self.bids, self.reads, self.nsig = [], [], [], 0
+        self.inflight, self.second_in = threading.Event(), threading.Event()
+        a, b, c = self._pane("feed"), self._pane("feed"), self._pane("chat")
+        km._clients[:] = [a, c, b]
+        self.panes = (a, b, c)
+        pushes = {"pusher": lambda: km._push([a, c]), "connect": lambda: km._push([b], connect=True)}
+        first, second = pushes[order], pushes["connect" if order == "pusher" else "pusher"]
+        with self._patches():
+            t1 = threading.Thread(target=first); t1.start()
+            self.assertTrue(self.inflight.wait(5), "the first push's cold build started")
+            t2 = threading.Thread(target=second); t2.start()
+            t1.join(20); t2.join(20)
+        self.assertFalse(t1.is_alive() or t2.is_alive(), "both pushes ended")
+        bs = km._PERF_STATS.snapshot()["builds"]["feed"]
+        return {"pusher": self._by_build(a), "connect": self._by_build(b)}, (bs["built"], bs["cached"]), list(self.events)
+
+    def test_one_mid_build_mark_and_a_stable_signature_build_twice_in_either_order(self):
+        """The regression guard, green before this change too. With one mark during the first build and an unchanged view
+        signature, a waiter that re-checked under the pusher's arm rebuilt and the regular section served that rebuild;
+        now the waiter serves and the regular section rebuilds. The second build moves; the count stays at two."""
+        for order in self.ORDERS:
+            with self.subTest(order=order):
+                frames, counts, _ = self._run(order)
+                self.assertEqual(counts, (2, 2), "%s first: built, cached over the whole push (frames %r)" % (order, frames))
+
+    def test_the_second_build_follows_the_chat_stage_and_each_feed_pane_gets_the_pre_mark_build_first(self):
+        """Where the second build goes and the frame order it costs, in both orders. The chat stage starts right after the
+        first cold build, the one the mark landed in, and the post-mark build is the regular section's, after it. So the
+        pusher's feed pane gets the pre-mark build and then the post-mark build one chat stage later, and the connect pane
+        gets the pre-mark build (the mark reaches it at the next pusher cycle). A waiter that rebuilt sent the connect pane
+        the post-mark build first in the measured order, and in the mirrored order the pusher's pane, with that rebuild
+        ahead of the chat stage; handing the caller's role through to the cache would bring the mirrored one back."""
+        for order in self.ORDERS:
+            with self.subTest(order=order):
+                frames, _counts, events = self._run(order)
+                self.assertEqual(events, ["feed", "chat", "chat", "feed"], "%s first: the chat stage between the two builds" % order)
+                self.assertEqual(frames, {"pusher": [1, 2], "connect": [1]}, "%s first: each feed pane's frames by build" % order)
+
+    def test_a_mark_in_every_build_costs_two_builds_where_a_rebuilding_waiter_made_three(self):
+        """The first case where the count falls: a mark lands in every build, so the regular section rebuilds over whatever
+        the early passes stored. With the waiter rebuilding too that was built 3, cached 1; now built 2, cached 2 in both
+        orders, with the frames of the single mark."""
+        self.mark_every = True
+        for order in self.ORDERS:
+            with self.subTest(order=order):
+                frames, counts, _ = self._run(order)
+                self.assertEqual(counts, (2, 2), "%s first: built, cached over the whole push (frames %r)" % (order, frames))
+                self.assertEqual(frames, {"pusher": [1, 2], "connect": [1]}, "%s first: each feed pane's frames by build" % order)
+
+    def test_a_signature_moved_past_the_floor_costs_two_builds_where_a_rebuilding_waiter_made_three(self):
+        """The second case: one mark, a view signature that moves between asks (any live input moves it, and so does its
+        5 s bucket), and a regular ask later than REBUILD_MIN_S after the waiter's build (the floor patched to 0 here,
+        standing for a chat stage longer than its 2 s), so the regular section rebuilds whatever the early passes stored.
+        With the waiter rebuilding too that was built 3, cached 1; now built 2, cached 2 in both orders."""
+        self.moved_sig = True
+        with mock.patch.object(km, "REBUILD_MIN_S", 0.0):
+            for order in self.ORDERS:
+                with self.subTest(order=order):
+                    frames, counts, _ = self._run(order)
+                    self.assertEqual(counts, (2, 2), "%s first: built, cached over the whole push (frames %r)" % (order, frames))
+                    self.assertEqual(frames, {"pusher": [1, 2], "connect": [1]}, "%s first: each feed pane's frames by build" % order)
+
+    def test_the_first_pushs_needs_you_reads_trail_one_build_and_the_rebuild_wakes_the_push_that_catches_up(self):
+        """The chat stage's needs-you reads for the first push after a restart, in the mirrored order (where a waiter that
+        rebuilt did so before the chat stage). The post-mark build files a card that needs the user in S1's session; the
+        first build has none. The chat stage runs before the post-mark build, so the ring, its count and the Needs you
+        box's rows read the pre-mark build. The regular section's rebuild then moves the needs-you set, which wakes the
+        pusher (_build_feed_locked), and the push that wake brings reads the post-mark set."""
+        self.needs_from = 2
+        self._run("connect")
+        self.assertEqual(sorted(self.reads), [(S1, False, 0, []), (S2, False, 0, [])], "the first push's chat stage read the pre-mark build")
+        self.assertTrue(km._pusher_wake.is_set(), "the regular section's rebuild moved the needs-you set and woke the pusher")
+        a, _b, c = self.panes
+        del self.reads[:]
+        with self._patches():
+            km._push([a, c])                              # the cycle that wake brings
+        self.assertIn((S1, True, 1, ["g1"]), self.reads, "its chat stage rebuilt S1's tab on the post-mark set: %r" % self.reads)
+
+    def test_a_rebuild_that_leaves_the_needs_you_set_alone_wakes_nothing_after_the_chat_stage(self):
+        """The control for the wake above: both builds carry the card, so the regular section's rebuild moves no needs-you
+        read and nothing after the chat stage wakes the pusher. The wake is the set's change, not the push's."""
+        self.needs_from = 1
+        self._run("connect")
+        self.assertEqual(sorted(self.reads), [(S1, True, 1, ["g1"]), (S2, False, 0, [])], "the chat stage read the card")
+        self.assertFalse(km._pusher_wake.is_set(), "no needs-you change after the chat stage, no wake")
 
 
 class ChatClaimRelease(unittest.TestCase):
