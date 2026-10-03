@@ -222,7 +222,7 @@ def restart():
     km._parse_cache.clear()
     km._thread_msgs_cache.clear(); km._built_thread.clear()
     for memo in ("_thread_own_offsets", "_thread_own_memo", "_thread_tail_memo",   # getattr: an older kernel reds on behavior
-                 "_CUT_WIDE_MISSES"):
+                 "_CUT_FIRST_UUIDS"):
         getattr(km, memo, {}).clear()
 
 
@@ -825,6 +825,142 @@ class CutFromTheDisplayParse(Base):
         finally:
             km._comment_cut_from_parse = real
 
+    def test_the_first_transcripts_read_leaves_its_record_cache_entry_as_it_found_it(self):
+        # review round two: the widening read the session's first transcript through the record cache's whole road, which
+        # installed its records, or upgraded in place the tail a restore left, and nothing let them go. Its read now leaves the
+        # entry as it found it: none stays none, a tail stays that same tail, and a whole entry standing at the file's stat
+        # serves the uuids with no read and stays as it stood; the session's set then answers with no read
+        first, _leaf, _last, _t = cleared(self)
+        size = os.path.getsize(first)
+        data = Path(first).read_bytes()
+        lines = data.split(b"\n")
+        k = len(lines) // 2
+        off = sum(len(ln) + 1 for ln in lines[:k])
+        tail_from = (off, k, data[off - em._JSONL_TAIL_GUARD:off])     # a checkpoint's cut halfway: a restore's tail entry
+
+        def entry():
+            with em._JSONL_CACHE_LOCK:
+                return em._JSONL_CACHE.get(str(first))
+        for held in ("none", "tail", "whole"):
+            with self.subTest(held=held):
+                restart()
+                if held == "tail":
+                    em._read_jsonl_entry(first, tail_ok=True, tail_from=tail_from)
+                elif held == "whole":
+                    em._read_jsonl_entry(first)
+                before = entry()
+                self.assertEqual(before is None, held == "none", "premise: %s" % held)
+                if before is not None:
+                    self.assertEqual(before[5] > 0, held == "tail", "premise: the entry's form (%s)" % held)
+                zero_reads()
+                uuids, recs, read = km._cut_first_uuids(PARENT, first)
+                self.assertTrue({"ku0", "ka5", "kt12", "ka19"} <= uuids and not {"cu0", "ca5"} & uuids, held)
+                self.assertTrue(read and recs is not None, "the first ask reads, or serves from the whole entry (%s)" % held)
+                self.assertIs(entry(), before, "the entry as it found it (%s)" % held)
+                self.assertEqual(read_of(first), 0 if held == "whole" else size, held)
+                zero_reads()
+                again = km._cut_first_uuids(PARENT, first)
+                self.assertEqual((again[0], again[1], again[2]), (uuids, None, False), "the set answers while the stat stands")
+                self.assertEqual(read_of(first), 0, held)
+                self.assertIs(entry(), before, held)
+
+    def test_the_first_transcripts_set_is_kept_only_after_a_read_at_a_stable_stat(self):
+        # a read the file moved under (a stat before it unequal to one after) remembers nothing, so the next ask reads again and
+        # sees what landed meanwhile
+        first, _leaf, _last, _t = cleared(self)
+        real = em.read_records_detached
+
+        def moving(p):
+            got = real(p)
+            with open(first, "a") as fh:                      # a line lands while the file is read
+                fh.write(json.dumps(uline(self.now - 50000, "a line written during the read", "kz1", "ka19")) + "\n")
+            return got
+        em.read_records_detached = moving
+        try:
+            self.assertEqual(km._cut_first_uuids(PARENT, first), (None, None, True), "the file moved under the read")
+        finally:
+            em.read_records_detached = real
+        self.assertNotIn(PARENT, km._CUT_FIRST_UUIDS, "nothing remembered from it")
+        uuids, _recs, read = km._cut_first_uuids(PARENT, first)
+        self.assertTrue(read and "kz1" in uuids, "the next ask read the file again, the new line in it")
+        self.assertEqual(km._CUT_FIRST_UUIDS[PARENT][1], uuids)
+
+    def test_the_first_transcripts_uuid_sets_are_bounded_the_least_recently_consulted_out(self):
+        first = write(self.proj / (PARENT + ".jsonl"), [uline(self.now - 900, "how does the notes route page?", "ku0"),
+                                                       aline(self.now - 890, "By cursor, fifty notes a page.", "ka0", "ku0")])
+        cap = km._CUT_FIRST_MAX
+        sids = ["5e5e5e5e-1212-3434-5656-%012d" % (100 + i) for i in range(cap + 1)]
+        for sid in sids[:cap]:
+            self.assertIn("ka0", km._cut_first_uuids(sid, first)[0])
+        self.assertEqual(list(km._CUT_FIRST_UUIDS), sids[:cap], "one set per session, in the order consulted")
+        km._cut_first_uuids(sids[0], first)                   # consulted again: the most recently used now
+        km._cut_first_uuids(sids[cap], first)                 # one session more than the bound
+        self.assertEqual(len(km._CUT_FIRST_UUIDS), cap, "bounded at %d sessions" % cap)
+        self.assertNotIn(sids[1], km._CUT_FIRST_UUIDS, "the least recently consulted went")
+        self.assertIn(sids[0], km._CUT_FIRST_UUIDS)
+        self.assertIn(sids[cap], km._CUT_FIRST_UUIDS)
+
+    def test_a_widening_that_reads_a_file_counts_as_a_read_and_one_answered_from_the_set_as_its_display_road(self):
+        # review round two: the widening's read counted as the display road's walk and said nothing on stderr, against the
+        # rule above _CUT_ROADS. A widening that reads a file counts as a read, named on stderr once per session and cause;
+        # one the session's uuid set answers reads nothing and counts as the display road it came from
+        first, leaf, _last, _t = cleared(self)
+        km._parse(leaf, PARENT, self.now)                     # the chat's whole entry
+        km._cut_read_said.discard((PARENT, "widen"))
+
+        def step(anchor):
+            r0 = self.roads()
+            got = km._comment_cut_resolve(leaf, PARENT, anchor)
+            r1 = self.roads()
+            return got, {k: r1[k] - r0[k] for k in r1}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            zero_reads()
+            pre, d1 = step("ka5")                             # the first widening: the first transcript's set is read
+            read1 = read_of(first)
+            zero_reads()
+            _, d2 = step("kt12")                              # another pre-clear target: the set answers
+            lag, d3 = step("cz1")                             # a reply not flushed yet: the set answers
+            read2 = read_of(first)
+            st = os.stat(first)
+            os.utime(first, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))   # the file's stat moves: read again
+            _, d4 = step("ka6")
+        self.assertIn("rewound away", pre[2] or "")
+        self.assertEqual(lag[2], km.ANCHOR_LAG_ERR)
+        self.assertEqual(d1, {"whole": 0, "seeded": 0, "read": 1}, "the set's read is a read")
+        self.assertEqual(read1, os.path.getsize(first), "…of the first transcript alone, once")
+        self.assertEqual((d2, d3), ({"whole": 1, "seeded": 0, "read": 0},) * 2, "answered from the set: the display road")
+        self.assertEqual(read2, 0)
+        self.assertEqual(d4, {"whole": 0, "seeded": 0, "read": 1}, "a moved stat reads again, and counts again")
+        said = [ln for ln in err.getvalue().splitlines() if ln.startswith("comment cut for")]
+        self.assertEqual(len(said), 1, "once per session and cause: %s" % err.getvalue())
+        self.assertIn("widen", said[0])
+
+    def test_a_pre_clear_target_behind_a_post_clear_link_into_the_first_transcript_is_walked_over_both_files(self):
+        # outside the transcript model, a CLI that links a post-clear record into the old file: the leaf's head has no parent,
+        # so the leaf parses alone, but a record of its graph names a parent in the first transcript. Only then is the graph
+        # over both files built, and the walk over it answers, for the linked record and the records behind it alike
+        old, _last, t = turns(self.now - 100000, 20, 20000)
+        first = write(self.proj / (PARENT + ".jsonl"), old)
+        new, _l2, _t2 = turns(t + 100, 10, 20000, parent=None, tag="c")
+        for r in new:
+            if r["uuid"] == "cu5":
+                r["parentUuid"] = "ka19"                      # the sixth question links back to the first transcript's last answer
+        leaf = write(self.proj / (CLEARED + ".jsonl"), new)
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: a parentless head, so the leaf parses alone")
+        for road in ("whole", "seeded"):
+            with self.subTest(road=road):
+                restart()
+                if road == "seeded":
+                    self.restored(leaf)
+                else:
+                    km._parse(leaf, PARENT, self.now)
+                for anchor in ("ka19", "ka18"):               # the linked answer, and one behind it
+                    got = km._comment_cut_resolve(leaf, PARENT, anchor)
+                    want = self.cold(leaf, anchor)
+                    self.assertEqual((want[0], want[2]), ("", None), "premise: over both files, a tip fork (%s)" % anchor)
+                    self.assertEqual(got, want, "%s: %s" % (road, anchor))
+
     def _two_creates_after_a_budget_eviction(self, path, files, anchors):
         """The chat's parse of the session whose leaf is `path` (its transcripts `files`) installs its entry; another file's
         read under a budget that holds only that file evicts the transcripts and releases the entry; the display's next
@@ -1238,7 +1374,10 @@ class CreatesAfterAClear(CreateDoor):
     a message from before the clear found no record there and its create was parked as lag, with nothing said, until the
     pusher dropped it. It now gets the refusal it got when the first transcript was a candidate, and parks nothing; a
     post-clear reply whose record is not flushed yet stays a transient lag, and its retries read the first transcript at
-    most once, on either road, then create the thread once the record lands."""
+    most once, on either road, then create the thread once the record lands. Since review round two the widening reads the
+    first transcript alone, into a list nobody keeps, never the leaf, and leaves the record cache's entry for it as it was;
+    the session's uuid set of that file answers later targets while its stat stands, and is kept only after a read that
+    succeeded."""
 
     def _cleared(self):
         first, leaf, last, t = cleared(self)
@@ -1285,22 +1424,123 @@ class CreatesAfterAClear(CreateDoor):
                     self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
                     self.assertEqual(len(km._parked_creates), 1, "parked for the pusher")
                     for n in range(3):
-                        drop_reader(first)                # a release between retries: a read now costs its bytes again
                         km._retry_parked_creates()
                         self.assertEqual([pk["tries"] for pk in km._parked_creates], [n + 1], "still lagging, still parked")
-                    self.assertLessEqual(len(over_first), 1, "the first transcript's graph built at most once (%d)"
-                                         % len(over_first))
-                    self.assertLess(read_of(first), 2 * os.path.getsize(first), "…and read at most once (%d bytes of %d)"
-                                    % (read_of(first), os.path.getsize(first)))   # a whole read counts its guard bytes too
+                    self.assertEqual(len(over_first), 0, "no graph over the first transcript for a target it lacks (%d)"
+                                     % len(over_first))
+                    self.assertLessEqual(read_of(first), os.path.getsize(first), "…which is read alone, once (%d bytes of %d)"
+                                         % (read_of(first), os.path.getsize(first)))
                     with open(leaf, "a") as fh:            # the reply's record lands
                         fh.write(json.dumps(aline(t, "a reply about the tags route, flushed late", "cz1", last)) + "\n")
                     km._retry_parked_creates()
                     self.assertEqual(km._parked_creates, [], "created once the record landed")
                     self.assertEqual([c[2] for c in self.be.calls if c[0] == "fork"], ["cz1"], "forked at the reply")
-                    self.assertLessEqual(len(over_first), 1)
+                    self.assertEqual(len(over_first), 0)
                 finally:
                     em.FileAdapter.__init__ = real_init
                     km._comment_cut_from_parse = real_parse
+
+    def test_in_the_steady_state_the_widening_reads_the_first_transcript_alone_and_leaves_nothing_resident(self):
+        # review round two: after a /clear the judges' per-file scan walks the first transcript once, writes its memo into
+        # the file's fold document and drops its records (scan one); the next scan restores a tail of it from that document
+        # (scan two). A gesture then, at the previous head, built the graph over both files: it read the leaf's restored tail
+        # whole and the first transcript whole and upgraded both entries in place, at the same generation, so the next scan
+        # served its memo from them and nothing let them go. Now the first transcript is read alone, once, into a list nobody
+        # keeps: its tail stays a tail, the leaf is not read, and a second lagging target reads no byte of it
+        saved_owner = jd._SDK_OWNER_FN
+        jd._SDK_OWNER_FN = None                           # no backend answers for the parent: the registry road (none here)
+        self.addCleanup(setattr, jd, "_SDK_OWNER_FN", saved_owner)
+        em.checkpoint_cycle_begin(em._ckpt_cycle_default_cap())   # a pusher cycle begins: the drop's write budget is whole
+        first, leaf, last, t = cleared(self)
+        old = time.time() - 600
+        os.utime(first, (old, old))                       # the pre-clear file, unchanged since the clear: past the quiet window
+        km._sessions = lambda now, window=None, forks=True: [{"sid": PARENT, "name": "web", "path": leaf, "mtime": self.now}]
+        self.restored(leaf)                               # the chat's parse, restored from its document at a boot
+        size, lsize = os.path.getsize(first), os.path.getsize(leaf)
+
+        def scan():
+            _out, fails = jd._per_file_rewound(PARENT, jd._judge_candidates(PARENT, [leaf]))
+            self.assertEqual(fails, 0)
+
+        def entry(p):
+            with em._JSONL_CACHE_LOCK:
+                return em._JSONL_CACHE.get(str(p))
+
+        def tail(p):
+            e = entry(p)
+            return e is not None and e[5] > 0
+        zero_reads()
+        scan()                                            # the first pass after the clear
+        self.assertGreaterEqual(read_of(first), size, "premise: scan one walked the first transcript, a whole read")
+        self.assertIsNone(entry(first), "premise: and dropped its records once its memo was written")
+        scan()                                            # the next pass
+        self.assertTrue(tail(first), "premise: scan two restored a tail of the first transcript from its document")
+        self.assertTrue(tail(leaf), "premise: the leaf's entry is the tail its restore left")
+        f0, l0 = read_of(first), read_of(leaf)
+        failed = self._job("ka5", "g-pre")                # a message from before the clear: refused, nothing parked
+        self.assertEqual([f.get("transient") for f in failed], [False], self.sent)
+        self.assertIn("rewound away", failed[0].get("text") or "")
+        f1 = read_of(first)
+        self.assertLessEqual(f1 - f0, size, "the first transcript read alone, once: %d bytes of %d" % (f1 - f0, size))
+        failed = self._job("cz1", "g-lag")                # a post-clear reply not flushed yet: parked as lag
+        self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
+        km._retry_parked_creates()
+        failed = self._job("cz2", "g-lag-2")              # a second distinct lagging target
+        self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
+        self.assertEqual([pk["createId"] for pk in km._parked_creates], ["g-lag", "g-lag-2"])
+        self.assertEqual(read_of(first) - f1, 0, "the lagging targets and the retry read no byte of the first transcript")
+        scan()                                            # the pass after the gestures
+        ent = entry(first)
+        self.assertFalse(ent is not None and ent[5] == 0, "no whole entry for the first transcript")
+        self.assertTrue(tail(leaf), "the leaf's entry is still the tail its restore left")
+        self.assertLessEqual(read_of(leaf) - l0, 4 * em._JSONL_TAIL_GUARD,
+                             "the leaf's reads stay within the guard bytes: %d of %d" % (read_of(leaf) - l0, lsize))
+        self.assertLessEqual(read_of(first), 2 * size + 4 * em._JSONL_TAIL_GUARD,
+                             "the first transcript read whole twice in all, scan one's walk and the widening's one read: %d of %d"
+                             % (read_of(first), size))
+        self.assertEqual(self.be.calls, [], "no fork")
+
+    def test_a_first_transcript_that_could_not_be_read_records_nothing_and_the_next_create_is_refused(self):
+        # review round two: a miss was remembered after a failed read, so a comment on a pre-clear message made while the
+        # first transcript could not be opened kept the lag answer, parked, once the file read again with its stat unchanged
+        # (a chmod moves neither its mtime nor its size), until a restart. Nothing is remembered from a read that failed
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file: the unreadable transcript cannot be staged")
+        first, leaf, _last, _t = self._cleared()
+        st0 = os.stat(first)
+        os.chmod(first, 0)
+        try:
+            with self.assertRaises(PermissionError, msg="premise: the first transcript cannot be opened"):
+                open(first, "rb").close()
+            failed = self._job("ka5", "g-pre-1")
+        finally:
+            os.chmod(first, 0o644)
+        st1 = os.stat(first)
+        self.assertEqual((st1.st_ino, st1.st_mtime_ns, st1.st_size), (st0.st_ino, st0.st_mtime_ns, st0.st_size),
+                         "premise: the stat the set keys on is unchanged")
+        self.assertEqual([f.get("transient") for f in failed], [True], "the first create could not tell: lag, parked")
+        self.assertNotIn(PARENT, getattr(km, "_CUT_FIRST_UUIDS", {}), "nothing remembered from the failed read")
+        failed = self._job("ka5", "g-pre-2")
+        self.assertEqual([f.get("transient") for f in failed], [False], self.sent)
+        self.assertIn("rewound away", failed[0].get("text") or "")
+        self.assertEqual([pk["createId"] for pk in km._parked_creates], ["g-pre-1"], "the second create parked nothing")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "the first create, retried, is refused too and leaves the park")
+        self.assertEqual(self.be.calls, [], "no fork")
+
+    def test_a_parked_create_whose_record_lands_in_the_first_transcript_leaves_the_park_at_the_next_retry(self):
+        # the set is keyed on the first transcript's inode, mtime and size, never on its presence: a record that lands there
+        # after the set was read (a CLI writing into the old file, outside the transcript model) moves the stat, and the next
+        # retry reads the file again and finds it, a record no record of the leaf links to: refused, the park left
+        first, leaf, _last, _t = self._cleared()
+        failed = self._job("cz9", "g-late")
+        self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
+        self.assertEqual(len(km._parked_creates), 1, "parked for the pusher")
+        with open(first, "a") as fh:
+            fh.write(json.dumps(aline(self.now - 50000, "a reply written into the first transcript late", "cz9", "ka19")) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "the next retry found the record and left the park")
+        self.assertEqual(self.be.calls, [], "refused, so no fork")
 
 
 class FrameAfterAnswer(Base):

@@ -2421,6 +2421,59 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     return ent
 
 
+def cached_whole_records(path):
+    """The records of the reader's WHOLE entry for `path` when one stands at the file's current stat, else None. The entry is
+    not touched (its place in the LRU order stays), so a caller that only looks through it leaves the cache as it found it."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(path)
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and hit[5] == 0:
+            return hit[4]
+    return None
+
+
+def read_records_detached(path):
+    """`path`'s records read whole off the disk, line by line as the reader reads a file (_scan_jsonl_stream, to the size a stat
+    taken before the read saw), into a list only the caller holds: no reader entry is installed, upgraded or touched, so the
+    record cache keeps exactly what it held for the file (a tail a restore left stays a tail, a file it did not hold stays
+    out) and nothing stays resident once the caller lets the list go (review round two, 2026-10-03: the comment cut's look
+    into a session's first file after a /clear). Nor the file's read stripe: this read fills no cache. The bytes count like
+    every reader byte (read_bytes_report), and the read as a whole read on /perf, kind "detached" under its caller. None when
+    the file cannot be stat'd, opened or read."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+        with open(path, "rb") as fh:
+            records, _end, nread = _scan_jsonl_stream(fh, 0, None, limit=st.st_size)
+    except OSError:
+        return None
+    _count_read(path, nread)
+    try:
+        fr = sys._getframe(1)
+        while fr is not None and (fr.f_code.co_filename == __file__ or _synthetic_scope(fr)):
+            fr = fr.f_back
+        who = fr.f_code.co_name if fr is not None else "?"
+    except Exception:
+        who = "?"
+    with _JSONL_CACHE_LOCK:
+        table = _RECORD_CACHE_STATS.get("wholeReads")
+        if not isinstance(table, dict):
+            table = _RECORD_CACHE_STATS["wholeReads"] = {}
+        wr = table.setdefault("detached<-%s" % who, {"count": 0, "bytes": 0})
+        wr["count"] += 1; wr["bytes"] += nread
+        stg = _read_stage() or "none"
+        bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")
+        if not isinstance(bys, dict):
+            bys = _RECORD_CACHE_STATS["wholeReadsByStage"] = {}
+        ws = bys.setdefault("%s:detached<-%s" % (stg, who), {"count": 0, "bytes": 0})
+        ws["count"] += 1; ws["bytes"] += nread
+    return records
+
+
 _SERVED_RECORDS = threading.local()   # .by_path = {path: records} while a caller serves its own records (serve_records)
 
 
@@ -5253,6 +5306,14 @@ class TranscriptGraph:
 
     def fsid(self, u):
         return self._ad.fsid_of.get(u)
+
+    def dangling(self):
+        """The parent targets records of the graph name that are no record of it, as a frozenset: the adapter's dangling set,
+        collected at ingest over every record, kept or not (a restored entry's seed carries its pre-cut part's), less any the
+        graph holds (a tail record's parent before a restored entry's cut). A link from the active chain is among them even
+        where a restored entry's spine stops at it (review round two, 2026-10-03: after a /clear the comment cut builds the
+        graph over both files only when one of these is a record of the session's first file)."""
+        return frozenset(u for u in self._ad.dangling if not self.has(u))
 
     def _splice_atom(self, u):
         """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
