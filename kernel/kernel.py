@@ -18465,7 +18465,11 @@ def _anchor_adapter(path, sid, need=None):
     first (jd._judge_candidates: a /clear's leaf alone, 2026-10-03) and widened to the anchor file only
     when `need` is not in that graph, so an edit or a comment on the conversation reads no pre-clear
     file while a target from before the clear still gets the answer it always got (the seam refusal,
-    the tip fork). Without `need`, the wide set, as before."""
+    the tip fork). Without `need`, the wide set, as before. A `need` the widened graph did not hold
+    either (a reply whose record is not flushed yet) is remembered against the anchor's stat
+    (_cut_widen_missed), so the gesture's retries build the leaf's own graph alone and read the
+    anchor once, not at every retry: the anchor is frozen after a /clear, so a uuid it lacked at
+    that stat it still lacks, and the leaf is read fresh each time."""
     states = jd.STATE / "states" / (sid + ".jsonl")
     links = em.resume_fork_links(em._load_states(str(states)) if states.exists() else [])
 
@@ -18488,9 +18492,60 @@ def _anchor_adapter(path, sid, need=None):
         narrow = jd._judge_candidates(sid, [path])
         if len(narrow) < len(cands):                   # the anchor is left out of the parse: try the leaf's own graph first
             ad = em.FileAdapter(closed(narrow), path, resume_links=links)
-            if need in ad.by_uuid:
-                return ad
+            if need in ad.by_uuid or _cut_widen_missed(sid, need, anchor):
+                return ad                              # ...and a uuid the anchor lacked at its stat is not looked for there again
+            wide = em.FileAdapter(closed(cands), path, resume_links=links)
+            if need not in wide.by_uuid:
+                _cut_widen_note_miss(sid, need, anchor)
+            return wide
     return em.FileAdapter(closed(cands), path, resume_links=links)
+
+
+# A target the widened graph did not hold (2026-10-03): (sid, uuid) -> the anchor's (path, inode, mtime_ns, size) when a
+# widened read found the uuid in neither the leaf's own graph nor the anchor. The widened set differs from the leaf's own
+# by the anchor alone (both are closed over the same lineage from the leaf), and the anchor is frozen after a /clear, so
+# while its stat stands the widened answer for that uuid is the leaf-alone answer: a lagging create's retries (up to
+# _PARK_MAX_TRIES pusher cycles, and the page's re-posts after them) read the anchor once, and an anchor released between
+# them is not read back. Bounded, oldest out; read and written from create threads and the pusher (plain dict operations).
+_CUT_WIDE_MISSES = {}
+_CUT_WIDE_MISSES_MAX = 1024
+
+
+def _cut_anchor_stat(anchor):
+    try:
+        st = os.stat(anchor)
+    except OSError:
+        return None
+    return (str(anchor), st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def _cut_widen_missed(sid, need, anchor):
+    """Whether a widened read already found `need` in neither the leaf's own graph nor `anchor` at the anchor's current stat."""
+    k = _CUT_WIDE_MISSES.get((str(sid), str(need)))
+    return k is not None and k == _cut_anchor_stat(anchor)
+
+
+def _cut_widen_note_miss(sid, need, anchor):
+    st = _cut_anchor_stat(anchor)
+    if st is None:
+        return
+    if len(_CUT_WIDE_MISSES) >= _CUT_WIDE_MISSES_MAX:
+        try:
+            _CUT_WIDE_MISSES.pop(next(iter(_CUT_WIDE_MISSES)), None)   # the oldest entry; a racing writer's resize is harmless
+        except (StopIteration, RuntimeError):
+            pass
+    _CUT_WIDE_MISSES[(str(sid), str(need))] = st
+
+
+def _cut_unread_anchor(path, sid):
+    """The session's first transcript <sid>.jsonl when it is on disk and the parse of `path` leaves it out (jd._judge_candidates:
+    a /clear's leaf, 2026-10-03), else None."""
+    anchor = os.path.join(os.path.dirname(path), sid + ".jsonl")
+    if os.path.basename(path) == sid + ".jsonl" or not os.path.exists(anchor):
+        return None
+    if any(os.path.basename(str(c)) == sid + ".jsonl" for c in jd._judge_candidates(sid, [path])):
+        return None
+    return anchor
 
 
 def _comment_cut_target(path, sid, anchor_uuid):
@@ -18722,8 +18777,23 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     message of a thread on a passage from before the last compaction carries (_precompact_block), "" for every
     other anchor. A pre-compaction anchor is a tip fork (cut "") stamped with its own record's time, like the
     restart-seam case. Walked over the parent's display parse when it can answer (_comment_cut_from_parse), else over
-    a fresh read of the stitched transcript (_anchor_adapter): the same walk, the same answer, the read only slower."""
+    a fresh read of the stitched transcript (_anchor_adapter): the same walk, the same answer, the read only slower.
+
+    After a /clear the display parse reads the leaf alone (2026-10-03), so its graph holds no message from before the
+    clear, and a comment on one (selected in the expanded "Conversation cleared" card) answered ANCHOR_LAG_ERR: parked as
+    lag with nothing said, dropped by the pusher after _PARK_MAX_TRIES cycles (review round one). A lag answer there is
+    widened to the session's first transcript when the parse leaves it out (_cut_unread_anchor), so such a comment gets
+    the refusal it always got. A genuinely lagging post-clear target widens too, at most once while the anchor's stat
+    stands (_cut_widen_missed), so its retries read no byte of the anchor. A comment in the conversation a second /clear's
+    card expands (the file between the two clears) is in neither graph and still parks as lag, as it did before."""
     got = _comment_cut_from_parse(path, sid, anchor_uuid)
+    if got is not None and got[2] == ANCHOR_LAG_ERR:
+        anchor = _cut_unread_anchor(path, sid)
+        if anchor is not None and not _cut_widen_missed(sid, anchor_uuid, anchor):
+            ad = _anchor_adapter(path, sid)            # the wide set: the anchor's records, read as they always were
+            if anchor_uuid not in ad.by_uuid:
+                _cut_widen_note_miss(sid, anchor_uuid, anchor)
+            return _comment_cut_walk(em.TranscriptGraph(ad), path, anchor_uuid)
     if got is not None:
         return got
     return _comment_cut_walk(em.TranscriptGraph(_anchor_adapter(path, sid, need=anchor_uuid)), path, anchor_uuid)

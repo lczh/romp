@@ -189,6 +189,24 @@ def zero_reads_cold():
     zero_reads()
 
 
+def drop_reader(path):
+    """The reader's records of `path` dropped (a release, a budget eviction), so a later read of it costs its bytes again."""
+    rp = os.path.realpath(str(path))
+    with em._JSONL_CACHE_LOCK:
+        for k in [k for k in em._JSONL_CACHE if os.path.realpath(str(k)) == rp]:
+            em._cache_pop_locked(k)
+
+
+def cleared(test):
+    """A /clear world under PARENT: the session's first transcript (20 turns, tag k) and the leaf the clear opened (10 turns,
+    tag c, a parentless head). Returns (first, leaf, the leaf's last uuid, the next free time)."""
+    old, _last, t = turns(test.now - 100000, 20, 20000)
+    first = write(test.proj / (PARENT + ".jsonl"), old)
+    new, last, t2 = turns(t + 100, 10, 20000, parent=None, tag="c")
+    leaf = write(test.proj / (CLEARED + ".jsonl"), new)
+    return first, leaf, last, t2
+
+
 def restart():
     """A kernel restart's in-memory side: every reader entry, assembly entry, body memo and parse slot gone."""
     with em._JSONL_CACHE_LOCK:
@@ -203,7 +221,8 @@ def restart():
     jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
     km._parse_cache.clear()
     km._thread_msgs_cache.clear(); km._built_thread.clear()
-    for memo in ("_thread_own_offsets", "_thread_own_memo", "_thread_tail_memo"):   # getattr: an older kernel reds on behavior
+    for memo in ("_thread_own_offsets", "_thread_own_memo", "_thread_tail_memo",   # getattr: an older kernel reds on behavior
+                 "_CUT_WIDE_MISSES"):
         getattr(km, memo, {}).clear()
 
 
@@ -762,12 +781,49 @@ class CutFromTheDisplayParse(Base):
         # after a /clear the leaf is a new transcript beside the session's first one; its head has no parent, so the display
         # parses it alone (2026-10-03: the first transcript is no candidate of a /clear's leaf), and the entry the retry
         # rebuilds is over the leaf alone, matching the walk's candidates; the first transcript is read by neither
-        old, _last, t = turns(self.now - 100000, 20, 20000)
-        first = write(self.proj / (PARENT + ".jsonl"), old)
-        new, _l2, _t2 = turns(t + 100, 10, 20000, parent=None, tag="c")
-        leaf = write(self.proj / (CLEARED + ".jsonl"), new)
+        first, leaf, _last, _t = cleared(self)
         self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "one file: the /clear's leaf alone")
         self._two_creates_after_a_budget_eviction(leaf, [leaf, first], ("cr5", "ca7"))
+
+    def test_a_pre_clear_message_answers_what_the_wide_walk_answers_on_a_whole_and_a_seeded_entry(self):
+        # after a /clear the display parse reads the leaf alone, so its graph holds no message from before the clear; a
+        # comment on one (selected in the expanded "Conversation cleared" card) answered lag there, and the create was parked
+        # with nothing said (review round one). The lag answer is widened to the first transcript: the refusal the wide walk
+        # gives, as before the leaf parsed alone. A post-clear target still reads no byte of the first transcript
+        for road in ("whole", "seeded"):
+            with self.subTest(road=road):
+                restart()
+                first, leaf, _last, _t = cleared(self)
+                if road == "seeded":
+                    self.restored(leaf)
+                else:
+                    km._parse(leaf, PARENT, self.now)
+                for anchor in ("ka5", "kt12"):            # a pre-clear reply, a pre-clear tool call
+                    got = km._comment_cut_resolve(leaf, PARENT, anchor)
+                    want = self.cold(leaf, anchor)
+                    self.assertIn("rewound away", want[2] or "", "premise: the wide walk refuses it (%s)" % anchor)
+                    self.assertEqual(got, want, "%s: %s" % (road, anchor))
+                drop_reader(first)
+                zero_reads()
+                got = km._comment_cut_resolve(leaf, PARENT, "ca7")
+                self.assertEqual(read_of(first), 0, "%s: a post-clear target reads no byte of the first transcript" % road)
+                self.assertEqual(got, self.cold(leaf, "ca7"), road)
+
+    def test_a_post_clear_comment_on_the_read_road_reads_no_byte_of_the_first_transcript(self):
+        # the read road (no display entry can answer) builds the leaf's own graph first and finds a post-clear target there
+        first, leaf, _last, _t = cleared(self)
+        real = km._comment_cut_from_parse
+        km._comment_cut_from_parse = lambda *a, **k: None
+        try:
+            for anchor in ("ca7", "cr5"):
+                drop_reader(first)
+                zero_reads()
+                got, reads = self.walks_reading_the_transcript(km._comment_cut_resolve, leaf, PARENT, anchor)
+                self.assertEqual(reads, 1, "premise: the read road (%s)" % anchor)
+                self.assertEqual(read_of(first), 0, "no byte of the first transcript (%s)" % anchor)
+                self.assertEqual(got, self.cold(leaf, anchor), anchor)
+        finally:
+            km._comment_cut_from_parse = real
 
     def _two_creates_after_a_budget_eviction(self, path, files, anchors):
         """The chat's parse of the session whose leaf is `path` (its transcripts `files`) installs its entry; another file's
@@ -1067,8 +1123,9 @@ class FakeBackend:
         return True
 
 
-class CreateAnswersFast(Base):
-    """The create door on a huge parent: off the socket thread, answered the moment the row exists, with the thread's row."""
+class CreateDoor(Base):
+    """The create door's harness: a fake backend that forks, the parent registered as "web", and a page client that records
+    what it is sent."""
 
     def setUp(self):
         super().setUp()
@@ -1098,7 +1155,25 @@ class CreateAnswersFast(Base):
     def tearDown(self):
         (km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for, km._push_session_now,
          km._live_map, km._kernel_knows, km._comment_create_spawn) = self._saved_fns
+        with km._create_lock:
+            km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
         super().tearDown()
+
+    def _create(self, anchor, cid="g-1"):
+        return {"type": "commentCreate", "id": PARENT, "uuid": anchor, "exact": "the notes route pages by cursor",
+                "text": "Why a cursor and not an offset?", "name": "", "createId": cid}
+
+    def _wait_for_ack(self):
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            if any(f.get("type") == "commentCreated" for f in self.sent):
+                return True
+            time.sleep(0.01)
+        return False
+
+
+class CreateAnswersFast(CreateDoor):
+    """The create door on a huge parent: off the socket thread, answered the moment the row exists, with the thread's row."""
 
     def _huge_parent(self, mb=100):
         n = 400
@@ -1106,10 +1181,6 @@ class CreateAnswersFast(Base):
         path = self.parent(recs)
         km._sessions = lambda now, window=None, forks=True: [{"sid": PARENT, "name": "web", "path": path, "mtime": self.now}]
         return path
-
-    def _create(self, anchor, cid="g-1"):
-        return {"type": "commentCreate", "id": PARENT, "uuid": anchor, "exact": "the notes route pages by cursor",
-                "text": "Why a cursor and not an offset?", "name": "", "createId": cid}
 
     def test_the_answer_arrives_within_a_bound_on_a_hundred_megabyte_parent(self):
         path = self._huge_parent(100)
@@ -1161,13 +1232,74 @@ class CreateAnswersFast(Base):
             km._comment_create = real
         self.assertEqual(len(km._load_comments(PARENT).get("threads") or []), 1)
 
-    def _wait_for_ack(self):
-        end = time.monotonic() + 10
-        while time.monotonic() < end:
-            if any(f.get("type") == "commentCreated" for f in self.sent):
-                return True
-            time.sleep(0.01)
-        return False
+
+class CreatesAfterAClear(CreateDoor):
+    """The create door after a /clear (review round one, 2026-10-03): the display parse reads the leaf alone, so a comment on
+    a message from before the clear found no record there and its create was parked as lag, with nothing said, until the
+    pusher dropped it. It now gets the refusal it got when the first transcript was a candidate, and parks nothing; a
+    post-clear reply whose record is not flushed yet stays a transient lag, and its retries read the first transcript at
+    most once, on either road, then create the thread once the record lands."""
+
+    def _cleared(self):
+        first, leaf, last, t = cleared(self)
+        km._sessions = lambda now, window=None, forks=True: [{"sid": PARENT, "name": "web", "path": leaf, "mtime": self.now}]
+        km._parse(leaf, PARENT, self.now)             # the chat holds the session open
+        return first, leaf, last, t
+
+    def _job(self, anchor, cid):
+        msg = self._create(anchor, cid)
+        key = km._create_key(PARENT, msg["uuid"], msg["exact"], msg["text"], cid)
+        km._comment_create_job(PARENT, msg, key, self.client)
+        return [f for f in self.sent if f.get("type") == "commentCreateFailed" and f.get("createId") == cid]
+
+    def test_a_comment_on_a_pre_clear_message_is_refused_and_nothing_is_parked(self):
+        first, leaf, _last, _t = self._cleared()
+        failed = self._job("ka5", "g-pre")
+        self.assertEqual([f.get("transient") for f in failed], [False], self.sent)
+        self.assertIn("rewound away", failed[0].get("text") or "")
+        self.assertIn("warn", [f.get("type") for f in self.sent], "the refusal is said")
+        self.assertEqual(km._parked_creates, [], "nothing parked for the pusher to retry")
+        self.assertEqual(self.be.calls, [], "no fork")
+
+    def test_a_lagging_post_clear_reply_stays_transient_and_its_retries_read_the_first_transcript_at_most_once(self):
+        for road in ("display", "read"):
+            with self.subTest(road=road):
+                restart()
+                with km._create_lock:
+                    km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
+                self.sent.clear(); self.be.calls.clear()
+                first, leaf, last, t = self._cleared()
+                over_first, real_init = [], em.FileAdapter.__init__
+
+                def counting(self_, files, *a, **k):
+                    if any(os.path.realpath(str(f)) == os.path.realpath(first) for f in files):
+                        over_first.append(1)
+                    return real_init(self_, files, *a, **k)
+                real_parse = km._comment_cut_from_parse
+                em.FileAdapter.__init__ = counting
+                if road == "read":
+                    km._comment_cut_from_parse = lambda *a, **k: None
+                try:
+                    zero_reads()
+                    failed = self._job("cz1", "g-lag-" + road)
+                    self.assertEqual([f.get("transient") for f in failed], [True], self.sent)
+                    self.assertEqual(len(km._parked_creates), 1, "parked for the pusher")
+                    for n in range(3):
+                        drop_reader(first)                # a release between retries: a read now costs its bytes again
+                        km._retry_parked_creates()
+                        self.assertEqual([pk["tries"] for pk in km._parked_creates], [n + 1], "still lagging, still parked")
+                    self.assertLessEqual(len(over_first), 1, "the first transcript's graph built at most once (%d)"
+                                         % len(over_first))
+                    self.assertLessEqual(read_of(first), os.path.getsize(first), "…and read at most once")
+                    with open(leaf, "a") as fh:            # the reply's record lands
+                        fh.write(json.dumps(aline(t, "a reply about the tags route, flushed late", "cz1", last)) + "\n")
+                    km._retry_parked_creates()
+                    self.assertEqual(km._parked_creates, [], "created once the record landed")
+                    self.assertEqual([c[2] for c in self.be.calls if c[0] == "fork"], ["cz1"], "forked at the reply")
+                    self.assertLessEqual(len(over_first), 1)
+                finally:
+                    em.FileAdapter.__init__ = real_init
+                    km._comment_cut_from_parse = real_parse
 
 
 class FrameAfterAnswer(Base):
