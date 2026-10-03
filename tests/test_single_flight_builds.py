@@ -159,7 +159,11 @@ class FeedFirstWaiter(unittest.TestCase):
     the pusher's push and a pane's connect push both reach _feed_first while no feed is built; one builds, the other waits on
     the single-flight lock. The waiter used to re-check the stored build under the pusher's dirty rule, so a views mark the
     housekeeping made DURING the build made it build the same cold feed again. The waiter now serves the build it waited
-    for, and the pusher's regular feed section carries the mark. Hermetic: build_feed stubbed to count, mark and hold; fake feed panes."""
+    for, and the second build moves to the pusher's regular feed section, after its chat stage, which carries the mark. The
+    built 1 / cached 1 read here counts the two early passes only. Over the whole push the count falls only where that
+    section would have rebuilt over the waiter's rebuild anyway: a later mark, any time from the start of that rebuild to
+    the regular ask, or a view signature that moved across a chat stage longer than REBUILD_MIN_S. FeedFirstWholePush below
+    reads the whole push. Hermetic: build_feed stubbed to count, mark and hold; fake feed panes."""
 
     def setUp(self):
         self.saved = (km.build_feed, list(km._built_feed), km._views_dirty[0], dict(km._VIEW_STATS), km._feed_wire,
@@ -229,19 +233,24 @@ class FeedFirstWaiter(unittest.TestCase):
         self._assert_one_build_both_served(*self._race(False, True))
 
     def test_the_pusher_waiting_on_a_connects_cold_build_serves_it_too(self):
-        """The mirrored order. A fix that only handed `connect` through to the cache would still rebuild here: the waiter is the
-        pusher, whose own arm asks under the dirty rule."""
+        """The mirrored order: a pane's connect push builds the cold feed and the pusher's early pass waits for it. The pusher
+        serves its feed panes the pre-mark build, so its chat stage starts one cold build sooner, and those panes get the
+        post-mark build from the regular section one chat stage later (FeedFirstWholePush reads that order). This test pins
+        the early passes only. A fix that only handed `connect` through to the cache would still rebuild here: the waiter is
+        the pusher, whose own arm asks under the dirty rule."""
         self._assert_one_build_both_served(*self._race(True, False))
 
     def test_the_pushers_arm_still_rebuilds_for_a_mark_that_landed_during_the_build(self):
         """Freshness is the regular section's, which asks on the pusher's arm (connect False; that it does is pinned in
         tests/test_feed_first_cold_push.py): after the early frame, that arm finds the mark that landed during the build newer
-        than its start, and builds. This pins the arm's dirty rule, not which arm the regular section asks."""
+        than its start, and builds. This pins the arm's dirty rule alone, not which arm the regular section asks, so it counts
+        the builds of that one ask after the race; the whole push's count is FeedFirstWholePush's."""
         self._race(False, True)
+        n = len(self.builds)
         km.build_feed = lambda now, live_map: (self.builds.append("feed"), json.loads(json.dumps(FEED)))[1]
         with mock.patch.object(km, "_task_tracking_on", lambda: True):
             km._cached_feed(int(time.time()), {}, ("view", 1), False)
-        self.assertEqual(self.builds, ["feed", "feed"], "the regular section rebuilt for the mid-build mark: %r" % self.builds)
+        self.assertEqual(self.builds[n:], ["feed"], "the pusher's arm rebuilt for the mid-build mark: %r" % self.builds)
 
     def test_a_cold_early_frame_builds_for_either_caller(self):
         """Alone on a cold cache, either role builds once and sends: this guards a connect arm made serve-only. (The
