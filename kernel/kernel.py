@@ -18653,10 +18653,17 @@ _cut_read_said = set()
 def _comment_cut_from_parse(path, sid, anchor_uuid):
     """_comment_cut_walk over the parent's DISPLAY parse (em.with_display_graph): the graph the chat's own parse already
     holds, so a create reads none of the transcript the chat build has read, and on a restored entry only the few pre-cut
-    records the walk needs a body of. The entry must stand for this session's inputs and be current; when it is not, the
-    parse is brought current (_parse: a serve, a fold of the appended records, or a restore) and asked again. None when
-    neither ask is answered (no entry stands, or a pre-cut fact the restored entry cannot give: em.GraphMiss), and the
-    caller reads the transcript."""
+    records the walk needs a body of. The entry must stand for this session's inputs and be current; when it is stale, the
+    parse is brought current (_parse: a serve, a fold of the appended records, or a restore) and asked again. When no
+    entry stands (a record cache budget eviction released it, 2026-10-02, and an idle session's _parse is then a
+    parse-store hit that rebuilds nothing), the parse is brought current the same way and then, unless its road was
+    "fallback" (an assembly that installs nothing), the event model's parse over the inputs jd.parsed_session hands it,
+    with no cut, installs the entry once, so later creates answer from it; when that parse itself falls back (a rebuild
+    whose restore or whole parse raises after a release), it installs nothing and each create parses again until the
+    files change (review round four: an induced state, disclosed rather than remembered; pinned both ways by
+    test_a_rebuild_that_falls_back_after_a_release_parses_again_at_each_create_until_the_file_changes). None when
+    neither ask is answered (no entry stands even so, or a pre-cut fact the restored entry cannot give: em.GraphMiss),
+    and the caller reads the transcript."""
     states = str(jd.STATE / "states" / (sid + ".jsonl"))
     cands = jd._judge_candidates(sid, [path])
     human = _display_sdk_human(sid)
@@ -18668,6 +18675,9 @@ def _comment_cut_from_parse(path, sid, anchor_uuid):
         try:
             if attempt:
                 _parse(path, sid, int(time.time()))
+                if why == "none" and _parse_mode.get(path) != "fallback":
+                    em.parse_session(path, rompuuid=sid, candidate_files=list(cands), states=states,
+                                     postal_log=str(jd.MESSAGES), now=int(time.time()), sdk_human=human)
             how, got = em.with_display_graph(path, sid, human, cands, states, walk)
         except em.GraphMiss as e:
             why = "miss (%s)" % e

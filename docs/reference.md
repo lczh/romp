@@ -2424,8 +2424,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   zero bytes). These occupancy gauges attribute a resident size to its
   holders; they do not sum to it. The transcript record cache, the largest
   resident holder when the kernel is large, is not among them: its occupancy
-  already rides this response under `recordCache` (`entries` and `bytes`
-  against `budgetBytes`), so a resident size these gauges leave unaccounted
+  already rides this response under `recordCache` (`entries`, and
+  `realBytes` against `budgetBytes`), so a resident size these gauges leave unaccounted
   for is read there first. The block reads a length or a counter per
   cache, under the cache's own lock where its readers take one and over a
   copied value list otherwise; on a plain read it walks neither the
@@ -2901,12 +2901,51 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   nobody can log into) or when the request says `?stacks=1` (`romp perf
   stacks`, T401); `null` otherwise.
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
-  `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
-  `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop, the files a dead timeline lane releases, and a leaf a second
-  /clear retired; a subagent's quiet drop is held back while a viewer's
-  parse built before the file's last append still stands, a whole entry the
-  assembly pin keeps, counted below), `pinnedKept` (drops that kept an entry because a whole assembly
+  `entries`; `bytes`, the held entries' file bytes; `realBytes`, the same
+  entries decoded, `bytes` times `decodedMultiple` (bytes of memory per file
+  byte: 2.85 by default, what a transcript measured decoded in a lab, which
+  the kernel's resident size over its cached file bytes agrees with; content
+  moves it, 1.44 to 7.7 by shape as measured;
+  `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, over 0 and at most 1000, and
+  1 weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget
+  in memory, per process, which `realBytes` is weighed against, the least
+  recently used entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  which is 4 GiB times `decodedMultiple` in memory, so a machine under about
+  23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
+  bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
+  in file bytes); `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright in
+  megabytes of memory). A budget eviction also releases every assembly
+  entry (a chat's copy) that read the evicted file, so the records' lists
+  go, though an idle session's parsed tree shares their text until the
+  parse store replaces or drops it and a shown tab's build memos of it go
+  at that tab's next build (its goal-tree memo at the next build that
+  walks its goals: a build that merges a live tail, runs while a rewind
+  is armed or reads an empty goal store keeps it), or when the tab is no
+  longer shown, and the live-merge memo, which the chat, feed and
+  timeline builds fill for any alive session, shown or not, keeps it
+  until a build merges a live tail over a newer parse or, at the next
+  push that serves a chat tab or the Outline pane, the session is
+  neither shown nor alive (its 512-entry cap ages out the oldest first);
+  a build that read the file before the
+  eviction and installs after it keeps what it read, and a file evicted
+  during its own read is not released. While the file is unchanged that
+  chat's display build is served from its parsed tree and rebuilds
+  nothing; a comment create rebuilds the entry once (for a chat parsed
+  whole, beside the parsed tree, so two copies stand until the parse
+  store replaces or drops that tree, a shown tab's build memos of it go
+  and the live-merge memo lets it go (as above), or the budget evicts
+  the file again; a chat whose stored parse fell
+  back to a plain parse installs nothing, and its creates read the
+  transcript, while one whose rebuild itself falls back after a release
+  parses again at each create until its files change), as does the first
+  build after an append (a restore from its document or a whole parse,
+  under `asmCheckpoint.parse`), and near the limit busy sessions may
+  rebuild repeatedly; `countCap`,
+  `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
+  `droppedBytes` (the quiescence drop, the files a dead timeline lane
+  releases, and a leaf a second /clear retired; a subagent's quiet drop is
+  held back while a viewer's parse built before the file's last append
+  still stands, a whole entry the assembly pin keeps, counted below), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
@@ -2918,7 +2957,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entry, a whole one whose leaf has a document a restore would take, or a whole
   one whose pin check raised, and the
   bytes of those records: `bytes` fell by them while the memory stayed, so the
-  memory drops freed is about `droppedBytes` less `droppedHeldBytes`), `released` (every pop that removed an entry, whatever the
+  drops freed about `droppedBytes` less `droppedHeldBytes` of file bytes, that times
+  `decodedMultiple` in memory), `budgetRereads` and
+  `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
+  the last `countCap` it evicted, each counted once, and the file bytes
+  they read again, a tail restored first and the whole read that upgrades
+  it both counted, and a file rewritten after its eviction counted too:
+  near zero while the budget evicts only cold entries,
+  level with `budgetEvictions` once the files read every cycle no longer
+  fit and every read misses; after a change that lets the budget bind, read
+  them beside `budgetEvictions`, `wholeReads` and the restores and whole
+  parses under `asmCheckpoint.parse`), `budgetReleased` (the assembly
+  entries budget evictions released, several when one evicted lineage file
+  was read by several chats),
+  every byte counter in file bytes,
+  `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
@@ -3772,7 +3825,7 @@ the pass's own, `failures` its tier crashes, and the five blocks (`recordCache` 
 gate counters per stage (`plan`, `group`, `close`, `distill`, `unblock`, `consolidate`): `ran`, `skipped`, `stamped`,
 `bypassed`, `incomplete`, `due_clock`, the admittance the pass ran under) are the DIFFERENCES against the previous pass's snapshot for every counter, so the kernel can feed its `/perf`
 counters per pass, while each block's GAUGES ride as their current values: in `recordCache` the keys `entries`, `bytes`
-(the cache's contents now), `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
+and `realBytes` (the cache's contents now), `decodedMultiple`, `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
 memo's size and cap); in `tierGate` the key `stamps` (the stage stamps held now); `parses` and `goalIo` carry counters only. `asmCheckpoint.restoreMs` is a counter like its neighbours (the restore's parts
 since boot, as described above), so the line carries the pass's own restore time. A non-numeric value (a name) rides as
 current too. `recovered` is the child's judge-module recovery flag (the once-per-storm
