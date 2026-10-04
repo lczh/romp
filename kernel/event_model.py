@@ -1193,7 +1193,10 @@ def fold_steps_in_hand(cache, name, path, new=True):
     fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds. A pending
     restore whose count for the fold does not read as an int is a corrupt document, counted and removed as the restore
     counts it (review round ten, 2026-10-04: a count json read as infinity raised out of the gate at every jobs pass, and
-    the document stayed with nothing recorded)."""
+    the document stayed with nothing recorded), and the reader's entry, the tail restored from that document, is let go
+    with it, so the caller's next read takes the file whole from zero (review round eleven, 2026-10-04: the fallback
+    removes every fold's restored state, and the guard asks once per fold, so the folds it asked after the corrupt one
+    found a tail with no cursor and no state at that pass and at every later one, and a returned agent's tail stayed)."""
     key = str(path)
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(key)
@@ -1213,7 +1216,10 @@ def fold_steps_in_hand(cache, name, path, new=True):
             ok = isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
         except (KeyError, TypeError, ValueError, OverflowError) as e:   # a count that is no int (OverflowError: one json read as
             _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e))   #  infinity) is a corrupt document, counted and removed
-            return False                                                #  once, as the restore counts it
+            with _JSONL_CACHE_LOCK:                                     #  once, as the restore counts it; the tail it restored
+                if _JSONL_CACHE.get(key) is ent:                        #  goes with it (that very entry), so the next read takes
+                    _cache_pop_locked(key)                              #  the file whole and the folds start over it
+            return False
     return ok and not _asm_holds_records(key, ent[4])
 
 
