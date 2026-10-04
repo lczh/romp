@@ -18915,9 +18915,9 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     of it while the stat stands; the leaf is read only as each road reads it anyway. The one case that reads the first file
     again is a record of the leaf's graph linking into it (a CLI that writes such a link, outside the transcript model): a
     target it holds is then walked over both files (_cut_wide_walk), the first file read again outside the cache when the
-    set answered, and the leaf through the cache. So is any target of the leaf's graph that graph's walk refuses as having
-    no prose record above it (ANCHOR_NO_PROSE_ERR) in such a session: where that link is what stopped the walk (a
-    non-prose record linking into the first file, or a row under one before the next post-clear prose), the walk over
+    set answered, and the leaf through the cache. So is a target of the leaf's graph that graph's walk refuses as having
+    no prose record above it (ANCHOR_NO_PROSE_ERR) where that link is what stopped the walk (a non-prose record
+    linking into the first file, or a row under one before the next post-clear prose): the walk over
     both files reaches that file's prose and answers from the tip, as before the leaf parsed alone, and any other such
     target keeps the refusal (_cut_widen_linked, review round four). Only a walk that stopped at a parent the leaf's graph
     lacks looks, and it reads on only when the first file holds that parent; a walk stopped by a compaction boundary, the
