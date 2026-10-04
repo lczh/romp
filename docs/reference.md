@@ -1584,6 +1584,44 @@ enumerates, which the checkpoint work that follows removes. `/perf`'s `parses`
 counts the cold parses, and `scripts/bench_boot_parse.py` measures a boot's
 cost against transcript size on synthetic worlds.
 
+The Sessions pane's first full build after a boot runs on its own thread, the
+timeline builder (`timeline-build`), never on the pusher or a page's connect.
+Until 2026-10-03 the pusher built it inside its cycle. After a restart with the
+pane open, that cycle could not end, and the next could not begin, until the
+build finished, so no pane got a frame from any later cycle (no new chat
+message, no card move, no next feed frame), and the Sessions pane got nothing
+from that cycle's timeline section; a reloaded pane also built live bars of its
+own beside it. Now, while no full build exists, every push sends the lanes of
+the live sessions (no transcript is parsed for them), built again only under
+the rule a cached build is rebuilt under, and owes the build. The builder makes
+the live sessions' bars first, marked `warming` so a pane with no bars yet
+keeps its loader rather than showing no activity, and sends them itself to
+every Sessions pane that already has its lanes, the moment they are built,
+through the same dedup the pusher uses, so the pusher's next push does not send
+them again. Then it makes the full build with the dead lanes, and wakes the
+pusher after each; the lanes stay the live sessions' until the full build lands,
+and once it has landed no pane is sent those lanes or the first bars again.
+While a board is open, the full build starts only once the board's first feed
+frame has gone out (or the cold kernel's early feed frame failed to build, or
+the last board closed), so the two cold builds do not share the interpreter;
+with no board open it starts at once. The builder sends none of the full
+build's frames: the pusher's next push sends them. Once a full build exists,
+the pusher serves and rebuilds it as before. The rebuild floor never serves the
+builder's build: if anything a lane reads moved while it ran, the pusher's next
+cycle rebuilds it before sending its lanes, and a push already under way when
+it lands, whose liveness read is older than the build, serves it as it stands
+rather than rebuild it from that older read. A full build that lands after the
+live sessions' lanes were rebuilt on a later clock is rebuilt first too, by the
+pusher's next cycle (a push already under way serves it as it stands), since
+an awaiting lane's open interval ends at the build's clock.
+`/version`'s `views` counts each push's ask of the
+unbuilt timeline as `tlOwed` and each builder pass that raised as
+`tlBuildFailed`: the pass is said once per kind of error on stderr, the slot
+stays cold, the panes keep their lanes and the last bars they were sent, and
+the next owe retries both phases. The builder's time, less any wait for the
+board, is `/perf`'s `timelineBuild` stage and its reads count under the
+`timeline.build` stage mark.
+
 The kernel and the judges share one parse. Until 2026-09-11 each kept its own
 cache of parsed session trees (the kernel's keyed by transcript path, the
 judges' by session), so every live transcript was parsed twice per file
@@ -2948,7 +2986,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `judge-index`, `judge-triage` and the other tiers' pool workers, `pool`
   for an unprefixed pool worker, `thread` for a default name with no target,
   `pusher`, `producer`, `index`, `triage`, `parse-warm`, `boot-warm`,
-  `sdk-boot`, `first-cycle-sampler`, `jobs` (the housekeeping loop split off the pusher), `main`; never a
+  `sdk-boot`, `first-cycle-sampler`, `jobs` (the housekeeping loop split off the pusher),
+  `timeline-build` (the cold Sessions-pane build, off the pusher), `main`; never a
   session's name, sid, host or path (the ident
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
   sample), `stage` (the thread's current stage mark: the pusher's
@@ -3106,7 +3145,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   whose roads differ by the second), `warm.parse`, `warm.boot`,
   `producer`, `revive`, `rewind.migration`, `rewind.holds`, `move`,
   `remote-ws`, `federation.push`, `federation.pull`, `federation.ask`,
-  `ask-poll`; `none` means the build ran on a thread with no mark, which
+  `ask-poll`, `timeline.build` (the timeline builder thread); `none` means the build ran on a thread with no mark, which
   should not happen: the kernel's thread census (every Thread, Timer and
   pool construction site in the kernel, the judge and the two session
   backends, walked by the ast, and every kernel callback the backends are
@@ -3189,7 +3228,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `jobs.<job>` per tick job (`jobs.interruptBlock`, `jobs.autoNudge`,
   `jobs.convergeCheckpoints` and the rest, T398), `push`, and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
-  `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
+  `push.feedFirst`; and `timelineBuild`, the timeline builder's passes (the
+  cold build after a boot, on a thread that opens no cycle, so it is in no
+  cycle's split); a fresh snapshot lists every one at zero. The `push.*`
   stages count every push, including the one a connecting page gets, so they
   can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.

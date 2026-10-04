@@ -552,9 +552,11 @@ class _PerfStats:
             "kernelSample", "autoPauseOnLimit", "usagePoll", "retryUpgrade", "autoPauseOnSpend", "spendGuard", "autoResumeRetry", "apiHealth",
             "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes", "heldWorking")   # the tick jobs, each a `jobs.<job>` stage (T398)
     STAGES = ("prelude", "jobs", "push", "push.chat", "push.feed", "push.timeline", "push.send", "push.warm", "push.feedFirst",
-              "jobsPass", "jobs.prelude") \
+              "jobsPass", "jobs.prelude", "timelineBuild") \
         + tuple("jobs." + j for j in JOBS)   # every stage a fresh snapshot lists at zero: the cycle's prelude, the containers, the sub-stages
-    #                                          (`jobsPass` and `jobs.prelude` are the jobs thread's: its pass and its own opening)
+    #                                          (`jobsPass` and `jobs.prelude` are the jobs thread's: its pass and its own opening;
+    #                                          `timelineBuild` the timeline builder's passes, a thread that opens no cycle, so the
+    #                                          cumulative total alone, 2026-10-03)
     OWNERS = ("pusher", "jobs")              # the two threads whose per-cycle splits the stats keep (the jobs thread since the split
     #                                          of the housekeeping off the pusher, 2026-09-13; see _jobs_loop)
     CONTAINERS = {"push": "push.", "jobs": "jobs.", "jobsPass": "jobs."}   # a container stage -> the prefix of its sub-stages
@@ -53105,9 +53107,10 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
     judging band and the message connectors are left empty. The push ships the lanes as a {type:"data"}
     frame FIRST and the bars as a separate {type:"bars"} message (the user 2026-06-25, who wanted everything
     else loaded and the bars loaded after); build_timeline is ~95% bars+judging by payload. The skeleton
-    BUILD runs only on the cold live-first connect (no cached full build yet): every warm push projects the
-    lanes frame from the cached full build instead (_timeline_skeleton; the WARM note in _push has the
-    contract and its lag), so the with_bars=False branches below are the cold-connect path."""
+    BUILD runs only while no full build is cached (the cold live-first connect, the pusher's cold lanes in
+    _timeline_cold_lanes) and on a connect over a stale cache: every warm push projects the lanes frame from
+    the cached full build instead (_timeline_skeleton; the WARM note in _push has the contract and its lag),
+    so the with_bars=False branches below are those paths."""
     if live_map is None:
         live_map = _live_map()
     alive = _timeline_sessions(now, live_map, live_only=live_only)   # living + window-dead (≤12h) lanes; per-session `live` below marks the dead ones (struck). live_only → live sessions only (cold-start first paint)
@@ -59894,6 +59897,7 @@ def _feed_first(now, live_map, targets, connect):
         if c["app"] == "feed":
             try:
                 _send_slot(c, "feed", feed, feed_ms, feed_sig, feed_parts)
+                _board_first_sent()                  # the cold timeline's full build may start (_timeline_wait_for_board)
             except Exception:
                 sys.stderr.write("push feed-first send: %s\n" % traceback.format_exc())
     _wire_bump("feed_first")
@@ -59933,6 +59937,8 @@ def _send_feed_frames(targets, feed_src, feed):
                             _wire_bump("feed_sig_fallback")
                         _feed_wire = (feed_src, feed.get("ledgers"), feed, feed_ms, feed_sig, feed_parts)
                 _send_slot(c, "feed", feed, feed_ms, feed_sig, feed_parts)
+                if c["app"] == "feed":
+                    _board_first_sent()                  # the cold timeline's full build may start (_timeline_wait_for_board)
             except Exception:
                 sys.stderr.write("push send feed (%s): %s\n" % (c.get("app"), traceback.format_exc()))
                 if feed_ms is None:                          # the FILL raised (nothing assigned): stand the slot down this push
@@ -59986,6 +59992,7 @@ def _push(targets, connect=False, live_map=None):
             _feed_first(now, live_map, targets, connect)
         except Exception:
             sys.stderr.write("push feed-first: %s\n" % traceback.format_exc())
+            _board_first_sent()                       # a feed that cannot build never holds the cold timeline build
     try:
         chat_list = _chat_tab_sessions(now, live_map)   # live + explicitly kept-open (read-only reopened dead) — nothing else
         tab_order = [s["sid"] for s in chat_list]
@@ -60576,11 +60583,16 @@ def _push(targets, connect=False, live_map=None):
         _PERF_STATS.stage("push.send", time.monotonic() - _t_stage)
         # TIMELINE in two messages (the user 2026-06-25): the LANES SKELETON ({type:"data"}) flushes FIRST —
         # cheap, so the lanes/status paint instantly — THEN the heavy bars+judging ride a {type:"bars"} message
-        # (the ~95% of the payload). On a COLD connect the skeleton is on the wire before the expensive
-        # _cached_timeline build even runs, so the user sees the fleet at once instead of a blank wait.
-        # LIVE-FIRST (the user 2026-06-26): the very first paint after a kernel start reads NO dead session — it
-        # builds live sessions only (lanes + bars) so the main UI is up at once; the producer warms the full
-        # build (live + dead-within-12h) and the next pusher push folds the dead lanes in, in the background.
+        # (the ~95% of the payload). On a COLD connect the skeleton is on the wire before any bars exist, so the
+        # user sees the sessions at once instead of a blank wait.
+        # LIVE-FIRST (the user 2026-06-26): the very first paint after a kernel start reads NO dead session: the
+        # lanes skeleton of the live sessions alone (_timeline_cold_lanes, one memo for the pusher and the connects).
+        # The cold BARS come from the timeline builder thread (_timeline_builder, 2026-10-03), off the pusher and
+        # every handler thread: first the live-only partial (its bars served warming beside the cold lanes, and sent
+        # by the builder itself the moment they land, _timeline_send_partial), then the full build (live +
+        # dead-within-12h, lanes and bars), each followed by a pusher wake, so the next push folds them in; no push
+        # waits on either (see _cached_timeline), and no cold frame goes once the full build has landed (_tl_cold_frame).
+        # The full build starts once the board's first feed frame has gone out (_timeline_wait_for_board, 2026-10-04).
         # WARM: once a full build is cached, the skeleton is PROJECTED from it (_timeline_skeleton) instead of
         # built again. Every cycle used to run build_timeline(with_bars=False) — no transcript parse, but the
         # same per-lane derivation the full build had just done (store loads, the chip over the cached parse
@@ -60590,10 +60602,9 @@ def _push(targets, connect=False, live_map=None):
         # the 5 s bucket, so the lanes lag a rebuild by at most REBUILD_MIN_S, the lag the bars always had.
         # Two visible differences from the built skeleton: the lanes' `compactions` come from the full build's
         # parse (the built skeleton parsed nothing and always shipped []), and a dead lane's `since` is its
-        # last work end rather than the transcript mtime. Accepted too: the first regular cycle after boot
-        # serves the full build before the lanes frame (the connect push took the cold path and cached
-        # nothing), so the DEAD lanes reach the client one build later than the per-cycle skeleton showed
-        # them; the live lanes painted on the connect.
+        # last work end rather than the transcript mtime. Accepted too: after a boot the DEAD lanes reach the
+        # client only with the builder's full build (the cold lanes and the partial are live-only), later than
+        # the per-cycle skeleton showed them; the live lanes painted on the connect.
         # The frame is serialized once per BUILD (_skel_wire, keyed on the cached object's identity like
         # _bars_wire) and deduped on CONTENT through _dedup_sig, which strips the nested clock as it does for
         # every {type:"data"} frame: a rebuild whose lanes are unchanged sends nothing, exactly as the bars
@@ -60604,7 +60615,6 @@ def _push(targets, connect=False, live_map=None):
         # the cycle's clock (below), since the pane anchors its live edge on its first sample and the cache
         # can be hours old when no timeline client kept it warm, when the cache is FRESH by the kernel's own
         # rule (_timeline_cache_fresh); a stale one gets its lanes built fresh instead (below).
-        global _skel_wire
         _t_stage = time.monotonic()
         timeline = None
         tl_warming = False
@@ -60612,20 +60622,48 @@ def _push(targets, connect=False, live_map=None):
             tl_clients = [c for c in targets if c["app"] == "timeline"]
             live_first = connect and _built_timeline[1] is None     # cold start, nothing warmed yet → live only
             if live_first:
-                # Outside any lock (round two, medium 2): this is the pane's FIRST frame, the cheap live-only partial, and
-                # holding the full build's lock across it serialised two cold connects and blocked the pusher's whole
-                # timeline stage (the cards for every pane behind it). The single-flight lock covers the FULL build alone
-                # (_cached_timeline); a connect racing it still gets its partial at once and the full on the next cycle.
-                skel = build_timeline(now, live_map, with_bars=False, live_only=True)
+                # Outside any lock (round two, medium 2): the pane's FIRST frame, the live lanes skeleton, which parses nothing.
+                # Its bars are the timeline builder's (2026-10-03); until then this connect built live-only bars of its own
+                # here, stored nowhere, beside the pusher's full build of the same cold timeline. The ask owes the cold build
+                # to the builder and serves its live-only partial once that has landed, or the full build if one landed since
+                # the read above, or nothing yet: then no bars go, the pane keeps its loader, and the builder's wake brings them.
+                # The lanes are the pusher's cold lanes (_timeline_cold_lanes) under the cycle's clock, as a warm connect
+                # projects the cached build: a skeleton built here, fresher than the memo, was followed by the pusher's memo
+                # frame on its next push, an older frame re-sent with nothing new behind it (review find, 2026-10-03).
+                cold, _cold_pre, _cold_sig = _timeline_cold_lanes(now, live_map, fsig)
+                skel = {**cold["data"], "now": now}
+                dropped = []                                  # panes whose cold lanes the guard held back: the full build landed
                 for c in tl_clients:
-                    _send_client(c, ("timeline",), {"type": "data", "data": skel})
-                timeline = build_timeline(now, live_map, with_bars=True, live_only=True)   # live bars now (no dead reads)
-                tl_warming = True                                   # this is the PARTIAL cold build — the client keeps its loader up
-                _producer_wake.set()                                # ...if it lands empty (SDK/federation not yet merged), rather than flashing
-                #                                                     "no activity"; a later warmed push (tl_warming False) settles it (the user 2026-07-03)
+                    with _tl_cold_frame(c) as still_cold:     # never after the full build's lanes, landed since the read
+                        if still_cold:
+                            _send_client(c, ("timeline",), {"type": "data", "data": skel})
+                        else:
+                            dropped.append(c)
+                timeline = _cached_timeline(now, live_map, fsig, True)
+                if dropped and timeline is not None and not isinstance(timeline, _TimelinePartial):
+                    # the full build landed under this connect's cold read: a pane the pusher has not reached yet gets its
+                    # lanes, as a warm connect's, before the bars below; a pane that already holds lanes gets nothing here
+                    lf = {"type": "data", "data": ({**_timeline_skeleton(timeline), "now": now} if _timeline_cache_fresh(fsig)
+                                                   else build_timeline(now, live_map, with_bars=False))}
+                    lp = json.dumps(lf)
+                    for c in dropped:
+                        with _client_lock(c):
+                            if ("timeline",) not in c.get("sent", {}):
+                                _send_client(c, ("timeline",), lf, pre=lp)
+                tl_warming = isinstance(timeline, _TimelinePartial)   # the PARTIAL: the client keeps its loader up if it lands
+                #                                                       empty (SDK/federation not yet merged), rather than flashing
+                #                                                       "no activity"; the full build (tl_warming False) settles it (the user 2026-07-03)
             else:
                 timeline = _cached_timeline(now, live_map, fsig, connect)
-                if connect:
+                tl_warming = isinstance(timeline, _TimelinePartial)   # the builder's partial, while the slot is cold: warming
+                if timeline is None or tl_warming:
+                    # A cold slot (the build is owed to the builder): the lanes skeleton, live sessions only, rebuilt under the
+                    # cached build's rule (_timeline_cold_lanes), deduped on content; the partial's bars, warming, once it has
+                    # landed, and no bars before. The lanes never come from the partial: it is as old as phase one's start,
+                    # and projecting it over the cold lanes a pane already holds moved the lanes back (an ended lane live
+                    # again) with no new build behind it, for the rest of phase two (review find, 2026-10-03).
+                    frame, skel_pre, skel_sig = _timeline_cold_lanes(now, live_map, fsig)
+                elif connect:
                     if _timeline_cache_fresh(fsig):
                         # A CONNECT serves the cached lanes under the CYCLE's clock: the pane anchors its live
                         # edge and its window fit on the first data.now it sees, and the cache is as old as the
@@ -60647,16 +60685,12 @@ def _push(targets, connect=False, live_map=None):
                         frame = {"type": "data", "data": build_timeline(now, live_map, with_bars=False)}
                     skel_pre, skel_sig = json.dumps(frame), None
                 else:
-                    w = _skel_wire                                  # tuple snapshot — rebound whole, never mutated
-                    if w is not None and w[0] is timeline:
-                        frame, skel_pre, skel_sig = w[1], w[2], w[3]
-                    else:
-                        frame = {"type": "data", "data": _timeline_skeleton(timeline)}
-                        skel_pre = json.dumps(frame)
-                        skel_sig = _dedup_sig(frame, skel_pre)
-                        _skel_wire = (timeline, frame, skel_pre, skel_sig)
+                    frame, skel_pre, skel_sig = _skel_fill(timeline)   # the build's one lanes tuple
+                cold_lanes = timeline is None or tl_warming   # the cold lanes never go after the full build's
                 for c in tl_clients:
-                    _send_client(c, ("timeline",), frame, pre=skel_pre, sig=skel_sig)
+                    with _tl_cold_frame(c) as still_cold:
+                        if still_cold or not cold_lanes:
+                            _send_client(c, ("timeline",), frame, pre=skel_pre, sig=skel_sig)
         _PERF_STATS.stage("push.timeline", time.monotonic() - _t_stage)
     except Exception:
         sys.stderr.write("push build: %s\n" % traceback.format_exc())
@@ -60698,7 +60732,6 @@ def _push(targets, connect=False, live_map=None):
     # timeline section (no lanes, no bars, no warm), not the pusher thread. So that belt still earns its place: without
     # it, a send that raised for one feed pane would cost the feed panes after it their frame, and a raise of either
     # kind would cost the Sessions pane its lanes and bars for the push.
-    global _bars_wire
     bars = bars_ms = bars_sig = bars_parts = None
     bars_down = False                                    # this cycle's fill raised: the slot's clients are skipped
     _t_stage = time.monotonic()
@@ -60708,23 +60741,10 @@ def _push(targets, connect=False, live_map=None):
                 if bars_down:
                     continue
                 if bars_ms is None:
-                    w = _bars_wire
-                    if w is not None and w[0] is timeline and w[1] == tl_warming:
-                        bars, bars_ms, bars_sig, bars_parts = w[2], w[3], w[4], w[5]
-                    else:
-                        bars = {"type": "bars", "turns": timeline["turns"], "judging": timeline["judging"],
-                                "messages": timeline["messages"], "now": timeline["now"], "warming": tl_warming}
-                        bars_parts = _delta_parts("bars", bars)   # the one per-entry encode, handed down to the delta path
-                        if bars_parts is not None:
-                            bars_sig = _parts_sig(bars_parts)
-                            bars_ms = _LazyWire(lambda b=bars: json.dumps(b, default=_wire_default_in("_push bars")),
-                                                _parts_est(bars_parts), "bars_body")
-                        else:                                # unkeyable: whole frames and the string signature, as before
-                            s = json.dumps(bars, default=_wire_default_in("_push bars"))
-                            bars_ms, bars_sig = _LazyWire(None, len(s), text=s), _dedup_sig(bars, s)
-                            _wire_bump("bars_sig_fallback")
-                        _bars_wire = (timeline, tl_warming, bars, bars_ms, bars_sig, bars_parts)
-                _send_slot(c, "bars", bars, bars_ms, bars_sig, bars_parts)
+                    bars, bars_ms, bars_sig, bars_parts = _bars_fill(timeline, tl_warming)   # the build's one wire tuple
+                with _tl_cold_frame(c) as still_cold:    # a partial's bars only while the slot is cold
+                    if still_cold or not tl_warming:
+                        _send_slot(c, "bars", bars, bars_ms, bars_sig, bars_parts)
         except Exception:
             if bars_ms is None:                          # the FILL raised (nothing assigned): stand the slot down this cycle
                 bars_down = True
@@ -61201,6 +61221,9 @@ _built_feed = [None, None, 0.0, 0.0]              # [fleet_sig, payload, built_a
 # result; a chat tab in flight on another thread is waited for the same way (_chat_inflight_*), and the waiter re-reads
 # the cache the builder stored. The review's item (review-push 7): three threads under one interpreter lock gain little
 # from concurrency; ordering and de-duplication do. Counted under _VIEW_STATS feedWaited / tlWaited / chatWaited.
+# The timeline's lock now guards the warm road alone (2026-10-03): a COLD timeline slot has one writer, the timeline builder
+# thread (_timeline_builder, which takes this lock for its full build), and no caller waits on a cold build at all; the
+# pusher's rebuild of a filled, stale slot is single-flight under this lock as before.
 _FEED_BUILD_LOCK = threading.RLock()
 _TL_BUILD_LOCK = threading.RLock()
 _CHAT_INFLIGHT = {}                                # sid -> (Event set when that sid's build and its cache store ended, claimed at)
@@ -61257,8 +61280,51 @@ _VIEW_STATS = {"feedBuild": 0, "feedServe": 0, "tlBuild": 0, "tlServe": 0,
                "feedWaited": 0, "tlWaited": 0, "chatWaited": 0,   # served a build another thread had in flight (single-flight)
                # GET /feed.json's reads (_pure_feed), apart: a poller's builds under the pusher's numbers
                # would forge the bug signature above, or bury a pusher regression (review find, 2026-09-08)
-               "feedJsonBuild": 0, "feedJsonServe": 0}
+               "feedJsonBuild": 0, "feedJsonServe": 0,
+               # the cold timeline build (2026-10-03, _timeline_builder): every ask of a cold slot owes the build to the
+               # builder thread (tlOwed), and a builder pass that raised and left the slot cold is tlBuildFailed
+               "tlOwed": 0, "tlBuildFailed": 0}
 _built_timeline = [None, None, 0.0, 0.0]          # [fleet_sig, payload, built_at, build_started_at]
+# THE COLD TIMELINE BUILD (2026-10-03). A cold slot (_built_timeline[1] is None: no full build since the boot) is filled by
+# ONE thread, the timeline builder (_timeline_builder): the pusher and the connect pushes never build bars into it; they send
+# the cold lanes (_timeline_cold_lanes: the live sessions' skeleton, no transcript parse) and owe the build through _TL_OWED.
+# The builder lands the live-only partial first (LIVE-FIRST), whose bars are served `warming` from _tl_partial beside the cold
+# lanes while the slot is cold, then the full build, and wakes the pusher after each. A filled slot is served and rebuilt on
+# the pusher's thread as before (_cached_timeline), except that a pusher push already in flight when the builder's build
+# lands serves it as it stands (2026-10-04). Before this, after
+# a restart the pusher built the whole cold timeline inside its cycle: that cycle could not end, and the next could not
+# begin, until the build finished, so no pane got a frame from any later cycle (no new chat message, no card move, no next
+# feed frame) and the Sessions pane got nothing from that cycle's timeline section; meanwhile a reloaded Sessions pane's
+# connect push built a second, unstored copy of its live part on the handler thread.
+# The builder also sends the partial's bars itself the moment they land (_timeline_send_partial, round two), through the
+# pusher's wire tuple and dedup slots, so they reach the panes without waiting for the pusher's next push; and no cold frame
+# (the cold lanes, a partial's bars) goes to a pane once the full build has landed (_tl_cold_frame).
+# Round three (2026-10-04): the full build starts only once the board's first feed frame has gone out, or at once with no
+# board pane connected (_timeline_wait_for_board). The builder sends none of the full build's frames: the pusher's next
+# timeline section serves or rebuilds it and sends it.
+_tl_partial = [None]                              # the builder's live-only first build (a _TimelinePartial) while the slot is cold
+_TL_OWED = threading.Event()                      # a cold build is owed: set by every ask of a cold slot, cleared by the builder
+#                                                   as a pass starts (owes during a pass coalesce into one more pass)
+_tl_cold_lanes = [None]                           # (view sig, started, frame, pre, dedup sig, built at): the lanes frame every push
+#                                                   sends while the slot is cold, the pusher's and a connect's, rebuilt under the
+#                                                   rule a cached full build is served under (_timeline_cold_lanes)
+_TL_COLD_LANES_LOCK = threading.Lock()            # the memo's one store: of two overlapping builds, the later START wins; and the
+#                                                   full build's store into the slot, which reads the memo's clock (_timeline_build_cold)
+_BOARD_FIRST = threading.Event()                  # the board's first feed frame has gone out since the boot, or the cold kernel's
+#                                                   early feed frame raised (_board_first_sent); set once, never cleared
+_TL_BOARD_WAKE = threading.Event()                # wakes the builder's wait for it: that frame, a board pane's socket closing
+#                                                   (_board_pane_gone), the loop stop
+
+
+class _TimelinePartial(dict):
+    """The timeline builder's live-only first build (phase one), whose bars are served while the slot is cold (its lanes never
+    are: the cold lanes stand). A dict like any build; its TYPE is the mark the push reads for the bars' `warming` flag, so a
+    push that took the partial just before the full build landed still knows it for the partial (an identity compare with
+    _tl_partial would read it as settled once the builder dropped the partial) and sends it as warming or, once the full
+    build has landed, not at all (_tl_cold_frame); a full build, a stub or a projection never reads as one."""
+    __slots__ = ()
+
+
 # The sids the LAST feed build filed under needs_input: the per-session form of the feed's Blocked column,
 # read by build_session's ledger (needsInput) so the chat's section-at-a-glance rows say "needs you" exactly
 # when the feed does. None until the first feed build since start (a chat client alone makes the push build
@@ -64264,15 +64330,37 @@ def _consume_pending_reveal(client, why="the pane's ready"):
 
 
 def _cached_timeline(now, live_map, sig, connect=False):
+    """The timeline build a push serves. A FILLED slot is served while fresh (_timeline_cache_fresh; a connect serves it as it
+    stands) and rebuilt here when stale, on the caller's thread under _TL_BUILD_LOCK, single-flight, as before 2026-10-03. A
+    COLD slot (no full build since the boot) is never built here: it has one writer, the timeline builder thread
+    (_timeline_builder). The call owes it the build (_TL_OWED, counted under views.tlOwed) and returns the builder's live-only
+    partial once that has landed (a _TimelinePartial, whose bars the push sends as warming beside the cold lanes), else None
+    (the cold lanes alone; _timeline_cold_lanes). So no push, the pusher's or a connect's, ever waits on a cold build, and the
+    builder never touches a filled slot, so the two never contend for the lock. A pusher push whose cycle took its liveness
+    snapshot before the slot's build started (the timeline builder's build, landed during the push) serves that build as it
+    stands: rebuilt from the older snapshot and clock, it reached the panes after the builder's send of its partial's bars,
+    which phase one built from a newer world, and moved the bars and their clock back with no new information (review
+    find, 2026-10-04). The next cycle's push, on a fresh snapshot, rebuilds it if anything moved."""
     e = _built_timeline
     built = e[1]                # one read: the pusher assigns _built_timeline[:] on its thread while a connect reads here
-    if built is not None and (connect or _timeline_cache_fresh(sig)):
+    snap_t = None if connect else getattr(_live_scope, "snapshot_t", None)   # this pusher cycle's snapshot stamp
+    if built is not None and (connect or _timeline_cache_fresh(sig) or (snap_t is not None and e[3] > snap_t)):
         _VIEW_STATS["tlServe"] += 1
         _PERF_STATS.build("timeline", True)
         return built
+    if built is None:                                     # cold: owed to the builder, never built on this thread
+        partial = _tl_partial[0]
+        if partial is None and _built_timeline[1] is not None:   # the builder fills the slot BEFORE it drops the partial, so
+            return _cached_timeline(now, live_map, sig, connect)  # no partial and a filled slot is a full build that landed
+        #                                                           since the read above: served or rebuilt as any filled slot,
+        #                                                           never answered with nothing (a cycle of no bars, and the
+        #                                                           cold lanes built again after the full build dropped them)
+        _VIEW_STATS["tlOwed"] += 1
+        _TL_OWED.set()
+        return partial
     with _TL_BUILD_LOCK:                                  # single-flight: a build in flight on another thread is the one we want
         built = _built_timeline[1]
-        if built is not None and (connect or _timeline_cache_fresh(sig)):   # ...and it landed while we waited for the lock
+        if built is not None and (connect or _timeline_cache_fresh(sig) or (snap_t is not None and _built_timeline[3] > snap_t)):   # ...and it landed while we waited for the lock
             _VIEW_STATS["tlServe"] += 1
             _VIEW_STATS["tlWaited"] += 1
             _PERF_STATS.build("timeline", True)
@@ -64306,6 +64394,315 @@ def _timeline_skeleton(tl):
     (_built_timeline[1]), shared with every later cycle and the identity key of the bars and lanes wire
     caches."""
     return {**tl, "turns": {}, "judging": {}, "messages": []}
+
+
+def _timeline_cold_lanes(now, live_map, sig):
+    """The lanes frame while the timeline slot is cold (2026-10-03), the pusher's and a cold connect's, as (frame, its
+    serialization, its dedup signature): the lanes skeleton, live sessions only (LIVE-FIRST: no dead session is read before
+    the builder has run), no transcript parse (the skeleton reads cached parses alone). Built again under the rule a cached
+    full build is served under (_timeline_cache_fresh): a dirty mark since the last one started, or a moved view signature
+    once REBUILD_MIN_S has passed since it was built. So the lanes move on a rebuild and not on every cycle of the cold
+    stretch (the signature carries every live transcript's mtime, and an awaiting lane's open interval ends at the build's
+    clock, so a skeleton built per cycle would send its frame per cycle); serialized once per build, as _skel_wire is. A
+    connect sends it under the cycle's clock, so its next push dedups against it. A build that finds the slot filled when
+    it ends is returned and not kept: the full build has dropped the memo, and nothing reads it again. Of two builds that
+    overlap (a connect's and the pusher's), the one that STARTED later is the memo and what both send, whichever ends first:
+    an older build that ends last is neither kept nor sent (gate find, 2026-10-03; stored last, it was the memo every push
+    served, a lane stepped back with nothing new)."""
+    m = _tl_cold_lanes[0]
+    if m is None or _dirty_since(m[1]) or (m[0] != sig and time.time() - m[5] >= REBUILD_MIN_S):
+        started = time.time()
+        frame = {"type": "data", "data": build_timeline(now, live_map, with_bars=False, live_only=True)}
+        pre = json.dumps(frame)
+        m = (sig, started, frame, pre, _dedup_sig(frame, pre), time.time())
+        with _TL_COLD_LANES_LOCK:
+            cur = _tl_cold_lanes[0]
+            if cur is not None and cur[1] > started:  # a build that began after this one landed first: it is the newer world
+                m = cur
+            elif _built_timeline[1] is None:
+                _tl_cold_lanes[0] = m
+    return m[2], m[3], m[4]
+
+
+def _bars_fill(timeline, tl_warming):
+    """The bars frame of one timeline build as (bars, ms, sig, parts), filled once per build and warming flag and kept in
+    _bars_wire, keyed on the build's identity and the flag: the pusher's fill (a connect push's too), and since round two
+    of the cold build (2026-10-03) the timeline builder's for its partial, so whichever sends a build first fills the tuple
+    and the other serves the same objects, and a pane that holds them dedups (on the signature, or on the split's identity
+    on the delta path). `ms` is a _LazyWire, serialized only if a whole frame goes; `parts` is the per-entry split handed
+    down to the delta path, None for an unkeyable payload (whole frames and the string signature)."""
+    global _bars_wire
+    w = _bars_wire                                       # tuple snapshot: rebound whole, never mutated
+    if w is not None and w[0] is timeline and w[1] == tl_warming:
+        return w[2], w[3], w[4], w[5]
+    bars = {"type": "bars", "turns": timeline["turns"], "judging": timeline["judging"],
+            "messages": timeline["messages"], "now": timeline["now"], "warming": tl_warming}
+    bars_parts = _delta_parts("bars", bars)              # the one per-entry encode, handed down to the delta path
+    if bars_parts is not None:
+        bars_sig = _parts_sig(bars_parts)
+        bars_ms = _LazyWire(lambda b=bars: json.dumps(b, default=_wire_default_in("_push bars")),
+                            _parts_est(bars_parts), "bars_body")
+    else:                                                # unkeyable: whole frames and the string signature, as before
+        s = json.dumps(bars, default=_wire_default_in("_push bars"))
+        bars_ms, bars_sig = _LazyWire(None, len(s), text=s), _dedup_sig(bars, s)
+        _wire_bump("bars_sig_fallback")
+    _bars_wire = (timeline, tl_warming, bars, bars_ms, bars_sig, bars_parts)
+    return bars, bars_ms, bars_sig, bars_parts
+
+
+def _skel_fill(timeline):
+    """The lanes frame of one full timeline build as (frame, pre, sig): projected from the build (_timeline_skeleton),
+    serialized and signed once per build and kept in _skel_wire, keyed on the build's identity, so every warm push of the
+    same build serves the same frame, which a pane that holds it dedups on its signature. The pusher's warm push, one helper
+    since round three of the cold build (2026-10-04)."""
+    global _skel_wire
+    w = _skel_wire                                       # tuple snapshot: rebound whole, never mutated
+    if w is not None and w[0] is timeline:
+        return w[1], w[2], w[3]
+    frame = {"type": "data", "data": _timeline_skeleton(timeline)}
+    pre = json.dumps(frame)
+    sig = _dedup_sig(frame, pre)
+    _skel_wire = (timeline, frame, pre, sig)
+    return frame, pre, sig
+
+
+@contextlib.contextmanager
+def _tl_cold_frame(c):
+    """Whether a cold frame (the cold lanes, a partial's bars) may still go to the Sessions pane `c`, held under the pane's
+    slot lock for the send that follows (2026-10-03, round two): True while the timeline slot is cold. The full build reaches
+    a pane only after it has landed in the slot, and its frames take this same lock (_send_client, _send_slot), so a cold
+    frame sent under a True here always lands before them; one a push, a connect push or the builder read before the full
+    build landed and sends after it is dropped instead (the push the builder's wake brings sends the full build). Sent after
+    it, the cold lanes dropped the dead lanes and the partial's bars stepped the bars back to phase one's start, with no
+    new information, until the next push."""
+    with _client_lock(c):
+        yield _built_timeline[1] is None
+
+
+def _timeline_send_partial(tl):
+    """Phase one's bars, from the timeline builder the moment the partial lands (2026-10-03, round two): to every Sessions
+    pane that holds a lanes frame, warming, through the pusher's wire tuple (_bars_fill) and its dedup slots, so the pusher's
+    next push of the same partial sends nothing, and only while the slot is cold (_tl_cold_frame). Until then the panes got
+    the partial on the pusher's next push, which at boot came 10 to 22 s later than the base's connect push had sent its
+    live-only bars (lab, synthetic). A pane with no lanes frame yet is left to its connect push or the pusher, which send
+    the lanes first and these bars after them. The lanes are not sent here: while the slot is cold they are the cold lanes
+    (_timeline_cold_lanes), the pusher's, and every pane served here already has them (a memo rebuilt since goes on the
+    pusher's next push, under its rule). A fill or a send that raises is said on stderr and never reaches the builder's
+    pass: the pusher's next push sends the bars instead."""
+    with _clients_lock:
+        panes = [c for c in _clients if c.get("app") == "timeline" and c.get("alive", True)
+                 and ("timeline",) in (c.get("sent") or {})]
+    if not panes or _built_timeline[1] is not None:
+        return
+    try:
+        bars, ms, sig, parts = _bars_fill(tl, True)
+    except Exception:
+        sys.stderr.write("timeline-build send bars (fill): %s\n" % traceback.format_exc())
+        return
+    for c in panes:
+        try:
+            with _tl_cold_frame(c) as still_cold:
+                if not still_cold:
+                    return
+                _send_slot(c, "bars", bars, ms, sig, parts)
+        except Exception:
+            sys.stderr.write("timeline-build send bars: %s\n" % traceback.format_exc())
+
+
+def _board_first_sent():
+    """The board's first feed frame has gone out since the boot (_feed_first's send, or a push's feed send, to a Feed pane),
+    or the cold kernel's early feed frame (_feed_first) raised, so a feed that cannot build never holds the timeline: phase
+    two of the cold timeline build may start (_timeline_wait_for_board; 2026-10-04, round three). Once per kernel life;
+    every later call costs one is_set."""
+    if not _BOARD_FIRST.is_set():
+        _BOARD_FIRST.set()
+        _TL_BOARD_WAKE.set()
+
+
+def _board_pane_gone(client):
+    """A pane's socket closed (the ws handler's end, after its removal from _clients): a Feed pane leaving wakes the timeline
+    builder's wait for the board's first frame, since it may have been the last board pane connected."""
+    if client.get("app") == "feed":
+        _TL_BOARD_WAKE.set()
+
+
+def _board_connected():
+    """Whether a board pane (a Feed pane) is connected and alive."""
+    with _clients_lock:
+        return any(c.get("app") == "feed" and c.get("alive", True) for c in _clients)
+
+
+def _timeline_wait_for_board():
+    """Phase two of the cold timeline build starts only after the board's first feed frame has gone out, or at once with no
+    board pane connected (2026-10-04, round three). In the lab (synthetic) the board's connect push built its cold feed
+    beside both builder phases and its first frame came 2.6 and 10.0 s later than at the base; phase one is still the
+    live-only partial, unchanged, and the full build waits here for the event, never for a timer: the first frame's send
+    (_board_first_sent), a board pane's socket closing (_board_pane_gone) or the loop stop. Returns False only when the
+    loop stop ended a wait."""
+    while not _BOARD_FIRST.is_set() and _board_connected():
+        if _LOOPS_STOP.is_set():
+            return False
+        _TL_BOARD_WAKE.wait()
+        _TL_BOARD_WAKE.clear()
+    return True
+
+
+def _timeline_build_partial(now, live_map):
+    """Phase one of the cold build, on the timeline builder: the live lanes with their bars and no dead session read
+    (LIVE-FIRST, the user 2026-06-26), stored in _tl_partial for the pushes to send its bars as warming while the slot stays
+    cold (the lanes stay the cold lanes, _timeline_cold_lanes), its bars sent to the Sessions panes at once
+    (_timeline_send_partial), then the pusher woken, which sends them to a pane that had no lanes yet. A slot that filled
+    meanwhile keeps the partial out, and its bars go nowhere."""
+    tl = _TimelinePartial(build_timeline(now, live_map, with_bars=True, live_only=True))
+    if _built_timeline[1] is None:
+        _tl_partial[0] = tl
+    _timeline_send_partial(tl)
+    _pusher_wake.set()
+    return tl
+
+
+def _timeline_build_cold(now, live_map, sig):
+    """Phase two of the cold build, on the timeline builder: the full build (live lanes and the dead ones within the window)
+    into the EMPTY slot, under _TL_BUILD_LOCK, counted as every full build is (tlBuild, builds.timeline), the start stamped
+    before the build reads anything (the dirty rule keys on it), and stored with no built-at, so the REBUILD_MIN_S floor never
+    serves it (see the note at the slot's write); and under no signature when the cold lanes were rebuilt during phase two
+    on a later clock than its own, since an awaiting lane's open interval ends at the build's clock: served under the
+    signature it read, inside the same 5 s bucket, its lanes shrank that interval on every pane holding the newer cold
+    lanes, on the pusher's next push (gate find, 2026-10-04); then the partial and the cold lanes dropped and the pusher
+    woken to send the full build. A slot already filled is returned as it stands: this never rebuilds one (the pusher's
+    stale rebuild is the warm road's). Also the synchronous form of the builder's full build for a test."""
+    with _TL_BUILD_LOCK:
+        built = _built_timeline[1]
+        if built is not None:
+            return built
+        _VIEW_STATS["tlBuild"] += 1
+        started = time.time()
+        _t0 = time.monotonic()
+        tl = build_timeline(now, live_map)
+        _PERF_STATS.build("timeline", False, time.monotonic() - _t0)
+        # no built-at (0.0), so the REBUILD_MIN_S floor never serves a cold build (gate finds, 2026-10-03): phase two reads its
+        # world at its start and runs as long as it takes, while the pushes rebuild the cold lanes the panes hold from newer
+        # worlds. Stamped at its finish, the floor served a snapshot that old as fresh; stamped at its start, a phase two
+        # shorter than the floor was still inside it when it landed; either way the push on the landing wake projected lanes
+        # older than the panes held (a lane stepped back). Now it is served only under the signature phase two read, with no
+        # dirty mark since its start; a moved signature rebuilds it on the pusher first, the one warm rebuild the boot expects
+        # (a pusher push already in flight, whose cycle snapshot predates its start, serves it as it stands: _cached_timeline)
+        with _TL_COLD_LANES_LOCK:                 # the cold lanes the panes may hold: rebuilt during phase two on a later clock?
+            _cl = _tl_cold_lanes[0]
+            if _cl is not None and _cl[2]["data"].get("now", 0) > tl.get("now", 0):
+                sig = None                       # then no signature serves it: the pusher's next cycle rebuilds it first
+            _built_timeline[:] = [sig, tl, 0.0, started]
+    _tl_partial[0] = None
+    _tl_cold_lanes[0] = None
+    _pusher_wake.set()
+    return tl
+
+
+@contextlib.contextmanager
+def _timeline_builder_scope(with_sig):
+    """One phase's world on the timeline builder: its own clock, ONE liveness snapshot and the scopes _jobs_cycle opens around
+    a pass (the paths, the discover rows, the billing memo, the subagent-tree samples, the caption slot, the names snapshot),
+    so the build reads what the pusher's build read, once per phase; with `with_sig`, the view signature the build is stored
+    under, taken before the build reads anything. Yields (now, live_map, sig); every scope closed in the finally."""
+    now = int(time.time())
+    live_map = _live_map()
+    _live_scope.snapshot = live_map
+    try:
+        _live_scope.paths = {}
+        _live_scope.sessions = {}
+        _live_scope.auth = {}
+        _live_scope.subagent_trees = {}
+        _live_scope.msgsum = [_MSGSUM_UNSET]
+        _live_scope.names = _names_snapshot()
+        yield now, live_map, (_fleet_view_sig(now, live_map) if with_sig else None)
+    finally:
+        _chat_push_scopes_close()
+        _live_scope.snapshot = None
+        _live_scope.names = None
+        _live_scope.paths = None
+        _live_scope.sessions = None
+        _live_scope.auth = None
+        _live_scope.subagent_trees = None
+        _live_scope.msgsum = None
+
+
+def _timeline_builder_pass():
+    """One pass of the timeline builder, synchronous (the loop runs it per owe; a test runs it on its own thread): nothing
+    when the slot is filled; else phase one (the live-only partial) unless a partial already stands (a failed pass drops
+    its own, so a retry runs both phases), then phase two (the full build), each in its own scope, so the live bars come
+    before any dead lane is read and each phase reads a world no older than its own start. Since round three (2026-10-04)
+    phase two waits for the board's first feed frame while a board pane is connected (_timeline_wait_for_board); the
+    builder sends none of the full build's frames, which the pusher's next timeline section sends. Returns the seconds the
+    pass waited for the board (None when it reached no wait), also kept in _TL_BOARD_WAITED as soon as the wait ends, which
+    the loop leaves out of the `timelineBuild` stage, a phase two that raises included."""
+    if _built_timeline[1] is not None:
+        return
+    if _tl_partial[0] is None:
+        with _timeline_builder_scope(False) as (now, live_map, _sig):
+            _timeline_build_partial(now, live_map)
+    if _built_timeline[1] is not None:
+        return
+    _tw = time.monotonic()
+    released = _timeline_wait_for_board()
+    waited = _TL_BOARD_WAITED[0] = time.monotonic() - _tw   # the loop reads it, a phase two that raises included
+    if not released:                                  # the loop stop ended the wait
+        return waited
+    with _timeline_builder_scope(True) as (now, live_map, sig):
+        _timeline_build_cold(now, live_map, sig)
+    return waited
+
+
+_TL_BUILD_FAILED_SAID = {}                         # exception type name -> said once per kernel life (the timeline builder's)
+_TL_BOARD_WAITED = [0.0]                           # the current pass's wait for the board's first frame (the loop's stage leaves it out)
+
+
+@_stage_marked("timeline.build")                    # the builder's reads and hydrations count under their own stage
+def _timeline_builder():
+    """The timeline builder thread (2026-10-03), started in main() beside the pusher: waits for an owe (_TL_OWED, set by every
+    ask of a cold slot, so it idles until a Sessions pane is a target), clears it and runs one pass; an owe landing during a
+    pass sets the Event again, so owes coalesce into at most one more pass, which finds the slot filled and returns. Each
+    pass's wall, less any wait for the board's first frame, is the cumulative `timelineBuild` stage (the wait is kept in
+    _TL_BOARD_WAITED, so a pass whose phase two raises leaves it out too). A pass that raises is said once per exception
+    kind on stderr, counted under views.tlBuildFailed and paced at the pusher's failure backoff, and its partial is
+    dropped: the slot stays cold; the panes keep their lanes and the last bars they were sent, and the next owe retries
+    both phases (a partial kept across a failure froze every pane's bars at phase one's start for as long as the fault
+    lasted, review find 2026-10-03). Only the error's kind and text outlive the except: the exception's traceback would keep the failed build's frames, and
+    everything they reference, alive while the loop waits for an owe that may never come. Stopped by _LOOPS_STOP with the
+    other loops (set it, then _TL_OWED and _TL_BOARD_WAKE)."""
+    streak = 0
+    while not _LOOPS_STOP.is_set():
+        _TL_OWED.wait()
+        if _LOOPS_STOP.is_set():
+            break
+        _TL_OWED.clear()
+        _t0 = time.monotonic()
+        failed = False
+        kind = text = ""
+        _TL_BOARD_WAITED[0] = 0.0
+        try:
+            _timeline_builder_pass()
+        except Exception as e:                        # Exception, never BaseException: a deliberate loop stop passes
+            failed = True
+            kind = type(e).__name__
+            try:
+                text = "".join(traceback.format_exception_only(type(e), e)).strip()
+            except Exception:                         # an error whose str() raises still leaves the loop standing
+                text = kind
+        _PERF_STATS.stage("timelineBuild", time.monotonic() - _t0 - _TL_BOARD_WAITED[0])
+        if not failed:
+            streak = 0
+            continue
+        _tl_partial[0] = None
+        _VIEW_STATS["tlBuildFailed"] += 1
+        if kind not in _TL_BUILD_FAILED_SAID:
+            _TL_BUILD_FAILED_SAID[kind] = True
+            try:
+                sys.stderr.write("timeline-build: a pass raised %s; the slot stays cold and the next owe retries (counted under "
+                                 "views.tlBuildFailed; said once per kind): %s\n" % (kind, text))
+            except Exception:
+                pass
+        streak += 1
+        _LOOPS_STOP.wait(PUSHER_FAIL_BACKOFF_S[min(streak, len(PUSHER_FAIL_BACKOFF_S)) - 1])
 
 
 def _tiers_may_start(tracking=None):
@@ -64933,6 +65330,7 @@ def _pusher_cycle():
     _m_cycle = (_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"])   # idle-cycle marks: see cycle()
     with _clients_lock:
         any_client = bool(_clients)
+    _live_scope.snapshot_t = time.time()      # the stamp of the cycle's liveness snapshot, taken before it (_cached_timeline)
     now = int(time.time())
     live_map = _live_map()               # THE cycle's liveness snapshot — one fork + one reg sweep
     _live_scope.snapshot = live_map           # …served to every read on THIS thread until the cycle ends,
@@ -64980,6 +65378,7 @@ def _pusher_cycle():
         _live_scope.sessions = None
         _live_scope.auth = None
         _live_scope.launch_errors = None
+        _live_scope.snapshot_t = None
         _live_scope.compact_end_records = None
         _live_scope.subagent_trees = None
         _live_scope.msgsum = None
@@ -77078,6 +77477,7 @@ class Handler(BaseHTTPRequestHandler):
             with _clients_lock:
                 if client in _clients:
                     _clients.remove(client)
+            _board_pane_gone(client)               # the cold timeline build may be waiting on this board pane's first frame
             with _clients_lock:
                 _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
 
@@ -77957,6 +78357,8 @@ def main():
     _seed_whole_chat_frames()   # the ROMP_CHAT_FLOOR0 seed, here where every definition it reaches is loaded (the 1704 read, low 1)
     threading.Thread(target=_producer, daemon=True, name="producer").start()   # named: the stack sample says whose frames
     threading.Thread(target=_pusher, daemon=True, name="pusher").start()
+    threading.Thread(target=_timeline_builder, daemon=True, name="timeline-build").start()   # the cold timeline build, off the
+    #                                                           pusher (see _cached_timeline); idle until a Sessions pane owes it
     _JOBS_THREAD_STARTED[0] = True                            # the boot row waits for this thread's first pass too
     threading.Thread(target=_jobs_loop, daemon=True, name="jobs").start()   # the housekeeping, off the pusher (see _jobs_pass)
     threading.Thread(target=_heartbeat, daemon=True).start()  # WS keepalive on its own thread (see _heartbeat)

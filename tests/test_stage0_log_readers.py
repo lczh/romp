@@ -251,9 +251,11 @@ class ViewCountersAreVisible(unittest.TestCase):
         self.assertEqual(km._VIEW_STATS["feedBuild"] - before["feedBuild"], 1)
         self.assertEqual(km._VIEW_STATS["feedServe"] - before["feedServe"], 1)
         km._built_timeline[:] = [None, None, 0.0, 0.0]
-        km._cached_timeline(NOW, {}, sig)
-        km._cached_timeline(NOW, {}, sig)
-        self.assertEqual(km._VIEW_STATS["tlBuild"] - before["tlBuild"], 1)
+        km._timeline_build_cold(NOW, {}, sig)              # first: a build (a cold slot is the timeline builder's, 2026-10-03)
+        km._cached_timeline(NOW, {}, sig)                  # same sig: served
+        km._built_timeline[2] = 0.0                        # a moved sig past REBUILD_MIN_S: the pusher's stale rebuild, counted
+        km._cached_timeline(NOW, {}, ("stage0-test", 2))
+        self.assertEqual(km._VIEW_STATS["tlBuild"] - before["tlBuild"], 2, "the builder's cold build and the stale rebuild")
         self.assertEqual(km._VIEW_STATS["tlServe"] - before["tlServe"], 1)
 
     def test_b_the_version_payload_carries_them(self):
