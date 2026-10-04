@@ -349,7 +349,8 @@ class GateDemotions(unittest.TestCase):
 
     def _stream_then(self, base_records, appended, expect_full=True):
         """Stream a clean base (folding), then append `appended` in ONE step and assert that
-        step full-parsed (a gate demotion) — or folded, for the near-miss twin."""
+        step full-parsed (a gate demotion) — or folded, for the near-miss twin. Returns the
+        road counters that step moved."""
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / (SID + ".jsonl")
             kw = {"candidate_files": [str(path)], "states": None, "postal_log": [], "now": NOW}
@@ -359,16 +360,28 @@ class GateDemotions(unittest.TestCase):
                     fh.write(json.dumps(r) + "\n")
                 self._parse_both(path, kw)
             fulls0, folds0 = emi._ASM_STATS["full"], emi._ASM_STATS["fold"]
+            before = dict(emi._ASM_STATS)
             with open(path, "a") as fh:
                 for r in appended:
                     fh.write(json.dumps(r) + "\n")
             self._parse_both(path, kw)
+            moved = {k: emi._ASM_STATS.get(k, 0) - before.get(k, 0) for k in set(before) | set(emi._ASM_STATS)
+                     if emi._ASM_STATS.get(k, 0) != before.get(k, 0)}
             if expect_full:
                 self.assertEqual(emi._ASM_STATS["full"], fulls0 + 1,
-                                 "the gate should have demoted this append to a full parse")
+                                 "the gate should have demoted this append to a full parse: %s" % moved)
             else:
                 self.assertEqual(emi._ASM_STATS["fold"], folds0 + 1,
-                                 "this append is the fast path's own case and must fold")
+                                 "this append is the fast path's own case and must fold: %s" % moved)
+            return moved
+
+    @staticmethod
+    def _promptid_arms(moved):
+        """The promptid gate's counters one step moved: every demotion, the two arms, the seed's part, the deltas the narrowed arm
+        let through that demoted after all, and the folds it saved (fold:attachedPass, counted once the fold serves)."""
+        arms = {k: moved.get("g:promptid" + k, 0) for k in ("", ":boundary", ":wrapper", ":boundarySeed", ":passedDemote")}
+        arms["fold:attachedPass"] = moved.get("fold:attachedPass", 0)
+        return arms
 
     def _base(self):
         return [G.uline(T0, "first ask", "u1"),
@@ -405,7 +418,10 @@ class GateDemotions(unittest.TestCase):
         so = G.uline(T0 + 61, "<local-command-stdout>tokens: plenty</local-command-stdout>",
                      "so1", "w1")
         so["promptId"] = "p77"
-        self._stream_then(self._base() + [w1], [so])
+        moved = self._stream_then(self._base() + [w1], [so])
+        self.assertEqual(self._promptid_arms(moved),
+                         {"": 1, ":boundary": 0, ":wrapper": 1, ":boundarySeed": 0, ":passedDemote": 0, "fold:attachedPass": 0},
+                         "the wrapper arm demoted, and its counter says so: %s" % moved)
 
     def test_repeated_promptid_on_plain_records_folds(self):
         # the ROUTINE shape: every record of a turn wears its prompt's id, so tool results
@@ -418,7 +434,56 @@ class GateDemotions(unittest.TestCase):
         tr = G.trline(T0 + 80, "tu_a2_0", "u3", "a2")
         tr["promptId"] = "p42"
         done = G.aline(T0 + 90, "all green", "a3", "u3")
-        self._stream_then(self._base() + [opener, work], [tr, done], expect_full=False)
+        moved = self._stream_then(self._base() + [opener, work], [tr, done], expect_full=False)
+        self.assertEqual(self._promptid_arms(moved)["fold:attachedPass"], 0,
+                         "a routine repeated prompt id is not the narrowed arm's pass: %s" % moved)
+
+    def test_tool_results_after_an_auto_compaction_in_the_same_prompt_fold(self):
+        """An automatic compaction in the middle of a long turn (2026-10-03): the CLI writes the boundary and its summary
+        ATTACHED (the conversation chains through them); here the summary wears the prompt id of the turn it compacted in (the
+        shape the narrowed gate assumes the CLI can write), and every later tool result of the turn wears the same id. The
+        boundary arm demoted each such append to a whole parse until the next prompt. Adoption skips an attached pair, so
+        nothing such a record does can re-seat it: the append folds, and the tree equals the whole parse's at every step. The
+        append holds two such tool results, and the fold it saved counts once (fold:attachedPass)."""
+        opener = dict(G.uline(T0 + 60, "migrate the notes-api search index", "u2", "a1"), promptId="p9")
+        work = G.aline(T0 + 70, "running the migration", "a2", "u2", tools=("Bash",), stop="tool_use")
+        res1 = dict(G.trline(T0 + 80, "tu_a2_0", "r2", "a2", content="migration applied"), promptId="p9")
+        cb = G.compact_line(T0 + 90, "cb1", logical_parent="r2", trigger="auto")
+        cs = dict(G.compact_summary_line(T0 + 91, "cs1", parent="cb1"), promptId="p9")
+        more = G.aline(T0 + 100, "checking the rebuilt index", "a3", "cs1", tools=("Bash",), stop="tool_use")
+        res2 = dict(G.trline(T0 + 110, "tu_a3_0", "r3", "a3", content="index rebuilt: 3 shards"), promptId="p9")
+        check = G.aline(T0 + 115, "querying the rebuilt index", "a3q", "r3", tools=("Bash",), stop="tool_use")
+        res3 = dict(G.trline(T0 + 118, "tu_a3q_0", "r3q", "a3q", content="3 hits"), promptId="p9")
+        done = G.aline(T0 + 120, "the index is migrated", "a4", "r3q")
+        moved = self._stream_then(self._base() + [opener, work, res1, cb, cs, more], [res2, check, res3, done], expect_full=False)
+        self.assertEqual(self._promptid_arms(moved),
+                         {"": 0, ":boundary": 0, ":wrapper": 0, ":boundarySeed": 0, ":passedDemote": 0, "fold:attachedPass": 1},
+                         "the narrowed arm let the attached pair's prompt id through, and says so: %s" % moved)
+
+    def test_a_passed_record_the_stamp_gate_then_demotes_counts_no_saved_fold(self):
+        """The pass counter counts folds the narrowed arm saved, so it moves only once the fold serves (review of 2026-10-03,
+        round one). A live manual /compact parsed while its boundary and summary are the file's last two records reads as
+        attached, so the arm lets the episode's next record through, the raw twin stamped at the command's issue time; the
+        stamp gate then demotes it to a whole parse, as before the narrowing, and no pass is counted."""
+        side, _so = G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a1")   # boundary, summary (pc), raw twin, wrapper, stdout
+        moved = self._stream_then(self._base() + side[:2], side[2:3])             # the pair is the leaf; then the raw twin
+        self.assertEqual((moved.get("g:ts", 0), moved.get("fold:attachedPass", 0)), (1, 0),
+                         "the stamp gate demotes the passed record, and no saved fold is counted: %s" % moved)
+        self.assertEqual({k: n for k, n in moved.items() if k.startswith("g:promptid")}, {},
+                         "the promptid gate files nothing for a record it let through: %s" % moved)
+
+    def test_a_record_wearing_a_detached_manual_compacts_pid_still_demotes(self):
+        """The boundary arm's own case, kept: a LIVE manual /compact writes its boundary and summary as a DETACHED pair, the
+        summary wearing the /compact's prompt id, and until the stdout lands adoption splices the pair after the episode's last
+        landed record (here the wrapper). A later record of the same episode moves that splice, and with it the boundary's
+        parent and time, without changing which records are kept, so the fold's kept check cannot see it: the arm demotes, and
+        the tree equals the whole parse's."""
+        side, _so = G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a1")   # boundary, summary (pc), raw twin, wrapper, stdout
+        late = dict(G.uline(T0 + 125, "compacting the notes-api conversation", "pl", "cwc", ps=None), promptId="pc", isMeta=True)
+        moved = self._stream_then(self._base() + side[:4], [late])                # the stdout has not landed: the wrapper is the leaf
+        self.assertEqual(self._promptid_arms(moved),
+                         {"": 1, ":boundary": 1, ":wrapper": 0, ":boundarySeed": 0, ":passedDemote": 0, "fold:attachedPass": 0},
+                         "the boundary arm demoted, and its counter says so: %s" % moved)
 
     def test_skill_link_to_new_invocation_demotes(self):
         # the payload record references tu_skill_9 BEFORE any such invocation exists; when the
@@ -491,6 +556,127 @@ class GateDemotions(unittest.TestCase):
             path.write_text("\n".join(json.dumps(r) for r in recs[:2]) + "\n")   # shrink = rewrite
             self._parse_both(path, kw)
             self.assertEqual(emi._ASM_STATS["full"], fulls0 + 1)
+
+
+class PromptIdAdoptable(unittest.TestCase):
+    """The narrowed boundary arm's rule (_asm_pid_adoptable, 2026-10-03), asked of real adapters: a record wearing a compaction
+    summary's prompt id may fold only when every summary wearing it hangs off a boundary on the active path that adoption did
+    not splice. Each other shape demotes as before: an adopted pair (a live manual /compact, whose splice a later episode
+    record moves), a detached pair no episode adopted (off the path), a pid with no summary on record, and a pid a restored
+    adapter's seed names (its document's gates name the summaries before its cut, whose pairs the restored adapter never
+    read)."""
+
+    def _adapter(self, records):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / (SID + ".jsonl")
+            path.write_text("".join(json.dumps(r) + "\n" for r in records))
+            return emi.FileAdapter([str(path)], str(path))
+
+    def test_only_an_attached_unspliced_pair_lets_its_prompt_id_through(self):
+        base = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")]
+        attached = self._adapter(base + [
+            dict(G.uline(T0 + 60, "migrate the notes-api search index", "u2", "a1"), promptId="p9"),
+            G.aline(T0 + 70, "running the migration", "a2", "u2", tools=("Bash",), stop="tool_use"),
+            dict(G.trline(T0 + 80, "tu_a2_0", "r2", "a2"), promptId="p9"),
+            G.compact_line(T0 + 90, "cb1", logical_parent="r2", trigger="auto"),
+            dict(G.compact_summary_line(T0 + 91, "cs1", parent="cb1"), promptId="p9"),
+            G.aline(T0 + 100, "checking the rebuilt index", "a3", "cs1", tools=("Bash",), stop="tool_use")])
+        self.assertEqual(attached.summary_pids, {"p9": ["cs1"]}, "the ingest records the summary under its prompt id")
+        self.assertFalse(emi._asm_pid_adoptable(attached, "p9"), "an automatic compaction's attached pair: its pid folds")
+        self.assertTrue(emi._asm_pid_adoptable(attached, "p-unknown"), "a pid with no summary on record demotes")
+        attached.seed = {"boundary_pids": {"p9"}}     # as a restored adapter whose document names the pid
+        self.assertTrue(emi._asm_pid_adoptable(attached, "p9"),
+                        "a pid the restore seed names demotes, whatever the tail's summaries say: a pre-cut summary may wear it")
+        side, _so = G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a1")
+        adopted = self._adapter(base + side[:4])      # the wrapper is the leaf: the pair is spliced after it
+        self.assertIn("cbc", adopted._adopted, "the premise: the live manual compact's pair is adopted")
+        self.assertTrue(emi._asm_on_path(adopted, "cbc"), "the premise: the splice puts it on the path")
+        self.assertTrue(emi._asm_pid_adoptable(adopted, "pc"), "an adopted pair's pid demotes: a later episode record moves it")
+        hidden = self._adapter(base + side[:2] + [G.uline(T0 + 130, "a plain next ask", "u3", "a1")])
+        self.assertNotIn("cbc", hidden._adopted, "the premise: no episode adopts the pair")
+        self.assertFalse(emi._asm_on_path(hidden, "cbc"), "the premise: the detached pair is off the path")
+        self.assertTrue(emi._asm_pid_adoptable(hidden, "pc"), "a detached pair's pid demotes: an episode record could adopt it")
+
+    def test_one_prompt_id_on_an_attached_pair_and_an_adopted_pair_demotes(self):
+        """Every summary wearing the id is asked, not the first or the last (review of 2026-10-03, round one): one prompt id worn
+        by an attached automatic pair and by a live manual /compact's adopted pair demotes, whichever pair comes first in the
+        file. Asked of the attached pair alone, a record wearing the id would fold, and the fold would serve the adopted
+        boundary with the parent and time a later episode record moved away from."""
+        base = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")]
+
+        def auto(t, anchor, nxt):
+            """An automatic compaction anchored on `anchor`, attached (the reply `nxt` chains on its summary)."""
+            return [G.compact_line(t, "cba", logical_parent=anchor, trigger="auto"),
+                    dict(G.compact_summary_line(t + 1, "csa", parent="cba"), promptId="pc"),
+                    G.aline(t + 5, "the notes-api search index is migrated", nxt, "csa", stop="end_turn")]
+        run = [G.aline(T0 + 20, "running the migration", "a2", "a1", tools=("Bash",), stop="tool_use"),
+               G.trline(T0 + 30, "tu_a2_0", "r2", "a2", content="migration applied")]
+        first = base + run + auto(T0 + 40, "r2", "a3") + G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a3")[0][:4]
+        side, so = G.manual_compact_lines(T0 + 20, T0 + 40, "c", parent="a1")
+        last = base + side + [G.uline(T0 + 60, "and the search cursor?", "u3", so),
+                              G.aline(T0 + 70, "paging the cursor", "a4", "u3", tools=("Bash",), stop="tool_use"),
+                              G.trline(T0 + 80, "tu_a4_0", "r4", "a4", content="cursor pages")] + auto(T0 + 90, "r4", "a5")
+        for order, records, want in (("attached first", first, ["csa", "csc"]), ("adopted first", last, ["csc", "csa"])):
+            with self.subTest(order=order):
+                ad = self._adapter(records)
+                self.assertEqual(ad.summary_pids, {"pc": want}, "the premise: both summaries wear the id, in file order")
+                self.assertIn("cbc", ad._adopted, "the premise: the manual compact's pair is adopted")
+                self.assertNotIn("cba", ad._adopted, "the premise: the automatic pair is not")
+                self.assertTrue(emi._asm_on_path(ad, "cba"), "the premise: the automatic pair is attached")
+                self.assertTrue(emi._asm_pid_adoptable(ad, "pc"), "the adopted pair wearing the id demotes it (%s)" % order)
+
+    def test_a_summary_hung_on_a_user_record_demotes(self):
+        """A summary whose parent is not a compact_boundary, here the turn's tool result on the path, is no attached pair: its id
+        demotes (review of 2026-10-03, round one)."""
+        ad = self._adapter([
+            G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1"),
+            dict(G.uline(T0 + 60, "migrate the notes-api search index", "u2", "a1"), promptId="p9"),
+            G.aline(T0 + 70, "running the migration", "a2", "u2", tools=("Bash",), stop="tool_use"),
+            dict(G.trline(T0 + 80, "tu_a2_0", "r2", "a2"), promptId="p9"),
+            dict(G.compact_summary_line(T0 + 91, "cs1", parent="r2"), promptId="p9"),
+            G.aline(T0 + 100, "checking the rebuilt index", "a3", "cs1", tools=("Bash",), stop="tool_use")])
+        self.assertEqual((ad.summary_pids, ad.parent_of.get("cs1"), ad.by_uuid["r2"].get("type")), ({"p9": ["cs1"]}, "r2", "user"),
+                         "the premise: the summary hangs off a user record")
+        self.assertTrue(emi._asm_on_path(ad, "r2"), "the premise: that record is on the path")
+        self.assertTrue(emi._asm_pid_adoptable(ad, "p9"), "a summary off no boundary: its id demotes")
+
+    def test_a_summary_replaced_by_a_later_copy_of_its_uuid_demotes(self):
+        """A later record reusing the summary's uuid replaces it (last write wins): the uuid the adapter recorded under the id is
+        no summary any more, and the id demotes, even with that copy hung on the attached boundary (review of 2026-10-03,
+        round one)."""
+        ad = self._adapter([
+            G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1"),
+            dict(G.uline(T0 + 60, "migrate the notes-api search index", "u2", "a1"), promptId="p9"),
+            G.aline(T0 + 70, "running the migration", "a2", "u2", tools=("Bash",), stop="tool_use"),
+            dict(G.trline(T0 + 80, "tu_a2_0", "r2", "a2"), promptId="p9"),
+            G.compact_line(T0 + 90, "cb1", logical_parent="r2", trigger="auto"),
+            dict(G.compact_summary_line(T0 + 91, "cs1", parent="cb1"), promptId="p9"),
+            G.uline(T0 + 100, "a note written again under the summary's uuid", "cs1", "cb1")])
+        self.assertEqual(ad.summary_pids, {"p9": ["cs1"]}, "the premise: the ingest recorded the summary under its id")
+        self.assertIsNot(ad.by_uuid["cs1"].get("isCompactSummary"), True, "the premise: the later copy replaced the summary")
+        self.assertEqual(ad.parent_of.get("cs1"), "cb1", "the premise: the copy hangs on the boundary")
+        self.assertTrue(emi._asm_on_path(ad, "cb1") and "cb1" not in ad._adopted, "the premise: the boundary is attached")
+        self.assertTrue(emi._asm_pid_adoptable(ad, "p9"), "a replaced summary: its id demotes")
+
+    def test_the_documents_gates_name_the_summaries_before_its_cut(self):
+        """What the seed check reads (_asm_doc_boundary_pids, 2026-10-03): a document's gates name the prompt ids of the summaries
+        before its cut. A summary past the cut is read again from the tail by every restore, so its id stays out of the seed
+        and the restored entry checks its pair as a whole entry does."""
+        records = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1"),
+                   G.compact_line(T0 + 20, "cb0", logical_parent="a1", trigger="auto"),
+                   dict(G.compact_summary_line(T0 + 21, "cs0", parent="cb0"), promptId="p1"),
+                   dict(G.uline(T0 + 60, "migrate the notes-api search index", "u2", "cs0"), promptId="p9"),
+                   G.aline(T0 + 70, "running the migration", "a2", "u2", tools=("Bash",), stop="tool_use"),
+                   G.compact_line(T0 + 90, "cb1", logical_parent="a2", trigger="auto"),
+                   dict(G.compact_summary_line(T0 + 91, "cs1", parent="cb1"), promptId="p9"),
+                   G.aline(T0 + 100, "checking the rebuilt index", "a3", "cs1", tools=("Bash",), stop="tool_use")]
+        ad = self._adapter(records)
+        recs = [(ad.seq_of[r["uuid"]], r) for r in records]
+        self.assertEqual(ad.boundary_pids, {"p1", "p9"}, "the premise: the whole adapter holds both summaries' ids")
+        self.assertEqual(emi._asm_doc_boundary_pids(ad, recs, ad.seq_of["cb1"]), {"p1"},
+                         "a cut before the second compaction names the first summary's id alone")
+        self.assertEqual(emi._asm_doc_boundary_pids(ad, recs, ad.seq_of["a3"]), {"p1", "p9"},
+                         "a cut past the second summary names both")
 
 
 class PostalHeal(unittest.TestCase):

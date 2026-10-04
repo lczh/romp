@@ -3206,6 +3206,9 @@ class FileAdapter:
         # would rebind repaired stitches, so it forces full).
         self.prompt_ids = set()
         self.boundary_pids = set()
+        self.summary_pids = {}   # compaction summary promptId -> the uuids of the summaries THIS adapter ingested wearing it (a
+        #                          restored adapter's tail alone; the seed's boundary_pids stands for the rest): what the fold's
+        #                          promptid gate reads to tell an attached pair's pid from an adoptable one (_asm_pid_adoptable)
         self.skill_use_ids = set()
         self.src_tool_links = set()
         self.dangling = set()
@@ -3331,6 +3334,7 @@ class FileAdapter:
                             # a compaction summary's promptId is the designed link the boundary
                             # ADOPTION keys on — episode records wearing it can re-seat a card
                             self.boundary_pids.add(r["promptId"])
+                            self.summary_pids.setdefault(r["promptId"], []).append(u)
                     if r.get("sourceToolUseID"):
                         self.src_tool_links.add(r["sourceToolUseID"])
                 elif t == "assistant":
@@ -5630,9 +5634,14 @@ def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, 
 #   - the new leaf does not descend from the old leaf through the delta, unless the
 #     delta is a parallel tool batch landing (FileAdapter._batch_delta)               -> full
 #   - the delta contains: a compact boundary or summary; a uuid already in the graph
-#     or among its recorded dangling parent targets; a promptId already seen; a Skill
-#     tool_use an old payload record already references; an unparseable or
+#     or among its recorded dangling parent targets; a promptId already seen, on a
+#     command-wrapper record or wearing an adoptable compaction's summary pid
+#     (_asm_pid_adoptable); a Skill tool_use an old payload record already references; an unparseable or
 #     watermark-regressing conversational timestamp                                   -> full
+#   - a delta holding a record the narrowed promptid arm let through, refused by a compaction,
+#     the descent or a batch's kept check: the whole parse, never the restore road    -> full
+#     (a compaction summary does not mark its own delta; the re-seat steps aside for such a
+#     delta that passed on a batch's link, so its kept check rules)
 #   - after the fold's graph recompute, ANY old record's kept-membership changed      -> full
 #     (a batch landing's delta: the restore road first, as its descent demotion took)
 # Postal is the one input with no gate, on the log's own invariant: rows are append-only and
@@ -5698,6 +5707,98 @@ def _asm_demote(reason):
     _asm_stat(k)
     _ASM_DEMOTE_TL.reason = reason
     return None
+
+
+def _asm_demote_passed():
+    """The demotion of a delta the narrowed promptid arm let through (_asm_pid_adoptable: every summary wearing the record's
+    id hangs off an attached pair) that then fails for a reason the restore road takes: a compaction in the delta, the leaf
+    descent, or the kept check of a parallel tool batch the descent let by (review of 2026-10-03, round one). It is filed as
+    the promptid demotion it was before the arm narrowed, which the restore road does not take, so it parses whole as it did
+    then, counted g:promptid:passedDemote beside the arms. The restore proves only that the tail chains onto the document, and
+    a record wearing the summary's prompt id that rewinds onto the pre-compaction leaf hangs off the tip of a document cut at
+    the compaction's turn: restored, it served a turn the cold parse does not build, and the settle, which writes nothing for
+    a restored entry, left that document standing, and each boot served the same turn, until the tail reached the churn
+    share. The descent cannot tell that rewind from an api_error retry, so a retry whose result wears the id parses whole here
+    too, as it did before the narrowing. The re-seat (_assemble) steps aside for a passed delta that passed on a parallel
+    batch's link, so its kept check rules and a rejection lands here (round two: re-seated, a result parented at a parallel
+    call that an automatic compaction was anchored on was served as a turn of its own); a passed delta that extends the path
+    keeps its re-seat. A compaction summary does not mark its own delta (_asm_gates), so a turn's later compaction alone in its
+    append takes the restore road as any compaction does."""
+    _asm_stat("g:promptid:passedDemote")
+    return _asm_demote("promptid")
+
+
+def _asm_on_path(ad, u):
+    """Whether `u` sits on the adapter's active path as the last parse or fold left it: a walk back over ad.parent_of (the
+    graph after the repair passes, adoption's splices included) from ad.leaf_uuid, stopping at `u`. For a compaction in the
+    current turn the walk is the records since it, never the whole chain; the seen set is the cycle guard, as in
+    active_path."""
+    cur, seen = ad.leaf_uuid, set()
+    while cur is not None and cur not in seen:
+        if cur == u:
+            return True
+        seen.add(cur)
+        cur = ad.parent_of.get(cur)
+    return False
+
+
+def _asm_pid_adoptable(ad, pid):
+    """Whether a delta record wearing `pid`, a compaction summary's promptId, could re-seat a boundary adoption, the one thing
+    such a record can change that the fold's kept check cannot see (2026-10-03). False only when every summary on record wearing
+    it hangs off a compact_boundary on the entry's active path that adoption did not splice: an ATTACHED pair, which an
+    automatic compaction writes, and which _adopt_detached_compactions skips (`if b in active: continue`). A delta that the
+    descent gate passes extends that path, or lands a parallel tool batch (_batch_delta), whose results can move the leaf onto
+    another call's branch and leave the pair off the path. Adoption cannot re-seat the pair then either: it splices a pair only
+    behind a /compact episode on the path that the summary's promptId names, and an automatic summary wearing its turn's
+    prompt id names that turn's records, none of them a /compact; the fold's recompute and kept check rule on the rest, and a
+    record wearing the id after that finds the pair off the path and demotes (review of 2026-10-03, round one). The records
+    after the pair already fold on the carried state (the restore dedup, the summaries map) when they wear another prompt's
+    id. A delta in which this lets through a record other than a compaction summary, and which a compaction, the descent
+    or a batch's kept check then refuses, parses whole (_asm_demote_passed), and a fold of one counts under
+    fold:attachedPass. Before, every summary's pid
+    demoted: if the CLI stamps an automatic compaction's summary with the prompt id of the turn it compacted in (not yet
+    checked on live transcripts; the fixtures give it none), every later tool result of that turn wears it, and each append
+    was a whole parse of the transcript until the next prompt.
+
+    True, the demotion as before, for a pid the entry cannot vouch for: one the restore seed carries (the document's gates name
+    the pids of the summaries before its cut, whose attachment is not on record here: _asm_doc_boundary_pids; a document
+    written before that names every summary's pid, which only demotes more), one with no summary in the graph, a summary whose
+    record a later copy replaced or whose parent is not a compact_boundary, a boundary adoption spliced (a live manual
+    /compact, whose episode a later record can move), and a boundary off the path."""
+    if pid in ((ad.seed or {}).get("boundary_pids") or ()):
+        return True
+    sums = getattr(ad, "summary_pids", {}).get(pid)
+    if not sums:
+        return True
+    for s in sums:
+        sr = ad.by_uuid.get(s)
+        if not (sr and sr.get("isCompactSummary") is True and sr.get("promptId") == pid):
+            return True                                  # a later copy of the uuid replaced the summary (last write wins)
+        b = ad.parent_of.get(s)                          # the summary's own link: adoption rewrites the boundary's and its child's
+        br = ad.by_uuid.get(b) if b else None
+        if not (br and br.get("type") == "system" and br.get("subtype") == "compact_boundary"):
+            return True
+        if b in ad._adopted or not _asm_on_path(ad, b):
+            return True
+    return False
+
+
+def _asm_doc_boundary_pids(ad, all_recs, cut_seq):
+    """The prompt ids a document's gates name as boundary_pids (2026-10-03): those of the compaction summaries before the cut,
+    every copy the pre-cut bytes carry (`all_recs`, the writer's (seq, record) pairs; _ingest adds each copy's). The writer
+    reads a whole entry's adapter, so no seed is carried: it refuses a restored entry with pre-cut atoms or turns, and no
+    exercised road reaches this line from the one restored entry it does not refuse there, a degenerate document's whose
+    pre-cut part restored no atoms (tests/test_asm_write_over_grown_entry.py; review round one). Every restore re-ingests the
+    tail, its summaries included, so the adapter it seeds holds the same boundary_pids a whole parse does, while the seed
+    names only the summaries the restored entry cannot see, which is what _asm_pid_adoptable's seed check asks. The gates
+    named every summary's pid until then, so a restore from any document written after a compaction past its cut (a restart
+    in the turn, the re-seat after a later whole parse) demoted every record wearing that summary's pid for the rest of the
+    turn. A document written before then still restores, and its wider set only demotes more."""
+    out = set()
+    for sq, r in all_recs:
+        if sq < cut_seq and r.get("type") == "user" and r.get("promptId") and r.get("isCompactSummary") is True:
+            out.add(r["promptId"])
+    return out
 
 
 def _asm_compaction_under_share(entry, leaf_path):
@@ -6081,6 +6182,9 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         return _asm_demote("empty-graph")
     parent_d, new_leaf = {}, old_leaf
     compaction = None      # the delta's compaction reason, filed only once every record has met the other gates (below)
+    adoptable = {}         # a summary pid -> _asm_pid_adoptable's answer, asked once per delta
+    attached_pass = False  # the narrowed boundary arm let a record through where it demoted before: a later demotion the restore
+    #                        road would take parses whole instead (_asm_demote_passed), and the fold counts it once it serves
     for r in delta:
         t, u = r.get("type"), r.get("uuid")
         if u:
@@ -6105,11 +6209,31 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             # retroactively) and any record wearing an adoptable boundary's episode pid (it can
             # re-seat the adopted card's splice without changing kept — invisible to the
             # invariance check). Everything else folds: the carried twins map serves the DELTA
-            # record's own classification record-locally.
+            # record's own classification record-locally. A summary pid counts as adoptable
+            # unless the entry vouches that every summary wearing it hangs off an attached
+            # boundary (_asm_pid_adoptable, 2026-10-03: an automatic compaction's summary, when it
+            # wears its turn's prompt id, demoted every later tool result of that turn). The two arms count apart
+            # (g:promptid:boundary, g:promptid:wrapper; boundarySeed, the boundary demotions whose
+            # pid the restore seed named), beside g:promptid. A delta the narrowed arm let through
+            # (a record other than a compaction summary, which does not mark its own delta)
+            # is marked (attached_pass): if a compaction, the descent or a batch's kept check then
+            # refuses it, it parses whole under promptid as before (g:promptid:passedDemote), and
+            # if it folds, the fold counts it (fold:attachedPass, the folds the narrowing saved).
             _wtxt = _text_of(_content(r.get("message"))) or ""
-            if r["promptId"] in ad.boundary_pids or \
-                    (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
-                return _asm_demote("promptid")                                        #   re-classifies nothing (T333)
+            _pid = r["promptId"]
+            _bnd = False
+            if _pid in ad.boundary_pids:
+                if _pid not in adoptable:
+                    adoptable[_pid] = _asm_pid_adoptable(ad, _pid)
+                _bnd = adoptable[_pid]
+            if _bnd or (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
+                _asm_stat("g:promptid:" + ("boundary" if _bnd else "wrapper"))          #   re-classifies nothing (T333)
+                if _bnd and _pid in ((ad.seed or {}).get("boundary_pids") or ()):
+                    _asm_stat("g:promptid:boundarySeed")
+                return _asm_demote("promptid")
+            if _pid in ad.boundary_pids and r.get("isCompactSummary") is not True:
+                attached_pass = True     # not the delta's own summary (round two): a turn's later compaction, its summary wearing
+                #                          the id the first put on record, restores alone in its append as any compaction does
         if t == "assistant":
             for b in _content(r.get("message")) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use" and \
@@ -6126,8 +6250,9 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         # a record past the compaction that the fold refuses for its own reason (a stamp before the records folded, a Skill call
         # a pre-cut payload names, a uuid a pre-cut record named as its parent, a re-classifying prompt id) demoted above for that
         # reason and keeps its whole parse (review of 2026-09-24: returning at the compaction masked them, and the restore served
-        # a tree a cold parse does not build, at every later boot as well)
-        return _asm_demote(compaction)
+        # a tree a cold parse does not build, at every later boot as well). A delta holding a record the narrowed promptid arm
+        # let through parses whole as it did before the narrowing (_asm_demote_passed)
+        return _asm_demote_passed() if attached_pass else _asm_demote(compaction)
     # Leaf descent: the new file-leaf must chain back to the old one THROUGH the delta — an
     # api_error spur re-parent, a rewind, and a /clear fork all fail here. walk.pop doubles
     # as the cycle guard; a delta with no uuid-bearing record passes trivially (leaf unmoved).
@@ -6142,14 +6267,19 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     # says the delta passed on the batch link, so a kept rejection of it takes the road the
     # descent gave it (_asm_fold). It is cleared before every walk, so it speaks for this delta
     # alone: a later delta that descends from the old leaf keeps a kept rejection's own road.
+    # The pass bit beside it, set the same way, says the narrowed promptid arm let a record of
+    # this delta through: a descent demotion of such a delta, and a batch's kept rejection,
+    # parse whole instead of restoring (_asm_demote_passed), and its fold is counted. Both bits
+    # set means the re-seat (_assemble) steps aside, so that kept check rules (round two).
     _ASM_DEMOTE_TL.batch = False
+    _ASM_DEMOTE_TL.passed = attached_pass
     cur, hops, walk = new_leaf, 0, dict(parent_d)
     while cur != old_leaf:
         if cur is None or cur not in walk or hops > len(delta) + 1:
             if ad._batch_delta(delta, parent_d, old_leaf):
                 _ASM_DEMOTE_TL.batch = True
                 break
-            return _asm_demote("descent")
+            return _asm_demote_passed() if attached_pass else _asm_demote("descent")
         cur = walk.pop(cur)
         hops += 1
     return delta, leaf_recs
@@ -6220,6 +6350,10 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     kept = ad.kept_uuids(ad.active_path())
     dset = {r.get("uuid") for r in delta if r.get("uuid")}
     if kept - dset != entry["kept"]:
+        if getattr(_ASM_DEMOTE_TL, "batch", False) and getattr(_ASM_DEMOTE_TL, "passed", False):
+            return _asm_demote_passed()   # a batch delta the narrowed promptid arm let through: the whole parse it had before the
+            #                               narrowing, never the restore road the batch's kept rejection takes below (round one;
+            #                               the re-seat steps aside for such a delta so it reaches this check, round two)
         _asm_demote("kept")          # ancestry moved under an old record — the fold cannot
         #                              re-emit history; a full parse can, and so can a restore
         if getattr(_ASM_DEMOTE_TL, "batch", False):
@@ -6250,6 +6384,9 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     _asm_reseat_src(ad, leaf_key, leaf_recs)      #  delta next visit and the uuid gate demotes it
     ad._src_keys[leaf_key] = entry["recs"][leaf_key]
     _asm_stat("fold")
+    if getattr(_ASM_DEMOTE_TL, "passed", False):
+        _asm_stat("fold:attachedPass")   # a fold the narrowed promptid arm saved, counted only once the fold serves (round one): a
+        #                                  delta it let through that a later gate, the kept check or the re-seat took is no fold
     return _asm_serve(entry)
 
 
@@ -7963,7 +8100,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                #                                             (absorbed attachments, shadowed copies): the restore's reuse check reads
                #                                             rows and these, so a tail record reusing any of them refuses (round two)
                "turns": turns_doc, "treeIdentity": _tree_identity_of_doc(turns_doc, identity) if turns_doc else None,
-               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
+               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(_asm_doc_boundary_pids(ad, all_recs, cut_seq)),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
                "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless)}
@@ -8984,13 +9121,22 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
             if entry is not None:
                 _ASM_DEMOTE_TL.reason = None
                 got = _asm_gates(entry, leaf_path, candidate_files, links)
-                if got is not None and entry.get("reseat"):
+                if got is not None and entry.get("reseat") and not (got[0] and getattr(_ASM_DEMOTE_TL, "batch", False)
+                                                                    and getattr(_ASM_DEMOTE_TL, "passed", False)):
                     # A WHOLE entry whose own document now stands (2026-09-24): the settle or the converge pass wrote it from this
                     # entry, which then kept every record and atom for the life of the process, so every fold re-ran the graph
                     # passes over the whole history and copied every atom (at 150 MB, an order of magnitude over a fold of the
                     # restored entry) and the chat's render floor stayed at turn 0. A delta the gates pass is re-seated instead: the
                     # restore road reads the document and the tail from its cut, and the folds after it walk the tail alone. A
-                    # delta the gates demote keeps its own road and its own reason
+                    # delta the gates demote keeps its own road and its own reason. Nor is a delta the narrowed promptid arm let
+                    # through that passed on a parallel batch's link re-seated (both thread bits, which the gate's walk sets for
+                    # every delta it rules on; an empty delta runs no walk, so it re-seats whatever an earlier delta left on the
+                    # thread): the fold's kept check rules on it, and a rejection there parses whole (_asm_demote_passed).
+                    # Re-seated, it took the restore road, which proves only that the tail chains onto the document: with an
+                    # automatic compaction anchored on the parallel call and a result of that call parented at the call, the
+                    # restore served the result as a turn of its own, and the settle, which writes nothing for a restored entry,
+                    # left that tree standing for the next record and every boot (review of 2026-10-03, round two). A passed
+                    # delta that extends the path keeps its re-seat
                     got = _asm_demote("reseat")
                 if got is not None:
                     delta, leaf_recs = got

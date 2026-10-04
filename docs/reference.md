@@ -2762,7 +2762,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   are process-wide, so a collection inside both windows is in both deltas and
   a sum would count it twice; the key is absent when neither split has one.
   The row also carries `parse`, the assembly's road counters at
-  the first cycle's end (T398): `serve`, `fold`, `restore` (with
+  the first cycle's end (T398): `serve`, `fold` (with `fold:attachedPass`,
+  the folds of a delta the `promptid` gate let through, described under
+  `full:demoted` below), `restore` (with
   `restore:afterDemote`, the restores taken over an entry the gates demoted
   instead of a whole parse, `restore:pastShare`, a compaction whose tail past
   the cut had reached an eighth of the pre-cut bytes, parsed whole so the
@@ -2855,11 +2857,41 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `descent` when the new leaf does not chain to the old through the delta
   (a parallel tool batch's results, each parented at its own call, fold instead;
   one that then moves an old record's kept membership counts under `kept` and
-  takes the restore road a descent takes),
+  takes the restore road a descent takes, unless the `promptid` gate let a
+  record of it through, counted under `g:promptid:passedDemote` below),
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
   `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
-  `boundary`, `summary`, `promptid`, `skill-link`, `ts`, `kept`, and
+  `boundary`, `summary`, `promptid` (a record repeating a prompt id in a way
+  that can re-classify records already read, its arm counted beside it:
+  `g:promptid:wrapper` for a command-wrapper record, `g:promptid:boundary`
+  for a record wearing a compaction summary's prompt id whose boundary an
+  adoption could still move, with `g:promptid:boundarySeed` the part of
+  those whose id a restored entry's document names (a document names the
+  prompt ids of the summaries before its cut), where the entry cannot tell
+  whether that boundary is attached, and `g:promptid:passedDemote` for a
+  delta in which the gate let a record wearing a summary's prompt id
+  through, because every summary wearing its id hangs off a boundary on the
+  conversation's path that
+  adoption did not splice, as an automatic compaction's does, and which a
+  compaction in it, the descent (a rewind and an api_error retry alike) or
+  a parallel batch's kept check then refused: it parses whole, as it did
+  before the gate let such records through, and never takes the restore
+  road (nor the re-seat, when it passed on a batch's link, so the kept
+  check rules). A compaction summary does not count as such a record in
+  its own delta, so a later compaction alone in its append restores as any
+  compaction does. A delta the gate let through that the stamp (`ts`),
+  `skill-link` or `uuid-known` gate then takes counts under that gate's
+  reason alone: a live manual /compact's raw twin, which `promptid` counted
+  before, counts under `ts`. A delta the gate let through that extends the
+  path on a whole entry marked for its re-seat is re-seated and counts as a
+  re-seat alone: under the `reseat` reason, and as a restore under `restore`
+  and `restore:afterDemote` when that restore serves (when it refuses the
+  document, under the whole parse's `full:demoted`), never under
+  `fold:attachedPass`. The deltas
+  the gate let through that folded count under `fold:attachedPass`, the
+  folds it saved),
+  `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
   here only when that restore refused the document),
