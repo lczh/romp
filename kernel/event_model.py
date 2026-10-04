@@ -1190,7 +1190,10 @@ def fold_steps_in_hand(cache, name, path, new=True):
     holds no entry for the path, or an empty one, and while a parse's assembly entry holds the entry's very records list
     (the subagent viewer's, _asm_holds_records), which a parse rebuilt since the file's last append does: a drop there
     frees nothing, and a stepping fold's drop would leave the viewer's next rebuild a whole read. The spend guard asks before it folds an agent file it priced (2026-10-01), so its
-    fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds."""
+    fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds. A pending
+    restore whose count for the fold does not read as an int is a corrupt document, counted and removed as the restore
+    counts it (review round ten, 2026-10-04: a count json read as infinity raised out of the gate at every jobs pass, and
+    the document stayed with nothing recorded)."""
     key = str(path)
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(key)
@@ -1208,8 +1211,9 @@ def fold_steps_in_hand(cache, name, path, new=True):
             f = (pend.get("folds") or {}).get(name) if isinstance(pend, dict) and pend.get("gen") == ent[6] else None
         try:
             ok = isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
-        except (KeyError, TypeError, ValueError):
-            ok = False
+        except (KeyError, TypeError, ValueError, OverflowError) as e:   # a count that is no int (OverflowError: one json read as
+            _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e))   #  infinity) is a corrupt document, counted and removed
+            return False                                                #  once, as the restore counts it
     return ok and not _asm_holds_records(key, ent[4])
 
 

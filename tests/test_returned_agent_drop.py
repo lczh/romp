@@ -30,7 +30,8 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     once, whichever side logged the larger usage), reads the file whole when the memo ends short of the tail or starts
     after the window, prices a file a fresh process restored as a tail (one whole read after the boot, none later, the
     drop after two quiet minutes), prices a restored tail that covers the window without a whole read and folds it out of
-    memory, re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written record;
+    memory, counts that tail's document corrupt once, with no raise, when its launch-ids count reads as infinity, re-scans
+    its memo when a tail entry becomes the whole file, and pays no whole read for a half-written record;
     a raise in the drop's witness check or the guard's folds (its launch-ids fold included) is counted and said with the
     file and the frame, at the 1st, 10th, 100th and 1000th raise, and a guard fold that raises at every pass does not keep
     the folds after it from dropping a returned agent;
@@ -1267,6 +1268,43 @@ class SpendGuard(Base):
         self.assertTrue(ent is None or not ent[4], "the tail's records left memory through the guard's fold: %r" % ((ent or ())[5:6],))
         self.assertGreaterEqual(em.record_cache_stats()["dropped"], 1)
         self.assertLess(self.read_of(wf), size, "the file was never read whole")
+
+    def test_a_restored_tail_whose_launch_ids_count_reads_as_infinity_is_counted_corrupt_once(self):
+        """The restored-tail test above with the document's launch-ids count edited to `Infinity`, which json reads as a
+        float int() refuses with OverflowError (no writer produces one; it takes a hand edit or another tool). The restore
+        counts such a document corrupt and removes it. The guard's gate caught only KeyError, TypeError and
+        ValueError, so it raised at every pass while the file stayed in the window, and the document stayed on disk with
+        nothing counted (review round ten). It now counts the document corrupt once, and no pass raises."""
+        wf = str(self.sub / "workflows" / "wf_1" / "agent-a9a00000000000002.jsonl")
+        pairs = [(rec(T0 - 1000 + 10 * i, i), T0 - 1000 + 10 * i) for i in range(100)]   # T0-1000 .. T0-10
+        write(wf, [r for r, _t in pairs[:5]], T0 - 960)
+        self.clock.t = T0 - 955
+        km._agent_launch_ids(wf)                                  # the previous process: the guard's fold while the agent ran
+        self.assertTrue(em.checkpoint_write(wf))                  # its document, count 5
+        append(wf, [r for r, _t in pairs[5:]], T0 - 10)
+        cp = em._ckpt_file(wf)
+        d = json.loads(cp.read_text())
+        d["folds"]["agentLaunchIds"]["count"] = float("inf")     # a hand edit while the kernel was down
+        cp.write_text(json.dumps(d))
+        self.assertIn("Infinity", cp.read_text())
+        self.fresh_process()
+        em._SWALLOWED.clear()
+        fb0 = em.checkpoint_stats()["fallbacks"]
+        err = io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            for t in range(T0, T0 + 901, 5):
+                want = sum(usd(r) for r, rt in pairs if rt >= t - 600)
+                self.assertAlmostEqual(self.window(t), want, places=9, msg="the window at +%d s" % (t - T0))
+                if t == T0:
+                    ent = self.entry(wf)
+                    self.assertEqual((ent[5], len(ent[4])), (5, 95), "priced from the restored tail, as above")
+                    first = cp.exists()
+        fb = {k: n - fb0.get(k, 0) for k, n in em.checkpoint_stats()["fallbacks"].items() if n != fb0.get(k, 0)}
+        self.assertEqual((em.record_cache_stats()["swallowed"], fb, first, cp.exists(),
+                          err.getvalue().count("spendGuardFold raised"), err.getvalue().count("checkpoint fallback (corrupt)")),
+                         ({}, {"corrupt": 1}, False, False, 0, 1),
+                         "no raise at any pass (swallowed, said); the document counted corrupt once, at the first pass, and gone")
+        self.assertIn("fold agentLaunchIds: ", err.getvalue(), "the fallback names the fold whose count it refused")
 
     def test_the_row_memo_rescans_when_its_tail_entry_becomes_the_whole_file(self):
         f = str(self.proj / "11111111-2222-4333-8444-0000000000e1.jsonl")
