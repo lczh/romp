@@ -2519,6 +2519,62 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     return ent
 
 
+def cached_whole_records(path):
+    """The records of the reader's WHOLE entry for `path` when one stands at the file's current stat, else None. The entry is
+    not touched (its place in the LRU order stays), so a caller that only looks through it leaves the cache as it found it."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(path)
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and hit[5] == 0:
+            return hit[4]
+    return None
+
+
+def read_records_detached(path, on_fail=None):
+    """`path`'s records read whole off the disk, line by line as the reader reads a file (_scan_jsonl_stream, to the size a stat
+    taken before the read saw), into a list only the caller holds: no reader entry is installed, upgraded or touched, so the
+    record cache keeps exactly what it held for the file (a tail a restore left stays a tail, a file it did not hold stays
+    out) and nothing stays resident once the caller lets the list go (review round two, 2026-10-03: the comment cut's look
+    into a session's first file after a /clear). Nor the file's read stripe: this read fills no cache. The bytes count like
+    every reader byte (read_bytes_report), and the read as a whole read on /perf, kind "detached" under its caller. None when
+    the file cannot be stat'd, opened or read, after on_fail(error) with the OSError that stopped it when given, so a caller
+    can say why (review round three); a read that failed counts no byte and no whole read."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+        with open(path, "rb") as fh:
+            records, _end, nread = _scan_jsonl_stream(fh, 0, None, limit=st.st_size)
+    except OSError as e:
+        if on_fail is not None:
+            on_fail(e)
+        return None
+    _count_read(path, nread)
+    try:
+        fr = sys._getframe(1)
+        while fr is not None and (fr.f_code.co_filename == __file__ or _synthetic_scope(fr)):
+            fr = fr.f_back
+        who = fr.f_code.co_name if fr is not None else "?"
+    except Exception:
+        who = "?"
+    with _JSONL_CACHE_LOCK:
+        table = _RECORD_CACHE_STATS.get("wholeReads")
+        if not isinstance(table, dict):
+            table = _RECORD_CACHE_STATS["wholeReads"] = {}
+        wr = table.setdefault("detached<-%s" % who, {"count": 0, "bytes": 0})
+        wr["count"] += 1; wr["bytes"] += nread
+        stg = _read_stage() or "none"
+        bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")
+        if not isinstance(bys, dict):
+            bys = _RECORD_CACHE_STATS["wholeReadsByStage"] = {}
+        ws = bys.setdefault("%s:detached<-%s" % (stg, who), {"count": 0, "bytes": 0})
+        ws["count"] += 1; ws["bytes"] += nread
+    return records
+
+
 _SERVED_RECORDS = threading.local()   # .by_path = {path: records} while a caller serves its own records (serve_records)
 
 
@@ -5226,8 +5282,9 @@ def rewound_uuids(path, drop=True):
     such and walked again next time. The leaf road with a rompuuid never comes here.
 
     `drop`: whether the walk's entry leaves the reader's cache after the memo is stored (the quiescence drop, when the file
-    has been idle past its window). True for a dead episode's file, which nothing else reads; False for a file of a LIVE
-    session's lineage (its /clear anchor, T391 round one, medium): the chain walk reads that file whole first at every pass,
+    has been idle past its window). True for a dead episode's file, which nothing else reads, and for a /clear's anchor, which
+    no parse reads since 2026-10-03; False for a file of a LIVE session's lineage (an anchor its parse reaches, T391 round
+    one, medium): the chain walk reads that file whole first at every pass,
     and a memo that popped the entry made the next pass's chain walk read it whole again, every pass, while the memo itself
     found its cursor at a moved generation and walked. Resident, the anchor is read once per process and the memo's cursor
     stays at the generation the chain walk's entry holds, so the scan reads nothing at all.
@@ -5361,6 +5418,25 @@ class TranscriptGraph:
     def fsid(self, u):
         return self._ad.fsid_of.get(u)
 
+    def dangling(self):
+        """The parent targets records of the graph name that are no record of it, as a frozenset: the adapter's dangling set,
+        collected at ingest over every record, kept or not (a restored entry's seed carries its pre-cut part's), less any the
+        graph holds (a tail record's parent before a restored entry's cut). A link from the active chain is among them even
+        where a restored entry's spine stops at it (review round two, 2026-10-03: after a /clear the comment cut builds the
+        graph over both files only when one of these is a record of the session's first file)."""
+        return frozenset(u for u in self._ad.dangling if not self.has(u))
+
+    def root_may_link(self, u):
+        """Whether `u`, a record this graph gives no parent, names one all the same that the graph lacks (root_parent).
+        Never over a whole adapter, whose parent map is its records' own links; a restored entry's spine root may
+        (_SeededGraph, review round five, 2026-10-03, narrowed to a recorded parent in round six, 2026-10-04)."""
+        return False
+
+    def root_parent(self, u):
+        """The parent `u`'s record names where this graph gives `u` none: None over a whole adapter, whose parent map holds
+        every link its records name; for a restored entry's spine root, the one its document recorded (_SeededGraph)."""
+        return None
+
     def _splice_atom(self, u):
         """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
         the adapter's splices and its kept chain, from an empty dedup memory as a whole parse starts, with no postal index
@@ -5452,6 +5528,7 @@ class _SeededGraph(TranscriptGraph):
             spine = seed["spine"]
             sp = seed["_spineParent"] = dict(zip(spine, [None] + list(spine[:-1])))
         self._spine_parent = sp
+        self._root_parent = seed.get("spine_root_parent")    # the spine root's raw parentUuid (_seed_from_doc)
         self._locs = _precut_locations(entry, rompuuid)
         self._recs = {}
 
@@ -5472,6 +5549,21 @@ class _SeededGraph(TranscriptGraph):
         if u in self._types:
             raise GraphMiss("record %s is before the document's cut and off its active spine" % u)
         return None
+
+    def root_may_link(self, u):
+        """True for the root of the pre-cut spine when its record names a parent, not itself, that this graph lacks: the
+        spine, root to cut, gives that root no parent, so it reads as parentless here even where its record links into a
+        file the parse left out, a session's first transcript after a /clear among them (the comment cut, review round
+        five, 2026-10-03). A root whose record names no parent answers False (review round six, 2026-10-04)."""
+        p = self.root_parent(u)
+        return p is not None and p != u and not self.has(p)
+
+    def root_parent(self, u):
+        """The raw parentUuid the document recorded for the pre-cut spine's root (the seed's "spine_root_parent", review
+        round six), for that root alone; None for any other record."""
+        if u in self._ad.by_uuid or u not in self._spine_parent or self._spine_parent[u] is not None:
+            return None
+        return self._root_parent
 
     def _loc(self, u):
         form, src, got = self._locs
@@ -7254,9 +7346,10 @@ def _asm_refusal_stands(leaf_path):
 def asm_document_seeds(leaf_path):
     """Whether the assembly document for `leaf_path` can SEED a one-file walk of the leaf: its inputs are the leaf alone. Read
     from the sidecar's `files` (a few bytes, never the document); a sidecar without the list (an older write) answers as
-    asm_document_stands does, and the next write adds it. A cleared or resume-forked session's document is written over the
-    leaf plus its lineage, so file_rewound's load refused it on the inputs comparison and the leaf was read whole at every
-    process (T391 follow-up, round one, low 1): such a leaf takes the memo road."""
+    asm_document_stands does, and the next write adds it. A back-linked or resume-forked session's document is written over
+    the leaf plus its lineage, so file_rewound's load refused it on the inputs comparison and the leaf was read whole at every
+    process (T391 follow-up, round one, low 1): such a leaf takes the memo road. A /clear's leaf documents alone since
+    2026-10-03 (judge _judge_candidates), and takes the seeded leaf road."""
     if not asm_document_stands(leaf_path):
         return False
     cp = _asm_ckpt_file(leaf_path)
@@ -8569,10 +8662,13 @@ def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links, quiet
 
 def _seed_from_doc(doc):
     """(seed, landed) from a verified document: the pre-cut graph facts a FileAdapter takes, and the pre-cut uuids
-    whose records carried assistant text."""
+    whose records carried assistant text. "spine_root_parent" is the raw parentUuid of the pre-cut spine's root, as that
+    record's row holds it, None with no spine: the spine gives its root no parent, and _SeededGraph.root_may_link reads
+    this to tell a root whose record links outside the graph from one with no parent (review round six, 2026-10-04)."""
     verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
     type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
     seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
+            "spine_root_parent": doc["records"][doc["spine"][0]][9] if doc["spine"] else None,
             "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
             "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
             "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
@@ -9241,6 +9337,81 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
         return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {}), []
 
 
+_FILE_HEAD_T = {}                 # realpath -> the stamp of the file's first uuid-bearing record, once one is on disk (a head never moves)
+_FILE_HEAD_T_MAX = 4096
+
+
+def _file_head_t(path):
+    """The stamp (epoch seconds) of `path`'s first uuid-bearing record, or None while it has none, when its stamp does not
+    parse, or when the file cannot be read. The record judge.transcript_head reads (a transcript is append-only, so its head
+    never changes once written): read from the start a line at a time, normally that one record, the bytes counted like every
+    reader byte, and memoized by realpath once found. Each line is decoded as transcript_head and the reader decode it, with
+    bad bytes replaced, so a head record holding an invalid byte is the head here too, as it is to the candidate rule (review
+    round two, 2026-10-03: raw bytes made json.loads refuse it and the floor fell to the next record's stamp)."""
+    key = os.path.realpath(str(path))
+    hit = _FILE_HEAD_T.get(key)
+    if hit is not None:
+        return hit
+    t, n = None, 0
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                n += len(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("uuid"):
+                    t = parse_z(r.get("timestamp")) or None
+                    break
+    except OSError:
+        t = None
+    if n:
+        _count_read(str(path), n)
+    if t is not None:
+        if len(_FILE_HEAD_T) >= _FILE_HEAD_T_MAX:
+            try:
+                _FILE_HEAD_T.pop(next(iter(_FILE_HEAD_T)), None)   # the oldest entry; a racing writer's resize is harmless
+            except (StopIteration, RuntimeError):
+                pass
+        _FILE_HEAD_T[key] = t
+    return t
+
+
+def _conversation_floor(candidate_files):
+    """When the conversation a parse reads began: the earliest head stamp over its candidate files, or None when any of them
+    has no readable head stamp yet (no floor, then: nothing is dropped on a guess)."""
+    ts = []
+    for f in candidate_files:
+        t = _file_head_t(f)
+        if t is None:
+            return None
+        ts.append(t)
+    return min(ts) if ts else None
+
+
+def _orphan_rows_from(srows, candidate_files):
+    """The states rows synthesize_orphans reads: every row, less the orphanReply markers stamped before the conversation the
+    parse reads began (_conversation_floor over `candidate_files`; None, the tail road's, is no floor). A marker from before
+    that is a reply of a conversation this parse does not hold: a /clear's new file starts after the pre-clear markers, and
+    once the pre-clear file that held what landed of them is no candidate (judge _judge_candidates leaves it out of a /clear's
+    parse, 2026-10-03) the landed-text dedup cannot see them, so they would come back as fresh replies at pre-clear times; a
+    marker that never landed leaked into every post-clear parse already. Same-second markers stay (`>=` the whole second:
+    losing a reply is the worse error). A no-op whenever the session's first file is a candidate: no marker predates the
+    conversation's first record. The heads are read only when a marker exists, and the rows themselves stay whole for idle
+    spans (synthesize_idle)."""
+    if candidate_files is None or not any(isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) for r in srows or []):
+        return srows
+    conv0 = _conversation_floor(candidate_files)
+    if conv0 is None:
+        return srows
+    floor = int(conv0)
+    return [r for r in srows if not (isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) and (r.get("t") or 0) < floor)]
+
+
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
                   candidate_files=None, states=None, postal_log=None, now=None, sdk_human=False,
                   leaf_override=None, asm_mode_out=None, private_entry_out=None, tail_records=None):
@@ -9307,7 +9478,11 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # tail alone is segmented and synthesized over below, and a span or a marker from before the tail's first atom is the
     # document's (or nothing: the whole parse put it in a pre-cut turn)
     t_tail0 = min((a["t"] for a in atoms if a.get("t")), default=None) if pre_turns else None
-    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid,
+    # salvaged replies never predate the conversation the parse reads (2026-10-03): the floor is the first record of its own
+    # candidate files, the same number whatever road served the atoms (whole, fold, restore, refresh), so it never races the
+    # kernel's episode tick. The tail road reads no candidate file and has no floor
+    orphans = synthesize_orphans(_orphan_rows_from(_srows, candidate_files if tail_records is None else None), atoms,
+                                 landed_text_uuids=landed, rompuuid=rompuuid,
                                  pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None)
     if pre_turns:
         orphans = [a for a in orphans if t_tail0 is not None and a["t"] >= t_tail0]

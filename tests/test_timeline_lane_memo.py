@@ -411,20 +411,34 @@ class DeadLaneMemo(unittest.TestCase):
         self.assertEqual(s2, s1, "to the same state")
         self.assertLessEqual(read, 4 * km.em._JSONL_TAIL_GUARD, "reading the guard bytes, not the %d-byte file" % os.path.getsize(p))
 
-    def test_a_dead_lane_after_a_clear_drops_its_leaf_and_its_anchor(self):
-        """After a /clear the dead lane's leaf is a file of its own and the session's first file is its anchor, the new leaf's
-        candidate: the release drops both record entries (round one of the review: every dead-lane test had a leaf that was its
-        own anchor, so a release that left the anchor passed them all)."""
-        self._three_turns()
-        anchor = str(self.tpath)
+    def _second_file(self, head_parent):
+        """The session's second transcript beside its first (self.tpath, the anchor), three turns whose head names
+        `head_parent`: the anchor's last uuid for a leaf that links back into it, None for the fresh head a /clear writes."""
         leaf = str(self.tpath.with_name("11111111-2222-3333-4444-5555555555c2.jsonl"))
         Path(leaf).write_text("\n".join(json.dumps(r) for r in [
-            _rec("user", T0 + 1800, "cu1", None, "page the notes-api index"), _rec("assistant", T0 + 1810, "ca1", "cu1", "Paged."),
+            _rec("user", T0 + 1800, "cu1", head_parent, "page the notes-api index"),
+            _rec("assistant", T0 + 1810, "ca1", "cu1", "Paged."),
             _rec("user", T0 + 2400, "cu2", "ca1", "and by cursor?"), _rec("assistant", T0 + 2410, "ca2", "cu2", "By cursor too."),
             _rec("user", T0 + 3000, "cu3", "ca2", "ship it"), _rec("assistant", T0 + 3010, "ca3", "cu3", "Shipped.")]) + "\n")
+        return leaf
+
+    def _documented_parse(self, leaf):
         human = bool(km._display_sdk_human(SID))
         tree = km._parse(leaf, SID, NOW)
         self.assertTrue(km.em.asm_checkpoint_write(leaf, SID, sdk_human=human, tree=tree), km.em.asm_checkpoint_stats()["skipped"])
+
+    def test_a_dead_lane_over_a_back_linked_leaf_drops_its_leaf_and_its_anchor(self):
+        """A dead lane whose leaf is a file of its own, its head linking back into the session's first file (a resume-style
+        fork): that first file is the anchor, the leaf's second candidate, so the parse holds both files' records and the
+        release drops both record entries (round one of an earlier review: every dead-lane test had a leaf that was its own
+        anchor, so a release that left the anchor passed them all). A /clear's leaf parses alone since 2026-10-03, so a
+        back-linked leaf is the case whose anchor a parse reaches, and the one this release must drop."""
+        self._three_turns()
+        anchor = str(self.tpath)
+        leaf = self._second_file("a3")                                # the anchor's last uuid
+        self.assertEqual(km.jd._judge_candidates(SID, [leaf]), [leaf, anchor], "the premise: the head links back, so the "
+                                                                              "anchor is a candidate")
+        self._documented_parse(leaf)
         with km.em._JSONL_CACHE_LOCK:
             self.assertTrue(leaf in km.em._JSONL_CACHE and anchor in km.em._JSONL_CACHE, "the premise: the parse read both files")
         km._parse_cache.pop(leaf, None)
@@ -433,6 +447,23 @@ class DeadLaneMemo(unittest.TestCase):
         with km.em._JSONL_CACHE_LOCK:
             self.assertNotIn(leaf, km.em._JSONL_CACHE, "the leaf's records go")
             self.assertNotIn(anchor, km.em._JSONL_CACHE, "and so do its anchor's: no live lane reads it")
+
+    def test_a_dead_lane_after_a_clear_never_holds_its_anchor(self):
+        """After a /clear the dead lane's leaf heads fresh, and its parse reads the leaf alone (2026-10-03): the session's first
+        file never enters the reader, before the release or after it."""
+        self._three_turns()
+        anchor = str(self.tpath)
+        leaf = self._second_file(None)
+        self.assertEqual(km.jd._judge_candidates(SID, [leaf]), [leaf], "the premise: a fresh head, the leaf alone")
+        self._documented_parse(leaf)
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertIn(leaf, km.em._JSONL_CACHE, "the premise: the parse read the leaf")
+            self.assertNotIn(anchor, km.em._JSONL_CACHE, "the parse never read the session's first file")
+        km._parse_cache.pop(leaf, None)
+        km._release_dead_lane(SID, leaf, ("v1",), [{"sid": SID, "path": leaf}], {})
+        with km.em._JSONL_CACHE_LOCK:
+            self.assertNotIn(leaf, km.em._JSONL_CACHE, "the leaf's records go")
+            self.assertNotIn(anchor, km.em._JSONL_CACHE, "and the first file is not held")
 
     def test_a_release_that_raises_never_drops_the_frame(self):
         """The dead lane's release does file I/O (a stat, a sidecar read, a document write) inside the timeline build's lane

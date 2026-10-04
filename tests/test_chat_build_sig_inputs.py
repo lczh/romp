@@ -94,6 +94,9 @@ CENSUS = {
     "_cmd_gestures": ("sig", "states"),
     "_colormap": ("sig", "colormap"),
     "_compacting": ("sig", "backend", "the backend's compacting bracket; else the row's state and since, the parse, and the optimistic stamp's clock boolean (clock)"),
+    "_conversation_floored": ("sig", "transcript", "the salvaged-reply markers (states) floored at the parse's own first record: the head "
+                                                  "of each candidate file the parse reads (transcript), found through the states log's resume "
+                                                  "links (states), the same candidates _parse reads"),
     "_edit_diff": ("pure", "over a tool input"),
     "_effort_changes": ("sig", "states"),
     "_effort_color": ("pure", "over the effort string and the colormap name"),

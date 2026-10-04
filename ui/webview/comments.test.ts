@@ -245,7 +245,7 @@ test("a refused create un-sticks the popover; a pre-seam anchor tip-forks instea
   assert.match(UI, /if \(m\.transient\) \{ if \(held\.tries === 0\) held\.tries = 1; \}\s*\n\s*else refuseCmtCreate\(held\);/);
   assert.match(UI, /function refuseCmtCreate\(c: CommentCreate\): void \{[\s\S]{0,700}document\.getElementById\("cmt-pop"\)\?\.remove\(\);\s*\n\s*renderCommentPopover\(\);/);
   assert.doesNotMatch(UI, /m\.type === "warn" && pendingCommentAnchor/, "no warn reaction left on the create box");
-  assert.match(KERNEL, /def _anchor_adapter\(path, sid\)/);
+  assert.match(KERNEL, /def _anchor_adapter\(path, sid, need=None\)/);   // the leaf's own graph first, the anchor only when needed
   assert.match(KERNEL, /return "", cut_t, None/);
 });
 

@@ -125,6 +125,29 @@ class ForkStoreSeeding(unittest.TestCase):
         Path(empty).write_text("")
         self.assertIn("nothing to fork", km._seed_fork_stores(PARENT, NEWSID, empty, "") or "")
 
+    def test_a_cleared_parents_fork_reads_no_pre_clear_file_and_a_pre_clear_cut_seeds_as_before(self):
+        # the parent /cleared: its leaf heads fresh, so the seeding walks the parse's own candidates, the leaf alone, and
+        # reads no byte of the pre-clear file (2026-10-03); a named cut only that file holds still seeds exactly as before
+        em = km.em
+        leaf = os.path.join(self.td.name, "99999999-1111-2222-3333-444444444444.jsonl")
+        Path(leaf).write_text("\n".join(json.dumps(r) for r in [
+            uline(T_A2 + 100, "a fresh start after the clear", "c1"),
+            aline(T_A2 + 110, "fresh reply", "c2", "c1")]) + "\n")
+        with em._JSONL_CACHE_LOCK:
+            em._JSONL_CACHE.pop(self.path, None)
+        with em._READ_BYTES_LOCK:
+            em._READ_BYTES.pop(self.path, None)
+        self.assertIsNone(km._seed_fork_stores(PARENT, NEWSID, leaf, "c2"))
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(self.path, 0), 0, "the seeding read no byte of the pre-clear file")
+        self.assertEqual([r["head"] for r in jd.episode_rows(NEWSID)], ["c1", "c2"], "root and cut from the leaf's own graph")
+        other = "99999999-8888-7777-6666-000000000002"
+        self.assertIsNone(km._seed_fork_stores(PARENT, other, leaf, "a1"), "a pre-clear cut is found as before")
+        rows = jd.episode_rows(other)
+        self.assertEqual([r["head"] for r in rows], ["c1", "a1"])
+        self.assertEqual(jd.episode_floor(other), T_A1, "floored at the pre-clear cut's own time, as before")
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "the leaf parses alone")
+
 
 @contextlib.contextmanager
 def _reads_fault(target):

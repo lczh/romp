@@ -1665,7 +1665,8 @@ document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
 The record drops at the events that end a file's use (a leaf a second /clear
-retired, a dead timeline lane's leaf and anchor) take the same write, budget
+retired, the session's first file at its first /clear when the new leaf's parse
+does not read it, a dead timeline lane's leaf and anchor) take the same write, budget
 and deferral with no two-minute wait, since the event says the file's use
 ended (a drop the budget defers is paid later through the quiet drop's own
 path, after that wait): the judges' episode scan after the second /clear, and
@@ -2984,13 +2985,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   devbox boot); its verdict set per frozen file is now the fold `rewoundUuids`
   of that file's fold document, written from the walk's own read at the
   quiescence drop and restored at the next boot, so such a file is read whole
-  once (a live session's own files, its /clear anchor among them, stay
-  resident instead, since the chain walk reads them at every pass; a leaf
-  with no assembly document, one with no compaction boundary, takes the memo
-  road too, since the leaf road's seeded walk had nothing to seed and read it
-  whole at every boot, and so does every cleared or resume-forked session's
-  leaf, whose document is written over its lineage and cannot seed the
-  one-file walk). The
+  once (a live session's own files that its parse reads, the anchor of a leaf
+  whose head links back into it or whose resume lineage runs through it among
+  them, stay resident instead, since the chain walk reads them at every pass;
+  a /clear's anchor, which no parse of the new leaf reads, is walked once, its
+  memo written, and then dropped like a dead episode's file, and it is
+  released at the first clear's flip; a leaf with no assembly document, one
+  with no compaction boundary, takes the memo road too, since the leaf road's
+  seeded walk had nothing to seed and read it whole at every boot, and so does
+  every back-linked or resume-forked session's leaf, whose document is written
+  over its lineage and cannot seed the one-file walk, while a /clear's leaf
+  is documented alone and takes the seeded leaf road). The
   counters: the memo's answers (`served`), the walks it took (`walked`), the
   walks over a memo the file's growth or rewrite retired (`stale`; a file
   whose entry merely left memory and came back is walked, not stale; a growing
@@ -3064,7 +3069,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   rebuild repeatedly; `countCap`,
   `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
   `droppedBytes` (the quiescence drop, the files a dead timeline lane
-  releases, and a leaf a second /clear retired), `pinnedKept` (drops that kept an entry because a whole assembly
+  releases, a leaf a second /clear retired, and the session's first file at
+  its first /clear when the new leaf's parse does not read it), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
@@ -3097,8 +3103,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
-  `shrunk` and `upgrade`, and the first calling function outside the event
-  model and the parse family), with `count` and `bytes`; a tail read, an
+  `shrunk` and `upgrade`, or `detached` for a whole read that leaves the
+  cache as it was, which is how a comment, edit or rewind after a /clear
+  learns which messages the session's first file holds, once per change of
+  that file, and the only way a comment reads that file again, where a
+  record of the new conversation links back into it; and the first calling
+  function outside the event model and the parse family), with `count` and
+  `bytes`; a tail read, an
   append and a restore's tail read are not whole reads and are not counted;
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
   the stage being the pusher thread's current tick job (`jobs.<job>`) or
