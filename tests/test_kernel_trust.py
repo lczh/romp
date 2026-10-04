@@ -6,6 +6,7 @@ message from a directed peer as a needs-you NOTICE card whose Approve and Deny a
 
 Synthetic only — hermetic temp STATE, placeholder hostnames/mids, invented notes-domain sessions.
 """
+import contextlib
 import http.client
 import io
 import json
@@ -13,8 +14,10 @@ import sys
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest import mock
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -167,6 +170,17 @@ OTHER = "11111111-2222-3333-4444-000000000903"   # a second session: the recipie
 LATE = "11111111-2222-3333-4444-000000000904"    # a recipient the names registry learns only after its hold was posted owner-less
 _HELD_SIDS = (WEB, OTHER, LATE)
 _HELD_MIDS = set()                               # every held file these tests write, removed at their end
+_HELD_STAMP = [0]                                # the last mtime _held_dir_moved set
+
+
+def _held_dir_moved():
+    """Move the hold directory's mtime past every value a build has read. The backfill's pass is keyed on the directory's
+    stat, and on a filesystem without fine-grained timestamps (every one before Linux 6.13) a change inside the timestamp tick
+    of a build's read leaves the stat as that build read it, so a test that changes the directory and expects the next build
+    to look moves the stat itself, as a later tick would."""
+    q = km.jd.STATE / "postal" / "quarantine"
+    _HELD_STAMP[0] = max(os.stat(q).st_mtime_ns, _HELD_STAMP[0]) + 1000
+    os.utime(q, ns=(_HELD_STAMP[0], _HELD_STAMP[0]))
 
 
 class _HeldMailFixture:
@@ -230,7 +244,7 @@ class HeldMailCards(unittest.TestCase):
     """A message held from a DIRECTED peer is a NOTICE CARD (plans/notice-cards.md, "Action kinds and the held-mail card",
     2026-09-19): the kernel's backfill posts one under the RECIPIENT for every held file the notice store has no row for,
     key = the message id, producer postal, Approve and Deny of the quarantine kind, dismissed on the decision. Idempotent over
-    the live rows and the archive, memoized on the directory's stat; a recipient the kernel does not know files owner-less
+    the live rows and the archive, memoized as _held_mail_backfill says; a recipient the kernel does not know files owner-less
     with no actions. Synthetic: a placeholder recipient sid, invented session names and text."""
 
     def _write_held(self, mid, frm="api", to="web", to_id=WEB, origin="TESTHOST", body="ship the parser fix", at=1000):
@@ -239,6 +253,11 @@ class HeldMailCards(unittest.TestCase):
         (qdir / (mid + ".json")).write_text(json.dumps(
             {"mid": mid, "to": to, "toId": to_id, "frm": frm, "frmId": "id-api", "body": body, "kind": "coordinate", "origin": origin, "at": at}))
         _HELD_MIDS.add(mid)
+        _held_dir_moved()
+
+    def _drop_held(self, mid):                           # the bus deletes a decided hold's file (quarantine_del)
+        (km.jd.STATE / "postal" / "quarantine" / (mid + ".json")).unlink()
+        _held_dir_moved()
 
     def _name(self, sid, name):
         (km.jd.NAMES / sid).write_text("%s\t%s\t#1EA1EB\t#ffffff\n" % (name, km.jd.STATE / "notes-api"))
@@ -373,6 +392,549 @@ class HeldMailCards(unittest.TestCase):
         self.assertIn("_notice_cards(now, cleared, {s[\"sid\"] for s in alive})", src, "the notice cards take the build's alive roster")
         self.assertFalse(hasattr(km, "_quarantine_cards"))
 
+    def test_a_held_id_longer_than_sixty_four_characters_gets_a_card_whose_verdict_carries_that_id(self):
+        # a relayed id is "px-" + "<epoch>.<pid>_<32 hex>.<sender host>" (postal _unique): 48 + pid digits + host length
+        # characters, so a 13-character host passes 64 at a 4-digit pid; the bus holds any id up to its _safe_id bound, 128
+        mids = ["px-1700000000.%d_%s.TESTHOSTPADXY" % (pid, "0123456789abcdef" * 2) for pid in (4321, 54321, 654321, 4194303)] + ["q" * 128]
+        self.assertEqual([len(m) for m in mids], [65, 66, 67, 68, 128])
+        for m in mids:
+            self._write_held(m)
+        cards = {c["notice"]["key"]: c for c in self._cards()}
+        self.assertEqual(sorted(cards), sorted(mids), "one card per held id")
+        mid = mids[0]
+        iid = "notice:%s:%s:1" % (WEB, mid)
+        self.assertEqual((cards[mid]["itemId"], cards[mid]["notice"]["actions"]), (iid, km._held_mail_actions(mid)))
+        acts, saved = [], km._bus_quarantine_act
+        km._bus_quarantine_act = lambda body: (acts.append(body) or (True, ""))
+        try:
+            self.assertEqual(km._notice_action(iid, "quarantine", {"mid": mid, "verdict": "deny"}), (True, ""))
+        finally:
+            km._bus_quarantine_act = saved
+        self.assertEqual(acts, [{"mid": mid, "action": "deny", "sid": WEB}])
+        self.assertNotIn(iid, [c["itemId"] for c in self._cards()])
+
+    def test_a_held_message_that_gets_no_card_is_named_on_stderr_once(self):
+        # no card: an id outside the key rule [A-Za-z0-9_.-]{1,128}, which the bus could not hold, a text that passes the
+        # notice body cap once the card's route line is added, a held file that cannot be read or parsed, and a hold not yet
+        # carded while the revision index of a home it could be posted to cannot be read; a hold already carded is not named,
+        # nor one whose owner-less card stands while its recipient's revision index cannot be read, nor one whose card the
+        # user cleared and the sweep archived while the owner-less revision index cannot be read
+        prefix = "[notice] held message "
+
+        def two_passes():
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(km._held_mail_backfill(), 0)
+                km._HELD_MAIL_MEMO["slot"] = None
+                self.assertEqual(km._held_mail_backfill(), 0)
+            lines = [l for l in err.getvalue().splitlines() if l.startswith(prefix)]
+            said = dict(l[len(prefix):].split(": ", 1) for l in lines)
+            self.assertEqual(len(said), len(lines), "each named once over two passes: %r" % lines)
+            return said
+        qdir = km.jd.STATE / "postal" / "quarantine"
+        self._write_held("qc-ok")
+        self.assertEqual(km._held_mail_backfill(), 1)
+        self._write_held("bad id!"); self._write_held("q" * 129); self._write_held("qc-big", body="x" * km.NOTICE_BODY_MAX)
+        (qdir / "qc-dir.json").mkdir()                 # a read that raises (IsADirectoryError, an OSError)
+        (qdir / "qc-nj.json").write_text("not json"); _HELD_MIDS.add("qc-nj")
+        real_listdir = os.listdir
+
+        def listdir(p="."):                            # a file listed, then gone before its read: decided mid-pass, not named
+            return real_listdir(p) + (["qc-gone.json"] if str(p) == str(qdir) else [])
+        try:
+            with mock.patch.object(km.os, "listdir", listdir):
+                said = two_passes()
+        finally:
+            (qdir / "qc-dir.json").rmdir()
+        self.assertEqual(sorted(said), sorted(["bad id!", "q" * 129, "qc-big", "qc-dir", "qc-nj"]))
+        self.assertEqual([said["bad id!"], said["q" * 129]], ["no card (the key must match [A-Za-z0-9_.-]{1,128})"] * 2)
+        self.assertTrue(said["qc-big"].startswith("no card ("))
+        self.assertIn("the body is too long", said["qc-big"])
+        self.assertEqual([said["qc-dir"][:19], said["qc-nj"][:19]], ["could not be read ("] * 2)
+        (qdir / "qc-big.json").unlink(); (qdir / "qc-nj.json").unlink()
+        archive = km.jd.STATE / "notices-archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        self._write_held("qc-rh", to="late", to_id=LATE)
+        self.assertEqual(km._held_mail_backfill(), 1, "owner-less: its recipient is not known yet")
+        self._name(LATE, "late"); km._live_scope.names = None
+        (archive / (LATE + ".revs.json")).write_text("not json")
+        self.assertEqual(two_passes(), {})
+        self.assertEqual([c["sid"] for c in self._cards() if c["notice"]["key"] == "qc-rh"], [km.NOTICE_OWNERLESS_SID], "the owner-less card stands")
+        (archive / (LATE + ".revs.json")).unlink()
+        km._HELD_MAIL_MEMO["slot"] = None
+        self.assertEqual(km._held_mail_backfill(), 1, "moved to its recipient once that home reads")
+        self._write_held("qc-ar")                      # a hold whose card the user cleared and the sweep archived
+        self.assertEqual(km._held_mail_backfill(), 1)
+        km._clear_ask("notice:%s:qc-ar:1" % WEB)
+        self.assertGreater(km._compact_notices(now=10**9), 0)
+        self._write_held("qc-ix")
+        (archive / (km.NOTICE_OWNERLESS_SID + ".revs.json")).write_text("not json")
+        said = two_passes()
+        self.assertEqual(sorted(said), ["qc-ix"])
+        self.assertIn("revision index could not be read", said["qc-ix"])
+        self.assertEqual(sorted((c["sid"], c["notice"]["key"]) for c in self._cards()), sorted([(WEB, "qc-ok"), (LATE, "qc-rh")]))
+
+    def test_a_card_whose_message_is_no_longer_held_leaves_the_board_at_the_next_build_and_cards_of_other_shapes_stay(self):
+        # the bus deletes a decided hold's file (quarantine_del). The other five cards are not in the shape the backfill posts:
+        # the held-mail producer's with Approve and Deny on another id, the same producer's with no action in a session's home,
+        # another producer's in the owner-less home, the held-mail producer's with an action of another kind naming its own key,
+        # and the held-mail producer's with Approve on its own key beside an action of another kind
+        self._write_held("qc-d1"); self._write_held("qc-d2"); self._write_held("qc-d3", to="gone", to_id="11111111-2222-3333-4444-999999999999")
+        km.post_notice(WEB, "qc-d4", "New message from api", producer="postal", actions=km._held_mail_actions("qc-d9"), needs_you=True, now=100, t=100)
+        km.post_notice("", "qc-d5", "a note", producer="cli", now=100, t=100)
+        km.post_notice(WEB, "qc-d6", "a note", producer="postal", needs_you=True, now=100, t=100)
+        send = {"label": "Go", "kind": "send", "body": {"text": "hi", "mid": "qc-d7"}}
+        self.assertIsNone(km.post_notice(WEB, "qc-d7", "a note", producer="postal", actions=[send], needs_you=True, now=100, t=100)[1])
+        self.assertIsNone(km.post_notice(WEB, "qc-d8", "a note", producer="postal", actions=[km._held_mail_actions("qc-d8")[0], send],
+                                         needs_you=True, now=100, t=100)[1])
+        keys = lambda: sorted(c["notice"]["key"] for c in self._cards())
+        self.assertEqual(keys(), ["qc-d1", "qc-d2", "qc-d3", "qc-d4", "qc-d5", "qc-d6", "qc-d7", "qc-d8"])
+        self._drop_held("qc-d1"); self._drop_held("qc-d3")
+        saved = km._feed_needs_input[0]
+        km._feed_needs_input[0] = frozenset()
+        try:
+            self.assertEqual(keys(), ["qc-d2", "qc-d4", "qc-d5", "qc-d6", "qc-d7", "qc-d8"])
+            self.assertEqual(sorted(r["key"] for r in km._chat_notices(WEB)), ["qc-d2", "qc-d4", "qc-d6", "qc-d7", "qc-d8"])
+        finally:
+            km._feed_needs_input[0] = saved
+        km._HELD_MAIL_MEMO["slot"] = None
+        self.assertEqual(keys(), ["qc-d2", "qc-d4", "qc-d5", "qc-d6", "qc-d7", "qc-d8"], "a later pass")
+        ops = lambda sid, k: [r["op"] for r in km._notice_rows(sid) if r["key"] == k]
+        self.assertEqual([ops(WEB, "qc-d1"), ops(WEB, "qc-d2"), ops(km.NOTICE_OWNERLESS_SID, "qc-d3")], [["post", "expire"], ["post"], ["post", "expire"]], "one expire for each card whose file is gone")
+
+    def test_a_card_whose_expiry_cannot_be_written_stays_is_said_once_and_the_next_build_retires_it(self):
+        self._write_held("qc-w1"); self._write_held("qc-w2")
+        keys = lambda: sorted(c["notice"]["key"] for c in self._cards())
+        self.assertEqual(keys(), ["qc-w1", "qc-w2"])
+        self._drop_held("qc-w1")
+        real, real_known, looked = km._notice_append, km._notice_session_known, []
+
+        def refuse(sid, row):
+            return "the notice could not be saved (disk full)" if row.get("op") == "expire" else real(sid, row)
+
+        def known(sid):                                # the posting half asks once for each held file it reads whose card stands
+            looked.append(sid)
+            return real_known(sid)
+        err = io.StringIO()
+        with mock.patch.object(km, "_notice_append", refuse), mock.patch.object(km, "_notice_session_known", known), \
+                contextlib.redirect_stderr(err):
+            self.assertEqual(keys(), ["qc-w1", "qc-w2"])
+            self.assertEqual(looked, [WEB], "the build after the directory moved looks at the hold still there, qc-w2")
+            del looked[:]
+            self.assertEqual(keys(), ["qc-w1", "qc-w2"])
+            self.assertEqual(looked, [], "a build with the directory unmoved runs the retire alone")
+        self.assertEqual([l for l in err.getvalue().splitlines() if "qc-w1" in l],
+                         ["[notice] held message qc-w1: its card could not be retired (the notice could not be saved (disk full))"])
+        self.assertEqual(keys(), ["qc-w2"], "a write that works retires it, with the hold directory unchanged")
+
+    def test_a_hold_store_that_cannot_be_read_or_is_missing_retires_no_card_and_each_episode_is_said_once(self):
+        qdir = km.jd.STATE / "postal" / "quarantine"
+        away = qdir.with_name("quarantine-away")
+        real_listdir, real_stat = os.listdir, os.stat
+
+        def listdir(p="."):
+            if str(p) == str(qdir):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_listdir(p)
+
+        def stat(p, *a, **kw):
+            if str(p) == str(qdir):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_stat(p, *a, **kw)
+
+        def file_stat(p, *a, **kw):
+            if str(p) == str(qdir / "qc-u-file.json"):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_stat(p, *a, **kw)
+
+        @contextlib.contextmanager
+        def missing():
+            qdir.rename(away)
+            try:
+                yield
+            finally:
+                away.rename(qdir)
+        # the listdir and stat refusals carry one text: the second is said only because the working read between re-armed it
+        directory, retire = "no held-mail card was posted or retired", "no held-mail card was retired"
+        for name, fault, what in (("listdir", lambda: mock.patch.object(km.os, "listdir", listdir), directory),
+                                  ("stat", lambda: mock.patch.object(km.os, "stat", stat), directory), ("missing", missing, retire),
+                                  ("file", lambda: mock.patch.object(km.os, "stat", file_stat), retire)):
+            mid = "qc-u-" + name
+            self._write_held(mid)
+            self.assertEqual([c["notice"]["key"] for c in self._cards()], [mid])
+            self._drop_held(mid)                          # a read that worked would retire the card
+            err = io.StringIO()
+            with fault(), contextlib.redirect_stderr(err):
+                self.assertEqual([c["notice"]["key"] for c in self._cards()], [mid], "a failed %s retires nothing" % name)
+                self.assertEqual([c["notice"]["key"] for c in self._cards()], [mid])
+            said = [l for l in err.getvalue().splitlines() if l.startswith("[notice] the held messages could not be read")]
+            self.assertEqual(len(said), 1, "a failed %s, said once: %r" % (name, err.getvalue()))
+            self.assertTrue(said[0].endswith("): " + what), said[0])
+            self.assertEqual(self._cards(), [], "a read that works retires it")
+        # two failed stats with the directory unmoved between them: the build between finds it unmoved and re-arms the line
+        self._write_held("qc-u-again")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-u-again"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(2):
+                with mock.patch.object(km.os, "stat", stat):
+                    self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-u-again"])
+                self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-u-again"])
+        said = [l for l in err.getvalue().splitlines() if l.startswith("[notice] the held messages could not be read")]
+        self.assertEqual(len(said), 2, "one line per episode: %r" % err.getvalue())
+
+    def test_a_notice_store_that_cannot_be_read_retires_no_card_is_said_once_and_the_next_build_retires_it(self):
+        self._write_held("qc-l1")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-l1"])
+        self._drop_held("qc-l1")
+        ndir, home = km._notice_dir(), km._notice_path(WEB)
+        aside, real_listdir = home.with_name(home.name + ".aside"), os.listdir
+        ops = lambda: [r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-l1"]
+
+        def listdir(p="."):
+            if str(p) == str(ndir):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_listdir(p)
+
+        @contextlib.contextmanager
+        def home_unreadable():                         # a read that raises (IsADirectoryError, an OSError), the memo emptied
+            home.rename(aside); home.mkdir(); km._NOTICE_MEMO.clear()
+            try:
+                yield
+            finally:
+                home.rmdir(); aside.rename(home)
+        for name, fault in (("listing", lambda: mock.patch.object(km.os, "listdir", listdir)), ("home", home_unreadable)):
+            err = io.StringIO()
+            with fault(), contextlib.redirect_stderr(err):
+                km._held_mail_backfill()
+                km._held_mail_backfill()
+            said = [l for l in err.getvalue().splitlines() if l.startswith("[notice] the notice cards could not be read (")]
+            self.assertEqual(len(said), 1, "a failed %s, said once: %r" % (name, err.getvalue()))
+            self.assertTrue(said[0].endswith("): no held-mail card was retired"), said[0])
+            self.assertEqual(ops(), ["post"], "a failed %s retires nothing" % name)
+        err = io.StringIO()
+        with mock.patch.object(km, "_notice_dir", lambda: ndir.with_name("notices-absent")), contextlib.redirect_stderr(err):
+            self.assertEqual(km._held_mail_retire(set()), (0, False), "no notice directory: no card to retire, nothing unresolved")
+        self.assertEqual(err.getvalue(), "")
+
+        def listdir_ghost(p="."):                      # a home listed, then gone before its read: no rows, nothing to say
+            return real_listdir(p) + (["ghost.jsonl"] if str(p) == str(ndir) else [])
+        err = io.StringIO()
+        with mock.patch.object(km.os, "listdir", listdir_ghost), contextlib.redirect_stderr(err):
+            self.assertEqual(km._held_mail_backfill(), 0)
+        self.assertNotIn("[notice] the notice cards", err.getvalue())
+        self.assertEqual(ops(), ["post", "expire"], "a read that works retires it, with the hold directory unchanged")
+        self.assertEqual(self._cards(), [])
+
+    def test_a_hold_that_lands_while_its_recipients_notice_home_cannot_be_read_raises_nothing(self):
+        # the posting half reads the recipient's home leniently: a read that raises is no rows there, the post the store then
+        # refuses is said once, and the hold is carded at the next pass over a moved directory; a raise would leave the build
+        self._write_held("qc-l0")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-l0"])
+        home = km._notice_path(WEB)
+        aside = home.with_name(home.name + ".aside")
+        home.rename(aside); home.mkdir(); km._NOTICE_MEMO.clear()   # a read that raises (IsADirectoryError, an OSError)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                self._write_held("qc-l9")
+                km._held_mail_backfill()
+                km._held_mail_backfill()
+        finally:
+            home.rmdir(); aside.rename(home)
+        said = [l for l in err.getvalue().splitlines() if l.startswith("[notice] held message qc-l9: no card (")]
+        self.assertEqual(len(said), 1, "the refused post, said once: %r" % err.getvalue())
+        _held_dir_moved()
+        self.assertEqual(sorted(c["notice"]["key"] for c in self._cards()), ["qc-l0", "qc-l9"])
+
+    def test_a_hold_that_lands_while_another_build_is_mid_pass_keeps_its_card(self):
+        # build A lists the hold directory; the hold lands; build B runs its whole pass and posts the card; A then retires
+        # against its own listing, which lacks the hold
+        qdir = km.jd.STATE / "postal" / "quarantine"
+        self._write_held("qc-r0")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-r0"])
+        real, seen = os.listdir, []
+
+        def listdir(p="."):
+            out = real(p)
+            if str(p) == str(qdir) and not seen:
+                seen.append(True)
+                self._write_held("qc-r1")
+                km._HELD_MAIL_MEMO["slot"] = None
+                self.assertEqual(km._held_mail_backfill(), 1, "B posts the card")
+            return out
+        km._HELD_MAIL_MEMO["slot"] = None
+        with mock.patch.object(km.os, "listdir", listdir):
+            self.assertEqual(km._held_mail_backfill(), 0)
+        self.assertEqual(seen, [True])
+        self.assertEqual([r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-r1"], ["post"])
+        self.assertEqual(sorted(c["notice"]["key"] for c in self._cards()), ["qc-r0", "qc-r1"])
+
+    def _decide_while_b_posts(self, fault=None):
+        """Build B reads a new hold's file, qc-v1, and waits at its post while the bus decides the hold; build C starts after
+        the decision, runs its retire before B posts (no card to expire yet) and finishes last, so the memo holds the directory
+        as the decision left it with nothing unresolved, and no later build looks at the hold again unless B's pass sees to
+        it. `fault`: "write" refuses B's expiries after its post, "stat" makes B's stats of qc-v1's file after its post raise.
+        Returns what the two builds said on stderr."""
+        qdir = km.jd.STATE / "postal" / "quarantine"
+        self._write_held("qc-v0")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-v0"])
+        self._write_held("qc-v1")
+        real_post, real_retire, real_append, real_stat = km.post_notice, km._held_mail_retire, km._notice_append, os.stat
+        role, done, posted = threading.local(), {}, []
+        b_at_post, b_go, c_retired, c_go = (threading.Event() for _ in range(4))
+        b_after_post = lambda: getattr(role, "name", "") == "B" and bool(posted)
+
+        def post(*a, **kw):
+            if getattr(role, "name", "") == "B" and a[1] == "qc-v1":
+                b_at_post.set()
+                b_go.wait(10)
+                out = real_post(*a, **kw)
+                posted.append(a[1])
+                return out
+            return real_post(*a, **kw)
+
+        def retire(held):
+            out = real_retire(held)
+            if getattr(role, "name", "") == "C":
+                c_retired.set()
+                c_go.wait(10)
+            return out
+
+        def append(sid, row):
+            if fault == "write" and b_after_post() and row.get("op") == "expire":
+                return "the notice could not be saved (disk full)"
+            return real_append(sid, row)
+
+        def stat(p, *a, **kw):
+            if fault == "stat" and b_after_post() and str(p) == str(qdir / "qc-v1.json"):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_stat(p, *a, **kw)
+
+        def build(name):
+            role.name = name
+            try:
+                done[name] = km._held_mail_backfill()
+            except Exception as e:                    # a raise fails the test below
+                done[name] = repr(e)
+        b, c = threading.Thread(target=build, args=("B",)), threading.Thread(target=build, args=("C",))
+        err = io.StringIO()
+        with mock.patch.object(km, "post_notice", post), mock.patch.object(km, "_held_mail_retire", retire), \
+                mock.patch.object(km, "_notice_append", append), mock.patch.object(km.os, "stat", stat), \
+                contextlib.redirect_stderr(err):
+            try:
+                b.start()
+                self.assertTrue(b_at_post.wait(10), "B read qc-v1's file and waits at its post")
+                self._drop_held("qc-v1")              # the bus decides it
+                c.start()
+                self.assertTrue(c_retired.wait(10), "C ran its retire after the decision")
+                b_go.set(); b.join(10)
+                c_go.set(); c.join(10)
+            finally:
+                b_go.set(); c_go.set()
+                for t in (b, c):
+                    if t.ident is not None:
+                        t.join(10)
+        self.assertEqual(done, {"B": 1, "C": 0})
+        so = os.stat(qdir)
+        self.assertEqual((km._HELD_MAIL_MEMO["slot"][2:], km._HELD_MAIL_MEMO["retry"]),
+                         ((so.st_mtime_ns, so.st_size, so.st_ino, so.st_ctime_ns), False), "C wrote the memo last")
+        return err.getvalue()
+
+    def test_a_hold_decided_after_a_pass_read_its_file_loses_the_card_that_pass_posts(self):
+        self._decide_while_b_posts()
+        self.assertEqual([r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-v1"], ["post", "expire"], "B expires the card it posted")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-v0"])
+
+    def test_a_pass_that_cannot_expire_the_card_it_posted_for_a_decided_hold_leaves_it_to_the_next_build(self):
+        ops = lambda: [r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-v1"]
+        said = self._decide_while_b_posts("write")
+        self.assertEqual(ops(), ["post"], "B's expiry was refused")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-v0"], "the next build retires it, though C wrote the memo last")
+        self.assertEqual(ops(), ["post", "expire"])
+        self.assertEqual([l for l in (said + err.getvalue()).splitlines() if l.startswith("[notice]")],
+                         ["[notice] held message qc-v1: its card could not be retired (the notice could not be saved (disk full))"])
+
+    def test_a_pass_that_cannot_stat_a_hold_after_posting_its_card_says_so_once_and_leaves_the_card_to_the_next_build(self):
+        ops = lambda: [r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-v1"]
+        said = self._decide_while_b_posts("stat")
+        self.assertEqual(ops(), ["post"], "B could not tell whether the hold was decided")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-v0"], "the next build retires it, though C wrote the memo last")
+        self.assertEqual(ops(), ["post", "expire"])
+        e = PermissionError(13, "Permission denied", str(km.jd.STATE / "postal" / "quarantine" / "qc-v1.json"))
+        self.assertEqual([l for l in (said + err.getvalue()).splitlines() if l.startswith("[notice]")],
+                         ["[notice] the held messages could not be read (%s): no held-mail card was retired" % e])
+
+    def test_a_dismissed_hold_decided_meanwhile_stays_off_the_board_after_undo(self):
+        self._write_held("qc-z")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-z"])
+        km._clear_ask("notice:%s:qc-z:1" % WEB)
+        self.assertGreater(km._compact_notices(now=10**9), 0, "the pass archived the dismissed row")
+        self._drop_held("qc-z")
+        self.assertEqual(self._cards(), [])
+        km._undo_clear()
+        self.assertEqual(self._cards(), [], "the restored card's message is no longer held")
+        self.assertEqual([r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-z"], ["post", "expire"], "restored, then retired")
+
+    def test_an_undo_during_a_pass_restores_a_decided_card_that_the_next_build_retires(self):
+        # the restore lands while the pass posts another hold, after its retire: the pass ends after the restore
+        self._write_held("qc-h")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-h"])
+        km._clear_ask("notice:%s:qc-h:1" % WEB)
+        self.assertGreater(km._compact_notices(now=10**9), 0, "the pass archived the dismissed row")
+        self._drop_held("qc-h")
+        self._write_held("qc-n")
+        real, undone = km._held_mail_title, []
+
+        def title(rec):
+            if not undone:
+                undone.append(km._undo_clear())
+            return real(rec)
+        with mock.patch.object(km, "_held_mail_title", title):
+            self.assertEqual(km._held_mail_backfill(), 1)
+        self.assertEqual(len(undone), 1)
+        self.assertEqual([r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-h"], ["post"], "restored during the pass")
+        self.assertEqual([c["notice"]["key"] for c in self._cards()], ["qc-n"])
+        self.assertEqual([r["op"] for r in km._notice_rows(WEB) if r["key"] == "qc-h"], ["post", "expire"])
+
+    def test_a_held_card_stands_beside_fifty_newer_notices_and_the_sweep_keeps_it(self):
+        # in the recipient's home and, for a recipient this kernel does not know, in the owner-less home
+        self._write_held("qc-cap", at=1000); self._write_held("qc-capo", to="gone", to_id="11111111-2222-3333-4444-999999999999", at=1000)
+        homes = ((WEB, "qc-cap"), ("", "qc-capo"))
+        for sid, _ in homes:
+            for i in range(50):
+                km.post_notice(sid, "n%02d" % i, "card %d" % i, producer="cli", now=2000 + i, t=2000 + i)
+        keys = lambda sid: [c["notice"]["key"] for c in self._cards() if c["sid"] == (sid or km.NOTICE_OWNERLESS_SID)]
+        for sid, held in homes:
+            self.assertEqual(keys(sid), [held] + ["n%02d" % i for i in range(50)], "the held card, the oldest, stands with the fifty")
+            km.post_notice(sid, "n50", "card 50", producer="cli", now=2050, t=2050)
+            self.assertEqual(keys(sid), [held] + ["n%02d" % i for i in range(1, 51)], "a fifty-first newer notice pushes out the oldest other card")
+        km._compact_notices(now=5000)
+        for sid, held in homes:
+            self.assertIn(("post", held), [(r["op"], r["key"]) for r in km._notice_rows(sid or km.NOTICE_OWNERLESS_SID)], "the sweep leaves the held card's row live")
+        km._HELD_MAIL_MEMO["slot"] = None; km._NOTICE_MEMO.clear()
+        self.assertEqual(km._held_mail_backfill(), 0)
+        self.assertEqual([keys(sid)[0] for sid, _ in homes], ["qc-cap", "qc-capo"])
+
+    def test_a_postal_card_not_in_the_held_shape_yields_to_the_cap_and_the_sweep_while_the_held_card_stays(self):
+        # the cap passes over the held-mail shape (_held_mail_row), not the producer label: a session's postal card with no
+        # actions (romp card --producer postal -s web), the held-mail producer's card with Approve and Deny naming another id,
+        # one whose one action is a send naming its own key, and one with Approve on its own key beside a send, each hold a
+        # slot, in the projection and in the sweep
+        self._write_held("qc-cn", at=1000)
+        km.post_notice(WEB, "qc-cn-note", "a note", producer="postal", now=1001, t=1001)
+        self.assertIsNone(km.post_notice(WEB, "qc-cn-other", "New message from api", producer="postal", actions=km._held_mail_actions("qc-cn-zz"),
+                                         needs_you=True, now=1002, t=1002)[1])
+        send = lambda k: {"label": "Go", "kind": "send", "body": {"text": "hi", "mid": k}}
+        self.assertIsNone(km.post_notice(WEB, "qc-cn-send", "a note", producer="postal", actions=[send("qc-cn-send")],
+                                         needs_you=True, now=1003, t=1003)[1])
+        self.assertIsNone(km.post_notice(WEB, "qc-cn-mix", "a note", producer="postal", actions=[km._held_mail_actions("qc-cn-mix")[0], send("qc-cn-mix")],
+                                         needs_you=True, now=1004, t=1004)[1])
+        for i in range(50):
+            km.post_notice(WEB, "n%02d" % i, "card %d" % i, producer="cli", now=2000 + i, t=2000 + i)
+        fifty = ["n%02d" % i for i in range(50)]
+        keys = lambda: [c["notice"]["key"] for c in self._cards() if c["sid"] == WEB]
+        self.assertEqual(keys(), ["qc-cn"] + fifty, "the four postal cards yield to the fifty newer cards; the held card stands")
+        live = lambda: sorted({r["key"] for r in km._notice_rows(WEB) if r["op"] == "post"} & {"qc-cn", "qc-cn-note", "qc-cn-other", "qc-cn-send", "qc-cn-mix"})
+        self.assertEqual(live(), ["qc-cn", "qc-cn-mix", "qc-cn-note", "qc-cn-other", "qc-cn-send"])
+        km._compact_notices(now=5000)
+        self.assertEqual(live(), ["qc-cn"], "the sweep archives the four postal cards' rows and leaves the held card's live")
+        self.assertEqual(keys(), ["qc-cn"] + fifty)
+
+    def test_a_hold_that_lands_after_fifty_notices_takes_no_slot_and_the_sweep_archives_none(self):
+        # the held card is the NEWEST card of its home, so a cap that counted it and only spared it would push off the oldest
+        # of the fifty: in the recipient's home and, for a recipient this kernel does not know, in the owner-less home
+        homes = ((WEB, "qc-new"), ("", "qc-newo"))
+        for sid, _ in homes:
+            for i in range(50):
+                km.post_notice(sid, "n%02d" % i, "card %d" % i, producer="cli", now=2000 + i, t=2000 + i)
+        self._write_held("qc-new", at=3000); self._write_held("qc-newo", to="gone", to_id="11111111-2222-3333-4444-999999999999", at=3000)
+        fifty = ["n%02d" % i for i in range(50)]
+        home = lambda sid: sid or km.NOTICE_OWNERLESS_SID
+        keys = lambda sid: [c["notice"]["key"] for c in self._cards() if c["sid"] == home(sid)]
+        for sid, held in homes:
+            self.assertEqual(keys(sid), fifty + [held], "the fifty older notices and the held card all stand")
+        km._compact_notices(now=5000)
+        for sid, held in homes:
+            live = {r["key"] for r in km._notice_rows(home(sid)) if r["op"] == "post"}
+            self.assertEqual(sorted(live & set(fifty + [held])), sorted(fifty + [held]), "the sweep archives none of the fifty")
+            self.assertEqual(keys(sid), fifty + [held])
+
+    def test_a_pass_reads_no_notice_home_under_the_lock_for_a_hold_whose_card_stands(self):
+        # held cards hold no cap slot, so a home keeps a row for every waiting hold, and a read of its file under the lock for
+        # each held file made a pass quadratic in the waiting holds: a hold whose card stands in the home it would be posted
+        # to is passed over on that home's memoized rows, read once a pass. A new hold is still read and carded, and so is a
+        # hold whose owner-less card moves to its recipient once known, though the owner-less rows, read for another hold,
+        # list its key
+        for i in range(3):
+            self._write_held("qc-p%d" % i)
+        self._write_held("qc-po", to="gone", to_id="11111111-2222-3333-4444-999999999999")
+        self._write_held("qc-pr", to="late", to_id=LATE)
+        self.assertEqual(km._held_mail_backfill(), 5)
+        real, reads = km._notice_rows_unlocked, []
+        real_rows, memo_reads = km._notice_rows, []
+
+        def counted(sid, *a, **kw):                    # the posting half's reads (the retire's are strict)
+            if not (a and a[0]) and not kw.get("strict"):
+                reads.append(sid)
+            return real(sid, *a, **kw)
+
+        def rows_counted(sid):
+            memo_reads.append(sid)
+            return real_rows(sid)
+        with mock.patch.object(km, "_notice_rows_unlocked", counted), mock.patch.object(km, "_notice_rows", rows_counted):
+            _held_dir_moved()
+            self.assertEqual(km._held_mail_backfill(), 0)
+            self.assertEqual(reads, [], "a pass over carded holds reads no home under the lock")
+            self.assertLessEqual(memo_reads.count(WEB), 2, "the retire's read and one pass-over read of the home, not one per held file")
+            self._write_held("qc-p9")
+            self.assertEqual(km._held_mail_backfill(), 1)
+        self.assertIn(WEB, reads, "the new hold's home is read under the lock")
+        self._name(LATE, "late"); km._live_scope.names = None
+        _held_dir_moved()
+        self.assertEqual(km._held_mail_backfill(), 1, "qc-pr moves to its recipient")
+        self.assertEqual(sorted((c["sid"], c["notice"]["key"]) for c in self._cards()),
+                         sorted([(WEB, "qc-p0"), (WEB, "qc-p1"), (WEB, "qc-p2"), (WEB, "qc-p9"), (km.NOTICE_OWNERLESS_SID, "qc-po"), (LATE, "qc-pr")]))
+
+    def test_a_build_that_forgets_the_said_lines_while_another_build_says_one_does_not_raise(self):
+        # feed builds can run at once (the pusher's, GET /feed.json's, each connection's clearAll): one forgets the store-wide
+        # lines (_held_mail_rearm) while another says a line. A walk of the live set in bytecode raises "Set changed size
+        # during iteration" out of the build. The test runs for one second
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        km._HELD_MAIL_SAID.update(("qc-s%d" % i, "why") for i in range(200))
+        errs, stop, t0 = [], threading.Event(), time.monotonic()
+
+        def rearm():
+            try:
+                while not errs and time.monotonic() - t0 < 1:
+                    km._held_mail_rearm()
+            except Exception as e:                    # any raise fails the test, and the other thread stops
+                errs.append(repr(e))
+            finally:
+                stop.set()
+
+        def say():
+            i = 0
+            try:
+                while not stop.is_set() and time.monotonic() - t0 < 5:
+                    i += 1
+                    km._held_mail_say(("qc-t%d" % (i % 500), "why"), "x")
+                    km._held_mail_unreadable(OSError("episode %d" % (i % 50)))
+            except Exception as e:
+                errs.append(repr(e))
+        threads = [threading.Thread(target=rearm), threading.Thread(target=say)]
+        with open(os.devnull, "w") as sink, contextlib.redirect_stderr(sink):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(errs, [])
+
 
 class HeldMailDecision(unittest.TestCase):
     """The decision is a notice ACTION of the quarantine kind over the noticeAction op: the kernel runs the STORED action
@@ -458,6 +1020,24 @@ class HeldMailDecision(unittest.TestCase):
         self.assertEqual((self.acts, self.sent), ([], [{"type": "unknownOp", "op": "quarantineDecision"}]), "quarantineDecision is an op the kernel no longer knows; the bus is never asked")
         import inspect
         self.assertNotIn("quarantineRefused", inspect.getsource(km.Handler._dispatch_ws))
+
+    def test_a_verdict_the_bus_carried_out_after_the_kernel_gave_up_retires_the_card_at_the_next_build(self):
+        held = km.jd.STATE / "postal" / "quarantine" / "qc-7.json"
+
+        def late(body):
+            self.acts.append(body)
+            held.unlink(); _held_dir_moved()           # the bus decided and deleted the hold after the kernel's request timed out
+            return False, "postal bus unreachable: timed out"
+        km._bus_quarantine_act = late
+        self._op({"mid": "qc-7", "verdict": "deny"})
+        self.assertEqual(self.sent[-1], {"type": "noticeActionDone", "itemId": self.iid, "ok": False, "error": "postal bus unreachable: timed out"})
+        self.assertEqual(self.dirtied, [])
+        pushed = []
+        with mock.patch.object(km, "_push_soon", lambda: pushed.append(True)):
+            self.assertEqual(km._notice_cards(2000, km._cleared_ids()), [])
+        self.assertEqual([r["op"] for r in km._notice_rows(WEB)], ["post", "expire"])
+        self.assertTrue(self.dirtied, "the expiry rebuilds the views")
+        self.assertTrue(pushed, "and wakes the pusher")
 
 
 class MirrorTrust(unittest.TestCase):

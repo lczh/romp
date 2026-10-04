@@ -26713,6 +26713,9 @@ def _watches_save():
 # arbitrary request. An attachment is judged at post time by the hover preview's confinement (_slice_allowed) and an image is
 # pinned (_pin_mention), so the card keeps the picture it was posted with and never shows a file the preview would refuse.
 NOTICE_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# a post from inside the kernel (internal=True) may key up to 128: the held-mail card's key is the bus's message id, which the
+# bus bounds at 128 (_safe_id), and a relayed id runs past 64 on a long sender host name
+NOTICE_INTERNAL_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 NOTICE_PRODUCER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 NOTICE_TITLE_MAX = 200
 NOTICE_BODY_MAX = 64 * 1024
@@ -26740,7 +26743,8 @@ NOTICE_ACTION_ROUTES = tuple(_NOTICE_ROUTE_KINDS)   # kept as a name: the routes
 NOTICE_OWNERLESS_SID = "notes"             # the owner-less notice cards' home under STATE/notices (the user 2026-09-18: a card with no session,
                                            # shown at the top of the feed): a word, so it can never be a sid (a uuid is hex and hyphens)
 NOTICE_OWNERLESS_NAME = "Notes"            # the run's name on the feed; no identity colour (no session stands behind it)
-NOTICE_LIVE_KEYS_MAX = 50                  # live keys per session: past it the oldest keys are superseded into the archive (round two, low a)
+NOTICE_LIVE_KEYS_MAX = 50                  # live keys per session: past it the oldest keys are superseded into the archive (round two, low a);
+                                           # a held-mail card (_held_mail_row) holds no slot
 _notice_lock = threading.Lock()            # one appender at a time per kernel; the file is append-only between sweeps
 
 
@@ -26940,7 +26944,8 @@ def _notice_actions_check(actions, owner=None, internal=False):
 def post_notice(sid, key, title, body="", *, producer, attachment=None, needs_you=False, expires_at=None, actions=None,
                 dismiss_on_action=False, t=None, now=None, board="", category="", internal=False):
     """Post a notice card for session `sid` (plans/notice-cards.md). `internal` marks a post from inside the kernel: the one
-    door for the action kinds in NOTICE_ACTION_KINDS_INTERNAL (the route and the command never set it). Returns (row, error): the appended row on success, else a
+    door for the action kinds in NOTICE_ACTION_KINDS_INTERNAL and for a key past 64 characters (NOTICE_INTERNAL_KEY_RE) (the
+    route and the command never set it). Returns (row, error): the appended row on success, else a
     human-readable refusal, never a silent drop (add_watch's contract). One validation for every door: the key's grammar,
     the title and body caps, the producer label, the session known to this kernel, the attachment's verdict (a refusal
     carries its why), the actions' allowlist and cap. The kernel assigns `rev`, the revision count for the key in the
@@ -26955,8 +26960,9 @@ def post_notice(sid, key, title, body="", *, producer, attachment=None, needs_yo
     title = " ".join(str(title or "").split())
     body = str(body or "")
     producer = str(producer or "").strip()
-    if not NOTICE_KEY_RE.match(key):
-        return None, "the key must match [A-Za-z0-9_.-]{1,64}"
+    key_re = NOTICE_INTERNAL_KEY_RE if internal else NOTICE_KEY_RE
+    if not key_re.match(key):
+        return None, "the key must match %s" % key_re.pattern[1:-1]
     if not title:
         return None, "a notice needs a title"
     if len(title) > NOTICE_TITLE_MAX:
@@ -27051,8 +27057,9 @@ def expire_notice(sid, key, now=None):
     return dict(row), None
 
 
-def _notice_rows_unlocked(sid):
-    """The rows for a WRITER holding _notice_lock: a fresh read of the file (the memo is keyed on the stat the next reader takes)."""
+def _notice_rows_unlocked(sid, strict=False):
+    """The rows for a WRITER holding _notice_lock: a fresh read of the file (the memo is keyed on the stat the next reader takes).
+    A missing file is no rows; a read that raises any other OSError is no rows too, or with `strict` raises it."""
     p = _notice_path(sid)
     rows = []
     try:
@@ -27063,8 +27070,11 @@ def _notice_rows_unlocked(sid):
                 continue
             if isinstance(o, dict) and o.get("op") and o.get("key"):
                 rows.append(o)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError:
+        if strict:
+            raise
     return rows
 
 
@@ -27082,7 +27092,8 @@ def _notice_append(sid, row):
 
 def _notice_projection(sid, now, cleared=()):
     """The newest revision per key that still stands: not retired by an expire row, not past its expiresAt, not in the cleared
-    ledger, in post order, and at most NOTICE_LIVE_KEYS_MAX of them (the newest by post time). The ledger is applied BEFORE
+    ledger, in post order, and at most NOTICE_LIVE_KEYS_MAX of them (the newest by post time) besides the held-mail cards,
+    which hold no slot and never yield to the cap. The ledger is applied BEFORE
     the cap (round three, low a): a dismissed row held a cap slot until the sweep and hid the oldest undismissed card. A key
     past the cap is superseded into the archive by the sweep with no further signal (the reference and the help line say so)."""
     newest, retired, acted = {}, set(), set()
@@ -27112,8 +27123,12 @@ def _notice_projection(sid, now, cleared=()):
             continue
         out.append(r)
     out.sort(key=lambda r: (int(r.get("t") or 0), r.get("key") or ""))
-    if len(out) > NOTICE_LIVE_KEYS_MAX:                    # the cap (round two, low a): the newest keys stand, the oldest yield
-        out = out[len(out) - NOTICE_LIVE_KEYS_MAX:]
+    # the cap (round two, low a): the newest keys stand, the oldest yield; a held-mail card (read from its stored row) is
+    # outside it, so newer notices never push it off the board (the sweep's cap reads the same rule)
+    capped = [r.get("key") for r in out if not _held_mail_row(newest[r.get("key")])]
+    if len(capped) > NOTICE_LIVE_KEYS_MAX:
+        gone = set(capped[:len(capped) - NOTICE_LIVE_KEYS_MAX])
+        out = [r for r in out if r.get("key") not in gone]
     return out
 
 
@@ -27155,8 +27170,13 @@ def _chat_notices(sid):
 # the revision index, gets one post, so a boot, a first build and a hold that landed while the kernel was down are covered
 # and a decided or dismissed card is never re-posted. The directory's stat keys the check (the bus publishes a hold by
 # rename, which moves it); a held file whose recipient this kernel does not know posts to the owner-less home with the
-# recipient's name in the title and no actions (a verdict needs a live recipient).
-_HELD_MAIL_MEMO = {"slot": None}         # the quarantine directory's stat at the last backfill
+# recipient's name in the title and no actions (a verdict needs a live recipient). The same pass expires a held-mail card once
+# a read under the notice lock finds the hold directory there and the card's file gone (_held_mail_retire), and a held-mail
+# card holds no slot under the live cap (_notice_projection).
+_HELD_MAIL_MEMO = {"slot": None, "gen": 0, "retry": False}   # slot: the last pass's key (the quarantine directory's stat and gen);
+                                                            # gen: moved by each Undo's restore out of the archive and by a
+                                                            # pass whose late retire left a card unresolved; retry: the last
+                                                            # pass left a card unresolved
 HELD_MAIL_PRODUCER = "postal"
 
 
@@ -27191,62 +27211,204 @@ def _held_mail_record(mid):
         return None
 
 
-def _held_mail_backfill():
-    """Post a notice for every held message that has none yet; returns how many were posted. Idempotent by (recipient, key):
-    a key with a live post row or an archived revision is never posted again (a decided, expired or dismissed card stays
-    decided). Memoized on the directory's stat, so a build with no new hold lists nothing. Best-effort: a hold whose post the
-    door refuses is said on stderr once per (id, reason) and tried again when the directory moves."""
-    d = _held_mail_dir()
-    st = _stat_key(d)
-    if st is None:
-        return 0
-    key = (str(d),) + st
-    if _HELD_MAIL_MEMO["slot"] == key:
-        return 0
-    posted = 0
+def _held_mail_row(r):
+    """Whether notice row `r` is a held-mail card in the shape the backfill posts: the held-mail producer's, every action of
+    the quarantine kind on the row's own key, or no actions in the owner-less home."""
+    if r.get("producer") != HELD_MAIL_PRODUCER:
+        return False
+    acts = r.get("actions") or []
+    if not acts:
+        return r.get("sid") == NOTICE_OWNERLESS_SID
+    return all(_notice_action_kind(a) == "quarantine" and (a.get("body") or {}).get("mid") == r.get("key") for a in acts)
+
+
+def _held_mail_say(mark, line):
+    """`line` on stderr, once per `mark` while the mark is in _HELD_MAIL_SAID (_held_mail_rearm forgets the store-wide ones)."""
+    if mark not in _HELD_MAIL_SAID:
+        _HELD_MAIL_SAID.add(mark)
+        sys.stderr.write(line + "\n")
+
+
+def _held_mail_unreadable(e, what="no held-mail card was posted or retired", store="the held messages"):
+    """A failed read of `store` (the hold directory or a held file, or the notice cards the retire reads), on stderr once until
+    _held_mail_rearm forgets it (its mark's first element is None). The mark leaves `store` out: a stat, list or open error
+    names its path."""
+    _held_mail_say((None, str(e), what), "[notice] %s could not be read (%s): %s" % (store, e, what))
+    return 0
+
+
+def _held_mail_rearm():
+    """Forget the store-wide lines (_held_mail_unreadable), so the next failed read is said again: _held_mail_backfill calls
+    this after a pass that leaves no card unresolved, and when the directory stats unmoved after such a pass. More than one
+    build can run this at once (the pusher's, GET /feed.json's, each connection's clearAll): tuple() copies the set in C, in
+    one step under the GIL, where a walk of the live set in bytecode raises if another build says or forgets a line
+    meanwhile."""
+    _HELD_MAIL_SAID.difference_update([m for m in tuple(_HELD_MAIL_SAID) if m[0] is None])
+
+
+def _held_mail_gone(d, k):
+    """Whether hold `k` is decided, read at the moment its card would be expired: True when the hold directory `d` is there
+    and `k`'s file is not, False while the file is there, else the OSError that kept either from being read (a missing
+    directory included: it is no evidence that any hold was decided)."""
     try:
-        files = sorted(f for f in os.listdir(d) if f.endswith(".json"))
-    except OSError:
+        os.stat(d / (k + ".json"))
+        return False
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        return e
+    try:
+        os.stat(d)
+    except OSError as e:
+        return e
+    return True
+
+
+def _held_mail_retire(held):
+    """Expire, in every notice home, each held-mail card (_held_mail_row) whose newest revision has no expire row and whose
+    key is not in `held`, the ids the hold directory listed, once a read under the notice lock finds its file gone
+    (_held_mail_gone): the bus deletes a hold's file once it is decided, by whatever road, and the card would otherwise stay
+    on the board, a recipient's with Approve and Deny that the bus refuses. A card whose file is there at that read stays (the
+    listing predates its hold). A card whose hold cannot be read, or whose expiry cannot be written, stays and is said once;
+    so does every card of a notice home, or of the notice directory, whose read raises an OSError. Returns (expired, unresolved):
+    unresolved is True when a card stayed, or may have stayed, for one of those reasons."""
+    try:
+        homes = sorted(n[:-6] for n in os.listdir(_notice_dir()) if n.endswith(".jsonl"))
+    except FileNotFoundError:
+        return 0, False                               # no notice home: no card to retire
+    except OSError as e:
+        _held_mail_unreadable(e, "no held-mail card was retired", "the notice cards")
+        return 0, True
+    d, now, n, unresolved = _held_mail_dir(), int(time.time()), 0, False
+    for h in homes:
+        rows = _notice_rows(h)                        # [] is also an OSError: the strict read under the lock tells which
+        if rows and not any(r.get("op") == "post" and r.get("key") not in held and _held_mail_row(r) for r in rows):
+            continue
+        with _notice_lock:
+            try:
+                rows = _notice_rows_unlocked(h, strict=True)
+            except OSError as e:
+                unresolved = True
+                _held_mail_unreadable(e, "no held-mail card was retired", "the notice cards")
+                continue
+            newest = {}
+            for r in rows:
+                if r.get("op") == "post" and int(r.get("rev") or 0) >= int(newest.get(r.get("key"), {}).get("rev") or 0):
+                    newest[r.get("key")] = r
+            retired = {(r.get("key"), int(r.get("rev") or 0)) for r in rows if r.get("op") == "expire"}
+            for k, r in newest.items():
+                rev = int(r.get("rev") or 0)
+                if k in held or (k, rev) in retired or not _held_mail_row(r):
+                    continue
+                gone = _held_mail_gone(d, k)
+                if gone is False:
+                    continue
+                if gone is not True:
+                    unresolved = True
+                    _held_mail_unreadable(gone, "no held-mail card was retired")
+                    continue
+                err = _notice_append(h, {"op": "expire", "t": now, "key": k, "rev": rev, "sid": h})
+                if err:
+                    unresolved = True
+                    _held_mail_say((k, err), "[notice] held message %s: its card could not be retired (%s)" % (k, err))
+                else:
+                    n += 1
+    if n:
+        _mark_views_dirty()
+        _push_soon()
+    return n, unresolved
+
+
+def _held_mail_backfill():
+    """Post a notice for every held message that has none yet, and expire the held-mail cards whose messages are no longer
+    held (_held_mail_retire), a card this pass posted included: when a stat just after the post finds the hold's file gone
+    or fails, the retire runs once more (a late retire); returns how many were posted. Idempotent by (recipient, key):
+    a key with a live post row or an archived revision is never posted again (a decided, expired or dismissed card stays
+    decided). Memoized on the directory's stat and a count (a hold's publish and a decision's delete both move the
+    directory's stat, to the filesystem's timestamp granularity; an Undo that copies a card's rows back out of the archive
+    moves the count, also during a pass, and so does a late retire that leaves a card unresolved, since another build can
+    write the memo after this one): a build with neither moved lists nothing, unless the last pass left a card unresolved
+    (_held_mail_retire), when it lists the directory, runs the retire again and posts nothing. Said on stderr
+    once per held message and reason, and tried again when the directory moves: a held file that cannot be read or parsed,
+    and a hold that gets no card because its id is no key, a revision index cannot be read or the door refuses the post. A
+    directory that cannot be stat'd or listed is said once and changes no card, and the next build tries again; a directory
+    that does not exist posts nothing."""
+    d = _held_mail_dir()
+    gen = _HELD_MAIL_MEMO["gen"]                     # read before the pass: a count move from here on makes the next build fresh
+    try:
+        so = os.stat(d)
+    except FileNotFoundError:
+        so = None
+    except OSError as e:
+        return _held_mail_unreadable(e)
+    key = (str(d), gen) + ((so.st_mtime_ns, so.st_size, so.st_ino, so.st_ctime_ns) if so is not None else (None,))
+    fresh = _HELD_MAIL_MEMO["slot"] != key
+    if not fresh and not _HELD_MAIL_MEMO["retry"]:
+        _held_mail_rearm()                            # the directory stats again, unmoved since a pass that settled every card
         return 0
-    for f in files:
+    files = []
+    if so is not None:
+        try:
+            files = sorted(f for f in os.listdir(d) if f.endswith(".json"))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            return _held_mail_unreadable(e)
+    _, unresolved = _held_mail_retire({f[:-5] for f in files})
+    posted, standing, late = 0, {}, set()
+    for f in (files if fresh else ()):
         try:
             rec = json.loads((d / f).read_text())
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            continue                                  # decided since the listing: nothing to post
+        except (OSError, ValueError) as e:
+            _held_mail_say((f, str(e)), "[notice] held message %s: could not be read (%s)" % (f[:-5], e))
             continue
         mid = str(rec.get("mid") or "")
-        if not mid or not NOTICE_KEY_RE.match(mid):
+        if not NOTICE_INTERNAL_KEY_RE.fullmatch(mid):
+            why = "the key must match %s" % NOTICE_INTERNAL_KEY_RE.pattern[1:-1]
+            _held_mail_say((mid or f, why), "[notice] held message %s: no card (%s)" % (mid or f, why))
             continue
         to_id = str(rec.get("toId") or "")
         known = bool(to_id) and to_id != NOTICE_OWNERLESS_SID and _notice_session_known(to_id)
         sid = to_id if known else NOTICE_OWNERLESS_SID
+        # a post row leaves a home's file only for the archive, whose revision index the sweep writes first, so a key with a
+        # post row in the home its card would go to is skipped by the read under the lock below too: it is passed over on that
+        # home's memoized rows, read once a pass (held cards hold no cap slot, so a home keeps a row per waiting hold, and a
+        # read of the file per held file made a pass quadratic in the waiting holds)
+        if sid not in standing:
+            standing[sid] = {r.get("key") for r in _notice_rows(sid) if r.get("op") == "post"}
+        if mid in standing[sid]:
+            continue
         # the key's standing in EVERY home it could have been posted to (the manager's review of PR 1885, low 1: a hold posted
         # owner-less while its recipient was unknown was posted again under the recipient once the names entry existed). A
         # live row in the chosen home or an archived revision in any home (decided, dismissed, expired) means no new card; a
         # live row in another home stands (the recipient's card while its name is gone); a live OWNER-LESS row for a recipient
         # known now is re-homed: the actionable card is posted under the recipient and the informational one expired
         homes = [sid] + [h for h in (NOTICE_OWNERLESS_SID, to_id) if h and h != sid and (h == NOTICE_OWNERLESS_SID or _safe_id(h))]
-        skip, rehome = False, []
+        skip, rehome, fault = False, [], ""
         with _notice_lock:
             for h in homes:
                 live_rows = [r for r in _notice_rows_unlocked(h) if r.get("op") == "post" and r.get("key") == mid]
                 arch, aerr = _notice_archive_rev_unlocked(h, mid)
-                if aerr or arch > 0 or (live_rows and h == sid):
+                if aerr:
+                    fault = aerr
+                elif arch > 0 or (live_rows and h == sid):
                     skip = True
                 elif live_rows and h == NOTICE_OWNERLESS_SID and known:
                     rehome = live_rows
                 elif live_rows:
                     skip = True
-        if skip:
+        if fault and not (skip or rehome):            # nothing in the homes it could read, and a home it could not read: no card
+            _held_mail_say((mid, fault), "[notice] held message %s: no card (%s)" % (mid, fault))
+        if skip or fault:
             continue
         title = _held_mail_title(rec) if known else "New message from %s for %s" % (rec.get("frm") or "?", rec.get("to") or "?")
         row, err = post_notice(to_id if known else "", mid, title, _held_mail_body(rec), producer=HELD_MAIL_PRODUCER,
                                needs_you=known, actions=_held_mail_actions(mid) if known else None,
-                               dismiss_on_action=known, t=int(rec.get("at") or 0) or None)
+                               dismiss_on_action=known, t=int(rec.get("at") or 0) or None, internal=True)
         if err:
-            mark = (mid, err)
-            if mark not in _HELD_MAIL_SAID:
-                _HELD_MAIL_SAID.add(mark)
-                sys.stderr.write("[notice] held message %s: no card (%s)\n" % (mid, err))
+            _held_mail_say((mid, err), "[notice] held message %s: no card (%s)" % (mid, err))
             continue
         posted += 1
         if rehome:
@@ -27254,7 +27416,20 @@ def _held_mail_backfill():
                 for r in rehome:
                     _notice_append(NOTICE_OWNERLESS_SID, {"op": "expire", "t": int(time.time()), "key": mid,
                                                           "rev": int(r.get("rev") or 0), "sid": NOTICE_OWNERLESS_SID})
-    _HELD_MAIL_MEMO["slot"] = key
+        if _held_mail_gone(d, mid) is not False:
+            late.add(mid)                             # decided since this pass read its file, or the stat failed
+    if late:
+        # another build's retire can have run between the decision and the post, found no card, and then written the memo's
+        # last key (the directory as the decision left it, nothing unresolved), after which no pass would look at these holds
+        # again: the retire runs once more, over the listing less these ids, and if it leaves a card unresolved the count
+        # moves, so the next build passes again whichever build writes the memo last
+        if _held_mail_retire({f[:-5] for f in files} - late)[1]:
+            unresolved = True
+            with _notice_lock:
+                _HELD_MAIL_MEMO["gen"] += 1
+    _HELD_MAIL_MEMO["slot"], _HELD_MAIL_MEMO["retry"] = key, unresolved
+    if not unresolved:
+        _held_mail_rearm()
     return posted
 
 
@@ -27464,10 +27639,11 @@ def _compact_notices(now=None):
                         newest[k] = rv
             retired = {(r.get("key"), int(r.get("rev") or 0)) for r in rows if r.get("op") == "expire"}
             # the live cap (round two, low a): the keys past NOTICE_LIVE_KEYS_MAX, oldest by their newest post's time, are
-            # superseded into the archive whole, so the live file holds what the projection shows
+            # superseded into the archive whole, so the live file holds what the projection shows; a held-mail card is outside
+            # the cap there and here
             live_keys = [r for r in rows if r.get("op") == "post" and int(r.get("rev") or 0) == newest.get(r.get("key"), 0)
                          and (r.get("key"), int(r.get("rev") or 0)) not in retired and _notice_item_id(sid, r.get("key"), int(r.get("rev") or 0)) not in cleared
-                         and not (r.get("expiresAt") and now >= int(r.get("expiresAt")))]
+                         and not (r.get("expiresAt") and now >= int(r.get("expiresAt"))) and not _held_mail_row(r)]
             live_keys.sort(key=lambda r: (int(r.get("t") or 0), r.get("key") or ""))
             capped = {r.get("key") for r in live_keys[:max(0, len(live_keys) - NOTICE_LIVE_KEYS_MAX)]}
             keep, arch = [], []
@@ -27819,6 +27995,8 @@ def _restore_notice_archive(item_ids):
             _NOTICE_SWEPT.pop(sid, None)             # the pass looks again: the row is live and, once the ledger reads, undismissed
             moved += len(back)
     if moved:
+        with _notice_lock:                            # the next backfill runs, also after a pass now in flight: it expires a restored
+            _HELD_MAIL_MEMO["gen"] += 1               # held-mail card whose file is gone
         _mark_views_dirty()
         _push_soon()
     return faults
