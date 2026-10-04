@@ -51687,8 +51687,9 @@ def _js_num(v):
 
 
 _judging_compact_memo = None   # {id(entry): (entry, compact)} from the LAST _compact_judging call, ONE dict rebound
-#                                whole (never refilled in place): a connect push builds the timeline outside the
-#                                pusher's lock, so two calls can overlap; each reads one snapshot, the last writer's
+#                                whole (never refilled in place): the timeline builder's phase one builds the live bars
+#                                outside _TL_BUILD_LOCK (a cold connect push did until 2026-10-03), so no lock orders a
+#                                call against another thread's; each reads one snapshot, the last writer's
 #                                memo stands and the other's entries miss once, never a wrong compact (2026-09-16)
 
 

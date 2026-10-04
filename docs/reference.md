@@ -1602,11 +1602,11 @@ them again. Then it makes the full build with the dead lanes, and wakes the
 pusher after each; the lanes stay the live sessions' until the full build lands,
 and once it has landed no pane is sent those lanes or the first bars again.
 Those lanes are dated by the liveness read they came from, not by when their
-build began, so of two builds the one from the newer read is what every pane is
-sent, whichever finished first. A pane that connects while the full build runs,
-or while it waits for the board, gets the first bars, as old as the builder's
-first phase, which can be tens of seconds, until the full build lands; the
-first phase is not run again for it.
+build began, so of two builds the one from the newer read is what every pane
+ends up with, whichever finished first. A pane that connects while the full
+build runs, or while it waits for the board, gets the first bars, built at the
+start of the builder's first phase and so possibly tens of seconds old, until
+the full build lands; the first phase is not run again for it.
 While a board is open, the full build starts only once the board's first feed
 frame has gone out (or the cold kernel's early feed frame failed to build, or
 the last board closed), so the two cold builds do not share the interpreter;
