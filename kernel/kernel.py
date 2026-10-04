@@ -61421,11 +61421,13 @@ _built_timeline = [None, None, 0.0, 0.0]          # [fleet_sig, payload, built_a
 _tl_partial = [None]                              # the builder's live-only first build (a _TimelinePartial) while the slot is cold
 _TL_OWED = threading.Event()                      # a cold build is owed: set by every ask of a cold slot, cleared by the builder
 #                                                   as a pass starts (owes during a pass coalesce into one more pass)
-_tl_cold_lanes = [None]                           # (view sig, started, frame, pre, dedup sig, built at): the lanes frame every push
-#                                                   sends while the slot is cold, the pusher's and a connect's, rebuilt under the
-#                                                   rule a cached full build is served under (_timeline_cold_lanes)
-_TL_COLD_LANES_LOCK = threading.Lock()            # the memo's one store: of two overlapping builds, the later START wins; and the
-#                                                   full build's store into the slot, which reads the memo's clock (_timeline_build_cold)
+_tl_cold_lanes = [None]                           # (view sig, started, frame, pre, dedup sig, built at, world): the lanes frame every
+#                                                   push sends while the slot is cold, the pusher's and a connect's, rebuilt under
+#                                                   the rule a cached full build is served under (_timeline_cold_lanes); `world` is
+#                                                   the stamp of the liveness snapshot it was built from
+_TL_COLD_LANES_LOCK = threading.Lock()            # the memo's one store: of two overlapping builds, the newer world's wins (the later
+#                                                   snapshot, then the later start); and the full build's store into the slot, which
+#                                                   reads the memo's clock (_timeline_build_cold)
 _BOARD_FIRST = threading.Event()                  # the board's first feed frame has gone out since the boot, or the cold kernel's
 #                                                   early feed frame raised (_board_first_sent); set once, never cleared
 _TL_BOARD_WAKE = threading.Event()                # wakes the builder's wait for it: that frame, a board pane's socket closing
