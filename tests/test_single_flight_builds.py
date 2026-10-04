@@ -275,7 +275,8 @@ class ColdTimelineBuilder(unittest.TestCase):
     "feed") in km._clients and no feed frame sent to one yet, phase two waits for that frame; with none it runs at once, as
     every earlier test has it. The builder sends no frame of the full build: the pusher's next push sends it (2026-10-04).
     The PR's first review round (2026-10-04) adds two cold-lanes sends that overlap, a connect's clock, a raising send inside
-    the builder's pass, the backoff after a failed pass, and the two guards only a direct call reaches."""
+    the builder's pass, the backoff after a failed pass, and the two guards only a direct call reaches; its second, a memo's
+    clock ahead of a connect's and the full build landing at the pusher's held send."""
 
     LANES = [{"id": S1, "name": NAMES[S1]}, {"id": S2, "name": NAMES[S2]}]   # S1 is the live session, S2 dead within the window
 
@@ -1100,10 +1101,13 @@ class ColdTimelineBuilder(unittest.TestCase):
             turns = {s["id"]: [{"id": "t-" + s["id"][-1], "t": 1, "t1": 2}] for s in sessions} if with_bars else {}
             return {"type": "timeline", "sessions": sessions, "turns": turns, "judging": [], "messages": [], "now": now}
         km.build_timeline = build
+        # the fourth case lands the full build at the pusher's held send (review find, 2026-10-04, second round: only the
+        # connect's was landed on); in every case no push raises, which a push's except would only say on stderr
         cases = (("a connect's send held", True, False), ("the pusher's send held", False, False),
-                 ("the full build landing at the held send", True, True))
+                 ("the full build landing at the held send", True, True),
+                 ("the full build landing at the pusher's held send", False, True))
         for label, held_connect, lands in cases:
-            with self.subTest(label):
+            with self.subTest(label), contextlib.redirect_stderr(io.StringIO()) as err:
                 km._built_timeline[:] = [None, None, 0.0, 0.0]
                 km._views_dirty[0] = 0.0
                 km._skel_wire = km._bars_wire = None
@@ -1140,6 +1144,7 @@ class ColdTimelineBuilder(unittest.TestCase):
                         gate[0].go.set()
                         th.join(10)
                     km._push([pane])                      # the next push
+                self.assertNotIn("push build:", err.getvalue(), "%s: a push raised: %s" % (label, err.getvalue()))
                 web = [[s.get("state") for s in f["data"]["sessions"] if s["id"] == S1][0]
                        for f in frames if f["type"] == "data"]
                 self.assertEqual(web[:2], ["working", "waiting"], "%s: the cold lanes, then the newer build's: %r" % (label, web))
@@ -1163,6 +1168,22 @@ class ColdTimelineBuilder(unittest.TestCase):
         self.assertEqual(self.builds, ["skel"], "the connect served the memo: %r" % self.builds)
         self.assertEqual(fb[0]["data"]["sessions"], aged["data"]["sessions"])
         self.assertGreaterEqual(fb[0]["data"]["now"], t0, "the connect's clock, not the memo's: %r" % (fb[0]["data"]["now"],))
+
+    def test_a_cold_connect_never_sends_a_clock_behind_the_memos(self):
+        # the other half of the connect's clock (review find, 2026-10-04, second round): a memo from a newer world than the
+        # connect's read is served to it as it stands, and when its clock is ahead of the connect's, the connect sends the
+        # memo's (test 41 moves only the memo's clock back, so a connect that always sent its own clock passed)
+        a, _fa = self._pane()
+        km._push([a])                                     # the pusher's cold lanes: the memo
+        m = km._tl_cold_lanes[0]
+        ahead = {"type": "data", "data": dict(m[2]["data"], now=m[2]["data"]["now"] + 30)}
+        km._tl_cold_lanes[0] = m[:2] + (ahead, json.dumps(ahead)) + m[4:6] + (time.time() + 60,)   # a newer world's memo
+        b, fb = self._pane()
+        km._push([b], connect=True)
+        self.assertEqual(self.builds, ["skel"], "the connect served the newer memo as it stands: %r" % self.builds)
+        self.assertEqual(fb[0]["data"]["sessions"], ahead["data"]["sessions"])
+        self.assertGreaterEqual(fb[0]["data"]["now"], ahead["data"]["now"],
+                                "never behind the memo's clock: %r" % (fb[0]["data"]["now"],))
 
     def test_a_raising_bars_fill_or_pane_send_never_fails_the_builders_pass(self):
         # review find (2026-10-04): nothing raised inside _timeline_send_partial, so narrowing either of its excepts left the
