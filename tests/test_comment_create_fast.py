@@ -23,6 +23,7 @@ Pinned here:
 
 SYNTHETIC fixtures only: invented notes-api text, placeholder uuids. The state root is the test's own (session hosts off)."""
 import contextlib
+import gzip
 import io
 import json
 import os
@@ -1124,18 +1125,21 @@ class CutFromTheDisplayParse(Base):
                     self.assertEqual((want[0], want[2]), ("", None), "premise: over both files, a tip fork (%s)" % anchor)
                     self.assertEqual(got, want, "%s: %s" % (road, anchor))
 
-    def _linked_world(self, link, parent="ka7", compact_after=None):
+    def _linked_world(self, link, parent="ka7", compact_after=None, off_chain=None):
         """A /clear world under PARENT whose leaf links one record outside itself, outside the transcript model: the leaf's
         record `link` (cn5, the token-count attachment of its sixth turn, or cu5, that turn's question) takes `parent` as its
         parent, by default the first transcript's last answer (ka7), while the leaf's head stays parentless, so the leaf
         parses alone. Eight short turns in each file, the leaf compacted after its turn `compact_after` when given (its
-        boundary cb). Returns (first, leaf, every uuid of both files)."""
+        boundary cb). `off_chain`, a (uuid, parent) pair, adds an off-chain token-count attachment right after the leaf's
+        head. Returns (first, leaf, every uuid of both files)."""
         old, _last, t = turns(self.now - 100000, 8, 1000)
         first = write(self.proj / (PARENT + ".jsonl"), old)
         new, _l2, _t2 = turns(t + 100, 8, 1000, parent=None, tag="c", compact_after=compact_after)
         for r in new:
             if r["uuid"] == link:
                 r["parentUuid"] = parent
+        if off_chain is not None:
+            new.insert(1, attachment(t + 100, off_chain[0], off_chain[1], type="total_tokens_reminder"))
         leaf = write(self.proj / (CLEARED + ".jsonl"), new)
         return first, leaf, [r["uuid"] for r in old + new]
 
@@ -1201,7 +1205,11 @@ class CutFromTheDisplayParse(Base):
         # where the parent the walk stopped at was written in neither file, the first refusal reads the first transcript
         # once, for its uuid set, and counts a read, and the next, which the set answers, reads none of it and counts as the
         # display road (the set's check on that parent); and a comment on a compaction boundary whose logical parent was
-        # never written, a refusal no other file can change, reads none of it at either attempt, on either road
+        # never written, a refusal no other file can change, reads none of it at either attempt, on either road. Review
+        # round six: with an off-chain row parented into the first transcript beside that unwritten parent, the walk hands
+        # on only the parent it stopped at, so a second comment reads none of that file, on the display road, on the read
+        # road and on a restored entry, whose pre-cut spine has the linking attachment as its root and hands on the parent
+        # its document recorded for it; every parent the leaf's graph lacks would meet the set and read the file again
         none = {"whole": 0, "seeded": 0, "read": 0, "failed": 0}
 
         def resolve(anchor, read_road=False):
@@ -1231,6 +1239,27 @@ class CutFromTheDisplayParse(Base):
                          [{"answer": refusal, "bytes": size, "counted": dict(none, read=1)},
                           {"answer": refusal, "bytes": 0, "counted": dict(none, whole=1)}],
                          "the first refusal reads the set, the next is answered from it")
+        restart()
+        first, leaf, _uuids = self._linked_world("cn5", parent="kz9", off_chain=("cx1", "ka7"))
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: the leaf parses alone")
+        size = os.path.getsize(first)
+        km._parse(leaf, PARENT, self.now)
+        display = [resolve("ct5"), resolve("ct5")]
+        restart()
+        km._parse(leaf, PARENT, self.now)
+        read = [resolve("ct5", read_road=True), resolve("ct5", read_road=True)]
+        restart()
+        self.restored(leaf)              # the linking attachment is the root of the restored entry's pre-cut spine
+        seeded = [resolve("ct5"), resolve("ct5")]
+        shutil.rmtree(jd.STATE / "checkpoints", ignore_errors=True)    # the worlds below rewrite the leaf at this path
+        self.assertEqual({"display": display, "read": read, "seeded": seeded},
+                         {"display": [{"answer": refusal, "bytes": size, "counted": dict(none, read=1)},
+                                      {"answer": refusal, "bytes": 0, "counted": dict(none, whole=1)}],
+                          "read": [{"answer": refusal, "bytes": size, "counted": none},
+                                   {"answer": refusal, "bytes": 0, "counted": none}],
+                          "seeded": [{"answer": refusal, "bytes": size, "counted": dict(none, read=1)},
+                                     {"answer": refusal, "bytes": 0, "counted": dict(none, seeded=1)}]},
+                         "beside an off-chain row parented into the first file, only the parent the walk stopped at is looked up")
         restart()
         old, _last, t = turns(self.now - 100000, 8, 1000)
         first = write(self.proj / (PARENT + ".jsonl"), old)
@@ -1311,6 +1340,29 @@ class CutFromTheDisplayParse(Base):
                     counted = dict(none, **{road: 1}) if road != "read" else none
                     want[(road, anchor, attempt)] = (km.ANCHOR_NO_PROSE_ERR, 0, counted)
         self.assertEqual(seen, want)
+
+    def test_a_restored_entrys_spine_root_whose_record_names_no_parent_reads_none_of_the_first_transcript(self):
+        # review round six: on a restored entry the graph gives the root of the pre-cut spine no parent, and in round five
+        # the walk took that root as one that may link into the first transcript, handing the widening every parent the
+        # leaf's graph lacks. In the world above (an off-chain row parented into that file), restored from its document as
+        # at a boot, each comment on the parentless head read the whole file and counted a read. The document records
+        # that root's own parent, here none: three comments on the head keep the refusal, read none of that file and
+        # count as the restored road
+        first, leaf = self._off_chain_head_world()
+        self.restored(leaf)
+        doc = json.loads(gzip.decompress(em._asm_ckpt_file(leaf).read_bytes()).decode("utf-8"))
+        root = doc["records"][doc["spine"][0]]
+        self.assertEqual((root[0], root[9]), ("czh", None), "premise: the spine's root is the head, recorded with no parent")
+        none = {"whole": 0, "seeded": 0, "read": 0, "failed": 0}
+        seen = []
+        for _attempt in range(3):
+            drop_reader(first)
+            zero_reads()
+            r0 = self.roads()
+            got = km._comment_cut_resolve(leaf, PARENT, "czh")
+            r1 = self.roads()
+            seen.append({"answer": got[2], "bytes": read_of(first), "counted": {k: r1[k] - r0[k] for k in r1}})
+        self.assertEqual(seen, [{"answer": km.ANCHOR_NO_PROSE_ERR, "bytes": 0, "counted": dict(none, seeded=1)}] * 3)
 
     def test_an_unreadable_first_transcript_leaves_a_row_behind_a_link_refused_at_once_on_both_roads_and_says_why(self):
         # review round five: with the first transcript at mode 0 (restored in the finally) the no-prose widening's look at it
