@@ -1364,6 +1364,58 @@ class CutFromTheDisplayParse(Base):
             seen.append({"answer": got[2], "bytes": read_of(first), "counted": {k: r1[k] - r0[k] for k in r1}})
         self.assertEqual(seen, [{"answer": km.ANCHOR_NO_PROSE_ERR, "bytes": 0, "counted": dict(none, seeded=1)}] * 3)
 
+    def _restored_root_comments(self, links, turn_parent, root_row):
+        """Three comments on the root of a restored entry's pre-cut spine, each as {"answer", "bytes", "counted"}, in a
+        /clear world under PARENT whose leaf opens at a parentless token-count attachment off the chain (czh: a first record
+        that names a parent keeps the first transcript in the parse, leaving no file out to look into), then holds `links`,
+        a token-count attachment per (uuid, parent) pair, the off-chain cx1 parented into the first transcript's last answer
+        (ka7), and eight short turns whose first question is parented at `turn_parent`. Restored from its document as at a
+        boot, whose row for the spine's root must read `root_row`: (uuid, recorded parent)."""
+        old, _last, t = turns(self.now - 100000, 8, 1000)
+        first = write(self.proj / (PARENT + ".jsonl"), old)
+        head = attachment(t + 100, "czh", None, type="total_tokens_reminder")    # a parentless head, off the chain
+        rows = [attachment(t + 100, u, p, type="total_tokens_reminder") for u, p in links]
+        off = attachment(t + 100, "cx1", "ka7", type="total_tokens_reminder")    # an off-chain row parented into the first file
+        new, _l, _t = turns(t + 101, 8, 1000, parent=turn_parent, tag="c")
+        leaf = write(self.proj / (CLEARED + ".jsonl"), [head] + rows + [off] + new)
+        self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: the leaf parses alone")
+        self.restored(leaf)
+        doc = json.loads(gzip.decompress(em._asm_ckpt_file(leaf).read_bytes()).decode("utf-8"))
+        root = doc["records"][doc["spine"][0]]
+        self.assertEqual((root[0], root[9]), root_row, "premise: the document's row for the spine's root")
+        seen = []
+        for _attempt in range(3):
+            drop_reader(first)
+            zero_reads()
+            r0 = self.roads()
+            got = km._comment_cut_resolve(leaf, PARENT, root_row[0])
+            r1 = self.roads()
+            seen.append({"answer": got[2], "bytes": read_of(first), "counted": {k: r1[k] - r0[k] for k in r1}})
+        return seen
+
+    def test_a_restored_entrys_spine_root_that_closes_a_ring_reads_none_of_the_first_transcript(self):
+        # review round seven: where the leaf's chain closes a ring, here three records that are not prose (r1 parented at
+        # r3, r2 at r1, r3 at r2) above the turns, which are parented at r2, the pre-cut spine ends at its first revisit,
+        # and its root r3 records as its parent r2, a record of its own spine. The restored graph holds r2, so a walk that
+        # ends at that root hands the widening nothing: three comments on r3 keep the refusal, read none of the first
+        # transcript and count as the restored road. This pins root_may_link's clause that the graph lacks the recorded
+        # parent: without it the walk hands r2 on, and the first comment at a stat of that file reads it whole and counts
+        # a read, for the same refusal
+        none = {"whole": 0, "seeded": 0, "read": 0, "failed": 0}
+        seen = self._restored_root_comments([("r1", "r3"), ("r2", "r1"), ("r3", "r2")], "r2", ("r3", "r2"))
+        self.assertEqual(seen, [{"answer": km.ANCHOR_NO_PROSE_ERR, "bytes": 0, "counted": dict(none, seeded=1)}] * 3)
+
+    def test_a_restored_entrys_self_linked_spine_root_reads_none_of_the_first_transcript(self):
+        # review round seven: a record that is not prose parented at itself (cs1), above the turns, which are parented at
+        # it, is the root of the pre-cut spine, recorded with itself as its parent. Three comments on cs1 keep the refusal,
+        # read none of the first transcript and count as the restored road. This pins root_may_link's two clauses as a
+        # pair, that the recorded parent is not the root itself and that the graph lacks it: either one alone answers
+        # False here, so only both dropped read the file. The first alone can never change an answer: the root is a
+        # record of the graph, so a parent equal to it is one the graph holds
+        none = {"whole": 0, "seeded": 0, "read": 0, "failed": 0}
+        seen = self._restored_root_comments([("cs1", "cs1")], "cs1", ("cs1", "cs1"))
+        self.assertEqual(seen, [{"answer": km.ANCHOR_NO_PROSE_ERR, "bytes": 0, "counted": dict(none, seeded=1)}] * 3)
+
     def test_an_unreadable_first_transcript_leaves_a_row_behind_a_link_refused_at_once_on_both_roads_and_says_why(self):
         # review round five: with the first transcript at mode 0 (restored in the finally) the no-prose widening's look at it
         # fails, and a comment on a row the leaf's own graph cannot anchor, behind a non-prose record linking into that file,
