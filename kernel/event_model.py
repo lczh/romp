@@ -5319,10 +5319,15 @@ class TranscriptGraph:
         return frozenset(u for u in self._ad.dangling if not self.has(u))
 
     def root_may_link(self, u):
-        """Whether `u`, a record this graph gives no parent, may still name one outside it. Never over a whole adapter, whose
-        parent map is its records' own links; a restored entry's spine root may (_SeededGraph, review round five,
-        2026-10-03)."""
+        """Whether `u`, a record this graph gives no parent, names one all the same that the graph lacks (root_parent).
+        Never over a whole adapter, whose parent map is its records' own links; a restored entry's spine root may
+        (_SeededGraph, review round five, 2026-10-03, narrowed to a recorded parent in round six, 2026-10-04)."""
         return False
+
+    def root_parent(self, u):
+        """The parent `u`'s record names where this graph gives `u` none: None over a whole adapter, whose parent map holds
+        every link its records name; for a restored entry's spine root, the one its document recorded (_SeededGraph)."""
+        return None
 
     def _splice_atom(self, u):
         """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
@@ -5415,6 +5420,7 @@ class _SeededGraph(TranscriptGraph):
             spine = seed["spine"]
             sp = seed["_spineParent"] = dict(zip(spine, [None] + list(spine[:-1])))
         self._spine_parent = sp
+        self._root_parent = seed.get("spine_root_parent")    # the spine root's raw parentUuid (_seed_from_doc)
         self._locs = _precut_locations(entry, rompuuid)
         self._recs = {}
 
@@ -5437,10 +5443,19 @@ class _SeededGraph(TranscriptGraph):
         return None
 
     def root_may_link(self, u):
-        """True for the root of the pre-cut spine: the seed keeps the spine, root to cut, and no parent of its root, so that
-        root reads as parentless here even when its record links into a file the parse left out, a session's first
-        transcript after a /clear among them (the comment cut, review round five, 2026-10-03)."""
-        return u not in self._ad.by_uuid and u in self._spine_parent and self._spine_parent[u] is None
+        """True for the root of the pre-cut spine when its record names a parent, not itself, that this graph lacks: the
+        spine, root to cut, gives that root no parent, so it reads as parentless here even where its record links into a
+        file the parse left out, a session's first transcript after a /clear among them (the comment cut, review round
+        five, 2026-10-03). A root whose record names no parent answers False (review round six, 2026-10-04)."""
+        p = self.root_parent(u)
+        return p is not None and p != u and not self.has(p)
+
+    def root_parent(self, u):
+        """The raw parentUuid the document recorded for the pre-cut spine's root (the seed's "spine_root_parent", review
+        round six), for that root alone; None for any other record."""
+        if u in self._ad.by_uuid or u not in self._spine_parent or self._spine_parent[u] is not None:
+            return None
+        return self._root_parent
 
     def _loc(self, u):
         form, src, got = self._locs
@@ -8229,10 +8244,13 @@ def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links, quiet
 
 def _seed_from_doc(doc):
     """(seed, landed) from a verified document: the pre-cut graph facts a FileAdapter takes, and the pre-cut uuids
-    whose records carried assistant text."""
+    whose records carried assistant text. "spine_root_parent" is the raw parentUuid of the pre-cut spine's root, as that
+    record's row holds it, None with no spine: the spine gives its root no parent, and _SeededGraph.root_may_link reads
+    this to tell a root whose record links outside the graph from one with no parent (review round six, 2026-10-04)."""
     verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
     type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
     seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
+            "spine_root_parent": doc["records"][doc["spine"][0]][9] if doc["spine"] else None,
             "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
             "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
             "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},

@@ -18922,11 +18922,10 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     target keeps the refusal (_cut_widen_linked, review round four). Only a walk that stopped at a parent the leaf's graph
     lacks looks, and it reads on only when the first file holds that parent; a walk stopped by a compaction boundary, the
     hop cap or a parentless root keeps the refusal reading nothing of the first file, since no other file can change it
-    (review round five). The one exception is the root of a restored entry's pre-cut spine, which reads as parentless
-    there even when its record links into the first file: a walk that ends there looks as before, by every parent the
-    leaf's graph names and lacks. A comment in the
-    conversation a second /clear's card expands (the file between the two clears) is in neither file and still parks as
-    lag, as it did before."""
+    (review round five). On a restored entry, whose pre-cut spine gives its root no parent, a walk that ends at that root
+    counts as stopped at the parent its document recorded for it, so a root whose record names none reads nothing either
+    (review round six). A comment in the conversation a second /clear's card expands (the file between the two clears) is
+    in neither file and still parks as lag, as it did before."""
     facts = {}
     got = _comment_cut_from_parse(path, sid, anchor_uuid, facts=facts)
     how = facts.get("how")
@@ -18990,10 +18989,10 @@ def _cut_widen_linked(path, sid, anchor_uuid, links):
     graph lacks, and when a record of the leaf links into the session's first file (a CLI that writes such a link,
     outside the transcript model) and is not prose (an attachment or a tool row), it and the rows under it up to the
     next post-clear prose were refused where the walk over both files reaches the first file's prose and answers from the
-    tip. `links`: what the walk left in its `stop` (_comment_cut_walk), the parent it stopped at when the leaf's graph
-    lacks it, or at the root of a restored entry's spine, which reads as parentless there, every parent that graph names
-    and lacks; empty after a compaction boundary, the hop cap or a parentless root, refusals the first file cannot change
-    (review round five). When the first file's uuid set (_cut_first_uuids) meets `links`, the walk over both files
+    tip. `links`: what the walk left in its `stop` (_comment_cut_walk), the one parent it stopped at that the leaf's graph
+    lacks (on a restored entry, for the root of its spine, the parent its document recorded, review round six); empty
+    after a compaction boundary, the hop cap or a parentless root, refusals the first file cannot change (review round
+    five). When the first file's uuid set (_cut_first_uuids) meets `links`, the walk over both files
     answers (_cut_wide_walk); else answer None and the refusal stands. (None, None), with nothing read, when `links` is
     empty or no first file is left out of the parse. `how` as _cut_widen_lag's."""
     first = _cut_unread_anchor(path, sid) if links else None
@@ -19031,9 +19030,10 @@ def _comment_cut_walk(g, path, anchor_uuid, stop=None):
 
     With `stop` (a dict), a refusal for want of a prose record above the anchor (ANCHOR_NO_PROSE_ERR) leaves in
     stop["links"] the parents another file could lead the walk on from (review round five, read by _cut_widen_linked):
-    the record it stopped at when `g` lacks it; at the root of a restored entry's spine, which `g` gives no parent even
-    when its record names one (em._SeededGraph.root_may_link), every parent `g` names and lacks (g.dangling()); else, after
-    a compaction boundary, at the hop cap or at a root with no parent, an empty set, since no other file can change those."""
+    the record it stopped at when `g` lacks it; at the root of a restored entry's spine, which `g` gives no parent, the
+    parent the document recorded for that root's record when `g` lacks it (em._SeededGraph.root_may_link and root_parent,
+    review round six); else, after a compaction boundary, at the hop cap or at a root with no parent, an empty set, since
+    no other file can change those."""
     if not g.has(anchor_uuid):
         return None, 0, ANCHOR_LAG_ERR, ""
 
@@ -19069,7 +19069,7 @@ def _comment_cut_walk(g, path, anchor_uuid, stop=None):
         if u is not None and hops < 500000 and not g.has(u):
             stop["links"] = frozenset((u,))          # the parent the graph lacks: the record the walk stopped at
         elif u is None and last is not None and g.root_may_link(last):
-            stop["links"] = g.dangling()             # a restored entry's spine root: the seed keeps no parent of it
+            stop["links"] = frozenset((g.root_parent(last),))   # a restored entry's spine root: its recorded parent
         else:
             stop["links"] = frozenset()              # a compaction boundary, the hop cap or a parentless root
     return None, 0, ANCHOR_NO_PROSE_ERR, ""

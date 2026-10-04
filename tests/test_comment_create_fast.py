@@ -1263,23 +1263,28 @@ class CutFromTheDisplayParse(Base):
                          {"answer": km.ANCHOR_NO_PROSE_ERR, "bytes": 0,
                           "counted": {"whole": 1, "seeded": 0, "read": 0, "failed": 0}})
 
-    def test_a_refusal_no_other_file_can_change_reads_none_of_the_first_transcript_at_any_attempt(self):
-        # review round five: the no-prose widening looked into the first transcript whenever the leaf's graph named any
-        # parent it lacks, so in a cleared leaf with an off-chain row parented into that file, a comment on the leaf's
-        # parentless head (not prose) or on its compaction boundary, refusals the walk over both files gives too, read that
-        # file whole at every attempt. It now looks only where the walk stopped at a parent the leaf's graph lacks: both
-        # refusals read none of it, at each of two attempts, on the display road and on the read road. The one exception,
-        # pinned as disclosed (risk 7): on a restored entry the head is the root of the pre-cut spine, which reads as
-        # parentless there even when its record links into the first transcript, so a comment on it still reads that file
-        # at each attempt, and counts a read
+    def _off_chain_head_world(self):
+        """A /clear world under PARENT whose leaf opens at a parentless head that is not prose (czh, a token-count
+        attachment), holds an off-chain row parented into the first transcript's last answer (cx1, at ka7) and compacts
+        after its sixth turn (boundary cb). Returns (first, leaf)."""
         old, _last, t = turns(self.now - 100000, 8, 1000)
         first = write(self.proj / (PARENT + ".jsonl"), old)
-        size = os.path.getsize(first)
         head = attachment(t + 100, "czh", None, type="total_tokens_reminder")    # a parentless head that is not prose
         off = attachment(t + 100, "cx1", "ka7", type="total_tokens_reminder")    # an off-chain row parented into the first file
         new, _l, _t = turns(t + 101, 8, 1000, parent="czh", tag="c", compact_after=5)
         leaf = write(self.proj / (CLEARED + ".jsonl"), [head, off] + new)
         self.assertEqual(jd._judge_candidates(PARENT, [leaf]), [leaf], "premise: the leaf parses alone")
+        return first, leaf
+
+    def test_a_refusal_no_other_file_can_change_reads_none_of_the_first_transcript_at_any_attempt(self):
+        # review round five: the no-prose widening looked into the first transcript whenever the leaf's graph named any
+        # parent it lacks, so in a cleared leaf with an off-chain row parented into that file, a comment on the leaf's
+        # parentless head (not prose) or on its compaction boundary, refusals the walk over both files gives too, read that
+        # file whole at every attempt. It now looks only where the walk stopped at a parent the leaf's graph lacks: both
+        # refusals read none of it, at each of two attempts, on the display road and on the read road. Review round six: on
+        # the restored road too, where the head is the root of the pre-cut spine, which that graph gives no parent, and
+        # its document records that the head's own record names none either
+        first, leaf = self._off_chain_head_world()
         for anchor in ("czh", "cb"):
             self.assertEqual(self.cold(leaf, anchor)[2], km.ANCHOR_NO_PROSE_ERR, "premise: over both files too (%s)" % anchor)
         real, seen, want = km._comment_cut_from_parse, {}, {}
@@ -1303,11 +1308,8 @@ class CutFromTheDisplayParse(Base):
                         km._comment_cut_from_parse = real
                     r1 = self.roads()
                     seen[(road, anchor, attempt)] = (got[2], read_of(first), {k: r1[k] - r0[k] for k in r1})
-                    if road == "seeded" and anchor == "czh":  # the spine root: the exception
-                        want[(road, anchor, attempt)] = (km.ANCHOR_NO_PROSE_ERR, size, dict(none, read=1))
-                    else:
-                        counted = dict(none, **{road: 1}) if road != "read" else none
-                        want[(road, anchor, attempt)] = (km.ANCHOR_NO_PROSE_ERR, 0, counted)
+                    counted = dict(none, **{road: 1}) if road != "read" else none
+                    want[(road, anchor, attempt)] = (km.ANCHOR_NO_PROSE_ERR, 0, counted)
         self.assertEqual(seen, want)
 
     def test_an_unreadable_first_transcript_leaves_a_row_behind_a_link_refused_at_once_on_both_roads_and_says_why(self):
