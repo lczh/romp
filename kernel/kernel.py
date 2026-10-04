@@ -60626,7 +60626,8 @@ def _push(targets, connect=False, live_map=None):
         return
     now = int(time.time())
     # When the world this push reads was read: the pusher cycle's stamp, taken before its liveness read (_pusher_cycle), for
-    # the map a cycle hands down; this push's own read otherwise. Two cold-lanes builds are ordered by it (_timeline_cold_lanes)
+    # the map a cycle hands down; this push's own read otherwise. Two cold-lanes builds are ordered by it, and the cold lanes
+    # are built at its second, not at `now` (_timeline_cold_lanes): lanes from a newer world never carry an older clock
     world_t = (getattr(_live_scope, "snapshot_t", None) or time.time()) if live_map is not None else time.time()
     live_map = _live_map() if live_map is None else live_map   # one liveness read per push, shared by all builders
     _chat_push_scopes_close()                     # a previous push on this thread that raised inside the chat loop
@@ -61300,7 +61301,9 @@ def _push(targets, connect=False, live_map=None):
                 # frame on its next push, an older frame re-sent with nothing new behind it (review find, 2026-10-03). The
                 # frame is chosen under the pane's slot lock (_tl_cold_lanes_at_send): a memo stored since, from a newer
                 # world, goes instead of this connect's, so a send that lands after a newer build's never steps the pane back.
-                tl_cold = _timeline_cold_lanes(now, live_map, fsig, world_t)
+                # Each memo is built at the clock of the liveness read it came from (this connect's, or a pusher cycle's), so
+                # a newer memo never carries an older clock either (review find, 2026-10-04, second round).
+                tl_cold = _timeline_cold_lanes(live_map, fsig, world_t)
                 dropped = []                                  # panes whose cold lanes the guard held back: the full build landed
                 for c in tl_clients:
                     with _tl_cold_frame(c) as still_cold:     # never after the full build's lanes, landed since the read
@@ -61335,8 +61338,9 @@ def _push(targets, connect=False, live_map=None):
                     # landed, and no bars before. The lanes never come from the partial: it is as old as phase one's start,
                     # and projecting it over the cold lanes a pane already holds moved the lanes back (an ended lane live
                     # again) with no new build behind it, for the rest of phase two (review find, 2026-10-03). Each pane's
-                    # frame is chosen under its slot lock below, as a connect's is (_tl_cold_lanes_at_send).
-                    tl_cold = _timeline_cold_lanes(now, live_map, fsig, world_t)
+                    # frame is chosen under its slot lock below, as a connect's is (_tl_cold_lanes_at_send). A pusher push
+                    # builds them at its cycle's clock, not its own `now`, read after the cycle's jobs (_timeline_cold_lanes).
+                    tl_cold = _timeline_cold_lanes(live_map, fsig, world_t)
                 elif connect:
                     if _timeline_cache_fresh(fsig):
                         # A CONNECT serves the cached lanes under the CYCLE's clock: the pane anchors its live
@@ -65075,7 +65079,7 @@ def _timeline_skeleton(tl):
     return {**tl, "turns": {}, "judging": {}, "messages": []}
 
 
-def _timeline_cold_lanes(now, live_map, sig, world_t=None):
+def _timeline_cold_lanes(live_map, sig, world_t=None):
     """The lanes frame while the timeline slot is cold (2026-10-03), the pusher's and a cold connect's, as the memo entry
     (view sig, started, frame, its serialization, its dedup signature, built at, world): the lanes skeleton, live sessions
     only (LIVE-FIRST: no dead session is read before the builder has run), no transcript parse (the skeleton reads cached
@@ -65094,7 +65098,13 @@ def _timeline_cold_lanes(now, live_map, sig, world_t=None):
     (the next pusher cycle) applies the rule. Of two builds that overlap, the one from the newer world (the later snapshot;
     of one snapshot, the later start) is the memo, whichever ends first, and each send picks the newest memo under the
     pane's slot lock (_tl_cold_lanes_at_send), so an older build that ends last is neither kept nor sent, and one that ends
-    first and is sent last does not step the pane back (gate find, 2026-10-03; review find, 2026-10-04)."""
+    first and is sent last does not step the pane back (gate find, 2026-10-03; review find, 2026-10-04).
+    It is built at `world_t`'s second, the clock of the world it read, never at the caller's own clock: a pusher push reads
+    its clock after its cycle's jobs, so a connect that read its world between the cycle's stamp and that read built the
+    newer memo on an earlier clock than the push's lanes, and the next push sent it, stepping a pane's clock and an awaiting
+    lane's open interval back (review find, 2026-10-04, second round). So a newer memo never carries an older clock, and
+    the full build's check of the memo's clock (_timeline_build_cold) compares the latest clock any pane's cold lanes were
+    built at."""
     if world_t is None:
         world_t = time.time()
     m = _tl_cold_lanes[0]
@@ -65102,7 +65112,7 @@ def _timeline_cold_lanes(now, live_map, sig, world_t=None):
         return m
     if m is None or _dirty_since(m[1]) or (m[0] != sig and time.time() - m[5] >= REBUILD_MIN_S):
         started = time.time()
-        frame = {"type": "data", "data": build_timeline(now, live_map, with_bars=False, live_only=True)}
+        frame = {"type": "data", "data": build_timeline(int(world_t), live_map, with_bars=False, live_only=True)}
         pre = json.dumps(frame)
         m = (sig, started, frame, pre, _dedup_sig(frame, pre), time.time(), world_t)
         with _TL_COLD_LANES_LOCK:

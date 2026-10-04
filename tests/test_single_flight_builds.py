@@ -1622,6 +1622,121 @@ class ColdLanesWorldOrder(_InFlightPush):
         self.assertEqual(km._tl_cold_lanes[0][2]["data"]["sessions"][0]["state"], "waiting", "the memo is the newer world's")
 
 
+class ColdLanesWorldClock(_InFlightPush):
+    """The cold lanes built at the clock of the world they read (the PR's second review round, 2026-10-04). After the first
+    round the memo was ordered by the snapshot it read but built at the push's own clock, which a pusher push reads after its
+    cycle's stamp and jobs. A reload's connect push that read its world between the two won on world and carried an older
+    clock: the next push sent the pusher's pane the connect's lanes, its clock and web's open interval a second back; and
+    the full build's check of the memo's clock compared its own with the connect's, so it kept its signature while that pane
+    held a later clock, and its landing shrank the interval. Each memo is now built at its world's second. One world
+    throughout (web live and waiting, its open interval ending at the build's clock) and a view signature with no clock in
+    it, so only the clocks tell the lanes apart. The cycle's push goes to pane X, the connect's to pane Y. REBUILD_MIN_S is
+    0.2 s here."""
+
+    BUCKET = True                                         # web's open interval ends at its build's clock
+
+    def setUp(self):
+        super().setUp()
+        self.clocks, self.hold = {}, None
+
+    def _sig(self, now, live_map):                        # the view signature without the clock: the live rows alone
+        return ("v", 0, tuple(sorted((sid, (row or {}).get("state")) for sid, row in (live_map or {}).items())))
+
+    def _build(self, now, live_map=None, with_bars=True, live_only=False):
+        out = super()._build(now, live_map, with_bars, live_only)
+        if not with_bars:
+            name = threading.current_thread().name
+            self.clocks.setdefault(name, now)             # the clock each thread's lanes build ran at
+            h = self.hold
+            if h is not None and name == h[0]:
+                self.hold = None
+                h[1].set()
+                h[2].wait(10)                             # the build has read its world and is held before its store
+        return out
+
+    @staticmethod
+    def _lanes(frames):
+        """Web's lanes frames as (the frame's clock, web's open interval's end)."""
+        out = []
+        for f in frames:
+            if f["type"] == "data":
+                web = [s for s in f["data"]["sessions"] if s["id"] == S1][0]
+                out.append((f["data"]["now"], web["states"][0][1]))
+        return out
+
+    def _overlap(self):
+        """The cycle stamps its snapshot; a reload's connect push starts 0.05 s later, reads the world and builds its lanes,
+        held before its store; the cycle's push, at the stamp plus 1.2 s and a second past the connect's clock, builds and
+        stores its lanes and sends them to X; then the connect's build stores and goes to Y. Returns the panes, their frames
+        and the connect's clock."""
+        world = {S1: {"state": "waiting"}}
+        self.live[0] = world
+        xf, yf = [], []
+        x = {"app": "timeline", "alive": True, "sent": {}, "send": lambda s: xf.append(json.loads(s))}
+        y = {"app": "timeline", "alive": True, "sent": {}, "send": lambda s: yf.append(json.loads(s))}
+        km._clients[:] = [x, y]
+        stamp, stamped, go = [None], threading.Event(), threading.Event()
+
+        def cycle():                                      # the pusher cycle: its stamp, its jobs, then its push to X
+            km._live_scope.snapshot_t = stamp[0] = time.time()
+            stamped.set()
+            go.wait(10)
+            try:
+                km._push([x], live_map=world)
+            finally:
+                km._live_scope.snapshot_t = None
+        began, store = threading.Event(), threading.Event()
+        self.hold = ("connect", began, store)
+        th = threading.Thread(target=cycle, name="cycle", daemon=True)
+        th.start()
+        cth = None
+        try:
+            self.assertTrue(stamped.wait(10), "the cycle stamped its snapshot")
+            time.sleep(0.05)                              # the connect starts at the stamp plus 0.05 s
+            cth = threading.Thread(target=km._push, args=([y],), kwargs={"connect": True}, name="connect", daemon=True)
+            cth.start()
+            self.assertTrue(began.wait(10), "the connect's lanes build read its world and is held before its store")
+            c = self.clocks["connect"]
+            while time.time() < max(stamp[0] + 1.2, c + 1.05):   # the cycle's push: the stamp plus 1.2 s, a second past c
+                time.sleep(0.01)
+            go.set()
+            th.join(10)
+            self.assertFalse(th.is_alive(), "the cycle's push ended")
+        finally:
+            go.set()
+            store.set()                                   # the connect's build stores after the cycle's push
+            if cth is not None:
+                cth.join(10)
+        self.assertEqual(sorted(self.clocks), ["connect", "cycle"], "both pushes built their lanes: %r" % (self.clocks,))
+        self.assertTrue(self._lanes(xf) and self._lanes(yf), "each pane got its push's lanes: %r %r" % (xf, yf))
+        return x, y, xf, yf, c
+
+    def _in_order(self, xf, yf):
+        for name, frames in (("X", xf), ("Y", yf)):
+            lanes = self._lanes(frames)
+            nows, ends = [n for n, _e in lanes], [e for _n, e in lanes]
+            self.assertEqual(nows, sorted(nows), "%s's lanes clock went back: %r" % (name, lanes))
+            self.assertEqual(ends, sorted(ends), "web's open interval on %s shrank with no new information: %r" % (name, lanes))
+
+    def test_a_connect_that_read_a_newer_world_never_steps_the_pushers_pane_clock_back(self):
+        x, y, xf, yf, _c = self._overlap()
+        km._push([x, y])                                  # the next push serves the memo, the connect's lanes
+        self._in_order(xf, yf)
+
+    def test_a_full_build_clocked_at_the_connects_second_never_shrinks_the_pushers_pane_interval(self):
+        x, y, xf, yf, c = self._overlap()
+        held = max(end for _now, end in self._lanes(xf))  # the latest open-interval end X holds
+        world = dict(self.live[0])
+        km._timeline_build_cold(c, world, self._sig(c, world))   # phase two, its clock read in the connect's second
+        if km._built_timeline[0] is not None:
+            self.assertLessEqual(held, c, "the full build kept its signature while X held lanes on a later clock: %r"
+                                 % (self._lanes(xf),))
+        km._push([x, y])                                  # the push on the landing wake
+        self._in_order(xf, yf)
+        last = [f for f in xf if f["type"] == "data"][-1]
+        self.assertEqual(len(last["data"]["sessions"]), 2, "the full build's lanes reached X: %r" % (self._lanes(xf),))
+
+
 class SameBucketLanding(unittest.TestCase):
     """The full build landing inside the view signature's clock bucket after the cold lanes moved on (the round-three gate's
     probe, 2026-10-04). The bucket turns just before phase two opens and nothing else moves; a push inside phase two rebuilds
