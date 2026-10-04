@@ -1615,7 +1615,10 @@ cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
 reads only the bytes past the offset and resumes each fold from its recorded
 state; a checkpoint that does not verify (its version, its path, a file that
 shrank, a rewrite under the guard, a corrupt document) falls back to a whole
-read, is counted per reason in `/perf` and said once on stderr. Every fold
+read, is counted per reason in `/perf` and said once on stderr. A document
+whose stat fails for any reason but its absence (a `checkpoints/` directory
+the kernel cannot search) reads as no document, so the file is read whole,
+and is said once on stderr with the error, its file left in place. Every fold
 holding a cursor inside the entry's held records is recorded at its own count
 (a fold stepped by builds rather than by the settle may lag the leaf), and the
 document's cut is the lowest of them, so the next kernel's tail read holds what
@@ -2974,8 +2977,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   does), `docConsults` (fold documents loaded through the one
   validated read that the two boot restore paths, a write's carry and a
   retirement's consult share; at boot the restore paths dominate it, one per
-  checkpointed file), `docMemo` (the documents that read keeps for the write
-  that follows: `entries`, `bytes` as their RESIDENT weight, each file's size
+  checkpointed file; a write's carry skips the load when this process already
+  knows the document has nothing to give it: over a document this process last
+  wrote or loaded, unchanged on disk since by inode, modification time and
+  size, in which every state and over-the-cap cursor belongs to a fold the
+  writer holds or stands at a count the writer cannot record, a write reads
+  nothing),
+  `docMemo` (the documents that read keeps for the write that follows, and a
+  document a write wrote with an entry it carried from the disk, a state or an
+  over-the-cap cursor, kept for the next write's carry: `entries`, `bytes` as
+  their RESIDENT weight, each file's size
   on disk times `parseMultiple`, the measured 4.5 a parsed document weighs
   against its bytes on disk, and `capBytes`, a ceiling on that resident
   weight of MemTotal / 512 floored at 64 MiB, `ROMP_DOC_MEMO_CAP_MB`; the
