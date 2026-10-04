@@ -153,6 +153,268 @@ class PureHelpers(unittest.TestCase):
         self.assertIsNone(sb.cli_sid_of("claude --resume other", [SID]))
         self.assertIsNone(sb.cli_sid_of("claude --resume %s" % SID, [""]))
 
+    def test_cli_sid_of_names_the_last_session_id_of_ours_on_a_forks_command_line_in_either_order_of_the_ids(self):
+        # a fork launch (the first CLI of a comment thread, or of a copied session: a fork that is not a thread) names
+        # two ids: the conversation it loads (--resume) and the one it writes (--session-id). The answer is its last
+        # --session-id of ours, here the one it writes, in either order of the ids
+        who = {SID: "parent", THREAD1: "thread", SID2: "other"}.get     # names, not uuids, in a failure's output
+        fork = "claude --output-format stream-json %s --input-format stream-json" % _fork(SID, THREAD1)
+        self.assertEqual(who(sb.cli_sid_of(fork, [SID, THREAD1])), "thread")
+        self.assertEqual(who(sb.cli_sid_of(fork, [THREAD1, SID])), "thread")
+        self.assertEqual(who(sb.cli_sid_of("claude --resume=%s --session-id %s --fork-session" % (SID, THREAD1),
+                                           [SID, THREAD1])), "thread")
+        # a --session-id naming none of the ids leaves the --resume's, the conversation that fork loaded
+        self.assertEqual(who(sb.cli_sid_of(fork, [SID, SID2])), "parent")
+        # the rewind's and the fork cut's --resume-session-at is not a --resume
+        self.assertIsNone(sb.cli_sid_of("claude --resume-session-at %s --resume-session-at=%s" % (SID, SID), [SID]))
+
+    def test_with_no_session_id_of_ours_ahead_of_the_resume_and_no_prompt_after_the_flags_cli_writes_sids_gives_a_forks_own_id_a_plain_resumes_id_and_none_for_another_kernels_fork_with_both_flags_after_its_resume(self):
+        # the boot's stay-down set reads this. For these command lines, none with a --session-id of ours ahead of its
+        # --resume or an appended prompt after its flags: for a fork of ours, its own id; for another kernel's fork
+        # whose --session-id and --fork-session follow its --resume (its own id none of ours), none; for a plain
+        # resume, its --resume's id
+        who = {SID: "parent", THREAD1: "thread", SID2: "other"}.get     # names, not uuids, in a failure's output
+        writes = lambda cmd, sids: [who(i) for i in sb.cli_writes_sids(cmd, sids)]
+        fork = "claude --output-format stream-json %s --input-format stream-json" % _fork(SID, THREAD1)
+        self.assertEqual(writes(fork, [SID, THREAD1]), ["thread"])
+        self.assertEqual(writes(fork, [THREAD1, SID]), ["thread"])
+        # the same fork with every flag spelled apart from its value, as an SDK that passes them as two argv entries
+        # writes them (_cli_carries_sid: both spellings have been seen)
+        spaced = ("claude --output-format stream-json --resume %s --session-id %s --fork-session --input-format "
+                  "stream-json" % (SID, THREAD1))
+        for sids in ([SID, THREAD1], [THREAD1, SID]):
+            with self.subTest(spelling="spaced", first=who(sids[0])):
+                self.assertEqual(writes(spaced, sids), ["thread"])
+                self.assertEqual(who(sb.cli_sid_of(spaced, sids)), "thread")
+        self.assertEqual(writes(fork, [SID, SID2]), [], "a fork whose own id is no row here (another kernel's)")
+        self.assertEqual(writes("claude --resume=%s --session-id %s --fork-session" % (SID, SID2), [SID]), [])
+        self.assertEqual(writes("claude --session-id=%s --input-format stream-json" % SID2, [SID2]), ["other"])
+        self.assertEqual(writes("claude --resume %s --input-format stream-json" % SID, [SID]), ["parent"])
+        self.assertEqual(writes("claude --resume-session-at %s --resume-session-at=%s" % (SID, SID), [SID]), [])
+        # flag text in an appended system prompt ahead of the flags does not make a plain resume of ours a fork (the
+        # prompt-text test below has more of it), and an id that is not ours is not an answer
+        prompt = "claude --output-format stream-json --append-system-prompt see %s for details --resume=%s"
+        for text in ("--session-id x", "--fork-session", "--resume x"):
+            with self.subTest(prompt_text=text):
+                self.assertEqual(writes(prompt % (text, SID), [SID, SID2]), ["parent"])
+
+    def test_a_fork_whose_own_id_is_none_of_ours_is_read_from_a_whole_fork_session_and_a_session_id_that_starts_a_token_and_carries_a_value_after_the_resume(self):
+        # the fork test reads the CLI's own flags, from its --resume on, where the text is its other flags and their
+        # values (an --add-dir path, say). Every --session-id here names none of ours, and a fork whose own id is none
+        # of ours needs both flags there, --fork-session a whole token and --session-id the start of one with a value:
+        # a --fork-session with no --session-id, a --session-id with no --fork-session, either flag glued after other
+        # text, a --fork-session glued before other text, or a `--session-id=` with nothing after it leaves the
+        # --resume's id
+        who = {SID: "parent", THREAD1: "thread", SID2: "other"}.get     # names, not uuids, in a failure's output
+        writes = lambda cmd: [who(i) for i in sb.cli_writes_sids(cmd, [SID, THREAD1, SID2])]
+        argv = "claude --output-format stream-json --resume=%s --add-dir /work/%s --input-format stream-json"
+        held = {"--fork-session alone": "notes --fork-session",
+                "--session-id alone": "notes --session-id x",
+                "--fork-session glued after other text": "x--fork-session --session-id x",
+                "--fork-session glued before other text": "notes --fork-sessions --session-id x",
+                "--session-id glued after other text": "x--session-id=y --fork-session",
+                "--session-id with no value": "notes --session-id= --fork-session"}
+        for key, text in held.items():
+            with self.subTest(flags_text=key):
+                self.assertEqual(writes(argv % (SID, text)), ["parent"])
+        for text in ("notes --fork-session --session-id x", "notes --session-id=y --fork-session"):
+            with self.subTest(flags_text=text):
+                self.assertEqual(writes(argv % (SID, text)), [])
+
+    def test_flag_text_in_a_prompt_ahead_of_the_flags_does_not_free_the_session_a_process_writes(self):
+        # with the appended system prompt on the argv ahead of the CLI's own flags (the order cli_writes_sids
+        # describes), a prompt line such as a command example reads like flags. The CLI's own flags run from its last
+        # --resume of ours on: none of these prompt texts frees the conversation a plain resume or a fork of ours
+        # writes, in either order of the ids. A --session-id in the prompt naming another of our sessions, ahead of the
+        # --resume with none after it, is also what a launch that put its own --session-id first would show, so its id
+        # is held as well (the next test), and cli_sid_of names one of the held ids. The fresh launch here
+        # (--session-id=<its sid> after the prompt, and no --resume) has its own id as the LAST --session-id of ours on
+        # the command line, so that id is the answer whether the read starts at the line's start or at a --resume of
+        # ours in the prompt. The list's order carries nothing (the boot reads it into a set); each id comes once
+        who = {SID: "parent", THREAD1: "thread", SID2: "other"}.get     # names, not uuids, in a failure's output
+        foreign = "77777777-8888-4999-8aaa-000000000304"                 # an id that is none of ours
+        resume_only = {"one fork flag": "--fork-session", "the other fork flag": "--session-id x",
+                       "both fork flags": "use --fork-session with --session-id x",
+                       "both fork flags, an id that is none of ours": "--session-id=%s --fork-session" % foreign,
+                       "another of our ids after --resume": "--resume=%s" % SID2,
+                       "the parent's id after --session-id": "--session-id %s" % SID}
+        ahead = {"another of our ids after --session-id": "--session-id %s" % SID2,
+                 "a fork's command line naming our ids": "claude --resume=%s --session-id=%s --fork-session" % (SID, SID2)}
+        head = "claude --output-format stream-json --append-system-prompt see %s for details "
+        for key, text in list(resume_only.items()) + list(ahead.items()):
+            for sids in ([SID, THREAD1, SID2], [SID2, THREAD1, SID]):
+                with self.subTest(prompt_text=key, first=who(sids[0])):
+                    plain = head % text + "--resume=%s --input-format stream-json" % SID
+                    held = [who(i) for i in sb.cli_writes_sids(plain, sids)]
+                    self.assertCountEqual(held, ["parent", "other"] if key in ahead else ["parent"])
+                    self.assertIn(who(sb.cli_sid_of(plain, sids)), held)
+                    fork = head % text + "%s --input-format stream-json" % _fork(SID, THREAD1)
+                    self.assertEqual([who(i) for i in sb.cli_writes_sids(fork, sids)], ["thread"])
+                    self.assertEqual(who(sb.cli_sid_of(fork, sids)), "thread")
+                    fresh = head % text + "--session-id=%s --input-format stream-json" % SID
+                    self.assertEqual([who(i) for i in sb.cli_writes_sids(fresh, sids)], ["parent"])
+                    self.assertEqual(who(sb.cli_sid_of(fresh, sids)), "parent")
+
+    def test_a_forks_session_id_ahead_of_its_resume_holds_its_session_with_the_resumes(self):
+        # a launch that puts the fork's --session-id ahead of its --resume reads like a plain resume with that flag text
+        # in its prompt. The fork writes the --session-id's conversation, the plain resume the --resume's, so both are
+        # held; here cli_sid_of, for the rows, names the fork's session, its only --session-id of ours
+        who = {SID: "parent", THREAD1: "thread", SID2: "other"}.get     # names, not uuids, in a failure's output
+        shapes = {"--fork-session ahead of --resume": "--session-id=%s --fork-session --resume=%s" % (THREAD1, SID),
+                  "--fork-session after --resume": "--session-id %s --resume %s --fork-session" % (THREAD1, SID)}
+        for shape, argv in shapes.items():
+            for sids in ([SID, THREAD1], [THREAD1, SID]):
+                with self.subTest(shape=shape, first=who(sids[0])):
+                    cmd = "claude --output-format stream-json %s --input-format stream-json" % argv
+                    self.assertCountEqual([who(i) for i in sb.cli_writes_sids(cmd, sids)], ["parent", "thread"])
+                    self.assertEqual(who(sb.cli_sid_of(cmd, sids)), "thread")
+
+    def test_with_no_session_id_after_a_resume_of_ours_every_session_id_of_ours_ahead_of_it_is_held(self):
+        # each --session-id of ours ahead of the last --resume of ours may be the process's own (a launch that put it
+        # first) or text in the appended prompt, so, with no --session-id after that --resume, every one is held with
+        # that --resume's id, not only the last: a plain resume whose prompt names two of our ids after a --session-id,
+        # and a fork whose own --session-id comes first, ahead of a prompt that names another of our ids after one. An
+        # id that is none of ours is never held, an id named twice comes once, and cli_sid_of names one of the held ids
+        who = {SID: "parent", THREAD1: "thread", SID2: "other"}.get     # names, not uuids, in a failure's output
+        foreign = "77777777-8888-4999-8aaa-000000000304"                 # an id that is none of ours
+        tail = "for details --resume=%s --input-format stream-json" % SID
+        shapes = {
+            "a plain resume, two of our ids after --session-id in its prompt":
+                "claude --output-format stream-json --append-system-prompt see --session-id %s --session-id %s %s"
+                % (THREAD1, SID2, tail),
+            "a fork whose own --session-id comes first, another of our ids in its prompt":
+                "claude --session-id=%s --fork-session --output-format stream-json --append-system-prompt see "
+                "--session-id %s %s" % (THREAD1, SID2, tail),
+            "the same, the prompt also naming an id that is none of ours and the fork's own":
+                "claude --session-id=%s --fork-session --output-format stream-json --append-system-prompt see "
+                "--session-id %s --session-id %s --session-id=%s %s" % (THREAD1, foreign, SID2, THREAD1, tail)}
+        for shape, cmd in shapes.items():
+            for sids in ([SID, THREAD1, SID2], [SID2, THREAD1, SID]):
+                with self.subTest(shape=shape, first=who(sids[0])):
+                    held = [who(i) for i in sb.cli_writes_sids(cmd, sids)]
+                    self.assertCountEqual(held, ["parent", "thread", "other"])
+                    self.assertIn(who(sb.cli_sid_of(cmd, sids)), held)
+
+    def test_the_flag_read_gives_the_answer_a_search_for_every_id_gives(self):
+        # _last_flag_id looks the ids a command line's flags name up among ours (_OurIds, built once per pass) instead
+        # of searching the command line once per id. Over generated command lines it gives what that search gives:
+        # the id at the last place the flag names one of ours, and of two ids named at one place (one a prefix of the
+        # other) the one earlier in the list. _flag_ids, which cli_writes_sids reads for every --session-id of ours
+        # ahead of the --resume, gives the id at every such place, in order, by the same rule. The lines mix both
+        # spellings, flags glued to other text, a flag and an id with a character other than a space or "=" between
+        # them, repeated flags, a flag at the very end, and lists with repeated and empty ids, in any order
+        import random
+
+        def search(cmd, flag, sids):
+            at, hit = -1, None
+            for s in sids:
+                if not s:
+                    continue
+                i = max(cmd.rfind(flag + " " + s), cmd.rfind(flag + "=" + s))
+                if i > at:
+                    at, hit = i, s
+            return at, hit
+
+        def search_every_place(cmd, flag, sids):
+            out = []
+            for at in range(len(cmd)):
+                if cmd.startswith(flag + " ", at) or cmd.startswith(flag + "=", at):
+                    named = [s for s in sids if s and cmd.startswith(s, at + len(flag) + 1)]
+                    if named:
+                        out.append(named[0])
+            return out
+
+        rng = random.Random(41)
+        pool = [SID, SID2, THREAD1, THREAD2, SID[:18], SID + "-2", "ab", "abc", "abcd", ""]
+        values = [SID, SID2, THREAD1, THREAD2, SID[:18], SID + "-2", "ab", "abcd", "x", ""]
+        other = ["--fork-session", "x", "-", "see", "--resume-session-at", "=", "--resume", "--session-id"]
+
+        def piece():
+            if rng.random() < 0.7:
+                return (rng.choice(["--resume", "--session-id"]) + rng.choice([" ", "=", "", "  ", ":"])
+                        + rng.choice(values) + rng.choice(["", "", "x", "-2"]))
+            return rng.choice(other)
+
+        wrong, found, ties, several = [], 0, 0, 0
+        for _ in range(6000):
+            cmd = "".join(piece() + rng.choice([" ", " ", ""]) for _ in range(rng.randint(0, 7)))
+            sids = rng.sample(pool, rng.randint(0, len(pool)))
+            sids += rng.sample(sids, min(len(sids), rng.randint(0, 2)))
+            for flag in ("--resume", "--session-id"):
+                want = search(cmd, flag, sids)
+                got = (sb._last_flag_id(cmd, flag, sids), sb._last_flag_id(cmd, flag, sb._OurIds(sids)))
+                if got != (want, want):
+                    wrong.append((cmd, flag, sids, got, want))
+                every = search_every_place(cmd, flag, sids)
+                got = (sb._flag_ids(cmd, flag, sids), sb._flag_ids(cmd, flag, sb._OurIds(sids)))
+                if got != (every, every):
+                    wrong.append((cmd, flag, sids, got, every))
+                if len(every) > 1:
+                    several += 1
+                if want[1] is not None:
+                    found += 1
+                    v = want[0] + len(flag) + 1
+                    ties += any(t and t != want[1] and cmd.startswith(t, v) for t in sids)
+        self.assertEqual(wrong[:3], [], "%d of the generated cases differ" % len(wrong))
+        self.assertGreater(found, 2000, "the generated lines name our ids often enough to compare the answers")
+        self.assertGreater(ties, 500, "and often enough name two ids at one place, where the list's order decides")
+        self.assertGreater(several, 300, "and often enough name our ids at more than one place")
+
+    def test_lease_census_admits_no_unleased_process_by_an_id_in_sids_alone(self):
+        # three processes with no lease, none a child of a kernel. Only the one whose command line names one of
+        # `lastsids` is in the verdict, as an orphan; a plain resume of an id only in `sids`, and a fork naming two ids
+        # only in `sids`, are in no part of it
+        moved = "44444444-5555-4666-8777-000000000304"     # the one id in `lastsids`
+        live, closed, fork = P + 310, P + 311, P + 312
+        ps = ["  %d 1 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % (live, moved),
+              "  %d 1 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % (closed, SID2),
+              "  %d 1 /x/claude --output-format stream-json %s --input-format stream-json"
+              % (fork, _fork(SID, THREAD1))]
+        census = sb.lease_census(ps, [moved], os.getpid(), [], now=1.0, start=lambda p: None,
+                                 sids=[SID, SID2, THREAD1])
+        self.assertEqual(census, {"orphans": [live], "owned": {}, "dead_leases": [], "problems": []})
+
+    def test_the_census_cost_per_cli_does_not_grow_with_closed_rows(self):
+        # the boot hands lease_census every registry row's own sid, closed rows included, and the registry keeps its
+        # closed rows; the census names each CLI whose argv names a live row's lastSid by those ids.
+        # Searching the command line once per id for those ids would make the census grow with the closed rows for
+        # every such CLI (its admission check, a search per live row's lastSid, still grows with the live rows).
+        # Counted in lines of the kernel module run (sys.settrace), which do not depend on the machine's speed, what
+        # 39 more CLIs cost is the same with 40 ids of closed rows as with 4,000. The boot's own calls, which read the
+        # CLIs it spares or reaps, are pinned in tests/test_reap_owned_only.py
+        import sys
+        live = ["%08x-1111-4222-8333-000000000304" % i for i in range(40)]
+        prompt = "see the notes " * 150       # an appended prompt of about 2 KB, ahead of the flags
+        ps = ["  %d 1 /x/claude --output-format stream-json --append-system-prompt %s --resume=%s --input-format "
+              "stream-json" % (P + 1000 + i, prompt, live[i]) for i in range(40)]
+        closed = {n: ["%08x-5555-4666-8777-000000000304" % i for i in range(n)] for n in (40, 4000)}
+
+        kernel = sb.lease_census.__code__.co_filename
+
+        def lines_run(clis, n):
+            count = [0]
+
+            def tracer(frame, event, arg):
+                # the kernel module's lines only, so code outside it that runs inside the window is not counted
+                if frame.f_code.co_filename != kernel:
+                    return None
+                if event == "line":
+                    count[0] += 1
+                return tracer
+            old = sys.gettrace()
+            sys.settrace(tracer)
+            try:
+                census = sb.lease_census(ps[:clis], live, os.getpid(), [], now=1.0, start=lambda p: None,
+                                         sids=closed[n])
+            finally:
+                sys.settrace(old)
+            self.assertEqual(len(census["orphans"]), clis, "every CLI was admitted and read")
+            return count[0]
+
+        more = {n: lines_run(40, n) - lines_run(1, n) for n in closed}
+        self.assertGreater(more[40], 0)
+        self.assertEqual(more[4000], more[40], "the cost of each CLI grew with the ids of closed rows")
+
     def test_duplicate_clis(self):
         ps = ["  %d 1 /x/claude --output-format stream-json --resume %s --input-format stream-json" % (CLI, SID),
               "  %d %d /x/claude --output-format stream-json --resume %s --input-format stream-json" % (LIVE, KERNEL, SID),
