@@ -9,7 +9,10 @@ stands above it):
   to the run's start, the reader's row keeps its viewport offset through one attributed gap-fill write, and no scroll gesture is
   filed for a move the reader never made;
 - a live tail arriving while the reader is up in history lands at the tail (the run's last uuid moves), with no paused strip and
-  no notice: nothing pauses live updates any more.
+  no notice: nothing pauses live updates any more;
+- over the head gap hidden in the top spacer at boot, the point under the viewport top (the turn a fill anchors on) is read from where
+  the spacer starts, below #content's top padding: a top anywhere in the padding reads as the gap's start, turn 0, and a top in the
+  spacer's last 8 px still names a turn (ServedHiddenHeadPoint, 2026-10-02: the walk started at 0, 8 px above the spacer).
 
 Synthetic fixtures only (placeholder uuids, invented prose); hostname TESTHOST.
 """
@@ -185,6 +188,52 @@ class ServedHistoryRegions(WindowLab):
         self.assertTrue(b["atBottom"], "…and the view is at the bottom: %r" % b)
         self.assertTrue(b["ordered"], "the rendered rows stand in transcript order (misordered at %r): %r" % (b["misordered"], b))
         self.assertTrue(b["runsOrdered"], "the runs are ordered by lo with the open-ended run last: %r" % b["regions"])
+
+
+# The point under the viewport top over the hidden head gap (2026-10-02, the #68 follow-up), on a fresh boot: every scrollTop write and its
+# reading through the page's own hook happen in ONE task, so no scroll handler, re-window or ask runs between them; the position is put back
+# before the task ends, and nothing else runs on this page.
+POINT_DRIVER = DRIVER_HEAD + r"""
+const probe = await page.evaluate((sid) => {
+  const c = document.getElementById("content");
+  const t = document.querySelector('#content .thread[data-session="' + sid + '"]');
+  const sp = t && t.querySelector(":scope > .tx-spacer-top");
+  const spY = sp ? sp.getBoundingClientRect().top - c.getBoundingClientRect().top + c.scrollTop : null, spH = sp ? sp.offsetHeight : null;
+  const headEl = Array.from(document.querySelectorAll("#content .tx-gap")).some((g) => Number(g.dataset.lo) === 0);
+  const regions = typeof window.__rompRegions === "function" ? (window.__rompRegions() || []).map((r) => [r.kind, r.lo, r.hi]) : null;
+  const read = (y) => { c.scrollTop = y; return { at: y, st: c.scrollTop, p: typeof window.__rompTurnUnderTop === "function" ? window.__rompTurnUnderTop() : "nohook" }; };
+  const st0 = c.scrollTop;
+  const pad = [0, 4, 8].map(read);                          // the top of #content's padding, inside it, and its end (where the spacer starts)
+  const last = sp ? read(Math.round(spY + spH - 4)) : null;  // 4 px above the spacer's end, inside its last 8 px
+  c.scrollTop = st0;
+  return { spacer: !!sp, spY, spH, headEl, regions, pad, last };
+}, cfg.sid);
+process.stdout.write("RESULT:" + JSON.stringify(probe) + "\n");
+await browser.close();
+"""
+
+
+class ServedHiddenHeadPoint(WindowLab):
+    """turnUnderTop walks the units hidden in the top spacer from where the spacer starts (topSpacerY), below #content's top padding,
+    and reads a top in that padding as the spacer's start (2026-10-02). It walked from 0: scrollTop 0 read turn 0, but a top further into
+    the padding or at the spacer's start named a point past the gap's start that grew with the top (the base read 0.029 at scrollTop 4,
+    inside the padding, and 0.058 at 8, where the spacer starts), and a top in the spacer's last 8 px named none."""
+
+    def test_the_point_over_the_hidden_head_gap_is_read_from_where_the_top_spacer_starts(self):
+        r = self._drive(POINT_DRIVER, "point")
+        r.pop("_klog", None)
+        print("POINT:", json.dumps(r), file=sys.stderr)
+        rs = r["regions"] or []
+        self.assertTrue(rs and rs[0][0] == "gap" and rs[0][1] == 0, "the boot holds a head gap (the premise): %r" % r)
+        self.assertTrue(r["spacer"] and not r["headEl"], "…hidden in the top spacer, with no element of its own (the premise): %r" % r)
+        self.assertGreaterEqual(r["spY"], 8, "the spacer starts at or below scrollTop 8, the end of #content's 8 px top padding, so the reads at 0, 4 and 8 are all at or above it (the premise): %r" % r)
+        for got in r["pad"]:
+            self.assertEqual(got["st"], got["at"], "the write took: %r" % got)
+            self.assertIsNotNone(got["p"], "a top at scrollTop %r names a point: %r" % (got["at"], r["pad"]))
+            self.assertLess(abs(got["p"]), 1e-6, "a top at scrollTop %r, at or above where the spacer starts (%r), reads as the head gap's start, turn 0: %r" % (got["at"], r["spY"], r["pad"]))
+        last = r["last"] or {}
+        self.assertTrue(last.get("st") == last.get("at") and last.get("at", 0) > r["spY"] + r["spH"] - 8, "the last read sits inside the spacer's last 8 px: %r (spacer at %r, %r px)" % (last, r["spY"], r["spH"]))
+        self.assertIsNotNone(last.get("p"), "a top inside the spacer's last 8 px names a turn: %r" % last)
 
 
 if __name__ == "__main__":

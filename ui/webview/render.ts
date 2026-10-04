@@ -13300,8 +13300,13 @@ function layoutLimitPx(): number {
   return h;
 }
 if (typeof window !== "undefined") window.addEventListener("resize", () => { layoutLimit = null; });
-/** The most px the page's gaps may stand for together: their share of the measured layout limit (chat-regions.ts GAPS_SHARE). */
-function gapsMaxPx(): number { return layoutLimitPx() * GAPS_SHARE; }
+/** The most px the page's gaps may stand for together: their share of the measured layout limit (chat-regions.ts GAPS_SHARE), or the
+ *  figure a served lab holds it at (__rompGapsBound, 2026-10-02: UnreachableEndInsideAGapSettles holds it at the fallback's share, so a gap
+ *  stands past the measured limit where the layout clamps, the case a fill's quiet gaps exist for, which no lab reaches at the measured
+ *  share). */
+let gapsBoundHeld: number | null = null;
+function gapsMaxPx(): number { return gapsBoundHeld ?? layoutLimitPx() * GAPS_SHARE; }
+if (typeof window !== "undefined") (window as any).__rompGapsBound = (px: number | null): void => { gapsBoundHeld = typeof px === "number" && px > 0 ? px : null; };
 /** The gap units' heights, by unit: each its own estimate (turns x px-per-turn), not the average row (T386 stage 2). */
 function gapUnitsOf(items: DisplayItem[], pxPerTurn: number | undefined): Map<number, number> | undefined {
   const gu = new Map<number, number>();
@@ -13380,14 +13385,21 @@ function noteTypedTurns(v: View, typed: number, rows: number): void {
   chatDiagRow("turnCountTyped", { sid, cause, typed, rows });
 }
 
+/** Where the top spacer starts in scroll space (below #content's top padding), 0 when the view has none: the origin of every walk over
+ *  the units hidden above the window (hiddenUnitTop, unitAtScroll, turnUnderTop, yOfTurn, preJumpIntoGap), so they agree on where a
+ *  hidden unit stands (2026-10-02: four walked from 0 and one from the spacer, so a pre-jump to the head gap's start wrote scrollTop 0, 8 px
+ *  above the gap, where no turn is named and a fill could neither anchor on the point nor ask for the reader's page). */
+function topSpacerY(v: View, content: HTMLElement): number {
+  const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
+  return top ? top.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop : 0;
+}
 /** The estimated top, in scroll space, of a unit hidden in a spacer (the same walk unitAtScroll maps a position by: each hidden unit its
  *  own height, a gap's estimate else the average), or null when it is not hidden. */
 function hiddenUnitTop(v: View, content: HTMLElement, u: number): number | null {
   const avg = v.avgTurnH ?? 60;
   if (u < (v.winStart ?? 0)) {
-    const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
-    if (!top) return null;
-    let y = top.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+    if (!v.el.querySelector(".tx-spacer-top")) return null;
+    let y = topSpacerY(v, content);
     for (let k = 0; k < u; k++) y += v.gapUnits?.get(k) ?? avg;
     return y;
   }
@@ -13408,10 +13420,10 @@ function unitAtScroll(v: View, content: HTMLElement): number {
   const cTop = content.getBoundingClientRect().top;
   const yOf = (e: HTMLElement) => e.getBoundingClientRect().top - cTop + st;   // position in scroll space
   const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
-  const topH = top ? top.offsetHeight : 0;
-  if (st < topH) {   // in the top spacer: walk the hidden units by their own heights (a gap's estimate, else the average)
-    if (!v.gapUnits) return Math.max(0, Math.floor(st / avg));
-    let y = 0;
+  const topH = top ? top.offsetHeight : 0, topY = topSpacerY(v, content);
+  if (st < topY + topH) {   // in the top spacer: walk the hidden units by their own heights (a gap's estimate, else the average) from where it starts
+    if (!v.gapUnits) return Math.max(0, Math.floor((st - topY) / avg));
+    let y = topY;
     for (let u = 0; u < (v.winStart ?? 0); u++) { y += v.gapUnits.get(u) ?? avg; if (st < y) return u; }
     return Math.max(0, (v.winStart ?? 1) - 1);
   }
@@ -15855,13 +15867,13 @@ function preJumpIntoGap(sid: string, t: number | null | undefined, rec: WindowAs
       if (!g.classList.contains("tx-gap-loading")) { g.classList.add("tx-gap-loading"); g.appendChild(gapGlyph()); }
       y = g.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop + frac * g.offsetHeight;
     } else {
-      // the gap sits inside a spacer: its place is the hidden units' heights before it (the walk unitAtScroll takes), and the
-      // re-window the write provokes renders it with its glyph
+      // the gap sits inside a spacer: its place is the hidden units' heights before it (the walk unitAtScroll takes: for a gap above the
+      // window, from where the top spacer starts, topSpacerY), and the re-window the write provokes renders it with its glyph
       const items = displayItems(s);
       const idx = items.findIndex((it) => it.kind === "gap" && it.lo === r.lo && it.hi === r.hi);
       if (idx < 0) { landTrail.push("pre-jump-noitem"); return; }
       const avg = v.avgTurnH ?? 60, own = hiddenHeight(v, idx, idx + 1, avg);
-      if (idx < (v.winStart ?? 0)) y = hiddenHeight(v, 0, idx, avg) + frac * own;
+      if (idx < (v.winStart ?? 0)) y = topSpacerY(v, content) + hiddenHeight(v, 0, idx, avg) + frac * own;
       else { const bot = v.el.querySelector(".tx-spacer-bot") as HTMLElement | null; y = content.scrollHeight - (bot ? bot.offsetHeight : 0) + hiddenHeight(v, v.winEnd ?? idx, idx, avg) + frac * own; }
     }
     v.stick = false;   // a navigation's move ends follow mode (else the re-window the write provokes lands the reader back at the bottom)
@@ -20160,9 +20172,12 @@ function gapElement(s: Session, it: { lo: number; hi: number }, v: View): HTMLEl
   gapObserver?.observe(g);
   return g;
 }
-// A gap element a FILL built (2026-10-01): its first observation is the page's own rebuild, not the reader, so it asks nothing; the
-// fill's completion asks for a reader still parked in a gap (fillInPlace). Asking on it walked a gap that could not leave the viewport
-// (a layout past the browser's limit) one page per reply, for as long as pages came.
+// A gap element a FILL built (2026-10-01; since 2026-10-02 only while the layout stands at the measured limit, layoutLimitPx): its first
+// observation is the page's own rebuild, not the reader, so it asks nothing; the fill's completion asks for a reader still parked in a gap
+// (fillInPlace). Asking on it walked a gap that could not leave the viewport (a layout past the browser's limit) one page per reply, for as
+// long as pages came. Below the measured limit a fill's gaps are not quiet (2026-10-02): a gap the fill leaves on screen next to the page it
+// brought asks on its first observation like any gap, else the rest of the pane stayed blank, with no loader and nothing asked, until the
+// reader scrolled again.
 const quietGaps = new WeakSet<Element>();
 let fillBuilding = false;
 /** Ask for the page a gap element in view stands for, by where the reader is against it: INSIDE it (both its edges off the viewport, a
@@ -20284,12 +20299,12 @@ function turnUnderTop(v: View, s: Session, items: DisplayItem[], turns: number[]
     if (tr != null && tr !== "") return Number(tr) + (top - y0) / h;
   }
   const spacer = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
-  const topH = spacer ? spacer.offsetHeight : 0;
-  if (top < topH) {
-    const avg = v.avgTurnH ?? 60; let y = 0;
+  const topH = spacer ? spacer.offsetHeight : 0, topY = topSpacerY(v, content);
+  if (spacer && top < topY + topH) {   // the walk starts where the spacer does (topSpacerY); a top in the padding above it is its start
+    const at = Math.max(top, topY), avg = v.avgTurnH ?? 60; let y = topY;
     for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
       const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
-      if (top < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((top - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
+      if (at < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((at - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
       y += h;
     }
   }
@@ -20306,7 +20321,7 @@ function yOfTurn(v: View, s: Session, items: DisplayItem[], turns: number[], con
     const tr = c.dataset.turn; if (tr == null || tr === "" || Number(tr) !== whole) continue;   // the row names its turn (round six)
     return c.getBoundingClientRect().top - cTop + st + c.offsetHeight * Math.min(1, Math.max(0, t - whole));
   }
-  const avg = v.avgTurnH ?? 60; let y = 0;
+  const avg = v.avgTurnH ?? 60; let y = topSpacerY(v, content);   // a hidden unit: the spacer's walk, from where the spacer starts
   for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
     const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
     if (it.kind === "gap" && t >= it.lo && t < it.hi) return y + h * ((t - it.lo) / (it.hi - it.lo));
@@ -20319,6 +20334,11 @@ function fillInPlace(sid: string, v: View | undefined): void {
   const content = document.getElementById("content"), s = sessions.get(sid);
   if (!content || !v || !s || sid !== activeId) { showActive(); return; }
   const topBefore = content.scrollTop;
+  // the layout stands at the measured limit (layoutLimitPx: the probe's reading, or the fallback where the probe reads 0), read once before
+  // either rebuild: only there are this fill's gap elements quiet (quietGaps), so below the limit a gap it leaves on screen asks on its first
+  // observation like any gap (askGapElement: the page at its edge in view, or, for a reader inside it, the page under the viewport top;
+  // nothing while a page of it is on the wire) (2026-10-02)
+  const atLimit = content.scrollHeight >= layoutLimitPx() - 1;
   const keep = captureScrollAnchor(content, v);
   // a row anchors the fill when it INTERSECTS the viewport, whatever the sign of its top (round four, medium 1: a partially visible
   // top row, the normal state after any wheel, is an anchor too); a reader with no row on screen (a jump to the head, a cancelled
@@ -20344,7 +20364,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
     if (u < 0) u = unitAtScroll(v, content);
   }
   v.stick = false;   // a fill never follows the tail: the reader is where they are
-  fillBuilding = true;   // the gap elements this rebuild makes are the page's own (quietGaps)
+  fillBuilding = atLimit;   // the gap elements this rebuild makes are the page's own (quietGaps), at the limit only
   try {
     if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
     else syncView(sid);
@@ -20365,7 +20385,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
   if (pointBefore != null && !rowOnScreen(v, content)) {
     const u2 = unitOfTurn(items, turnsNow, Math.floor(pointBefore));
     if (u2 >= 0) {
-      fillBuilding = true;
+      fillBuilding = atLimit;
       try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting"); }
       finally { fillBuilding = false; }
       const y2 = yOfTurn(v, s, items, turnsNow, content, pointBefore);
@@ -20374,8 +20394,8 @@ function fillInPlace(sid: string, v: View | undefined): void {
   }
   // the fill's own completion meets a parked reader (2026-10-01): the turn under the viewport top before the fill is still in a gap (the
   // page that landed was another's, or the reader's gap was busy with it) and the reader has not moved, so the page holding it is asked
-  // now. A fill that brought that turn asks nothing: the rebuilt gap's first observation is quiet, so a gap that cannot leave the view
-  // (a layout past the browser's limit) is not walked one page per reply.
+  // now. A fill that brought that turn asks nothing here: below the measured limit a rebuilt gap left on screen asks on its first
+  // observation, and at the limit that observation is quiet, so a gap that cannot leave the view is not walked one page per reply.
   if (pointBefore != null && s.regions) { const gp = gapAt(s.regions, Math.floor(pointBefore)); if (gp) requestTurns(sid, gp, "inside", pointBefore); }
   if (activeId) applyCommentMarks(activeId);
   scheduleRailSticky();
