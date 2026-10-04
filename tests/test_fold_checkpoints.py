@@ -2007,9 +2007,14 @@ class CarryReadsOncePerChange(Base):
         """A stat of the document that fails for a reason other than a missing file (here a checkpoints directory without its
         search bit) reads as no document at the restore and at the write's carry, as a missing one does, and never raises.
         Unlike a missing one it is said once on stderr, naming the document and the error: the file is read whole and the
-        write fails, and nothing else would say why. No fallback is counted, and the document is not removed."""
-        self.fold("t"); self.assertTrue(em.checkpoint_write(self.p))
+        write fails, and nothing else would say why. No fallback is counted, and the document is not removed. The restore's
+        stat (the shared read's) says it here; the write's own, the carry's, is pinned by the next test."""
         d, cp = jd.STATE / "checkpoints", self.cp()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.fold("t"); self.assertTrue(em.checkpoint_write(self.p))   # the first fold and write: no document yet
+        self.assertEqual([ln for ln in err.getvalue().splitlines() if str(cp) in ln], [],
+                         "a missing document is the quiet common case: nothing names it")
         self.assertEqual(cp.parent, d)
         before, mode = cp.read_bytes(), d.stat().st_mode
         os.chmod(d, 0o600)                               # readable and writable, not searchable: a stat of any file in it fails
@@ -2021,14 +2026,36 @@ class CarryReadsOncePerChange(Base):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(self.fold("t"), [0, 1, 2, 3], "the restore reads the file whole")
+        said = [ln for ln in err.getvalue().splitlines() if str(cp) in ln]
+        self.assertEqual(len(said), 1, "the restore's read says it: %r" % err.getvalue())
+        self.assertIn(os.strerror(errno.EACCES), said[0])
+        with contextlib.redirect_stderr(err):
             self.assertFalse(em.checkpoint_write(self.p), "the carry reads no document, and the write's own tmp file fails")
         said = [ln for ln in err.getvalue().splitlines() if str(cp) in ln]
         self.assertEqual(len(said), 1, "said once across the restore and the write: %r" % err.getvalue())
-        self.assertIn(os.strerror(errno.EACCES), said[0])
         self.assertEqual((em.checkpoint_stats()["fallbacks"], em.checkpoint_stats()["restoredFolds"]), ({}, {}),
                          "no fallback counted, nothing restored")
         os.chmod(d, mode)
         self.assertEqual(cp.read_bytes(), before, "and the document stays as it was")
+
+    def test_a_write_whose_document_stat_fails_says_so_once(self):
+        """The write's carry stats the document on its own path: a running kernel whose checkpoints directory fails after
+        boot reaches only that stat (its folds hold their cursors, so no restore reads the document), and its writes then
+        fail with that line the one word on why."""
+        d, cp = jd.STATE / "checkpoints", self.cp()
+        self.fold("t"); self.assertTrue(em.checkpoint_write(self.p))
+        _append(self.p, {"n": 3}); self.assertEqual(self.fold("t"), [0, 1, 2, 3])   # the cursor advances; nothing reads the document
+        mode = d.stat().st_mode
+        os.chmod(d, 0o600)
+        self.addCleanup(os.chmod, d, mode)
+        if os.access(d, os.X_OK):
+            self.skipTest("this account searches a directory whatever its mode (root)")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertFalse(em.checkpoint_write(self.p), "the carry reads no document, and the write's own tmp file fails")
+        said = [ln for ln in err.getvalue().splitlines() if str(cp) in ln]
+        self.assertEqual(len(said), 1, "the write's carry says it: %r" % err.getvalue())
+        self.assertIn(os.strerror(errno.EACCES), said[0])
 
     def test_the_exit_drains_budget_counts_the_paths_it_attempted(self):
         """checkpoint_write_dirty's budget (the exit drain's, inside the manager's grace) is keyed on the paths attempted, as
@@ -2082,8 +2109,9 @@ class CarryReadsOncePerChange(Base):
         self.assertEqual(self.states().get("v"), (3, [7]), "and carries its entry")
 
     def test_the_index_holds_at_most_its_bound_and_the_oldest_path_reads_once_after(self):
-        """_DOC_INDEX is bounded in paths (_DOC_INDEX_MAX): over it the oldest path is let go, and that path's next carry reads
-        its document once, as a carry with no index entry does. Here the bound is 2 and three files are written."""
+        """_DOC_INDEX is bounded in paths (_DOC_INDEX_MAX): over it the path least recently written or loaded is let go, and
+        that path's next carry reads its document once, as a carry with no index entry does. Here the bound is 2 and three
+        files are written."""
         saved = em._DOC_INDEX_MAX; em._DOC_INDEX_MAX = 2
         self.addCleanup(setattr, em, "_DOC_INDEX_MAX", saved)
         paths = [str(self.td / ("bound-%d.jsonl" % i)) for i in range(3)]
@@ -2097,7 +2125,27 @@ class CarryReadsOncePerChange(Base):
         self.assertTrue(em.checkpoint_write(paths[0]))
         self.assertEqual((self.doc_reads(paths[0]) - reads, self.consults() - n0), (size, 1), "its next carry reads its document once")
         with em._CKPT_LOCK:
-            self.assertEqual(list(em._DOC_INDEX), [paths[2], paths[0]], "and the write files it again as the newest")
+            self.assertEqual(list(em._DOC_INDEX), [paths[2], paths[0]], "and the carry's load files it again as the newest")
+
+    def test_a_write_files_its_path_as_the_newest_in_the_index(self):
+        """A write moves its path to the newest end of the index, so the bound lets go of the path least recently written or
+        loaded, not the first one ever filed: without the move, a path written every cycle would go by its first filing's
+        age, and its next carry would read its document again. At a bound of 2: p0 and p1 written, p0 again after an append
+        (its carry reads nothing, so the write alone files it), then p2. p1 goes."""
+        saved = em._DOC_INDEX_MAX; em._DOC_INDEX_MAX = 2
+        self.addCleanup(setattr, em, "_DOC_INDEX_MAX", saved)
+        paths = [str(self.td / ("newest-%d.jsonl" % i)) for i in range(3)]
+        for q in paths:
+            _write(q, [{"n": k} for k in range(3)])
+        for q in paths[:2]:
+            self.fold("t", q); self.assertTrue(em.checkpoint_write(q))
+        _append(paths[0], {"n": 3}); self.assertEqual(self.fold("t", paths[0]), [0, 1, 2, 3])
+        n0 = self.consults()
+        self.assertTrue(em.checkpoint_write(paths[0]))
+        self.assertEqual(self.consults() - n0, 0, "the premise: p0's carry loaded nothing")
+        self.fold("t", paths[2]); self.assertTrue(em.checkpoint_write(paths[2]))
+        with em._CKPT_LOCK:
+            self.assertEqual(list(em._DOC_INDEX), [paths[0], paths[2]], "p1, the least recently written, goes; p0 stays")
 
 
 class CursorTableBound(Base):
