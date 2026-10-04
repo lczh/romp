@@ -18408,39 +18408,90 @@ def _comments_path(sid):
     return jd.STATE / "comments" / (sid + ".json")
 
 
+def _read_comments(sid):
+    """The store read through one descriptor: ((mtime_ns, size, ino) of the bytes decoded, from os.fstat, and the dict).
+    Raises FileNotFoundError for a missing store, and another OSError or a ValueError for one that could not be read or
+    decoded, a store nested too deep to decode included; a decoded value that is not a dict reads as {"threads": []}."""
+    with _comments_path(sid).open("rb") as f:
+        st = os.fstat(f.fileno())
+        try:
+            d = json.loads(f.read())
+        except RecursionError as e:              # too deep to decode: as undecodable as a file that is not JSON
+            raise ValueError(str(e)) from e
+    return (st.st_mtime_ns, st.st_size, st.st_ino), (d if isinstance(d, dict) else {"threads": []})
+
+
 def _load_comments(sid):
     try:
-        d = json.loads(_comments_path(sid).read_text())
-        return d if isinstance(d, dict) else {"threads": []}
+        return _read_comments(sid)[1]
     except (OSError, ValueError):
         return {"threads": []}
 
 
-_comments_memo = {}      # sid -> ((mtime_ns, size, ino), dict) — the store decoded once per file version
+_comments_memo = {}      # sid -> ((mtime_ns, size, ino), dict): the store decoded once per file version, never a failed read
+_comments_read_failed = set()   # sids in a failure episode (see _comments_read_failure): one stderr line per episode
+
+
+def _comments_read_failure(sid, e):
+    """A store's stat or read failed with anything but FileNotFoundError: drop its memo, and say so on stderr once per
+    failure episode (a read that works, or _comments_store_exists or the loader finding the store missing, ends it)."""
+    _comments_memo.pop(sid, None)
+    if sid not in _comments_read_failed:
+        _comments_read_failed.add(sid)
+        sys.stderr.write("comments store for %s could not be read (%s: %s); nothing is remembered, the next build "
+                         "reads it again\n" % (sid, type(e).__name__, e))
 
 
 def _load_comments_cached(sid):
     """_load_comments for the READ-ONLY per-push callers (_comments_frame, _comment_markers), decoded once
     per file version: the store is published by _save_comments through _atomic_write (a rename), so its
     (mtime_ns, size, ino) is an exact key. Every caller gets its own deep copy — the memo's dict is never
-    handed out, so no reader can leak a write into the next reader. A missing or unreadable store reads
-    as {"threads": []} exactly as _load_comments does, and drops any memo (the file is gone).
-    Writers (_comment_thread and the handlers under _comments_lock) keep reading fresh through
-    _load_comments. Idle cost before this: twelve stores re-read and re-decoded on every pusher cycle."""
-    p = _comments_path(sid)
+    handed out, so no reader can leak a write into the next reader. A store found missing
+    (FileNotFoundError) reads as {"threads": []} and drops any memo. Any other failure of the stat, of a
+    miss's read or decode, or of the copy (EMFILE, EIO, a truncated file, one that is not JSON, one nested
+    too deep to decode or to copy) RAISES an OSError or ValueError, logged once per episode by
+    _comments_read_failure, and leaves nothing in the memo: a remembered failure showed the session as
+    having no threads (2026-10-02). An OSError belongs to that pass, and a version that does not decode is
+    read again on every build too, so no failed read is ever served from the memo. A hit costs a stat; a
+    miss reads through _read_comments, so the key stored is the one of the bytes decoded. Writers
+    (_comment_thread and the handlers under _comments_lock) keep reading fresh through _load_comments.
+    Idle cost before this: twelve stores re-read and re-decoded on every pusher cycle."""
     try:
-        st = os.stat(p)
-        key = (st.st_mtime_ns, st.st_size, st.st_ino)
-    except OSError:
+        st = os.stat(_comments_path(sid))
+        hit = _comments_memo.get(sid)
+        if hit is None or hit[0] != (st.st_mtime_ns, st.st_size, st.st_ino):
+            hit = _read_comments(sid)
+            if len(_comments_memo) > 512:
+                _comments_memo.clear()
+            _comments_memo[sid] = hit
+        try:
+            out = copy.deepcopy(hit[1])
+        except RecursionError as e:              # decodes, but is too deep to copy
+            raise ValueError(str(e)) from e
+    except FileNotFoundError:
         _comments_memo.pop(sid, None)
+        _comments_read_failed.discard(sid)
         return {"threads": []}
-    hit = _comments_memo.get(sid)
-    if hit is None or hit[0] != key:
-        if len(_comments_memo) > 512:
-            _comments_memo.clear()
-        hit = (key, _load_comments(sid))
-        _comments_memo[sid] = hit
-    return copy.deepcopy(hit[1])
+    except (OSError, ValueError) as e:
+        _comments_read_failure(sid, e)
+        raise
+    _comments_read_failed.discard(sid)
+    return out
+
+
+def _comments_store_exists(sid):
+    """The per-push callers' check for a store: False when the stat finds none (FileNotFoundError), which ends a failure
+    episode, True when it finds one. Any other stat failure (EACCES, EIO, ENOTDIR) is a failed read:
+    _comments_read_failure, and the OSError raises, inside the callers' try."""
+    try:
+        os.stat(_comments_path(sid))
+    except FileNotFoundError:
+        _comments_read_failed.discard(sid)
+        return False
+    except OSError as e:
+        _comments_read_failure(sid, e)
+        raise
+    return True
 
 
 # Each store's write generation (2026-10-01), bumped AFTER every save lands: the pusher reads it before it builds a comments
@@ -19652,8 +19703,9 @@ def _echo_landing_atoms(turns, live):
 
 
 def _comments_frame(sid, live_map=None):
-    """The chat pane's {type:"comments"} frame for parent session `sid`, or None when it has never
-    had a thread. Built per push for sessions WITH a store (few) — _send_client's dedup keeps an
+    """The chat pane's {type:"comments"} frame for parent session `sid`, or None when the stat of its
+    store finds none (FileNotFoundError), as for a session that has never had a thread. Built in full
+    per push only for sessions whose store the stat finds (few); _send_client's dedup keeps an
     unchanged frame off the wire.
 
     Two per-thread bits carry the mark's colour, and the kernel is their ONE truth (T237, the user
@@ -19669,14 +19721,23 @@ def _comments_frame(sid, live_map=None):
     which clears that slot). The client joins it with the anchored turn to draw the mark (render.ts applyCommentMarks).
     The pusher reads the store's write generation (_comments_gen) BEFORE calling this and sends the frame only while that
     generation stands (_send_comments_frame), so a frame built before a create saved its row never follows that create's
-    answer onto the wire."""
-    p = _comments_path(sid)
-    if not p.exists():
-        return None
+    answer onto the wire.
+
+    A stat of the store that fails with anything but FileNotFoundError (a session with no store included, when the
+    comments directory cannot be searched), or a read of it that fails (_comments_store_exists or _load_comments_cached
+    raises), gives {"type": "comments", "id", "error"} with no `threads`: the page keeps the threads it holds and says
+    the read failed, and the next cycle reads the store again. The pusher sends it like any frame, and the rest of the
+    push goes on."""
+    try:
+        if not _comments_store_exists(sid):
+            return None
+        rows = _load_comments_cached(sid).get("threads") or []
+    except (OSError, ValueError) as e:
+        return {"type": "comments", "id": sid, "error": getattr(e, "strerror", None) or str(e) or type(e).__name__}
     be = _sdk()
     now = int(time.time())
     threads = []
-    for th in _load_comments_cached(sid).get("threads") or []:
+    for th in rows:
         row = _comment_frame_entry(th, be, now, live_map)
         if row is not None:
             threads.append(row)
@@ -19850,12 +19911,19 @@ def _comment_markers(sid):
     session — open + resolved only (a promoted thread is a session with a branch connector; a
     dead-promoted one is done). anchorT (stamped at create) places the square at the commented
     message; rows from before that stamp fall back to createdT, the comment's own moment. One
-    exists() stat for every session that never had a thread."""
-    p = _comments_path(sid)
-    if not p.exists():
+    stat for every session that never had a thread. A stat of the store that fails with anything but
+    FileNotFoundError, or a read of it that fails (_comments_store_exists or _load_comments_cached
+    raises), gives no squares for this build instead of a raise, which would end build_timeline and,
+    inside _push, that cycle's push build. The failure is logged once per episode and nothing is
+    remembered, so the next build reads the store again."""
+    try:
+        if not _comments_store_exists(sid):
+            return []
+        rows = _load_comments_cached(sid).get("threads") or []
+    except (OSError, ValueError):
         return []
     out = []
-    for th in _load_comments_cached(sid).get("threads") or []:
+    for th in rows:
         if (th.get("status") or "open") not in ("open", "resolved"):
             continue
         out.append({"t": th.get("anchorT") or th.get("createdT") or 0,
