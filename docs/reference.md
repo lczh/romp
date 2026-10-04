@@ -129,7 +129,7 @@ yields nothing rather than an error.
 
 ### Notice cards: a feed card without a judge
 
-`romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [-b <board>] [-c <category>] [--body-file <path>] [--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]`, or the shorthand `romp card "title" "text"`, posts a **notice card** to the feed: a card the kernel makes from what you hand it, with no judge involved (design: plans/notice-cards.md). With no session named the card is **owner-less** and shows at the **top** of the feed under the name Notes, above every session's cards (outside a session that is the default; inside one `ROMP_SID` owns the card unless you pass `--no-session`); `-s <name>` gives it to a session. `-k` names the card: a second post under the same key is a **revision** (it replaces the earlier card on the board, and shows again even if you had dismissed the earlier one, since it carries new information, and its number counts the archived posts of the key too, so a dismissed card's id is never minted again); with no `-k` the command mints a key and prints it, so a later `romp card -k <key> ...` revises the card. The body is markdown, rendered through the chat's sanitizer; `--attach` names a file the card shows inline when it is an image (the kernel judges it as the hover preview does: your home or the session's folder, no secrets-shaped names, the size caps, and keeps a pinned copy of an image as posted; an owner-less card's attachment is judged against your home alone). A card leaves the board on your dismissal (Clear; Undo restores it, copying its rows back out of the archive when the retention pass has already moved them), on a revision, or at `--expires` seconds from the post. `--needs-you` files it under Needs you. The kernel keeps every post in `notices/<session>.jsonl` under the state directory (`notices/notes.jsonl` for owner-less cards) and archives dismissed, expired and superseded rows to `notices-archive/`; a home shows at most fifty live keys at once, the oldest superseded past that. The same door is `POST /notice` on the kernel (the `/watch` shape: `{"id"|"name", "key", "title", "body"?, "attachment"?, "needsYou"?, "expiresAt"?, "producer"?}`; with neither `id` nor `name` the card is owner-less; `{"id"|"name", "expire": "<key>"}` retires a card early), and producers inside romp call the kernel's `post_notice` in process. An owner-less card carries no actions. `-b <board>` files the card on a board of yours (`plans/card-boards.md`): an unknown board is created on first use with the category `-c` names (or `notes`), a category unknown to your board is added to it, and the posted line names the board and says when the post created it, so a typo in `-b` is a new board you can see at once (`romp board list` names it, `romp board remove` takes it away while no card stands on it). `-c` alone names a feed category (`working`, `needs_input`, `completed`). `--needs-you` on a board is that board's needs-you category, and is refused when its definition names none.
+`romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [-b <board>] [-c <category>] [--body-file <path>] [--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]`, or the shorthand `romp card "title" "text"`, posts a **notice card** to the feed: a card the kernel makes from what you hand it, with no judge involved (design: plans/notice-cards.md). With no session named the card is **owner-less** and shows at the **top** of the feed under the name Notes, above every session's cards (outside a session that is the default; inside one `ROMP_SID` owns the card unless you pass `--no-session`); `-s <name>` gives it to a session. `-k` names the card: a second post under the same key is a **revision** (it replaces the earlier card on the board, and shows again even if you had dismissed the earlier one, since it carries new information, and its number counts the archived posts of the key too, so a dismissed card's id is never minted again); with no `-k` the command mints a key and prints it, so a later `romp card -k <key> ...` revises the card. The body is markdown, rendered through the chat's sanitizer; `--attach` names a file the card shows inline when it is an image (the kernel judges it as the hover preview does: your home or the session's folder, no secrets-shaped names, the size caps, and keeps a pinned copy of an image as posted; an owner-less card's attachment is judged against your home alone). A card leaves the board on your dismissal (Clear; Undo restores it, copying its rows back out of the archive when the retention pass has already moved them), on a revision, or at `--expires` seconds from the post. `--needs-you` files it under Needs you. The kernel keeps every post in `notices/<session>.jsonl` under the state directory (`notices/notes.jsonl` for owner-less cards) and archives dismissed, expired and superseded rows to `notices-archive/`; a home shows at most fifty live keys at once besides the cards of messages held for your approval, the oldest superseded past that (a card you post with `--producer postal` and no session is taken for one of those: it holds no slot, and the kernel expires it as it does the card of a message no longer held). The same door is `POST /notice` on the kernel (the `/watch` shape: `{"id"|"name", "key", "title", "body"?, "attachment"?, "needsYou"?, "expiresAt"?, "producer"?}`; with neither `id` nor `name` the card is owner-less; `{"id"|"name", "expire": "<key>"}` retires a card early), and producers inside romp call the kernel's `post_notice` in process. An owner-less card carries no actions. `-b <board>` files the card on a board of yours (`plans/card-boards.md`): an unknown board is created on first use with the category `-c` names (or `notes`), a category unknown to your board is added to it, and the posted line names the board and says when the post created it, so a typo in `-b` is a new board you can see at once (`romp board list` names it, `romp board remove` takes it away while no card stands on it). `-c` alone names a feed category (`working`, `needs_input`, `completed`). `--needs-you` on a board is that board's needs-you category, and is refused when its definition names none.
 
 ### Card boards: your own categories
 
@@ -1659,7 +1659,10 @@ cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
 reads only the bytes past the offset and resumes each fold from its recorded
 state; a checkpoint that does not verify (its version, its path, a file that
 shrank, a rewrite under the guard, a corrupt document) falls back to a whole
-read, is counted per reason in `/perf` and said once on stderr. Every fold
+read, is counted per reason in `/perf` and said once on stderr. A document
+whose stat fails for any reason but its absence (a `checkpoints/` directory
+the kernel cannot search) reads as no document, so the file is read whole,
+and is said once on stderr with the error, its file left in place. Every fold
 holding a cursor inside the entry's held records is recorded at its own count
 (a fold stepped by builds rather than by the settle may lag the leaf), and the
 document's cut is the lowest of them, so the next kernel's tail read holds what
@@ -1709,7 +1712,8 @@ document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
 The record drops at the events that end a file's use (a leaf a second /clear
-retired, a dead timeline lane's leaf and anchor) take the same write, budget
+retired, the session's first file at its first /clear when the new leaf's parse
+does not read it, a dead timeline lane's leaf and anchor) take the same write, budget
 and deferral with no two-minute wait, since the event says the file's use
 ended (a drop the budget defers is paid later through the quiet drop's own
 path, after that wait): the judges' episode scan after the second /clear, and
@@ -2690,8 +2694,33 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `pass_cpu_ms_sum`, `pass_ms_p50`, `pass_ms_p90`, `pass_ms_ring_max`,
   `ring_n`, `passFailed` (a pass that raised out of the loop and was
   skipped), `splitFailed`, `firstPass` (the boot's first pass's stage split,
-  the shape of `pusher.firstCycle`) and `stageRing`. The pass's container
-  stage is `jobsPass`, its opening `jobs.prelude`; each job is still its
+  the shape of `pusher.firstCycle`), `stageRing` and `cpuByJob` (per job this
+  thread ran, by its `<job>` name: `runs`, one per call by the pass, a call
+  that returned early on the job's own pace or raised included, and `cpuMs`,
+  the thread's own CPU inside the job, which includes any collection the
+  interpreter ran on this thread during the job, a pause set by the heap and
+  not by the job. Both generation-2 tallies, `gc.gen."2"` and a ring row's
+  `n2` and `ms2`, count every thread's collections, so over an interval an
+  unmoved tally rules a collection out of a job's `cpuMs` and a moved one
+  does not put it there (the freeze controller's own collections, counted
+  under `gc.freeze.collections`, run on the pusher thread and reach a job
+  only as a wait in its wall; a job still open at the first read records its
+  CPU, any collection inside it included, only when it ends, so take the
+  tally from a read made before that job began or set such a job aside; a
+  read of `/perf?stacks=1` names the job open at that read, by the `jobs`
+  row's stage mark, though it samples the stacks after copying the counters
+  and building the rest of the snapshot, so a job that ended in between
+  shows as `null` or as a later job and its CPU arrives in the next read; a
+  plain read names none unless
+  the kernel runs with `ROMP_PERF_STACKS`);
+  compare `gc.gen."2"` or the kernel samples'
+  generation-2 tallies over the interval, and the ring rows only for the
+  passes the ring still holds (the newest 16 on a plain read, the whole ring
+  with `?ring=all`); the job's `jobs.<job>` stage is its wall, which also
+  counts its waits for a lock, the disk or a free core, so the two side by
+  side say which jobs worked and which waited; the pusher's jobs are not
+  counted). The pass's container stage is `jobsPass`,
+  its opening `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
   in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,
   turn notify, the checkpoint persist and converge, the boot row backstop,
@@ -2806,7 +2835,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   are process-wide, so a collection inside both windows is in both deltas and
   a sum would count it twice; the key is absent when neither split has one.
   The row also carries `parse`, the assembly's road counters at
-  the first cycle's end (T398): `serve`, `fold`, `restore` (with
+  the first cycle's end (T398): `serve`, `fold` (with `fold:attachedPass`,
+  the folds of a delta the `promptid` gate let through, described under
+  `full:demoted` below), `restore` (with
   `restore:afterDemote`, the restores taken over an entry the gates demoted
   instead of a whole parse, `restore:pastShare`, a compaction whose tail past
   the cut had reached an eighth of the pre-cut bytes, parsed whole so the
@@ -2899,11 +2930,41 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `descent` when the new leaf does not chain to the old through the delta
   (a parallel tool batch's results, each parented at its own call, fold instead;
   one that then moves an old record's kept membership counts under `kept` and
-  takes the restore road a descent takes),
+  takes the restore road a descent takes, unless the `promptid` gate let a
+  record of it through, counted under `g:promptid:passedDemote` below),
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
   `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
-  `boundary`, `summary`, `promptid`, `skill-link`, `ts`, `kept`, and
+  `boundary`, `summary`, `promptid` (a record repeating a prompt id in a way
+  that can re-classify records already read, its arm counted beside it:
+  `g:promptid:wrapper` for a command-wrapper record, `g:promptid:boundary`
+  for a record wearing a compaction summary's prompt id whose boundary an
+  adoption could still move, with `g:promptid:boundarySeed` the part of
+  those whose id a restored entry's document names (a document names the
+  prompt ids of the summaries before its cut), where the entry cannot tell
+  whether that boundary is attached, and `g:promptid:passedDemote` for a
+  delta in which the gate let a record wearing a summary's prompt id
+  through, because every summary wearing its id hangs off a boundary on the
+  conversation's path that
+  adoption did not splice, as an automatic compaction's does, and which a
+  compaction in it, the descent (a rewind and an api_error retry alike) or
+  a parallel batch's kept check then refused: it parses whole, as it did
+  before the gate let such records through, and never takes the restore
+  road (nor the re-seat, when it passed on a batch's link, so the kept
+  check rules). A compaction summary does not count as such a record in
+  its own delta, so a later compaction alone in its append restores as any
+  compaction does. A delta the gate let through that the stamp (`ts`),
+  `skill-link` or `uuid-known` gate then takes counts under that gate's
+  reason alone: a live manual /compact's raw twin, which `promptid` counted
+  before, counts under `ts`. A delta the gate let through that extends the
+  path on a whole entry marked for its re-seat is re-seated and counts as a
+  re-seat alone: under the `reseat` reason, and as a restore under `restore`
+  and `restore:afterDemote` when that restore serves (when it refuses the
+  document, under the whole parse's `full:demoted`), never under
+  `fold:attachedPass`. The deltas
+  the gate let through that folded count under `fold:attachedPass`, the
+  folds it saved),
+  `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
   here only when that restore refused the document),
@@ -2985,8 +3046,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   does), `docConsults` (fold documents loaded through the one
   validated read that the two boot restore paths, a write's carry and a
   retirement's consult share; at boot the restore paths dominate it, one per
-  checkpointed file), `docMemo` (the documents that read keeps for the write
-  that follows: `entries`, `bytes` as their RESIDENT weight, each file's size
+  checkpointed file; a write's carry skips the load when this process already
+  knows the document has nothing to give it: over a document this process last
+  wrote or loaded, unchanged on disk since by inode, modification time and
+  size, in which every state and over-the-cap cursor belongs to a fold the
+  writer holds or stands at a count the writer cannot record, a write reads
+  nothing),
+  `docMemo` (the documents that read keeps for the write that follows, and a
+  document a write wrote with an entry it carried from the disk, a state or an
+  over-the-cap cursor, kept for the next write's carry: `entries`, `bytes` as
+  their RESIDENT weight, each file's size
   on disk times `parseMultiple`, the measured 4.5 a parsed document weighs
   against its bytes on disk, and `capBytes`, a ceiling on that resident
   weight of MemTotal / 512 floored at 64 MiB, `ROMP_DOC_MEMO_CAP_MB`; the
@@ -2996,13 +3065,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   devbox boot); its verdict set per frozen file is now the fold `rewoundUuids`
   of that file's fold document, written from the walk's own read at the
   quiescence drop and restored at the next boot, so such a file is read whole
-  once (a live session's own files, its /clear anchor among them, stay
-  resident instead, since the chain walk reads them at every pass; a leaf
-  with no assembly document, one with no compaction boundary, takes the memo
-  road too, since the leaf road's seeded walk had nothing to seed and read it
-  whole at every boot, and so does every cleared or resume-forked session's
-  leaf, whose document is written over its lineage and cannot seed the
-  one-file walk). The
+  once (a live session's own files that its parse reads, the anchor of a leaf
+  whose head links back into it or whose resume lineage runs through it among
+  them, stay resident instead, since the chain walk reads them at every pass;
+  a /clear's anchor, which no parse of the new leaf reads, is walked once, its
+  memo written, and then dropped like a dead episode's file, and it is
+  released at the first clear's flip; a leaf with no assembly document, one
+  with no compaction boundary, takes the memo road too, since the leaf road's
+  seeded walk had nothing to seed and read it whole at every boot, and so does
+  every back-linked or resume-forked session's leaf, whose document is written
+  over its lineage and cannot seed the one-file walk, while a /clear's leaf
+  is documented alone and takes the seeded leaf road). The
   counters: the memo's answers (`served`), the walks it took (`walked`), the
   walks over a memo the file's growth or rewrite retired (`stale`; a file
   whose entry merely left memory and came back is walked, not stale; a growing
@@ -3027,9 +3100,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `timeline-build` (the cold Sessions-pane build, off the pusher), `main`; never a
   session's name, sid, host or path (the ident
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
-  sample), `stage` (the thread's current stage mark: the pusher's
-  `jobs.<job>` or `push`, a handler's `connect`, the timeline builder's
-  `timeline.build`, `null` outside one) and
+  sample), `stage` (the thread's current stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, a handler's `connect`, the timeline builder's
+  `timeline.build`, any other mark the `asmIndex.materializedByStage` list
+  names, a job's finer part as `jobs.<job>.<part>`, `null` for a thread with
+  no mark) and
   `frames`, "function (file:line)" strings innermost last, at most 40; no
   locals, arguments or session content. Filled when the kernel runs with
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
@@ -3078,7 +3154,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   rebuild repeatedly; `countCap`,
   `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
   `droppedBytes` (the quiescence drop, the files a dead timeline lane
-  releases, and a leaf a second /clear retired), `pinnedKept` (drops that kept an entry because a whole assembly
+  releases, a leaf a second /clear retired, and the session's first file at
+  its first /clear when the new leaf's parse does not read it), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
@@ -3111,14 +3188,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
-  `shrunk` and `upgrade`, and the first calling function outside the event
-  model and the parse family), with `count` and `bytes`; a tail read, an
+  `shrunk` and `upgrade`, or `detached` for a whole read that leaves the
+  cache as it was, which is how a comment, edit or rewind after a /clear
+  learns which messages the session's first file holds, once per change of
+  that file, and the only way a comment reads that file again, where a
+  record of the new conversation links back into it; and the first calling
+  function outside the event model and the parse family), with `count` and
+  `bytes`; a tail read, an
   append and a restore's tail read are not whole reads and are not counted;
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
-  the stage being the pusher thread's current tick job (`jobs.<job>`) or
-  `push`, `connect` for a fresh client's full push on its handler thread (a
-  browser reload or reconnect), `timeline.build` for the timeline builder's
-  cold build, `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
+  the stage being the calling thread's stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, `connect` for a fresh client's full push on its handler
+  thread (a browser reload or reconnect), `timeline.build` for the timeline
+  builder's cold build, any other mark the `asmIndex.materializedByStage`
+  list names, a job's finer part as `jobs.<job>.<part>`, and `none` for a
+  thread with no mark (T401); `asmCheckpoint.hydratedByStage`
   does the same for the hydration rows.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
@@ -3183,6 +3268,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   first segment, or its first two under `/push`, `/tunnels` and `/usage`,
   whose roads differ by the second), `warm.parse`, `warm.boot`,
   `producer`, `revive`, `rewind.migration`, `rewind.holds`, `move`,
+  `asm.refresh` (the assembly document refresh's thread), `comment.create`
+  (the thread a comment's create runs on), `restart` (the restart and Apply
+  now doors), `judge.end` (the thread that reaps a judge child; not a tier's
+  mark, and it builds and hydrates nothing),
   `remote-ws`, `federation.push`, `federation.pull`, `federation.ask`,
   `ask-poll`, `timeline.build` (the timeline builder thread); `none` means the build ran on a thread with no mark, which
   should not happen: the kernel's thread census (every Thread, Timer and
@@ -3264,12 +3353,24 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   id.
 - `stages_ms`: `prelude` (the cycle's opening: the liveness snapshot and the
   names), `jobs` (the cycle's tick jobs outside the push) and inside it one
-  `jobs.<job>` per tick job (`jobs.interruptBlock`, `jobs.autoNudge`,
-  `jobs.convergeCheckpoints` and the rest, T398), `push`, and inside it
+  `jobs.<job>` per job the pusher runs (`jobs.convergeCheckpoints`,
+  `jobs.applyPendingOps` and the rest, T398), `jobs.prelude` (the jobs
+  thread's opening: its liveness snapshot and names, timed beside its pass,
+  not inside it), `jobsPass` (the jobs thread's pass) and inside it one
+  `jobs.<job>` per job that thread runs (`jobs.interruptBlock`,
+  `jobs.autoNudge` and the rest), and inside a job its finer parts as
+  `jobs.<job>.<part>` (such as the nudge job's snapshot, looks and parse),
+  which that job's own stage already covers on the jobs thread (the pass
+  the dashboard's auto-nudge and compaction-suggestion toggles run at once,
+  on the socket's thread, records its parts with no job stage around
+  them, and that thread carries the nudge job's marks only until the pass
+  returns, when its own route's mark is put back), `push`,
+  and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
   `push.feedFirst`; and `timelineBuild`, the timeline builder's passes (the
   cold build after a boot, on a thread that opens no cycle, so it is in no
-  cycle's split); a fresh snapshot lists every one at zero. The `push.*`
+  cycle's split); a fresh snapshot lists every one at zero except a job's
+  finer parts, which appear once the part has run. The `push.*`
   stages count every push, including the one a connecting page gets, so they
   can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.

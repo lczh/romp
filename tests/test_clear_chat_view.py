@@ -305,3 +305,73 @@ class PreClearNotesStayInTheirEpisode(unittest.TestCase):
         events = km.build_session(SID, NOW)["events"]
         self.assertEqual([e["retries"] for e in events if e.get("kind") == "retried"], [1, 3, 2],
                          "no boundary, no floor — the whole history is one episode")
+
+
+FIRST_CLEAR = "66666666-7777-8888-9999-000000000001"   # the file the FIRST /clear opened (NEWFSID is the second's here)
+PRE_LANDED = "done - the notes-api server runs on port 8080"
+
+
+class TwoClearsExpandHoldsNoEarlierSalvage(unittest.TestCase):
+    """After a second /clear the boundary card expands the conversation between the two clears, the first clear's file
+    (review round one, 2026-10-03). That file's head has no parent, so its parse reads it alone, without the session's
+    first file, and the parse's landed-text uuids no longer dedup a salvaged reply that landed in the first file; the
+    episode render has no T131 floor, so such a reply stood above that conversation's first prompt. The render floors
+    the salvaged replies at the first record its parse reads, as the live render does; a reply salvaged inside that
+    conversation still shows. Synthetic data only."""
+
+    def setUp(self):
+        self._saved_state, self._saved_projects = jd.STATE, jd.PROJECTS
+        self._td = tempfile.mkdtemp()
+        jd._rebind_state(Path(self._td))
+        jd.PROJECTS = Path(self._td) / "projects"
+        jd._discover_cache["fp"] = None
+        jd._discover_cache["result"] = None
+        self.cwd = os.path.realpath(os.path.join(self._td, "notes-api"))
+        os.makedirs(self.cwd, exist_ok=True)
+        self.proj = jd._proj_dir(self.cwd)
+        self.proj.mkdir(parents=True)
+        (jd.STATE / "names").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "names" / SID).write_text("web\t" + self.cwd)
+        _write_jsonl(self.proj / (SID + ".jsonl"), [
+            _urec(NOW - 3600, "u1", "set up the api server"),
+            _arec(NOW - 3590, "a1", PRE_LANDED, "u1"),
+        ])
+        _write_jsonl(self.proj / (FIRST_CLEAR + ".jsonl"), [
+            _urec(NOW - 1800, "e1", "add a tags route to the notes-api", fsid=FIRST_CLEAR),
+            _arec(NOW - 1790, "e2", "Added the tags route.", "e1", fsid=FIRST_CLEAR),
+        ])
+        _write_jsonl(self.proj / (NEWFSID + ".jsonl"), [
+            _urec(NOW - 50, "n1", "hello again", fsid=NEWFSID),
+            _arec(NOW - 40, "n2", "fresh start - what next?", "n1", fsid=NEWFSID),
+        ])
+        (jd.STATE / "sdk").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "sdk" / (SID + ".json")).write_text(json.dumps(
+            {"sid": SID, "name": "web", "alive": True, "lastSid": NEWFSID}))
+        _write_jsonl(jd.STATE / "episodes" / (SID + ".jsonl"), [
+            {"head": "u1", "fsid": SID, "t": NOW - 3600},
+            {"head": "e1", "fsid": FIRST_CLEAR, "t": NOW - 1800},
+            {"head": "n1", "fsid": NEWFSID, "t": CLEAR_T},
+        ])
+        _write_jsonl(jd.STATE / "states" / (SID + ".jsonl"), [
+            {"t": NOW - 3590, "orphanReply": {"uuid": "a1", "text": PRE_LANDED + ", as it streamed"}},   # landed in the first file
+            {"t": NOW - 1700, "orphanReply": {"uuid": "e9", "text": "A reply salvaged between the two clears."}},
+        ])
+
+    def tearDown(self):
+        jd._rebind_state(self._saved_state)
+        jd.PROJECTS = self._saved_projects
+        shutil.rmtree(self._td, ignore_errors=True)
+
+    def test_the_expand_shows_no_reply_from_before_its_own_first_prompt(self):
+        got = km.build_episode(SID, NOW)
+        self.assertNotIn("error", got or {}, "the first clear's file must resolve")
+        evs = got["events"]
+        mds = [e.get("md") or "" for e in evs]
+        first_prompt = next((i for i, md in enumerate(mds) if "add a tags route" in md), None)
+        self.assertIsNotNone(first_prompt, "premise: the expand is the conversation between the two clears")
+        self.assertFalse(any(PRE_LANDED in md for md in mds), "a reply that landed in the first file does not come back")
+        above = [mds[i] for i, e in enumerate(evs) if e.get("orphaned") and i < first_prompt]
+        self.assertEqual(above, [], "no salvaged reply above the conversation's first prompt")
+        mid = [i for i, md in enumerate(mds) if "salvaged between the two clears" in md]
+        self.assertTrue(mid and all(i > first_prompt for i in mid), "a reply salvaged inside that conversation still shows, "
+                                                                     "below its first prompt: %s" % mid)
