@@ -1216,12 +1216,13 @@ def _ckpt_load(path):
         _ckpt_fallback(path, "path", str(doc.get("path"))[:80]); return None
     try:
         offset, count, size = int(doc["offset"]), int(doc["count"]), int(doc["size"])
+        int(doc.get("seq") or 0); float(doc.get("mtime") or 0)   # as the restore reads them: a bad one is corrupt here, not a raise there
         guard = bytes.fromhex(doc.get("guard") or "")
         folds = doc.get("folds") or {}
         if offset < 0 or count < 0 or len(guard) > _JSONL_TAIL_GUARD or not isinstance(folds, dict):
             raise ValueError("shape")
-    except (KeyError, TypeError, ValueError) as e:
-        _ckpt_fallback(path, "corrupt", "shape: %s" % e); return None
+    except (KeyError, TypeError, ValueError, OverflowError) as e:   # OverflowError: a number json read as infinity, which raised out
+        _ckpt_fallback(path, "corrupt", "shape: %s" % e); return None   #  of every process's restore before, never counted or removed
     return doc
 
 
@@ -1354,7 +1355,7 @@ def _restored_cursor(key, name, ent):
         with _CKPT_LOCK:
             _CKPT_STATS["restoredFolds"][name] = _CKPT_STATS["restoredFolds"].get(name, 0) + 1
         return (count, ent[6], state)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, OverflowError) as e:   # OverflowError: a count json read as infinity
         _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e)); return None
 
 
@@ -1730,7 +1731,7 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     the file whole for that fold once and the write after carries its state.
     The document is not read when this process already knows it gives nothing: when _DOC_INDEX describes the very file on
     disk (its inode, mtime and size, as this process last wrote or loaded it) and none of its carryable entries passes the
-    filter below (each names a fold this write holds, stands at a count it cannot record, or has no integer count), the
+    filter below (each names a fold this write holds, stands at a count it cannot record, or has no int count), the
     answer is {} without a read, the answer the read would give whatever its verdict and guard say, since those only ever
     withhold entries."""
     cp = _ckpt_file(key)
@@ -1763,10 +1764,9 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     for name, f in (doc.get("folds") or {}).items():
         if name in folds or not isinstance(f, dict) or not ("state" in f or f.get("over")):
             continue
-        try:
-            c = int(f["count"])
-        except (KeyError, TypeError, ValueError, OverflowError):   # no integer count (infinity among them): not carried
-            continue
+        c = f.get("count")
+        if type(c) is not int:                                # an int count only: the entry is carried as it stands and the cut takes
+            continue                                          #  its count as is, so "3", 3.0, infinity or none is not carried
         if _count_recordable(base, count, c):                 # a carried count too far behind would drag the cut (the bound above)
             out[name] = f
     return out
@@ -1942,17 +1942,20 @@ def converge_stat(name, n=1):
 def checkpoint_write_dirty(paths=None, budget_s=None):
     """Write the checkpoints of `paths` (default: every dirty path); returns how many were written. `budget_s`
     bounds the pass (the exit path, 2026-09-11: an unbounded write over a kernel life's dirty files outran the
-    manager's 5 s grace and the SIGKILL lost the cut row): the first file always writes, the pass stops once the
-    budget has passed, and what is left stays dirty for the next writer."""
+    manager's 5 s grace and the SIGKILL lost the cut row): the first path is always attempted, the pass stops once the
+    budget has passed, whether or not anything was written, and what is left stays dirty for the next writer."""
     return len(checkpoint_write_dirty_paths(paths, budget_s))
 
 
 def checkpoint_write_dirty_paths(paths=None, budget_s=None):
-    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle)."""
+    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle). The budget is
+    keyed on the paths ATTEMPTED, as the converge pass's is: under a lasting fault every write fails (a checkpoints directory
+    the kernel cannot search or write, a full disk), each after its encode, and a budget that tripped only after a written
+    path let the exit drain attempt every dirty one."""
     out = []
     t0 = time.monotonic()
-    for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
-        if budget_s is not None and out and time.monotonic() - t0 > budget_s:
+    for i, p in enumerate(checkpoint_dirty() if paths is None else [str(p) for p in paths]):
+        if budget_s is not None and i and time.monotonic() - t0 > budget_s:
             break
         if checkpoint_write(p):
             out.append(p)
@@ -6907,11 +6910,12 @@ _DOC_MEMO_CAP = _env_or("ROMP_DOC_MEMO_CAP_MB", max(64 * 1024 ** 2, _machine_mem
 #                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (236 MiB on a 118 GiB machine; a count
 #                                    cap said nothing about bytes and held whole documents for files no writer touched again), reported
 #                                    under checkpoints.docMemo
-_DOC_INDEX = {}                    # path -> (document file's _doc_sig, {fold name: count, or None when unreadable}) for every entry
+_DOC_INDEX = {}                    # path -> (document file's _doc_sig, {fold name: count, or None when not an int}) for every entry
 #                                   with a state or an over-the-cap cursor, as this process last WROTE or LOADED the document: what a
 #                                   write's carry could take from it, so a write after a write that changed nothing carryable reads
 #                                   no document byte (_carry_forward_states)
-_DOC_INDEX_MAX = 4096              # paths; over it the oldest is let go (its next carry reads the document once)
+_DOC_INDEX_MAX = 4096              # paths; over it the one least recently written or loaded is let go (its next carry reads the
+#                                    document once)
 
 
 def _doc_sig(st_):
@@ -6938,19 +6942,19 @@ def _doc_stat_sig(cp, key):
 
 def _doc_carryable(folds):
     """{fold name: count} of the entries a write's carry could take from a document's `folds` (the carry's own shape test: a
-    dict with a state or an over-the-cap cursor; the count None when it does not read as an integer, which the carry skips)."""
+    dict with a state or an over-the-cap cursor; the count None when it is not an int, "3", 3.0 or infinity among them, an
+    entry the carry skips)."""
     out = {}
     for n, f in (folds or {}).items():
         if isinstance(f, dict) and ("state" in f or f.get("over")):
-            try:
-                out[n] = int(f["count"])
-            except (KeyError, TypeError, ValueError, OverflowError):   # OverflowError: a count json read as infinity
-                out[n] = None
+            c = f.get("count")
+            out[n] = c if type(c) is int else None
     return out
 
 
 def _doc_index_put_locked(key, sig, folds):
-    """Record (under _CKPT_LOCK) what `key`'s document, the file with stat `sig`, can give a write's carry."""
+    """Record (under _CKPT_LOCK) what `key`'s document, the file with stat `sig`, can give a write's carry; the path becomes the
+    index's newest, so the bound lets go of the path least recently written or loaded."""
     _DOC_INDEX.pop(key, None)
     _DOC_INDEX[key] = (sig, _doc_carryable(folds))
     while len(_DOC_INDEX) > _DOC_INDEX_MAX:

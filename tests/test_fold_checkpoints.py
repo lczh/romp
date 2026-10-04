@@ -1940,28 +1940,68 @@ class CarryReadsOncePerChange(Base):
         self.assertEqual(sorted(self.doc(self.p)["folds"]), ["t"], "u stands too far behind to carry, as the carry has always left it")
         self.assertEqual((self.doc_reads() - reads, self.consults() - n0), (0, 0), "and learning that costs no read")
 
-    def test_an_entry_whose_count_reads_as_infinity_is_one_no_write_carries(self):
+    def test_an_entry_whose_count_is_not_an_int_is_one_no_write_carries(self):
         """A count json reads as float infinity (`Infinity`, or `1e999`) is one int() refuses with OverflowError, not
-        ValueError. The index and the carry read it as no integer count, an entry nothing carries, so the load that fills the
-        index (a retirement's consult in a fresh process, the restore of another entry) and the write return, and the write
-        leaves that entry out. Before, the load raised on the first read of that transcript in each process, and the carry
-        at every write. No writer produces such a count; it takes a hand edit."""
-        self.fold("t"); self.fold("u"); self.fold("v"); self.assertTrue(em.checkpoint_write(self.p))
-        cp = self.cp(); d = json.loads(cp.read_text()); d["folds"]["u"]["count"] = float("inf")
-        cp.write_text(json.dumps(d))
-        self.assertEqual(json.loads(cp.read_text())["folds"]["u"]["count"], float("inf"), "the premise: json writes and reads it")
-        self.fresh_process()
-        n0 = self.consults()
-        em.rewound_memo_forget(self.p)                   # a retirement's consult before any load in the process: it asks the disk
-        self.assertEqual(self.consults() - n0, 1, "the consult loaded the document")
-        self.assertNotIn(self.p, em._RETIRED_FOLDS, "and found nothing to retire")
-        self.fresh_process()
-        _append(self.p, {"n": 3})
-        self.assertEqual(self.fold("t"), [0, 1, 2, 3])
-        self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("t"), 1, "the restore of another entry")
-        self.assertTrue(em.checkpoint_write(self.p), "the write proceeds")
-        self.assertEqual(self.states(), {"t": (4, [0, 1, 2, 3]), "v": (3, [0, 1, 2])}, "carrying v")
-        self.assertNotIn("u", self.doc(self.p)["folds"], "and leaving out the entry with no integer count")
+        ValueError; "3" and 3.0 are counts int() accepts but that are not ints, and the carry takes an entry as it stands, so
+        the cut met them as they were (min() of "3" and an int, an entry's offsets indexed by 3.0). The index and the carry take
+        only an int count: such an entry is one nothing carries, so the load that fills the index (a retirement's consult in
+        a fresh process, the restore of another entry) and the write return, and the write leaves that entry out. Before, an
+        infinite count raised at that load, on the first read of the transcript in each process, and at the carry at every
+        write; "3" and 3.0 raised at every write before its rename, so the document was never rewritten. No writer produces
+        such a count; it takes a hand edit."""
+        for i, bad in enumerate((float("inf"), "3", 3.0)):
+            with self.subTest(count=bad):
+                self.p = str(self.td / ("count-%d.jsonl" % i))
+                _write(self.p, [{"n": k} for k in range(3)])
+                self.fresh_process()
+                em._CKPT_STATS["restoredFolds"] = {}
+                self.fold("t"); self.fold("u"); self.fold("v"); self.assertTrue(em.checkpoint_write(self.p))
+                cp = self.cp(); d = json.loads(cp.read_text()); d["folds"]["u"]["count"] = bad
+                cp.write_text(json.dumps(d))
+                self.assertEqual(json.loads(cp.read_text())["folds"]["u"]["count"], bad, "the premise: json writes and reads it")
+                self.fresh_process()
+                n0 = self.consults()
+                em.rewound_memo_forget(self.p)           # a retirement's consult before any load in the process: it asks the disk
+                self.assertEqual(self.consults() - n0, 1, "the consult loaded the document")
+                self.assertNotIn(self.p, em._RETIRED_FOLDS, "and found nothing to retire")
+                self.fresh_process()
+                _append(self.p, {"n": 3})
+                self.assertEqual(self.fold("t"), [0, 1, 2, 3])
+                self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("t"), 1, "the restore of another entry")
+                with em._CKPT_LOCK:
+                    indexed = em._DOC_INDEX[self.p][1].get("u", "absent")   # the restore's load filled the index; the write refills it
+                self.assertTrue(em.checkpoint_write(self.p), "the write proceeds")
+                self.assertEqual(self.states(), {"t": (4, [0, 1, 2, 3]), "v": (3, [0, 1, 2])}, "carrying v")
+                self.assertNotIn("u", self.doc(self.p)["folds"], "and leaving out the entry with no int count")
+                self.assertIsNone(indexed, "the index listed that entry with no count, as the carry reads it")
+
+    def test_a_document_whose_count_seq_or_mtime_does_not_read_falls_back_at_the_restore(self):
+        """The validated load reads the document's top-level seq and mtime as the restore does, and a number json reads as
+        infinity (OverflowError) is a corrupt document there like any other bad shape: counted under fallbacks, removed, and
+        the file read whole, as a bad offset always was. So is a fold's own count at infinity at that fold's restore. Before,
+        each raised out of the restore, the top-level count also out of a retirement's consult, and nothing counted or
+        removed the document, so every process raised again. No writer produces such a document; it takes a hand edit."""
+        def spoil(d, field):
+            if field == "fold":
+                d["folds"]["u"]["count"] = float("inf")
+            else:
+                d[field] = "x" if field == "mtime" else float("inf")
+        for field in ("count", "seq", "mtime", "fold"):
+            with self.subTest(field=field):
+                self.p = str(self.td / ("top-%s.jsonl" % field))
+                _write(self.p, [{"n": k} for k in range(3)])
+                self.fresh_process()
+                em._CKPT_STATS["fallbacks"] = {}
+                self.fold("t"); self.fold("u"); self.assertTrue(em.checkpoint_write(self.p))
+                cp = self.cp(); d = json.loads(cp.read_text()); spoil(d, field)
+                cp.write_text(json.dumps(d))
+                self.fresh_process()
+                _append(self.p, {"n": 3})
+                with contextlib.redirect_stderr(io.StringIO()):
+                    got = (self.fold("t"), self.fold("u"))
+                self.assertEqual(got, ([0, 1, 2, 3], [0, 1, 2, 3]), "both folds answer, from the file read whole where needed")
+                self.assertEqual(em.checkpoint_stats()["fallbacks"], {"corrupt": 1}, "counted corrupt once")
+                self.assertFalse(cp.exists(), "and removed, so the next process does not meet it again")
 
     def test_a_document_whose_stat_fails_reads_as_none_and_is_said_once(self):
         """A stat of the document that fails for a reason other than a missing file (here a checkpoints directory without its
@@ -1989,6 +2029,33 @@ class CarryReadsOncePerChange(Base):
                          "no fallback counted, nothing restored")
         os.chmod(d, mode)
         self.assertEqual(cp.read_bytes(), before, "and the document stays as it was")
+
+    def test_the_exit_drains_budget_counts_the_paths_it_attempted(self):
+        """checkpoint_write_dirty's budget (the exit drain's, inside the manager's grace) is keyed on the paths attempted, as
+        the converge pass's is. Under a lasting fault every write fails (here a checkpoints directory without its search bit),
+        and a budget that tripped only after a written path let the drain attempt every dirty path, each after its encode.
+        At a zero budget it attempts the first, and every path stays dirty for the next writer."""
+        paths = sorted(str(self.td / ("drain-%d.jsonl" % i)) for i in range(3))
+        for q in paths:
+            _write(q, [{"n": k} for k in range(3)])
+            self.fold("t", q)
+        self.assertEqual(em.checkpoint_dirty(), paths, "the premise: three dirty paths")
+        d = jd.STATE / "checkpoints"
+        d.mkdir(parents=True, exist_ok=True)
+        mode = d.stat().st_mode
+        os.chmod(d, 0o600)
+        self.addCleanup(os.chmod, d, mode)
+        if os.access(d, os.X_OK):
+            self.skipTest("this account searches a directory whatever its mode (root)")
+        tried, real = [], em.checkpoint_write
+
+        def write(p, force=False):
+            tried.append(p)
+            return real(p, force)
+        with mock.patch.object(em, "checkpoint_write", write), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(em.checkpoint_write_dirty(budget_s=0), 0, "no write succeeds")
+        self.assertEqual(tried, paths[:1], "one path attempted, then the budget ends the drain")
+        self.assertEqual(em.checkpoint_dirty(), paths, "and every path stays dirty")
 
     def test_another_writers_rename_right_after_this_writes_is_read_at_the_next_write(self):
         """The write takes its index entry's stat from its own tmp file before the rename (a rename keeps the inode, the

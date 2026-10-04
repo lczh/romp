@@ -182,6 +182,16 @@ class BoundedDirtyWrite(unittest.TestCase):
              mock.patch.object(km.em, "checkpoint_write", lambda p: calls.append(p) or True):
             self.assertEqual(km.em.checkpoint_write_dirty(), 2, "no budget: everything, as the settle writer relies on")
 
+    def test_a_zero_budget_attempts_one_path_when_every_write_fails(self):
+        """The budget counts the paths attempted, not the ones written: under a lasting fault (a checkpoints directory the
+        kernel cannot search or write, a full disk) every write fails, and the exit must still stop inside its share of the
+        grace."""
+        calls = []
+        with mock.patch.object(km.em, "checkpoint_dirty", lambda: ["/synthetic/a.jsonl", "/synthetic/b.jsonl", "/synthetic/c.jsonl"]), \
+             mock.patch.object(km.em, "checkpoint_write", lambda p: calls.append(p) or False):
+            n = km.em.checkpoint_write_dirty(budget_s=0.0)
+        self.assertEqual((n, calls), (0, ["/synthetic/a.jsonl"]), "one attempt, nothing written; the budget then stops the pass")
+
 
 class AttachTimedOutNamesTheAttaches(unittest.TestCase):
     def test_the_backstop_row_carries_the_unsettled_sids_and_the_pending_count(self):
