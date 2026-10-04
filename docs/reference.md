@@ -2589,7 +2589,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the
+  `loadTrees` and `backstopFoldins` (the two thresholds), `gen2Threshold` (the
+  full-collection trigger the controller set, below, or `null` while the
+  stock one stands), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
   backstop), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
@@ -2625,7 +2627,36 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every cycle). A request that arrives during a reconcile waits that
+  fire every cycle). While the freeze is on, the kernel also raises CPython's
+  full-collection trigger (the third of `thresholds`, stock 10) to 100 at boot,
+  and `gen2Threshold` reads it. CPython runs an automatic full collection once
+  generation 2 has seen more than that many generation-1 collections and the
+  objects promoted since the last full collection reach a quarter of what
+  survived it. Over a frozen heap what an automatic full collection leaves is
+  small, so with the stock 10 one can come every eleventh generation-1
+  collection, and on a loaded kernel most full collections are these automatic
+  ones (`gc.gen."2".collections` less `freeze.collections`). Raised, an
+  automatic full collection comes at most once per 101 generation-1
+  collections, and every fold-in, release and backstop (each a full
+  collection) restarts that count. `ROMP_GC_GEN2_THRESHOLD` sets it: a value
+  that is not an integer, or is above 2147483647 (the largest C int, the most
+  the collector takes), falls back to 100, said once and counted under
+  `errors` when that 100 is applied (where no trigger is raised, nothing is
+  said); any other is floored at 10, so it can only
+  raise the trigger. It is not applied with the freeze off or on a
+  free-threaded build, whose collector differs. After setting it the kernel
+  reads the third threshold back, and where the collector does not keep the
+  value it puts the old one back and `gen2Threshold` stays `null`. That check
+  reads the stored value, not what the collector does with it, so the
+  free-threaded build stays excluded: it stores the value, but its collector
+  was not seen to follow it. The raise was measured on a hermetic lab kernel's
+  own garbage (synthetic sessions under a load that saturates the pusher,
+  CPython 3.12, medians of four ten-minute windows per value). Raising the
+  trigger from 10 to 100 lengthened the worst automatic full collection from
+  429 to 513 ms and the worst fold-in from 310 to 451 ms, left peak memory
+  where it was (VmHWM 858 MiB at 10 and 851 at 100, inside the run-to-run
+  spread), and cut the summed generation-2 time from 118 to 37 s. A
+  request that arrives during a reconcile waits that
   one collection. The idle boundary is the best moment for the frozen-heap
   walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an
   automatic full collection would have walked anyway. To read a slow cycle: find
@@ -4096,8 +4127,12 @@ re-send once a reconnecting page's listeners are up. A create's answer (`comment
 the new thread's row itself, built as the frame builds it, so the page lists and opens the thread
 before the next frame; a frame built from the store as it stood before a write is dropped at the
 send (each store write bumps a generation the pusher reads before it builds the frame), so it can
-never follow that answer and take the thread away again. A document write over a session's parse,
-which only reads it, does not hold the comment's walk.
+never follow that answer and take the thread away again. The frame's read of the store, when it
+fails (a descriptor shortage, a read error, a truncated file or one that is not JSON), is never
+remembered as empty: the frame carries `error` in place of `threads`, the page keeps the threads it
+holds and says once that the read failed, until a readable frame ends the failure, and the next cycle
+reads the store again. A document write over a session's parse, which only reads it, does not hold
+the comment's walk.
 
 Creating a comment runs off the page's socket thread, so the page's other messages are read while
 it runs. The cut is found on the session's own parse (the chat's assembly entry, whole or restored
