@@ -1601,6 +1601,12 @@ through the same dedup the pusher uses, so the pusher's next push does not send
 them again. Then it makes the full build with the dead lanes, and wakes the
 pusher after each; the lanes stay the live sessions' until the full build lands,
 and once it has landed no pane is sent those lanes or the first bars again.
+Those lanes are dated by the liveness read they came from, not by when their
+build began, so of two builds the one from the newer read is what every pane is
+sent, whichever finished first. A pane that connects while the full build runs,
+or while it waits for the board, gets the first bars, as old as the builder's
+first phase, which can be tens of seconds, until the full build lands; the
+first phase is not run again for it.
 While a board is open, the full build starts only once the board's first feed
 frame has gone out (or the cold kernel's early feed frame failed to build, or
 the last board closed), so the two cold builds do not share the interpreter;
@@ -3022,7 +3028,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   session's name, sid, host or path (the ident
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
   sample), `stage` (the thread's current stage mark: the pusher's
-  `jobs.<job>` or `push`, a handler's `connect`, `null` outside one) and
+  `jobs.<job>` or `push`, a handler's `connect`, the timeline builder's
+  `timeline.build`, `null` outside one) and
   `frames`, "function (file:line)" strings innermost last, at most 40; no
   locals, arguments or session content. Filled when the kernel runs with
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
@@ -3110,7 +3117,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
   the stage being the pusher thread's current tick job (`jobs.<job>`) or
   `push`, `connect` for a fresh client's full push on its handler thread (a
-  browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
+  browser reload or reconnect), `timeline.build` for the timeline builder's
+  cold build, `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
   does the same for the hydration rows.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom

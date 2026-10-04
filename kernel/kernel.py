@@ -52990,8 +52990,9 @@ _JUDGING_ROW_CAP = 20000     # judging marks per bars frame — far above any le
                              # far below the 147k-mark storm frame that starved bars (2026-08-18)
 _JUDGING_TRIMMED = {}        # transition latch for the trim log line (order-of-magnitude keyed)
 # The band's memo from the LAST _run_judging call: (rows, skip, skip_row, pruned, t0, entries). ONE tuple in one
-# slot, read once at the start of a call and rebound whole at its end (the _skel_wire pattern): a connect push
-# builds the timeline outside the pusher's lock, so two calls can overlap, and a memo read field by field could
+# slot, read once at the start of a call and rebound whole at its end (the _skel_wire pattern): the timeline builder's
+# phase one builds the live bars outside _TL_BUILD_LOCK (a cold connect push did until 2026-10-03), so no lock orders a
+# call against another thread's, and a memo read field by field could
 # pair one call's cursor with another's horizon and skip rows verified under a horizon larger than the reader's
 # own; a whole snapshot is exact by the argument in _run_judging, and the last writer's memo stands while the
 # other's entries miss once (2026-09-16). `entries` is {id(row): (row, kind, text, entry)}, bounded by the band's
@@ -53016,8 +53017,8 @@ def _judging_band_report():
     tuples and the entry and compact dicts, not the rows and strings they share with the reader and the marks) and
     `bound` (the band's wire cap, which bounds both memos: only entries that reach the frame are held). The effect of
     the memo is read here after a rollout, not inferred from a probe. The counters are plain increments from whichever
-    thread built the band (the pusher, or a cold connect push when their builds overlap), so under overlap they can
-    under-count; the memos themselves are exact (one read, one whole rebind)."""
+    thread built the band (the pusher, or the timeline builder, whose phase one runs outside the pusher's lock), so under
+    overlap they can under-count; the memos themselves are exact (one read, one whole rebind)."""
     out = dict(_JUDGING_BAND_STATS)
     mb, cm = _judging_band, _judging_compact_memo          # one read each: rebound whole and never mutated, so safe to walk
     ents, cms = (mb[5] if mb is not None else {}), (cm or {})
@@ -53298,7 +53299,8 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             # _session_chip — same event-model working, api-error gate, compacting corroboration,
             # interrupt stamp. Same INPUT, not just the same formula (the user 2026-07-03): the chip
             # computes over the LIVE-MERGED session, so the full build's lane does too (`session` above is
-            # merged). The SKELETON build — the cold live-first connect only — has no fresh parse: it uses
+            # merged). The SKELETON build (the cold lanes of the pusher and a cold connect, _timeline_cold_lanes,
+            # and a connect over a stale cache) has no fresh parse: it uses
             # the CACHED one with the live tail merged the same way, and a COLD cache falls back to the raw
             # snapshot state, the one moment the two surfaces may briefly differ, self-healing on the next
             # build (the 2026-06-26 fast-first-paint contract). Warm pushes project the lanes from the
@@ -53339,9 +53341,9 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             turns[sid] = bars
             semantic.extend(_dead_lane_marks(cached["marks"], now - TL_HORIZON))
         elif not with_bars:
-            # SKELETON: no bars, no marks, no memo (a cold live-first connect, and a connect over a stale cache;
-            # neither reads nor evicts here). The lane's `since` falls back to the transcript's last write (last
-            # activity), with no parse.
+            # SKELETON: no bars, no marks, no memo (the cold lanes of the pusher and a cold connect, and a connect
+            # over a stale cache; none reads nor evicts here). The lane's `since` falls back to the transcript's
+            # last write (last activity), with no parse.
             compactions = []
             try:
                 last_t = os.stat(s["path"]).st_mtime
@@ -60062,6 +60064,9 @@ def _push(targets, connect=False, live_map=None):
     if not targets:
         return
     now = int(time.time())
+    # When the world this push reads was read: the pusher cycle's stamp, taken before its liveness read (_pusher_cycle), for
+    # the map a cycle hands down; this push's own read otherwise. Two cold-lanes builds are ordered by it (_timeline_cold_lanes)
+    world_t = (getattr(_live_scope, "snapshot_t", None) or time.time()) if live_map is not None else time.time()
     live_map = _live_map() if live_map is None else live_map   # one liveness read per push, shared by all builders
     _chat_push_scopes_close()                     # a previous push on this thread that raised inside the chat loop
     _seen_live.update(live_map)                       # remember who's been alive → keep their tab when they die
@@ -60731,14 +60736,17 @@ def _push(targets, connect=False, live_map=None):
                 # the read above, or nothing yet: then no bars go, the pane keeps its loader, and the builder's wake brings them.
                 # The lanes are the pusher's cold lanes (_timeline_cold_lanes) under the cycle's clock, as a warm connect
                 # projects the cached build: a skeleton built here, fresher than the memo, was followed by the pusher's memo
-                # frame on its next push, an older frame re-sent with nothing new behind it (review find, 2026-10-03).
-                cold, _cold_pre, _cold_sig = _timeline_cold_lanes(now, live_map, fsig)
-                skel = {**cold["data"], "now": now}
+                # frame on its next push, an older frame re-sent with nothing new behind it (review find, 2026-10-03). The
+                # frame is chosen under the pane's slot lock (_tl_cold_lanes_at_send): a memo stored since, from a newer
+                # world, goes instead of this connect's, so a send that lands after a newer build's never steps the pane back.
+                tl_cold = _timeline_cold_lanes(now, live_map, fsig, world_t)
                 dropped = []                                  # panes whose cold lanes the guard held back: the full build landed
                 for c in tl_clients:
                     with _tl_cold_frame(c) as still_cold:     # never after the full build's lanes, landed since the read
-                        if still_cold:
-                            _send_client(c, ("timeline",), {"type": "data", "data": skel})
+                        sent_cold = _tl_cold_lanes_at_send(tl_cold) if still_cold else None   # the connect's: newest memo
+                        if sent_cold is not None:             # the cycle's clock, never behind the memo's own
+                            cd = sent_cold[2]["data"]
+                            _send_client(c, ("timeline",), {"type": "data", "data": {**cd, "now": max(now, cd.get("now") or 0)}})
                         else:
                             dropped.append(c)
                 timeline = _cached_timeline(now, live_map, fsig, True)
@@ -60758,13 +60766,15 @@ def _push(targets, connect=False, live_map=None):
             else:
                 timeline = _cached_timeline(now, live_map, fsig, connect)
                 tl_warming = isinstance(timeline, _TimelinePartial)   # the builder's partial, while the slot is cold: warming
+                tl_cold = None
                 if timeline is None or tl_warming:
                     # A cold slot (the build is owed to the builder): the lanes skeleton, live sessions only, rebuilt under the
                     # cached build's rule (_timeline_cold_lanes), deduped on content; the partial's bars, warming, once it has
                     # landed, and no bars before. The lanes never come from the partial: it is as old as phase one's start,
                     # and projecting it over the cold lanes a pane already holds moved the lanes back (an ended lane live
-                    # again) with no new build behind it, for the rest of phase two (review find, 2026-10-03).
-                    frame, skel_pre, skel_sig = _timeline_cold_lanes(now, live_map, fsig)
+                    # again) with no new build behind it, for the rest of phase two (review find, 2026-10-03). Each pane's
+                    # frame is chosen under its slot lock below, as a connect's is (_tl_cold_lanes_at_send).
+                    tl_cold = _timeline_cold_lanes(now, live_map, fsig, world_t)
                 elif connect:
                     if _timeline_cache_fresh(fsig):
                         # A CONNECT serves the cached lanes under the CYCLE's clock: the pane anchors its live
@@ -60788,11 +60798,14 @@ def _push(targets, connect=False, live_map=None):
                     skel_pre, skel_sig = json.dumps(frame), None
                 else:
                     frame, skel_pre, skel_sig = _skel_fill(timeline)   # the build's one lanes tuple
-                cold_lanes = timeline is None or tl_warming   # the cold lanes never go after the full build's
                 for c in tl_clients:
-                    with _tl_cold_frame(c) as still_cold:
-                        if still_cold or not cold_lanes:
+                    with _tl_cold_frame(c) as still_cold:     # the cold lanes never go after the full build's
+                        if tl_cold is None:
                             _send_client(c, ("timeline",), frame, pre=skel_pre, sig=skel_sig)
+                        elif still_cold:
+                            sent_cold = _tl_cold_lanes_at_send(tl_cold)   # the pusher's: the newest memo, chosen under the lock
+                            if sent_cold is not None:
+                                _send_client(c, ("timeline",), sent_cold[2], pre=sent_cold[3], sig=sent_cold[4])
         _PERF_STATS.stage("push.timeline", time.monotonic() - _t_stage)
     except Exception:
         sys.stderr.write("push build: %s\n" % traceback.format_exc())
@@ -64498,32 +64511,61 @@ def _timeline_skeleton(tl):
     return {**tl, "turns": {}, "judging": {}, "messages": []}
 
 
-def _timeline_cold_lanes(now, live_map, sig):
-    """The lanes frame while the timeline slot is cold (2026-10-03), the pusher's and a cold connect's, as (frame, its
-    serialization, its dedup signature): the lanes skeleton, live sessions only (LIVE-FIRST: no dead session is read before
-    the builder has run), no transcript parse (the skeleton reads cached parses alone). Built again under the rule a cached
-    full build is served under (_timeline_cache_fresh): a dirty mark since the last one started, or a moved view signature
-    once REBUILD_MIN_S has passed since it was built. So the lanes move on a rebuild and not on every cycle of the cold
-    stretch (the signature carries every live transcript's mtime, and an awaiting lane's open interval ends at the build's
-    clock, so a skeleton built per cycle would send its frame per cycle); serialized once per build, as _skel_wire is. A
-    connect sends it under the cycle's clock, so its next push dedups against it. A build that finds the slot filled when
-    it ends is returned and not kept: the full build has dropped the memo, and nothing reads it again. Of two builds that
-    overlap (a connect's and the pusher's), the one that STARTED later is the memo and what both send, whichever ends first:
-    an older build that ends last is neither kept nor sent (gate find, 2026-10-03; stored last, it was the memo every push
-    served, a lane stepped back with nothing new)."""
+def _timeline_cold_lanes(now, live_map, sig, world_t=None):
+    """The lanes frame while the timeline slot is cold (2026-10-03), the pusher's and a cold connect's, as the memo entry
+    (view sig, started, frame, its serialization, its dedup signature, built at, world): the lanes skeleton, live sessions
+    only (LIVE-FIRST: no dead session is read before the builder has run), no transcript parse (the skeleton reads cached
+    parses alone). Built again under the rule a cached full build is served under (_timeline_cache_fresh): a dirty mark
+    since the last one started, or a moved view signature once REBUILD_MIN_S has passed since it was built. So the lanes
+    move on a rebuild and not on every cycle of the cold stretch (the signature carries every live transcript's mtime, and
+    an awaiting lane's open interval ends at the build's clock, so a skeleton built per cycle would send its frame per
+    cycle); serialized once per build, as _skel_wire is. A connect sends it under the cycle's clock, so its next push dedups
+    against it. A build that finds the slot filled when it ends is returned and not kept: the full build has dropped the
+    memo, and nothing reads it again.
+    The memo is dated by `world_t`, the stamp of the liveness snapshot `live_map` came from (_push's: the pusher cycle's,
+    taken before its read, or a connect's own read; the call's time for a caller with none), never by when its build began:
+    a pusher push builds from its cycle's snapshot after the chat stage, so a long one began its build after a connect that
+    had read a newer world, and replaced that connect's memo with older lanes (review find, 2026-10-04). A memo that read a
+    newer world than the caller's is served to it as it stands, whatever moved since: the next caller with a newer snapshot
+    (the next pusher cycle) applies the rule. Of two builds that overlap, the one from the newer world (the later snapshot;
+    of one snapshot, the later start) is the memo, whichever ends first, and each send picks the newest memo under the
+    pane's slot lock (_tl_cold_lanes_at_send), so an older build that ends last is neither kept nor sent, and one that ends
+    first and is sent last does not step the pane back (gate find, 2026-10-03; review find, 2026-10-04)."""
+    if world_t is None:
+        world_t = time.time()
     m = _tl_cold_lanes[0]
+    if m is not None and m[6] > world_t:              # the memo read a newer world than this caller's: served as it stands
+        return m
     if m is None or _dirty_since(m[1]) or (m[0] != sig and time.time() - m[5] >= REBUILD_MIN_S):
         started = time.time()
         frame = {"type": "data", "data": build_timeline(now, live_map, with_bars=False, live_only=True)}
         pre = json.dumps(frame)
-        m = (sig, started, frame, pre, _dedup_sig(frame, pre), time.time())
+        m = (sig, started, frame, pre, _dedup_sig(frame, pre), time.time(), world_t)
         with _TL_COLD_LANES_LOCK:
             cur = _tl_cold_lanes[0]
-            if cur is not None and cur[1] > started:  # a build that began after this one landed first: it is the newer world
+            if cur is not None and _tl_cold_newer(cur, m):   # a build from a newer world landed first: it stands
                 m = cur
             elif _built_timeline[1] is None:
                 _tl_cold_lanes[0] = m
-    return m[2], m[3], m[4]
+    return m
+
+
+def _tl_cold_newer(a, b):
+    """Whether cold-lanes memo entry `a` read a newer world than `b`: the later liveness snapshot, and of two from one
+    snapshot, the later start (_timeline_cold_lanes)."""
+    return (a[6], a[1]) > (b[6], b[1])
+
+
+def _tl_cold_lanes_at_send(m):
+    """The cold lanes entry to send one Sessions pane, chosen inside _tl_cold_frame (under the pane's slot lock) by a push that
+    built or was served `m` (review find, 2026-10-04): the stored memo when it read a newer world than `m`, so a send that
+    lands after a newer build's was sent never steps the pane back; else `m`. None when the slot has filled since the guard
+    read it cold: the memo is read first, and the full build fills the slot before it drops the memo, so a memo read as
+    dropped is never mistaken for one never stored, and no cold lanes go once the full build has landed."""
+    cur = _tl_cold_lanes[0]
+    if _built_timeline[1] is not None:
+        return None
+    return cur if cur is not None and _tl_cold_newer(cur, m) else m
 
 
 def _bars_fill(timeline, tl_warming):
@@ -64768,9 +64810,10 @@ def _timeline_builder():
     kind on stderr, counted under views.tlBuildFailed and paced at the pusher's failure backoff, and its partial is
     dropped: the slot stays cold; the panes keep their lanes and the last bars they were sent, and the next owe retries
     both phases (a partial kept across a failure froze every pane's bars at phase one's start for as long as the fault
-    lasted, review find 2026-10-03). Only the error's kind and text outlive the except: the exception's traceback would keep the failed build's frames, and
-    everything they reference, alive while the loop waits for an owe that may never come. Stopped by _LOOPS_STOP with the
-    other loops (set it, then _TL_OWED and _TL_BOARD_WAKE)."""
+    lasted, review find 2026-10-03). Only the error's kind and its traceback's text, formatted inside the except, outlive
+    it: the exception's traceback object would keep the failed build's frames, and everything they reference, alive while
+    the loop waits for an owe that may never come. Stopped by _LOOPS_STOP with the other loops (set it, then _TL_OWED and
+    _TL_BOARD_WAKE)."""
     streak = 0
     while not _LOOPS_STOP.is_set():
         _TL_OWED.wait()
@@ -64787,7 +64830,8 @@ def _timeline_builder():
             failed = True
             kind = type(e).__name__
             try:
-                text = "".join(traceback.format_exception_only(type(e), e)).strip()
+                text = traceback.format_exc().strip()   # with the function and file it raised in (review find, 2026-10-04): a
+                #                                         string, formatted inside the except, so no frame outlives it
             except Exception:                         # an error whose str() raises still leaves the loop standing
                 text = kind
         _PERF_STATS.stage("timelineBuild", time.monotonic() - _t0 - _TL_BOARD_WAITED[0])

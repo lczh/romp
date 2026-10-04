@@ -758,6 +758,7 @@ class DeadLaneWindow(unittest.TestCase):
         km._fleet_view_sig = lambda now, live: ("sig",)
         km._built_timeline[0], km._built_timeline[1], km._built_timeline[2] = None, None, 0.0   # cold cache
         km._TL_OWED.clear(); km._tl_partial[0] = km._tl_cold_lanes[0] = None
+        km._producer_wake.clear()
         try:
             km._push([client], connect=True)
         finally:
@@ -767,6 +768,8 @@ class DeadLaneWindow(unittest.TestCase):
         self.assertEqual(calls, [("skel", True)], "cold connect: the lanes skeleton, LIVE-ONLY, and no bars build of its own")
         self.assertEqual([json.loads(f)["type"] for f in sent], ["data"], "the lanes went; the bars wait for the builder")
         self.assertTrue(km._TL_OWED.is_set(), "the cold build (the live bars, then live+dead) is owed to the timeline builder")
+        self.assertFalse(km._producer_wake.is_set(), "and the producer is not woken: it never builds the timeline, and the owe "
+                         "took that wake's place (the PR's first review round, 2026-10-04: the assertion was dropped, not inverted)")
         km._TL_OWED.clear()
 
 

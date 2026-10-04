@@ -91,6 +91,50 @@ class _Gate:
         return False
 
 
+class _HoldAtLock:
+    """A pane's slot lock (its `dlock`) that, once `name` is set, holds the thread of that name at its next take of the lock
+    until `go` is set: the moment a push has built or been served its cold lanes and has not sent them yet."""
+
+    def __init__(self):
+        self.lk, self.name, self.held, self.go = threading.RLock(), None, threading.Event(), threading.Event()
+
+    def acquire(self, blocking=True, timeout=-1):
+        if self.name is not None and threading.current_thread().name == self.name:
+            self.name = None
+            self.held.set()
+            self.go.wait(10)
+        return self.lk.acquire(blocking, timeout)
+
+    def release(self):
+        self.lk.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *a):
+        self.release()
+        return False
+
+
+class _HookAtRead(list):
+    """A one-slot module list (_tl_cold_lanes) whose next read of slot 0 on the thread named `thread` runs `hook` first and
+    then returns what the slot holds after it (`before=False`), or what it held before it (`before=True`): a moment between
+    a read and what the reader does next, on one thread, with other threads left alone."""
+
+    def __init__(self):
+        super().__init__([None])
+        self.thread, self.hook, self.before = None, None, False
+
+    def __getitem__(self, i):
+        if i == 0 and self.thread is not None and threading.current_thread().ident == self.thread:
+            self.thread = None
+            held = list.__getitem__(self, 0)
+            self.hook()
+            return held if self.before else list.__getitem__(self, 0)
+        return list.__getitem__(self, i)
+
+
 class FeedAndTimelineSingleFlight(unittest.TestCase):
     def setUp(self):
         self.saved = (km.build_feed, km.build_timeline, list(km._built_feed), list(km._built_timeline), km._views_dirty[0],
@@ -229,7 +273,9 @@ class ColdTimelineBuilder(unittest.TestCase):
     tearDown), and a push that meets the full build mid-way sends no cold frame after it; `on_skel` runs inside a skeleton
     build, the moment a push has read the slot and the partial and has not sent yet. Round three: with a board pane (app
     "feed") in km._clients and no feed frame sent to one yet, phase two waits for that frame; with none it runs at once, as
-    every earlier test has it. The builder sends no frame of the full build: the pusher's next push sends it (2026-10-04)."""
+    every earlier test has it. The builder sends no frame of the full build: the pusher's next push sends it (2026-10-04).
+    The PR's first review round (2026-10-04) adds two cold-lanes sends that overlap, a connect's clock, a raising send inside
+    the builder's pass, the backoff after a failed pass, and the two guards only a direct call reaches."""
 
     LANES = [{"id": S1, "name": NAMES[S1]}, {"id": S2, "name": NAMES[S2]}]   # S1 is the live session, S2 dead within the window
 
@@ -585,6 +631,8 @@ class ColdTimelineBuilder(unittest.TestCase):
         lines = [l for l in err.getvalue().splitlines() if l.startswith("timeline-build:")]
         self.assertEqual(len(lines), 1, "said once per exception kind: %r" % lines)
         self.assertIn("RuntimeError", lines[0])
+        self.assertIn(", in on_bars", err.getvalue(), "the line carries the traceback, the function the build raised in "
+                      "included (review find, 2026-10-04: the kind and text alone named neither function nor file)")
 
     def test_a_failed_pass_keeps_nothing_of_the_failed_build_alive(self):
         # the loop kept the exception between passes, and through its traceback every frame of the failed build and what
@@ -1033,6 +1081,199 @@ class ColdTimelineBuilder(unittest.TestCase):
                 self.assertEqual(self._kinds(frames)[2:], [("data", None), ("bars", False)],
                                  "%s: the rebuild's lanes, then its bars" % label)
 
+    # ---- the PR's first review round (2026-10-04) ----
+
+    def test_a_cold_lanes_send_landing_after_a_newer_builds_never_steps_the_pane_back(self):
+        # review find (2026-10-04): of two overlapping cold-lanes builds, the older one could also end first, be stored and be
+        # sent after the newer one's, since the send checked only that the slot was still cold, and the pane stepped back
+        # until the next push. Each send now takes the newest memo under the pane's slot lock, and none once the full build
+        # has landed: the third case lands it between the guard's read of the slot and the send's read of the memo
+        world, arm, gate = ["working"], [False], [None]
+
+        def build(now, live_map=None, with_bars=True, live_only=False):
+            sessions = [{"id": S1, "name": NAMES[S1], "state": world[0]}]
+            if not live_only:
+                sessions.append({"id": S2, "name": NAMES[S2], "state": "ended"})
+            if not with_bars and arm[0] and threading.current_thread().name == "held":
+                arm[0] = False
+                gate[0].name = "held"                     # its next take of the pane's lock is its cold-lanes send
+            turns = {s["id"]: [{"id": "t-" + s["id"][-1], "t": 1, "t1": 2}] for s in sessions} if with_bars else {}
+            return {"type": "timeline", "sessions": sessions, "turns": turns, "judging": [], "messages": [], "now": now}
+        km.build_timeline = build
+        cases = (("a connect's send held", True, False), ("the pusher's send held", False, False),
+                 ("the full build landing at the held send", True, True))
+        for label, held_connect, lands in cases:
+            with self.subTest(label):
+                km._built_timeline[:] = [None, None, 0.0, 0.0]
+                km._views_dirty[0] = 0.0
+                km._skel_wire = km._bars_wire = None
+                _cold_timeline_state_clear()
+                world[0], arm[0], gate[0] = "working", False, _HoldAtLock()
+                frames = []
+                pane = {"app": "timeline", "alive": True, "sent": {}, "dlock": gate[0],
+                        "send": lambda s, frames=frames: frames.append(json.loads(s))}
+                memo = _HookAtRead()
+                full = {"type": "timeline", "sessions": [{"id": S1, "name": NAMES[S1], "state": "waiting"},
+                                                         {"id": S2, "name": NAMES[S2], "state": "ended"}],
+                        "turns": {}, "judging": [], "messages": [], "now": int(time.time())}
+
+                def land(memo=memo, full=full):           # the builder's landing: the slot filled, then the memo dropped
+                    km._built_timeline[:] = [self.sig[0], full, 0.0, time.time()]
+                    list.__setitem__(memo, 0, None)
+                memo.hook = land
+                with mock.patch.object(km, "REBUILD_MIN_S", 0.2), mock.patch.object(km, "_tl_cold_lanes", memo):
+                    km._push([pane])                      # the cold lanes: web working
+                    self.sig[0] = ("sig", label)
+                    time.sleep(0.3)                       # the memo is past the floor under a moved signature
+                    arm[0] = True
+                    th = threading.Thread(target=km._push, args=([pane],), kwargs={"connect": held_connect}, name="held",
+                                          daemon=True)
+                    th.start()
+                    try:
+                        self.assertTrue(gate[0].held.wait(10), "%s: the older build was stored and its send waits" % label)
+                        world[0] = "waiting"              # web stops working
+                        km._mark_views_dirty()
+                        km._push([pane], connect=not held_connect)   # the newer build: stored, and sent to the pane
+                        if lands:
+                            memo.thread = th.ident        # the held send's read of the memo, under the pane's lock
+                    finally:
+                        gate[0].go.set()
+                        th.join(10)
+                    km._push([pane])                      # the next push
+                web = [[s.get("state") for s in f["data"]["sessions"] if s["id"] == S1][0]
+                       for f in frames if f["type"] == "data"]
+                self.assertEqual(web[:2], ["working", "waiting"], "%s: the cold lanes, then the newer build's: %r" % (label, web))
+                self.assertNotIn("working", web[1:], "%s: the pane stepped back to the older lanes: %r" % (label, web))
+                if lands:
+                    last = [f for f in frames if f["type"] == "data"][-1]
+                    self.assertEqual(len(last["data"]["sessions"]), 2, "the full build's lanes went next: %r" % (web,))
+
+    def test_a_cold_connect_sends_the_cold_lanes_under_its_own_clock(self):
+        # a connect stamps the memo with its own cycle's clock, as a warm connect re-stamps the cached build: the pane anchors
+        # its live edge on its first sample, and the memo's own clock can be a floor and a bucket old (review find,
+        # 2026-10-04: test 8 compares only the sessions, so sending the memo's clock left the suite green)
+        a, _fa = self._pane()
+        km._push([a])                                     # the pusher's cold lanes: the memo
+        m = km._tl_cold_lanes[0]
+        aged = {"type": "data", "data": dict(m[2]["data"], now=m[2]["data"]["now"] - 30)}
+        km._tl_cold_lanes[0] = m[:2] + (aged, json.dumps(aged)) + m[4:]   # the memo as a push 30 s ago built it
+        b, fb = self._pane()
+        t0 = int(time.time())
+        km._push([b], connect=True)
+        self.assertEqual(self.builds, ["skel"], "the connect served the memo: %r" % self.builds)
+        self.assertEqual(fb[0]["data"]["sessions"], aged["data"]["sessions"])
+        self.assertGreaterEqual(fb[0]["data"]["now"], t0, "the connect's clock, not the memo's: %r" % (fb[0]["data"]["now"],))
+
+    def test_a_raising_bars_fill_or_pane_send_never_fails_the_builders_pass(self):
+        # review find (2026-10-04): nothing raised inside _timeline_send_partial, so narrowing either of its excepts left the
+        # suite green, while a raise there would fail the whole pass: the full build lost and a failed pass counted
+        def boom(*a, **k):
+            raise RuntimeError("synthetic send failure")
+        for label, name, said in (("the fill raises", "_bars_fill", "timeline-build send bars (fill):"),
+                                  ("a pane's send raises", "_send_slot", "timeline-build send bars:")):
+            with self.subTest(label):
+                del self.builds[:]
+                km._built_timeline[:] = [None, None, 0.0, 0.0]
+                _cold_timeline_state_clear()
+                pane, frames = self._pane()
+                pane["sent"][("timeline",)] = ("lanes", time.time())   # it holds a lanes frame: the builder sends it bars
+                km._clients[:] = [pane]
+                failed0 = km._VIEW_STATS.get("tlBuildFailed", 0)
+                err = io.StringIO()
+                th = threading.Thread(target=km._timeline_builder, name="timeline-build", daemon=True)
+                alive = None
+                try:
+                    with mock.patch.object(km, name, boom), contextlib.redirect_stderr(err):
+                        th.start()
+                        km._cached_timeline(int(time.time()), {}, ("sig",), False)   # the owe
+                        self._wait(lambda: km._built_timeline[1] is not None
+                                   or km._VIEW_STATS.get("tlBuildFailed", 0) != failed0, "%s: the pass ended" % label)
+                finally:
+                    alive = self._stop(th)
+                self.assertFalse(alive, "the loop ended on the stop seam")
+                self.assertIsNotNone(km._built_timeline[1], "%s: the full build landed" % label)
+                self.assertEqual(km._VIEW_STATS.get("tlBuildFailed", 0), failed0, "%s: no failed pass counted" % label)
+                self.assertIn(said, err.getvalue(), "%s: said on stderr" % label)
+                self.assertEqual(self.builds, ["live", "full"], "%s: one pass, both phases: %r" % (label, self.builds))
+
+    def test_a_failed_pass_waits_out_the_backoff_before_an_owe_retries_it(self):
+        # review find (2026-10-04): test 15 sleeps past the backoff before its retry, so a loop with no backoff wait passed it
+        fails, marks = [1], []
+
+        def on_bars(kind, live_map):
+            marks.append((kind, time.monotonic()))
+            if kind == "full" and fails[0] > 0:
+                fails[0] -= 1
+                raise RuntimeError("synthetic build failure")
+        self.on_bars = on_bars
+        failed0 = km._VIEW_STATS.get("tlBuildFailed", 0)
+        th = threading.Thread(target=km._timeline_builder, name="timeline-build", daemon=True)
+        alive = None
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                th.start()
+                km._cached_timeline(int(time.time()), {}, ("sig",), False)   # the owe
+                self._wait(lambda: km._VIEW_STATS.get("tlBuildFailed", 0) - failed0 >= 1, "the failure")
+                km._cached_timeline(int(time.time()), {}, ("sig",), False)   # an owe at once
+                self._wait(lambda: len([k for k, _t in marks if k == "live"]) >= 2, "the retry's phase one")
+        finally:
+            alive = self._stop(th)
+        self.assertFalse(alive, "the loop ended on the stop seam")
+        failed_at = [t for k, t in marks if k == "full"][0]
+        retry_at = [t for k, t in marks if k == "live"][1]
+        self.assertGreaterEqual(retry_at - failed_at, km.PUSHER_FAIL_BACKOFF_S[0] - 0.05,
+                                "the retry waited out the backoff after the failure: %.3f s" % (retry_at - failed_at))
+
+    def test_the_builders_full_build_returns_a_filled_slot_as_it_stands(self):
+        # _timeline_build_cold over a filled slot, fresh or stale: the slot's build comes back and nothing is built. The pass
+        # returns before it today, so only a direct call reaches the guard its docstring promises (review find, 2026-10-04)
+        held = {"type": "timeline", "sessions": [], "turns": {}, "judging": [], "messages": [], "now": 1}
+        for entry in ([("sig",), held, time.time(), time.time()], [("older",), held, 1.0, 1.0]):
+            km._built_timeline[:] = entry
+            before = list(km._built_timeline)
+            self.assertIs(km._timeline_build_cold(int(time.time()), {}, ("sig",)), held)
+            self.assertEqual(self.builds, [], "nothing built over a filled slot: %r" % (entry[0],))
+            self.assertEqual(km._built_timeline, before, "the slot's entry stands: %r" % (entry[0],))
+
+    def test_the_builders_send_stops_at_a_pane_whose_lock_it_takes_after_the_full_build_landed(self):
+        # _timeline_send_partial decides each pane under its slot lock: the full build landing as it takes the second pane's
+        # lock stops the send there. The builder is the slot's one writer, so only a direct call reaches it today (review find,
+        # 2026-10-04)
+        a, fa = self._pane()
+        b, fb = self._pane()
+        for p in (a, b):
+            p["sent"][("timeline",)] = ("lanes", time.time())   # each holds a lanes frame
+        full, landed = self._full(), []
+
+        class LandsOnTake:
+            """b's slot lock: the full build lands as the send takes it."""
+
+            def __init__(self):
+                self.lk = threading.RLock()
+
+            def acquire(self, blocking=True, timeout=-1):
+                if not landed:
+                    landed.append(1)
+                    km._built_timeline[:] = [("sig",), full, 0.0, time.time()]
+                return self.lk.acquire(blocking, timeout)
+
+            def release(self):
+                self.lk.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *x):
+                self.release()
+                return False
+        b["dlock"] = LandsOnTake()
+        km._clients[:] = [a, b]
+        km._timeline_send_partial(self._partial())
+        self.assertEqual(landed, [1], "the full build landed at the second pane's take")
+        self.assertEqual(self._kinds(fa), [("bars", True)], "the first pane got the partial's bars, warming")
+        self.assertEqual(fb, [], "the second pane got no cold bars after the full build landed")
+
 
 class FullBuildLanding(unittest.TestCase):
     """The builder's full build landing over the cold lanes a Sessions pane holds (the gate's probe, 2026-10-03). Phase two
@@ -1271,6 +1512,116 @@ class InFlightPushClockMoved(_InFlightPush):
         self.assertEqual(bnows, sorted(bnows), "the bars frame's clock went back: %r" % (bars,))
 
 
+class ColdLanesWorldOrder(_InFlightPush):
+    """The cold lanes dated by the world they read (the PR's first review round, 2026-10-04). The memo was dated by when its
+    build began, but a pusher push builds from its cycle's snapshot after the cycle's jobs and its own chat stage: one that
+    began its build after a reload's connect push had read a newer world replaced that connect's memo with older lanes and
+    stepped the pane's lane back. The memo now carries the stamp of its liveness snapshot (the cycle's, or the connect's own
+    read): a memo from a newer world is served to an older push as it stands, and of two overlapping builds the newer
+    world's is the memo, whichever began first. The in-flight push's thread carries its cycle's stamp, as _pusher_cycle
+    sets it; web works in the first snapshot and waits in the second. REBUILD_MIN_S is 0.2 s here."""
+
+    BUCKET = False
+
+    def setUp(self):
+        super().setUp()
+        self.skels, self.hold = [], None
+
+    def _build(self, now, live_map=None, with_bars=True, live_only=False):
+        out = super()._build(now, live_map, with_bars, live_only)   # web's state from the snapshot it is handed
+        if not with_bars:
+            name = threading.current_thread().name
+            self.skels.append(name)
+            h = self.hold
+            if h is not None and name == h[0]:
+                self.hold = None
+                h[1].set()
+                h[2].wait(10)                             # the build has read its world and is held before its store
+        return out
+
+    def _in_flight(self, pane, old):
+        """The pusher cycle's push, its snapshot `old` and its stamp taken now, held in its chat stage."""
+        started, release = threading.Event(), threading.Event()
+        self.block = (started, release)
+
+        def run():
+            km._live_scope.snapshot_t = time.time()
+            try:
+                km._push([pane], live_map=old)
+            finally:
+                km._live_scope.snapshot_t = None
+        th = threading.Thread(target=run, name="in-flight", daemon=True)
+        th.start()
+        self.assertTrue(started.wait(10), "the in-flight push reached its chat stage")
+        return th, release
+
+    @staticmethod
+    def _web(frames):
+        return [[s["state"] for s in f["data"]["sessions"] if s["id"] == S1][0] for f in frames if f["type"] == "data"]
+
+    def _pane_frames(self):
+        frames = []
+        return {"app": "timeline", "alive": True, "sent": {}, "send": lambda s: frames.append(json.loads(s))}, frames
+
+    def test_a_push_from_an_older_snapshot_serves_a_newer_memo_as_it_stands(self):
+        # the cycle stamps its snapshot and runs its jobs before its push; a reload's connect push reads a newer world in
+        # between, so the cycle's push, which begins after the connect, still builds from the older snapshot
+        old, new = {S1: {"state": "working"}}, {S1: {"state": "waiting"}}
+        self.live[0] = old
+        pane, frames = self._pane_frames()
+        km._push([pane], live_map=old)                   # the cold lanes: web working
+        time.sleep(0.3)                                   # past the floor
+        stamped, release = threading.Event(), threading.Event()
+
+        def cycle():
+            km._live_scope.snapshot_t = time.time()      # the cycle's stamp, before its snapshot `old` (_pusher_cycle)
+            stamped.set()
+            release.wait(10)                              # the cycle's jobs before its push
+            try:
+                km._push([pane], live_map=old)
+            finally:
+                km._live_scope.snapshot_t = None
+        th = threading.Thread(target=cycle, name="in-flight", daemon=True)
+        th.start()
+        self.assertTrue(stamped.wait(10), "the cycle stamped its snapshot")
+        self.live[0] = new
+        km._push([pane], connect=True)                    # a reload reads the world now: web waiting, and that is the memo
+        time.sleep(0.3)                                   # past the floor, under a signature the cycle's push does not share
+        del self.skels[:]
+        release.set()
+        th.join(10)
+        self.assertFalse(th.is_alive(), "the cycle's push ended")
+        self.assertEqual(self.skels, [], "the push from the older snapshot built no lanes over the newer memo: %r" % self.skels)
+        self.assertEqual(self._web(frames), ["working", "waiting"], "and no lane stepped back: %r" % (self._web(frames),))
+
+    def test_of_two_overlapping_builds_the_newer_worlds_is_the_memo_whichever_began_first(self):
+        old, new = {S1: {"state": "working"}}, {S1: {"state": "waiting"}}
+        self.live[0] = old
+        pane, frames = self._pane_frames()
+        km._push([pane], live_map=old)                   # the cold lanes: web working
+        time.sleep(0.3)
+        th, release = self._in_flight(pane, old)
+        self.live[0] = new
+        km._mark_views_dirty()                            # both builds below build the lanes again
+        del self.skels[:]
+        began, go = threading.Event(), threading.Event()
+        self.hold = ("connect", began, go)
+        cth = threading.Thread(target=km._push, args=([pane],), kwargs={"connect": True}, name="connect", daemon=True)
+        cth.start()
+        try:
+            self.assertTrue(began.wait(10), "the reload's lanes build read the world now and is held before its store")
+            release.set()
+            th.join(10)                                   # the in-flight push builds from its older snapshot and stores first
+            self.assertFalse(th.is_alive(), "the in-flight push ended")
+        finally:
+            go.set()
+            cth.join(10)
+        self.assertEqual(self.skels, ["connect", "in-flight"], "the reload's build began first: %r" % self.skels)
+        self.assertEqual(self._web(frames), ["working", "waiting"],
+                         "the reload sent the newer world's lanes, and nothing older went after them: %r" % (self._web(frames),))
+        self.assertEqual(km._tl_cold_lanes[0][2]["data"]["sessions"][0]["state"], "waiting", "the memo is the newer world's")
+
+
 class SameBucketLanding(unittest.TestCase):
     """The full build landing inside the view signature's clock bucket after the cold lanes moved on (the round-three gate's
     probe, 2026-10-04). The bucket turns just before phase two opens and nothing else moves; a push inside phase two rebuilds
@@ -1340,12 +1691,56 @@ class SameBucketLanding(unittest.TestCase):
         self.assertEqual(ends, sorted(ends), "web's open interval shrank with no new information: %r" % (seq,))
         self.assertEqual(seq[-1][0], 2, "the full build's lanes reached the pane: %r" % (seq,))
 
+    def test_a_cold_lanes_store_between_the_full_builds_read_and_its_store_waits_for_the_landing(self):
+        # The full build reads the cold lanes' clock and stores itself into the slot under the cold lanes' lock (the PR's first
+        # review round, 2026-10-04: no test reached that lock). Without it, a push could store newer cold lanes between that
+        # read and the store, and send them; the full build, stored under the signature it read, then went on the next push
+        # with web's open interval ending earlier than the end the pane held. The push here runs at that moment: it waits for
+        # the lock, finds the slot filled, and sends nothing
+        frames = []
+        pane = {"app": "timeline", "alive": True, "sent": {}, "send": lambda s: frames.append(json.loads(s))}
+        km._clients[:] = [pane]
+        gate, memo, pushed = _Gate(), _HookAtRead(), []
+        memo.before = True                                # the full build reads the memo as it stood before the push
+
+        def push_between():                               # inside the full build's read of the memo, under the lock
+            gate.armed = True
+            th = threading.Thread(target=km._push, args=([pane],), daemon=True)
+            th.start()
+            deadline = time.monotonic() + 5
+            while th.is_alive() and not gate.waiting.is_set() and time.monotonic() < deadline:
+                time.sleep(0.01)                          # until the push waits on the lock, or has run to its end
+            pushed.append(th)
+        memo.hook = push_between
+
+        def hook():                                       # phase two has read its world and its clock
+            time.sleep(1.1)                               # a second on, inside the same bucket: the push's clock is later
+            memo.thread = threading.get_ident()           # the full build's next read of the memo is the one in its store
+        self.hook = hook
+        with mock.patch.object(km, "_tl_cold_lanes", memo), mock.patch.object(km, "_TL_COLD_LANES_LOCK", gate):
+            km._push([pane])                              # the cold lanes, under bucket one
+            time.sleep(0.3)                               # the memo is past the floor
+            self.sigv[0] = ("v", 2)                       # the clock bucket turns before phase two opens; nothing else
+            km._timeline_builder_pass()                   # phase one, phase two, the push between, the landing
+            for th in pushed:
+                th.join(10)
+            km._push([pane])                              # the pusher's next pushes, the same bucket
+            km._push([pane])
+        self.assertEqual(len(pushed), 1, "the push ran inside the full build's store")
+        seq = [(len(f["data"]["sessions"]), f["data"]["now"], [s for s in f["data"]["sessions"] if s["id"] == S1][0]["awaiting"][0][1])
+               for f in frames if f["type"] == "data"]
+        ends = [end for _k, _now, end in seq]
+        self.assertEqual(ends, sorted(ends), "web's open interval shrank with no new information: %r" % (seq,))
+        self.assertEqual(seq[-1][0], 2, "the full build's lanes reached the pane: %r" % (seq,))
+
 
 class TimelineBuildStage(unittest.TestCase):
     """The builder loop's `timelineBuild` stage leaves out the wait for the board's first frame (the round-three gate's probe,
     2026-10-04), for a pass that completes and for one whose phase two raises: the wait is kept in a module slot as soon as
     it ends, so a raise in phase two no longer puts it in the stage. The real loop, stopped through the T282 seam; a board
-    pane connected and unfed, released by the first frame's event after 0.6 s."""
+    pane connected and unfed, released by the first frame's event after 0.6 s. Phase two takes 0.15 s, so the stage also
+    holds at least 100 ms (the PR's first review round, 2026-10-04: with the upper bound alone, a deleted stage line or the
+    wait subtracted twice passed)."""
 
     def setUp(self):
         # the kernel names this class needs, read before anything is changed: on a kernel without them (a red run over an
@@ -1380,9 +1775,13 @@ class TimelineBuildStage(unittest.TestCase):
         km._clients[:] = clients
         _cold_timeline_state_clear()
 
+    PHASE_TWO_S = 0.15                                    # phase two's known length: the stage holds at least it
+
     def _build(self, now, live_map=None, with_bars=True, live_only=False):
-        if with_bars and not live_only and self.fail_full:
-            raise RuntimeError("synthetic phase-two failure")
+        if with_bars and not live_only:
+            time.sleep(self.PHASE_TWO_S)
+            if self.fail_full:
+                raise RuntimeError("synthetic phase-two failure")
         sessions = [{"id": S1, "name": NAMES[S1]}] + ([] if live_only else [{"id": S2, "name": NAMES[S2]}])
         return {"type": "timeline", "sessions": sessions, "turns": {}, "judging": [], "messages": [], "now": now}
 
@@ -1419,6 +1818,7 @@ class TimelineBuildStage(unittest.TestCase):
         ms = self._one_pass_ms()
         self.assertIsNotNone(km._built_timeline[1], "the pass completed")
         self.assertLess(ms, 400.0, "the stage counted the wait for the board: %.1f ms" % ms)
+        self.assertGreaterEqual(ms, 100.0, "the stage holds phase two's own time (review find, 2026-10-04): %.1f ms" % ms)
 
     def test_a_pass_whose_phase_two_raises_leaves_the_wait_for_the_board_out_of_the_stage(self):
         self.fail_full = True
@@ -1426,6 +1826,7 @@ class TimelineBuildStage(unittest.TestCase):
             ms = self._one_pass_ms()
         self.assertIsNone(km._built_timeline[1], "phase two raised and the slot stayed cold")
         self.assertLess(ms, 400.0, "the stage counted the wait for the board: %.1f ms" % ms)
+        self.assertGreaterEqual(ms, 100.0, "the stage holds phase two's own time, up to its raise: %.1f ms" % ms)
 
 
 class FeedFirstWaiter(unittest.TestCase):
