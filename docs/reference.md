@@ -2650,8 +2650,33 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `pass_cpu_ms_sum`, `pass_ms_p50`, `pass_ms_p90`, `pass_ms_ring_max`,
   `ring_n`, `passFailed` (a pass that raised out of the loop and was
   skipped), `splitFailed`, `firstPass` (the boot's first pass's stage split,
-  the shape of `pusher.firstCycle`) and `stageRing`. The pass's container
-  stage is `jobsPass`, its opening `jobs.prelude`; each job is still its
+  the shape of `pusher.firstCycle`), `stageRing` and `cpuByJob` (per job this
+  thread ran, by its `<job>` name: `runs`, one per call by the pass, a call
+  that returned early on the job's own pace or raised included, and `cpuMs`,
+  the thread's own CPU inside the job, which includes any collection the
+  interpreter ran on this thread during the job, a pause set by the heap and
+  not by the job. Both generation-2 tallies, `gc.gen."2"` and a ring row's
+  `n2` and `ms2`, count every thread's collections, so over an interval an
+  unmoved tally rules a collection out of a job's `cpuMs` and a moved one
+  does not put it there (the freeze controller's own collections, counted
+  under `gc.freeze.collections`, run on the pusher thread and reach a job
+  only as a wait in its wall; a job still open at the first read records its
+  CPU, any collection inside it included, only when it ends, so take the
+  tally from a read made before that job began or set such a job aside; a
+  read of `/perf?stacks=1` names the job open at that read, by the `jobs`
+  row's stage mark, though it samples the stacks after copying the counters
+  and building the rest of the snapshot, so a job that ended in between
+  shows as `null` or as a later job and its CPU arrives in the next read; a
+  plain read names none unless
+  the kernel runs with `ROMP_PERF_STACKS`);
+  compare `gc.gen."2"` or the kernel samples'
+  generation-2 tallies over the interval, and the ring rows only for the
+  passes the ring still holds (the newest 16 on a plain read, the whole ring
+  with `?ring=all`); the job's `jobs.<job>` stage is its wall, which also
+  counts its waits for a lock, the disk or a free core, so the two side by
+  side say which jobs worked and which waited; the pusher's jobs are not
+  counted). The pass's container stage is `jobsPass`,
+  its opening `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
   in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,
   turn notify, the checkpoint persist and converge, the boot row backstop,
@@ -3030,8 +3055,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `sdk-boot`, `first-cycle-sampler`, `jobs` (the housekeeping loop split off the pusher), `main`; never a
   session's name, sid, host or path (the ident
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
-  sample), `stage` (the thread's current stage mark: the pusher's
-  `jobs.<job>` or `push`, a handler's `connect`, `null` outside one) and
+  sample), `stage` (the thread's current stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, a handler's `connect`, any other mark the
+  `asmIndex.materializedByStage` list names, a job's finer part as
+  `jobs.<job>.<part>`, `null` for a thread with no mark) and
   `frames`, "function (file:line)" strings innermost last, at most 40; no
   locals, arguments or session content. Filled when the kernel runs with
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
@@ -3123,9 +3151,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `bytes`; a tail read, an
   append and a restore's tail read are not whole reads and are not counted;
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
-  the stage being the pusher thread's current tick job (`jobs.<job>`) or
-  `push`, `connect` for a fresh client's full push on its handler thread (a
-  browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
+  the stage being the calling thread's stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, `connect` for a fresh client's full push on its handler
+  thread (a browser reload or reconnect), any other mark the
+  `asmIndex.materializedByStage` list names, a job's finer part as
+  `jobs.<job>.<part>`, and `none` for a thread with no mark (T401); `asmCheckpoint.hydratedByStage`
   does the same for the hydration rows.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
@@ -3190,6 +3221,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   first segment, or its first two under `/push`, `/tunnels` and `/usage`,
   whose roads differ by the second), `warm.parse`, `warm.boot`,
   `producer`, `revive`, `rewind.migration`, `rewind.holds`, `move`,
+  `asm.refresh` (the assembly document refresh's thread), `comment.create`
+  (the thread a comment's create runs on), `restart` (the restart and Apply
+  now doors), `judge.end` (the thread that reaps a judge child; not a tier's
+  mark, and it builds and hydrates nothing),
   `remote-ws`, `federation.push`, `federation.pull`, `federation.ask`,
   `ask-poll`; `none` means the build ran on a thread with no mark, which
   should not happen: the kernel's thread census (every Thread, Timer and
@@ -3271,10 +3306,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   id.
 - `stages_ms`: `prelude` (the cycle's opening: the liveness snapshot and the
   names), `jobs` (the cycle's tick jobs outside the push) and inside it one
-  `jobs.<job>` per tick job (`jobs.interruptBlock`, `jobs.autoNudge`,
-  `jobs.convergeCheckpoints` and the rest, T398), `push`, and inside it
+  `jobs.<job>` per job the pusher runs (`jobs.convergeCheckpoints`,
+  `jobs.applyPendingOps` and the rest, T398), `jobs.prelude` (the jobs
+  thread's opening: its liveness snapshot and names, timed beside its pass,
+  not inside it), `jobsPass` (the jobs thread's pass) and inside it one
+  `jobs.<job>` per job that thread runs (`jobs.interruptBlock`,
+  `jobs.autoNudge` and the rest), and inside a job its finer parts as
+  `jobs.<job>.<part>` (such as the nudge job's snapshot, looks and parse),
+  which that job's own stage already covers on the jobs thread (the pass
+  the dashboard's auto-nudge and compaction-suggestion toggles run at once,
+  on the socket's thread, records its parts with no job stage around
+  them, and that thread carries the nudge job's marks only until the pass
+  returns, when its own route's mark is put back), `push`,
+  and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
-  `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
+  `push.feedFirst`; a fresh snapshot lists every one at zero except a job's
+  finer parts, which appear once the part has run. The `push.*`
   stages count every push, including the one a connecting page gets, so they
   can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
