@@ -12713,8 +12713,9 @@ class SdkBackend:
             (to launchd on macOS, to the `systemd --user` subreaper on Linux) and keep writing the
             transcript, so a resume would give the conversation two writers. Only an orphan carrying
             this kernel's state tag is ended; for one the tag check spares, a session whose lastSid or
-            own sid is among the ids cli_writes_sids reads from its argv is not resumed by this boot
-            (the guard in the per-session loop below).
+            own sid is among the ids cli_writes_sids reads from its argv, or whose own sid is the sid
+            of the first lease in name order naming its pid when that lease's start time is the
+            process's, is not resumed by this boot (the guard in the per-session loop below).
           * A session whose state tail is 'working' had its turn CUT by the kernel death — a user
             interrupt writes 'idle', a finished turn 'waiting'; only a kill leaves 'working' — so resume
             it with a visible continuation nudge (BOOT_RESUME_NUDGE) ahead of its restored queue. The
@@ -12749,6 +12750,10 @@ class SdkBackend:
             # lastSid or own sid is among them is not resumed by this boot, whatever its state tail says. Empty when
             # nothing is spared
             spared_fsids: set[str] = set()
+            # for each spared orphan, the sid of the first lease in name order naming its pid, when that lease's start
+            # time is the process's. A session whose own sid is among them is not resumed by this boot either. Empty
+            # when nothing is spared
+            spared_lease: set[str] = set()
             if lastsids:
                 try:
                     ps = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10).stdout
@@ -12805,26 +12810,36 @@ class SdkBackend:
                         else:
                             left.append(("claude pid %d" % pid, tag))
                     spared = {pid for pid in census["orphans"] if pid not in orphans and pid != os.getpid()}
-                    spared_fsids.update(s for pid in spared for s in cli_writes_sids(cmd_of.get(pid, ""), writes))
-                    problems = [p for p in census["problems"] if p.get("cliPid") not in spared]
-                    # a row's fsid -> its session: a live row's lastSid first, else a row's own sid
-                    sid_of = {s: s for s in by_sid_reg}
-                    sid_of.update({str(r.get("lastSid")): str(r.get("sid")) for r in alive if r.get("lastSid")})
-                    for prob in problems:
-                        self._lease_problem(prob, sid_of)
                     lease_by_pid = {}
                     for lease in leases:
                         try:
                             lease_by_pid.setdefault(int(lease.get("pid")), lease)
                         except (TypeError, ValueError):
                             pass
+                    # pid -> the sid of the first lease in name order naming it (lease_by_pid), for each CLI the boot
+                    # spares or ends whose start time is that lease's (lease_census's identity check)
+                    lease_sid = {}
+                    for pid in spared.union(orphans):
+                        lease = lease_by_pid.get(pid)
+                        if lease is not None and lease.get("sid") and proc_start(pid) == str(lease.get("start") or ""):
+                            lease_sid[pid] = str(lease["sid"])
+                    spared_fsids.update(s for pid in spared for s in cli_writes_sids(cmd_of.get(pid, ""), writes))
+                    spared_lease.update(lease_sid[pid] for pid in spared if pid in lease_sid)
+                    problems = [p for p in census["problems"] if p.get("cliPid") not in spared]
+                    # a row's fsid -> its session: a row's own sid first, else a live row's lastSid
+                    sid_of = {str(r.get("lastSid")): str(r.get("sid")) for r in alive if r.get("lastSid")}
+                    sid_of.update({s: s for s in by_sid_reg})
+                    for prob in problems:
+                        self._lease_problem(prob, sid_of)
                     for pid in orphans:
                         # the CLI AND its tree (T276): its scope unit, then every process still under it
                         try:
                             res = self._end_cli_tree(pid, ps_lines)
                             reaped += 1
                             fsid = cli_sid_of(cmd_of.get(pid, ""), writes) or ""
-                            r0 = by_fsid.get(fsid) or by_sid_reg.get(fsid) or {}
+                            r0 = by_sid_reg.get(fsid) or by_fsid.get(fsid) or {}
+                            if pid in lease_sid:     # its lease's session first, when that session has a row
+                                r0 = by_sid_reg.get(lease_sid[pid]) or r0
                             res = res if isinstance(res, dict) else {}
                             problem_row(self.state_dir,
                                         "boot: ended an orphaned claude process (pid %d) still holding session %s's "
@@ -12885,14 +12900,19 @@ class SdkBackend:
                     _keep = isinstance(_w.get("picks"), dict) and "effort" in _w["picks"] and self._lease_survives(sid)
                     if r.get("modelPending") or (r.get("effortPending") and not _keep):
                         self._update_reg(sid, modelPending=False, **({} if _keep else {"effortPending": False}))
-                    if str(r.get("lastSid") or "") in spared_fsids or sid in spared_fsids:
+                    if str(r.get("lastSid") or "") in spared_fsids or sid in spared_fsids or sid in spared_lease:
                         # A claude process this kernel did not start (another kernel's state tag, or none) may still
                         # be writing this session's conversation: the reap above spared it and named it on its
                         # left-alone line, and this session's lastSid or its own sid is among the ids cli_writes_sids
-                        # reads from that process's argv. The own sid matters for a session whose lastSid is not among
-                        # those ids, for example a fork whose first CLI writes the fork's own sid while the fork's
-                        # lastSid is still the one it was made with (SdkBackend.fork), or a session cleared inside its
-                        # CLI, whose command line still names the session's own sid after its lastSid has moved on.
+                        # reads from that process's argv, or its own sid is the sid of the first lease in name order
+                        # naming that process's pid, when that lease's start time is the process's. The own sid matters
+                        # for a session whose lastSid is not among those ids, for example a fork whose first CLI writes
+                        # the fork's own sid while the fork's lastSid is still the one it was made with
+                        # (SdkBackend.fork), or a session cleared inside its CLI, whose command line still names the
+                        # session's own sid after its lastSid has moved on. The lease's sid is matched against a
+                        # session's own sid only, so a thread or copy whose lastSid is the leased session's sid (one
+                        # made before that session's first clear, still before its own first message) is not held by
+                        # the lease.
                         # This test runs ahead of the attach branch below on purpose: an attach's connect reads the
                         # lease again (_host_transport_for), and if the host read here has died since, that connect
                         # launches a CLI (a fresh host, or a kernel child when the session-hosts file says off), which
@@ -12902,6 +12922,11 @@ class SdkBackend:
                         # conversation, the hazard the reap exists to prevent. So the session stays down: no resume
                         # nudge, no machine-cut stamp, no spawn. Its cut tail, queue, dead tasks and pending ask stay on
                         # disk for the boot that finds the conversation free.
+                        # A fork before its first message (forkOf still set) is held by its lastSid as well, the
+                        # conversation it was made from, though a launch of the fork writes only the fork's own sid:
+                        # that launch loads the conversation and copies it into the fork (fork_session, up to the
+                        # fork's cut when it has one), and a copy taken while a process this kernel did not start may
+                        # still be appending to the conversation can end partway through what that process is writing.
                         self._log("boot reconcile: %s stays down: a claude process this kernel did not start may "
                                   "still be writing its conversation (the process is named above)"
                                   % (r.get("name") or sid[:8]))

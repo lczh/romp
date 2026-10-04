@@ -440,6 +440,30 @@ class ASparedOrphanHoldsItsConversation(unittest.TestCase):
                                      + _named([reaped[0].get("sid"), reaped[0].get("fsid")]),
                                      [CLI_U, "fresh", "fresh", "fresh"])
 
+    def test_a_spared_processs_lease_whose_start_time_is_not_the_processs_does_not_hold_the_leases_session(self):
+        # web's lease on this state root names the pid of a surviving plain resume of api's conversation (no tag), with
+        # a start time that is not the process's. Both sessions have a cut turn. api stays down, held by the process's
+        # command line, and web is started. In either order
+        for order in ((SID, WEB), (WEB, SID)):
+            with self.subTest(first=_named(order)[0]):
+                d = _root()
+                _reg(d, SID)
+                _reg(d, WEB, name="web")
+                sb.append_state(Path(d), SID, "working")
+                sb.append_state(Path(d), WEB, "working")
+                sb.write_lease(d, {"sid": WEB, "fsid": WEB, "name": "web", "pid": CLI_U, "start": "9", "version": "",
+                                   "holder": {"kind": "kernel", "pid": P + 70, "start": "3"}, "t": time.time()})
+                ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER, _cli(CLI_U, MANAGER)]
+                boot = Boot(d, ps, [], [], tags={}, starts={CLI_U: "7"}, sids=order)
+                boot.go()
+                self.assertFalse([m for m in boot.said if "reap failed" in m], boot.said)
+                self.assertEqual(boot.signaled(), [])
+                self.assertEqual(len([m for m in boot.said if "left alone" in m]), 1, boot.said)
+                self.assertEqual(_named(boot.started), ["web"])
+                down = [m for m in boot.said if "stays down" in m]
+                self.assertEqual(len(down), 1, boot.said)
+                self.assertIn("api", down[0])
+
     def test_flag_text_in_a_spared_processs_prompt_ahead_of_its_flags_leaves_its_session_held(self):
         # an appended system prompt ahead of the CLI's own flags (the argv order cli_writes_sids describes) puts
         # flag-shaped text on a plain resume's command line before its own --resume. The boot reads the process's own
@@ -978,6 +1002,79 @@ class ASparedForkHoldsItsOwnConversation(unittest.TestCase):
                 down = self._down(boot)
                 self.assertEqual(len(down), 2, boot.said)
                 self.assertEqual(len([m for m in down if "web thread" in m]), 1, down)
+
+    def test_a_session_cleared_inside_its_leased_spared_process_after_an_earlier_clear_stays_down_alone_or_beside_a_copys_first_process_or_another_kernels_fork_of_its_current_conversation(self):
+        # web was cleared, resumed on the conversation that clear gave it (C1), and cleared again inside that CLI, so
+        # its lastSid is C2 while the CLI's command line names only C1, which is no live row's lastSid and no row's own
+        # sid. The CLI survives with no tag and with web's lease on this state root, whose kernel holder is gone: the
+        # census admits it by that lease and the tag check spares it. Beside it, a second spared process (no tag) names
+        # C2 on its --resume: the first process of a copy of web made after the second clear, before or past the copy's
+        # first message, or another kernel's fork of C2; or there is no second process. web, the copy and api each have
+        # a cut turn, and nothing holds api. In each world and either order, web and the copy stay down and api is
+        # started
+        c1, c2 = "22222222-3333-4444-5555-6666eeee0930", "22222222-3333-4444-5555-6666ffff0930"
+        lease = {"sid": WEB, "fsid": c1, "name": "web", "pid": CLI_U, "start": "7", "version": "",
+                 "holder": {"kind": "kernel", "pid": P + 70, "start": "3"}, "t": time.time()}
+        web = {"sid": WEB, "name": "web", "lastSid": c2, "_tail": "working"}
+        api = {"sid": SID, "name": "api", "lastSid": SID, "_tail": "working"}
+        copy_past = {"sid": CPY, "name": "web copy", "lastSid": CPY, "_tail": "working"}
+        copy_before = dict(copy_past, lastSid=c2, forkOf=WEB, forkedFrom=dict(self.LINEAGE))
+        worlds = {   # the copy's row, the second process, the sessions that stay down
+            "a copy's first process, before the copy's first message":
+                (copy_before, _fork_cli(CLI_F, MANAGER, c2, CPY), ["web", "web copy"]),
+            "a copy's first process, past the copy's first message":
+                (copy_past, _fork_cli(CLI_F, MANAGER, c2, CPY), ["web", "web copy"]),
+            "another kernel's fork of C2": (None, _fork_cli(CLI_F, MANAGER, c2, ELSE), ["web"]),
+            "no second process": (None, None, ["web"])}
+        for world, (copy, second, held) in worlds.items():
+            regs = [web, api] + ([copy] if copy else [])
+            others = tuple(r["sid"] for r in regs[1:])
+            for order in ((WEB,) + others, others + (WEB,)):
+                with self.subTest(world=world, first=_named(order)[0]):
+                    ps = [self._cleared_web_process("--resume=%s" % c1)] + ([second] if second else [])
+                    d, boot, _ = self._boot(regs, ps, {CLI_U: None, CLI_F: None}, order, lease=lease,
+                                            starts={CLI_U: "7"})
+                    self.assertEqual(boot.signaled(), [], "both processes are spared")
+                    self.assertEqual(len([m for m in boot.said if "left alone" in m]), 1, boot.said)
+                    self.assertEqual(_named(boot.started), ["api"])
+                    self.assertEqual(sorted(m.split("boot reconcile: ", 1)[1].split(" stays down", 1)[0]
+                                            for m in self._down(boot)), held)
+                    self.assertEqual(sb.read_reg(Path(d), WEB).get("queue") or [], [])
+                    self.assertFalse([r for r in _states(d, WEB) if "machineCut" in r], _states(d, WEB))
+                    self.assertEqual(sb.last_state_value(Path(d), WEB), "working")
+
+    def test_a_thread_or_copy_made_before_its_parents_first_clear_is_started_beside_its_parents_leased_spared_process_whose_command_line_names_a_later_conversation(self):
+        # web was cleared, and its surviving CLI (no tag, web's lease on this state root, whose kernel holder is gone)
+        # resumes the conversation that clear gave it (C1). Either web's lastSid is C1, or web was cleared again inside
+        # that CLI and its lastSid is C2, alone or beside another kernel's fork of C2. A thread or a copy made from web
+        # before the first clear, still before its first message, has web's sid as its lastSid and a queued message;
+        # api has a cut turn. No process names web's sid. In each world and each order, web stays down and the fork and
+        # api are started
+        c1, c2 = "22222222-3333-4444-5555-6666e1e10930", "22222222-3333-4444-5555-6666f1f10930"
+        lease = {"sid": WEB, "fsid": c1, "name": "web", "pid": CLI_U, "start": "7", "version": "",
+                 "holder": {"kind": "kernel", "pid": P + 70, "start": "3"}, "t": time.time()}
+        api = {"sid": SID, "name": "api", "lastSid": SID, "_tail": "working"}
+        forks = {"a thread": self._thread(first_message=False),
+                 "a copy": {"sid": CPY, "name": "web copy", "lastSid": WEB, "forkOf": WEB,
+                            "forkedFrom": dict(self.LINEAGE), "queue": ["a first message typed to the copy"]}}
+        worlds = {   # web's lastSid, the second process
+            "cleared once": (c1, None),
+            "cleared again inside the CLI": (c2, None),
+            "cleared again inside the CLI, beside another kernel's fork of C2":
+                (c2, _fork_cli(CLI_F, MANAGER, c2, ELSE))}
+        for kind, fork in forks.items():
+            for world, (last, second) in worlds.items():
+                web = {"sid": WEB, "name": "web", "lastSid": last, "_tail": "working"}
+                for order in ((WEB, fork["sid"], SID), (SID, fork["sid"], WEB), (fork["sid"], SID, WEB)):
+                    with self.subTest(fork=kind, world=world, first=_named(order)[0]):
+                        ps = [self._cleared_web_process("--resume=%s" % c1)] + ([second] if second else [])
+                        d, boot, _ = self._boot([web, fork, api], ps, {CLI_U: None, CLI_F: None}, order, lease=lease,
+                                                starts={CLI_U: "7"})
+                        self.assertEqual(boot.signaled(), [], "every process is spared")
+                        self.assertEqual(len([m for m in boot.said if "left alone" in m]), 1, boot.said)
+                        self.assertEqual(sorted(_named(boot.started)), sorted([fork["name"], "api"]))
+                        self.assertEqual([m.split("boot reconcile: ", 1)[1].split(" stays down", 1)[0]
+                                          for m in self._down(boot)], ["web"])
 
     def test_a_copied_sessions_process_with_its_session_id_after_its_resume_holds_the_copy_not_the_session_it_was_copied_from(self):
         copy = {"sid": CPY, "name": "web copy", "lastSid": CPY, "_tail": "working"}    # its turn was cut too
@@ -2055,16 +2152,17 @@ class AHeldSessionStaysDown(unittest.TestCase):
 
 class TheBootsRowsNameTheirSession(unittest.TestCase):
     """The boot files each lease census row it keeps (it drops the rows about a spared process) under the row's lease's
-    sid, else under a session whose live lastSid is the row's fsid, else under the session whose own sid it is (the
-    boot's sid_of map), else under no session; and the orphan-reaped row about a process it ends under a session
-    whose live lastSid is that row's fsid, else whose own sid it is, else under no session. The tests here run the real
-    _boot_reconcile."""
+    sid, else under the session whose own sid is the row's fsid, else under a session whose live lastSid it is (the
+    boot's sid_of map), else under no session; and the orphan-reaped row about a process it ends under the session of
+    the first lease in name order naming the process's pid when that lease's start time is the process's and that
+    session has a row, else under the session whose own sid is that row's fsid, else under a session whose live lastSid
+    it is, else under no session. The tests here run the real _boot_reconcile."""
 
-    # Three tests share one world. web, a copy of api, was cleared inside its first CLI, which still runs
+    # Two tests share one world. web, a copy of api, was cleared inside its first CLI, which still runs
     # `--resume=<api's sid> --session-id=<web's sid> --fork-session`, so web's lastSid has moved on from its sid. A
     # thread made from web before the clear, still before its first message, keeps web's sid as its lastSid, and is
     # live or closed. Each row is about web's CLI, and its fsid is web's sid.
-    THREAD = {"live": (True, "web thread"), "closed": (False, "web")}     # the thread's alive flag; the row's session
+    THREAD = {"live": True, "closed": False}     # the thread's alive flag
 
     def _web_cleared_with_a_thread_from_before(self, d, thread_alive):
         moved = "22222222-3333-4444-5555-6666aaaa0930"
@@ -2073,10 +2171,10 @@ class TheBootsRowsNameTheirSession(unittest.TestCase):
                                     "threadOf": WEB, "lastSid": WEB, "forkOf": WEB})
         _reg(d, SID)
 
-    def test_the_orphan_reaped_row_names_a_session_whose_live_lastsid_it_is_before_the_one_whose_sid_it_is(self):
-        # web's CLI carries this root's tag, so the boot ends it. Its row names the live thread, whose lastSid web's
-        # sid is, before web, whose own sid it is; with the thread closed, the row names web. In either order
-        for thread, (alive, session) in self.THREAD.items():
+    def test_the_orphan_reaped_row_names_the_session_whose_sid_it_is_before_one_whose_live_lastsid_it_is(self):
+        # web's CLI carries this root's tag, so the boot ends it. Its row names web, whose own sid the row's fsid is,
+        # whether the thread, whose lastSid it is, is live or closed. In either order
+        for thread, alive in self.THREAD.items():
             for order in ((WEB, THR, SID), (THR, WEB, SID)):
                 with self.subTest(thread=thread, first=_named(order)[0]):
                     d = _root()
@@ -2090,14 +2188,14 @@ class TheBootsRowsNameTheirSession(unittest.TestCase):
                     self.assertEqual(len(rows), 1, _rows(d))
                     r = rows[0]
                     self.assertEqual([r.get("cliPid"), r.get("name")] + _named([r.get("sid"), r.get("fsid")]),
-                                     [CLI_B, session, session, "web"])
+                                     [CLI_B, "web", "web", "web"])
 
-    def test_a_census_row_without_a_lease_names_a_session_whose_live_lastsid_it_is_before_the_one_whose_sid_it_is(self):
+    def test_a_census_row_without_a_lease_names_the_session_whose_sid_it_is_before_one_whose_live_lastsid_it_is(self):
         # web's CLI is a child of another live kernel on this state root, with no lease. Its census row's session comes
-        # from the boot's sid_of map: the live thread, whose lastSid web's sid is, before web, whose own sid it is; with
-        # the thread closed, web. In either order
+        # from the boot's sid_of map: web, whose own sid the row's fsid is, whether the thread, whose lastSid it is, is
+        # live or closed. In either order
         cli = P + 92
-        for thread, (alive, session) in self.THREAD.items():
+        for thread, alive in self.THREAD.items():
             for order in ((WEB, THR, SID), (THR, WEB, SID)):
                 with self.subTest(thread=thread, first=_named(order)[0]):
                     d = _root()
@@ -2112,28 +2210,110 @@ class TheBootsRowsNameTheirSession(unittest.TestCase):
                     rows = [r for r in _rows(d) if r.get("kind") == "lease.cli-without-lease"]
                     self.assertEqual(len(rows), 1, _rows(d))
                     self.assertEqual([rows[0].get("cliPid")] + _named([rows[0].get("sid"), rows[0].get("fsid")]),
-                                     [cli, session, "web"])
+                                     [cli, "web", "web"])
 
     def test_a_census_row_names_its_leases_session_before_the_session_the_lookup_finds(self):
-        # web's CLI holds a lease on this state root, with sid web, whose host is gone: the census keeps the CLI and
-        # files a holder-gone row about it. The row names web, the lease's session, though the boot's sid_of map gives
-        # the live thread for web's sid. In either order
+        # web was cleared inside a CLI that resumes the conversation an earlier clear gave it (C1), and that CLI holds a
+        # lease on this state root, with sid web, whose host is gone: the census keeps the CLI and files a holder-gone
+        # row about it, whose fsid is C1. A thread made between the two clears, still before its first message, has C1
+        # as its lastSid, and C1 is no row's own sid, so the boot's sid_of map gives the thread for C1. The row names
+        # web, the lease's session. In either order
         cli = P + 93
+        c1, c2 = "22222222-3333-4444-5555-6666cccc0930", "22222222-3333-4444-5555-6666dddd0930"
+        who = {c1: "C1"}.get      # a name, not a uuid, in a failure's output
         for order in ((WEB, THR, SID), (THR, WEB, SID)):
             with self.subTest(first=_named(order)[0]):
                 d = _root()
-                self._web_cleared_with_a_thread_from_before(d, True)
-                sb.write_lease(d, {"sid": WEB, "fsid": WEB, "name": "web", "pid": cli, "start": "7", "version": "",
+                sb.write_reg(Path(d), WEB, {"sid": WEB, "name": "web", "cwd": "/tmp", "alive": True, "lastSid": c2})
+                sb.write_reg(Path(d), THR, {"sid": THR, "name": "web thread", "cwd": "/tmp", "alive": True,
+                                            "threadOf": WEB, "lastSid": c1, "forkOf": WEB})
+                _reg(d, SID)
+                sb.write_lease(d, {"sid": WEB, "fsid": c1, "name": "web", "pid": cli, "start": "7", "version": "",
                                    "holder": {"kind": "host", "pid": P + 94, "start": "5"}, "t": time.time()})
-                ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER, _fork_cli(cli, MANAGER, SID, WEB)]
+                ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER, _cli(cli, MANAGER, sid=c1)]
                 boot = Boot(d, ps, [], [], tags={}, starts={cli: "7"}, sids=order)
                 boot.go()
                 self.assertFalse([m for m in boot.said if "reap failed" in m], boot.said)
                 self.assertEqual(boot.signaled(), [], "a CLI whose host is gone is kept")
                 rows = [r for r in _rows(d) if r.get("kind") == "lease.holder-gone"]
                 self.assertEqual(len(rows), 1, _rows(d))
-                self.assertEqual([rows[0].get("cliPid")] + _named([rows[0].get("sid"), rows[0].get("fsid")]),
-                                 [cli, "web", "web"])
+                self.assertEqual([rows[0].get("cliPid")] + _named([rows[0].get("sid")])
+                                 + [who(rows[0].get("fsid"), rows[0].get("fsid"))], [cli, "web", "C1"])
+
+    def test_the_orphan_reaped_row_about_a_leased_process_whose_command_line_names_none_of_our_ids_names_the_leases_session(self):
+        # web was cleared, resumed on the conversation that clear gave it (C1), and cleared again inside that CLI, so
+        # its lastSid is C2 while the CLI's command line names only C1, which is no live row's lastSid and no row's own
+        # sid. The CLI holds web's lease on this state root, whose kernel holder is gone, and carries this root's tag:
+        # the census admits it by that lease and the boot ends it. Its row names web, the lease's session, with an
+        # empty fsid. In either order
+        c1, c2 = "22222222-3333-4444-5555-6666eeee0930", "22222222-3333-4444-5555-6666ffff0930"
+        for order in ((WEB, SID), (SID, WEB)):
+            with self.subTest(first=_named(order)[0]):
+                d = _root()
+                sb.write_reg(Path(d), WEB, {"sid": WEB, "name": "web", "cwd": "/tmp", "alive": True, "lastSid": c2})
+                _reg(d, SID)
+                sb.write_lease(d, {"sid": WEB, "fsid": c1, "name": "web", "pid": CLI_B, "start": "7", "version": "",
+                                   "holder": {"kind": "kernel", "pid": P + 70, "start": "3"}, "t": time.time()})
+                ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER,
+                      "  %d %d /x/claude --output-format stream-json --resume=%s --input-format stream-json"
+                      % (CLI_B, MANAGER, c1)]
+                boot = Boot(d, ps, [], [], tags={CLI_B: _tag(d)}, starts={CLI_B: "7"}, sids=order)
+                boot.go()
+                self.assertFalse([m for m in boot.said if "reap failed" in m], boot.said)
+                self.assertEqual(boot.signaled(), [CLI_B], "this kernel's own orphan is ended")
+                rows = [r for r in _rows(d) if r.get("kind") == "reconcile.orphan-reaped"]
+                self.assertEqual(len(rows), 1, _rows(d))
+                r = rows[0]
+                self.assertEqual([r.get("cliPid"), r.get("name"), _named([r.get("sid")])[0], r.get("fsid")],
+                                 [CLI_B, "web", "web", ""])
+
+    def test_the_orphan_reaped_row_about_a_leased_process_names_the_leases_session_before_a_session_whose_live_lastsid_its_command_line_names(self):
+        # web was cleared inside a CLI that resumes the conversation an earlier clear gave it (C1). The CLI holds web's
+        # lease on this state root, whose kernel holder is gone, and carries this root's tag, so the boot ends it. A
+        # thread made between the two clears, still before its first message, has C1 as its lastSid, and C1 is no row's
+        # own sid. The orphan-reaped row names web, the lease's session, with fsid C1, and the census row about the same
+        # process names web too. In either order
+        c1, c2 = "22222222-3333-4444-5555-6666c1c10930", "22222222-3333-4444-5555-6666d1d10930"
+        who = {c1: "C1"}.get      # a name, not a uuid, in a failure's output
+        for order in ((WEB, THR, SID), (THR, WEB, SID)):
+            with self.subTest(first=_named(order)[0]):
+                d = _root()
+                sb.write_reg(Path(d), WEB, {"sid": WEB, "name": "web", "cwd": "/tmp", "alive": True, "lastSid": c2})
+                sb.write_reg(Path(d), THR, {"sid": THR, "name": "web thread", "cwd": "/tmp", "alive": True,
+                                            "threadOf": WEB, "lastSid": c1, "forkOf": WEB})
+                _reg(d, SID)
+                sb.write_lease(d, {"sid": WEB, "fsid": c1, "name": "web", "pid": CLI_B, "start": "7", "version": "",
+                                   "holder": {"kind": "kernel", "pid": P + 70, "start": "3"}, "t": time.time()})
+                ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER, _cli(CLI_B, MANAGER, sid=c1)]
+                boot = Boot(d, ps, [], [], tags={CLI_B: _tag(d)}, starts={CLI_B: "7"}, sids=order)
+                boot.go()
+                self.assertFalse([m for m in boot.said if "reap failed" in m], boot.said)
+                self.assertEqual(boot.signaled(), [CLI_B], "this kernel's own orphan is ended")
+                reaped = [r for r in _rows(d) if r.get("kind") == "reconcile.orphan-reaped"]
+                self.assertEqual(len(reaped), 1, _rows(d))
+                r = reaped[0]
+                self.assertEqual([r.get("cliPid"), r.get("name"), _named([r.get("sid")])[0],
+                                  who(r.get("fsid"), r.get("fsid"))], [CLI_B, "web", "web", "C1"])
+                census = [r for r in _rows(d) if r.get("kind") == "lease.holder-gone"]
+                self.assertEqual([[r.get("cliPid")] + _named([r.get("sid")]) for r in census], [[CLI_B, "web"]])
+
+    def test_the_orphan_reaped_row_about_a_process_whose_lease_names_a_session_with_no_row_names_the_session_its_command_line_names(self):
+        # this root's tagged CLI resumes api's conversation and holds a lease on this state root, whose kernel holder is
+        # gone, for a session that has no row here. The boot ends it, and its row names api
+        d = _root()
+        _reg(d, SID)
+        sb.write_lease(d, {"sid": ELSE, "fsid": SID, "name": "gone", "pid": CLI_B, "start": "7", "version": "",
+                           "holder": {"kind": "kernel", "pid": P + 70, "start": "3"}, "t": time.time()})
+        ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER, _cli(CLI_B, MANAGER)]
+        boot = Boot(d, ps, [], [], tags={CLI_B: _tag(d)}, starts={CLI_B: "7"})
+        boot.go()
+        self.assertFalse([m for m in boot.said if "reap failed" in m], boot.said)
+        self.assertEqual(boot.signaled(), [CLI_B], "this kernel's own orphan is ended")
+        reaped = [r for r in _rows(d) if r.get("kind") == "reconcile.orphan-reaped"]
+        self.assertEqual(len(reaped), 1, _rows(d))
+        r = reaped[0]
+        self.assertEqual([r.get("cliPid"), r.get("name")] + _named([r.get("sid"), r.get("fsid")]),
+                         [CLI_B, "api", "api", "api"])
 
     def test_rows_about_a_live_kernels_unleased_resumes_of_a_moved_on_conversation_naming_no_other_id_of_ours_name_a_session_whose_lastsid_it_is(self):
         # two CLIs of another live kernel on this state root, with no lease, resuming a session's current
