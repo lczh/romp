@@ -60744,9 +60744,10 @@ def _push(targets, connect=False, live_map=None):
                 for c in tl_clients:
                     with _tl_cold_frame(c) as still_cold:     # never after the full build's lanes, landed since the read
                         sent_cold = _tl_cold_lanes_at_send(tl_cold) if still_cold else None   # the connect's: newest memo
-                        if sent_cold is not None:             # the cycle's clock, never behind the memo's own
+                        if sent_cold is not None:
                             cd = sent_cold[2]["data"]
-                            _send_client(c, ("timeline",), {"type": "data", "data": {**cd, "now": max(now, cd.get("now") or 0)}})
+                            skel = {**cd, "now": max(now, cd.get("now") or 0)}   # the cycle's clock, never behind the memo's
+                            _send_client(c, ("timeline",), {"type": "data", "data": skel})
                         else:
                             dropped.append(c)
                 timeline = _cached_timeline(now, live_map, fsig, True)
