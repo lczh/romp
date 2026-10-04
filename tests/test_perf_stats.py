@@ -917,6 +917,263 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(s1[("delta", "chat")] - s0.get(("delta", "chat"), 0), 1, "the tail is the chat's delta")
 
 
+class JobsCpu(unittest.TestCase):
+    """Per-job CPU on the jobs thread (/perf jobs.cpuByJob). The jobs thread runs its housekeeping jobs one after another and
+    starts the next pass half a second after the last one ends, so each job's stage (stages_ms["jobs.<job>"]) is wall time,
+    and that wall includes every wait for a lock the pusher, a judge or a handler holds: it cannot say which jobs cost CPU.
+    _job_stage now also reads the thread's own CPU (time.thread_time) around each job it runs on that thread and counts the
+    run. Each test runs on a fresh collector patched in as km._PERF_STATS, on a thread of its own that opens the jobs cycle
+    the way _jobs_cycle does (cycle_begin("jobs")). Synthetic job names only."""
+
+    JOBS_KEYS = {"passes", "pass_ms_sum", "pass_ms_max", "pass_ms_last", "pass_cpu_ms_sum", "passFailed", "splitFailed",
+                 "firstPass", "stageRing", "stageRingLen", "ring_n", "pass_ms_p50", "pass_ms_p90", "pass_ms_ring_max",
+                 "cpuByJob"}   # cpuByJob: per job on the jobs thread, {runs, cpuMs}
+
+    def setUp(self):
+        self.ps = km._PerfStats()
+        patch = mock.patch.object(km, "_PERF_STATS", self.ps)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _on_thread(self, body, kind="jobs"):
+        """body() on a fresh thread that first opened `kind`'s cycle ("jobs", "pusher"; None: a thread that opened none, as a
+        handler's); its exception, if any, re-raised here."""
+        failed = []
+
+        def run():
+            try:
+                if kind:
+                    self.ps.cycle_begin(kind)
+                body()
+            except BaseException as e:      # carried to the test's thread
+                failed.append(e)
+        th = threading.Thread(target=run, name="jobs-cpu-test")
+        th.start()
+        th.join(30)
+        self.assertFalse(th.is_alive(), "the thread finished")
+        if failed:
+            raise failed[0]
+
+    def test_the_jobs_block_carries_cpu_by_job_beside_every_pass_counter(self):
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]), self.JOBS_KEYS, "every existing jobs key kept, cpuByJob added beside them")
+        self.assertEqual(snap["jobs"]["cpuByJob"], {}, "no job has run")
+        self._on_thread(lambda: km._job_stage("probe", lambda: None))
+        rows = self.ps.snapshot()["jobs"]["cpuByJob"]
+        self.assertEqual(set(rows), {"probe"}, "keyed by the job's name, the <job> of its jobs.<job> stage")
+        self.assertEqual(set(rows["probe"]), {"runs", "cpuMs"})
+        self.assertEqual(rows["probe"]["runs"], 1)
+        rows["probe"]["runs"] = 99
+        self.assertEqual(self.ps.snapshot()["jobs"]["cpuByJob"]["probe"]["runs"], 1, "the snapshot's rows are copies")
+        json.dumps(rows)
+        doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
+        i = doc.index("- `jobs`: the jobs thread")
+        self.assertIn("`cpuByJob`", doc[i:doc.index("\n- `pusher`:", i)], "the reference's jobs bullet names it")
+
+    def test_a_busy_job_counts_its_cpu_and_a_sleeping_job_of_the_same_wall_does_not(self):
+        """Two synthetic jobs on the jobs thread: one spins for 60 ms of its own CPU, the other sleeps for as long as the
+        first took on the wall clock. Their walls (the stages) match; only the busy one's cpuMs is large. The bounds hold on
+        a loaded 2-CPU node: the spin is measured in thread CPU, so being descheduled lengthens its wall and never its CPU;
+        the sleep is sized from that measured wall, so the two walls match however slow the node is (the upper bound only
+        allows a late wakeup); and a sleeping thread accrues no CPU, so the 20 ms ceiling covers the bracket's own reads and a
+        collection that might run on that thread, with the busy job's 60 ms still three times above it."""
+        def body():
+            km._job_stage("busy", lambda: _burn_cpu(0.060))
+            wall = self.ps.stages["jobs.busy"] / 1000.0
+            km._job_stage("sleepy", lambda: time.sleep(wall))
+        self._on_thread(body)
+        snap = self.ps.snapshot()
+        rows, stages = snap["jobs"]["cpuByJob"], snap["stages_ms"]
+        busy_wall, sleepy_wall = stages["jobs.busy"], stages["jobs.sleepy"]
+        self.assertGreaterEqual(busy_wall, 59.0, "the spin took at least its CPU on the wall clock")
+        self.assertGreaterEqual(sleepy_wall, busy_wall - 1.0, "the sleep's wall is the busy job's: %r" % ((busy_wall, sleepy_wall),))
+        self.assertLess(sleepy_wall, busy_wall + 500.0, "and not much more: %r" % ((busy_wall, sleepy_wall),))
+        self.assertEqual((rows["busy"]["runs"], rows["sleepy"]["runs"]), (1, 1))
+        self.assertGreaterEqual(rows["busy"]["cpuMs"], 59.0, "the spin's own CPU: %r" % rows)
+        self.assertLess(rows["sleepy"]["cpuMs"], 20.0, "a sleep is a wait, not work: %r" % rows)
+        self.assertGreater(rows["busy"]["cpuMs"], 3 * rows["sleepy"]["cpuMs"], rows)
+
+    def test_a_job_that_raises_counts_its_run_and_cpu_and_the_pass_goes_on(self):
+        """The REAL _jobs_pass with every job stubbed (the names read off its own source), the death sweep spinning 20 ms of
+        CPU and then raising: the sweep counts its run and its CPU (the record sits in _job_stage's finally), the exception
+        reaches the pass's own catch as before (its stderr line), and every later job still runs and is counted. The spend
+        guard alone is absent: it skips a collector's first pass, and this collector is fresh."""
+        fns = re.findall(r"_job_stage\('(\w+)', lambda: (_\w+)\(", inspect.getsource(km._jobs_pass))
+        self.assertGreater(len(fns), 15, fns)
+        stubs = {fn: (lambda *a, **k: None) for _job, fn in fns}
+
+        def dies(*a, **k):
+            _burn_cpu(0.020)
+            raise RuntimeError("synthetic sweep fault")
+        stubs["_death_sweep_tick"] = dies
+        stubs["_files_stat_pass_open"] = lambda live_map: False      # the pass's shared stat snapshot: not this test's subject
+        stubs["_files_stat_pass_close"] = lambda opened: None
+        err = io.StringIO()
+        with mock.patch.multiple(km, **stubs), redirect_stderr(err):
+            self._on_thread(lambda: km._jobs_pass(int(time.time()), {}))
+        self.assertIn("death-sweep: ", err.getvalue())
+        self.assertIn("RuntimeError: synthetic sweep fault", err.getvalue(), "the pass's own catch named the fault")
+        rows = self.ps.snapshot()["jobs"]["cpuByJob"]
+        self.assertEqual(rows.get("deathSweep", {}).get("runs"), 1, "the raising job's run is counted: %r" % rows)
+        self.assertGreaterEqual(rows["deathSweep"]["cpuMs"], 19.0, "with the CPU it spent before it raised")
+        jobs = [job for job, _fn in fns]
+        self.assertEqual(set(rows), set(jobs) - {"spendGuard"}, "every other job ran, the ones after the fault included")
+        self.assertEqual({job: row["runs"] for job, row in rows.items()}, dict.fromkeys(rows, 1))
+        self.assertGreaterEqual(self.ps.stages["jobsPass"], 19.0, "the pass reached its end and closed its stage")
+
+    def test_another_threads_cpu_during_a_job_is_not_the_jobs(self):
+        """While a job on the jobs thread sleeps, a second thread spins: the job's cpuMs stays near zero, since the reading is
+        the jobs thread's own clock (time.thread_time), never the whole process's (time.process_time would charge it the
+        spinner's 100 ms). The spinner holds a core of its own on a 2-CPU node; a sleeping thread, and one waiting for the
+        interpreter lock, accrues no CPU, so the 20 ms ceiling is loose."""
+        started, stop = threading.Event(), threading.Event()
+
+        def burner():
+            started.set()
+            while not stop.is_set():
+                _burn_cpu(0.005)
+        th = threading.Thread(target=burner, name="jobs-cpu-burner")
+        th.start()
+        try:
+            self.assertTrue(started.wait(30))
+            self._on_thread(lambda: km._job_stage("waits", lambda: time.sleep(0.100)))
+        finally:
+            stop.set()
+            th.join(30)
+        row = self.ps.snapshot()["jobs"]["cpuByJob"]["waits"]
+        self.assertLess(row["cpuMs"], 20.0, "another thread's CPU is not the job's: %r" % row)
+
+    def test_runs_and_cpu_add_up_over_runs(self):
+        """One job run three times on the jobs thread: three runs, and its cpuMs is the three spins' CPU added, so the
+        difference of two snapshots is the interval's work."""
+        def body():
+            for _ in range(3):
+                km._job_stage("repeat", lambda: _burn_cpu(0.010))
+        self._on_thread(body)
+        row = self.ps.snapshot()["jobs"]["cpuByJob"]["repeat"]
+        self.assertEqual(row["runs"], 3, row)
+        self.assertGreaterEqual(row["cpuMs"], 29.0, "the three runs' CPU, added: %r" % row)
+
+    def test_only_the_jobs_threads_runs_are_counted(self):
+        """Before the jobs thread opens its first cycle (the boot's window: the pusher thread starts first), the pusher's own
+        jobs (_pusher_cycle_jobs, on the thread that opened the pusher's cycle) and a call on a thread that opened no cycle (a
+        handler's, a test's) still record their stage, and no cpuByJob row: the pusher's CPU is its cycle_cpu_ms_sum, and the
+        block is the jobs thread's. test_with_the_jobs_thread_alive_only_its_own_runs_are_counted makes the same calls with
+        the jobs thread alive, the state after the window.
+        The no-cycle call runs FIRST: a joined thread's ident is reused by the next thread, so a call made after the pusher
+        thread finished reads as the pusher's and never reaches the no-owner path."""
+        def handler():
+            assert self.ps._mine() is None, "this thread opened no cycle"
+            km._job_stage("onHandler", lambda: _burn_cpu(0.005))
+        self._on_thread(handler, kind=None)
+        self._on_thread(lambda: km._job_stage("onPusher", lambda: _burn_cpu(0.005)), kind="pusher")
+        self._on_thread(lambda: km._job_stage("onJobs", lambda: _burn_cpu(0.005)))
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"onJobs"})
+        for name in ("onPusher", "onHandler", "onJobs"):
+            self.assertGreater(snap["stages_ms"]["jobs." + name], 0.0, "every thread's stage still records its wall: " + name)
+
+    def test_with_the_jobs_thread_alive_only_its_own_runs_are_counted(self):
+        """The state the kernel is in after the boot's window: the jobs loop opens its cycle on every pass, and a thread's
+        owner entry goes only when that thread opens a cycle of another kind, so a jobs owner is registered, its pass open or
+        not, whenever the pusher's jobs or a handler's call run. Here the jobs thread opens its cycle and waits; while it is
+        alive, a call on a thread with no cycle and then one on a pusher-owned thread record their stage and no row; then
+        the jobs thread runs its own job, the only row. A check that counted any thread once a jobs owner exists, or any
+        thread while a jobs pass is open, passes test_only_the_jobs_threads_runs_are_counted and fails here. The no-cycle
+        call still goes before the pusher's, for that test's reason; a live thread's ident is never reused, so the order
+        against the jobs thread is free."""
+        opened, release, failed = threading.Event(), threading.Event(), []
+
+        def jobs_thread():
+            try:
+                self.ps.cycle_begin("jobs")
+                opened.set()
+                if not release.wait(30):
+                    raise AssertionError("the jobs thread was never released")
+                km._job_stage("onJobs", lambda: _burn_cpu(0.005))
+            except BaseException as e:      # carried to the test's thread
+                failed.append(e)
+        th = threading.Thread(target=jobs_thread, name="jobs-cpu-jobs")
+        th.start()
+        try:
+            self.assertTrue(opened.wait(30), "the jobs thread opened its cycle")
+
+            def handler():
+                assert self.ps._mine() is None, "this thread opened no cycle"
+                km._job_stage("onHandler", lambda: _burn_cpu(0.005))
+            self._on_thread(handler, kind=None)
+            self._on_thread(lambda: km._job_stage("onPusher", lambda: _burn_cpu(0.005)), kind="pusher")
+            self.assertIn("jobs", self.ps._owners, "a jobs owner was registered through both calls")
+            self.assertIsNotNone(self.ps._cycle_state["jobs"]["mark"], "and its pass was open")
+        finally:
+            release.set()
+            th.join(30)
+        self.assertFalse(th.is_alive(), "the jobs thread finished")
+        if failed:
+            raise failed[0]
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"onJobs"})
+        for name in ("onPusher", "onHandler", "onJobs"):
+            self.assertGreater(snap["stages_ms"]["jobs." + name], 0.0, "every thread's stage still records its wall: " + name)
+
+    def test_the_cpu_is_read_before_the_stage_bookkeeping(self):
+        """_job_stage reads the job's CPU before its closing bookkeeping (the stage mark's reset and the collector's stage()),
+        so that bookkeeping is never charged to the job. The real bookkeeping costs microseconds, under this class's 20 ms
+        resolution, so here the collector's stage() spins 30 ms of CPU before it records: a no-op job on the jobs thread
+        still reads under 20 ms, where a read after the stage call would carry the spin."""
+        record = self.ps.stage
+
+        def slow_stage(name, dt):
+            _burn_cpu(0.030)
+            record(name, dt)
+        with mock.patch.object(self.ps, "stage", slow_stage):
+            self._on_thread(lambda: km._job_stage("noop", lambda: None))
+        snap = self.ps.snapshot()
+        self.assertIn("jobs.noop", snap["stages_ms"], "the wrapped stage() still recorded the job's wall")
+        row = snap["jobs"]["cpuByJob"]["noop"]
+        self.assertEqual(row["runs"], 1, row)
+        self.assertLess(row["cpuMs"], 20.0, "the stage's bookkeeping is not the job's CPU: %r" % row)
+
+
+class ActNowStageMark(unittest.TestCase):
+    """The dashboard's auto-nudge and compaction-suggestion toggles run the nudge pass at once on the socket's handler
+    thread (_ws_act_now_tick). The pass sets the nudge job's stage marks and restores none, so the socket kept
+    jobs.autoNudge (or jobs.autoNudge.snapshot, after an early return) as its mark until the connection closed, and its
+    later whole reads and stacks rows counted under that job (review round nine). The wrapper puts the socket's own mark
+    back however the pass ends; the jobs thread never calls it, so nothing the jobs thread records moves."""
+
+    def _after(self, body):
+        saved = km._auto_nudge_pass, km._live_map
+        km._auto_nudge_pass, km._live_map = body, (lambda: {})
+        try:
+            km._set_stage("http.GET.ws")                  # the mark the GET handler gives the socket's thread
+            with redirect_stderr(io.StringIO()):
+                km._ws_act_now_tick()
+            return km._current_read_stage(), km._STAGE_BY_TID.get(threading.get_ident())
+        finally:
+            km._auto_nudge_pass, km._live_map = saved
+            km._set_stage(None)
+
+    def test_a_pass_that_runs_the_job_leaves_the_sockets_mark(self):
+        def body(now, live_map, run_dead_wait):
+            km._set_stage("jobs.autoNudge.snapshot")
+            km._set_stage("jobs.autoNudge")
+        self.assertEqual(self._after(body), ("http.GET.ws", "http.GET.ws"),
+                         "the read stage and the stacks row are the socket's again after the pass")
+
+    def test_a_pass_that_returns_early_leaves_the_sockets_mark(self):
+        def body(now, live_map, run_dead_wait):
+            km._set_stage("jobs.autoNudge.snapshot")      # an unproved ledger snapshot: the pass stands down here
+        self.assertEqual(self._after(body), ("http.GET.ws", "http.GET.ws"))
+
+    def test_a_pass_that_raises_leaves_the_sockets_mark(self):
+        def body(now, live_map, run_dead_wait):
+            km._set_stage("jobs.autoNudge.snapshot")
+            raise OSError("a synthetic store read failure")
+        self.assertEqual(self._after(body), ("http.GET.ws", "http.GET.ws"),
+                         "the wrapper logs the failure and still restores the mark")
+
+
 class PushStages(unittest.TestCase):
     """_push driven for real (the test_tab_meta_push.py pattern) with builders stubbed to sleep 5 ms
     each: every push.* stage grows by at least its builder's sleep, the chat build counts as built on
@@ -1058,11 +1315,14 @@ class PushStages(unittest.TestCase):
         self.assertEqual(after["bg_miss"].get("targeted", 0), before["bg_miss"].get("targeted", 0), "no background attribution for the watched tab")
 
     def test_the_seams_stay_where_the_stages_are_defined(self):
-        # the order of the four stage records in _push is the definition of the split; pinned beside the
+        # the order of the stage records in _push is the definition of the split; pinned beside the
         # behavioural test above so a re-ordering is caught even when every stage still grows
         push = inspect.getsource(km._push)
-        idx = [push.index('_PERF_STATS.stage("%s"' % st) for st in ("push.chat", "push.feed", "push.timeline", "push.send")]
-        self.assertEqual(idx, sorted(idx))
+        chat, feed, tl = [push.index('_PERF_STATS.stage("%s"' % st) for st in ("push.chat", "push.feed", "push.timeline")]
+        send = '_PERF_STATS.stage("push.send"'
+        self.assertEqual(push.count(send), 2, "the send stage closes twice: the feed's send, then the bars' (2026-10-03)")
+        self.assertTrue(chat < feed < push.index(send) < tl < push.rindex(send),
+                        "the feed's send between the feed and the timeline stages, the bars' after the timeline")
         self.assertIn("_PERF_STATS.judge_pass(", inspect.getsource(km._producer))
         loop = inspect.getsource(km._pusher)
         self.assertIn("_woke = _pusher_wake.wait(0.5)", loop)
@@ -1181,6 +1441,61 @@ class PerfRoutes(unittest.TestCase):
         self.assertIsInstance(walked["heap"]["allocatedBlocks"], int)
         self.assertIsInstance(walked["gc"]["frozen"], int)
         self.assertEqual(set(walked), TOP_KEYS, "the same document, two slots filled")
+
+    def test_get_perf_paths_all_carries_the_whole_read_table_and_walks_nothing(self):
+        """The per-file read table on its own flag (review of 2026-10-01): a plain GET carries the 50 paths with the most bytes
+        (em.READ_BY_PATH_TOP) and `readPaths`, the whole table's size; ?paths=all carries every path and leaves the two
+        whole-heap gauges null, so a reader of the table never pays the allocator's walk or the frozen count that ?walk=1
+        pays; a refused token gets neither."""
+        keys = ["/TESTDIR/notes-api/read-%03d.jsonl" % i for i in range(120)]
+        with km.em._READ_BYTES_LOCK:
+            for i, k in enumerate(keys):
+                km.em._READ_BYTES[k] = 10 ** 12 + i      # larger than anything a real read left, and distinct
+        try:
+            with mock.patch.object(sys, "getallocatedblocks", wraps=sys.getallocatedblocks) as blocks, \
+                 mock.patch.object(km.gc, "get_freeze_count", wraps=km.gc.get_freeze_count) as frozen:
+                st, plain = self._req("GET", "/perf")
+                st2, whole = self._req("GET", "/perf?paths=all")
+                st3, body = self._req("GET", "/perf?paths=all", token=False)
+        finally:
+            with km.em._READ_BYTES_LOCK:
+                for k in keys:
+                    km.em._READ_BYTES.pop(k, None)
+        planted = {k: 10 ** 12 + i for i, k in enumerate(keys)}
+        self.assertEqual((st, st2, st3), (200, 200, 403))
+        self.assertNotIn("readByPath", str(body))
+        self.assertEqual((blocks.call_count, frozen.call_count), (0, 0), "neither GET walked the heap")
+        top = dict(sorted(planted.items(), key=lambda kv: -kv[1])[:km.em.READ_BY_PATH_TOP])
+        self.assertEqual(plain["checkpoints"]["readByPath"], top, "the plain read: the 50 largest, here the planted ones")
+        self.assertGreaterEqual(plain["checkpoints"]["readPaths"], len(planted))
+        by = whole["checkpoints"]["readByPath"]
+        self.assertEqual({k: by.get(k) for k in planted}, planted, "every path, with its bytes")
+        self.assertEqual(whole["checkpoints"]["readPaths"], len(by), "the table's size beside it")
+        self.assertIsNone(whole["heap"]["allocatedBlocks"])
+        self.assertIsNone(whole["gc"]["frozen"])
+        self.assertEqual(set(whole), TOP_KEYS, "the same document, the one table whole")
+
+    def test_get_perf_walk_carries_the_whole_read_table(self):
+        """The served ?walk=1 twin of the test above (review of 2026-10-02): the route discards what _perf_walks returns, so the
+        table must land in the snapshot it serves, and the in-process test, which reads the return value, passed a version
+        that filled a fresh dict while this route served 50 rows. 120 rows are planted, past the 50 a plain read carries."""
+        keys = ["/TESTDIR/notes-api/walk-%03d.jsonl" % i for i in range(120)]
+        with km.em._READ_BYTES_LOCK:
+            for i, k in enumerate(keys):
+                km.em._READ_BYTES[k] = 10 ** 12 + i      # larger than anything a real read left, and distinct
+        try:
+            st, walked = self._req("GET", "/perf?walk=1")
+        finally:
+            with km.em._READ_BYTES_LOCK:
+                for k in keys:
+                    km.em._READ_BYTES.pop(k, None)
+        planted = {k: 10 ** 12 + i for i, k in enumerate(keys)}
+        self.assertEqual(st, 200)
+        by = walked["checkpoints"]["readByPath"]
+        self.assertEqual({k: by.get(k) for k in planted}, planted, "every path, with its bytes")
+        self.assertEqual(walked["checkpoints"]["readPaths"], len(by), "the table's size beside it")
+        self.assertIsInstance(walked["heap"]["allocatedBlocks"], int)
+        self.assertIsInstance(walked["gc"]["frozen"], int)
 
     def test_get_perf_stacks_carries_one_frame_list_per_thread_with_its_stage_mark(self):
         """T401 (2)'s proof instrument: `?stacks=1` adds one row per live thread (name, ident, self, stage, frames innermost

@@ -300,7 +300,7 @@ class ExitThenBoot(unittest.TestCase):
         k2, p2 = self._boot()
         try:
             self._drive(p2)
-            perf = self._get(p2, "/perf")["checkpoints"]
+            perf = self._get(p2, "/perf?paths=all")["checkpoints"]   # ?paths=all: the whole per-file read table (a plain GET carries the 50 largest)
             by = perf["readByPath"]
             report = {"agent": 0, "states": 0, "leaf": 0, "postal": 0, "checkpoint": 0, "other": 0}
             for path, n in by.items():

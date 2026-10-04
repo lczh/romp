@@ -10168,6 +10168,7 @@ function showForkPrompt(sid: string, uuid: string): void {
 // drifts, so a thread is never unreachable. State lives in module maps keyed by sid/tid, so every
 // re-render (the transcript rebuilds constantly) reapplies it — the openFolds pattern.
 const commentThreads = new Map<string, CommentThread[]>();          // parent sid → last frame's threads
+const commentReadError = new Set<string>();                         // parent sids whose store the kernel cannot read: the page has said so
 const commentPending = new Map<string, { text: string; t: number; imgPaths?: string[] }[]>(); // tid → optimistic sends (+ shipped image paths → echo thumbnails, the parity bundle 2026-08-26)
 // image paths shipped into the OPEN popover's box (the droppedPath ack) and not yet sent — the next
 // send attaches them to its pending entry so the echo renders the same thumbnails the chat's does
@@ -21852,10 +21853,22 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   }
   // the editor selection collapsed (deselect / click away) — drop the chip that highlight seeded
   else if (m.type === "editorSelectionCleared") clearEditorCitation(activeId);
+  // a comments frame the kernel could not read the session's store for (2026-10-02): the page keeps the threads it holds,
+  // drafts and marks included, and says so once, even if the error changes, until a readable frame replaces the list.
+  // The notice reports a state the fresh page hears again from the kernel's next frame, so a reload does not replay it
+  // (ephemeralWarnToast).
+  else if (m.type === "comments" && m.id && typeof m.error === "string") {
+    const sid = String(m.id);
+    if (!commentReadError.has(sid)) {
+      commentReadError.add(sid);
+      ephemeralWarnToast(`Couldn’t read the comments on “${tabName(sid) || sid}” (${m.error}). The highlights you see may be out of date until the next successful read.`);
+    }
+  }
   // comment threads (the user 2026-08-13): the per-session thread frame — store, prune dead
   // client-side state, re-anchor the highlights, adopt a parked create ack, refresh the popover
   else if (m.type === "comments" && m.id) {
     const sid = String(m.id);
+    commentReadError.delete(sid);
     const threads = (m.threads || []) as CommentThread[];
     // an OPTIMISTIC synth thread (a create still in flight) survives the frame rebuild until the
     // frame lists the thread that create made, or its create fails — the frame used to wipe it, so
