@@ -389,8 +389,10 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         """The pusher's cycle, then the jobs thread's pass, `n` times, one thread each as in the kernel, under `patches` (the
         quiet jobs and the world a test sets); `between(i)` runs before the i-th cycle, where the world moves between passes.
         Each pass is recorded as the kernel's jobs loop records it (_PERF_STATS.jobs_pass, in the same submitted call on the
-        jobs thread), so a job that tells the boot's first pass by the pass count sees the later passes as later (review of
-        2026-10-05, round four)."""
+        jobs thread), so a job that tells the boot's first pass by the pass count (or by the first-pass split it records)
+        sees the later passes as later (review of 2026-10-05, round four). The jobs loop's other signal for the boot's first
+        pass, the boot marks (_BOOT_HEALTH_DONE and _BOOT_FIRST, which _jobs_cycle reads before the pass and reports after
+        it), is not advanced here: every pass of this harness reads as the boot's first by those marks (round five)."""
         km = self.km
         before = km._PERF_STATS.jobs.get("passes", 0)
 
@@ -584,9 +586,10 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         boot's first pass, their evidence standing; tests is first listed before the second pass (before the pusher's second
         cycle), and its turn settles during that pass's reminder walk (its turn-end key moves from 1 to 2). The second pass's
         start records tests' key as 1, so the settle write at its end sees the move and writes tests' document, once, and no
-        other session's. A first sight taken on the boot's first pass alone would leave tests to the write's own first sight,
-        at the second pass's end, after the move: nothing written, its documents waiting for its next settle or a leaf move
-        past the period."""
+        other session's. A first sight taken on the boot's first pass alone, told by the pass count or the first-pass split,
+        would leave tests to the write's own first sight, at the second pass's end, after the move: nothing written, its
+        documents waiting for its next settle or a leaf move past the period. A limit told by the jobs loop's boot marks is
+        not caught here, since the harness does not advance them (see _cycles_and_passes)."""
         km = self.km
         patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
         turn = {"key": 1}
