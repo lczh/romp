@@ -97,6 +97,12 @@ def echo_keys(text) -> tuple:
     return tuple(keys)
 
 
+# Apply now's answer when no setting waits for a relaunch on the session (SessionBackend.apply_now, 2026-10-01): a no-op,
+# not a failure, so a script that pushes every session through can run it over all of them (`romp apply` exits 0 on it).
+# One text, which the backends return and the kernel's /apply route compares.
+NOTHING_TO_APPLY = "nothing is waiting to apply on this session — it already runs with every setting picked for it"
+
+
 class SessionBackend(ABC):
 
     # ── liveness / identity ──────────────────────────────────────────────────────────────────────
@@ -273,7 +279,7 @@ class SessionBackend(ABC):
         """Set the reasoning effort (one of the kernel's effort choices, 'low' through 'ultracode'). The
         backends land it differently from each other and from set_model: effort is a connect-time CLI flag
         (--effort) with no SDK control request, so the SDK persists the value and RECONNECTS to apply it —
-        at once if the session is idle, at the end of the turn if it's busy — with `effortPending` driving
+        at once if the session is quiet, else once no turn, subagent or background task would be cut — with `effortPending` driving
         the badge's switching-dots and the chat's "Reloading session…" notice (SdkBackend.set_effort); Codex
         persists the level on the session's registry row and applies it at the next turn
         (CodexBackend.set_effort). False when the backend can tell the change did not land, so the kernel
@@ -357,6 +363,15 @@ class SessionBackend(ABC):
         omission — `move`'s shape."""
         return ("this session's backend has no way to relaunch a running session — "
                 "end it and revive it instead")
+
+    def apply_now(self, sid: str) -> str:
+        """Apply now (2026-10-01): push a setting that waits for a quiet session through at once, relaunching the
+        session's CLI with the work it waits on cut. "" on success; NOTHING_TO_APPLY when no setting waits; any other
+        string is the reason, verbatim for the user. SDK-only (see SdkBackend.apply_now, where a billing, effort, fast,
+        bypass-mode or per-session env pick waits for a relaunch that nothing would cut): a backend with no relaunch
+        primitive has no setting waiting for one, since every setting it takes applies as it is picked (Codex's do),
+        so it answers the no-op."""
+        return NOTHING_TO_APPLY
 
     @abstractmethod
     def kill(self, sid: str) -> bool: ...

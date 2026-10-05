@@ -6,7 +6,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findExact, findAnchorRange, sliceRanges, prunePending, markSkipsParent,
-         newCommentCreate, commentCreateFrame, type CommentThread, type CommentCreate } from "./comments";
+         newCommentCreate, commentCreateFrame, holdAnswered, holdForPassage, synthSuperseded, samePassage, existingThreadFor,
+         threadTakesReplies,
+         type CommentThread, type CommentCreate } from "./comments";
 import { compactDisplay } from "./compact";
 
 const th = (over: Partial<CommentThread>): CommentThread => ({
@@ -191,11 +193,11 @@ test("a comments frame refreshes the open popover IN PLACE — composer and care
 });
 
 test("the working state starts on the gesture, and delete is optimistic and cuts the work", () => {
-  // create: a synthetic working thread marks the passage before any round-trip; the frame's
-  // wholesale list replacement retires it, and a refusal drops it with the warn
-  assert.match(UI, /tid: "pending:" \+ create\.uuid, anchorUuid: create\.uuid/);
+  // create: a synthetic working thread marks the passage before any round-trip, under the GESTURE's id (two creates on
+  // one reply are two marks); the frame that lists its thread retires it, and a refusal drops it by that id
+  assert.match(UI, /tid: "pending:" \+ held\.createId, anchorUuid: create\.uuid/);
   assert.match(UI, /state: "working",\s*\n\s*unread: false/);
-  assert.match(UI, /t\.tid !== "pending:" \+ pa\.uuid/);
+  assert.match(UI, /function dropSynthThread\(sid: string, createId: string\): void \{\s*\n\s*const tid = "pending:" \+ createId;/);
   // reply: the local state flips on send; the kernel's next frame confirms
   assert.match(UI, /cur\.th\.state = "working";\s+\/\/ optimistic/);
   // delete: the highlight goes NOW, and the kernel interrupts the in-flight reply before the kill
@@ -212,8 +214,18 @@ test("create adopts exactly the thread the kernel named — never a guess", () =
   assert.match(UI, /m\.type === "commentCreated"/);
   assert.match(UI, /function adoptCommentThread\(sid: string, tid: string\)/);
   assert.match(KERNEL, /"type": "commentCreated", "id": sid, "tid": tid/);
-  // the FRAME rides ahead of the ack, so adoption always finds the thread in the map
-  assert.match(KERNEL, /fr = _comments_frame\(sid\)\s*\n\s*if fr:\s*\n\s*client\["send"\]\(json\.dumps\(fr\)\)\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "commentCreated"/);
+  // the ACK carries the new thread's row, built as the frame builds it (2026-10-01: the kernel answers the moment the row
+  // exists and leaves the frame to its pusher), and the page lists that row before it adopts, so adoption finds the thread
+  // without waiting for the frame
+  assert.match(KERNEL, /entry = _comment_frame_entry\(row, _sdk\(\), int\(time\.time\(\)\)\)/);
+  assert.match(KERNEL, /ack\["thread"\] = entry/);
+  const ack = UI.split('else if (m.type === "commentCreated" && m.id && m.tid) {')[1].split("\n  }\n  // a reply the kernel refused")[0];
+  assert.match(ack, /if \(row && row\.tid === tid && !have\.some\(\(t\) => t\.tid === tid\)\) commentThreads\.set\(String\(m\.id\), \[\.\.\.have, row\]\);/);
+  assert.ok(ack.indexOf("commentThreads.set(String(m.id), [...have, row])") < ack.indexOf("dropSynthThread(held.sid, held.createId)"),
+            "the real row is listed before the optimistic mark goes, so the highlight never blinks out");
+  // …and a frame built before that row was saved never follows the answer: the pusher sends a frame only at the store
+  // generation it was built from, under the lock the answer takes
+  assert.match(KERNEL, /if _comments_gen\.get\(sid, 0\) != gen:/);
 });
 
 test("a refused reply hands the words back instead of thinking forever", () => {
@@ -228,8 +240,12 @@ test("ending the parent sweeps its threads' CLIs — no unreachable running sess
 });
 
 test("a refused create un-sticks the popover; a pre-seam anchor tip-forks instead of erroring", () => {
-  assert.match(UI, /m\.type === "warn" && pendingCommentAnchor\) \{[\s\S]{0,400}document\.getElementById\("cmt-pop"\)\?\.remove\(\);/);
-  assert.match(KERNEL, /def _anchor_adapter\(path, sid\)/);
+  // the TYPED nack hands the box back (2026-10-01), never any warn: an unrelated warning rebuilt an open create box
+  // under the caret and, after a send, re-armed the arrow while the create still ran (a second press, a second thread)
+  assert.match(UI, /if \(m\.transient\) \{ if \(held\.tries === 0\) held\.tries = 1; \}\s*\n\s*else refuseCmtCreate\(held\);/);
+  assert.match(UI, /function refuseCmtCreate\(c: CommentCreate\): void \{[\s\S]{0,700}document\.getElementById\("cmt-pop"\)\?\.remove\(\);\s*\n\s*renderCommentPopover\(\);/);
+  assert.doesNotMatch(UI, /m\.type === "warn" && pendingCommentAnchor/, "no warn reaction left on the create box");
+  assert.match(KERNEL, /def _anchor_adapter\(path, sid, need=None\)/);   // the leaf's own graph first, the anchor only when needed
   assert.match(KERNEL, /return "", cut_t, None/);
 });
 
@@ -238,7 +254,8 @@ test("the projection never reads the parent transcript pre-fork", () => {
 });
 
 test("a promoted thread whose session ended drops off the frame entirely", () => {
-  assert.match(KERNEL, /if status == "promoted" and not _thread_reg\(tsid\)\.get\("alive"\):\s*\n\s*continue/);
+  assert.match(KERNEL, /if status == "promoted" and not _thread_reg\(tsid\)\.get\("alive"\):\s*\n\s*return None/);
+  assert.match(KERNEL, /row = _comment_frame_entry\(th, be, now, live_map\)\s*\n\s*if row is not None:\s*\n\s*threads\.append\(row\)/);
 });
 
 test("promote latches the row before seeding; racing ops refuse through the CAS", () => {
@@ -313,7 +330,8 @@ test("kernel registers every comment drive op", () => {
 });
 
 test("the comments frame rides its own dedup slot, never the chat delta baseline", () => {
-  assert.match(KERNEL, /_send_client\(c, \("comments", s\["sid"\]\), fr\)/);
+  assert.match(KERNEL, /_send_comments_frame\(chat_clients, s\["sid"\], fr, gen\)/);
+  assert.match(KERNEL, /_send_client\(c, \("comments", sid\), fr\)/);
 });
 
 test("a thread fork withholds the names/ entry; promote seeds first, then registers", () => {
@@ -369,12 +387,12 @@ test("the highlight is highlighter-YELLOW — never the selection blue — and o
 test("the create dialog names the thread right there: prefilled <session>-comment-<N>, validated", () => {
   // T289: the prefill is a HINT from the BARE session name (comment-name.ts), remembered on the box so an
   // untouched one is sent as "" and the kernel picks its own default
-  assert.match(UI, /const prefill = defaultCommentName\(sess0\?\.name, sid, \(commentThreads\.get\(sid\) \|\| \[\]\)\.length\);\s*\n\s*nameBox\.dataset\.prefill = prefill;\s*\n\s*nameBox\.value = commentDrafts\.get\(nk\) \|\| prefill;/);
+  assert.match(UI, /const prefill = defaultCommentName\(sess0\?\.name, sid, \(commentThreads\.get\(sid\) \|\| \[\]\)\.length\);\s*\n\s*nameBox\.dataset\.prefill = prefill;\s*\n\s*nameBox\.value = sent \? \(sent\.name \|\| prefill\) : \(commentDrafts\.get\(nk\) \|\| prefill\);/);   // the sent view shows the name as it went
   // the name lives IN the header ("New comment: <name>"), the button says Comment, and the picks ride along
   assert.match(UI, /"New comment:"/);
   assert.match(UI, /if \(nameBox\) head\.append\(title, nameBox, maxBtn, closeBtn\);/);   // the maximize button rides between (2026-09-10, comment-pop-size.test.ts)
   assert.match(UI, /send\.setAttribute\("aria-label", create \? "Comment" : "Send"\);/);   // the ➤ carries the word
-  assert.match(UI, /const held = newCommentCreate\(create, text, nm\);\s*\n\s*vscodeApi\.postMessage\(commentCreateFrame\(held\)\);/);   // the anchor's picks ride the held create
+  assert.match(UI, /const held = newCommentCreate\(create, text, nm\);[\s\S]{0,3000}vscodeApi\.postMessage\(commentCreateFrame\(held\)\);/);   // the anchor's picks ride the held create
   // the comment's own model/effort selectors reuse the statusline's /models-fed choices + menu skin
   assert.match(UI, /const metaRow = el\("div", "statusline cmt-meta-row"\);/);   // the chat statusline dress (2026-08-25 parity)
   assert.match(UI, /META_CHOICES\[kind\]/);
@@ -563,8 +581,8 @@ test("busy latches at the SEND gesture and clears exactly on the reply-arrived r
   assert.match(UI, /cmtAwaitBase\.set\(synth\.tid, \{ \.\.\.CMT_LATCH_ZERO \}\);\s+\/\/ the SEND gesture latches the pulse/);
   // follow-up: re-latches at ITS send, with the thread's projected counts at that moment as the base (T237)
   assert.match(UI, /cmtAwaitBase\.set\(cur\.th\.tid, cmtLatchOf\(cur\.th\)\);/);
-  // the create's latch carries onto the real thread at adopt (the synth tid retires)
-  assert.match(UI, /if \(k\.startsWith\("pending:"\)\) \{ cmtAwaitBase\.set\(tid, cmtAwaitBase\.get\(k\)!\); cmtAwaitBase\.delete\(k\); \}/);
+  // the create's latch carries onto the real thread at its ack (the synth tid retires with the create)
+  assert.match(UI, /const synthTid = "pending:" \+ held\.createId;\s*\n\s*const base = cmtAwaitBase\.get\(synthTid\);\s*\n\s*if \(base !== undefined\) \{ cmtAwaitBase\.set\(tid, base\); cmtAwaitBase\.delete\(synthTid\); \}/);
   // the ONE clearing site (T237): the comments frame whose projection carries the SEND (more messages
   // than at the click) — or the thread leaving "open"/erroring. From that frame the KERNEL's replyOwed
   // owns the wash: it reads the thread's transcript with the event model's own turn-end, so a mid-turn
@@ -647,20 +665,21 @@ test("a create refused by parse lag holds its mark and retries on the frame even
   assert.match(KERNELSRC, /_retry_parked_creates\(\)   # lag-parked comment creates ride every pusher cycle \(T106\)/);
   assert.match(KERNELSRC, /_PARK_MAX_TRIES = 30/);
   // the client holds the payload at send and re-posts when a session frame proves the parse caught up
-  assert.match(UI, /cmtCreateInFlight\.set\(create\.uuid, held\);/);   // the held create is the stamped one the send posted
+  assert.match(UI, /cmtCreateInFlight\.set\(held\.createId, held\);/);   // the held create is the stamped one the send posted, keyed by its id
   assert.match(UI, /retryCmtCreates\(String\(msg\.id \|\| ""\)\);\s+\/\/ a session frame = the kernel re-parsed/);
   assert.match(UI, /const CMT_CREATE_MAX_TRIES = 12;/);
-  // the ack retires the hold; a REAL refusal drops the synth honestly
-  assert.match(UI, /if \(m\.uuid\) cmtCreateInFlight\.delete\(String\(m\.uuid\)\);\s+\/\/ the ack retires the retry hold/);
-  assert.match(UI, /else \{ cmtCreateInFlight\.delete\(String\(m\.uuid\)\); dropSynthThread\(held\.sid, held\.uuid\); \}/);
+  // the ack retires the hold it names; a REAL refusal drops the synth honestly and hands the words back
+  assert.match(UI, /cmtCreateInFlight\.delete\(held\.createId\);\s+\/\/ the ack retires the retry hold/);
+  assert.match(UI, /else refuseCmtCreate\(held\);/);
+  assert.match(UI, /function refuseCmtCreate\(c: CommentCreate\): void \{\s*\n\s*cmtCreateInFlight\.delete\(c\.createId\);\s*\n\s*dropSynthThread\(c\.sid, c\.createId\);/);
 });
 
 test("the optimistic synth thread survives comments frames until superseded or failed", () => {
   // the frame used to WIPE it: every create's mark blinked between the gesture and the real
   // thread's first frame, and a lag-refused create erased the comment entirely
-  assert.match(UI, /const synths = \(commentThreads\.get\(sid\) \|\| \[\]\)\.filter\(\(t\) =>\s*\n\s*t\.tid\.startsWith\("pending:"\) && cmtCreateInFlight\.has\(t\.tid\.slice\("pending:"\.length\)\)/);
-  assert.match(UI, /&& !threads\.some\(\(r\) => r\.anchorUuid === t\.anchorUuid\)\);/,
-    "a real thread on the same anchor supersedes the synth");
+  assert.match(UI, /const held = cmtCreateInFlight\.get\(t\.tid\.slice\("pending:"\.length\)\);\s*\n\s*return !!held && !synthSuperseded\(threads, held\);/,
+    "the thread THIS create made supersedes the synth (synthSuperseded), never any thread on the same reply");
+  assert.doesNotMatch(UI, /!threads\.some\(\(r\) => r\.anchorUuid === t\.anchorUuid\)/, "the any-thread-on-the-turn rule is gone");
 });
 
 test("the pending echo prunes against EVENTS too — a landed user turn never double-shows", () => {
@@ -767,7 +786,7 @@ test("the popover's send and its frame-keyed retry both post the held create's f
   const sendBody = send.slice(0, send.indexOf("\nfunction ", 10));
   assert.match(sendBody, /const held = newCommentCreate\(create, text, nm\)/, "the send mints the gesture's id");
   assert.match(sendBody, /vscodeApi\.postMessage\(commentCreateFrame\(held\)\)/);
-  assert.match(sendBody, /cmtCreateInFlight\.set\(create\.uuid, held\)/, "the hold IS the stamped create");
+  assert.match(sendBody, /cmtCreateInFlight\.set\(held\.createId, held\)/, "the hold IS the stamped create, keyed by its id");
   const retry = UI.slice(UI.indexOf("function retryCmtCreates("));
   const retryBody = retry.slice(0, retry.indexOf("\nfunction ", 10));
   assert.match(retryBody, /vscodeApi\?\.postMessage\(commentCreateFrame\(c\)\)/, "the retry re-sends the held frame, id included");
@@ -788,9 +807,9 @@ function liftRetry(held: CommentCreate[]) {
   const prelude = `
     const CMT_CREATE_MAX_TRIES = ${bound};
     const vscodeApi = { postMessage: (m) => posted.push(m) };
-    const dropSynthThread = (sid, u) => dropped.push(u);
+    const refuseCmtCreate = (c) => { cmtCreateInFlight.delete(c.createId); dropped.push(c.uuid); };
     const warnToast = (t) => toasts.push(t);`;
-  const cmtCreateInFlight = new Map(held.map((c) => [c.uuid, c] as [string, CommentCreate]));
+  const cmtCreateInFlight = new Map(held.map((c) => [c.createId, c] as [string, CommentCreate]));
   const fn = new Function("cmtCreateInFlight", "commentCreateFrame", "posted", "dropped", "toasts", "sid",
                           prelude + "\n" + src + "\nretryCmtCreates(sid);");
   return { run: (sid: string) => { fn(cmtCreateInFlight, commentCreateFrame, posted, dropped, toasts, sid); },
@@ -858,4 +877,178 @@ test("markSkipsParent: a table's structural parents are skipped, every text-bear
   const r = findExact(nodes.map((n) => n.text).join(""), "Charlie 12 done")!;
   const wrapped = sliceRanges(nodes.map((n) => n.text.length), r.start, r.end).filter((sl) => !markSkipsParent(nodes[sl.idx].parent)).map((sl) => nodes[sl.idx].text);
   assert.deepEqual(wrapped, ["Charlie", "12", "done"], "one mark per cell, none in the row itself");
+});
+
+// ── one comment per send, and an answer for exactly that send (2026-10-01) ─────────────────────────────────────────
+// The user pressed Enter in a new comment, saw nothing change for seconds (the kernel reads the whole transcript before
+// it answers), and pressed again, or clicked away, re-selected the passage and sent the words the box still held: two
+// threads for one comment. An ack keyed by the reply it anchors adopted a
+// thread into whatever comment box was open on the session. Synthetic text only.
+const SID = "aaaaaaaa-1111-2222-3333-444444444444";
+
+test("an answer names its send by the echoed createId; an older kernel's (turn only) falls to the oldest hold on that turn", () => {
+  const a = newCommentCreate({ sid: SID, uuid: "a1", exact: "exponential backoff" }, "why?", "");
+  const b = newCommentCreate({ sid: SID, uuid: "a1", exact: "with a jitter" }, "and this?", "");
+  const c = newCommentCreate({ sid: SID, uuid: "a2", exact: "the retry cap" }, "how long?", "");
+  const holds = [a, b, c];
+  assert.equal(holdAnswered(holds, SID, "a1", b.createId), b, "two comments on one reply: the id says which");
+  assert.equal(holdAnswered(holds, SID, "a1", "someone-elses-id"), null, "another page's send is nobody's here");
+  assert.equal(holdAnswered(holds, SID, "a1", undefined), a, "no id: the oldest hold on the turn");
+  assert.equal(holdAnswered(holds, SID, "a1", ""), a);
+  assert.equal(holdAnswered(holds, SID, "a3", undefined), null);
+  assert.equal(holdAnswered(holds, "bbbbbbbb-1111-2222-3333-444444444444", "a2", undefined), null, "the session counts too");
+});
+
+test("a second Comment on the same passage finds the send still unanswered there: same turn, overlapping text", () => {
+  const a = newCommentCreate({ sid: SID, uuid: "a1", exact: "exponential backoff with jitter" }, "why?", "");
+  assert.equal(holdForPassage([a], SID, "a1", "exponential  backoff\nwith jitter"), a, "whitespace aside");
+  assert.equal(holdForPassage([a], SID, "a1", "exponential backoff"), a, "a passage inside the sent one is the same passage");
+  const prose = "Use exponential backoff with jitter of ten percent, and cap the delay at two minutes.";
+  assert.equal(holdForPassage([a], SID, "a1", "jitter of ten percent", prose), a, "overlapping in the turn's prose");
+  assert.equal(holdForPassage([a], SID, "a1", "cap the delay", prose), null, "another passage of the same reply is another comment");
+  assert.equal(holdForPassage([a], SID, "a2", "exponential backoff with jitter"), null, "same words in another reply");
+});
+
+test("the optimistic mark stays until the frame lists the thread ITS create made — not any thread on the same reply", () => {
+  const thr = (tid: string, anchorUuid: string, exact: string): CommentThread =>
+    ({ tid, anchorUuid, exact, status: "open", createdT: 0, state: "", unread: false, promotedName: "", msgs: [] });
+  const held = newCommentCreate({ sid: SID, uuid: "a1", exact: "with a jitter" }, "and this?", "");
+  held.prior = ["t-old"];
+  const older = thr("t-old", "a1", "exponential backoff");
+  assert.equal(synthSuperseded([older], held), false, "an earlier thread elsewhere in the reply is not this one (the old rule dropped the mark here)");
+  assert.equal(synthSuperseded([older, thr("t-other", "a1", "exponential backoff")], held), false, "a new thread on another passage is not it");
+  assert.equal(synthSuperseded([older, thr("t-new", "a2", "with a jitter")], held), false, "nor the same words in another reply");
+  assert.equal(synthSuperseded([older, thr("t-new", "a1", "with a jitter")], held), true, "the new thread on this passage is");
+  const same = newCommentCreate({ sid: SID, uuid: "a1", exact: "exponential backoff" }, "again", "");
+  same.prior = ["t-old"];
+  assert.equal(synthSuperseded([older], same), false, "a thread the page already had on the identical passage is not this create's");
+  const long = "x".repeat(2400);
+  const capped = newCommentCreate({ sid: SID, uuid: "a1", exact: long }, "long one", "");
+  capped.prior = [];
+  assert.equal(synthSuperseded([thr("t-cap", "a1", long.slice(0, 2000))], capped), true, "the kernel's 2000-character cap is the same passage");
+});
+
+test("the send is one per gesture, and the box shows it at once (source pins)", () => {
+  const send = UI.slice(UI.indexOf("function commentSendFromPop("));
+  const sendBody = send.slice(0, send.indexOf("\nfunction ", 10));
+  assert.match(sendBody, /if \(create\) \{[\s\S]{0,400}if \(create\.sent\) return;/, "a box that has sent has nothing left to send");
+  assert.match(sendBody, /create\.sent = \{ createId: held\.createId, text, name: synth\.name \|\| "" \};/);
+  // the sent view is painted BEFORE the frame is posted: a refusal that comes back synchronously (a remote host's dropped
+  // gesture) must land on it, not be painted over by it
+  const view = sendBody.indexOf("renderCommentPopover();");
+  const post = sendBody.indexOf("vscodeApi.postMessage(commentCreateFrame(held));");
+  assert.ok(view > 0 && post > view, "the sent view first, the post last");
+  const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
+  const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
+  assert.match(popBody, /const status = th \? th\.status : sent \? "sent" : "";/, "the send flips the refresh key: a full rebuild");
+  assert.match(popBody, /if \(sent\) \{[\s\S]{0,1400}rompLoaderInner\("opening the thread…", \{ wordmark: false \}\)\);[^\n]*\n\s*list\.append\(boot, cmtPendingQueued\(\[\{ text: sent\.text, t: Date\.now\(\) \/ 1000 \}\]\)\);/,
+               "the loader first (ui/CLAUDE.md), the thread boot's own, and the words as the chat's own pending bubble");
+  // nothing to type or send in the sent view: the composer row stays where the thread's will be, read-only and disarmed
+  assert.match(popBody, /box\.readOnly = !!sent;\s*\n\s*box\.value = sent \? "" : \(commentDrafts\.get\(dk\) \|\| ""\);/);
+  assert.match(popBody, /if \(sent\) \{ send\.disabled = true; send\.classList\.add\("busy"\); attach\.disabled = true; \}/);
+  assert.match(popBody, /if \(create && !sent\) \{/, "the picks went with the send");
+});
+
+test("a second Comment on a passage whose send is unanswered re-opens on that send (source pin)", () => {
+  const open = UI.slice(UI.indexOf("function openCommentComposer("));
+  const body = open.slice(0, open.indexOf("\nfunction ", 10));
+  assert.match(body, /const held = holdForPassage\(cmtCreateInFlight\.values\(\), sid, uuid, exact, prose\);/);
+  assert.match(body, /const live = !!held && \(commentThreads\.get\(sid\) \|\| \[\]\)\.some\(\(t\) => t\.tid === "pending:" \+ held\.createId\);/,
+               "only while its mark is still the optimistic one: once its thread is listed the passage opens a fresh box (no trap on a lost ack)");
+  assert.match(body, /sent: \{ createId: held\.createId, text: held\.text,/);
+});
+
+test("the ack moves only its own send, and only the box that sent it adopts the thread (source pins)", () => {
+  const ack = UI.split('else if (m.type === "commentCreated" && m.id && m.tid) {')[1].split("\n  }\n  // a reply the kernel refused")[0];
+  assert.match(ack, /const held = holdAnswered\(cmtCreateInFlight\.values\(\), String\(m\.id\), String\(m\.uuid \|\| ""\), m\.createId\);/);
+  assert.match(ack, /if \(pendingCommentAnchor\?\.sent\?\.createId === held\.createId\) \{/, "never any create box on the session");
+  assert.doesNotMatch(ack, /pendingCommentAnchor && pendingCommentAnchor\.sid === m\.id/, "the any-box-on-the-session adoption is gone");
+  // the words stay on screen through the thread's start, as the pending bubble prunePending retires when the record lands
+  assert.match(ack, /commentPending\.set\(tid, \[\.\.\.\(commentPending\.get\(tid\) \|\| \[\]\), \{ text: held\.text, t: Date\.now\(\) \/ 1000 \}\]\);/);
+  assert.match(UI, /if \(pendingCommentAnchor\?\.sent\?\.createId === pendingAdopt\.createId\) adoptCommentThread\(sid, pendingAdopt\.tid\);/,
+               "an ack that beat its frame adopts only into the box that is still showing that send");
+});
+
+test("bubbles and reply drafts are pruned against every session's threads, never one frame's list (source pins)", () => {
+  assert.doesNotMatch(UI, /const live = new Set\(threads\.filter\(\(t\) => t\.status !== "promoted"\)\.map\(\(t\) => t\.tid\)\);/,
+                      "a frame for one session wiped every other session's unsent replies and pending bubbles");
+  assert.match(UI, /commentThreads\.forEach\(\(list\) => list\.forEach\(\(t\) => \{ if \(t\.status !== "promoted"\) live\.add\(t\.tid\); \}\)\);/);
+  assert.match(UI, /if \(!k\.startsWith\("new:"\) && !k\.startsWith\("newname:"\) && !live\.has\(k\)\) commentDrafts\.delete\(k\);/,
+               "the create box's typed name is a draft too");
+});
+
+test("every create answer echoes the gesture's createId; a create a remote host never got is refused by type (source pins)", () => {
+  assert.match(KERNEL, /cid = str\(msg\.get\("createId"\) or ""\)\s*\n\s*key = _create_key\(sid, msg\["uuid"\], msg\["exact"\], msg\["text"\], cid\)/);
+  assert.equal((KERNEL.match(/"createId": cid/g) || []).length, 3, "the busy and refused answers at the door, and the parked copy");
+  assert.match(KERNEL, /_comment_create_spawn\(_answer_comment_created, \(\[client\], sid, again, str\(msg\["uuid"\]\), cid\)\)/, "the repeat's");
+  assert.match(KERNEL, /_answer_comment_created\(\[client\], sid, tid, str\(msg\["uuid"\]\), cid\)/, "the created answer's");
+  assert.match(KERNEL, /"createId": create_id or ""/, "the one answer both carry it in");
+  assert.match(KERNEL, /_answer_comment_created\(targets, pk\["sid"\], tid, pk\["uuid"\], pk\.get\("createId"\) or ""\)/, "and the parked create's broadcast");
+  const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");
+  assert.match(FED, /if \(msg && msg\.type === "commentCreate" && typeof msg\.id === "string" && msg\.uuid\)\s*\n\s*window\.dispatchEvent\(new MessageEvent\("message", \{ data: \{ type: "commentCreateFailed", id: prefixId\(host, msg\.id\),\s*\n\s*uuid: msg\.uuid, createId: msg\.createId \|\| "", transient: false \} \}\)\);/);
+});
+
+test("a pending group with no turn before it draws no rail stub (source pin)", () => {
+  // the sent view and the thread's boot view hold the pending bubble with nothing above it on the rail: the chat's last-turn
+  // stub (.turn:not(:has(~ .turn))::before, 16px) drew alone left of "sending…", a stray caret-like line (2026-10-01)
+  const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+  assert.match(CSS, /\.cmt-msgs > \.turn-queued:not\(\.turn ~ \.turn-queued\)::before \{ display: none; \}/);
+  assert.match(CSS, /\.cmt-msgs \.turn \+ \.turn::before \{ top: -6px; \}/, "after a turn it keeps its segment, continuous");
+});
+
+// ── a passage that already has a thread opens it (the user 2026-10-01) ─────────────────────────────────────────────
+// "The same passage", at the anchor level: the same turn, and texts that OVERLAP in that turn's rendered prose, each found
+// the way its highlight is drawn. Synthetic text only.
+const PROSE = "Keep the retry cap at two minutes on every sync path. Longer caps only delay the error the user will see anyway.";
+
+test("the same passage: overlapping in the turn's prose; touching or apart is two passages", () => {
+  assert.equal(samePassage(PROSE, "retry cap at two minutes", "two minutes on every sync path"), true, "a shared run of text");
+  assert.equal(samePassage(PROSE, "Keep the retry cap at two minutes on every sync path", "on every sync"), true, "one inside the other");
+  assert.equal(samePassage(PROSE, "Keep the retry cap at two minutes", " on every sync path"), false, "touching, not overlapping");
+  assert.equal(samePassage(PROSE, "Keep the retry cap", "Longer caps only delay the error"), false, "two sentences apart");
+  assert.equal(samePassage(PROSE, "retry  cap at\ntwo minutes", "two minutes on"), true, "whitespace as the highlight reads it");
+});
+
+test("without the turn's prose (scrolled out), the same passage is containment of the normalized texts", () => {
+  assert.equal(samePassage(null, "retry cap at two minutes", "cap at two"), true);
+  assert.equal(samePassage(null, "retry cap at two minutes", "two minutes on every sync path"), false, "an overlap it cannot see is never claimed");
+  assert.equal(samePassage("", "Keep the retry cap", "retry   cap"), true);
+  assert.equal(samePassage(PROSE, "a passage not in this turn", "a passage not in this turn at all"), true, "unfound in the prose: containment");
+});
+
+test("the thread a Comment opens instead: same turn, overlapping, talkable, the newest of several", () => {
+  const thr = (over: Partial<CommentThread>): CommentThread => ({ tid: "t", anchorUuid: "a2", exact: "", status: "open",
+    createdT: 0, state: "", unread: false, promotedName: "", msgs: [], ...over });
+  const old = thr({ tid: "t-old", exact: "Keep the retry cap at two minutes", createdT: 10 });
+  const newer = thr({ tid: "t-new", exact: "retry cap", createdT: 20 });
+  const elsewhere = thr({ tid: "t-else", exact: "Longer caps only delay the error", createdT: 30 });
+  const otherTurn = thr({ tid: "t-turn", anchorUuid: "a1", exact: "Keep the retry cap at two minutes", createdT: 40 });
+  assert.equal(existingThreadFor([old, elsewhere, otherTurn], "a2", "cap at two minutes on every", PROSE)?.tid, "t-old");
+  assert.equal(existingThreadFor([old, newer, elsewhere], "a2", "the retry cap", PROSE)?.tid, "t-new", "the newest overlapping one");
+  assert.equal(existingThreadFor([old, elsewhere], "a2", "on every sync path", PROSE), null, "no overlap: a new thread");
+  assert.equal(existingThreadFor([otherTurn], "a2", "Keep the retry cap", PROSE), null, "another reply's thread is not this passage's");
+  for (const status of ["resolved", "promoted", "promoting"] as const)
+    assert.equal(existingThreadFor([thr({ tid: "t-x", exact: "Keep the retry cap", status })], "a2", "retry cap", PROSE), null,
+                 status + " takes no reply: a new comment starts a new thread");
+  for (const status of ["open", "merged", "merging"] as const) assert.equal(threadTakesReplies(status), true, status);
+  assert.equal(existingThreadFor([thr({ tid: "pending:abc", exact: "Keep the retry cap" })], "a2", "retry cap", PROSE), null,
+               "an optimistic mark is the in-flight send's, which re-opens its own sent view");
+});
+
+test("a Comment on a passage with a thread opens it, and its box offers New thread instead (source pins)", () => {
+  const open = UI.slice(UI.indexOf("function openCommentComposer("));
+  const body = open.slice(0, open.indexOf("\nfunction ", 10));
+  assert.match(body, /const existing = !live && !fresh \? existingThreadFor\(commentThreads\.get\(sid\) \|\| \[\], uuid, exact, prose\) : null;/);
+  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y \}\);/);
+  const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
+  const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
+  assert.match(popBody, /if \(th && cmtRedirect && cmtRedirect\.tid === th\.tid\) \{[\s\S]{0,700}nb\.textContent = "New thread instead";[\s\S]{0,200}nb\.dataset\.act = "cmtnewthread";/);
+  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, true\); \},/,
+               "delegated on the body (click-safe), onto exactly the selection the gesture had");
+  assert.match(UI, /cmtRedirect = redirect && redirect\.tid === tid \? redirect : null;/, "a mark click or a rail jump offers no such action");
+});
+
+test("the thread layout honours only the user's own spot: a selection point places a new comment box alone (source pins)", () => {
+  assert.match(UI, /commentPopPos = \{ x, y \};\s*\n\s*cmtPopPosMine = false;/, "a Comment gesture's selection point is not the user's placement");
+  assert.equal((UI.match(/cmtPopPosMine = true;/g) || []).length, 5, "a drag, an edge pull, a grip resize, the maximize toggle and a reload's restore");
 });

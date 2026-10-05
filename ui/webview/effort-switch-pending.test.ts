@@ -15,7 +15,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("the effort badge shows switching-dots while a reconnect is pending, like the model badge", () => {
   assert.match(RENDER, /effortPending\?: boolean;/);   // status carries it
   assert.match(MODULE, /\(kind === "effort" && !!st\.effortPending\)/);          // effort feeds `pending`
-  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort"\);/);   // dots for both reconnect-style badges (billing moved to the tab menu, 2026-08-09)
+  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort" \|\| kind === "fast"\);/);   // dots for both reconnect-style badges (billing moved to the tab menu, 2026-08-09)
 });
 
 test("a live reconnect has its own ChatEvent kind, dispatched to renderReconnecting", () => {
@@ -30,8 +30,17 @@ test("a live reconnect has its own ChatEvent kind, dispatched to renderReconnect
 test("renderReconnecting is a slim live SESSION notice: the accent loader dots in its glyph slot, naming the effort", () => {
   // 2026-09-08 (the notice-vocabulary pass): the ONE builder, romp severity (accent) for an in-flight romp operation
   assert.match(RENDER, /function renderReconnecting\(ev: Extract<ChatEvent, \{ kind: "reconnecting" \}>\)/);
-  assert.match(RENDER, /notice\(\{ src: "session", glyph: noticeLiveGlyph\(metaDots\(\)\), sev: "romp", gist: reconnectingGist\(ev\.effort\), live: true,/);
+  assert.match(RENDER, /notice\(\{ src: "session", glyph: noticeLiveGlyph\(metaDots\(\)\), sev: "romp", gist: reconnectingGist\(ev\.effort, ev\.waits\), live: true,/);
   assert.match(RENDER, /Reloading session — applying \$\{effort\} effort…/);
   assert.match(RENDER, /"Reloading session…"/);                // effort-less fallback
   assert.match(CSS, /\.notice-sev-romp\s+\{ --notice-rail: var\(--accent\)/);   // accent (loading), not a status color
+});
+
+test("a reload that waits for the session to go quiet says what it waits for (2026-10-01)", () => {
+  // the kernel's relaunch no longer cuts the subagents and background tasks a session runs: an effort pick waits for them,
+  // and the event carries what holds it (relaunchWaits → waits), so the line never reads as a reload that never finishes
+  assert.match(RENDER, /kind: "reconnecting"; effort\?: string; waits\?: string;/);
+  assert.match(RENDER, /if \(waits\) return effort \? `Applying \$\{effort\} effort after \$\{waits\}…` : `Reloading session after \$\{waits\}…`;/);
+  assert.match(RENDER, /gist: reconnectingGist\(ev\.effort, ev\.waits\) \};/, "the compact run's brief says the same");
+  assert.match(RENDER, /relaunchWaits\?: string;/, "the status carries it");
 });

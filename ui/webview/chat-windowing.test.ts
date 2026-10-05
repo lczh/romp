@@ -62,7 +62,7 @@ test("scroll re-windows around the viewport (steady scroll OR jump) when near a 
   // CHEAP px pre-check on every scroll; the precise unit walk only runs when near a rendered edge
   assert.match(RENDER, /const nearTopEdge = \(v\.winStart \?\? 0\) > 0 && st < topH \+ edgePx;/);
   assert.match(RENDER, /const nearBotEdge = \(v\.winEnd \?\? total\) < total && st \+ vh > renderedBottom - edgePx;/);
-  assert.match(RENDER, /if \(!nearTopEdge && !nearBotEdge\) return;/);
+  assert.match(RENDER, /if \(ownEcho \|\| \(!nearTopEdge && !nearBotEdge\)\) return;/);   // …and never on its own write's echo (2026-10-01, chat-regions.test.ts)
   assert.match(RENDER, /const idx = unitAtScroll\(v, content\);/);
   assert.match(RENDER, /renderWindowItems\(v, s, items, Math\.max\(0, c - WINDOW_RADIUS\), Math\.min\(items\.length, c \+ WINDOW_RADIUS\), working\);/);
   // it re-anchors the focus unit so it doesn't jump, coalesced to one frame; a re-window of resident content shows no cue (T402, T386 stage 2)
@@ -147,8 +147,9 @@ test("round two/three code fixes each carry a pin (T386 stage 2, low 1)", () => 
   // the socket death clears every in-flight ask's state, not the glyph alone (medium 1)
   assert.match(RENDER, /function onWireDown\(\): void \{[\s\S]*?if \(hostOf\(parseGapKey\(k\)\.sid\) === ""\) gapLoading\.delete\(k\);[\s\S]*?windowAsks\.clear\(\); loadingOlder\.clear\(\);[\s\S]*?hideLandingNotice\(\);/, "the wire's down edge (the socket's or the pane's) clears the page asks, every ask record, the older-ask set and the notice");
   // sizeSpacers does not average the gap element (medium 3, round one)
-  const pxBlock = RENDER.slice(RENDER.indexOf("if (v.pxPerTurn == null) {"), RENDER.indexOf("if (h > 0 && turns > 0) v.pxPerTurn = h / turns;"));
-  assert.match(pxBlock, /if \(c\.classList\.contains\("tx-spacer"\) \|\| c\.classList\.contains\("tx-gap"\) \|\| !c\.classList\.contains\("turn"\)\) continue;/, "the px-per-turn measure skips the gap element and every non-turn child (pinned inside its own block; round four low 3, round five)");
+  const pxBlock = RENDER.slice(RENDER.indexOf("if (v.pxPerTurn == null) {"), RENDER.indexOf("const m = measureTurnPx(rows);"));
+  assert.match(pxBlock, /if \(c\.classList\.contains\("tx-gap"\)\) \{ rows\.push\(\{ h: 0, user: false, kturn: null, gap: true \}\); continue; \}/, "the px-per-turn measure takes no height off the gap element (it only splits the runs: chat-turn-stamp.test.ts)…");
+  assert.match(pxBlock, /if \(c\.classList\.contains\("tx-spacer"\) \|\| !c\.classList\.contains\("turn"\)\) continue;/, "…and skips every non-turn child (pinned inside its own block; round four low 3, round five)");
   const unitBlock = RENDER.slice(RENDER.indexOf("if (v.avgTurnH == null) {"), RENDER.indexOf("if (h > 0 && n > 0) v.avgTurnH = h / n;"));
   assert.match(unitBlock, /c\.classList\.contains\("tx-gap"\)\) continue;/, "…and so does the per-unit measure");
   // the region-fill view resets (chatTurns, chatWindow) keep the measured averages across fills (low 1); chatHead's prepend reset may still clear them
@@ -177,7 +178,7 @@ test("round four and five fixes each carry a pin (T386 stage 2, round five low 1
   assert.match(RENDER, /const liveLanding = !!landingNoticeSid \|\| Array\.from\(windowAsks\.values\(\)\)\.some\(\(a\) => a\.some\(\(r\) => !r\.cancelled && !!r\.gap\)\);/, "the wsdown toast fires only for a landing the reader had not cancelled (low 1)");
   assert.match(RENDER, /const nospan = !msg\.missing && Array\.isArray\(msg\.events\) && msg\.events\.length > 0 && !Array\.isArray\(msg\.span\);/, "missing is tested first; only a reply with events and no span is an older host (medium 3; round five low 3)");
   assert.match(RENDER, /const preJumpOrigin = rec\.origin;/, "the pre-jump origin is consumed by every window reply (low 2)");
-  const px = RENDER.slice(RENDER.indexOf("if (v.pxPerTurn == null) {"), RENDER.indexOf("if (h > 0 && turns > 0) v.pxPerTurn = h / turns;"));
+  const px = RENDER.slice(RENDER.indexOf("if (v.pxPerTurn == null) {"), RENDER.indexOf("const m = measureTurnPx(rows);"));
   assert.match(px, /\|\| !c\.classList\.contains\("turn"\)\) continue;/, "px-per-turn counts turn rows only, never cards or dividers (round five)");
 });
 
@@ -207,8 +208,8 @@ test("round six fixes each carry a pin (T386 stage 2): rows name their turn, the
   assert.doesNotMatch(turnsFn, /let t = r\.lo - 1;/, "…the unconditional lo - 1 is gone");
   // the px-per-turn measure takes the WHOLE row, action strip included: a gap stands for rows as they will render, and every user row
   // (history rows too) carries the strip; subtracting it drew the gap 16 percent short in the regions lab's sizing road
-  const px = RENDER.slice(RENDER.indexOf("if (v.pxPerTurn == null) {"), RENDER.indexOf("if (h > 0 && turns > 0) v.pxPerTurn = h / turns;"));
-  assert.match(px, /h \+= c\.offsetHeight;/, "px-per-turn sums whole rows");
+  const px = RENDER.slice(RENDER.indexOf("if (v.pxPerTurn == null) {"), RENDER.indexOf("const m = measureTurnPx(rows);"));
+  assert.match(px, /rows\.push\(\{ h: c\.offsetHeight, /, "px-per-turn sums whole rows");
   assert.doesNotMatch(px, /msg-acts/, "…and subtracts no action strip");
 });
 

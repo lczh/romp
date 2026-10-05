@@ -6,7 +6,8 @@ nudges); _push sends it as {type:"data"} FIRST, then the cached full build's det
 message. Profiling drove this: the timeline was 551ms/1940KB and ~95% of that is bars+judging, so the
 skeleton is tiny and lands immediately. (The dead `tokens` field — nothing reads it — was dropped too.)
 
-The skeleton BUILD runs only on the cold live-first connect. A warm push PROJECTS the skeleton from the cached
+The skeleton BUILD runs only while no full build is cached (the cold live-first connect, the pusher's cold lanes) and on
+a connect over a stale cache. A warm push PROJECTS the skeleton from the cached
 full build (_timeline_skeleton), serializes the frame once per build (_skel_wire) and dedups it on content the
 way every {type:"data"} frame is deduped (the nested clock stripped) — see SkeletonFromCache below. An interval
 a session is still in ends at the build's clock on the wire and carries an explicit open mark as its third
@@ -740,7 +741,9 @@ class DeadLaneWindow(unittest.TestCase):
         finally:
             km._alive_sessions, km._sessions, km._ordered = o_alive, o_sessions, o_ordered
 
-    def test_cold_connect_builds_live_only_and_wakes_the_producer_for_the_rest(self):
+    def test_cold_connect_builds_the_live_only_lanes_and_owes_the_bars_to_the_builder(self):
+        # The live bars this connect built for itself (stored nowhere, beside the pusher's full build) moved to the timeline
+        # builder's phase one (2026-10-03; tests/test_single_flight_builds.py ColdTimelineBuilder pins the live bars first)
         calls, sent = [], []
         client = {"app": "timeline", "send": sent.append, "sent": {}, "alive": True}
         SK = {"type": "timeline", "sessions": [], "turns": {}, "judging": {}, "messages": [],
@@ -754,15 +757,20 @@ class DeadLaneWindow(unittest.TestCase):
         km._live_map = lambda: {}
         km._fleet_view_sig = lambda now, live: ("sig",)
         km._built_timeline[0], km._built_timeline[1], km._built_timeline[2] = None, None, 0.0   # cold cache
+        km._TL_OWED.clear(); km._tl_partial[0] = km._tl_cold_lanes[0] = None
         km._producer_wake.clear()
         try:
             km._push([client], connect=True)
         finally:
             km.build_timeline, km._live_map, km._fleet_view_sig = o_bt, o_live, o_sig
             km._built_timeline[:] = o_built
-        self.assertIn(("skel", True), calls, "cold connect: the lanes skeleton is built LIVE-ONLY")
-        self.assertIn(("bars", True), calls, "cold connect: the bars are built LIVE-ONLY (no dead reads)")
-        self.assertTrue(km._producer_wake.is_set(), "the full live+dead build is warmed in the background")
+            km._tl_cold_lanes[0] = None
+        self.assertEqual(calls, [("skel", True)], "cold connect: the lanes skeleton, LIVE-ONLY, and no bars build of its own")
+        self.assertEqual([json.loads(f)["type"] for f in sent], ["data"], "the lanes went; the bars wait for the builder")
+        self.assertTrue(km._TL_OWED.is_set(), "the cold build (the live bars, then live+dead) is owed to the timeline builder")
+        self.assertFalse(km._producer_wake.is_set(), "and the producer is not woken: it never builds the timeline, and the owe "
+                         "took that wake's place (the PR's first review round, 2026-10-04: the assertion was dropped, not inverted)")
+        km._TL_OWED.clear()
 
 
 if __name__ == "__main__":

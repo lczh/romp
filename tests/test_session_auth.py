@@ -888,10 +888,11 @@ class SetAuth(_Keyed):
         s = self._sess(9)
         s.sid = sid
         called = []
-        s.request_reconnect = lambda: called.append(True)
+        s.request_reconnect = lambda *a, **k: called.append(k)
         self.be.sessions[sid] = s
         self.assertTrue(self.be.set_auth(sid, "key"))
         self.assertTrue(called, "auth is connect-time — the reconnect is what applies it")
+        self.assertEqual(called, [{"why": "billing"}], "…on the road that waits for a quiet session, never the cut one (2026-10-01)")
         self.assertEqual(s.auth, "key")
         self.assertEqual(s._auth_pending, "key")
         chips = [a for a in self.be._live.get(sid, {}).values() if a.get("command") == "/auth"]
@@ -1009,6 +1010,64 @@ class UsagePayloadMixed(unittest.TestCase):
         u = km._usage()
         self.assertTrue(u["apiKey"])
         self.assertNotIn("apiTail", u)
+
+
+class UsagePayloadNoSignIn(unittest.TestCase):
+    """The API cell on a machine with NO sign-in of its own never counts a stored login's turns. That arm sums the whole
+    ledger on the premise that every turn there bills the key, which stored logins (T346) broke: a session on such a
+    machine can bill a subscription seat through a stored login's token, and those turns are Claude Code's cost at API
+    prices, an estimate nobody is billed per token. The cell is labelled API and the spend detail's By account summary
+    shows them as the seat's, marked as estimates; the cell summed them as plain key dollars beside a mixed host's cell
+    that leaves its own seat turns out (the user 2026-10-01, who saw the seat's estimate in the usage hover after
+    linking the login). A bucket where a stored login billed turns now reads its key sub-count; every other bucket is
+    read exactly as before, whole. Synthetic ledger, invented login id."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.real_state = km.jd.STATE
+        km.jd.STATE = Path(self.d)
+        self.real_acct = km._claude_account
+        km._claude_account = lambda: ""   # no sign-in on this machine
+        (Path(self.d) / "usage.json").write_text(json.dumps({"t": 1000}))
+
+    def tearDown(self):
+        km.jd.STATE = self.real_state
+        km._claude_account = self.real_acct
+
+    def _ledger(self):
+        now = time.time()
+        day, hour = time.strftime("%Y-%m-%d", time.localtime(now)), time.strftime("%Y-%m-%dT%H", time.localtime(now))
+        old_hour = time.strftime("%Y-%m-%dT%H", time.localtime(now - 3 * 3600))
+        # this hour: $3 billed the key, $6 a stored login's seat, $1 the remainder (a sign-in signed out since)
+        b = {"usd": 10.0, "turns": 5, "tokIn": 100, "tokOut": 10, "tokCacheR": 0, "tokCacheW": 0,
+             "key": {"usd": 3.0, "turns": 2, "tok": 30, "tokIn": 27, "tokOut": 3, "tokCacheR": 0, "tokCacheW": 0},
+             "byLogin": {"aaaa1111": {"usd": 6.0, "turns": 2, "tok": 60}},
+             "bySid": {"11111111-2222-3333-4444-555555555555": {"usd": 10.0, "turns": 5, "tok": 110,
+                                                                  "key": {"usd": 3.0, "turns": 2, "tok": 30}}}}
+        legacy = {"usd": 4.0, "turns": 1, "tokIn": 40}   # no stored login billed this hour: whole, as before
+        (Path(self.d) / "spend.json").write_text(json.dumps({"days": {day: b}, "hours": {hour: b, old_hour: legacy}}))
+
+    def test_the_cell_counts_the_keys_turns_and_never_a_stored_logins(self):
+        self._ledger()
+        u = km._usage()
+        self.assertTrue(u["apiKey"], "the spend arm: no windows, no sign-in")
+        self.assertEqual(u["spend"]["month"]["usd"], 3.0, "the key's $3; the seat's $6 and the remainder's $1 are not key dollars")
+        self.assertEqual(u["spend"]["month"]["turns"], 2)
+        self.assertEqual(u["spend"]["month"]["tok"], 30)
+        self.assertEqual(u["spend"]["day"]["usd"], 7.0, "the key's $3 plus the other hour's $4, which no stored login billed")
+        self.assertEqual(u["spend"]["day"]["turns"], 3)
+        self.assertEqual(round(sum(u["spendSeries"]["usd"]), 4), 7.0, "the hover's graph follows the same rule")
+
+    def test_a_key_only_ledger_reads_as_it_always_did(self):
+        now = time.time()
+        b = {"usd": 2.5, "turns": 2, "tokIn": 20, "tokOut": 0, "tokCacheR": 0, "tokCacheW": 0,
+             "key": {"usd": 2.5, "turns": 2, "tok": 20, "tokIn": 20, "tokOut": 0, "tokCacheR": 0, "tokCacheW": 0}}
+        (Path(self.d) / "spend.json").write_text(json.dumps({
+            "days": {time.strftime("%Y-%m-%d", time.localtime(now)): b},
+            "hours": {time.strftime("%Y-%m-%dT%H", time.localtime(now)): b}}))
+        u = km._usage()
+        self.assertEqual((u["spend"]["day"]["usd"], u["spend"]["month"]["usd"]), (2.5, 2.5))
+        self.assertEqual(u["spend"]["month"]["tokIn"], 20, "the by-kind split rides the key's sub-count")
 
 
 class AuthErrorClass(unittest.TestCase):

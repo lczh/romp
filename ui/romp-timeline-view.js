@@ -118,6 +118,12 @@ function applyTagEditOp(v, edit, newId) {
       if (to) to.members = Array.from(new Set((to.members || []).concat(sids)));
       break;
     }
+    case 'setTags': {
+      const keep = edit.tids || [];
+      for (const x of tags) x.members = keep.indexOf(x.id) >= 0 ? Array.from(new Set((x.members || []).concat(sids)))
+                                                                 : (x.members || []).filter((m) => sids.indexOf(m) < 0);
+      break;
+    }
   }
   nv.tags = tags;
   return nv;
@@ -1235,6 +1241,13 @@ function crossX(lo0, hi0, xs, xe, obstacles) {
 // through here so both hosts resolve.
 function mediaUrl(name) {
   return ((typeof window !== 'undefined' && window.__rompMediaBase) || '/media') + '/' + name;
+}
+// The loader wordmark's swirl-o, inline, so it paints with the letters instead of a request later (the user
+// 2026-10-01). __ROMP_SWIRL_O__ is a data URI: esbuild.js bakes it in when it bundles this file for VS Code, and
+// the kernel's /timeline page declares it before injecting this file. A host that provides neither gets the
+// /media fetch it always had.
+function swirlOUrl() {
+  return typeof __ROMP_SWIRL_O__ === 'string' ? __ROMP_SWIRL_O__ : mediaUrl('romp-swirl-o.svg');
 }
 // Kernel HTTP endpoints this view fetches directly (/models). The twin of ui/webview/media.ts kernelUrl and
 // gear.js ku(), inlined here because this file is a CJS module bundled into the VS Code timeline pane AND
@@ -7235,7 +7248,7 @@ class TimelinePanel {
     const inner = document.createElement('div'); inner.className = 'rl-in';
     const word = document.createElement('div'); word.className = 'rl-word';
     const mk = (t, c) => { const s = document.createElement('span'); s.style.color = c; s.textContent = t; return s; };
-    const o = document.createElement('img'); o.className = 'rl-o'; o.src = mediaUrl('romp-swirl-o.svg'); o.alt = 'o';
+    const o = document.createElement('img'); o.className = 'rl-o'; o.src = swirlOUrl(); o.alt = 'o';
     o.onerror = () => o.remove();   // a missing asset must never leave a spinning broken-image icon
     word.appendChild(mk('R', '#1EA1EB')); word.appendChild(o);
     word.appendChild(mk('m', '#54B204')); word.appendChild(mk('p', '#4EA8A9'));

@@ -71,10 +71,13 @@ class EffortNoteSourcePins(unittest.TestCase):
         # self.backend.state_dir, not self.state_dir: a session has no state_dir of its own, and the typo
         # raised an AttributeError straight out of the connect path — killing the session thread on any
         # /effort switch that applied at reconnect (fixed 2026-07-28, found in the backend's crash log).
-        self.assertIn("append_effort_applied(self.backend.state_dir, self.sid, self._effort_pending)", BACKEND_SRC)
-        i = BACKEND_SRC.index("append_effort_applied(self.backend.state_dir")
+        # Since 2026-10-01 the block is the connect's reconcile of the waiting picks (SdkSession._reconcile_waiting_picks):
+        # the marker is written only for an effort the connected CLI was LAUNCHED with, at the launch's own moment, and
+        # never for an attach to a CLI launched before the pick (tests/test_pick_survives_restart.py runs it).
+        self.assertIn("append_effort_applied(self.backend.state_dir, self.sid, effort_applied,", BACKEND_SRC)
+        i = BACKEND_SRC.index("append_effort_applied(self.backend.state_dir, self.sid, effort_applied,")
         j = BACKEND_SRC.index('self._effort_pending = ""', i)
-        self.assertLess(i, j, "the marker is written while _effort_pending still holds the applied value")
+        self.assertLess(i, j, "the marker is written before the pending mark is cleared")
 
     def test_build_session_interleaves_the_durable_note_by_time(self):
         src = inspect.getsource(km.build_session)

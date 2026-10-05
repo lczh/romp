@@ -99,6 +99,11 @@ var GEAR_HTML =
   "<div class='rs-row' id=rs-billing style='cursor:default'>" +
   '<span style="flex:1 1 auto"><b>Claude login</b>' +
   '<span class=rs-sub id=rs-login-acct>…</span>' +
+  // THE MACHINE'S LOGIN AT REST (2026-09-30): who it is signed in as, in a permanent line under the label, and one dim line on
+  // how it bills beside an API key when one is set up here. Until then "Logged in as" sat in the hover popover alone, so a
+  // successful sign-in left the row reading exactly as before it (the user signed in and could not tell it had worked)
+  "<span id=rs-login-who class='rs-line rs-login-who'></span>" +
+  "<span id=rs-login-bill class=rs-line></span>" +
   "<div id=rs-login-flow style='margin-top:6px'>" +
   "<button id=rs-login-btn type=button style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Log in to Claude Code</button>" +
   // rs-note, NOT rs-sub: this is a live inline status ("starting the login flow…"), not the row's
@@ -217,8 +222,8 @@ var GEAR_HTML =
   "<div id=rs-chatscheme style='position:relative;margin-top:5px'></div>" +
   '</span></div>' +
   '<label class=rs-row><input type=checkbox id=rs-striprows checked>' +
-  '<span><b>One tag group per row in the tab strip</b>' +
-  '<span class=rs-sub>With the tabs grouped by tag, each group starts on its own row with its tag at the left edge. Off, the groups follow one another across the strip and wrap as they need, so many tags do not mean many rows.</span>' +
+  '<span><b>Keep tag groups together in the tab strip</b>' +
+  '<span class=rs-sub>With the tabs grouped by tag, groups share a row while they fit, and a group that does not fit moves to the next row whole instead of splitting across two. The untagged sessions keep a row of their own at the end. Off, the groups run on and wrap wherever a row fills, with the untagged sessions behind a thin divider.</span>' +
   '</span></label>' +
   // BOXES BELOW THE TRANSCRIPT (the user 2026-09-23, who looked for the switch and did not find it under Display): the Needs you box's
   // switch in a section of its own, named for where the box sits, so a scan of the section heads lands on it. plans/needs-you.md, phase
@@ -391,6 +396,8 @@ var GEAR_HTML =
   // refusal shows under it; before 2026-09-30 the dialog showed only its title and Cancel through both waits
   "<div id=rs-login-status class=rs-login-status hidden><span class=rs-login-dots><i></i><i></i><i></i></span><span id=rs-login-wait></span></div>" +
   "<div id=rs-login-err class=rs-login-err hidden></div>" +
+  // the outcome: once the flow reports done, the dialog says who the machine is signed in as, and Close replaces Cancel
+  "<div id=rs-login-ok class=rs-login-ok hidden></div>" +
   "<div id=rs-login-url hidden style='margin-top:6px'></div>" +
   "<div id=rs-login-code class=rs-login-code hidden>" +
   "<input id=rs-login-input type=text autocomplete=off spellcheck=false placeholder='paste the code from the browser…' style='flex:1;background:var(--input-bg, #1e1e1e);color:var(--fg, #ccc);border:1px solid #3a3a3a;border-radius:5px;padding:4px 8px'>" +
@@ -398,6 +405,7 @@ var GEAR_HTML =
   '</div>' +
   "<div style='margin-top:10px;text-align:right'>" +
   "<button id=rs-login-cancel type=button style='cursor:pointer;background:transparent;color:#888;border:1px solid #3a3a3a;border-radius:5px;padding:3px 10px'>Cancel</button>" +
+  "<button id=rs-login-close type=button hidden style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Close</button>" +
   '</div></div></div>' +
   '<div id=ranalytics-back hidden><div id=ranalytics>' +
   '<div class=ra-top><div class=ra-title>Token usage</div>' +
@@ -1200,8 +1208,15 @@ function initGear(post, opts) {
   var lgB = document.getElementById('rs-login-btn'), lgS = document.getElementById('rs-login-state'),
       lgU = document.getElementById('rs-login-url'), lgC = document.getElementById('rs-login-code'),
       lgI = document.getElementById('rs-login-input'), lgSend = document.getElementById('rs-login-send'),
-      lgX = document.getElementById('rs-login-cancel'), lgA = document.getElementById('rs-login-acct');
+      lgX = document.getElementById('rs-login-cancel'), lgA = document.getElementById('rs-login-acct'),
+      lgWho = document.getElementById('rs-login-who'), lgBill = document.getElementById('rs-login-bill'),
+      lgOk = document.getElementById('rs-login-ok'), lgClose = document.getElementById('rs-login-close');
   var lgTimer = null, lgLive = '';   // lgLive = the flow state lgRender last saw (drives the button's two jobs)
+  // lgV: the /version lgRender last painted from; lgMachine: /logins' block on the machine's own login (its display, and how it
+  // bills beside a key); lgN: the flow number last read; lgFrom: the number from before the dialog's own start, while the kernel
+  // has not yet reported that start (a read carrying it is the previous flow's); lgStale: how many such reads in a row;
+  // lgSaw: this dialog has shown a live flow since its start, so a "done" is the outcome it is waiting for
+  var lgV = null, lgMachine = null, lgN = null, lgFrom = null, lgStale = 0, lgSaw = false, lgStored = '';
   // ── the stored logins (T346): every other Claude login a session on this machine can be billed to, listed
   // under the machine's own with a Remove each. Read from the kernel's authed /logins on every settings fill
   // and after a Remove: labels, organisations, dates and states, never a token. A Remove acknowledges at once
@@ -1214,14 +1229,21 @@ function initGear(post, opts) {
     return d <= 0 ? 'now (the token is a year old)' : 'in ' + d + ' day' + (d === 1 ? '' : 's');
   }
   function lgLogins(d) {
-    if (!lgL) return;
     var rows = (d && d.logins) || [];
+    // what the row's one description says about the stored logins: as a second rs-sub of its own it floated a second popover
+    // over the first whenever the row was hovered (both sit at the row's foot), the 2026-09-02 stacking again
+    lgStored = rows.length ? 'For the other logins below, the token stays where you keep it; romp keeps only the label and the command that reads it.'
+                           : 'No other Claude logins stored on this machine. Add one with romp login add <label>.';
+    if (d && d.machine && typeof d.machine === 'object') lgMachine = d.machine;
+    lgAcct();
+    if (!lgL) return;
     lgL.textContent = '';
-    var head = document.createElement('div');
-    head.className = 'rs-sub';
-    head.textContent = rows.length ? 'Other logins a session can bill (the token stays where you keep it; romp keeps the label and the command that reads it):'
-                                   : 'No other Claude logins stored on this machine. Add one with romp login add <label>.';
-    lgL.appendChild(head);
+    if (rows.length) {   // the list's heading, in the flow above its rows
+      var head = document.createElement('div');
+      head.className = 'rs-line';
+      head.textContent = 'Other logins a session can bill:';
+      lgL.appendChild(head);
+    }
     rows.forEach(function (r) {
       var row = document.createElement('div');
       row.className = 'rs-login-row';
@@ -1230,13 +1252,52 @@ function initGear(post, opts) {
       name.textContent = r.display || r.label || r.id;
       name.title = name.textContent;
       row.appendChild(name);
+      // a LINK (2026-10-01) is the user's own statement that this login is some machine's signed-in account, so the spend
+      // breakdown counts the two as one account: said as theirs ("linked by you"), never as something romp verified
+      var ln = r.linked && typeof r.linked === 'object' && r.linked.host ? r.linked : null;
       var note = r.why ? r.why
         : r.expiresSoon ? 'token expires ' + lgWhen(r.expiresAt)
+        : ln ? ''
         : (typeof r.addedAt === 'number' ? 'added ' + lgDate(r.addedAt) : '');
+      if (ln) note = (note ? note + ' \u00b7 ' : '') + 'same account as ' + lgSignIn(ln.host) + ', linked by you';
       var st = document.createElement('span');
       st.className = 'rs-note' + (r.why ? ' rs-login-bad' : (r.expiresSoon ? ' rs-login-warn' : ''));
       st.textContent = note;
+      st.title = note;
       row.appendChild(st);
+      if (ln) {
+        var ul = document.createElement('button');
+        ul.type = 'button';
+        ul.className = 'rs-login-rm rs-login-unlink';
+        ul.textContent = 'Unlink';
+        ul.title = 'Take the link back: this login is a row of its own in the spend breakdown again.';
+        ul.addEventListener('click', function () {
+          ul.disabled = true; ul.textContent = 'Unlinking\u2026';
+          lgPost({ unlink: r.id }, st, ul, 'Unlink');
+        });
+        row.appendChild(ul);
+      } else if (!r.ownAccount) {
+        // the machines whose sign-in this login could be: this one and every connected kernel. romp copies the picked
+        // sign-in's account from that machine's own kernel and refuses, in the row, when it has none or does not answer
+        var sel = document.createElement('select');
+        sel.className = 'rs-login-link';
+        sel.title = 'Say this login is the same Claude account as a machine\'s sign-in, so the spend breakdown counts them as one account. romp copies that sign-in\'s account; it cannot read a token\'s account itself.';
+        var o0 = document.createElement('option');
+        o0.value = ''; o0.textContent = 'Same account as\u2026';
+        sel.appendChild(o0);
+        [selfName || 'local'].concat((kernels || []).map(function (k) { return k.host; })).forEach(function (h) {
+          if (!h) return;
+          var o = document.createElement('option');
+          o.value = h; o.textContent = lgSignIn(h);
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', function () {
+          if (!sel.value) return;
+          sel.disabled = true; st.className = 'rs-note'; st.textContent = 'Linking\u2026';
+          lgPost({ link: { login: r.id, sameAs: sel.value } }, st, sel, '');
+        });
+        row.appendChild(sel);
+      }
       var rm = document.createElement('button');
       rm.type = 'button';
       rm.className = 'rs-login-rm';
@@ -1252,6 +1313,21 @@ function initGear(post, opts) {
       lgL.appendChild(row);
     });
   }
+  // a machine's sign-in in the row's words: this machine's own, or a connected kernel's by its host name
+  function lgSignIn(h) { return (!h || h === 'local' || h === selfName) ? 'this machine\'s sign-in' : h + '\'s sign-in'; }
+  // link / unlink: the kernel's POST /logins answers ok (the list re-reads) or the refusal, said in the row's note with
+  // the control restored, so a host with no sign-in or one not answering is never a silent nothing
+  function lgPost(body, st, ctl, label) {
+    function refused(why) {
+      st.className = 'rs-note rs-login-bad'; st.textContent = why; st.title = why;
+      ctl.disabled = false;
+      if (ctl.tagName === 'SELECT') ctl.value = ''; else ctl.textContent = label;
+    }
+    fetch(ku('/logins'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) lgFetchLogins(); else refused((d && d.error) || 'refused'); })
+      .catch(function () { refused('the kernel did not answer; try again'); });
+  }
   function lgFetchLogins() {
     if (!lgL) return;
     fetch(ku('/logins'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(lgLogins).catch(function () {});
@@ -1262,7 +1338,44 @@ function initGear(post, opts) {
   // Closing the modal never cancels the flow (Cancel does); the row's state span keeps narrating,
   // and the button reopens the modal mid-flow instead of restarting the login.
   var lgM = document.getElementById('rs-login-modal');
-  function lgModal(on) { if (lgM) lgM.hidden = !on; }
+  function lgModal(on) {
+    if (lgM) lgM.hidden = !on;
+    if (!on) lgSuccess('');   // the next open starts from the flow, never from the last outcome
+  }
+  // The dialog's outcome: "Signed in as <who>" with Close in Cancel's place, the paste step and every wait gone ('' restores
+  // the flow's own dress). Close only closes: the flow has ended, so there is nothing to cancel.
+  function lgSuccess(text) {
+    var on = !!text;
+    if (lgOk) { lgOk.hidden = !on; lgOk.textContent = text; }
+    if (lgClose) lgClose.hidden = !on;
+    if (lgX) lgX.hidden = on;
+    if (on) { lgU.hidden = true; lgC.hidden = true; lgStatus({ state: 'done', err: '' }); }
+  }
+  // Who this machine is signed in as, the way the Billing surfaces name it: /logins' email · organisation · kind when that block is
+  // about the same login /version reports, else /version's own label; "" when there is no login
+  function lgName(v) {
+    var acct = v && typeof v.acctLabel === 'string' ? v.acctLabel : '';
+    if (!acct) return '';
+    return lgMachine && lgMachine.acct === acct && lgMachine.label ? String(lgMachine.label) : acct;
+  }
+  // The Account row at rest. The login is this machine's, and when other machines' kernels are connected (the selector above the
+  // tabs shows) the line names it, since the row would otherwise read as everyone's. The billing line appears only where it is
+  // true: an apiKeyHelper here outranks the login in Claude Code, so a session bills this account only when its Billing is Login
+  // (romp disables the helper for those launches), and a MANAGED helper outranks even that pick. No line when there is no key.
+  function lgAcct() {
+    var who = lgName(lgV), many = !!kernels && kernels.length > 0, where = selfName || 'this machine';
+    var line = who ? (many ? 'Signed in on ' + where + ' as ' + who : 'Signed in as ' + who) : (many && lgV ? 'Not signed in on ' + where : '');
+    if (lgWho && lgWho.textContent !== line) lgWho.textContent = line;
+    var m = who && lgMachine && lgMachine.acct === lgV.acctLabel ? lgMachine : null, bill = '';
+    if (m && m.keyHelper === true && m.loginUsable === true) bill = 'An API key is also set up here; a session uses this account only when its Billing is Login.';
+    else if (m && m.keyHelper === true && m.loginUsable === false && m.loginWhy) bill = 'Sessions cannot use this account here: ' + m.loginWhy + '.';
+    if (lgBill && lgBill.textContent !== bill) lgBill.textContent = bill;
+    if (who && lgOk && !lgOk.hidden) lgOk.textContent = 'Signed in as ' + who;   // the dialog's outcome follows a fuller name (the stored logins' read)
+    if (lgA) lgA.textContent = (who ? 'Each machine keeps its own Claude login. Sign in again to renew this one or switch it to another account, from any browser (your phone works: the code flow needs no localhost).'
+                                    : 'No Claude login on this machine — sessions can only bill an API key. Log in from any browser (your phone works: the code flow needs no localhost).')
+                               + (lgStored ? ' ' + lgStored : '');
+    return who;
+  }
   var lgW = document.getElementById('rs-login-status'), lgWT = document.getElementById('rs-login-wait'),
       lgE = document.getElementById('rs-login-err');
   // What the dialog says: "Starting Claude Code…" until the sign-in link arrives, "Checking the code…" while the CLI
@@ -1288,13 +1401,34 @@ function initGear(post, opts) {
   function lgRender(v) {
     if (!lgB) return;
     var f = (v && v.login) || { state: '' };
-    if (lgA) lgA.textContent = v && v.acctLabel ? 'Logged in as ' + v.acctLabel + '. Each machine logs in its own credential store.'
-                                                : 'No Claude login on this machine — sessions can only bill an API key. Log in from any browser (your phone works: the code flow needs no localhost).';
+    var n = typeof f.n === 'number' ? f.n : null;
+    if (lgFrom !== null && n !== null && n <= lgFrom) {
+      // the kernel has not reported the dialog's start yet: this read is the previous flow's (its "done" is not this flow's
+      // outcome), so the dialog keeps its own acknowledgement. A start the kernel never reports (the message lost with the
+      // socket) says so after about ten seconds of reads, rather than waiting on forever.
+      f = ++lgStale > 25 ? { state: 'error', err: 'the kernel did not start the login flow — try again' } : { state: 'starting', url: '', err: '' };
+      if (f.state === 'error') lgFrom = null;
+    } else {
+      if (lgFrom !== null) { lgFrom = null; lgStale = 0; }
+      if (n !== null) lgN = n;
+      if (f.state === 'url' || f.state === 'starting' || f.state === 'verifying') lgSaw = true;
+    }
+    if (v && typeof v.acctLabel === 'string') lgV = v;
+    var who = lgAcct();
     lgLive = f.state || '';
     var mid = f.state === 'url' || f.state === 'starting' || f.state === 'verifying';
     lgB.hidden = false;
-    lgB.textContent = mid ? 'Show login code…' : 'Log in to Claude Code';
-    if (!f.state || f.state === 'done') lgModal(false);   // the flow ended (logged in / cancelled) — the modal's job is done
+    lgB.textContent = mid ? 'Show login code…' : (who ? 'Sign in again…' : 'Log in to Claude Code');
+    if (f.state === 'done' && lgM && !lgM.hidden && lgSaw) {
+      // the flow this dialog followed signed the machine in: say so here, with Close, rather than vanish and leave the
+      // outcome to a line behind it (before 2026-09-30 the dialog closed itself and nothing visible changed)
+      lgSaw = false;
+      lgSuccess(who ? 'Signed in as ' + who : 'Signed in.');
+      lgFetchLogins();   // the organisation and kind beside the new login, and how it bills beside the key
+    } else if (!f.state || f.state === 'done') {
+      if (!(lgOk && !lgOk.hidden)) lgModal(false);   // cancelled, or finished out of this dialog's sight: nothing left for it to say
+    } else lgSuccess('');
+    if (lgOk && !lgOk.hidden) { lgS.textContent = ''; lgS.style.color = ''; return; }   // the outcome stands until Close
     lgStatus(f);
     lgS.textContent = f.state === 'starting' ? 'starting Claude Code…'
       : f.state === 'verifying' ? 'checking the code…'
@@ -1320,7 +1454,7 @@ function initGear(post, opts) {
   function lgPoll() {
     fetch(ku('/version'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (v) {
       lgRender(v);
-      var st = (v.login || {}).state;
+      var st = lgLive;   // the state as rendered: a read from before the dialog's start counts as starting
       // quick while the CLI is starting or checking a code (about a second each), the old pace while the person reads
       if (st === 'starting' || st === 'verifying') lgTimer = setTimeout(lgPoll, 400);
       else if (st === 'url') lgTimer = setTimeout(lgPoll, 1500);
@@ -1330,6 +1464,7 @@ function initGear(post, opts) {
   if (lgB) lgB.addEventListener('click', function () {
     lgModal(true);
     if (lgLive === 'url' || lgLive === 'starting' || lgLive === 'verifying') return;   // reopen only — never restart a live flow
+    lgFrom = lgN; lgStale = 0; lgSaw = false;   // reads numbered lgN or lower are the previous flow's, until the kernel reports this start
     post({ type: 'loginStart' });
     lgS.textContent = 'starting Claude Code…';
     lgStatus({ state: 'starting', err: '' });   // the dialog acknowledges at once, before the first poll
@@ -1347,7 +1482,8 @@ function initGear(post, opts) {
     lgTimer = setTimeout(lgPoll, 400);
   });
   if (lgI) lgI.addEventListener('keydown', function (e) { if (e.key === 'Enter' && lgSend) lgSend.click(); });
-  if (lgX) lgX.addEventListener('click', function () { lgModal(false); post({ type: 'loginCancel' }); if (lgTimer) { clearTimeout(lgTimer); lgTimer = null; } lgRender({ login: { state: '' } }); });
+  if (lgX) lgX.addEventListener('click', function () { lgModal(false); post({ type: 'loginCancel' }); if (lgTimer) { clearTimeout(lgTimer); lgTimer = null; } lgFrom = null; lgRender({ login: { state: '' } }); });
+  if (lgClose) lgClose.addEventListener('click', function () { lgModal(false); });   // the flow is over: Close closes, it cancels nothing
   if (upm) upm.addEventListener('change', function () { post({ type: 'setUpdateMode', mode: upm.value, gt: gclock.stamp('update-mode') }); });
   // The judge MODEL pickers mirror the session pickers (the user 2026-08-25): families top-level,
   // clicking a family sends its /models `default` (the user's remembered version), hover or
@@ -2171,8 +2307,9 @@ function initGear(post, opts) {
       fillAutoNudge(v.autoNudge, rows);
       fillMixedMarks(v, rows);
       fillScope(v); fillScopedRows(v);   // phase two: the machine selector and the scoped rows read the same rows
+      lgAcct();   // …and the Account row names this machine once other machines' kernels are connected
     }).catch(function (e) { try { console.error('romp: settings: the /tunnels read or the cross-machine fill failed', e); } catch (_e) {}   // fail loudly: a swallowed fault hid the selector
-      kernels = []; fillAutoNudge(v.autoNudge, []); fillMixedMarks(v, []); fillScope(v); fillScopedRows(v); });
+      kernels = []; fillAutoNudge(v.autoNudge, []); fillMixedMarks(v, []); fillScope(v); fillScopedRows(v); lgAcct(); });
     lastV = v; selfName = (typeof v.host === 'string' && v.host) ? v.host : selfName;
     if (ths) ths.checked = !!v.thinkingSummaries;   // per-install opt-in: this kernel's persisted answer is authoritative
     if (wcf) wcf.checked = !!v.wholeChatFrames;     // the Whole chat frames switch: the same per-install rule

@@ -27,6 +27,20 @@ const extension = {
   logLevel: "info",
 };
 
+// The loader wordmark's swirl-o as a data URI (media/romp-swirl-o.svg, read at build time), baked into the
+// webview bundles as __ROMP_SWIRL_O__ so the "o" paints in the same frame as the letters beside it rather than
+// after a /media request of its own (the user 2026-10-01). The same rule as the kernel's _svg_data_uri, which
+// carries the page-served copy: whitespace runs folded to one space, then the characters a CSS url("...")
+// string or a URI cannot hold raw percent-encoded. Each side's test pins that its URI decodes to the media file
+// (ui/webview/media-base.test.ts here, tests/test_wordmark_first_paint_served.py for the kernel's).
+function svgDataUri(file) {
+  let svg = fs.readFileSync(path.join(__dirname, "media", file), "utf8");
+  svg = svg.replace(/>\s+</g, "><").replace(/\s+/g, " ").trim();
+  for (const [ch, esc] of [["%", "%25"], ["#", "%23"], ["<", "%3C"], [">", "%3E"], ['"', "%22"]]) svg = svg.split(ch).join(esc);
+  return "data:image/svg+xml," + svg;
+}
+const SWIRL_O_DEFINE = { __ROMP_SWIRL_O__: JSON.stringify(svgDataUri("romp-swirl-o.svg")) };
+
 /** @type {import('esbuild').BuildOptions} */
 const webview = {
   // The browser UI sources live in the top-level ui/ dir (consolidated out of
@@ -92,6 +106,7 @@ const webview = {
   minifyWhitespace: production,
   minifySyntax: production,
   minifyIdentifiers: false,
+  define: SWIRL_O_DEFINE,
   logLevel: "info",
 };
 
@@ -116,6 +131,7 @@ function testBuild() {
     // the compiler stays a runtime require: the writer census (ui/webview/writer-census.ts) parses render.ts with it, and
     // bundling it would add its whole source to every test file that imports the census
     external: ["typescript"],
+    define: SWIRL_O_DEFINE,   // the tests bundle the webview modules, so they see the constant the shipped bundles carry
     format: "cjs",
     platform: "node",
     target: "node18",

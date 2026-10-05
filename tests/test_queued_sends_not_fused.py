@@ -564,7 +564,8 @@ class OneFedTextAtATime(unittest.TestCase):
         self.assertIs(self.be._text_landed(SID, "the fed text", 0, 0, FSID), True)
 
     def test_a_deferred_reconnect_waits_until_the_cli_has_taken_the_text_it_still_holds(self):
-        """An /effort change while busy defers to the turn's end. When a text was fed mid-turn, that
+        """A Restart's reconnect while busy (the cut road, request_reconnect(cut=True); a pick waits for a quiet session
+        since 2026-10-01) defers to the turn's end. When a text was fed mid-turn, that
         turn's result is NOT the moment: the CLI still holds the text and drains it into a turn right
         after, and a teardown at the result killed the CLI with the message in its queue (nothing
         re-fed it, nothing flagged it). The arm stays set; the drained turn's first frame counts that
@@ -573,7 +574,7 @@ class OneFedTextAtATime(unittest.TestCase):
         s, c1 = self.s, self._first_turn()
         self.assertTrue(self.be.send(SID, "mid-turn note"))
         self._wait(lambda: len(c1.writes) == 2, "the note forwarded")
-        s.request_reconnect()                          # an /effort change while busy: deferred to the turn's end
+        s.request_reconnect(cut=True)                  # the cut road (a Restart's arm) while busy: deferred to the turn's end
         self._wait(lambda: s._reconnect_when_idle, "the deferred reconnect armed")
         c1.phase = "after-result-1"
         self._result_frame(c1)
@@ -614,7 +615,7 @@ class OneFedTextAtATime(unittest.TestCase):
         self._result_frame(c1)
         self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "settled, untaken")
         self.assertEqual(s.pending(), [])
-        s.request_reconnect()
+        s.request_reconnect(cut=True)
         self._wait(lambda: s._reconnect_when_idle, "deferred, not fired")
         self._settle()
         self.assertEqual(len(self._Client.instances), 1, "the CLI keeps running: it still holds the note")
@@ -1112,7 +1113,7 @@ class OneFedTextAtATime(unittest.TestCase):
         the feeder, with the arm deferred, feeds C into that turn, to the same client. That turn's end holds C, so
         the arm waits again; C's own turn ends with nothing held, and the relaunch follows it with nothing left for
         the new process. Nothing is fed twice, nothing is flagged undelivered, and no signal is sent.
-        The reconnect's side of this is pinned on the road an /effort change takes, request_reconnect alone
+        The reconnect's side of this is pinned on the cut road itself, request_reconnect(cut=True) alone
         (test_a_deferred_reconnect_waits_until_the_cli_has_taken_the_text_it_still_holds above, and
         TheDeferredReconnectTakesTheHeldQueueWithIt in tests/test_sdk_stream_survives_handler_errors.py); none of
         those cuts a turn with a text held and one queued behind it, so a hold only a Restart raises, or an arm that

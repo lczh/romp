@@ -31,7 +31,7 @@ test("a scroll event within a pixel of the last programmatic write is its echo; 
   assert.equal(classifyScroll(1200, null), "gesture", "no write pending: the user did it");
   // the marker is one-shot (verifier low, T366 round two): set only by a write that MOVED the view, consumed by the first
   // event after it whatever that event was, so a gesture that lands within a pixel of an old write's target is a gesture
-  assert.match(RENDER, /const after = content\.scrollTop;\s*\n\s*if \(after !== before\) lastScrollWriteAfter = after;/, "a write that did not move owes no echo");
+  assert.match(RENDER, /const after = content\.scrollTop;\s*\n\s*if \(after !== before\) \{ lastScrollWriteAfter = after; lastScrollWriter = writer; \}/, "a write that did not move owes no echo; one that moved records its writer, which the echo names (2026-10-01)");
   assert.match(RENDER, /const cls = classifyScroll\(c\.scrollTop, lastScrollWriteAfter\);[\s\S]{0,900}?\n\s*lastScrollWriteAfter = null;/, "the first event after the write consumes the marker, echo or not");
 });
 
@@ -45,7 +45,7 @@ test("the row names the writer and carries before/after/delta/stick, gesture:fal
 
 test("render.ts: one helper writes #content.scrollTop, files the row only when the view moved, and no raw write remains", () => {
   assert.match(RENDER, /import \{ ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL \} from "\.\/scroll-write";/);
-  assert.match(RENDER, /function writeScroll\(content: HTMLElement, top: number, writer: string, stick = false, from\?: number\): void \{\s*\n\s*const before = from \?\? content\.scrollTop;\s*\n\s*content\.scrollTop = top;\s*\n\s*const after = content\.scrollTop;\s*\n\s*if \(after !== before\) lastScrollWriteAfter = after;[^\n]*\n\s*lastKnownSh = content\.scrollHeight;\s*\n\s*if \(after !== before\) scrollDiagRow\("scrollwrite", scrollWriteRow\(activeId \|\| "", writer, before, after, stick, content\.scrollHeight, content\.clientHeight\)\);/);
+  assert.match(RENDER, /function writeScroll\(content: HTMLElement, top: number, writer: string, stick = false, from\?: number\): void \{\s*\n\s*const before = from \?\? content\.scrollTop;\s*\n\s*content\.scrollTop = top;\s*\n\s*const after = content\.scrollTop;\s*\n\s*if \(after !== before\) \{ lastScrollWriteAfter = after; lastScrollWriter = writer; \}[^\n]*\n\s*lastKnownSh = content\.scrollHeight;\s*\n\s*if \(after !== before\) scrollDiagRow\("scrollwrite", scrollWriteRow\(activeId \|\| "", writer, before, after, stick, content\.scrollHeight, content\.clientHeight\)\);/);
   // the breadcrumb rides the existing clientDiag path, capped, with one capped row at the cap
   assert.match(RENDER, /\{ type: "clientDiag", surface: "chat", what: kind \+ "-capped", data: \{ sid: activeId \|\| "", perMinute: scrollDiagCap \} \}/);   // the cap the page runs with (T262j: configurable)
   assert.match(RENDER, /\{ type: "clientDiag", surface: "chat", what: kind, data \}/);

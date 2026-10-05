@@ -16,6 +16,8 @@ freeze the client found, the busy fold-in reached through the kernel's own wrapp
 (the unit tests drive the seam in-process and pin the kernel's call site only by its text). Some cycles between the
 pushes still read idle and can fold a load in on the idle path, so `freezes` can grow without the busy path, even
 with the client attached; `busyRuns` is the assertion that says the busy path ran.
+A third case reads the full-collection trigger main() raises with the freeze on (2026-10-03): the booted kernel's
+/perf shows it in the collector's own thresholds and in gc.freeze.gen2Threshold.
 The freeze is set ON in the kernel's own env here; the suite floors it OFF everywhere else. Synthetic only:
 invented text, placeholder uuids, TESTHOST.
 """
@@ -101,6 +103,15 @@ class ServedGcFreeze(unittest.TestCase):
         # and a zero quiescent-drop so a re-fold pops the old record-cache entry at once (a pop is acyclic and never reclaims)
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST",
                               ROMP_GC_FREEZE="on", ROMP_GC_FREEZE_LOAD_TREES="2", ROMP_RECORD_CACHE_DROP_QUIESCENT_S="0")
+        # the interpreter the kernel's shebang resolves under this env, asked directly, the way the product asks: not a
+        # free-threaded build, and a third threshold set reads back as set. Where both hold the kernel raises the trigger,
+        # so the pin below is exact for that interpreter
+        probe = subprocess.run(["/usr/bin/env", "python3", "-c",
+                                "import gc, sysconfig; t = gc.get_threshold(); gc.set_threshold(t[0], t[1], t[2] + 1); "
+                                "print(int(not sysconfig.get_config_var('Py_GIL_DISABLED') "
+                                "and gc.get_threshold()[2] == t[2] + 1))"],
+                               env=env, capture_output=True, text=True, timeout=30)
+        cls.keeps_threshold2 = probe.stdout.strip() == "1"
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(cls.klog, "w"),
                                       stderr=subprocess.STDOUT, env=env)
@@ -137,6 +148,20 @@ class ServedGcFreeze(unittest.TestCase):
                 pass
             time.sleep(0.5)
         return self._perf()
+
+    def test_main_raised_the_full_collection_trigger_in_the_booted_kernel(self):
+        """2026-10-03: with the freeze on, main() raised CPython's full-collection trigger at boot, before the server bound
+        (the unit tests pin the call's place in main by its text and the wrapper by executing it; this is the booted kernel).
+        /perf reads it twice: the collector's own `thresholds` (asserted first, so a kernel that never raised it fails on
+        10 != 100, the behavior this changes, not on a missing name) and `freeze.gen2Threshold`. Where the collector does not
+        keep the value, or the build is free-threaded, the stock trigger stands and gen2Threshold is null."""
+        g = self._perf()["gc"]
+        if self.keeps_threshold2:
+            self.assertEqual(g["thresholds"][2], 100, "the collector itself reads the raised trigger: %r" % g["thresholds"])
+            self.assertEqual(g["freeze"]["gen2Threshold"], 100, "the controller raised the trigger at boot: %r" % g["freeze"])
+        else:
+            self.assertIsNone(g["freeze"]["gen2Threshold"], "not raised on this collector: %r" % g["freeze"])
+        self.assertEqual(g["freeze"].get("errors", 0), 0, "nothing raised: %r" % g["freeze"])
 
     def test_a_busy_pusher_with_a_client_attached_folds_loads_in(self):
         # review 2026-09-28: with no client a served cycle can read idle throughout, so only a client makes the busy path run

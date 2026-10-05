@@ -39,6 +39,7 @@ EVENT_MODEL_ALLOWED = {
     "FileAdapter", "_emit_state", "_chrono", "synthesize_orphans", "synthesize_idle", "is_interrupt_record", "_is_opener",
     "_turn_id", "segment_turns", "_finalize_turn", "_segment_id", "segments", "_seam_real_work", "split_segment",
     "_text_hash8", "_stop_reason", "_has_text", "_machine_written", "_lazy_of", "_atom_kind", "_atom_scalars", "_hydrate_one",
+    "_hydrate_fields",                                  # the memo's fields of the RAW record a hydration read (2026-10-01), never an atom
     "_prose_chars", "atom_mids", "atom_is_settle",     # scalar-first readers (T358): the lazy marker answers, the body only for a resident atom
     "hydrate", "is_lazy", "atom_tool_uses", "atom_tool_results", "atom_model", "asm_checkpoint_write", "declared_plan",
     "plan_atoms",                                       # reads blocks only of atoms with no lazy marker; a lazy one answers from tu/tr
@@ -54,6 +55,8 @@ EVENT_MODEL_ALLOWED = {
     "_atom_line", "_dump",                              # the module's own --test dump over a whole parse (never a restored tree)
     "fold_records", "_read_jsonl_entry_unlocked", "_read_jsonl_entry", "_scan_jsonl_bytes", "resume_fork_links",
     "_lineage_closure", "_load_states", "_read_jsonl", "_read_jsonl_incremental", "_tail_read", "_pinned_entry",
+    "_SeededGraph._loc",                                # reads a restored atom's lazy sentinel for its source_path slot, never a
+    #                                                     body: the comment cut reads the RAW record by offset (2026-10-01)
 }
 SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw records only: every site allowed, listed for the record
 

@@ -70,7 +70,7 @@ For scripts / agents:
 EOF
     _romp_cmd "romp url"                   -            "Print ONLY the tokened dashboard URL (for scripts; humans just run \`romp\`)"
     _romp_cmd "romp sessions [--json]"     -            "List the fleet with each session's state, colours and backend"
-    _romp_cmd "romp perf [--interval <s>|--json [--walk]|log on|off]" - "Kernel performance counters as rates over two snapshots (pusher cycles, stage times, build cache hits, parses by road, bytes sent, goal loads, judge passes, rss, cpu); --json one raw snapshot, --walk with its two heap-wide gauges filled; log on|off flips the romp-perf stderr log without a restart"
+    _romp_cmd "romp perf [--interval <s>|--json [--walk] [--paths]|log on|off]" - "Kernel performance counters as rates over two snapshots (pusher cycles, stage times, build cache hits, parses by road, bytes sent, goal loads, judge passes, rss, cpu); --json one raw snapshot, --walk with its two heap-wide gauges filled, --paths with the whole per-file read table; log on|off flips the romp-perf stderr log without a restart"
     _romp_cmd "romp perf stacks [--json]" - "One stack per kernel thread right now (GET /perf?stacks=1): the thread's kind, its stage mark and its frames innermost last, so a slow boot names the lock a thread waits on; --json the raw rows"
     _romp_cmd "romp perf client [--minutes <n>|--json]" - "Browser-side performance of the open dashboards (client-diag.jsonl, surface perf): handler ms/min by frame type with window p50/p90/p99 and max, main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames — per dashboard and pane over the last <n> minutes (default 10)"
     _romp_cmd "romp api-health"            -            "The API-health signal across your sessions (GET /api-health as JSON: per-key/family retry rates and a thrash state)"
@@ -80,15 +80,16 @@ EOF
     _romp_cmd "romp color <session> [<#hex|slot>]" -    "Recolor a session's identity swatch (palette hex or slot number; no color arg reads bg/fg)"
     _romp_cmd "romp tag [<name>] [--add ...]" -         "Session tags: bare lists them; <name> with --add/--remove/--color/--delete merges one (a tagged session leaves the no-tags view); --host <kernel> edits an attached kernel's tag; --rename renames"
     _romp_cmd "romp watch-pr <n> [--repo o/r]" -        "One mail here when the PR lands or fails — the kernel owns the watch, so it survives restarts (replaces the mortal shell loop)"
-    _romp_cmd "romp login add|list|remove <label>" -    "The stored Claude logins a session can be billed to beside the machine's own: add records a COMMAND that prints the login's setup-token on demand (--cmd '<shell line>'; how the token is kept is the user's); list and remove print labels only, never a token"
+    _romp_cmd "romp login add|list|remove|link|unlink <label>" - "The stored Claude logins a session can be billed to beside the machine's own: add records a COMMAND that prints the login's setup-token on demand (--cmd '<shell line>'; how the token is kept is the user's); list and remove print labels only, never a token; link --same-as <host> records that a login is the same Claude account as that machine's sign-in (copied from its kernel; --on <host> when the login is on another connected kernel; unlink takes it back)"
     _romp_cmd "romp watch --cmd '<pred>' [...]" -       "One mail when the command exits 0 (or the timeout passes) — kernel-owned like watch-pr, for ANY background wait (--every Ns --timeout Ns --note '...' | --list | --cancel <id>)"
     _romp_cmd "romp board define|list|show|remove <id>" - "The card boards a producer or you can make (plans/card-boards.md): define <id> --from <file> | --json <text> writes a board's definition (categories, sort, bell, badge); list and show read them; remove takes one away once no card stands on it"
     _romp_cmd "romp pane define|list|show|remove <id>" - "The dashboard panes as data (plans/panes-as-data.md): define <id> --from <file>|--json <text> (id, title, source, on, experimental, protocol), list, show, remove; a shipped pane's id is refused."
-    _romp_cmd "romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [-b <board>] [-c <category>]" - "Post a NOTICE CARD to the feed (no judge): with no session (none named outside one, or --no-session inside one) it shows at the TOP under Notes; -k names the card (a second post under it revises it; absent, a key is minted and printed); romp card \"title\" \"text\" is the shorthand; --body-file, --attach <path>, --needs-you, --expires <s>, --producer; the card moves only on your dismissal, a new revision or its expiry; a home shows at most fifty live cards, the oldest superseded past that"
+    _romp_cmd "romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [-b <board>] [-c <category>]" - "Post a NOTICE CARD to the feed (no judge): with no session (none named outside one, or --no-session inside one) it shows at the TOP under Notes; -k names the card (a second post under it revises it; absent, a key is minted and printed); romp card \"title\" \"text\" is the shorthand; --body-file, --attach <path>, --needs-you, --expires <s>, --producer; the card moves only on your dismissal, a new revision or its expiry; a home shows at most fifty live cards besides the cards of messages held for your approval (a --producer postal card with no session counts as one), the oldest superseded past that"
     _romp_cmd "romp mail ..."              romp-postal-service  "Romp Postal Service: send <to> <text> | inbox | agents | remote"
     _romp_cmd "romp send <session> [--tag <label>] <text>" - "Hand a session a message; scripts/cron SHOULD pass --tag so it renders machine-sent, not as your typed words"
     _romp_cmd "romp compact <session> [--wait]" -       "Compact a session's context in place (Claude's /compact; on a Codex session, Codex's own compaction, no summary text), queued safely if a turn is open; --wait blocks until it finishes (--timeout <s>, default 600) and exits 1 with the end's words when a Codex compaction ended loudly instead (the wait reads the compaction's end record on the session row: an end new since the read before the request; for a queued compaction, new since the first sample after the request that reads not compacting); a failed Claude /compact leaves no notice on the row, so it reads as a clean end, never as a failure"
     _romp_cmd "romp interrupt <session>"   -            "Interrupt a session's current turn"
+    _romp_cmd "romp apply <session>"       -            "Apply now: a billing, effort, fast, bypass or env change waiting for the session to go quiet relaunches its CLI at once, ending the work it waited on (the session is told which background tasks ended); with nothing waiting it changes nothing and exits 0"
     _romp_cmd "romp end <session>"         -            "End a session"
     _romp_cmd "romp checkin <host>"        -            "Publish this machine to an attached hub (romp checkout withdraws)"
     _romp_cmd "romp engine claude|codex"   -            "One switch: which vendor runs the judges + what new sessions default to"
@@ -328,7 +329,7 @@ for r in rows:
     exit 0
 fi
 
-# `romp perf [--interval <s>] [--json [--walk]]` / `romp perf log on|off` — the kernel's performance counters
+# `romp perf [--interval <s>] [--json [--walk] [--paths]]` / `romp perf log on|off` — the kernel's performance counters
 # (GET /perf), read as RATES from two snapshots taken <s> seconds apart (default 10): pusher cycles and
 # wakes per second, cycle time percentiles, the share of cycle time per stage, CPU split between the
 # pusher thread, the judge threads and the rest of the process, build cache hits vs rebuilds, the
@@ -336,7 +337,9 @@ fi
 # goal-store loads per second, judge passes, rss. It exists so an optimization can
 # be checked against the LIVE kernel after each restart without attaching a profiler. --json prints one
 # raw snapshot (the shape is documented on the kernel's _PerfStats); --json --walk reads GET /perf?walk=1,
-# the snapshot with the two whole-heap gauges filled (2026-09-29). `log on|off` flips the romp-perf
+# the snapshot with the two whole-heap gauges filled (2026-09-29) and the whole per-file read table, which
+# the plain snapshot cuts to its 50 largest rows (2026-10-01); --json --paths reads GET /perf?paths=all, the
+# whole table without the heap walks (a sampler that diffs it pays only its copy). `log on|off` flips the romp-perf
 # stderr log (POST /perf): before this the log needed ROMP_PERF in the kernel's environment at start,
 # so turning it on meant a restart. Same contract as `sessions`: the token on stdin, a dead kernel
 # fails loudly, an unknown flag is refused. Two snapshots from different kernel processes (a restart
@@ -344,7 +347,7 @@ fi
 if [[ "${1:-}" == "perf" ]]; then
     shift
     _kport="${ROMP_KERNEL_PORT:-29855}"
-    _usage="usage: romp perf [--interval <s>] [--json [--walk]] | romp perf log on|off | romp perf stacks [--json] | romp perf client [--minutes <n>] [--json]"
+    _usage="usage: romp perf [--interval <s>] [--json [--walk] [--paths]] | romp perf log on|off | romp perf stacks [--json] | romp perf client [--minutes <n>] [--json]"
     # One kernel round trip: the body on stdout and 0 when the kernel answered 2xx. curl's -f folds a
     # refused token (403) into the same exit as a dead kernel, and on a diagnostic verb that sends the
     # user off to restart a kernel that is up and answering — so the status rides -w and is read here.
@@ -361,8 +364,9 @@ if [[ "${1:-}" == "perf" ]]; then
     }
     if [[ "${1:-}" == "stacks" ]]; then
         # `romp perf stacks [--json]`: one GET /perf?stacks=1, the kernel's threads as they stand at the read (T401): a
-        # thread's kind, its stage mark (the pusher's tick job or push, a handler's connect push) and its frames innermost
-        # last; the read a slow boot needs to NAME the lock a thread waits on where py-spy is not available.
+        # thread's kind, its stage mark (the jobs thread's job, the pusher's own job or push, a handler's connect push)
+        # and its frames innermost last; the read a slow boot needs to NAME the lock a thread waits on where py-spy is
+        # not available.
         shift
         _json=0
         while [[ $# -gt 0 ]]; do
@@ -700,11 +704,12 @@ for p in panes:
 PY
         exit $?
     fi
-    _json=false; _walk=false; _ival=10
+    _json=false; _walk=false; _paths=false; _ival=10
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) _json=true; shift ;;
             --walk) _walk=true; shift ;;
+            --paths) _paths=true; shift ;;
             --interval)
                 if [[ ! "${2:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then echo "$_usage" >&2; exit 2; fi
                 _ival="$2"; shift 2 ;;
@@ -715,9 +720,9 @@ PY
             *) echo "$_usage" >&2; exit 2 ;;
         esac
     done
-    # the rates never read the two walked gauges, so --walk is the raw snapshot's alone
-    if $_walk && ! $_json; then echo "$_usage" >&2; exit 2; fi
-    _q=""; if $_walk; then _q="?walk=1"; fi
+    # the rates never read the two walked gauges or the per-file table, so --walk and --paths are the raw snapshot's alone
+    if { $_walk || $_paths; } && ! $_json; then echo "$_usage" >&2; exit 2; fi
+    _q=""; if $_walk; then _q="?walk=1"; elif $_paths; then _q="?paths=all"; fi   # ?walk=1 carries the whole table too
     _a="$(_perf_curl "http://127.0.0.1:$_kport/perf$_q")" || exit 1
     if $_json; then
         printf '%s\n' "$_a"
@@ -1411,10 +1416,15 @@ fi
 # setup-token on demand (romp only ever runs it, at a session's or a judge's launch, into that one process's environment);
 # how the user keeps the token (a secret manager, a private file) is theirs, romp assumes nothing about it (the user
 # 2026-09-13: no store's shorthand inside romp). No token is ever read, printed or logged here; the kernel answers from its registry (GET /logins,
-# POST /logins {"add"} | {"remove"}).
+# POST /logins {"add"} | {"remove"} | {"link"} | {"unlink"}). `link <label|id> --same-as <host>` records the user's statement
+# that a stored login is the same Claude account as <host>'s sign-in (this machine's name or `local`, or a connected kernel's
+# host), so the spend breakdown counts the two as one account (the user 2026-10-01): the kernel copies that sign-in's
+# identity from <host>'s own kernel and refuses when it has none or cannot be reached; `unlink` takes it back. `--on <host>`
+# names the connected kernel that holds the stored login when it is not this machine's: attachments often run one way, so
+# the kernel that reaches both reads the sign-in and asks that one to record it.
 if [[ "${1:-}" == "login" ]]; then
     shift
-    _lg_usage="usage: romp login add <label> --cmd '<shell line that prints the token>' | romp login list | romp login remove <label|id>"
+    _lg_usage="usage: romp login add <label> --cmd '<shell line that prints the token>' | romp login list | romp login remove <label|id> | romp login link <label|id> --same-as <host> [--on <host>] | romp login unlink <label|id> [--on <host>]"
     _lg_sub="${1:-}"; [[ $# -gt 0 ]] && shift
     _tok="$(_romp_token)"
     _kport="${ROMP_KERNEL_PORT:-29855}"
@@ -1435,6 +1445,9 @@ if not rows:
 print("stored logins:")
 for r in rows:
     note = r.get("why") or ("token expires soon" if r.get("expiresSoon") else "")
+    ln = r.get("linked") if isinstance(r.get("linked"), dict) else None
+    if ln:   # a link is the user statement, said as theirs
+        note = "; ".join(x for x in (note, "linked by you to %s'"'"'s sign-in" % ln.get("host")) if x)
     added = r.get("addedAt")
     when = time.strftime("%Y-%m-%d", time.localtime(added)) if isinstance(added, (int, float)) else "?"
     print("  %s  (id %s, added %s%s)" % (r.get("display") or r.get("label") or r.get("id"), r.get("id"), when,
@@ -1479,6 +1492,76 @@ print(json.dumps(b))' "$_lg_label" "$_lg_cmd")"
                 || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
             if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
                 echo "romp login: removed $1"
+                exit 0
+            fi
+            _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+            echo "romp login: refused: $_err" >&2
+            exit 1 ;;
+        link)
+            _lg_ref=""; _lg_host=""; _lg_on=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --same-as) shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
+                               _lg_host="$1"; shift ;;
+                    --on)      shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
+                               _lg_on="$1"; shift ;;
+                    -*)        echo "$_lg_usage" >&2; exit 2 ;;
+                    *)         [[ -n "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+                               _lg_ref="$1"; shift ;;
+                esac
+            done
+            [[ -z "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+            if [[ -z "$_lg_host" ]]; then
+                echo "romp login: --same-as <host> is required: this machine's name (or local), or a connected kernel's host" >&2
+                exit 2
+            fi
+            if [[ -z "$_tok" ]]; then echo "romp login: the kernel isn't running (no serve token). Start romp first." >&2; exit 1; fi
+            _payload="$(python3 -c 'import json, sys
+b = {"link": {"login": sys.argv[1], "sameAs": sys.argv[2]}}
+if sys.argv[3]:
+    b["on"] = sys.argv[3]
+print(json.dumps(b))' "$_lg_ref" "$_lg_host" "$_lg_on")"
+            # the kernel asks <host>'s kernel for its sign-in, and with --on the login's kernel to record it (bounded calls
+            # of its own), so this waits a little longer
+            _resp="$(_romp_token_cfg | curl -sf -m 25 --config - -X POST "http://127.0.0.1:$_kport/logins" \
+                          -H 'Content-Type: application/json' -d "$_payload")" \
+                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+                python3 -c 'import json, sys
+d = json.loads(sys.argv[1])
+host = (d.get("linked") or {}).get("host") or sys.argv[2]
+acct = d.get("account") or ""
+on = (" on " + d["on"]) if d.get("on") else ""
+print("romp login: linked %r%s to %s'"'"'s sign-in%s; the spend breakdown now counts it as that account (your statement: romp cannot verify a token'"'"'s account)"
+      % (d.get("label") or sys.argv[3], on, host, (" (" + acct + ")") if acct else ""))' "$_resp" "$_lg_host" "$_lg_ref"
+                exit 0
+            fi
+            _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
+            echo "romp login: refused: $_err" >&2
+            exit 1 ;;
+        unlink)
+            _lg_ref=""; _lg_on=""
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --on) shift; [[ $# -eq 0 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
+                          _lg_on="$1"; shift ;;
+                    -*)   echo "$_lg_usage" >&2; exit 2 ;;
+                    *)    [[ -n "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+                          _lg_ref="$1"; shift ;;
+                esac
+            done
+            [[ -z "$_lg_ref" ]] && { echo "$_lg_usage" >&2; exit 2; }
+            if [[ -z "$_tok" ]]; then echo "romp login: the kernel isn't running (no serve token). Start romp first." >&2; exit 1; fi
+            _payload="$(python3 -c 'import json, sys
+b = {"unlink": sys.argv[1]}
+if sys.argv[2]:
+    b["on"] = sys.argv[2]
+print(json.dumps(b))' "$_lg_ref" "$_lg_on")"
+            _resp="$(_romp_token_cfg | curl -sf -m 20 --config - -X POST "http://127.0.0.1:$_kport/logins" \
+                          -H 'Content-Type: application/json' -d "$_payload")" \
+                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
+                echo "romp login: unlinked $_lg_ref${_lg_on:+ on $_lg_on}; it reads as its own record again"
                 exit 0
             fi
             _err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
@@ -2220,6 +2303,52 @@ print(n if isinstance(n, int) and n > 0 else "")' "$_resp" 2>/dev/null || true)"
     _r_err="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("error") or sys.argv[1])' "$_resp" 2>/dev/null || printf '%s' "$_resp")"
     echo "romp $_verb: refused — $_r_err" >&2
     exit 1
+fi
+
+# `romp apply <session>` — Apply now, headless (2026-10-01). A billing, effort, fast, bypass-mode or per-session env
+# change relaunches the session's CLI, and since that day the relaunch waits until nothing would be cut; a session whose
+# monitors never let it go quiet kept its change waiting for hours. This pushes it through at once (the kernel's /apply,
+# the dashboard's Apply now): the CLI relaunches, the work the change waited on ends, and the session is told which
+# background tasks ended. A session with nothing waiting is left alone, and that is exit 0, so a script can run this over
+# every session. Exit codes as `romp send`'s: 1 for a refusal or a kernel nobody answers on, 3 for a kernel that took
+# the request and answered late (it may already have relaunched the session).
+if [[ "${1:-}" == "apply" ]]; then
+    shift
+    _who="${1:-}"
+    if [[ -z "$_who" || $# -gt 1 ]]; then echo "usage: romp apply <session>" >&2; exit 2; fi
+    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _payload="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$_who")"
+    _cap="${ROMP_KERNEL_HTTP_TIMEOUT_S:-10}"
+    _crc=0
+    _resp="$(_romp_token_cfg | curl -sf -m "$_cap" --config - -X POST "http://127.0.0.1:$_kport/apply" \
+                  -H 'Content-Type: application/json' -d "$_payload")" || _crc=$?   # `|| ...`: survives set -e
+    if [[ $_crc -ne 0 ]]; then
+        case $_crc in
+            28) echo "romp apply: the kernel on :$_kport took the request but did not answer within ${_cap}s" \
+                     "(mid-restart or under load) — it may already have relaunched $_who; do not retry blindly" >&2; exit 3 ;;
+            22) echo "romp apply: the kernel refused the request (HTTP error) — nothing was applied" >&2; exit 1 ;;
+            *)  echo "romp apply: kernel not reachable on :$_kport (is romp running?) [curl exit $_crc]" >&2; exit 1 ;;
+        esac
+    fi
+    _a_out="$(python3 -c 'import json,sys
+try:
+    r = json.loads(sys.argv[1])
+except Exception:
+    r = None
+if not isinstance(r, dict):
+    print("refused\t" + sys.argv[1])
+elif r.get("ok") and r.get("applied") is False:
+    print("nothing\t" + str(r.get("why") or "nothing is waiting to apply on this session"))
+elif r.get("ok"):
+    print("applied\t")
+else:
+    print("refused\t" + str(r.get("error") or sys.argv[1]))' "$_resp" 2>/dev/null || printf 'refused\t%s' "$_resp")"
+    _a_kind="${_a_out%%$'\t'*}"; _a_text="${_a_out#*$'\t'}"
+    case "$_a_kind" in
+        applied) echo "romp apply: applying now ($_who) — its CLI relaunches, and it is told which background tasks ended"; exit 0 ;;
+        nothing) echo "romp apply: nothing to apply ($_who) — $_a_text"; exit 0 ;;
+        *)       echo "romp apply: refused — $_a_text" >&2; exit 1 ;;
+    esac
 fi
 
 # `romp default-dir [PATH]` — the default working directory for NEW sessions (what the picker prefills).

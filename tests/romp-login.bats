@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# `romp login add | list | remove` (T346; docs/reference.md "Several Claude logins"): the CLI door to the stored
+# `romp login add | list | remove | link | unlink` (T346; docs/reference.md "Several Claude logins"): the CLI door to the stored
 # Claude logins. Run against a mock curl (the kernel's /logins answers), recording its calls: `add` hands the kernel
 # a label and the COMMAND that prints the token, never a token and no store's shorthand (the user 2026-09-13); `list`
 # prints labels only.
@@ -26,6 +26,16 @@ url=""; body=""; prev=""
 for a in "$@"; do [[ "$a" == http* ]] && url="$a"; [[ "$prev" == "-d" ]] && body="$a"; prev="$a"; done
 if [[ "$url" == */logins && -n "$body" ]]; then
   echo "body $body" >> "$MOCK_LOG"
+  if [[ "$body" == *'"link"'* ]]; then
+    if [[ "$body" == *'"NOHOST"'* ]]; then echo '{"ok": false, "error": "no connected kernel is named '"'"'NOHOST'"'"' (this machine is TESTHOST; connected: PEERHOST)"}'
+    elif [[ "$body" == *'"on": "PEERHOST"'* ]]; then echo '{"ok": true, "id": "0123456789ab", "label": "Work", "linked": {"host": "TESTHOST", "at": 1700000000}, "account": "dev@example.com · Example Org · enterprise", "on": "PEERHOST"}'
+    else echo '{"ok": true, "id": "0123456789ab", "label": "Work", "linked": {"host": "PEERHOST", "at": 1700000000}, "account": "dev@example.com · Example Org · enterprise"}'; fi
+    exit 0
+  fi
+  if [[ "$body" == *'"unlink"'* ]]; then
+    if [[ "$body" == *'"Old"'* ]]; then echo '{"ok": false, "error": "the Old login is not linked to any sign-in"}'; else echo '{"ok": true, "id": "0123456789ab", "label": "Work", "unlinked": true}'; fi
+    exit 0
+  fi
   if [[ "$body" == *'"remove"'* ]]; then
     if [[ "$body" == *'"Nope"'* ]]; then echo '{"ok": false, "error": "no stored login named '"'"'Nope'"'"'"}'; else echo '{"ok": true, "removed": "0123456789ab", "label": "Work"}'; fi
   else
@@ -34,7 +44,7 @@ if [[ "$url" == */logins && -n "$body" ]]; then
   exit 0
 fi
 if [[ "$url" == */logins ]]; then
-  echo '{"ok": true, "machine": {"label": "user@example.com · personal"}, "logins": [{"id": "0123456789ab", "label": "Work", "display": "Work · Acme · enterprise", "addedAt": 1700000000, "hasCmd": true, "why": "", "expiresSoon": false}, {"id": "abcdefabcdef", "label": "Old", "display": "Old", "addedAt": 1600000000, "hasCmd": true, "why": "the Old login was refused: expired", "expiresSoon": false}]}'
+  echo '{"ok": true, "machine": {"label": "user@example.com · personal"}, "logins": [{"id": "0123456789ab", "label": "Work", "display": "Work · Acme · enterprise", "addedAt": 1700000000, "hasCmd": true, "why": "", "expiresSoon": false, "linked": {"host": "PEERHOST", "at": 1700000000}}, {"id": "abcdefabcdef", "label": "Old", "display": "Old", "addedAt": 1600000000, "hasCmd": true, "why": "the Old login was refused: expired", "expiresSoon": false}]}'
   exit 0
 fi
 echo '{"ok": true}'
@@ -47,14 +57,14 @@ teardown() { rm -rf "$TEST_DIR"; }
 
 @test "romp help lists the verb" {
     run "$ROMP_SCRIPT" help
-    [[ "$output" == *"romp login add|list|remove <label>"* ]]
+    [[ "$output" == *"romp login add|list|remove|link|unlink <label>"* ]]
 }
 
 @test "login list prints the machine login and the stored labels with their state, never a command" {
     run "$ROMP_SCRIPT" login list
     [ "$status" -eq 0 ]
     [[ "$output" == *"machine login: user@example.com · personal"* ]]
-    [[ "$output" == *"Work · Acme · enterprise  (id 0123456789ab, added 2023-11-1"* ]]
+    [[ "$output" == *"Work · Acme · enterprise  (id 0123456789ab, added 2023-11-1"*"; linked by you to PEERHOST's sign-in)"* ]]
     [[ "$output" == *"Old  (id abcdefabcdef"*"the Old login was refused: expired)"* ]]
     [[ "$output" != *"op read"* ]]
     grep -q 'curl .*/logins' "$MOCK_LOG"
@@ -93,11 +103,64 @@ teardown() { rm -rf "$TEST_DIR"; }
     [ "$status" -eq 2 ]
 }
 
+@test "login link --same-as asks the kernel to copy that machine's sign-in and says the link is the user's" {
+    run "$ROMP_SCRIPT" login link Work --same-as PEERHOST
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp login: linked 'Work' to PEERHOST's sign-in (dev@example.com · Example Org · enterprise)"* ]]
+    [[ "$output" == *"your statement"* ]]
+    grep -q '"link": {"login": "Work", "sameAs": "PEERHOST"}' "$MOCK_LOG"
+}
+
+@test "login link relays the kernel's refusal; a missing --same-as or login is a usage error" {
+    run "$ROMP_SCRIPT" login link Work --same-as NOHOST
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: refused: no connected kernel is named 'NOHOST'"* ]]
+    run "$ROMP_SCRIPT" login link Work
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--same-as <host> is required"* ]]
+    run "$ROMP_SCRIPT" login link --same-as PEERHOST
+    [ "$status" -eq 2 ]
+    run "$ROMP_SCRIPT" login link Work --same-as
+    [ "$status" -eq 2 ]
+}
+
+@test "login link --on asks this kernel to record the link on the connected kernel that holds the login" {
+    run "$ROMP_SCRIPT" login link Work --on PEERHOST --same-as local
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp login: linked 'Work' on PEERHOST to TESTHOST's sign-in"* ]]
+    grep -q '"link": {"login": "Work", "sameAs": "local"}, "on": "PEERHOST"' "$MOCK_LOG"
+    run "$ROMP_SCRIPT" login unlink Work --on PEERHOST
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp login: unlinked Work on PEERHOST"* ]]
+    grep -q '"unlink": "Work", "on": "PEERHOST"' "$MOCK_LOG"
+    run "$ROMP_SCRIPT" login link Work --same-as local --on
+    [ "$status" -eq 2 ]
+    run "$ROMP_SCRIPT" login unlink Work Other
+    [ "$status" -eq 2 ]
+}
+
+@test "login unlink takes the link back and relays a refusal" {
+    run "$ROMP_SCRIPT" login unlink Work
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp login: unlinked Work"* ]]
+    grep -q '"unlink": "Work"' "$MOCK_LOG"
+    run "$ROMP_SCRIPT" login unlink Old
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: refused: the Old login is not linked to any sign-in"* ]]
+    run "$ROMP_SCRIPT" login unlink
+    [ "$status" -eq 2 ]
+}
+
 @test "without a serve token every subcommand says the kernel is not running" {
     unset ROMP_SERVE_TOKEN
     run "$ROMP_SCRIPT" login list
     [ "$status" -eq 1 ]
     [[ "$output" == *"no serve token"* ]]
     run "$ROMP_SCRIPT" login add Work --cmd 'cat x'
+    [ "$status" -eq 1 ]
+    run "$ROMP_SCRIPT" login link Work --same-as PEERHOST
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no serve token"* ]]
+    run "$ROMP_SCRIPT" login unlink Work
     [ "$status" -eq 1 ]
 }

@@ -42,15 +42,15 @@ test("the slot comes from the VIRTUAL layout — boundaries that cannot move und
   // section headers + the untagged separator (tab groups, 2026-09-04) take width in the real
   // layout, so they join the virtual one as boxes — otherwise the simulated wrap drifts from the
   // strip's on every sectioned row
-  assert.match(body, /const others = Array\.from\(tabs\.querySelectorAll<HTMLElement>\("\.tab\[data-id\], \.tab-group-head, \.tab-group-sep"\)\)\.filter\(\(t\) => t !== dragged\);/,
-    "the dragged tab never participates in its own hit geometry");
+  assert.match(body, /const others = Array\.from\(tabs\.querySelectorAll<HTMLElement>\("\.tab\[data-id\], \.tab-group-head, \.tab-group-sep, \.tab-group-gutter"\)\)\.filter\(\(t\) => t !== dragged\);/,
+    "the dragged tab never participates in its own hit geometry; the gutter between two groups sharing a row is a box of its own (2026-10-01)");
   // the boxes are measured by getBoundingClientRect, which excludes margins — so no strip member
   // may carry a horizontal margin, or the virtual row holds more than the real one and the slot
   // hops in a band at every wrap boundary (the separator's 6px gutters were margin: a 12px drift)
   // the row openers are the breaks and the header a break precedes; the trail's first tab, which follows its break, is
   // not one (the break already opened its row — two openers on one row is what the themed-gap bug rode, 2026-09-11)
   assert.match(body, /\?\? t\.getBoundingClientRect\(\)\.width,\s*\n\s*br: isBreak\(t\) \|\| \(t\.classList\.contains\("tab-group-head"\) && isBreak\(before\(t\)\)\) \}\)\);/);
-  // T264 (under the one-group-per-row setting, on by default): the untagged trail's boundary is a zero-height
+  // T264 (under the keep-groups-together setting, on by default): the untagged trail's boundary is a zero-height
   // ROW BREAK, not a box in the real layout, so it joins the virtual one as a zero-width row opener (w: 0, br),
   // and a header after a break opens a row too; the simulation then wraps exactly where the strip does
   const brk = CSS.match(/^\.tab-group-break \{[^}]*\}/m)![0];
@@ -100,11 +100,12 @@ test("drop commits through the SAME reorderTo — neighbor + side, hidden-view i
     "the neighbours inside the dragged copy's own group first (T264b)");
   assert.match(body, /const prev = prevIn \?\? \(nextIn \? null : walk\(dragged\.previousElementSibling, back, false\)\);/,
     "…falling back across groups only when the group holds no other tab");
-  // …and since 2026-09-23 the drop also WRITES THE TAG its zone names (the user: dragging a tab onto a
-  // group should put the session IN it, and the ungrouped row should take the tag back off). The decision
-  // is drag-join.ts's, read off the same zone the cue painted; the write is the tab menu's Tags flyout's
-  // own (postTagEdit, or the editTag wire), so ONE writer owns tags — the handler inlines none of it.
-  assert.match(body, /const d = tabDropFor\(dragged, draggedId, viewTagUnion\(effViews\(\)\)\)\.drop;/);
+  // …and since 2026-09-23 the drop also WRITES THE TAGS its zone names (the user: dragging a tab onto a
+  // group should put the session IN it, and the ungrouped row should take the tags back off; since
+  // 2026-09-30 a drop into a group MOVES it there, and Option / Alt at the release adds instead). The
+  // decision is drag-join.ts's, read off the same zone the cue painted with the drop's own altKey; the
+  // write is postTabDropTag's (postTagEdit, or the editTag wire) — the handler inlines none of it.
+  assert.match(body, /const d = tabDropFor\(dragged, draggedId, viewTagUnion\(effViews\(\)\), e\.altKey\)\.drop;/);
   assert.match(body, /if \(postTabDropTag\(d, draggedId\)\) tabDragCommitted = true;/);
   assert.doesNotMatch(body, /editUnion|moveUnion|editTag|postTagEdit/, "no tag writer inlined in the handler");
   // …and reorderTo still persists exactly as before

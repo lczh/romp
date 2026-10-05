@@ -15,12 +15,15 @@ import type { SessionTag, SessionViews } from "./session-views";
  *  follow-up addressed by name could land on whichever OTHER tag already had it. The message nests
  *  this under `edit`, so no top-level `name` can read as a session address to the federation router. */
 export interface TagEditOp {
-  op: "create" | "rename" | "recolor" | "addMember" | "removeMember" | "delete" | "move";
-  /** the tag's stored id — every op but create and move */
+  op: "create" | "rename" | "recolor" | "addMember" | "removeMember" | "delete" | "move" | "setTags";
+  /** the tag's stored id — every op but create, move and setTags */
   tid?: string;
   /** move only: off `tid_from`, onto `tid_to`, as ONE write on the kernel — both halves or neither */
   tid_from?: string;
   tid_to?: string;
+  /** setTags only (the kernel's `tagSet` cap): the sessions' local tags set to EXACTLY these, off every
+   *  other, as ONE write on the kernel — all of it or none of it; empty clears them all */
+  tids?: string[];
   /** create only: the typed name, or none for the kernel's default ("tag N", minted unique there) */
   name?: string;
   newName?: string;
@@ -229,6 +232,45 @@ export function createInFlight(inflight: readonly InflightWrite[]): boolean {
   return inflight.some((w) => !!w.edit && w.edit.op === "create");
 }
 
+/** A NAME list after the tag `from` is renamed to `to`, or deleted (`to` null): the union display order
+ *  (tagOrder) and each lens's tags (the tag menu's Rename… and Delete tag…, the user 2026-10-01). A rename
+ *  takes the old name's slot, so the group stays where it was dragged; `held` (another tag still bears
+ *  `from`: the same-named tag on another kernel, the union's other half) keeps `from` where it is and puts
+ *  `to` right behind it. A list without `from` comes back as it was. The kernel's twin: _carry_tag_order. */
+export function carryTagOrder(order: readonly string[] | null | undefined, from: string, to: string | null, held: boolean): string[] {
+  const out = (order || []).slice();
+  if (!out.includes(from) || to === from) return out;
+  if (to !== null && !out.includes(to)) out.splice(out.indexOf(from) + 1, 0, to);
+  if (!held) out.splice(out.indexOf(from), 1);
+  return out;
+}
+
+/** The same carry through every name-keyed field of a blob copy, in place: `tagOrder` and each surface's
+ *  lens under `actives` (a filter left empty by a delete reads as All). The kernel's twin: _carry_tag_names.
+ *  Returns whether anything changed. */
+export function carryTagNames(nv: SessionViews, from: string, to: string | null, held: boolean): boolean {
+  let changed = false;
+  if (Array.isArray(nv.tagOrder) && nv.tagOrder.includes(from)) {
+    const o = carryTagOrder(nv.tagOrder, from, to, held);
+    if (JSON.stringify(o) !== JSON.stringify(nv.tagOrder)) { changed = true; if (o.length) nv.tagOrder = o; else delete nv.tagOrder; }
+  }
+  for (const lens of Object.values(nv.actives || {})) {
+    if (!lens || !Array.isArray(lens.tags) || !lens.tags.includes(from)) continue;
+    const names = carryTagOrder(lens.tags, from, to, held);
+    if (JSON.stringify(names) === JSON.stringify(lens.tags)) continue;
+    changed = true;
+    if (names.length) lens.tags = names;
+    else { delete lens.tags; if (!lens.none) { for (const k of Object.keys(lens)) delete (lens as Record<string, unknown>)[k]; lens.all = true; } }
+  }
+  return changed;
+}
+
+/** Does a tag other than `selfId` still bear `name` in this copy: one of its other local tags, or a remote
+ *  host's (remoteTags)? What a rename's or delete's `held` reads. */
+function heldElsewhere(nv: SessionViews, tags: readonly SessionTag[], name: string, selfId: string | undefined): boolean {
+  return tags.some((t) => t.id !== selfId && (t.name || "tag") === name) || (nv.remoteTags || []).some((t) => (t.name || "tag") === name);
+}
+
 /** One targeted op applied to a client blob's LOCAL tags, the way the gesture applied it
  *  optimistically — a copy, never the input. Unknown tids are no-ops (the kernel will refuse them);
  *  a create's row wears `newId` (the placeholder its ack replaces) so a re-derived copy shows the
@@ -243,12 +285,23 @@ export function applyTagEdit(v: SessionViews, edit: TagEditOp, newId?: string): 
     case "create":
       tags.push({ id: newId || "pending-" + Date.now().toString(36), name: edit.name || "", color: edit.color || "", members: sids.slice() });
       break;
-    case "rename": { const t = byId(edit.tid); if (t && edit.newName) t.name = edit.newName; break; }
+    case "rename": {
+      const t = byId(edit.tid);
+      if (t && edit.newName) {
+        const was = t.name || "tag";
+        t.name = edit.newName;
+        // the kernel carries the order and the lenses in the same write (its tagNameCarry); the copy shows it at once
+        carryTagNames(nv, was, edit.newName, heldElsewhere(nv, tags, was, t.id));
+      }
+      break;
+    }
     case "recolor": { const t = byId(edit.tid); if (t && edit.color) t.color = edit.color; break; }
     case "delete": {
       const i = tags.findIndex((t) => t.id === edit.tid);
+      const gone = i >= 0 ? (tags[i].name || "tag") : null;
       if (i >= 0) tags.splice(i, 1);
       if (nv.active === edit.tid) nv.active = "all";
+      if (gone !== null) carryTagNames(nv, gone, null, heldElsewhere(nv, tags, gone, edit.tid));
       break;
     }
     case "addMember": { const t = byId(edit.tid); if (t) t.members = Array.from(new Set((t.members || []).concat(sids))); break; }
@@ -257,6 +310,12 @@ export function applyTagEdit(v: SessionViews, edit: TagEditOp, newId?: string): 
       const from = byId(edit.tid_from), to = byId(edit.tid_to);
       if (from) from.members = (from.members || []).filter((m) => !sids.includes(m));
       if (to) to.members = Array.from(new Set((to.members || []).concat(sids)));
+      break;
+    }
+    case "setTags": {
+      const keep = edit.tids || [];
+      for (const t of tags) t.members = keep.includes(t.id) ? Array.from(new Set((t.members || []).concat(sids)))
+                                                            : (t.members || []).filter((m) => !sids.includes(m));
       break;
     }
   }

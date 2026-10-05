@@ -327,13 +327,15 @@ function liftMenu(opts: { thread?: { th: unknown; status: any }; vscodeApi?: { p
   const fn = new Function("document", "window", "kernelUrl", "fetch", "adoptCommentDefaults", "sessions",
     "openCommentThread", "threadMetaStatus", "metaCurrent", "metaPending", "vscodeApi",
     "modeIconSvg", "riskyMode", "nonClassicChoiceTone", "setTip", "pruneTip", "liveSession",
-    "pendingFlags", "dropPendingFlag", "notifyShell", "warnToast", "updateStatusline", js);
+    "pendingFlags", "dropPendingFlag", "notifyShell", "warnToast", "updateStatusline",
+    "applyNowOffered", "applyNowRow", "applyNowFor", js);   // the Apply now row (2026-10-01): no pick waits in these labs, so never drawn
   const api = fn(doc, win, (p: string) => p, stub.fetch, () => {}, sessions,
     () => (opts.thread ? { th: opts.thread.th } : null),
     () => { if (!opts.thread) throw new Error("no thread here"); return opts.thread.status; },
     () => "", new Map(), opts.vscodeApi ?? null, () => "", () => false, () => undefined, () => {}, () => {},   // setTip, pruneTip (closeMetaMenu/closeSub drop a row's tip with the menu, 2026-09-17)
     (id: string) => sessions.get(id),
-    new Map(), () => {}, (kind: string, text: string, sid: string) => { filed.push([kind, text, sid]); }, (t: string) => { toasts.push(t); }, () => { repaints++; });
+    new Map(), () => {}, (kind: string, text: string, sid: string) => { filed.push([kind, text, sid]); }, (t: string) => { toasts.push(t); }, () => { repaints++; },
+    () => false, () => { throw new Error("no pick waits here: the Apply now row is never built"); }, () => {});
   return { api, sessions, body: BODY, win, pending: stub.pending, failing: stub.failing, rectReads, filed, toasts, repaints: () => repaints };
 }
 const SID = "11111111-2222-4333-8444-555555555555";

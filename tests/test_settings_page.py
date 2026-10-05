@@ -25,6 +25,7 @@ browser guards (the gear opening in the settings iframe, the feed frame without 
 tests/test_log_opener_moved_served.py ServedOpener and tests/test_gear_select_matrix_served.py ServedMatrix.
 Synthetic fixtures only; nothing here mints a goal.
 """
+import inspect
 import os
 import re
 import tempfile
@@ -82,9 +83,9 @@ class Plumbing(unittest.TestCase):
     def test_settings_is_outside_the_feed_audience_and_nothing_is_built_for_it(self):
         self.assertFalse(km._feed_audience([{"app": "settings"}]))
         self.assertTrue(km._feed_audience([{"app": "settings"}, {"app": "chat"}]))
-        push = SRC[SRC.index("def _push(targets"):]
-        push = push[:push.index("\ndef ")]
-        _lacks(self, '"settings"', push, "_push names every app it builds for; the settings page is not one")
+        # the feed frame's routing line sits in _send_feed_frames since 2026-10-03, so the helper is read with _push
+        push = inspect.getsource(km._send_feed_frames) + inspect.getsource(km._push)
+        _lacks(self, '"settings"', push, "_push and its feed send name every app they build or send for; the settings page is not one")
 
     def test_a_settings_client_is_not_a_viewer_for_conserve_memory(self):
         # executed: the pass stamps the last-viewer clock for a pane, never for the always-connected

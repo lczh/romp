@@ -83,7 +83,7 @@ test("the switching CONTROL is the tab menu's Billing submenu, both sides listed
   // a pick posts the same setAuth the badge used, and only a CHANGE posts (current = dismiss)
   assert.match(RENDER, /if \(!cur && vscodeApi\) vscodeApi\.postMessage\(\{ type: "setAuth", id, value: c\.value \}\);/);
   // the item's sub-line names the current billing, or the applying reconnect
-  assert.match(RENDER, /st\.authPending \? "applying…"/);
+  assert.match(RENDER, /st\.authPending \? \(st\.relaunchWaits \? `applies after \$\{st\.relaunchWaits\}` : "applying…"\)/);   // 2026-10-01: a pick waits for a quiet session, and says on what
   assert.match(RENDER, /auth\?: string; authLive\?: string; authPending\?: boolean; authBoth\?: boolean; authAvail\?: AuthAvail; authPickUnavailable\?: string; authPickFell\?: string; authAcct\?: string; authLogin\?: string; authLabel\?: string;/);   // 2026-09-09: the fall the launch took rides beside the unavailable pick; T346: WHICH login
 });
 
@@ -115,7 +115,7 @@ test("the chat tab hover says Billing whenever the backend reports it, naming th
     "a confirmed contradiction leads with the warning");
   // the SWITCH CONTROL (the Billing submenu) carries the same truth where the pick lives
   // (T346: the stored-login evidence branch sits between "applying…" and the unavailable pick)
-  assert.match(RENDER, /sb\.textContent = st\.authPending \? "applying…"\s*\n\s*: \(st\.auth === "login" && st\.authLogin && st\.authLoginLive === ""\)\s*\n\s*\? "⚠ CLI used another credential"[^\n]*\n\s*: st\.authPickUnavailable === st\.auth\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `⚠ \$\{wordOf\(st\.auth\)\} unavailable`[^\n]*\n\s*: st\.authLive && st\.authLive !== st\.auth\s*\n\s*\? `⚠ CLI reports \$\{st\.authLive === "key" \? "API key" : "login"\}`/,
+  assert.match(RENDER, /sb\.textContent = st\.authPending \? \(st\.relaunchWaits \? `applies after \$\{st\.relaunchWaits\}` : "applying…"\)\s*\n\s*: \(st\.auth === "login" && st\.authLogin && st\.authLoginLive === ""\)\s*\n\s*\? "⚠ CLI used another credential"[^\n]*\n\s*: st\.authPickUnavailable === st\.auth\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `⚠ \$\{wordOf\(st\.auth\)\} unavailable`[^\n]*\n\s*: st\.authLive && st\.authLive !== st\.auth\s*\n\s*\? `⚠ CLI reports \$\{st\.authLive === "key" \? "API key" : "login"\}`/,
     "the submenu sub-line shows the contradiction, not the unapplied pick");
 });
 

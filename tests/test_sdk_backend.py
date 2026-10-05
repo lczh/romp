@@ -520,7 +520,7 @@ class LiveTail(unittest.TestCase):
         be, s = self._live_fast_session(d, sid, unlocked=True)
         self.assertTrue(s._fast_unlocked, "precondition: THIS connection carries the opt-in flag")
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         self.assertTrue(be.set_fast(sid, "on"))
         self.assertEqual(s.pending(), ["/fast on"], "the literal command is queued for the CLI to interpret")
         echoes = [a for a in be.live_atoms(sid) if a.get("_echo_text") == "/fast on"]
@@ -536,17 +536,23 @@ class LiveTail(unittest.TestCase):
     def test_set_fast_first_opt_in_reconnects_to_apply_the_flag(self):
         # The current connection was made WITHOUT the flag, so the CLI would refuse the literal send;
         # the opt-in applies at the (re)connect that carries it — request_reconnect, the /effort
-        # machinery: immediately if idle, at the end of the current turn if busy.
+        # machinery: at once if quiet, else once no turn, subagent or background task would be cut.
         d = tempfile.mkdtemp()
         sid = "11111111-2222-3333-4444-888888888888"
         be, s = self._live_fast_session(d, sid, unlocked=False)
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         self.assertTrue(be.set_fast(sid, "on"))
         self.assertEqual(len(reconnects), 1, "the flag is connect-time here → reconnect to apply")
+        self.assertFalse(reconnects[0].get("cut"), "on the road that waits for a quiet session (2026-10-01)")
         self.assertEqual(s.pending(), [], "no literal send — this connection would refuse it")
         self.assertTrue(s.fast_opt, "the next _options carries the flag")
-        self.assertEqual(s.fast, "on", "optimistic for the badge; init re-asserts")
+        # 2026-10-01: the relaunch waits for a quiet session, so the badge wears its dots until a launch carries the flag
+        # instead of flipping to On at the pick (the launch's reconcile flips it; the init re-asserts the truth)
+        self.assertNotEqual(s.fast, "on", "no early flip while the opt-in waits")
+        self.assertEqual(s._fast_pending, "on")
+        self.assertTrue(s.snapshot()["fastPending"], "the badge's dots")
+        self.assertIn("fast", sb.read_reg(d, sid)["relaunchWait"]["picks"], "the waiting pick is on record across a restart")
         self.assertTrue(sb.read_reg(d, sid)["fast"])
 
     def test_set_fast_off_on_a_locked_connection_is_a_no_op_beyond_the_reg(self):
@@ -557,7 +563,7 @@ class LiveTail(unittest.TestCase):
         be, s = self._live_fast_session(d, sid, unlocked=False)
         sb.write_reg(d, sid, dict(sb.read_reg(d, sid), fast=True))   # a stale on-disk ask to clear
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         self.assertTrue(be.set_fast(sid, "off"))
         self.assertEqual(s.pending(), [], "nothing to send — the connection never had fast mode")
         self.assertEqual(reconnects, [], "and nothing to reconnect for")
@@ -682,7 +688,7 @@ class LiveTail(unittest.TestCase):
         async def _noop(): pass
         s._do_refresh_context = _noop
         reconnects = []
-        s.request_reconnect = lambda: reconnects.append(1)
+        s.request_reconnect = lambda *a, **k: reconnects.append(k)
         async def run(data):
             s._on_message(_Sys(data), _AssistantMessage, _ResultMessage, _Sys)
             await asyncio.sleep(0)
@@ -2989,8 +2995,9 @@ class SpendRecord(unittest.TestCase):
             ksrc = f.read()
         self.assertIn('if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):',
                       ksrc, "_usage serves spend on the legacy marker OR a login-less machine with recorded spend")
-        self.assertIn('"spend": _spend_windows()', ksrc)
-        self.assertIn("def _spend_windows(keyed_only=False):", ksrc)   # keyed_only: the mixed-host API sum (test_session_auth)
+        # less a stored login's turns since 2026-10-01: those spent a seat, not the key (test_session_auth)
+        self.assertIn('"spend": _spend_windows(login_split=True)', ksrc)
+        self.assertIn("def _spend_windows(keyed_only=False, login_split=False):", ksrc)   # keyed_only: the mixed-host API sum (test_session_auth)
 
     def _spend_session(self, sid="11111111-2222-3333-4444-bbbbbbbbbbbb", name="n", **reg):
         import asyncio
@@ -4529,6 +4536,77 @@ class ReconnectReconcilesInflight(unittest.TestCase):
         self.backend.kill(sid)
 
 
+class SeatMonthlyAllowanceRecord(unittest.TestCase):
+    """An account with no usage windows (an enterprise seat) answers get_usage with its monthly spend limit in
+    rate_limits.extra_usage; the snapshot writer keeps the five fields the CLI's schema documents for it as `monthly`,
+    stamped with the login that answered, beside noWindows, so the usage hover can draw the seat's one bar (2026-10-01).
+    The kernel half (percent, reset date, staleness) executes in tests/test_usage_per_account.py. Synthetic figures."""
+
+    EU = {"is_enabled": True, "monthly_limit": 50000, "used_credits": 11500, "utilization": 23.0, "currency": "USD"}
+
+    def _answer(self, **eu):
+        # decimal_places: a field the live answer carries that the schema does not document, so it is not kept
+        return {"rate_limits": {"five_hour": None, "seven_day": None,
+                                "extra_usage": dict(self.EU, decimal_places=2, **eu)}}
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        _hosts_off(self.d)
+        self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        self._real = sb.acct_digest
+        sb.acct_digest = lambda: "a1" * 6
+
+    def tearDown(self):
+        sb.acct_digest = self._real
+
+    def _usage(self):
+        return json.loads((Path(self.d) / "usage.json").read_text())
+
+    def _write_usage(self, data):
+        (Path(self.d) / "usage.json").write_text(json.dumps(data))
+
+    def test_the_monthly_fields_are_kept_with_the_login_stamp(self):
+        self.be._record_usage_snapshot(self._answer())
+        out = self._usage()
+        self.assertTrue(out.get("noWindows"))
+        self.assertEqual(out["acct"], "a1" * 6, "stamped with the login that answered")
+        self.assertEqual(out["monthly"], self.EU, "the documented fields as answered, nothing else")
+
+    def test_a_changed_figure_is_a_new_reading_and_the_same_one_is_not(self):
+        self.be._record_usage_snapshot(self._answer())
+        out = self._usage()
+        self._write_usage(dict(out, t=out["t"] - 100))
+        self.be._record_usage_snapshot(self._answer())
+        self.assertEqual(self._usage()["t"], out["t"] - 100, "the same answer again, the same month: t stays")
+        self.be._record_usage_snapshot(self._answer(used_credits=12500, utilization=25.0))
+        now = self._usage()
+        self.assertEqual(now["monthly"]["utilization"], 25.0)
+        self.assertGreater(now["t"], out["t"] - 100, "a new figure is a new reading")
+
+    def test_an_unchanged_answer_in_a_later_month_restamps_the_reading(self):
+        # the answer carries no reset date and the kernel calls a reading from an earlier month stale, so an unchanged
+        # answer that lands in a new month must give the reading this month's stamp
+        self.be._record_usage_snapshot(self._answer())
+        last_month = int(time.time()) - 40 * 86400
+        self._write_usage(dict(self._usage(), t=last_month))
+        self.be._record_usage_snapshot(self._answer())
+        self.assertGreater(self._usage()["t"], last_month + 39 * 86400)
+
+    def test_an_answer_without_the_allowance_leaves_no_old_figure(self):
+        self.be._record_usage_snapshot(self._answer())
+        self.be._record_usage_snapshot({"rate_limits": {"five_hour": None, "seven_day": None}})
+        out = self._usage()
+        self.assertTrue(out.get("noWindows"))
+        self.assertNotIn("monthly", out)
+
+    def test_an_account_with_windows_keeps_none(self):
+        self.be._record_usage_snapshot({"rate_limits": {"five_hour": {"utilization": 10, "resets_at": "2026-07-03T00:59:59+00:00"},
+                                                        "seven_day": None, "extra_usage": dict(self.EU)}})
+        out = self._usage()
+        self.assertEqual(out["five_hour"]["pct"], 10)
+        self.assertNotIn("monthly", out, "the bar is for an account with no windows")
+
+
 class RateLimitUsageStaleness(unittest.TestCase):
     """usage.json (the /usage rail's 5h + weekly bars) is written by BOTH the tmux statusline — the CLI's
     CURRENT rate_limits handed to it every render, always fresh — and the SDK backend's _record_rate_limit,
@@ -4683,6 +4761,56 @@ class RateLimitUsageStaleness(unittest.TestCase):
         self.be._record_usage_snapshot({"rate_limits": {"limits": [
             {"kind": "session", "percent": 12, "resets_at": now + 3600}]}})
         self.assertEqual(self._usage()["t"], now - 999, "an identical snapshot must not refresh t")
+
+    def test_get_usage_snapshot_reads_the_documented_window_fields(self):
+        # the reply's documented fields (the CLI's get_usage schema): five_hour / seven_day as {utilization, resets_at}
+        # and the per-model weekly windows as model_scoped[]; a body with no limits[] row was dropped whole before
+        self.be._record_usage_snapshot({"rate_limits": {
+            "five_hour": {"utilization": 41.6, "resets_at": "2026-07-03T00:59:59+00:00"},
+            "seven_day": {"utilization": 12.0, "resets_at": "2026-07-06T18:59:59+00:00"},
+            "model_scoped": [{"display_name": "Fable", "utilization": 30.2, "resets_at": "2026-07-06T18:59:59+00:00"}]}})
+        out = self._usage()
+        self.assertEqual((out["five_hour"]["pct"], out["seven_day"]["pct"], out["fable"]["pct"]), (42, 12, 30))
+        self.assertIsInstance(out["five_hour"]["resets_at"], int)
+        self.assertNotIn("noWindows", out)
+
+    def test_an_account_that_answers_it_has_no_windows_replaces_the_old_reading(self):
+        # the user 2026-10-01: an enterprise seat answers get_usage with five_hour and seven_day null (it meters a
+        # monthly spend limit instead) and no limits[]; every such answer was dropped, so a weeks-old unstamped
+        # reading stayed on the rail as that account's allowance. The answer is recorded, stamped, as noWindows.
+        now = int(time.time())
+        self._write_usage({"t": now - 30 * 86400, "acct": "", "five_hour": {"pct": 71, "resets_at": now - 26 * 86400},
+                           "seven_day": {"pct": 16, "resets_at": now - 24 * 86400}, "fable": None})
+        sb.acct_digest, real = (lambda: "a1" * 6), sb.acct_digest
+        try:
+            answer = {"rate_limits": {"five_hour": None, "seven_day": None, "seven_day_opus": None,
+                                      "extra_usage": {"is_enabled": True, "monthly_limit": 1000, "used_credits": 50,
+                                                      "utilization": 5.0, "currency": "USD"}}}
+            self.be._record_usage_snapshot(answer)
+            out = self._usage()
+            self.assertTrue(out.get("noWindows"), "the account's answer is recorded")
+            self.assertEqual((out["five_hour"], out["seven_day"], out["fable"]), (None, None, None), "the old reading is gone")
+            self.assertEqual(out["acct"], "a1" * 6, "stamped with the login that answered")
+            t1 = out["t"]
+            self._write_usage(dict(out, t=t1 - 100))
+            self.be._record_usage_snapshot(answer)
+            self.assertEqual(self._usage()["t"], t1 - 100, "the same answer again is no change: t stays")
+            self.be._record_usage_snapshot({"rate_limits": {"five_hour": {"utilization": 10, "resets_at": now + 3600},
+                                                            "seven_day": None}})
+            out = self._usage()
+            self.assertEqual(out["five_hour"]["pct"], 10)
+            self.assertNotIn("noWindows", out, "a window read again clears the mark")
+        finally:
+            sb.acct_digest = real
+
+    def test_an_unavailable_endpoint_says_nothing_about_the_account(self):
+        # rate_limits null is the usage endpoint unavailable (a token without the scope, a failed fetch): no write
+        now = int(time.time())
+        before = {"t": now - 999, "acct": "", "five_hour": {"pct": 20, "resets_at": now + 3600}, "seven_day": None, "fable": None}
+        self._write_usage(before)
+        self.be._record_usage_snapshot({"rate_limits": None, "subscription_type": "enterprise"})
+        self.be._record_usage_snapshot({"rate_limits": {"extra_usage": None}})
+        self.assertEqual(self._usage(), before)
 
     def test_turn_end_schedules_the_usage_refresh(self):
         import inspect
@@ -5640,7 +5768,7 @@ class LiveSubagentsRetire(unittest.TestCase):
         self._start(s, "a1"); self._start(s, "a2")
         s._on_task_event("task_progress", {"task_id": "w1", "workflow_progress": [self._wf(1, "a1", "start")]})
         self.assertEqual(s.snapshot()["state"], "working")
-        s._drop_live_work("reconnect")
+        s._drop_live_work("reconnect", cut_by="restart")   # the gesture that asked for the relaunch (a Restart here)
         self.assertEqual(s._subagents, {})
         self.assertEqual(s._wf_agents, {})
         self.assertEqual(s._wf_slots, {})
@@ -5650,12 +5778,13 @@ class LiveSubagentsRetire(unittest.TestCase):
         notes = [q for q in s.pending() if "background task" in q]
         self.assertEqual(len(notes), 1, "the session is told what it lost: %r" % s.pending())
         self.assertEqual(notes[0], sb.task_death_notice([{"desc": "review sweep"}, {"desc": "watch the build"}],
-                                                        cause=sb.SdkSession._RECONNECT_CAUSE),
-                         "the very copy the session reads, with the cause named truthfully")
-        self.assertIn("settings switch", notes[0])
-        self.assertNotIn("crash", notes[0], "a reconnect is neither a crash nor an unexplained restart")
+                                                        did=sb.CUT_BY["restart"]),
+                         "the very copy the session reads, opening on what the person did (2026-10-01)")
+        self.assertIn("I restarted Claude Code, which cut off 2 background tasks", notes[0])
+        self.assertNotIn("crash", notes[0], "a relaunch somebody asked for is neither a crash nor an unexplained restart")
+        self.assertNotIn("settings switch", notes[0], "a settings pick alone no longer cuts anything (#67)")
         self.assertEqual(sb.read_reg(s.backend.state_dir, self.SID).get("bgTasks"), [], "mirror cleared: reported once")
-        self.assertTrue(any("dropped 2 subagents and 2 background tasks on reconnect" in str(m) for m in self.logs), self.logs)
+        self.assertTrue(any("dropped 2 subagents and 2 background tasks on reconnect (restart)" in str(m) for m in self.logs), self.logs)
         self.logs.clear()
         s._drop_live_work("reconnect")
         self.assertFalse(self.logs, "an empty set drops silently — the first connect is not an event worth a line")
@@ -5671,7 +5800,7 @@ class LiveSubagentsRetire(unittest.TestCase):
     def test_g_the_reconnect_loop_top_calls_the_drop_before_reconciling(self):
         """Pin the wiring: the drop runs at the loop top, before _reconcile_stranded, every iteration."""
         src = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()
-        i = src.index('self._drop_live_work("reconnect")')
+        i = src.index('self._drop_live_work("reconnect", cut_by=cut_by)')   # with the gesture that asked for it (2026-10-01)
         j = src.index("self._reconcile_stranded()")
         self.assertLess(i, j, "the drop precedes the stranded-turn reconcile at the loop top")
         k = src.rfind("while not self.ended:", 0, i)

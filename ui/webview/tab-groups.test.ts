@@ -154,9 +154,9 @@ test("the strip renders sections when the switch is on and some tag holds a visi
   assert.match(RENDER, /const unions = viewTagUnion\(effViews\(\)\);\s*\n\s*const plan = planStrip\(visibleIds, unions, readTabGroups\(unions\), activeId, phoneLayout\(\),/,
     "the pure module owns the rule; the phone layout and the create in flight are its inputs");
   assert.match(RENDER, /collapsedTabIds = plan\.folded;/);
-  // the break ahead of a header is emitted under the one-group-per-row setting (stripGroupRows, on by default)
-  assert.match(RENDER, /if \("head" in item\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount && !item\.packed\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);\s*\n\s*copyGroup = item\.head\.name;\s*\n\s*continue;\s*\n\s*\}/,
-    "a header paints from the plan (T264: on its own line under the setting, opened by the break ahead of it, unless the plan packed it onto the folded header before it; T264b: it names the group the copies below sit in)");
+  // the break ahead of a header is emitted under the keep-groups-together setting (stripGroupRows, on by default)
+  assert.match(RENDER, /if \("head" in item\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);\s*\n\s*copyGroup = item\.head\.name;\s*\n\s*continue;\s*\n\s*\}/,
+    "a header paints from the plan (T264: on its own line under the setting, opened by the break ahead of it, which the flow then keeps or lets go by width; T264b: it names the group the copies below sit in)");
 });
 
 test("executed: planStrip — sections + folds; the flat strip when off or untagged; the ACTIVE tab's section folds like any other, marked", () => {
@@ -165,13 +165,13 @@ test("executed: planStrip — sections + folds; the flat strip when off or untag
   const p = planStrip(["web", "old1", "loose", "old2"], unions, st, "web", false);
   assert.equal(p.sectioned, true);
   assert.deepEqual(p.items, [
-    { head: { name: "infra", localId: "g2", color: "#4EC9B0", ids: ["web"] }, folded: false, active: true, hidden: [], packed: false }, { id: "web" },
-    { head: { name: "archived", localId: "g4", color: "#6b7280", ids: ["old1", "old2"] }, folded: true, active: false, hidden: ["old1", "old2"], packed: false },
-    { head: { name: null, localId: null, color: "", ids: ["loose"] }, folded: false, active: false, hidden: [], packed: false }, { id: "loose" },
+    { head: { name: "infra", localId: "g2", color: "#4EC9B0", ids: ["web"] }, folded: false, active: true, hidden: [] }, { id: "web" },
+    { head: { name: "archived", localId: "g4", color: "#6b7280", ids: ["old1", "old2"] }, folded: true, active: false, hidden: ["old1", "old2"] },
+    { head: { name: null, localId: null, color: "", ids: ["loose"] }, folded: false, active: false, hidden: [] }, { id: "loose" },
   ], "archived starts folded: its header alone stands in for old1/old2; infra holds the active tab; nothing packs — archived follows a tab, not a folded header");
   assert.deepEqual([...p.folded], ["old1", "old2"], "the ids keyboard cycling skips");
   const active = planStrip(["web", "old1", "loose"], unions, st, "old1", false);
-  assert.deepEqual(active.items[2], { head: { name: "archived", localId: "g4", color: "#6b7280", ids: ["old1"] }, folded: true, active: true, hidden: ["old1"], packed: false },
+  assert.deepEqual(active.items[2], { head: { name: "archived", localId: "g4", color: "#6b7280", ids: ["old1"] }, folded: true, active: true, hidden: ["old1"] },
     "the active tab's section folds as the store says and is marked as holding it: the header is the hidden tab's stand-in");
   assert.deepEqual([...active.folded], ["old1"], "the active id is folded away too: visibleOrder drops it, the header takes its place");
   assert.equal(active.items.some((i) => "id" in i && i.id === "old1"), false, "no tab node for it: nothing hidden takes focus");
@@ -188,12 +188,12 @@ test("executed: the PHONE layout sections like the desktop — the same headings
   // while the desktop grouped them by tag (the user 2026-09-16), because the phone plan flattened; then it
   // sectioned but folded nothing, the picker being the phone's only switcher (#1770). The user asked to fold
   // groups on the phone too, with the folds shared with the desktop (2026-09-23): the phone plan is now the
-  // desktop's item for item, the one exception being `packed` (a strip layout; the picker lists every heading
-  // on its own row). The picker's heading is the fold control, so a folded group's members stay a tap away.
+  // desktop's item for item (the rows the strip packs its groups onto are measured on the page, never part of
+  // the plan; the picker lists every heading on its own row). The picker's heading is the fold control, so a
+  // folded group's members stay a tap away.
   const unions = viewTagUnion({ ...V, tags: [...V.tags, { id: "g4", name: "archived", color: "#6b7280", members: ["old1", "old2"] }] });
   const ids = ["web", "old1", "loose", "old2", "tests"];
   const shape = (p: ReturnType<typeof planStrip>) => p.items.map((i) => ("head" in i ? `#${i.head.name ?? ""}${i.folded ? "(folded)" : ""}` : i.id));
-  const unpacked = (p: ReturnType<typeof planStrip>) => p.items.map((i) => ("head" in i ? { ...i, packed: false } : i));
   for (const [st, want] of [
     [parseTabGroups(null), ["#qa", "tests", "#infra", "web", "#archived(folded)", "#", "loose"]],
     [{ on: true, collapsed: ["infra", "qa"], expanded: ["archived"], pinned: [] }, ["#qa(folded)", "#infra(folded)", "#archived", "old1", "old2", "#", "loose"]],
@@ -202,9 +202,8 @@ test("executed: the PHONE layout sections like the desktop — the same headings
     assert.equal(p.sectioned, true, "the phone sections");
     assert.deepEqual(shape(p), want, "qa, infra, archived in union order, each folded as the store says (archived by default), the untagged trail last");
     const desk = planStrip(ids, unions, st, "old1", false);
-    assert.deepEqual(p.items, unpacked(desk), "…item for item what the desktop renders from the same store (the same headings, folds, hidden members and active mark), `packed` aside");
+    assert.deepEqual(p.items, desk.items, "…item for item what the desktop renders from the same store (the same headings, folds, hidden members and active mark)");
     assert.deepEqual([...p.folded].sort(), [...desk.folded].sort(), "the same ids folded away: the picker lists none of them");
-    assert.ok(!p.items.some((i) => "head" in i && i.packed), "never packed on the phone: the picker lists each heading on its own row");
     assert.deepEqual(p.items.filter((i) => "head" in i && i.active).map((i) => ("head" in i ? i.head.name : "")), ["archived"], "the active tab's holder is marked, as on the desktop");
   }
   // a member set to show through its fold (the desktop's "Show when folded") shows through on the phone too
@@ -275,8 +274,8 @@ test("executed + pinned: the section holding the ACTIVE tab folds like any other
   assert.match(head, /if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);/);
   assert.match(head, /\+ \(holdsActive \? " holds-active" : ""\)\);/);
   assert.match(head, /head\.draggable = !settings\.tabsLocked;/, "it still drags to reorder the groups, unless the tabs are locked (T395)");
-  assert.equal(headWords("infra", 1, 0, false, true).title, "infra — 1 session; holds the tab you are reading; click to fold this group and see its sessions at a glance; drag to reorder the groups");
-  assert.match(head, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive, back, shown\);\s*\n\s*head\.title = words\.title;/, "the words are the pure module's");
+  assert.equal(headWords("infra", 1, 0, false, true).title, "infra — 1 session; holds the tab you are reading; click to fold this group; drag to reorder the groups");
+  assert.match(head, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive\);\s*\n\s*head\.title = words\.title;/, "the words are the pure module's");
   assert.ok(!RENDER.includes('"group-active"'), "no delegate handler for a no-op either");
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active \{ cursor: default; \}/, "the header folds, so its cursor promises the click");
   // the holding row wears no mark of its own (T322, the user 2026-09-10: the chip's accent underline read as a second
@@ -329,8 +328,8 @@ test("executed: the header click sets the fold state from what it RENDERED — n
   // the header carries its rendered state; the delegate reads it
   const head = RENDER.slice(RENDER.indexOf("function makeGroupHead("), RENDER.indexOf("function sectionHeadOf("));
   assert.match(head, /head\.dataset\.folded = collapsed \? "1" : "0";/);
-  assert.match(RENDER, /if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone && leaveFileTab\(\)\) snapView = name;[^\n]*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);\s*\n\s*if \(!phone\) showActive\(\);/,   // a file tab up gives the pane to the view (2026-09-30)
-    "rendered open → fold; rendered folded → open (and on the desktop the section shows in the pane: snapView; the phone's picker folds through the same handler and shows nothing, 2026-09-23)");
+  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);\s*\n\s*\},/,
+    "rendered open → fold; rendered folded → open, and nothing else: no view in the pane, on the desktop as on the phone (the user 2026-10-02)");
 });
 
 test("a folded section renders its header alone with the folded-away count and one MEMBER-derived pip after it — a label, not a session; cycling skips folded ids", () => {
@@ -347,7 +346,7 @@ test("a folded section renders its header alone with the folded-away count and o
   assert.ok(head.indexOf('el("span", "tab-group-count")') < head.indexOf("sectionPip("), "after the count (the row's last child when folded, T284)");
   assert.ok(!head.includes("tabStateClass("), "the header itself wears no state class");
   assert.ok(!head.includes('"tab-dot"'), "never a .tab-dot — the kernel's mobile scrape keys on the tab pips' vocabulary");
-  // the trail is never a header: its own row with no chip under the one-group-per-row setting (T264), a 13px
+  // the trail is never a header: its own row with no chip under the keep-groups-together setting (T264), a 13px
   // divider with the setting off
   assert.match(head, /if \(sec\.name === null\) return settings\.stripGroupRows \? makeRowBreak\(true\) : makeTrailSep\(\);/,
     "the untagged trail is UNLABELED (the ruling): never a header; its own row with no chip under stripGroupRows (T264), the divider otherwise");
@@ -384,8 +383,8 @@ test("the picker's Tags row is live for every offered backend, and the create al
 test("headers are click-safe: data-act on the node, the action on the stable #tabs delegate, one render path via the event", () => {
   assert.match(RENDER, /head\.dataset\.act = "toggle-group";/);
   // the click derives the next fold state from the one the header RENDERED (data-folded), never from the store, and
-  // shows the section in the pane (snapView; tab-snapshot-pane.test.ts)
-  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*const phone = phoneLayout\(\);\s*\n\s*if \(!phone && leaveFileTab\(\)\) snapView = name;[^\n]*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);/);
+  // does nothing else (the user 2026-10-02; tab-snapshot-pane.test.ts runs it)
+  assert.match(RENDER, /"toggle-group": \(el\) => \{\s*\n\s*const name = el\.dataset\.group;\s*\n\s*if \(!name\) return;\s*\n\s*writeTabGroups\(setSectionCollapsed\(tabGroups\(\), name, el\.dataset\.folded !== "1"\)\);/);
   // …and the kernel's copy of the folds, cached by a sibling pane (a fold there, or the kernel's push of one made on another device)
   assert.match(RENDER, /window\.addEventListener\("storage", \(e\) => \{ if \(e\.key === TABGROUPS_SHARED_KEY\) renderTabs\(\); \}\);/, "a fold cached by a sibling pane, or pushed from another device, repaints");
   assert.match(RENDER, /window\.addEventListener\(TABGROUPS_EVENT, \(\) => renderTabs\(\)\);/, "the same-window delivery");
@@ -442,21 +441,22 @@ test("the section chrome is a LABEL's (the user 2026-09-06): the surface's sub-l
   assert.doesNotMatch(CSS, /\.tab-group-dot/, "the dot is gone");
   const sizes = new Set(Array.from(CSS.matchAll(/\n\.tab-group-[^{\n]*\{[^}]*font-size: ([^;]+);/g)).map((m) => m[1]));
   assert.deepEqual([...sizes], ["0.82em"], "one font-size across every section rule");
-  // the divider the trail stands behind with the one-group-per-row setting off is scoped off the row break,
+  // the divider the trail stands behind with the keep-groups-together setting off is scoped off the row break,
   // which wears .tab-group-sep too (the boundary sectionHeadOf reads) and must keep no box
   assert.doesNotMatch(CSS, /\.tab-group-sep \{/, "no unscoped separator rule: the break's boundary class must not give it a box");
   assert.match(CSS, /\.tab-group-sep:not\(\.tab-group-break\) \{ flex: 0 0 auto; box-sizing: border-box; width: 13px; padding: 8px 6px; background: var\(--box-border\); background-clip: content-box; \}/,
     "the divider's rule: a 13px box whose gutters are padding");
 });
 
-// ── T264 (the user 2026-09-08): every tag group on its own line, under the stripGroupRows setting (on by default) ──
-test("under the setting (on by default), every group opens a new line: a zero-height full-width break ahead of each header, the trail's break doubling as the boundary (T264)", () => {
+// ── T264 (the user 2026-09-08): every tag group opens a line as painted, under the stripGroupRows setting (on by default);
+//    since 2026-10-01 the flow keeps a break only where its group does not fit the rest of the row (the flowGroups tests below) ──
+test("under the setting (on by default), the paint opens a new line per group: a zero-height full-width break ahead of each header, the trail's break doubling as the boundary (T264)", () => {
   // the strip read as one long concatenation; now the chip sits at the left edge, its tabs follow it
-  // and wrap onto further rows as they need, and the next group starts a fresh line. The breaks are
-  // emitted under the one-group-per-row setting (the next test runs the gate at both values)
+  // and wrap onto further rows as they need. The breaks are emitted under the keep-groups-together setting
+  // (the next test runs the gate at both values), and flowStripRows lets each go where its group fits
   const loop = RENDER.slice(RENDER.indexOf("collapsedTabIds = plan.folded;"), RENDER.indexOf("const id = item.id;"));
-  assert.match(loop, /if \(settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount && !item\.packed\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);/,
-    "under the setting, a break before every header but the strip's first item (which already opens the first row) and a header the plan packed onto the folded header before it (the next-but-one test)");
+  assert.match(loop, /if \(settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount\) bar\.appendChild\(makeRowBreak\(false\)\);\s*\n\s*bar\.appendChild\(makeGroupHead\(item\.head, item\.folded, item\.active, item\.hidden\)\);/,
+    "under the setting, a break before every header but the strip's first item (which already opens the first row)");
   const brk = RENDER.slice(RENDER.indexOf("function makeRowBreak("), RENDER.indexOf("function makeTrailSep("));
   assert.match(brk, /el\("div", "tab-group-break" \+ \(untagged \? " tab-group-sep" : ""\)\)/,
     "the untagged trail's break keeps the .tab-group-sep class — the boundary sectionHeadOf reads");
@@ -475,8 +475,8 @@ test("under the setting (on by default), every group opens a new line: a zero-he
   assert.match(CSS, /\.tab-group-head \{ display: flex; flex: 0 0 auto; align-items: center;/);
 });
 
-// ── the one-group-per-row setting (stripGroupRows, on by default): off, the groups follow one another across the strip ──
-test("executed + pinned: the one-group-per-row setting is on by default; off, the strip emits NO break, a group's head and tabs stay contiguous and the trail stands behind a divider; the gear's row", () => {
+// ── the keep-groups-together setting (stripGroupRows, on by default): off, the groups follow one another across the strip ──
+test("executed + pinned: the keep-groups-together setting is on by default; off, the strip emits NO break, a group's head and tabs stay contiguous and the trail stands behind a divider; the gear's row", () => {
   // the setting and its default (executed: the real defaults object)
   assert.equal(DEFAULT_SETTINGS.stripGroupRows, true, "on by default: every tag group on its own row");
   assert.match(SETTINGS, /stripGroupRows: boolean;/);
@@ -487,13 +487,15 @@ test("executed + pinned: the one-group-per-row setting is on by default; off, th
   const loop = RENDER.slice(RENDER.indexOf("for (const item of files.items) {"), RENDER.indexOf("const id = item.id;"));   // the paint with the file tabs woven in (2026-09-30: fileStripPaint)
   assert.equal((loop.match(/makeRowBreak\(/g) ?? []).length, 1, "one break site in the loop");
   assert.equal((loop.match(/bar\.appendChild\(/g) ?? []).length, 2, "the head branch appends the break (gated) and the header; nothing else sits between a head and its tabs");
-  const gate = loop.match(/if \((settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount && !item\.packed)\) bar\.appendChild\(makeRowBreak\(false\)\);/);
+  const gate = loop.match(/if \((settings\.stripGroupRows && item\.head\.name !== null && bar\.childElementCount)\) bar\.appendChild\(makeRowBreak\(false\)\);/);
   assert.ok(gate, "the break is gated on the setting");
   const breaks = new Function("settings", "item", "bar", "return !!(" + gate![1] + ");") as (s: unknown, it: unknown, b: unknown) => boolean;
-  const heads = [{ head: { name: "web" }, packed: false }, { head: { name: "api" }, packed: false }, { head: { name: null }, packed: false }];
+  const heads = [{ head: { name: "web" } }, { head: { name: "api" } }, { head: { name: null } }];
   assert.deepEqual(heads.map((it, i) => breaks({ stripGroupRows: true }, it, { childElementCount: i })), [false, true, false], "on: a break ahead of every header but the strip's first item; the trail's header is itself the break");
   assert.deepEqual(heads.map((it, i) => breaks({ stripGroupRows: false }, it, { childElementCount: i })), [false, false, false], "off: no break ahead of any header, first or later, nor the trail's");
-  assert.equal(breaks({ stripGroupRows: true }, { head: { name: "api" }, packed: true }, { childElementCount: 1 }), false, "on: no break ahead of a header the plan packed onto the folded header before it (the packing test below)");
+  // …and the flow, which reconciles those breaks to the measured widths, stands down with the setting off (no break to keep or let go)
+  const flow = RENDER.slice(RENDER.indexOf("function flowStripRows("), RENDER.indexOf("// A hairline under EVERY row of tabs"));
+  assert.match(flow, /if \(!settings\.stripGroupRows \|\| draggedId\) return;/, "off: the inline layout, untouched");
   // the plan's items are contiguous per group (executed on the pure module): a head, then its tabs, then the next
   // head; with no break appended the DOM is the plan in order, so the groups follow one another and wrap
   const unions = viewTagUnion({ tags: [{ id: "t-infra", name: "infra", color: "#1EA1EB", members: ["web", "api"] },
@@ -512,66 +514,141 @@ test("executed + pinned: the one-group-per-row setting is on by default; off, th
   assert.match(RENDER, /settings\.tabCtx, settings\.stripGroupRows, settings\.tabsLocked, settings\.tabStateBadge, settings\.theme, settings\.colormap,/, "in the strip's signature");
   assert.match(RENDER, /onExternalSettingsChange\(\(s\) => \{ settings = s; applyChatScheme\(s\); renderTabs\(\);/);
   // the gear's row: a checkbox like Show git branch's, checked by default, saved through the same save() and filled at open
-  assert.match(GEAR, /<label class=rs-row><input type=checkbox id=rs-striprows checked>' \+\s*\n\s*'<span><b>One tag group per row in the tab strip<\/b>/);
+  assert.match(GEAR, /<label class=rs-row><input type=checkbox id=rs-striprows checked>' \+\s*\n\s*'<span><b>Keep tag groups together in the tab strip<\/b>/);
   assert.match(GEAR, /sr\.addEventListener\('change', function \(\) \{ var s = load\(\); s\.stripGroupRows = sr\.checked; save\(s\); \}\);/);
   assert.match(GEAR, /if \(sr\) sr\.checked = s\.stripGroupRows !== false;/, "the default-ON fill: only an explicit false unchecks");
   assert.equal((GEAR.match(/stripGroupRows: true/g) ?? []).length, 2, "the gear's defaults mirror agrees: on, in both of load()'s literals");
-  // the guide says so in one sentence (matched across its line wraps)
-  const sentence = "Every group starts on its own row; turning off the gear's **One tag group per row in the tab strip** lets the groups follow one another across the strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many tags stays short.";
-  assert.match(REF, new RegExp(sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")));
+  // the reference says so (matched across its line wraps): the flow, then the switch
+  const flat = (t: string) => new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+"));
+  assert.match(REF, flat("The groups share rows in the tag order while they fit: a folded group is its header alone, an open group its header and its tabs, and a group that does not fit the rest of a row moves to the next row whole rather than splitting across two (one wider than the whole strip wraps onto rows of its own)."));
+  assert.match(REF, flat("Folded headers side by side sit as close as tabs; a short divider stands between two groups on a row when either shows tabs. The untagged sessions keep a row of their own at the end, which is where a dragged tab goes to lose its tags."));
+  assert.match(REF, flat("Turning off the gear's **Keep tag groups together in the tab strip** lets the groups run on across the strip and wrap wherever a row fills, with the untagged sessions behind a thin divider."));
   assert.match(REF, /the untagged sessions on a row of their\s+own at the end\./, "the paragraph's opening describes the default layout");
-  const packing = "tags stays short. Folded groups that follow one another in the tag order share one row, since each is only its header; an open group always starts a row of its own, and so do the untagged sessions, so a folded group between two open ones keeps its row too.";
-  assert.match(REF, new RegExp(packing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")), "…and the packing of folded neighbours follows it in the same paragraph");
+  assert.doesNotMatch(REF, /an open group always starts a row of its own/, "the retired rule is gone");
 });
 
-test("executed: FOLDED NEIGHBOURS SHARE A ROW — two folded groups side by side pack onto one row (no break between); folded-open-folded is three rows; an open pair is two; a pinned member ends the run; the trail never packs; the phone packs nothing (the user 2026-09-16)", () => {
-  // a folded group is one small header, yet each took a whole row. The plan marks a folded header `packed` when the
-  // item right before it in strip order is a folded header too, and render.ts emits no break ahead of a packed
-  // header (the executed gate in the test above), so a run of bare folded headers shares one row. Three tags in
-  // union order (qa, infra, archived) and a loose tab; the rows are read off the plan as render.ts would paint them
-  // under the setting: a row opens at every header the gate breaks before, i.e. every unpacked one
+// ── THE GROUPS FLOW ONTO ROWS AS UNITS (the user 2026-10-01; folded neighbours, 2026-09-16) ──
+// flowGroups executed over measured-width fixtures: a unit is a group's header and the tabs it shows (header first). Widths
+// are round numbers on a 400px row with no column gap and a 13px gutter unless a case says otherwise. `rowsOf` lays the units
+// out the way the strip does from the verdicts (flex-wrap inside a unit, a `row` verdict opening a line), so a case can say
+// which row each unit's items land on.
+const rowsOf = (units: number[][], joins: string[], rowW: number, gap = 0, gutter = 13): number[][] => {
+  let row = 0, x = 0;   // x: the row's fill so far, with the gap after its last item
+  return units.map((ws, i) => {
+    if (i > 0 && joins[i] === "row") { row++; x = 0; }
+    else if (i > 0 && joins[i] === "gutter") x += gutter + gap;
+    return ws.map((w) => {
+      if (x > 0 && x + w > rowW) { row++; x = 0; }
+      x += w + gap;
+      return row;
+    });
+  });
+};
+
+test("executed: flowGroups — the user's shape: two folded groups and an open group of three tabs share ONE row when it fits; the open group sits behind a gutter, the folded pair flush", () => {
+  // two folded groups and an open group of three tabs, in the notes-api world: web and api folded, tests open
+  const units = [[90], [80], [100, 60, 60, 60]];
+  const joins = TG_MOD.flowGroups(units, 600, 0, 13);
+  assert.deepEqual(joins, ["row", "flush", "gutter"], "the second folded header sits flush beside the first; the open group joins behind a gutter");
+  assert.deepEqual(rowsOf(units, joins, 600), [[0], [0], [0, 0, 0, 0]], "all three on the first row");
+  // the same row under the Yatharth strip's 3px column gap: the gutter carries a gap on each side
+  assert.deepEqual(TG_MOD.flowGroups(units, 600, 3, 13), ["row", "flush", "gutter"]);
+  // a folded group AFTER an open one sits behind a gutter too: the gutter ends the open group's run of tabs
+  assert.deepEqual(TG_MOD.flowGroups([[100, 60, 60], [80], [90]], 600, 0, 13), ["row", "gutter", "flush"], "open, then two folded: a gutter, then flush");
+  // a run of folded headers is as dense as tabs: no gutter anywhere between them
+  assert.deepEqual(TG_MOD.flowGroups([[80], [80], [80], [80]], 600, 0, 13), ["row", "flush", "flush", "flush"]);
+});
+
+test("executed: flowGroups — an open group that does not fit the rest of the row moves to the next row WHOLE, never leaving its header behind", () => {
+  // the folded pair uses 90 + 80 = 170 of a 400px row; the open group needs a 13px gutter and 280px, 463 in all
+  const units = [[90], [80], [100, 60, 60, 60]];
+  const joins = TG_MOD.flowGroups(units, 400, 0, 13);
+  assert.deepEqual(joins, ["row", "flush", "row"], "the open group opens the next row");
+  assert.deepEqual(rowsOf(units, joins, 400), [[0], [0], [1, 1, 1, 1]], "its header and its three tabs together on row 1");
+  // whole or not at all, down to the pixel: at exactly 463 the group goes down (the sub-pixel slack); at 464 it stays
+  assert.deepEqual(TG_MOD.flowGroups(units, 463, 0, 13), ["row", "flush", "row"], "a unit that fits only to the last pixel goes down whole");
+  assert.deepEqual(TG_MOD.flowGroups(units, 464, 0, 13), ["row", "flush", "gutter"], "…and one pixel more holds it on the row");
+  // each unit is judged in strip order against what the row has left: 90 + 13 + 280 = 383 holds the open group, and the
+  // folded group after it (13 + 80 more) opens the next row
+  const later = [[90], [100, 60, 60, 60], [80]];
+  const j2 = TG_MOD.flowGroups(later, 400, 0, 13);
+  assert.deepEqual(j2, ["row", "gutter", "row"]);
+  assert.deepEqual(rowsOf(later, j2, 400), [[0], [0, 0, 0, 0], [1]]);
+});
+
+test("executed: flowGroups — a group wider than the whole row opens a row and wraps INSIDE itself; the next group may share its last row", () => {
+  // a folded header (80); then an open group of six 100px tabs behind a 90px header, 690px on a 400px row; then a folded 70
+  const units = [[80], [90, 100, 100, 100, 100, 100, 100], [70]];
+  const joins = TG_MOD.flowGroups(units, 400, 0, 13);
+  assert.deepEqual(joins, ["row", "row", "gutter"], "the over-wide group opens a row of its own; the folded group after it shares its last row behind a gutter");
+  assert.deepEqual(rowsOf(units, joins, 400), [[0], [1, 1, 1, 1, 2, 2, 2], [2]],
+    "the header and three tabs on row 1, the other three on row 2 (flex-wrap's own rule: 300px used), and the folded header after them");
+  // seven tabs fill the over-wide group's last row to the edge (90 + 300 on one, 400 on the next): the next group opens a row
+  assert.deepEqual(TG_MOD.flowGroups([[90, 100, 100, 100, 100, 100, 100, 100], [70]], 400, 0, 13), ["row", "row"]);
+  // the very first unit always opens the strip, wide or not
+  assert.deepEqual(TG_MOD.flowGroups([[900]], 400, 0, 13), ["row"]);
+  assert.deepEqual(TG_MOD.flowGroups([], 400, 0, 13), []);
+});
+
+test("executed: flowGroups — a folded group with a member shown through the fold is an open unit (its tab needs the gutter too); the phone and the flat strip never flow", () => {
+  // qa folded with tests pinned through its fold: header + one tab, so the folded infra after it sits behind a gutter
+  assert.deepEqual(TG_MOD.flowGroups([[80, 70], [80]], 400, 0, 13), ["row", "gutter"]);
+  // the plan carries no row verdicts at all: the PHONE folds from the same store but its picker lists every heading on a
+  // row of its own, and the rows are measured on the page (render.ts flowStripRows), so planStrip is the same on both
   const unions = viewTagUnion({ ...V, tags: [...V.tags, { id: "g4", name: "archived", color: "#6b7280", members: ["old1", "old2"] }] });
   const ids = ["web", "api", "tests", "old1", "old2", "loose"];
-  const fold = (...names: string[]) => names.reduce((st, n) => setSectionCollapsed(st, n, true), setSectionCollapsed(parseTabGroups(null), "archived", false));
-  const rows = (p: ReturnType<typeof planStrip>): string[][] => {
-    const out: string[][] = [];
-    for (const it of p.items) {
-      const word = "head" in it ? `#${it.head.name ?? ""}${it.folded ? "(folded)" : ""}` : it.id;
-      if ("head" in it && !it.packed) out.push([word]); else out[out.length - 1].push(word);
-    }
-    return out;
-  };
-  // two adjacent folded groups → ONE row holding both headers; the open archived group and the trail on rows of their own
-  const two = planStrip(ids, unions, fold("qa", "infra"), "loose", false);
-  assert.deepEqual(rows(two), [["#qa(folded)", "#infra(folded)"], ["#archived", "old1", "old2"], ["#", "loose"]], "qa and infra, both folded, share a row");
-  assert.deepEqual(headsOf(two).map((h) => [h.head.name, h.packed]), [["qa", false], ["infra", true], ["archived", false], [null, false]],
-    "the first folded header opens the row (nothing before it to pack with); the second is packed; the open group and the trail are not");
-  // three adjacent folded groups → still one row (the run, not pairs)
-  assert.deepEqual(rows(planStrip(ids, unions, fold("qa", "infra", "archived"), "loose", false)), [["#qa(folded)", "#infra(folded)", "#archived(folded)"], ["#", "loose"]], "a run of three folded headers is one row");
-  // folded, OPEN, folded → three rows: the lone folded groups have nothing to pack with
-  assert.deepEqual(rows(planStrip(ids, unions, fold("qa", "archived"), "loose", false)), [["#qa(folded)"], ["#infra", "web", "api"], ["#archived(folded)"], ["#", "loose"]],
-    "an open group between two folded ones keeps its row, and so does each folded one");
-  // an open pair → two rows, as before this rule
-  assert.deepEqual(rows(planStrip(ids, unions, fold(), "loose", false)), [["#qa", "api", "tests"], ["#infra", "web", "api"], ["#archived", "old1", "old2"], ["#", "loose"]], "open groups: a row apiece");
-  // a folded group with a member PINNED through its fold ends in that member's tab, so the folded header after it is
-  // NOT packed (the item before it is a tab): the rule reads the item right before, never the section's fold alone
-  const pinned = setPinned(fold("qa", "infra"), { name: "qa", localId: "g1" }, "tests", true);
-  assert.deepEqual(rows(planStrip(ids, unions, pinned, "loose", false)), [["#qa(folded)", "tests"], ["#infra(folded)"], ["#archived", "old1", "old2"], ["#", "loose"]],
-    "qa shows a pinned tab, so infra's folded header opens a row of its own");
-  // the trail: never folded, so it never packs onto a folded run before it and nothing packs onto it
-  const last = planStrip(ids, unions, fold("qa", "infra", "archived"), "loose", false);
-  assert.equal(headsOf(last).find((h) => h.head.name === null)!.packed, false, "the trail's header (its break) opens a row after a folded run");
-  // the PHONE folds from the same store since 2026-09-23 (the user), but packs nothing: its picker lists each heading on
-  // a row of its own, so `packed` (a strip layout) is never set there
-  const onPhone = planStrip(ids, unions, fold("qa", "infra", "archived"), "loose", true);
-  assert.deepEqual(headsOf(onPhone).map((h) => [h.head.name, h.folded, h.packed]), [["qa", true, false], ["infra", true, false], ["archived", true, false], [null, false, false]],
-    "the phone: folded as the store says, never packed");
-  // the flat strip has no headers, so no packing
-  assert.ok(!planStrip(ids, unions, { ...fold("qa", "infra"), on: false }, "loose", false).items.some((i) => "head" in i), "switch off: flat");
-  // the drag's virtual layout agrees: a packed header has no break before it, so the dragover marks it `br` only when a break precedes
-  // it (the pinned rule in the T264 drag test below), and dragslot.test.ts executes the shared row
+  const st = setSectionCollapsed(setSectionCollapsed(parseTabGroups(null), "qa", true), "infra", true);
+  assert.deepEqual(planStrip(ids, unions, st, "loose", true).items, planStrip(ids, unions, st, "loose", false).items, "the phone's plan is the desktop's, item for item");
+  assert.ok(planStrip(ids, unions, st, "loose", false).items.every((i) => !("packed" in i)), "no row field rides the plan any more");
+});
+
+test("executed: flowGroups at thirty tags (ui/CLAUDE.md's scale rule) — thirty folded headers pack as densely as tabs; a mix of thirty folded and open groups keeps every group whole and every row as full as the next group allows", () => {
+  // thirty folded headers of 80px on a 1000px row: twelve to a row (12 x 80 = 960; a thirteenth would need 1040), flush
+  const folded = Array.from({ length: 30 }, () => [80]);
+  const fj = TG_MOD.flowGroups(folded, 1000, 0, 13);
+  assert.deepEqual(fj.map((j, i) => (j === "row" ? i : -1)).filter((i) => i >= 0), [0, 12, 24], "three rows: twelve, twelve, six");
+  assert.ok(!fj.includes("gutter"), "no gutter between bare folded headers");
+  // thirty groups alternating folded (80) and open (an 80px header and two or three tabs of 100 to 140px), the Yatharth gap
+  const mixed = Array.from({ length: 30 }, (_, i) => (i % 2 ? [80] : [80, ...Array.from({ length: 2 + (i % 3 ? 1 : 0) }, (_x, k) => 100 + 20 * k)]));
+  const rowW = 1000, gap = 3, gutter = 13;
+  const mj = TG_MOD.flowGroups(mixed, rowW, gap, gutter);
+  const rows = rowsOf(mixed, mj, rowW, gap, gutter);
+  rows.forEach((r, i) => assert.equal(new Set(r).size, 1, "group " + i + " is one run on one row: " + JSON.stringify(r)));
+  // tight: a group that opens a row would not have fitted after the group before it
+  let x = 0;
+  mixed.forEach((ws, i) => {
+    const w = ws.reduce((a, b) => a + b, 0) + gap * (ws.length - 1);
+    const lead = ws.length > 1 || (i > 0 && mixed[i - 1].length > 1) ? gutter + gap : 0;
+    if (i > 0 && mj[i] === "row") assert.ok(x + lead + gap + w > rowW - 1, "group " + i + " opened a row it would have fitted on");
+    x = mj[i] === "row" ? w : x + lead + gap + w;
+  });
+  assert.ok(new Set(rows.map((r) => r[0])).size < 30, "groups share rows: fewer rows than groups");
+});
+
+test("render.ts flowStripRows: measures each unit (header + its tabs, never the + or the trail), asks flowGroups, reconciles the element ahead of each header in place; re-run on resize and font load; frozen mid-drag", () => {
+  const flow = RENDER.slice(RENDER.indexOf("function flowStripRows("), RENDER.indexOf("// A hairline under EVERY row of tabs"));
+  assert.match(flow, /if \(c\.contains\("tab-group-sep"\)\) break;/, "the untagged trail ends the walk: it keeps a row of its own");
+  assert.match(flow, /if \(c\.contains\("tab-group-break"\) \|\| c\.contains\("tab-group-gutter"\)\) \{ lead = k; continue; \}/, "what stands ahead of a header: its break or its gutter");
+  assert.match(flow, /if \(c\.contains\("tab"\) && !c\.contains\("tab-add"\) && units\.length\) units\[units\.length - 1\]\.items\.push\(k\);/, "a unit's tabs (file tabs included, the + never)");
+  assert.match(flow, /if \(!\(rowW > 0\)\) return;/, "an unmeasurable strip keeps the breaks as painted");
+  assert.match(flow, /flowGroups\(units\.map\(\(u\) => u\.items\.map\(\(n\) => n\.getBoundingClientRect\(\)\.width\)\), rowW,\s*\n\s*parseFloat\(cs\.columnGap\) \|\| 0, parseFloat\(cs\.getPropertyValue\("--strip-gutter"\)\) \|\| 0\);/);
+  assert.match(flow, /if \(want === have\) continue;/, "a verdict that did not change touches nothing, so a second run is a no-op");
+  assert.match(flow, /bar\.insertBefore\(want === "row" \? makeRowBreak\(false\) : makeGroupGutter\(\), u\.head\);/);
+  assert.match(RENDER, /flowStripRows\(bar\);   \/\/ the groups onto rows, from their widths/, "renderTabs flows right after the items are painted");
+  assert.match(RENDER, /tabRowObserver = new ResizeObserver\(\(\) => \{ flowStripRows\(bar\); stripFit\?\.\(\); paintTabRowLines\(bar\); \}\);/);
+  assert.match(RENDER, /document\.fonts\?\.addEventListener\?\.\("loadingdone", \(\) => \{ flowStripRows\(bar\); stripFit\?\.\(\); paintTabRowLines\(bar\); \}\);/);
+  // the gutter: a real, padding-free box the drag's virtual layout measures, layout only
+  const gut = RENDER.slice(RENDER.indexOf("function makeGroupGutter("), RENDER.indexOf("function makeTrailSep("));
+  assert.match(gut, /const g = el\("div", "tab-group-gutter"\);\s*\n\s*g\.setAttribute\("aria-hidden", "true"\);/);
+  assert.match(CSS, /\n#tabs \{ --strip-gutter: 13px; \}/, "the width the flow reads off the strip");
+  const rule = CSS.match(/\n\.tab-group-gutter \{[^}]*\}/)![0];
+  assert.match(rule, /width: var\(--strip-gutter\);/); assert.match(rule, /pointer-events: none;/);
+  assert.doesNotMatch(rule, /margin|padding|border\s*:|outline/, "no margin or padding (the virtual layout measures rects), no border or outline (flat)");
+  assert.match(rule, /background: linear-gradient\(var\(--box-border\), var\(--box-border\)\) center \/ 1px 50% no-repeat;/, "a half-row hairline in the strip's own border token, in every theme");
+  // the drag: a gutter is a box of its own; a header behind one is a plain box; the slot before such a header is the end of the group before
   const over = RENDER.slice(RENDER.indexOf('tabs.addEventListener("dragover"'), RENDER.indexOf('tabs.addEventListener("drop"'));
-  assert.match(over, /A folded header PACKED onto the folded header before it \(planStrip, the user\s*\n\s*\/\/ 2026-09-16\) has no break ahead of it and so opens no row here either/, "the dragover's account names the packed header as a plain box");
+  assert.match(over, /querySelectorAll<HTMLElement>\("\.tab\[data-id\], \.tab-group-head, \.tab-group-sep, \.tab-group-gutter"\)/);
+  assert.match(over, /if \(ref && ref\.classList\.contains\("tab-group-head"\) && isLead\(before\(ref as HTMLElement\)\)\) ref = before\(ref as HTMLElement\);/);
 });
 
 test("executed: the drop's in-group neighbour walk stops at the trail's divider, as it stops at a break or a header", () => {
@@ -613,8 +690,10 @@ test("the tab drag's virtual layout wraps where the strip wraps: headers after a
   assert.match(over, /w: isBreak\(t\) \? 0 : /, "the trail's break is a zero-width row opener, not a full-row box");
   assert.match(over, /br: isBreak\(t\) \|\| \(t\.classList\.contains\("tab-group-head"\) && isBreak\(before\(t\)\)\) \}\)\);/,
     "a header after a break, and the break itself, open a row; the trail's first tab after its break does not (the break did)");
-  assert.match(over, /if \(ref && ref\.classList\.contains\("tab-group-head"\) && isBreak\(before\(ref as HTMLElement\)\)\) ref = before\(ref as HTMLElement\);/,
-    "the slot before a header is the end of the previous row — never between the break and the chip");
+  assert.match(over, /if \(ref && ref\.classList\.contains\("tab-group-head"\) && isLead\(before\(ref as HTMLElement\)\)\) ref = before\(ref as HTMLElement\);/,
+    "the slot before a header is the end of the group before — never between its break (or gutter) and the chip");
+  assert.match(over, /const isLead = \(n: Element \| null\) => isBreak\(n\) \|\| \(!!n && n\.classList\.contains\("tab-group-gutter"\)\);/,
+    "what stands ahead of a header: its row break, or the gutter of a group sharing the row (2026-10-01)");
   const DS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "dragslot.ts"), "utf8");
   assert.match(DS, /const needsWrap = row !== null && cx > 0 && \(b\.br === true \|\| cx \+ b\.w > containerW\);/, "dragslot honours br (executed in dragslot.test.ts)");
 });
@@ -664,7 +743,7 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
   // keyboard: a button to the keyboard, through the same click → delegate path as the pointer, on EVERY named
   // header, the one holding the tab being read too (it folds; aria-current marks it; the accessibility test
   // below). The stand-in's own keys come first in the handler (tab-snapshot-pane.test.ts runs them).
-  assert.match(head, /head\.setAttribute\("role", "button"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(!back\) head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);\s*\n\s*head\.tabIndex = 0;\s*\n\s*head\.addEventListener\("keydown", \(e\) => \{/,
+  assert.match(head, /head\.setAttribute\("role", "button"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);\s*\n\s*head\.tabIndex = 0;\s*\n\s*head\.addEventListener\("keydown", \(e\) => \{/,
     "role, expanded state, the current mark, tab stop and key handler together");
   assert.match(head, /if \(e\.key === "Enter" \|\| e\.key === " "\) \{ e\.preventDefault\(\); head\.click\(\); \}\s*\n\s*\}\);/, "Enter and Space press the header");
   // a push mid-read must not kick focus off the header: renderTabs re-focuses the same group after the rebuild
@@ -721,7 +800,7 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
   assert.equal(CSS.match(/\.tab-group-pip\.retrying \{ background: transparent; box-shadow: inset 0 0 0 [\d.]+px (var\(--st-retrying-bg\)); \}/)![1], CSS.match(/\.tab\.tab-retrying \{ --state: (var\(--st-retrying-bg\)); \}/)![1],
     "the pip's retrying amber (now on an inset stroke, a hollow ring) IS the tab's, the same status token");
   const toks = new Set((rules.map((m) => m[2]).join(" ").match(/var\((--[a-z-]+)/g) || []).map((m) => m.slice(4)));
-  for (const t of toks) assert.ok(["--fg", "--dim", "--accent", "--accent-wash", "--box-border", "--st-working-bg", "--st-blocked-bg", "--st-retrying-bg", "--st-needs-bg", "--tab-active-bg", "--chip-bg"].includes(t), "a token the strip does not already wear: " + t);   // --st-needs-bg: the Needs you ring's magenta, on the tab AND the pip (the ask ring of 2026-09-13, recoloured 2026-09-21)
+  for (const t of toks) assert.ok(["--fg", "--dim", "--accent", "--accent-wash", "--box-border", "--st-working-bg", "--st-blocked-bg", "--st-retrying-bg", "--st-needs-bg", "--tab-active-bg", "--chip-bg", "--strip-gutter"].includes(t), "a token the strip does not already wear: " + t);   // --strip-gutter: the gutter's WIDTH (2026-10-01), geometry the flow reads off #tabs, no colour; --st-needs-bg: the Needs you ring's magenta, on the tab AND the pip (the ask ring of 2026-09-13, recoloured 2026-09-21)
 });
 
 // SHOW WHEN FOLDED (the user 2026-09-06): a member pinned to its section keeps its tab on the strip
@@ -873,8 +952,8 @@ test("executed: SHARED — a member a local tag and a same-named remote tag both
   assert.deepEqual(st2.pinned, [{ sid: "web", name: "ops", id: "g7" }, { sid: "web", name: "infra" }], "the rewritten entry, and the old-name half");
   assert.equal(followTagRenames(st2, renames, ru), st2, "idempotent: a second pane adopting the same frame after the first has written finds nothing to change — the same object, no second write");
   assert.deepEqual(strip(vis, ru, st2, "loose"), [["#ops(folded)", "web", "#infra(folded)", "web", "#null", "loose"], ["api"]], "web shows under ops AND infra (every-tag rule, T264b), pinned in both");
-  // the user had dragged infra into place before the rename: the kernel leaves tagOrder alone, so infra
-  // keeps its slot and ops falls behind — web homes in the remote-only infra, and the kept half matches
+  // the user had dragged infra into place before the rename: the remote infra still bears the name, so the rename's
+  // write keeps infra's slot and puts ops right behind it — web homes in the remote-only infra, and the kept half matches
   const infraFirst = viewTagUnion({ ...renamedV, tagOrder: ["infra"] });
   assert.deepEqual(infraFirst.map((u) => u.name), ["infra", "ops"]);
   assert.deepEqual(strip(vis, infraFirst, st2, "loose"), [["#infra(folded)", "web", "#ops(folded)", "web", "#null", "loose"], ["api"]], "web pinned under infra; api under ops");
@@ -1162,7 +1241,8 @@ test("executed: the follow's memory is checked against EVERY adopted blob — a 
   const again = followTagRenames(repin, tagRenames(V4, V5), viewTagUnion(V5));
   assert.deepEqual([again.pinned, again.followed], [[{ sid: "TESTHOST-A:m1", name: "api" }], { "TESTHOST-A:t1": "api", g8: "y" }]);
   assert.deepEqual(strip(vis, viewTagUnion(V5), again, "loose"), [["#api(folded)", "TESTHOST-A:m1", "#y(folded)", "#null", "loose"], ["tests"]]);
-  const kept = followTagRenames({ ...repin, followed: away.followed }, tagRenames(V4, V5), viewTagUnion(V5));
+  // (the counterfactual's api is folded by hand: the fold follows a rename too since 2026-10-01, so `back` carried it to web)
+  const kept = followTagRenames({ ...repin, collapsed: repin.collapsed.concat("api"), followed: away.followed }, tagRenames(V4, V5), viewTagUnion(V5));
   assert.deepEqual(kept.pinned, repin.pinned, "(had the memory survived the reattach frame unchecked, the rename read as already followed …");
   assert.deepEqual(strip(vis, viewTagUnion(V5), kept, "loose"), [["#api(folded)", "#y(folded)", "#null", "loose"], ["TESTHOST-A:m1", "tests"]], "… and the tab folded away with no gesture on it)");
   // no detach at all — the PAGE was closed while A renamed t1 back to web (the same class, wider): the reopened
@@ -1791,7 +1871,7 @@ test("the toggle is a row in the tab menu's Tags flyout beside the Move-to rows:
   assert.match(RENDER, /function tabGroups\(\) \{ return readTabGroups\(viewTagUnion\(effViews\(\)\)\); \}/);
   assert.match(RENDER, /const unions = viewTagUnion\(effViews\(\)\);\s*\n\s*const plan = planStrip\(visibleIds, unions, readTabGroups\(unions\), activeId, phoneLayout\(\),/);
   assert.match(RENDER, /toggle: \(\) => \{ const st = tabGroups\(\); writeTabGroups\(\{ \.\.\.st, on: !st\.on \}\); \}/);
-  assert.equal((RENDER.match(/writeTabGroups\(setSectionCollapsed\(tabGroups\(\)/g) || []).length, 2, "the fold writes: the header's click (toggle-group) and the pick of a folded-away tab (unfoldSectionOf), which opens its holder");
+  assert.equal((RENDER.match(/writeTabGroups\(setSectionCollapsed\(tabGroups\(\)/g) || []).length, 3, "the fold writes: the header's click (toggle-group), the pick of a folded-away tab (unfoldSectionOf), which opens its holder, and the tag menu's Fold group / Open group (2026-10-01)");
   assert.equal((RENDER.match(/readTabGroups\(/g) || []).length, 5, "five reads in all…");
   assert.equal((RENDER.match(/readTabGroups\(unions\)/g) || []).length, 2, "…the adoption's and the plan's, with the unions in hand…");
   assert.equal((RENDER.match(/readTabGroups\(viewTagUnion\(effViews\(\)\)\)/g) || []).length, 1, "…tabGroups() for every write path…");
@@ -1828,24 +1908,21 @@ test("executed: a folded section whose EVERY member is pinned stays folded — t
   // the words render.ts paints for that header
   assert.deepEqual(headWords("infra", 2, 0, true, false), {
     count: "2", label: "infra, 2 sessions, folded, all shown",
-    title: "infra — folded, but all 2 sessions are set to show when folded, so none is hidden; click to open and see its sessions at a glance",
-  }, "the total, never a 0 beside two visible tabs; the title names the menu row that did it (and the click's other effect: the section in the pane)");
-  assert.equal(headWords("infra", 1, 0, true, false).title, "infra — folded, but its one session is set to show when folded, so none is hidden; click to open and see its sessions at a glance");
-  // …and for the ordinary folded, part-pinned, open and active headers
-  assert.deepEqual(headWords("infra", 2, 2, true, false), { count: "2", label: "infra, 2 sessions folded", title: "infra — 2 sessions folded; click to open and see its sessions at a glance" });
-  assert.deepEqual(headWords("infra", 2, 1, true, false), { count: "1", label: "infra, 1 session folded", title: "infra — 1 session folded; click to open and see its sessions at a glance" },
+    title: "infra — folded, but all 2 sessions are set to show when folded, so none is hidden; click to open this group",
+  }, "the total, never a 0 beside two visible tabs; the title names the menu row that did it");
+  assert.equal(headWords("infra", 1, 0, true, false).title, "infra — folded, but its one session is set to show when folded, so none is hidden; click to open this group");
+  // …and for the ordinary folded, part-pinned, open and active headers: the click's clause is the fold alone, since the
+  // click no longer shows the section in the pane (the user 2026-10-02; the tag menu's Show overview does)
+  assert.deepEqual(headWords("infra", 2, 2, true, false), { count: "2", label: "infra, 2 sessions folded", title: "infra — 2 sessions folded; click to open this group" });
+  assert.deepEqual(headWords("infra", 2, 1, true, false), { count: "1", label: "infra, 1 session folded", title: "infra — 1 session folded; click to open this group" },
     "one pinned: the hidden count, the pinned tab shows itself");
-  // while the pane already shows the section (`shown`) the title names the fold alone; the open, shown header
-  // holding the tab being read is the way back (`back`) and its spoken label names the action (render.ts
-  // drops that header's aria-expanded, so a reader would otherwise hear a plain button with no word about it)
-  assert.equal(headWords("infra", 2, 2, true, false, false, true).title, "infra — 2 sessions folded; click to open this group");
-  assert.equal(headWords("infra", 2, 0, false, false, false, true).title, "infra — 2 sessions; click to fold this group; drag to reorder the groups");
-  assert.deepEqual(headWords("infra", 3, 0, false, true, true, true), { count: "3", label: "infra, 3 sessions, holds the tab you are reading; back to the transcript",
-    title: "infra — 3 sessions; holds the tab you are reading; click to go back to the transcript; drag to reorder the groups" });
-  assert.deepEqual(headWords("infra", 3, 0, false, true, false, false), headWords("infra", 3, 0, false, true), "the defaults are the ordinary open header");
-  assert.deepEqual(headWords("infra", 2, 0, false, false), { count: "2", label: "infra, 2 sessions", title: "infra — 2 sessions; click to fold this group and see its sessions at a glance; drag to reorder the groups" });
-  assert.deepEqual(headWords("infra", 3, 0, false, true), { count: "3", label: "infra, 3 sessions, holds the tab you are reading", title: "infra — 3 sessions; holds the tab you are reading; click to fold this group and see its sessions at a glance; drag to reorder the groups" });
-  assert.match(MAKE_HEAD, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive, back, shown\);\s*\n\s*head\.title = words\.title;/);
+  assert.deepEqual(headWords("infra", 2, 2, true, true), { count: "2", label: "infra, 2 sessions folded, holds the tab you are reading",
+    title: "infra — 2 sessions folded; holds the tab you are reading; click to open this group" }, "the stand-in: the same open, the phrase in the words");
+  assert.deepEqual(headWords("infra", 2, 0, false, false), { count: "2", label: "infra, 2 sessions", title: "infra — 2 sessions; click to fold this group; drag to reorder the groups" });
+  assert.deepEqual(headWords("infra", 3, 0, false, true), { count: "3", label: "infra, 3 sessions, holds the tab you are reading", title: "infra — 3 sessions; holds the tab you are reading; click to fold this group; drag to reorder the groups" });
+  for (const w of [headWords("infra", 2, 2, true, false), headWords("infra", 2, 0, false, true)])
+    assert.doesNotMatch(w.title + w.label, /at a glance|transcript/, "no word promises the view or a way back: the click folds and nothing else");
+  assert.match(MAKE_HEAD, /const words = headWords\(name, total, hidden\.length, collapsed, holdsActive\);\s*\n\s*head\.title = words\.title;/);
   assert.match(MAKE_HEAD, /n\.textContent = words\.count;/);
   assert.ok(!MAKE_HEAD.includes("hidden.length : total"), "no second count rule beside the pure one");
   assert.match(REF, /when every tab in a section is set to\s+show, the folded header shows the full count and its tooltip says nothing is hidden\./);
@@ -1867,12 +1944,12 @@ test("assistive tech hears a label: decoration is aria-hidden, the header's name
     "archived, 2 sessions folded; 2 sessions in this group are stopped on you: api, tests",
     "the spoken label of a folded header wearing the pip");
   assert.ok(!MAKE_HEAD.includes('label.setAttribute("aria-hidden"'), "the name is the name: not hidden");
-  // the header holding the tab being read is the same button as the rest (it folds; the section at a glance is the
-  // pane's answer to a folded active tab), marked current: no header is a no-op "labeled group" any more
+  // the header holding the tab being read is the same button as the rest (it folds, and folded it stands in for the
+  // tab while the transcript stays), marked current: no header is a no-op "labeled group" any more
   assert.ok(!MAKE_HEAD.includes('"role", "group"'), "no header is a no-op group: every one folds");
-  assert.equal(MAKE_HEAD.split('"aria-expanded"').length - 1, 1, "aria-expanded once, on the one fold button every named header is (left off only while its press puts the transcript back)");
+  assert.equal(MAKE_HEAD.split('"aria-expanded"').length - 1, 1, "aria-expanded once, on the one fold button every named header is");
   assert.equal(MAKE_HEAD.split('"role", "button"').length - 1, 1);
-  assert.match(MAKE_HEAD, /if \(!back\) head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);[\s\S]{0,400}if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);/, "the header holding the tab being read says so");
+  assert.match(MAKE_HEAD, /\n\s*head\.setAttribute\("aria-expanded", collapsed \? "false" : "true"\);[\s\S]{0,400}if \(holdsActive\) head\.setAttribute\("aria-current", "true"\);/, "always a disclosure (its press always folds or opens, the user 2026-10-02), and the header holding the tab being read says so");
   assert.match(MAKE_HEAD, /head\.tabIndex = 0;/, "…and takes focus like the rest: it is the hidden tab's stand-in");
   assert.equal(headWords("archived", 2, 2, true, false).label, "archived, 2 sessions folded");
   assert.equal(headWords("archived", 2, 2, true, true).label, "archived, 2 sessions folded, holds the tab you are reading", "the stand-in says whose it is");
@@ -1920,7 +1997,7 @@ test("the tab drag moves THIS copy and reorders within its group's neighbours (T
   const drop = RENDER.slice(RENDER.indexOf('tabs.addEventListener("drop"'), RENDER.indexOf("tabDragCommitted = true; }"));
   assert.match(drop, /const own = \(n: Element \| null\) => !!n && \(n as HTMLElement\)\.dataset\?\.id === draggedId;/);
   // the neighbours come from the dragged copy's OWN group first: the walk stops at a header, a row break or
-  // the trail's divider (its boundary with the one-group-per-row setting off), and only a group holding no
+  // the trail's divider (its boundary with the keep-groups-together setting off), and only a group holding no
   // other tab falls back to the nearest tab across groups (a drop at a group's head used to anchor on the
   // group above's last tab, so the session's other copy jumped)
   assert.match(drop, /const edge = \(n: Element\) => n\.classList\.contains\("tab-group-head"\) \|\| n\.classList\.contains\("tab-group-break"\) \|\| n\.classList\.contains\("tab-group-sep"\);/);
@@ -1928,9 +2005,10 @@ test("the tab drag moves THIS copy and reorders within its group's neighbours (T
   assert.match(drop, /const prev = prevIn \?\? \(nextIn \? null : walk\(dragged\.previousElementSibling, back, false\)\);/);
   assert.match(drop, /const next = nextIn \?\? \(prevIn \? null : walk\(dragged\.nextElementSibling, fwd, false\)\);/);
   assert.doesNotMatch(drop, /\n\s*tabDragCommitted = true;\s*\/\//, "no unconditional commit: a drop that moved nothing takes dragend's cancel path");
-  // a drop still changes no membership: a copy dragged into another group's row re-sections home on the next render
+  // the hit-test places the copy and nothing more: what the release does to the session's tags (a move into the
+  // group, since 2026-09-30) is read from the slot it lands in, by drag-join.ts's rule (drag-join.test.ts)
   const over = RENDER.slice(RENDER.indexOf('tabs.addEventListener("dragover"'), RENDER.indexOf('tabs.addEventListener("drop"'));
-  assert.match(over, /A drop changes\s*\n?\s*\/\/ no membership/);
+  assert.match(over, /The hit-test places the tab and nothing more; what the release does to the\s*\n\s*\/\/ session's tags is read from the slot it lands in \(tabDropFor, below\)\./);
 });
 
 test("executed: the keyboard order keeps a session while any copy is on screen (T264b)", () => {

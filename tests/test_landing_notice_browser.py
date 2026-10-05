@@ -173,13 +173,13 @@ const trace2 = await trace();
 const noticeHit = await page.evaluate(() => { const n = document.querySelector(".tx-landing-notice"); if (!n) return null; const r = n.getBoundingClientRect(); const cx = r.left + r.width / 2, cy = r.top + r.height / 2; const el = document.elementFromPoint(cx, cy); return { x: cx, y: cy, isNotice: el === n || (!!el && n.contains(el)) }; });
 if (noticeHit) await page.mouse.click(noticeHit.x, noticeHit.y);
 await page.waitForFunction(() => { const n = document.querySelector(".tx-landing-notice"); return !n || getComputedStyle(n).display === "none"; }, null, { timeout: 5000 }).catch(() => {});
-const clicked2 = await state(); const rowClicked2 = await rowAtTop(); const regionsClicked = await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null));
+const clicked2 = await state(); const rowClicked2 = await rowAtTop(); const point2Clicked = await page.evaluate(() => (typeof window.__rompTurnUnderTop === "function" ? window.__rompTurnUnderTop() : null)); const regionsClicked = await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null));
 const rows2 = (await locateRows()).slice(locBefore2);
 await page.evaluate(() => { window.__hold.delete("loadAround"); window.__heldRaw = (window.__heldRaw || []).filter((d) => JSON.parse(d).type === "loadAround"); });
 const released2 = await page.evaluate(() => window.__release());
 await page.waitForFunction((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`) || window.__sent.some((m) => m.what === "scrollwrite" && m.data && m.data.writer === "gap-fill"), deep2, { timeout: 15000 }).catch(() => {});
 await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
-const late2 = await state(); const rowLate2 = await rowAtTop(); const regionsLate = await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null));
+const late2 = await state(); const rowLate2 = await rowAtTop(); const point2Late = await page.evaluate(() => (typeof window.__rompTurnUnderTop === "function" ? window.__rompTurnUnderTop() : null)); const regionsLate = await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null));
 const target2 = await onScreen(deep2);
 // ROAD 4 (T386 stage 2, medium 3): a fill while the reader stands INSIDE a gap must not jump them. At the transcript head (scrollTop 0,
 // no row on screen) a held gap-scroll ask, then the release: the head page fills and its first turn sits at the top, scrollTop still ~0.
@@ -203,14 +203,22 @@ await reboot();
 // Parked head-gap page asks (loadTurns) keep the gap whole (CI, 2026-09-14: a rebuild at the gap's top re-asked its first page).
 await page.evaluate(() => { window.__hold.add("loadTurns"); });
 const auqUser7 = "11111111-2222-3333-4444-" + pad(2 * 100), auqAnswer7 = "66666666-7777-8888-9999-" + pad(2 * 100);
+const nFocus7a = await page.evaluate(() => window.__sent.length);
 await page.evaluate((frame) => window.postMessage(frame, "*"), { type: "focus", id: cfg.sid, anchor: auqUser7, anchorT: cfg.base + 2 * 100 });   // turn 100: its window (about turns 40 to 160) leaves the head gap above it
 await page.waitForFunction((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), auqAnswer7, { timeout: 15000 }).catch(() => {});
 await page.waitForFunction(() => { const n = document.querySelector(".tx-landing-notice"); return !n || getComputedStyle(n).display === "none"; }, null, { timeout: 10000 }).catch(() => {});
 await painted();
-const gestureToTop7 = () => page.evaluate((u) => { const c = document.getElementById("content"); const t = document.querySelector(`#content .turn[data-uuid="${u}"]`); if (c) c.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 4 })); if (t && c) c.scrollTop += t.getBoundingClientRect().top - c.getBoundingClientRect().top; }, auqAnswer7);   // the wheel (the reader's input) then the scroll it drives: a gesture the settle yields to, so the answer stays under the top
+// the wheel (the reader's input) then the scroll it drives: a gesture the settle yields to, so the answer stays under the top. Returns whether
+// the landing was still settling when the gesture came, read in the same evaluation (2026-09-29): the settle ends on its own 1.2 s after the
+// landing and files its row then, so a runner that stalls past that before the gesture has nothing left to yield (a superseded row does not
+// count: the newer landing's settle is the one open)
+const gestureToTop7 = (n) => page.evaluate((a) => { const open = !window.__sent.slice(a.n).some((m) => m.type === "locateDiag" && "settled" in m && !m.superseded); const c = document.getElementById("content"); const t = document.querySelector(`#content .turn[data-uuid="${a.u}"]`); if (c) c.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 4 })); if (t && c) c.scrollTop += t.getBoundingClientRect().top - c.getBoundingClientRect().top; return open; }, { u: auqAnswer7, n });
 const nWr7a = await page.evaluate(() => window.__sent.length);
-await gestureToTop7();
-await page.waitForFunction((n) => window.__sent.slice(n).some((m) => m.type === "locateDiag" && "settled" in m), nWr7a, { timeout: 15000 }).catch(() => {});   // the gesture's takeover ends the settle: its landing row files
+const openAtGesture7a = await gestureToTop7(nFocus7a);
+// the gesture's takeover ends the settle: its landing row files. Recorded and asserted (2026-09-29): the no-realign read below means
+// something only once the settle has ended, since a realign comes during it
+const settled7a = await page.waitForFunction((n) => window.__sent.slice(n).some((m) => m.type === "locateDiag" && "settled" in m), nWr7a, { timeout: 15000 })
+  .then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
 await painted();
 const top7a = await rowAtTop();
 const turnAttr7a = await page.evaluate((u) => { const t = document.querySelector(`#content .turn[data-uuid="${u}"]`); return t ? (t.dataset.turn === undefined ? null : t.dataset.turn) : "absent"; }, auqAnswer7);
@@ -493,10 +501,10 @@ await noticeHidden(); await painted();
 const targetB15 = await onScreen(deepB15);
 await page.waitForTimeout(700);                                                       // past the cut animation's own length: a listener the hide did not remove would still be there
 const afterCut15 = await page.evaluate(() => ({ add: window.__aeAdd, remove: window.__aeRemove, cls: !!document.querySelector(".tx-landing-notice.pulse"), shown: (() => { const n = document.querySelector(".tx-landing-notice"); return !!n && getComputedStyle(n).display !== "none"; })() }));
-process.stdout.write("RESULT:" + JSON.stringify({ listeners15, cut15, afterCut15, first15, pulsed15, afterEnd15, targetA15, reshow15, targetB15, inGap6, regions13, hadFrame13, heldIn13a, heldIn13, heldOlder13, askState13, trail13, toast13, target13, asks13, before14, down14, after14, askedA10, askedB10, asks10, before10, relA10, afterA10, relB10, afterB10, runN10a, runN10b, runN10c, writes10, originA11, askedA11, foundB11, askedB11, noticeB11, atAsk11, afterMissing11, writes11, askedA12, reask12, target12, trail12, askedA8, afterCancel8, askedB8, busy8, toast8, noticeB8, released8, targetB8, residentA8, runN8Before, runN8After, asked9, fault9, rows9, top9Before, writes9, pxPerTurn9, heldAsk6, point6Before, point6After, fillWrites6, after6, head4, filled4, afterDrop5: { notice: afterDrop5.notice }, askBefore5, heldRaw5, askState5, winBefore5, winAtDeath5, redialed5, recvAfter5, sentAfter5, flushAsk5, reask5, landed5, top7a, turnAttr7a, point7a, realign7a, rowB7Before, pointB7Before, rowB7Held, pointB7Held, rowB7After, pointB7After, held7b, askState7b, fillWrites7b, runNBefore7b, runNAfter7b, asked3, nospan3, boot: { gaps: boot.gaps, atBottom: boot.atBottom, notice: boot.notice, regions: await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null)) }, asked1: { notice: asked1.notice, noticeText: asked1.noticeText, top: asked1.top, gaps: asked1.gaps, loadAround: heldAsk1 }, trace1, released1, guess1, trace2,
+process.stdout.write("RESULT:" + JSON.stringify({ listeners15, cut15, afterCut15, first15, pulsed15, afterEnd15, targetA15, reshow15, targetB15, inGap6, regions13, hadFrame13, heldIn13a, heldIn13, heldOlder13, askState13, trail13, toast13, target13, asks13, before14, down14, after14, askedA10, askedB10, asks10, before10, relA10, afterA10, relB10, afterB10, runN10a, runN10b, runN10c, writes10, originA11, askedA11, foundB11, askedB11, noticeB11, atAsk11, afterMissing11, writes11, askedA12, reask12, target12, trail12, askedA8, afterCancel8, askedB8, busy8, toast8, noticeB8, released8, targetB8, residentA8, runN8Before, runN8After, asked9, fault9, rows9, top9Before, writes9, pxPerTurn9, heldAsk6, point6Before, point6After, fillWrites6, after6, head4, filled4, afterDrop5: { notice: afterDrop5.notice }, askBefore5, heldRaw5, askState5, winBefore5, winAtDeath5, redialed5, recvAfter5, sentAfter5, flushAsk5, reask5, landed5, top7a, turnAttr7a, point7a, realign7a, settled7a, openAtGesture7a, rowB7Before, pointB7Before, rowB7Held, pointB7Held, rowB7After, pointB7After, held7b, askState7b, fillWrites7b, runNBefore7b, runNAfter7b, asked3, nospan3, boot: { gaps: boot.gaps, atBottom: boot.atBottom, notice: boot.notice, regions: await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null)) }, asked1: { notice: asked1.notice, noticeText: asked1.noticeText, top: asked1.top, gaps: asked1.gaps, loadAround: heldAsk1 }, trace1, released1, guess1, trace2,
   landed1: { notice: landed1.notice, gaps: landed1.gaps, turns: landed1.turns, top: landed1.top, strip: landed1.strip, regions: regionsLanded }, target1, rows1,
   asked2: { notice: asked2.notice, noticeText: asked2.noticeText, top: asked2.top }, clicked2: { notice: clicked2.notice, top: clicked2.top, gaps: clicked2.gaps }, rows2, released2,
-  late2: { notice: late2.notice, top: late2.top, gaps: late2.gaps, turns: late2.turns, regions: regionsLate }, noticeHit, regionsClicked, rowClicked2, rowLate2, target2, deep2Turn: 190, bootTop: boot.top }) + "\n");
+  late2: { notice: late2.notice, top: late2.top, gaps: late2.gaps, turns: late2.turns, regions: regionsLate }, noticeHit, regionsClicked, rowClicked2, rowLate2, point2Clicked, point2Late, chClicked2: clicked2.ch, target2, deep2Turn: 190, bootTop: boot.top }) + "\n");
 await browser.close();
 """
 
@@ -582,6 +590,8 @@ class ServedLandingNotice(WindowLab):
         # the message line-height (whole device px since the raster fix): the point names the turn by position, never a uuid lookup.
         r = self._result()
         answer = "66666666-7777-8888-9999-%012d" % 200
+        self.assertTrue(r["openAtGesture7a"], "the reader's scroll came while the landing was still settling (inside its 1.2 s window); a stalled runner reads here, not as a missing row")
+        self.assertTrue(r["settled7a"], "the reader's gesture ended the landing's settle (its landing row filed) before the rows were read: %r" % r["settled7a"])
         self.assertIsNotNone(r["top7a"], "a row sat under the viewport top after the reader's scroll")
         self.assertEqual(r["top7a"]["uuid"], answer, "the reader's scroll put the answered question (its answer's tool_result uuid) under the viewport top: %r" % r["top7a"])
         self.assertTrue(isinstance(r["turnAttr7a"], str) and r["turnAttr7a"].isdigit(), "the row names its own turn (data-turn), read by position, never a uuid lookup: %r" % r["turnAttr7a"])
@@ -778,8 +788,16 @@ class ServedLandingNotice(WindowLab):
         late = r["late2"]
         self.assertIsNotNone(r["boot"]["regions"] if "regions" in r["boot"] else r.get("trace1", {}).get("regions"), "the page holds no regions (the base has none: no runs and gaps, only the old window protocol)")
         self.assertIsNotNone(r["rowClicked2"], "a row sat under the viewport top when the notice was clicked")
-        self.assertEqual(r["rowLate2"]["uuid"], r["rowClicked2"]["uuid"], "the late reply moved nothing: the row under the viewport top is the same row (the run inserted above it, so scrollTop grew by its height): %r → %r" % (r["rowClicked2"], r["rowLate2"]))
-        self.assertLessEqual(abs(r["rowLate2"]["y"] - r["rowClicked2"]["y"]), 2, "…at its offset: %r → %r" % (r["rowClicked2"], r["rowLate2"]))
+        if r["rowClicked2"]["y"] >= r["chClicked2"] - 1:
+            # no row on screen at the click: the reader stands inside the gap where the pre-jump left them (a re-window keeps the offset into
+            # a gap, 2026-10-01; it used to put the gap's top at the viewport top and the reader ended on the row below it), so what must not
+            # move is the point under the viewport top, named as a turn (the fill puts it back by its turn, round five)
+            self.assertIsNotNone(r["point2Clicked"], "the point under the viewport top was named at the click")
+            self.assertIsNotNone(r["point2Late"], "…and after the late reply")
+            self.assertLess(abs(r["point2Late"] - r["point2Clicked"]), 1, "the late reply moved nothing: the point under the viewport top moved by less than a turn: %r → %r" % (r["point2Clicked"], r["point2Late"]))
+        else:
+            self.assertEqual(r["rowLate2"]["uuid"], r["rowClicked2"]["uuid"], "the late reply moved nothing: the row under the viewport top is the same row (the run inserted above it, so scrollTop grew by its height): %r → %r" % (r["rowClicked2"], r["rowLate2"]))
+            self.assertLessEqual(abs(r["rowLate2"]["y"] - r["rowClicked2"]["y"]), 2, "…at its offset: %r → %r" % (r["rowClicked2"], r["rowLate2"]))
         held = lambda rs: sum(x["n"] for x in rs if x["kind"] == "run")
         self.assertGreater(held(late["regions"]), held(r["regionsClicked"]), "the reply's run still inserted (nothing is thrown away): %r → %r" % (r["regionsClicked"], late["regions"]))
         self.assertTrue(any(x["kind"] == "run" and x["lo"] <= r["deep2Turn"] < (x["hi"] if x["hi"] is not None else 10**9) for x in late["regions"]), "the cancelled target's turn is resident, in place, for the reader to reach by scrolling: %r" % late["regions"])

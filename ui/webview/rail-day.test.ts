@@ -138,6 +138,6 @@ test("the day label reads the walk's day at the top row (data-day), never the ro
   assert.match(tg, /walk\.pass\(eventEpoch\(first\)\); stampWalkDay\(head, walk\); stamped\.add\(head\);/, "the head in the first member's day");
   assert.match(tg, /host\.appendChild\(tag\(child\)\); adv\(i\);\s*\n\s*walk\.pass\(eventEpoch\(s\.events\[i\]\)\); stampWalkDay\(child, walk\); stamped\.add\(child\);/, "each row in its own");
   assert.match(RENDER, /const stamped = new Set<HTMLElement>\(\);/);
-  assert.match(RENDER, /const tag = \(node: HTMLElement\): HTMLElement => \{ node\.dataset\.unit = String\(u\); if \(turnOf != null\) node\.dataset\.turn = turnOf; nodes\.push\(node\); return node; \};/, "every node the unit appends is collected for the stamp");
+  assert.match(RENDER, /const tag = \(node: HTMLElement\): HTMLElement => \{ node\.dataset\.unit = String\(u\); if \(turnOf != null\) node\.dataset\.turn = turnOf; if \(kt != null\) node\.dataset\.kturn = String\(kt\); nodes\.push\(node\); return node; \};/, "every node the unit appends is collected for the stamp");
   assert.match(RENDER, /m\.dataset\.epoch = String\(epoch\);/, "the row's own moment still rides the marker (deep links, hover, the fallback)");
 });

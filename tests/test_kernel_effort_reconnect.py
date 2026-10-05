@@ -25,7 +25,9 @@ class EffortReconnect(unittest.TestCase):
     def test_build_session_emits_a_reconnecting_event_while_effort_pending(self):
         src = inspect.getsource(km.build_session)
         self.assertIn('if (tm0 or {}).get("effortPending"):', src)
-        self.assertIn('events.append({"kind": "reconnecting", "effort": (tm0 or {}).get("effort") or ""})', src)
+        self.assertIn('events.append({"kind": "reconnecting", "effort": (tm0 or {}).get("effort") or "",', src)
+        # …and what the reload waits for, since a pick waits for a quiet session instead of cutting its work (2026-10-01)
+        self.assertIn('"waits": (tm0 or {}).get("relaunchWaits") or ""})', src)
 
     def test_the_reconnecting_notice_precedes_the_queued_bubble(self):
         # like the compacting element, it must sit ABOVE any queued/provisional message
@@ -43,10 +45,27 @@ class EffortReconnect(unittest.TestCase):
         src = inspect.getsource(km.Sessions.live)
         self.assertIn('"effortPending": bool(st.get("effortPending")),', src)
 
+    def test_what_a_pending_relaunch_waits_for_reaches_the_status_and_the_chat(self):
+        # 2026-10-01: a pick waits for a quiet session instead of cutting its subagents and background tasks, so the
+        # pending marks say what holds them: the backend's snapshot → the live row → the tab's status (the Billing
+        # row's sub-line) and the reconnecting event (the effort change's line), tests/test_reconnect_waits_for_work.py
+        self.assertIn('"relaunchWaits": st.get("relaunchWaits") or "",', inspect.getsource(km.Sessions.live))
+        src = inspect.getsource(km.build_session)
+        self.assertIn('"relaunchWaits": tm.get("relaunchWaits") or "",', src)
+        self.assertIn('"waits": (tm0 or {}).get("relaunchWaits") or ""', src)
+        self.assertIn('"relaunchWaits": self.relaunch_waits(),', BACKEND_SRC)
+
+    def test_what_applying_now_would_end_reaches_the_status(self):
+        # 2026-10-01, Apply now: the row a waiting pick's control offers says what pushing it through ends, and its confirm
+        # names it; the backend's snapshot → the live row → the tab's status, beside relaunchWaits
+        self.assertIn('"relaunchCuts": st.get("relaunchCuts") or "",', inspect.getsource(km.Sessions.live))
+        self.assertIn('"relaunchCuts": tm.get("relaunchCuts") or "",', inspect.getsource(km.build_session))
+        self.assertIn('"relaunchCuts": self.relaunch_cuts(),', BACKEND_SRC)
+
     def test_backend_set_effort_arms_the_pending_flag_and_reconnects(self):
         self.assertIn('s._effort_pending = value', BACKEND_SRC)
         self.assertIn('self._update_reg(sid, effort=value, effortPending=True)', BACKEND_SRC)
-        self.assertIn('s.request_reconnect()', BACKEND_SRC)
+        self.assertIn('s.request_reconnect(why="effort")', BACKEND_SRC)   # the road that waits for a quiet session (2026-10-01)
 
     def test_every_effort_pick_is_remembered_ultracode_included(self):
         # the user 2026-08-14: they pick ultracode and expect NEW sessions to follow. The old guard
@@ -82,9 +101,10 @@ class EffortReconnect(unittest.TestCase):
             self.assertIn(pin, BACKEND_SRC)
 
     def test_backend_clears_the_pending_flag_when_the_reconnect_lands(self):
-        # cleared the instant the new client connects (reconnect loop) — event-based, mirrors _model_pending
-        self.assertIn('if self._effort_pending:', BACKEND_SRC)
-        self.assertIn('self.backend._update_reg(self.sid, effortPending=False)', BACKEND_SRC)
+        # cleared at the connect that reached a CLI LAUNCHED with the pick (2026-10-01: an attach to a CLI launched before
+        # it keeps the dots; the connect's reconcile decides, tests/test_pick_survives_restart.py) — event-based
+        self.assertIn('self._reconcile_waiting_picks(launch, launched_here, spawned_at=self._hello_spawned_at)', BACKEND_SRC)
+        self.assertIn('fields["effortPending"] = False', BACKEND_SRC)
         # exposed on both the live snapshot and the reg-backed live_sessions (for dormant/all sessions)
         self.assertIn('"effortPending": bool(self._effort_pending),', BACKEND_SRC)
         self.assertIn('"effortPending": bool(reg.get("effortPending")),', BACKEND_SRC)

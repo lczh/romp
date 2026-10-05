@@ -8,8 +8,8 @@
 import { commandList } from "./commands";
 import { fuzzyMatch } from "./fuzzy";
 import {
-  bindable, builtInOwner, chordOf, conflictOf, displayChord, effectiveChord, yieldsTo,
-  loadOverrides, saveOverride, BUILT_IN, FIXED_KEYS, KEYS_EVENT,
+  bindable, builtInOwner, chordOf, displayChord, effectiveChord, reassignLosers, yieldsTo,
+  loadOverrides, saveOverride, BUILT_IN, FIXED_KEYS, KEYS_EVENT, type Bindings,
 } from "./keybindings";
 
 const CSS =
@@ -188,9 +188,13 @@ export function initShortcutsModal(mac: boolean, doc: Document = document): Shor
     e.preventDefault();
     e.stopPropagation();
     // a held conflict resolves on Enter (reassign: the other command loses the chord) — anything
-    // else keeps recording
+    // else keeps recording. Enter takes the chord from every command keybindings' reassignLosers lists at that moment
+    // (the one the dispatcher runs there, any other saved binding that reads as the chord, and the default of a chat
+    // command whose own handler answers it), so the fresh binding is what the key runs, in the chat too (review,
+    // 2026-09-30 and 2026-10-01). Those are the commands the row names, unless the saved keys or the commands changed
+    // while the row was pending (loserTitles)
     if (pendChord && e.key === "Enter") {
-      saveOverride(pendOther!, "");   // the loser is visibly unbound, never silently dead
+      for (const id of reassignLosers(pendChord, recId, bindableCommands(), loadOverrides(), mac)) saveOverride(id, "");   // the loser is visibly unbound, never silently dead
       commit(recId, pendChord);
       return;
     }
@@ -216,9 +220,28 @@ export function initShortcutsModal(mac: boolean, doc: Document = document): Shor
       return;
     }
     refused = null;
-    const other = conflictOf(ch, recId, bindableCommands(), loadOverrides(), mac);
-    if (other) { pendChord = ch; pendOther = other; render(); return; }
+    // the row shows whenever Enter would take the chord from any command (reassignLosers, the dispatcher's pick first),
+    // not only when the dispatcher runs another command there: a key recorded again for the command that already holds
+    // it, over a chat command's default (Open the log saved on Navigate back's Ctrl+M), still names that chat command,
+    // whose own handler takes the key in the chat, and Enter frees it (review, 2026-10-01)
+    const losers = reassignLosers(ch, recId, bindableCommands(), loadOverrides(), mac);
+    if (losers.length) { pendChord = ch; pendOther = losers[0]; render(); return; }
     commit(recId, ch);
+  }
+
+  // The titles the conflict row names: every command Enter takes the chord from (keybindings' reassignLosers: the one the
+  // dispatcher runs there first, then any other saved binding that reads as the chord and the default of a chat command
+  // whose own handler answers it), so nothing loses its key unnamed (review, 2026-10-01). The list can be empty only
+  // after a change while the row is pending, such as a Reset on the named command's row, which stays clickable: the row
+  // then keeps naming the first command it named (pendOther), by its id if that command has since left the registry,
+  // though Enter takes the key from no command. Joined for the row's quotes: A”, “B” and “C.
+  function loserTitles(chord: string, id: string, overrides: Bindings): string {
+    const losers = reassignLosers(chord, id, bindableCommands(), overrides, mac);
+    const titles = (losers.length ? losers : [pendOther!]).map((x) => {
+      const other = bindableCommands().find((c) => c.id === x);
+      return other ? other.title : x;
+    });
+    return titles.length > 1 ? titles.slice(0, -1).join("”, “") + "” and “" + titles[titles.length - 1] : titles[0];
   }
 
   function render(): void {
@@ -257,8 +280,7 @@ export function initShortcutsModal(mac: boolean, doc: Document = document): Shor
         const hint = doc.createElement("span");
         if (pendChord) {
           hint.className = "rkeys-conflict";
-          const other = bindableCommands().find((x) => x.id === pendOther);
-          hint.textContent = displayChord(pendChord, mac) + " is used by “" + (other ? other.title : pendOther) +
+          hint.textContent = displayChord(pendChord, mac) + " is used by “" + loserTitles(pendChord, c.id, overrides) +
             "” — Enter reassigns it here, Esc keeps it there";
         } else if (refused) {
           hint.className = "rkeys-conflict";
@@ -286,7 +308,8 @@ export function initShortcutsModal(mac: boolean, doc: Document = document): Shor
           chip.textContent = displayChord(eff, mac);
           row.appendChild(chip);
           // a DEFAULT on a chord the reader saved for another command yields to it in the dispatcher (keybindings'
-          // chordMap): the row says so, so the loser is visible, not silently dead (review, 2026-09-23)
+          // chordMap): the row says so, so the loser is visible, not silently dead (review, 2026-09-23). So does the
+          // earlier of two SAVED bindings on one chord, which the dispatcher gives to the later (review, 2026-09-30)
           const winner = yieldsTo(c.id, bindableCommands(), overrides, mac);
           if (winner) {
             const y = doc.createElement("span");

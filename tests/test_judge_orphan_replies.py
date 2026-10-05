@@ -11,6 +11,7 @@ markers into real assistant atoms — dedup'd by uuid and either-way text prefix
 the CLI's own "API Error: …" texts excluded (pre-tagging markers hold that noise). SYNTHETIC only."""
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -188,6 +189,239 @@ class JudgeSeesSalvagedWork(unittest.TestCase):
         self.assertIsNotNone(node, "the ask still gets its card")
         self.assertFalse(node.get("nodeComplete"),
                          "error noise in a marker must not un-guard the fabrication hole")
+
+
+FORK = "66666666-7777-8888-9999-bbbbbbbbbbbb"   # the transcript a /clear opened under SID's session
+
+
+def _iso_ms(t, ms):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % ms
+
+
+class SalvageFloorAfterAClear(unittest.TestCase):
+    """2026-10-03: a /clear's leaf parses without the session's first transcript (the anchor), which no
+    record of the new conversation links back into. That file was also what deduped a pre-clear salvaged
+    reply whose text DID land there (landed_text_uuids over every file read), and a pre-clear reply that
+    never landed leaked into every post-clear parse already. parse_session floors the markers at the first
+    record of its own candidate files: a pre-clear marker is no reply of the conversation the parse
+    reads. Here the parse is handed the leaf alone, the input the judge's candidates hand it for a /clear."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.anchor = self.td / (SID + ".jsonl")
+        self.leaf = self.td / (FORK + ".jsonl")
+        self.addCleanup(shutil.rmtree, self.td, True)
+
+    def _write(self, p, records):
+        p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    def _world(self, leaf_head_parent=None, head_ms=0):
+        self._write(self.anchor, [
+            {"type": "user", "timestamp": iso(T0), "uuid": "u_pre", "parentUuid": None, "promptSource": "typed",
+             "message": {"role": "user", "content": "how does the notes-api page its index?"}},
+            {"type": "assistant", "timestamp": iso(T0 + 30), "uuid": "a_pre", "parentUuid": "u_pre",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "By cursor, fifty notes a page."}],
+                         "stop_reason": "end_turn"}}])
+        self._write(self.leaf, [
+            {"type": "user", "timestamp": _iso_ms(T0 + 600, head_ms), "uuid": "u_post", "parentUuid": leaf_head_parent,
+             "promptSource": "typed", "message": {"role": "user", "content": "now add a tags filter to the search route"}},
+            {"type": "assistant", "timestamp": iso(T0 + 660), "uuid": "a_post", "parentUuid": "u_post",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "Added the tags filter."}],
+                         "stop_reason": "end_turn"}}])
+
+    def _markers(self):
+        return [_marker(T0 + 30, "a_pre", "By cursor, fifty notes a page, the reply as it streamed."),   # landed in the anchor
+                _marker(T0 + 40, "lost_pre", "A pre-clear reply that never reached the transcript."),
+                _marker(T0 + 650, "lost_post", "A post-clear reply that never reached the transcript.")]
+
+    def _parse(self, path, files, markers):
+        return em.parse_session(str(path), rompuuid=SID, candidate_files=[str(f) for f in files],
+                                states=markers, postal_log=[], now=NOW)
+
+    @staticmethod
+    def _salvaged(tree):
+        return [a["uuid"] for t in tree["turns"] for a in t["atoms"] if a.get("orphaned")]
+
+    def test_a_cleared_session_synthesizes_no_pre_clear_salvaged_reply(self):
+        self._world()
+        tree = self._parse(self.leaf, [self.leaf], self._markers())
+        self.assertEqual(self._salvaged(tree), ["lost_post"],
+                         "only the post-clear salvage: the landed pre-clear reply does not come back through a parse that no "
+                         "longer reads the file it landed in, and the never-landed one belongs to the cleared conversation")
+
+    def test_a_salvaged_reply_in_the_heads_second_is_kept(self):
+        # the head's stamp carries milliseconds; a marker written in that same second (stamped by the whole second) is a
+        # reply of the new conversation, and losing a reply is the worse error
+        self._world(head_ms=700)
+        tree = self._parse(self.leaf, [self.leaf], [_marker(T0 + 600, "same_sec", "A reply salvaged in the head's own second.")])
+        self.assertEqual(self._salvaged(tree), ["same_sec"])
+
+    def test_the_floor_is_a_no_op_with_the_first_file_among_the_candidates(self):
+        # a session that never cleared (its own first file is the leaf), and a fork whose head links back into the first
+        # file (its history is the conversation): every marker the floor-free parse salvages, the floored one salvages too,
+        # a pre-fork one included, so the floor is the EARLIEST head over the candidates, never the leaf's own
+        real = em._conversation_floor
+        self.addCleanup(setattr, em, "_conversation_floor", real)
+        markers = [_marker(T0 + 40, "lost_pre", "A reply from before the fork that never reached the transcript."),
+                   _marker(T0 + 650, "lost_post", "A reply from after the fork that never reached the transcript.")]
+        for name, parent, path, files in (("never cleared", None, self.anchor, [self.anchor]),
+                                          ("back-linked", "a_pre", self.leaf, [self.leaf, self.anchor])):
+            self._world(leaf_head_parent=parent)
+            em._conversation_floor = real
+            got = self._parse(path, files, markers)
+            em._conversation_floor = lambda files: None
+            ref = self._parse(path, files, markers)
+            em._conversation_floor = real
+            self.assertEqual(self._salvaged(ref), ["lost_pre", "lost_post"], "%s: the premise, the floor-free salvage" % name)
+            self.assertEqual(self._salvaged(got), self._salvaged(ref), "%s: the floor changes nothing" % name)
+
+    def test_a_head_record_holding_an_invalid_byte_is_the_floor_the_candidate_rule_reads(self):
+        # review round two: the candidate rule reads a head with bad bytes replaced (judge.transcript_head), and the floor read
+        # raw bytes, so with one invalid UTF-8 byte inside the head record's text (a byte the CLI never writes) the rule left
+        # the first file out while the floor skipped that record. With a record after it, the floor fell to that record's
+        # stamp and dropped the first turn's salvaged reply; with none, there was no floor, and the reply that landed in the
+        # first file came back as salvage. The floor decodes as the rule does, and finds the same head
+        for later in (True, False):
+            with self.subTest(record_after_the_head=later):
+                self._world()
+                raw = self.leaf.read_bytes().split(b"\n")
+                self.assertIn(b"tags filter", raw[0], "premise: the head is the first line")
+                raw[0] = raw[0].replace(b"tags filter", b"tags \xff filter")
+                self.leaf.write_bytes(b"\n".join(raw if later else [raw[0], b""]))
+                em._FILE_HEAD_T.pop(os.path.realpath(str(self.leaf)), None)
+                jd._head_memo.pop(str(self.leaf), None)
+                self.assertEqual(jd._judge_candidates(SID, [str(self.leaf)]), [str(self.leaf)],
+                                 "premise: the rule reads that head and leaves the first file out")
+                tree = self._parse(self.leaf, [self.leaf], self._markers())
+                self.assertEqual(self._salvaged(tree), ["lost_post"],
+                                 "floored at the head: the first turn's salvaged reply stays, nothing from before the clear")
+
+
+PSID = "5a1e0000-2222-4333-8444-000000000a01"     # private synthetic sids (the goal-store fixture rule: the planner run mints)
+PFORK = "5a1e0000-2222-4333-8444-000000000a02"
+PRE_TEXTS = ("how does the notes-api page its index?", "By cursor, fifty notes a page",
+             "A pre-clear reply that never reached the transcript.")
+
+
+class NoPreClearSalvageReachesTheJudges(unittest.TestCase):
+    """The judges' own road after a /clear (2026-10-03): jd.parsed_session hands the leaf alone to the parse (the anchor is
+    unreachable from a parentless head), and the floor keeps every pre-clear salvaged reply out of what the planner reads,
+    the one that landed in the pre-clear file included, so nothing from the cleared conversation is minted again."""
+
+    def setUp(self):
+        td = Path(tempfile.mkdtemp())
+        self.td = td
+        self.anchor, self.leaf = td / (PSID + ".jsonl"), td / (PFORK + ".jsonl")
+        self.anchor.write_text("\n".join(json.dumps(r) for r in [
+            {"type": "user", "timestamp": iso(T0), "uuid": "u_pre", "parentUuid": None, "promptSource": "typed",
+             "message": {"role": "user", "content": PRE_TEXTS[0]}},
+            {"type": "assistant", "timestamp": iso(T0 + 30), "uuid": "a_pre", "parentUuid": "u_pre",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "By cursor, fifty notes a page."}],
+                         "stop_reason": "end_turn"}}]) + "\n")
+        self.leaf.write_text("\n".join(json.dumps(r) for r in [
+            {"type": "user", "timestamp": iso(T0 + 600), "uuid": "u_post", "parentUuid": None, "promptSource": "typed",
+             "message": {"role": "user", "content": "now add a tags filter to the search route"}},
+            {"type": "assistant", "timestamp": iso(T0 + 660), "uuid": "a_post", "parentUuid": "u_post",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "Added the tags filter."}],
+                         "stop_reason": "end_turn"}}]) + "\n")
+        (td / "states").mkdir()
+        (td / "states" / (PSID + ".jsonl")).write_text("\n".join(json.dumps(m) for m in [
+            _marker(T0 + 30, "a_pre", "By cursor, fifty notes a page, the reply as it streamed."),
+            _marker(T0 + 40, "lost_pre", PRE_TEXTS[2]),
+            _marker(T0 + 650, "lost_post", "A post-clear reply that never reached the transcript.")]) + "\n")
+        saved = (jd.GOALDIR, jd.PCACHE, jd.STATESDIR, jd.plan_llm, jd.opener_llm, jd._group_store)
+        jd.GOALDIR, jd.PCACHE, jd.STATESDIR = td / "goals", td / "pcache", td / "states"
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+
+        def restore():
+            (jd.GOALDIR, jd.PCACHE, jd.STATESDIR, jd.plan_llm, jd.opener_llm, jd._group_store) = saved
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+            shutil.rmtree(td, ignore_errors=True)
+        self.addCleanup(restore)
+
+    @staticmethod
+    def _texts(tree):
+        return json.dumps([a.get("message") for t in tree["turns"] for a in t["atoms"]])
+
+    def test_the_judges_parse_of_a_cleared_session_holds_no_pre_clear_salvage(self):
+        texts = self._texts(jd.parsed_session(PSID, [str(self.leaf)], NOW))
+        for t in PRE_TEXTS:
+            self.assertNotIn(t, texts, "nothing of the cleared conversation: %r" % t)
+        self.assertIn("A post-clear reply that never reached the transcript.", texts, "the post-clear salvage stands")
+        self.assertEqual(jd._judge_candidates(PSID, [str(self.leaf)]), [str(self.leaf)], "the parse read the leaf alone")
+
+    def test_no_planner_call_sees_pre_clear_text_after_a_clear(self):
+        calls = []
+
+        def fake(text, *a, **k):
+            calls.append(text)
+            return '{"ops":[{"why":"asked for a filter","do":"mint","text":"Add a tags filter to the search route"}]}'
+        jd.plan_llm = jd.opener_llm = fake
+        jd._group_store = lambda *a, **k: None
+        jd._plan_session(PSID, str(self.leaf), NOW)
+        store = jd.load_goals(PSID)
+        self.assertTrue(any("tags filter" in c for c in calls), "premise: the planner read the post-clear conversation")
+        for c in calls:
+            for t in PRE_TEXTS:
+                self.assertNotIn(t, c, "a planner call carried pre-clear text: %r" % t)
+        self.assertFalse([nd for nd in store["nodes"].values() if nd.get("promptUuid") in ("u_pre", "a_pre", "lost_pre")],
+                         "no card anchored in the cleared conversation")
+
+
+RSID = "5a1e0000-2222-4333-8444-000000000b01"     # private synthetic sids: a session, its /clear's file, and the file a
+RL1 = "5a1e0000-2222-4333-8444-000000000b02"      #  resume of that file forked to
+RL2 = "5a1e0000-2222-4333-8444-000000000b03"
+MID_TEXT = "A reply salvaged after the clear and before the resume."
+
+
+class SalvageFloorOverTheResumeLineage(unittest.TestCase):
+    """The salvage floor is the earliest head over the lineage CLOSURE of the parse's candidates, on the parse's side
+    (parse_session) and on the chat's (jd.conversation_floor), never over the candidates alone (review round one,
+    2026-10-03). After a /clear to L1 and a resume fork from L1 to L2 the candidates are L2 alone, the anchor being
+    unreachable, but the parse reads L1 through the lineage: a reply salvaged between L1's head and L2's head belongs to
+    the conversation it reads and stays, while one from before the clear still goes."""
+
+    def setUp(self):
+        td = Path(tempfile.mkdtemp())
+        self.anchor, self.l1, self.l2 = (td / (s + ".jsonl") for s in (RSID, RL1, RL2))
+
+        def write(p, rows):
+            p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        def turn(t, u, a, ask, reply):
+            return [{"type": "user", "timestamp": iso(t), "uuid": u, "parentUuid": None, "promptSource": "typed",
+                     "message": {"role": "user", "content": ask}},
+                    {"type": "assistant", "timestamp": iso(t + 60), "uuid": a, "parentUuid": u,
+                     "message": {"role": "assistant", "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn"}}]
+        write(self.anchor, turn(T0, "u_pre", "a_pre", "how does the notes-api page its index?", "By cursor."))
+        write(self.l1, turn(T0 + 600, "u_l1", "a_l1", "now add a tags filter to the search route", "Added the tags filter."))
+        write(self.l2, turn(T0 + 1200, "u_l2", "a_l2", "and cache the tag counts", "Cached them."))   # the resume's fresh head
+        (td / "states").mkdir()
+        (td / "states" / (RSID + ".jsonl")).write_text("\n".join(json.dumps(m) for m in [
+            _marker(T0 + 40, "lost_pre", "A pre-clear reply that never reached the transcript."),
+            _marker(T0 + 700, "lost_mid", MID_TEXT),
+            {"t": T0 + 1190, "resumeFork": {"from": RL1, "to": RL2}}]) + "\n")
+        saved = jd.STATESDIR
+        jd.STATESDIR = td / "states"
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._RESUME_LINKS_MEMO.clear()
+
+        def restore():
+            jd.STATESDIR = saved
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._RESUME_LINKS_MEMO.clear()
+            shutil.rmtree(td, ignore_errors=True)
+        self.addCleanup(restore)
+
+    def test_the_judges_parse_keeps_a_reply_salvaged_between_the_clear_and_the_resume(self):
+        self.assertEqual(jd._judge_candidates(RSID, [str(self.l2)]), [str(self.l2)], "premise: the anchor is unreachable")
+        tree = jd.parsed_session(RSID, [str(self.l2)], NOW)
+        texts = json.dumps([a.get("message") for t in tree["turns"] for a in t["atoms"]])
+        self.assertIn("Added the tags filter.", texts, "premise: the parse reads L1 through the resume lineage")
+        self.assertEqual([a["uuid"] for t in tree["turns"] for a in t["atoms"] if a.get("orphaned")], ["lost_mid"],
+                         "floored at L1's head: the reply after the clear stays, the one before it goes")
+
+    def test_the_chats_floor_is_the_head_of_the_clears_file(self):
+        self.assertEqual(jd.conversation_floor(RSID, str(self.l2)), T0 + 600,
+                         "the earliest head over the closure (L2 and L1), not L2's own")
 
 
 if __name__ == "__main__":

@@ -72,8 +72,12 @@ test("the fork dialog prefills through the module: a remote session's fork never
 
 test("a typed name's draft dies with the ack, popover open or closed", () => {
   // drafts are keyed by the anchor message; a typed name that outlived a closed popover resurfaced as the
-  // first thread's own (taken) name on the next comment on that message (review, 2026-09-09)
-  assert.match(RENDER, /if \(m\.uuid\) commentDrafts\.delete\("new:" \+ String\(m\.uuid\)\);\s*\n\s*if \(m\.uuid\) commentDrafts\.delete\("newname:" \+ String\(m\.uuid\)\);/);
+  // first thread's own (taken) name on the next comment on that message (review, 2026-09-09). The ack names the page's
+  // own create (holdAnswered), and its name draft goes with it; the words left the draft at the send (2026-10-01)
+  assert.match(RENDER, /commentDrafts\.delete\("newname:" \+ held\.uuid\);\s+\/\/ a typed name dies with its ack/);
+  const send = RENDER.slice(RENDER.indexOf("function commentSendFromPop("));
+  assert.match(send.slice(0, send.indexOf("\nfunction ", 10)), /commentDrafts\.delete\("new:" \+ create\.uuid\);/,
+    "the sent words leave the draft at the send: a box re-opened on the passage never offers them to send twice");
 });
 
 test("the break-out dialog prefills through the module", () => {

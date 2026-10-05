@@ -194,7 +194,8 @@ already romp's, and nothing else in this design gets a name of its own.
 
 A producer supplies these fields:
 
-- `key`: the dedupe key, matching `[A-Za-z0-9_.-]{1,64}`, required.
+- `key`: the dedupe key, matching `[A-Za-z0-9_.-]{1,64}`, required. A post from inside the kernel may key up to 128
+  characters: the held-mail card's key is the bus's message id, which the bus bounds at 128.
 - `title`: one line, required, up to 200 characters.
 - `body`: markdown, optional, up to 64 kilobytes.
 - `session`: required. Every notice belongs to a session, which is the source of the card's chip,
@@ -492,7 +493,7 @@ same way, so no reader changes.
 **The archive bound.** The owner-less file is one more `<sid>.jsonl` to the retention pass: dismissed, expired,
 superseded and over-cap rows move to `notices-archive/notes.jsonl`, the revision index `notes.revs.json` counts its
 revisions, the restore's tail read serves its Undo. The fifty-live-keys cap applies to the file on its own, so owner-less
-cards are capped as one session's would be.
+cards are capped as one session's would be. A held-mail card holds no slot under the cap, in a session's file or this one.
 
 **Order: the feed board's rule.** Every NOTICE card carries two fields the board model reads (plans/card-boards.md;
 the names agreed with its author 2026-09-18): `board`, the board the card sits on, `"feed"` today; and `category`, the
@@ -855,9 +856,10 @@ goes.** The census of today's card and where each field lands:
 **Who posts, and when.** The kernel, at every notice attach in `build_feed` (`_notice_cards`), before
 the projection: each held file under `STATE/postal/quarantine` whose `mid` has no notice under the
 recipient's key, in the live rows or the revision index, gets one `post_notice(toId, mid, ...)`; the
-check is one directory listing memoized on the directory's stat (the held file's publish is an
-`os.replace`, which moves it), so a boot, a first build and a hold landing while the kernel was down are
-all covered and a decided or dismissed card is never re-posted. The bus changes nothing for this (a
+check lists the directory, memoized on its stat and on a count that Undo's restores out of the archive
+move (the held file's publish is an `os.replace`, which moves it), and runs at every build while a card it could not
+settle stands, so a boot, a first build and a hold landing while the kernel was down are all covered and
+a decided or dismissed card is never re-posted. The bus changes nothing for this (a
 later immediacy post through `POST /notice` stays idempotent by the same key check). A held file whose
 recipient this kernel does not know (a renamed or ended session) posts to the owner-less home with the
 recipient's name in the title and no actions, since a verdict needs a live recipient; the bus's approve
@@ -866,7 +868,13 @@ refusal for a gone recipient is the same fact.
 **How the card moves.** On a decision the runner calls `_bus_quarantine_act({mid, action, sid: owner,
 feedback?})`; success appends the `acted` row and clears the card (`dismissOnAction`), and appends an
 `expire` row for the key so the projection retires it whatever the ledger later says; the bus deletes the
-held file, so the backfill sees nothing to post. A refusal re-arms the buttons with the bus's reason
+held file, so the backfill sees nothing to post. A hold the bus decides by any other road (its own act route, or
+a verdict it carried out after the kernel's request timed out) loses its file too: each backfill pass expires a
+held-mail card whose file is gone, read again under the notice lock just before the expire, and retires no card
+while the hold directory cannot be read or is missing. A pass that posts a card and then finds the hold's file
+gone, or cannot stat it, runs that expiry check again before it ends; if the check leaves a card unsettled,
+the pass moves the count, so the next build checks again whichever build finishes last. A refusal re-arms
+the buttons with the bus's reason
 through `noticeActionDone`. Clear dismisses the card while the held file stays, as today, and the
 backfill's key check keeps the dismissed key dismissed. A message re-held under the same id cannot
 happen (the sender never resends a `peer_seen` id), so a key has one revision in practice; the revision
@@ -902,9 +910,9 @@ needs-you notice cards; the chat page renders them in a box ABOVE the background
 the session's needs-you notice list, the held-mail card its first content, never a mail-only widget.**
 The chat page hears no feed frame (the kernel sends the feed to feed clients alone), so the box rides
 `build_session`'s frame beside `needsYou`: `notices: [{itemId, title, producer, body, attachment,
-actions}]`, the projection's needs-you rows for the sid in post order (at most the live cap), empty for a
-session with none, absent before the first feed build as `needsYou` is. The pane renders `#notices`, a
-slot above `#bg-tasks` in the chat page's markup, shown and hidden by content as that box is
+actions}]`, the projection's needs-you rows for the sid in post order (at most the live cap besides the held-mail
+cards), empty for a session with none, absent before the first feed build as `needsYou` is. The pane
+renders `#notices`, a slot above `#bg-tasks` in the chat page's markup, shown and hidden by content as that box is
 (`renderNotices` beside `renderBgTasks`, keyed on the slice's content): per card the title with the
 producer, the body through the sanitizer, and the action buttons, the same stored actions posted as
 `noticeAction {itemId, sid, kind, body, input?}` over the chat's own socket and re-armed on

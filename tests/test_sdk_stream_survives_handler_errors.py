@@ -745,7 +745,7 @@ class TheSettleRunsWhateverTheResultsBookkeepingDid(unittest.TestCase):
         s.inflight = 1
         s._interrupted = True                          # the queue is gate-held behind an interrupted turn
         s._pending = ["queued during the interrupted turn"]
-        s._reconnect_when_idle = True                  # an /effort change waiting for this turn's end
+        s._reconnect_when_idle = True                  # a Restart waiting for this turn's end
         s._compacting = True
         return s
 
@@ -1128,7 +1128,7 @@ class TheDeferredReconnectTakesTheHeldQueueWithIt(unittest.TestCase):
         time.sleep(0.2)                                # every chance to be (wrongly) fed now
         self.assertEqual(s.pending(), ["queued head"], "gate-held behind the interrupted turn")
         self.assertEqual(c1.writes, [("first turn", "before-result")])
-        s.request_reconnect()                          # an /effort change while busy: deferred to the turn's end
+        s.request_reconnect(cut=True)                  # the cut road (a Restart's arm) while busy: deferred to the turn's end
         self._wait(lambda: s._reconnect_when_idle, "the deferred reconnect armed")
         s.loop.call_soon_threadsafe(c1.release.set)    # the interrupted turn's ResultMessage: the settle runs
         self._wait(lambda: len(self._Client.instances) == 2 and self._Client.instances[1].writes,
@@ -1162,11 +1162,11 @@ class TheDeferredReconnectTakesTheHeldQueueWithIt(unittest.TestCase):
 
     def test_a_deferred_arm_alone_does_not_hold_mid_turn_forwards(self):
         """The hold keys on _reconnect (armed: the teardown is next), not on _reconnect_when_idle (an
-        /effort change waiting for the turn to end): a message sent mid-turn with one pending is still
+        Restart waiting for the turn to end): a message sent mid-turn with one pending is still
         forwarded to the running turn's client — the designed forward — and the settle folds it."""
         s = self.s
         c1 = self._first_turn()
-        s.request_reconnect()
+        s.request_reconnect(cut=True)
         self._wait(lambda: s._reconnect_when_idle, "the deferred reconnect armed")
         echo = self._echo("echo:mid", "mid-turn note")
         s.enqueue("mid-turn note")

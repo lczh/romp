@@ -282,9 +282,36 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
         self.assertIn("3 background tasks you had running were cut off when the claude process that started them "
                       "ended (a restart or crash): a; b. Their completion notifications will never arrive. Check "
                       "whether each is still running before relaunching it; if they aren't needed, carry on.", three)
-        # the reconnect cause reads as the parenthesis after "ended", with "it" the process that ended
-        self.assertIn("ended (a settings switch or a rewind restarted it): a",
-                      sb.task_death_notice([{"desc": "a"}], cause=sb.SdkSession._RECONNECT_CAUSE))
+        # a relaunch somebody asked for opens on what they did (2026-10-01; it had read "a settings switch or a rewind
+        # restarted it" for every reconnect after a settings switch had stopped cutting anything): the three gestures
+        # that still relaunch a CLI with work running, each rendered whole, in the person's voice, past the prefix
+        self.assertEqual(sorted(sb.CUT_BY), ["apply", "restart", "rewind"], "Restart session, a rewind, Apply now")
+        rendered = {k: sb.task_death_notice([{"desc": "watching the CI run"}], did=v) for k, v in sb.CUT_BY.items()}
+        tail = (" Its completion notification will never arrive. Check whether it is still running before relaunching it; "
+                "if it isn't needed, carry on.")
+        self.assertEqual({k: v[v.index("[romp]"):] for k, v in rendered.items()}, {
+            "restart": "[romp] I restarted Claude Code, which cut off 1 background task you had running: watching the CI run." + tail,
+            "rewind": "[romp] I rewound the conversation and restarted Claude Code, which cut off 1 background task you had "
+                      "running: watching the CI run." + tail,
+            "apply": "[romp] I restarted Claude Code to apply a settings change now, which cut off 1 background task you had "
+                     "running: watching the CI run." + tail,
+        })
+        for k, text in rendered.items():
+            prose = text[text.index("[romp]"):]
+            self.assertNotIn("<!--", prose, k + ": markers lead, prose follows")
+            self.assertNotIn("\n", prose, k + ": one line")
+            body = prose.split("]", 1)[1].lower()
+            for word, why in ROMP_WORDS:
+                self.assertNotIn(word, body, "%s: the notice speaks plainly past its prefix (%r: %s)" % (k, word, why))
+            self.assertNotIn("session", body, k + ": the recipient is \"you\"")
+            self.assertNotIn("settings switch", body, k + ": a settings switch alone no longer cuts anything")
+            self.assertNotRegex(body, r"\(i restarted it\)|restarted it\b", k + ": never \"it\", which reads as the task here")
+        plural = sb.task_death_notice([{"desc": "a"}, {"desc": "b"}], did=sb.CUT_BY["restart"])
+        self.assertIn("[romp] I restarted Claude Code, which cut off 2 background tasks you had running: a; b. Their completion "
+                      "notifications will never arrive. Check whether each is still running before relaunching it; if they "
+                      "aren't needed, carry on.", plural)
+        self.assertIn("I restarted Claude Code, which cut off 1 background task you had running. Its",
+                      sb.task_death_notice([{}], did=sb.CUT_BY["restart"]), "no description, no colon")
 
     def test_the_untitled_fallback_names_no_romp_object(self):
         # a node with no text still renders SOMETHING; that placeholder must not smuggle in "goal"

@@ -124,11 +124,16 @@ for (const t of themes) {
   });
 }
 // the folded group pip and the overview row: web sits alone under one tag; a click on its header (by the element's own click(), since the
-// settings frame intercepts pointer events once open) folds the section, so the header's pip reads web's ring, and shows the section's
-// overview in the transcript's place, whose row wears the shared status chip with the category's word
+// settings frame intercepts pointer events once open) folds the section, so the header's pip reads web's ring; the section's overview,
+// whose row wears the shared status chip with the category's word, opens from the tag's menu (a header's click only folds since
+// 2026-10-02), reached the same way: the header's contextmenu event, then the row's own click()
 await chatF.waitForSelector('#tabs .tab-group-head[data-group="notes"]', { timeout: 30000 }).catch(() => { errors.push("strip: no tag section header"); });
 await chatF.evaluate(() => { const h = document.querySelector('#tabs .tab-group-head[data-group="notes"]'); if (h) h.click(); });
 await chatF.waitForSelector('#tabs .tab-group-head[data-group="notes"] .tab-group-pip.ask', { timeout: 20000 }).catch(() => { errors.push("pip: the folded header shows no ask pip"); });
+await chatF.evaluate(() => { const h = document.querySelector('#tabs .tab-group-head[data-group="notes"]'); if (!h) return; const r = h.getBoundingClientRect();
+  h.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: r.left + 8, clientY: r.bottom })); });
+await chatF.waitForSelector('.ctx-menu.ctx-tagmenu .ctx-tag-overview', { timeout: 10000 }).catch(() => { errors.push("overview: the tag menu offers no Show overview"); });
+await chatF.evaluate(() => { const b = document.querySelector('.ctx-menu.ctx-tagmenu .ctx-tag-overview'); if (b) b.click(); });
 await chatF.waitForSelector('.snap-row .chip.chip-needsInput', { timeout: 20000 }).catch(() => { errors.push("overview: no Needs you chip on the section's row"); });
 for (const t of themes) {
   await setTheme(chatF, t); await page.waitForTimeout(200);

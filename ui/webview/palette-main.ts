@@ -9,7 +9,7 @@
 import { registerCommand, unregisterCommand, runCommand, commandList } from "./commands";
 import { initPalette, PickItem } from "./palette";
 import { initShortcutsModal } from "./shortcuts-modal";
-import { chordMap, chordOf, dispatchable, displayChord, effectiveChord, keyHint, loadOverrides, saveOverride, titleWithKey, KEYS_EVENT } from "./keybindings";
+import { chordMap, chordOf, dispatchable, displayChord, editorKeepsKey, effectiveChord, keyHint, loadOverrides, saveOverride, titleWithKey, yieldsTo, KEYS_EVENT } from "./keybindings";
 import { hostPrefix } from "./host-prefix";   // pure display helper — safe here (never federation.ts, which boots a manager on import)
 import { installMenuEcho } from "./tag-menu";   // model deps only (tag-lens/session-views) — no manager, no DOM cost
 import { loadSettings, OPTIONAL_PANES, type PaneSet } from "./settings";   // the gear's store, read at every palette open (no side effects at import)
@@ -290,6 +290,24 @@ installMenuEcho();
   const stepSession = (type: "nextTab" | "prevTab"): void => { if (fullPaneUp()) return; chatPost({ type, gesture: true }); };
   registerCommand({ id: "chat.nextTab", title: "Go to the next session", run: () => stepSession("nextTab") });
   registerCommand({ id: "chat.prevTab", title: "Go to the previous session", run: () => stepSession("prevTab") });
+  // "Show tag overview" (the user 2026-10-02): a group header's click only folds now, so the section at a glance opens from
+  // the tag's menu and from here. The pick lists the tag groups on the strip of the column last worked in (that page's own
+  // list, __rompTagSections, in strip order) and a pick asks that column to show the group's overview (render.ts
+  // showOverview, the menu's path). Loud, never an empty list: a column that did not answer, the phone layout's lack of
+  // an overview and a strip with no groups each say so in the list.
+  function openTagOverviewPick(): void {
+    let secs: Array<{ name: string; color: string; count: number }> | null | undefined;
+    try { const f = (chatPane()?.contentWindow as any)?.__rompTagSections; secs = typeof f === "function" ? f() : undefined; }
+    catch (e) { secs = undefined; }   // the chat pane not loaded
+    const note = (title: string): PickItem[] => [{ title, run: () => {} }];
+    const items: PickItem[] = secs === undefined ? note("Couldn't read the tag groups: the chat pane didn't answer")
+      : secs === null ? note("The phone layout has no tag overview")
+      : !secs.length ? note("No tag groups on this chat column's strip")
+      : secs.map((g) => ({ title: g.name, color: g.color || undefined, dim: g.count + " session" + (g.count === 1 ? "" : "s"),
+                           run: () => chatPost({ romp: "showOverview", tag: g.name }) }));
+    palette.openPick({ placeholder: "Show the overview of a tag…", items });
+  }
+  registerCommand({ id: "chat.tagOverview", title: "Show tag overview", run: openTagOverviewPick });
   // "Open this file as a tab" (2026-09-30): listed while a file viewer is up in any pane (a chat column, the feed's file
   // browser, the Files pane); the run presses that viewer's own pop-out, so the palette and the button are one path
   const popOutButton = (): HTMLElement | null => {
@@ -339,9 +357,19 @@ installMenuEcho();
   // Esc (or running an item) hands focus back to the chat pane, so "palette, Esc, type"
   // never strands the keyboard on the shell document. The palette's hotkey chips show each
   // command's EFFECTIVE binding (kbdFor), so a rebound command never advertises a stale default.
+  // The comment key's chip goes blank while its chord yields to another command's saved binding
+  // (keybindings' yieldsTo, the dispatcher's own pick): the chat's comment-key handler steps aside
+  // then, so the key runs the other command from the shell and from the panes the dispatcher listens
+  // in, the chat included outside the stores yieldsTo's note lists (review, 2026-09-30). Other chips
+  // keep their chord, as the tooltips do: the chat answers some keys itself (the nav trail, the jump
+  // moves) whatever the dispatcher picks, and the dialog's yield marks say what the dispatcher does.
+  function kbdChip(c: { id: string; chord?: string }): string | undefined {
+    const ov = loadOverrides(), ch = effectiveChord(c.id, c.chord, ov, mac);
+    return ch && !(c.id === "chat.commentSelection" && yieldsTo(c.id, commandList(), ov, mac)) ? displayChord(ch, mac) : undefined;
+  }
   const palette = initPalette({
     onClose: () => { try { chatPane()!.contentWindow!.focus(); } catch (e) { /* no chat pane */ } },
-    kbdFor: (c) => { const ch = effectiveChord(c.id, c.chord, loadOverrides(), mac); return ch ? displayChord(ch, mac) : undefined; },
+    kbdFor: kbdChip,
   });
   w.__rompPalette = palette;   // reachable by other shell scripts (e.g. a future mobile-bar button)
 
@@ -430,10 +458,21 @@ installMenuEcho();
     if (!byChord) byChord = chordMap(commandList(), loadOverrides(), mac);
     const id = byChord.get(ch);
     if (!id) return;
+    if (editorKeepsKey(id, ch, e.target, mac)) return;   // the file viewer's code editor keeps its own toggle comment (keybindings)
     e.preventDefault(); e.stopPropagation();
     palette.close();                              // a command fired by key must not land under an open palette
     runCommand(id);
   }
+  // The command this dispatcher runs on chord `ch` (chordMap's pick), or null. The chat's comment-key handler and its
+  // menu line ask it through __rompChordPick (render.ts commentKeyTakenBy): the chat holds the store but not the command
+  // list, so it steps aside when this dispatcher would run another command (review, 2026-09-30), and also for one of the
+  // chat's own commands saved on its chord whose handler reads it, which takes the key first (keybindings' yieldsTo lists
+  // the stores where what the chat runs then differs from this pick). Built fresh per call rather than from byChord, so a
+  // save made in a pane counts before this document hears its storage event.
+  function chordPick(ch: string): string | null {
+    return chordMap(commandList(), loadOverrides(), mac).get(ch) || null;
+  }
+  w.__rompChordPick = chordPick;
   // The same dual wiring as the Alt+Arrow pane nav (_LANDING_FOCUS_JS): capture on the shell
   // document AND on every same-origin pane document, re-attached on every iframe (re)load.
   // render.ts's own window-capture Cmd+O handler stands down inside the shell (inRompShell),

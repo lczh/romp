@@ -36,10 +36,14 @@ class TailEntryWeight(unittest.TestCase):
         self.addCleanup(self._td.cleanup)
         self.dir = self._td.name
         self._budget = em._JSONL_CACHE_BUDGET_BYTES
+        self._multiple = em._RECORD_CACHE_MULTIPLE
+        em._RECORD_CACHE_MULTIPLE = em.RECORD_CACHE_DECODED_MULTIPLE   # the budget weighs entries decoded (2026-10-01): pinned to the
+        #                                                                 measured figure whatever the runner's environment exports
         em._JSONL_CACHE.clear(); em._JSONL_CACHE_BYTES[0] = 0
 
     def tearDown(self):
         em._JSONL_CACHE_BUDGET_BYTES = self._budget
+        em._RECORD_CACHE_MULTIPLE = self._multiple
         em._JSONL_CACHE.clear(); em._JSONL_CACHE_BYTES[0] = 0
 
     def _tail_file(self, name, prefix_records=1, tail_records=1, text_bytes=200_000):
@@ -111,17 +115,20 @@ class TailEntryWeight(unittest.TestCase):
         self.assertEqual(em._entry_weight((0.0, 5000, 5000, b"", held, 1, 0)), 5000, "a 7-tuple holding records: the same")
 
     def test_the_budget_sees_tail_entries(self):
-        # red on main: two tails of ~200 KB each under a budget of 1.5 tails never evicted (they weighed 0)
+        # red on main: two tails of ~200 KB each under a budget of 1.5 tails never evicted (they weighed 0). The budget is
+        # in memory, so 1.5 tails DECODED (2026-10-01); one tail fits alone, so the eviction is the two tails' sum and
+        # not the path that inserts an entry larger than the whole budget
         a, plen_a, tf_a = self._tail_file("web.jsonl")
         b, plen_b, tf_b = self._tail_file("api.jsonl")
         one = os.path.getsize(a) - plen_a
-        em._JSONL_CACHE_BUDGET_BYTES = int(one * 1.5)
+        em._JSONL_CACHE_BUDGET_BYTES = int(one * 1.5 * em._RECORD_CACHE_MULTIPLE)
         ev0 = em._RECORD_CACHE_STATS["budgetEvictions"]
         em._read_jsonl_entry(a, tail_ok=True, tail_from=tf_a)
+        self.assertEqual((em._RECORD_CACHE_STATS["budgetEvictions"] - ev0, set(em._JSONL_CACHE)), (0, {a}), "one tail fits the budget alone")
         em._read_jsonl_entry(b, tail_ok=True, tail_from=tf_b)
         self.assertEqual(em._RECORD_CACHE_STATS["budgetEvictions"] - ev0, 1, "the second tail evicts the first")
         self.assertEqual(set(em._JSONL_CACHE), {b})
-        self.assertLessEqual(em._JSONL_CACHE_BYTES[0], em._JSONL_CACHE_BUDGET_BYTES)
+        self.assertLessEqual(em._real_bytes(em._JSONL_CACHE_BYTES[0]), em._JSONL_CACHE_BUDGET_BYTES)
         self.assertTrue(self._consistent())
 
     def test_a_pop_subtracts_what_the_insert_added(self):

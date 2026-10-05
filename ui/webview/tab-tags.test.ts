@@ -83,22 +83,22 @@ test("presentation: one chip per NAME (the shared tag chip, T321), the action ro
   assert.doesNotMatch(fly.slice(0, 2500), /host-prefix|hostNameNodes/, "kernels are plumbing — no host chrome in the flyout");
 });
 
-test("one-click MOVE between groups (tab groups, 2026-09-04): 'Move to <name>' adds the target and drops the HOME tag on ONE blob; '+' adds without moving", () => {
+test("one-click MOVE between groups: 'Move to <name>' is the DRAG'S move (the user 2026-10-01), through its decision and writer; '+' adds without moving", () => {
   const fly = RENDER.slice(RENDER.indexOf('const sub = el("div", "ctx-menu ctx-sub ctx-sub-tags");'), RENDER.indexOf("// New tag… — an inline input"));
   assert.match(fly, /const home0 = readTabGroups\(\)\.on \? \(\(copy !== undefined \? holding\(\)\.find\(\(g\) => g\.name === copy\) : undefined\) \?\? holding\(\)\[0\]\) : undefined;\s*\n\s*const home = home0 && !home0\.pending \? home0 : undefined;/,
-    "the group THIS COPY sits in (T264b: a session under several tags has a copy per group, and the menu speaks for the right-clicked copy's group), else the first holder; only while the strip is sectioned, and never a tag whose create is still in flight");
+    "the rows show while the strip is sectioned and the right-clicked copy's group (T264b) is addressable — never a tag whose create is still in flight");
   assert.match(fly, /lb\.append\("Move to ", named\(\)\); bodyE\.appendChild\(lb\);/, "the tag inside the sentence is the chip (T321)");
-  assert.match(fly, /moveUnion\(home, g\); build\(\); sb\.textContent = subText\(\);/, "the row IS the move");
+  // the row IS the drag's plain drop into that group: the session's tags become exactly [name], whichever copy
+  // was right-clicked, in ONE setTags on a kernel with the tagSet cap and the older ops otherwise (drag-join.ts)
+  assert.match(fly, /if \(settings\.tabsLocked\) return; postTabDropTag\(moveToTag\(unionFor\(\), g\.name, id\), id\); build\(\); sb\.textContent = subText\(\);/,
+    "the row posts the drop's move through the drop's own writer");
+  assert.doesNotMatch(RENDER, /moveUnion/, "no second move writer: the menu's old one-tag swap is gone");
+  assert.match(RENDER, /import \{ resolveTabDrop, moveToTag, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type TabDrop, type LeaveWords, type DropZone \} from "\.\/drag-join";/);
   assert.match(fly, /plus\.title = "add this tag too \(the session keeps its other tags\)" \+ \(settings\.tabsLocked \? ": adding is not a move, so the lock does not hold it" : ""\);/, "…and multi-tag stays one click away (the tab lock, T395, adds its clause)");
+  assert.match(fly, /plus\.addEventListener\("click", \(e2\) => \{ e2\.stopPropagation\(\); editUnion\(g, \{ add: \[id\] \}\);/, "the + is the menu's Option-drag: an add, unchanged");
   assert.match(fly, /lb\.append\("\+ ", named\(\)\); bodyE\.appendChild\(lb\);/, "with no home tag, + <name> is the move");
-  const mv = RENDER.slice(RENDER.indexOf("const moveUnion = (from: TagUnion, to: TagUnion)"), RENDER.indexOf("// HOVER-INTENT open"));
-  assert.match(mv, /const a = applyUnionEdit\(nv, to, \{ add: \[id\] \}\);\s*\n\s*const r = applyUnionEdit\(nv, from, \{ remove: \[id\] \}\);/,
-    "two edits on ONE blob shown — the strip never shows the half-moved state");
-  assert.match(mv, /postUnionEdits\(nv, \{ ops: \[\{ op: "move", tid_from: rem\.tid, tid_to: add\.tid, sid: id \}\], mirrored: a\.mirrored \|\| r\.mirrored \}\);/,
-    "…and with both tags local, ONE `move` op the kernel applies under its lock: both halves or neither");
-  assert.match(mv, /else postUnionEdits\(nv, a, r\);/, "a half with no local home rides its own wire as before");
   assert.match(RENDER, /const applyUnionEdit = \(nv: SessionViews, g: TagUnion, edit: \{ add\?: string\[\]; remove\?: string\[\] \}\): UnionEdit =>/,
-    "editUnion and moveUnion share the one edit — never a forked implementation");
+    "the flyout's add and remove share the one edit — never a forked implementation");
 });
 
 test("the menu groups by what each item changes: [Rename+colours] / [Tags, Move] / [switches+Billing] / [Browse] (the user 2026-09-11)", () => {

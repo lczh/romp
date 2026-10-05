@@ -94,6 +94,9 @@ CENSUS = {
     "_cmd_gestures": ("sig", "states"),
     "_colormap": ("sig", "colormap"),
     "_compacting": ("sig", "backend", "the backend's compacting bracket; else the row's state and since, the parse, and the optimistic stamp's clock boolean (clock)"),
+    "_conversation_floored": ("sig", "transcript", "the salvaged-reply markers (states) floored at the parse's own first record: the head "
+                                                  "of each candidate file the parse reads (transcript), found through the states log's resume "
+                                                  "links (states), the same candidates _parse reads"),
     "_edit_diff": ("pure", "over a tool input"),
     "_effort_changes": ("sig", "states"),
     "_effort_color": ("pure", "over the effort string and the colormap name"),
@@ -128,6 +131,8 @@ CENSUS = {
     "_parked_clear_op": ("pure", "over a parked op and the owning backend's identity (the row's backend, fixed for the session's life): the drain's rule that a one-line Codex command op by a clear head is a clear, read by the clearing fold too (2026-09-19)"),
     "_op_paths": ("pure", "over a parked op (its attachment list, T373 fold)"),
     "_parse": ("sig", "transcript", "memoized on the transcript's (mtime, size), the pending cut (cut) and the states file (states)"),
+    "_thread_parse": ("sig", "transcript", "a comment thread's own records past its cut (thread_cut, _thread_events), memoized on the "
+                                           "transcript's version and the states file (states); else _parse"),
     "_parse_task_notification": ("pure", "over a reminder string"),
     "_patch_rows": ("pure", "over a structured patch"),
     "_path_links": ("sig", "pathlink", "a resolved token latches for the message's life; an unresolved one is retried, and the retry is the pathlink dep"),

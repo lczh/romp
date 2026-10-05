@@ -200,5 +200,82 @@ class BuildSessionNeverResurrectsARolledBackReply(unittest.TestCase):
                         "a genuinely lost reply still interleaves into the chat")
 
 
+FORK = "66666666-7777-8888-9999-cccccccccccc"   # the transcript a /clear opened under SID's session
+PRE_LANDED = "The notes-api pages by cursor, fifty notes a page."
+PRE_LOST = "A pre-clear reply the transcript never kept."
+POST_LOST = "A post-clear reply the transcript never kept."
+
+
+class BuildSessionAfterAClearHoldsNoPreClearSalvage(unittest.TestCase):
+    """The kernel door after a /clear (2026-10-03): the leaf parses without the pre-clear file, so the parse's
+    landedTextUuids no longer carry the uuid of a pre-clear reply that landed there, and build_session's own marker
+    interleave deduped such a marker by that uuid. Where the episode log holds no boundary row (this fixture's log holds
+    no rows at all, and the T131 floor needs two or more), the T131 floor is off, and the marker came back at the top of
+    the new conversation. The interleave is floored where the parse floors it, at the conversation's first record; a
+    pre-clear reply that never landed (which leaked there already) goes with it, and a post-clear one stays."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        td = Path(self.td.name)
+        cdir = td / "launchdir"; cdir.mkdir()
+        proj = td / "projects"
+        pdir = proj / jd.re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cdir)))
+        pdir.mkdir(parents=True)
+        (pdir / (SID + ".jsonl")).write_text("\n".join(json.dumps(r) for r in [
+            uline(T0, "how does the notes-api page its index?", "u_pre", None),
+            aline(T0 + 40, PRE_LANDED, "a_pre", "u_pre")]) + "\n")
+        (pdir / (FORK + ".jsonl")).write_text("\n".join(json.dumps(r) for r in [
+            uline(T0 + 900, "now add a tags filter to the search route", "u_post", None),   # the /clear: a parentless head
+            aline(T0 + 960, "Added the tags filter.", "a_post", "u_post")]) + "\n")
+        names = td / "names"; names.mkdir()
+        (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
+        (td / "states").mkdir()
+        (td / "states" / (SID + ".jsonl")).write_text("\n".join(json.dumps(m) for m in [
+            marker(T0 + 40, "a_pre", PRE_LANDED + " (as it streamed)"),
+            marker(T0 + 50, "lost_pre", PRE_LOST),
+            marker(T0 + 950, "lost_post", POST_LOST)]) + "\n")
+        (td / "sdk").mkdir()
+        (td / "sdk" / (SID + ".json")).write_text(json.dumps({"sid": SID, "name": "web", "cwd": str(cdir), "lastSid": FORK}))
+        self.saved = []
+        for mod in (jd, km.jd):
+            self.saved.append((mod, mod.NAMES, mod.PROJECTS, mod.CAPDIR, mod.ARCHDIR, mod.GOALDIR, mod.STATE, mod.STATESDIR,
+                               mod.SDKDIR, mod.EPIDIR))
+            mod.NAMES, mod.PROJECTS = names, proj
+            mod.CAPDIR, mod.ARCHDIR, mod.GOALDIR = td / "captions", td / "archive", td / "goals"
+            mod.STATE, mod.STATESDIR = td, td / "states"
+            mod.SDKDIR, mod.EPIDIR = td / "sdk", td / "episodes"
+            mod._lastsid_memo.clear(); mod._episode_memo.clear(); getattr(mod, "_RESUME_LINKS_MEMO", {}).clear()
+            mod._discover_cache["fp"] = None; mod._discover_cache["result"] = None
+        self.saved_km = (km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD)
+        km.NAMES = names
+        km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
+                                      "effort": "", "context": None, "compactPct": None,
+                                      "color": None}}
+        km._parse_cache.clear()
+        self.leaf = str(pdir / (FORK + ".jsonl"))
+
+    def tearDown(self):
+        for mod, *vals in self.saved:
+            (mod.NAMES, mod.PROJECTS, mod.CAPDIR, mod.ARCHDIR, mod.GOALDIR, mod.STATE, mod.STATESDIR,
+             mod.SDKDIR, mod.EPIDIR) = vals
+            mod._lastsid_memo.clear(); mod._episode_memo.clear(); getattr(mod, "_RESUME_LINKS_MEMO", {}).clear()
+            mod._discover_cache["fp"] = None; mod._discover_cache["result"] = None
+        (km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD) = self.saved_km
+        km._parse_cache.clear()
+        self.td.cleanup()
+
+    def test_the_chat_after_a_clear_carries_no_pre_clear_salvage_and_keeps_the_post_clear_one(self):
+        self.assertEqual(km.jd.episode_rows(SID), [], "premise: no boundary row, so the T131 floor is off")
+        m = km.build_session(SID, NOW)
+        self.assertIsNotNone(m, "fixture session must build")
+        mds = [e.get("md") or "" for e in m["events"]]
+        self.assertTrue(any("Added the tags filter." in md for md in mds), "premise: the chat is the post-clear leaf's")
+        self.assertFalse(any(PRE_LANDED in md for md in mds), "a pre-clear reply that landed never ghosts back")
+        self.assertFalse(any(PRE_LOST in md for md in mds), "nor one that never landed")
+        self.assertTrue(any(POST_LOST in md for md in mds), "a post-clear salvage still interleaves")
+        self.assertEqual(km.jd._judge_candidates(SID, [self.leaf]), [self.leaf], "the leaf parsed alone")
+
+
 if __name__ == "__main__":
     unittest.main()

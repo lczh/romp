@@ -18,6 +18,7 @@ export type MetaKind = "mode" | "model" | "effort" | "fast";
 export interface MetaStatus {
   mode?: string; model?: string; effort?: string; fast?: string;
   modelPending?: boolean; effortPending?: boolean;   // a /model switch resolving, an /effort switch reconnecting: the badge shows switching-dots
+  fastPending?: boolean;   // the first fast-mode opt-in waiting for its relaunch (2026-10-01): the fast badge's dots, not an early "Fast"
   modelColor?: number[] | null; effortColor?: number[] | null;   // the kernel's classic colormap RGB by rank
   modelTone?: number[] | null; effortTone?: number[] | null;     // the single-hue tones the yatharth themes pick instead
   backend?: string;
@@ -194,9 +195,12 @@ export function syncMetaControls(meta: HTMLElement, st: MetaStatus, forSid: stri
     // model resolves live; effort reconnects to apply (--effort is connect-time) — both drive the switching-
     // dots from the server (st.modelPending / st.effortPending), with isMetaPending covering the sub-second
     // before the first server push (the user 2026-07-06).
+    // …and the first fast-mode opt-in waits for its relaunch the same way (st.fastPending, 2026-10-01): dots until a launch
+    // carries the flag, never "Fast" while the session still runs without it
     const pending = (kind === "model" && !!st.modelPending) || (kind === "effort" && !!st.effortPending)
+      || (kind === "fast" && !!st.fastPending)
       || !!(hooks.pending && hooks.pending(kind, st));   // the chat's sub-second heuristic, when the chat is the caller
-    const showDots = pending && (kind === "model" || kind === "effort");   // both apply via a resolve/reconnect the server tracks
+    const showDots = pending && (kind === "model" || kind === "effort" || kind === "fast");   // each applies via a resolve/relaunch the server tracks
     if (label) {
       if (showDots) {
         if (!label.querySelector(".meta-dots")) label.replaceChildren(metaDots());
