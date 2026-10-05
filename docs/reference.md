@@ -5358,9 +5358,9 @@ The text form prints one screen per window: restarts and the turns they cut
 whose cut count is unknown, and the exits killed after their cut row, which
 count the turns their cut row predicted and are never clean; an exit whose
 prediction failed (`cutTurnsError`) with no drain result to stand in for it,
-killed or with a drain that raised, cut an unknown number too; the
-per-restart rate divides the measured restarts' turns by the measured
-restarts alone),
+killed or with a drain that raised, cut an unknown number too, and the text
+names how many such exits there were; the per-restart rate divides the
+measured restarts' turns by the measured restarts alone),
 the reasons, the outage from exit to first serve and the reconcile settle (from
 the `bootSettled` rows), the quiet windows' waits and backstop firings (from
 the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes

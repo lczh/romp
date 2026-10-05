@@ -310,6 +310,11 @@ class BootJoin(unittest.TestCase):
         text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
                            "buckets": [bucket(completed + [killed, killed_empty])], "live": {"skipped": True}})
         self.assertIn("clean restarts 0 · boots with no cut row 0 · killed after the cut row 2", text)
+        self.assertNotIn("unknown cut count", text, "every exit here has a known count")
+        text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
+                           "buckets": [bucket(completed + [killed_fault])], "live": {"skipped": True}})
+        self.assertIn("· killed after the cut row 1 · exits with an unknown cut count 1", text,
+                      "the text names the exit the per-measured-restart rate leaves out, so the rate reconciles")
 
     def test_rotated_predecessor_is_read_first(self):
         state = Path(tempfile.mkdtemp())

@@ -30108,12 +30108,13 @@ def _kernel_sample_tick(now=None):
 # overrun per phase, and the process teardown after the exit call, which grows with the kernel's size. The SDK drain's
 # reserve (EXIT_DRAIN_BUDGET_S, 35 percent of the deadline and never under EXIT_DRAIN_FLOOR_S, the top of the drain times
 # recorded with session hosts on, nor over the deadline) is held back from the start: every phase before the drain ends
-# by the pre-drain line (the deadline less the reserve), so an overrun shrinks the later best-effort phases, never the
-# drain, and the drain is handed what the deadline has left. The reserve is smaller than the drain's old share of the grace
-# (1.12 s at the manager's 8 s, where the old share was 2.625 s; 0.9 s at the default 5 s, where it was 1.575 s): the
-# drain is handed every second the earlier phases leave, but a slow drain past its reserve now meets the deadline sooner
-# than it met the old share. The three phase budgets are CAPS inside the work window
-# before the drain (priming 15 percent, checkpoint writes 45, assembly documents 25; the rest is the memos and the listing).
+# by the pre-drain line (the deadline less the reserve), so an overrun shrinks the later best-effort phases, and the
+# drain only by the one item in flight at the line; the drain is handed what the deadline has left (at least 0.25 s). The
+# reserve is smaller than the drain's old share of the grace (1.12 s at the manager's 8 s, where the old share was 2.625 s;
+# 0.9 s at the default 5 s, where it was 1.575 s): the drain is handed every second the earlier phases leave, but a slow
+# drain past its reserve now meets the deadline sooner than it met the old share. The three phase budgets are CAPS inside
+# the work window before the drain (priming 15 percent, checkpoint writes 45, assembly documents 25; the rest is the
+# memos and the listing).
 # Before this the four budgets were shares of the grace that summed to 94 percent of it, counted from the drain's own start
 # (after the broadcast and the audit read), with the memos, the listing and the reap left out, and the cut row was written
 # last: a busy exit met the SIGKILL and lost the one row that would have said so. An explicit ROMP_EXIT_DEADLINE_S or

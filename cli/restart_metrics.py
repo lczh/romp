@@ -970,6 +970,9 @@ def summary(doc: dict) -> str:
         lines.append("%s  (%s to %s)" % (b["key"], local_date(b["start"], tz), local_date(b["end"] - 1, tz)))
         per = (" (%s per measured restart)" % b["cutTurnsPerRestart"]) if b["cutTurnsPerRestart"] is not None else ""
         killed = (" · killed after the cut row %d" % b["killedExits"]) if b.get("killedExits") else ""
+        unknown = int(b.get("unmeasuredRestarts", 0)) - int(b.get("restartsWithoutCutRow", 0))   # a cut row whose turns are
+        if unknown > 0:                                                                            #  unknown: out of the rate
+            killed += " · exits with an unknown cut count %d" % unknown
         lines.append("  restarts %d · turns cut %d%s · clean restarts %d · boots with no cut row %d%s"
                      % (b["restarts"], b["cutTurns"], per, b["cleanRestarts"], b["restartsWithoutCutRow"], killed))
         if b["reasons"]:
