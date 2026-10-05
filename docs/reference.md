@@ -1707,12 +1707,25 @@ it) if a write would improve it with a state the process holds (the pass's
 rule, `_path_needs_write`; a dirty path counts here and not for the pass, and a
 fold cold for want of a state counts for the pass, which heals it, and not
 here, where it would only be written cold again), before the entry is popped,
-and on a hit or a restore at the witness the entry stays as it always has. The
+and on a hit or a restore at the witness the entry stays as it always has,
+except over a subagent's own transcript (its card's folds, which the spend
+guard also runs over each agent file after pricing it from a read of its own,
+catching up a card's cursor that stopped short of the file's end, and ahead of
+them the background-task state an open viewer of the agent left, which closing
+that viewer retires so a later write does not carry it forward): there a fold
+that finds nothing new also pops an entry holding records once the file's
+document stands at the entry's witness with every current fold's state, so a
+returned agent whose last record was folded while its file was fresh leaves
+memory too. An open viewer's parse keeps the entry either way: a parse rebuilt
+since the file's last append holds the very records list, so the pop waits,
+and an older one is a whole assembly entry, which the assembly pin keeps
+(counted `recordCache.pinnedKept`) until the viewer closes. The
 write is charged to the pusher cycle's byte budget, which the kernel begins at
 each cycle's start and the pass shares near its end; over the budget the write
 and the drop wait with the entry held (`converge.dropDeferred`), the drop then
 owed and paid at the next cycle's start with the room that cycle has, oldest
-first, or by the next fold over the file, whichever comes first. A document
+first, or by the next fold over the file, whichever comes first; a subagent's
+quiet pop is never owed and waits for the next fold that finds nothing new. A document
 already whole is never rewritten at a later drop (`converge.dropWrites` counts
 the writes), and a dropped file's next fold restores its cursor from the
 document over a tail read instead of reading the file whole, provided the
@@ -1787,7 +1800,16 @@ own count; further behind, the fold is left out (it refolds whole once when it
 next runs), so a fold that ran early and stopped cannot drag the document's
 cut, and every later boot's tail read, back to its count. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
-them at exit; checkpoints of files that no longer exist are swept at boot. A
+them at exit. The settle write runs on the jobs thread, as the last job of its
+pass (`jobs.persistCheckpoints`), so the pusher no longer runs it. A frame
+can still wait on it two ways: a CPU-bound write shares the interpreter lock
+with every frame built meanwhile, and a build that parses the same leaf waits
+on that leaf's writer lock while its assembly document is written. The
+write's first sight of each session, which writes nothing, opens the pass
+(`jobs.checkpointFirstSight`), so a turn that settles while the pass runs is
+written at its end. The converge pass stays on the pusher's cycle, whose byte
+budget it spends, and skips the paths the settle write took since it last
+looked. Checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
 
 The assembly checkpoint (2026-09-11) does the same for the parse itself. A
@@ -2698,8 +2720,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `jobs`: the jobs thread, which runs the housekeeping (the sweeps, the
   reminder walk, the interrupt tick, the persists, the pause and retry
   family) off the pusher since 2026-09-13, so no browser frame waits on a
-  cold read: `passes`, `pass_ms_sum`, `pass_ms_max`, `pass_ms_last`,
-  `pass_cpu_ms_sum`, `pass_ms_p50`, `pass_ms_p90`, `pass_ms_ring_max`,
+  cold read, and since 2026-10-05 the checkpoint settle write as its pass's
+  last job, its first sight of each session the first: `passes`,
+  `pass_ms_sum`, `pass_ms_max`, `pass_ms_last`, `pass_cpu_ms_sum`,
+  `pass_ms_p50`, `pass_ms_p90`, `pass_ms_ring_max`,
   `ring_n`, `passFailed` (a pass that raised out of the loop and was
   skipped), `splitFailed`, `firstPass` (the boot's first pass's stage split,
   the shape of `pusher.firstCycle`), `stageRing` and `cpuByJob` (per job this
@@ -2730,9 +2754,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   counted). The pass's container stage is `jobsPass`,
   its opening `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
-  in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,
-  turn notify, the checkpoint persist and converge, the boot row backstop,
-  the kernel sample, the API health frame) against `_jobs_pass`. The block's
+  in `_pusher_cycle_jobs` (the pusher's nine, in run order: the checkpoint
+  cycle, the sessions listing, pending ops, the artifacts signal, turn
+  notify, the checkpoint converge pass, the boot row backstop, the kernel
+  sample, the API health frame) against `_jobs_pass` (which opens with
+  `jobs.checkpointFirstSight` and ends with `jobs.persistCheckpoints`, the
+  checkpoint settle write's first sight and the write). The block's
   `gate` is the jobs pass's gate, below.
 - `jobs.gate`: the event-driven jobs pass, stage one, which observes and
   skips nothing. The jobs loop rests half a second after a pass and then
@@ -3111,8 +3138,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
   for the documents written at the reader's quiescence drop (and at the record
-  drops of the events that end a file's use) and the drops
-  deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
+  drops of the events that end a file's use) and the drops deferred for the
+  shared budget (a cycle, or for a subagent's quiet pop until the next fold
+  that finds nothing new), `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
@@ -3239,7 +3267,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
   `droppedBytes` (the quiescence drop, the files a dead timeline lane
   releases, a leaf a second /clear retired, and the session's first file at
-  its first /clear when the new leaf's parse does not read it), `pinnedKept` (drops that kept an entry because a whole assembly
+  its first /clear when the new leaf's parse does not read it; a subagent's
+  quiet drop is held back while a viewer's parse built before the file's last
+  append still stands, a whole entry the assembly pin keeps, counted below), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
@@ -3288,7 +3318,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   builder's cold build, any other mark the `asmIndex.materializedByStage`
   list names, a job's finer part as `jobs.<job>.<part>`, and `none` for a
   thread with no mark (T401); `asmCheckpoint.hydratedByStage`
-  does the same for the hydration rows.
+  does the same for the hydration rows; `swallowed` counts raises two handlers
+  keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
+  returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
+  spend guard's agent folds, each in a try of its own, so a raise does not skip
+  the ones after it and the file's records stay only when no later fold drops
+  them), each said on
+  stderr, with the file and the traceback, at its first, tenth and hundredth
+  raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
   row fails its shape check at load, or fails its decode at the first read
@@ -3371,8 +3408,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entries that expire, and `resident` counts those too until they do:
   before this (measured 2026-09-15) a strong reference kept every superseded
   generation's atoms, and its whole index behind them, resident until they
-  aged past the cap, about 1.2 GiB on a box whose LRU sat exactly at its cap
-  of a million entries, and live atoms evicted by stale ones were rebuilt),
+  aged past the cap, so an LRU at its cap held mostly dead generations, and
+  live atoms evicted by stale ones were rebuilt),
   `evictions` (a live entry past the cap: its slot's memo dropped, never a
   field in place), `expired` (an entry whose list has been collected, dropped
   when it reaches the cap or when a live list registers a slot under the id the
@@ -3819,7 +3856,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walks, and the walks that left a launch unresolved: an upper bound on what a
   negative walk cache would save), `idx_build` (placement indexes built, one
   per store object asked, a writer's private copy included) and the gauge
-  `entries` (sessions holding a map). `intrMarks` is the interrupt-marks
+  `entries` (sessions holding a map). `bgHold` is the settle gate's
+  background hold, which keeps a card from settling while the session waits
+  on a background task it launched: `calls`, `walks` (the calls that reached
+  the walk, the search for the newest turn naming a running launch),
+  `turns` (turns those walks read, newest first, stopping at the turn that
+  decides), `preTurns` (the read turns restored from an assembly document,
+  answered from the ids their rows carry: no atom is stored in a slot or
+  registered, and a row without a marker is built for the read and
+  dropped), `atoms` (atoms of the other read turns) and `exhausted` (walks
+  that met no turn naming some running launch, which then holds). A launch
+  in the turn that just ended costs its walk one turn. `intrMarks` is the
+  interrupt-marks
   memo behind the interrupt tick, the nudge tick and the feed's badge, one
   entry per (session, parse family) keyed on the parse object's identity and
   the machine-cut stamp (`hit`, `miss`, `evict` for entries released when a
@@ -4073,12 +4121,15 @@ announces `chatProto2` in its `caps`:
   TURN count times the rendered run's measured pixels per turn (a turn is a
   user row plus its reply and any tool rows; a per-display-unit average drew
   gaps half true), the turns counted the way the kernel numbers them: every
-  event carries `turn`, the index of the kernel turn it belongs to (the kernel
-  announces `chatTurn` in its `caps`), so a turn a peer session's message or a
-  nudge opened counts once (counted by typed rows alone, a session that takes
-  much mail read half its turns and drew its gaps twice their height; a page on
-  a kernel without the field still counts typed rows, and files one
-  `turnCountTyped` client-diag row per session saying why), lowered when the
+  transcript event carries `turn`, the index of the kernel turn it belongs to
+  (the kernel announces `chatTurn` in its `caps`), so a turn a peer session's
+  message opened counts once (counted by typed rows alone, a session
+  that takes much mail read half its turns and drew its gaps twice their
+  height; a page on a kernel without the field still counts typed rows, and
+  files at most one `turnCountTyped` client-diag row per session saying why; a
+  local session's row measured before the page's first caps frame waits for it,
+  so a page that never receives one files no `turnCountTyped` row for its local
+  sessions), lowered when the
   gaps together would stand taller than a quarter of the browser's layout
   limit: no box is laid out past a fixed height
   (2^25 px in Chromium divided by the device scale and the zoom, so 16,777,216
@@ -4090,8 +4141,10 @@ announces `chatProto2` in its `caps`:
   turn under the viewport top, and a re-window keeps the reader's offset into
   a hidden unit, so the jump stays where it was dropped; where the end is still
   out of reach (rows taller than the limit) the page settles: a re-window never
-  runs again on the echo of its own write, a gap element a fill rebuilt asks
-  nothing on its first observation, and the fill itself asks for the page under
+  runs again on the echo of its own write, a gap element a fill rebuilt while
+  the layout stands at the measured limit asks nothing on its first observation
+  (below the limit a gap a fill leaves on screen next to its page asks for a
+  page of it, so the pane fills), and the fill itself asks for the page under
   a reader still parked in a gap; a fill anchors on the
   first row that intersects the viewport, whatever the sign of its top; with
   no row on screen (or that row gone from the rebuild) it names the point
@@ -5294,13 +5347,23 @@ or delete.
 
 ## The spend ceiling
 
-Every pusher cycle the kernel reads each live session's spend rate: the
+Every jobs pass the kernel reads each live session's spend rate: the
 dollars its transcript and the agent transcripts beside it (the subagents and
 workflow agents it fanned out) record over the last ten minutes, priced by the
 same per-model table the cost view uses, scaled to an hour. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
-check reads nothing new; only an agent file that changed inside the window is
-read. The ceiling is the `spend-ceiling-usd-per-hour` setting, a bare value
+check reads little that is new: an agent file that changed inside the window is
+read, and after a restart an agent file inside the window whose restored tail
+does not reach back to the window's start is read whole once, since its records
+from before the checkpoint's cut may be in the window. After pricing an agent
+file, the check runs the file's agent folds over the records it holds, first
+the background-task state an open viewer of the agent left; once the
+agent has been quiet for two minutes they write the file's checkpoint document,
+charged to the pusher cycle's byte budget, and let its records leave memory. A
+session's own transcript restored from its assembly checkpoint is priced from
+the records past the checkpoint's cut, so for up to ten minutes after a restart
+the rate can leave out what that session spent before the cut. The ceiling is
+the `spend-ceiling-usd-per-hour` setting, a bare value
 file under the state directory read at each check: 1000 dollars an hour with
 no file, any number in the file, and `0` disables the guard. When a session's
 rate crosses the ceiling, once per crossing, the kernel interrupts its turn

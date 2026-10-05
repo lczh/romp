@@ -572,8 +572,11 @@ ARGV_ID_RE = re.compile(r"--(?:resume|session-id)[= ](\S+)")
 
 
 def argv_ids(cmd: str) -> set[str]:
-    """The conversation ids a CLI's argv names after --resume / --session-id, either spelling (the kernel's
-    cli_sid_of match, read as a set so a registry of thousands of rows costs one lookup per id)."""
+    """The conversation ids a CLI's argv names after --resume / --session-id, either spelling: the whole token after
+    each flag, read as a set so a registry of thousands of rows costs one lookup per id. It agrees with the kernel's
+    _cli_carries_sid substring match except in three cases, where that match counts an id this read does not: an id
+    with more characters after it in its token (`--resume=<id>-2`), an id whose flag sits inside the token this read
+    took as an earlier flag's value (`--resume --session-id=<id>`), and an id that contains whitespace."""
     return set(ARGV_ID_RE.findall(cmd))
 
 

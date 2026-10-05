@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, weakref
+import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, traceback, weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -642,11 +642,11 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
                                   # plus messages.jsonl now share the slots, and an evicted LEAF slot also demotes
                                   # the assembly cache's identity gate to a full parse.
 # A BYTE budget beside the count (the kernel memory work, 2026-09-11): the count bounded slots, never memory, and the
-# working set is files of every size (a 177 MB leaf and a 2 KB states log take one slot each), so the kernel climbed to
-# 5 to 8 GB between restarts holding every live and subagent transcript's records. Each entry weighs the bytes it
+# working set is files of every size (a large leaf and a small states log take one slot each), so the kernel's resident
+# size climbed between restarts, holding every live and subagent transcript's records. Each entry weighs the bytes it
 # holds (the file size less a tail entry's offset), and the budget counts those bytes DECODED, times
-# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 31 GiB machine meant about 48 GB of
-# records, so it never bound, while the kernel grew to 16.4 GB resident plus swap); past the budget the least
+# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 32 GiB machine meant about 46 GiB of
+# records, so it never bound, while the kernel grew into swap); past the budget the least
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
 # never refused, the budget then holds that one entry. Counters under /perf recordCache, where `bytes` stays file
@@ -676,20 +676,19 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
 # machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
 # memory we have; kept, in real units, on 2026-10-01), never under 4 GiB of FILE bytes (2026-09-11, the day the budget
-# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running 50 sessions is their live
-# leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: 18 entries
-# filled the 1 GiB, every build re-read whole transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one
-# pusher cycle of 132 s, chat builds of 3 s each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache.
+# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running many sessions is their
+# live leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: a
+# few leaves filled the 1 GiB, every build re-read whole transcripts, pusher cycles and chat builds slowed to a crawl,
+# and glibc's arenas kept the churn, the process resident far over its 1 GiB cache.
 # An LRU under reads that cycle through more than it holds misses on EVERY read; it does not degrade partway. So the
 # floor is a working-set bound and stays in the working set's unit, file bytes (in memory, the floor times the
 # multiple): wherever it binds (a machine under about 23 GiB, or one without /proc/meminfo, such as macOS) the cache
 # still holds 4 GiB of file bytes, what the floor has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which
-# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 31 GiB machine in real units
-# binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of file bytes at 12.2 hours of uptime, after
-# a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine the budget can bind after about a day,
-# later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus 2.9 bytes per cached file byte), past the
-# point where the machine it ran on began swapping it (about 14 GB, at 11.8 hours): half of memory caps this cache only
-# past swap there, and a budget tight enough to bind before swap sits at the working set, the thrash above. Once it
+# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 32 GiB machine in real units
+# binds at about 5.6 GiB of file bytes (16 / 2.85). A busy machine's cache reaches that only after a long uptime, and by
+# then the process holds those records decoded beside everything else it keeps, near or past the point where the
+# machine starts swapping: half of memory caps this cache only near swap on a busy machine, and a budget tight enough
+# to bind before swap sits at the working set, the thrash above. Once it
 # binds it evicts the least recently used entries, cold ones first, which is safe while the files read every cycle (live
 # leaves and their lineage) stay under the binding point; past it the thrash returns, and budgetRereads (an evicted path
 # read back) shows it on /perf. What is not needed until looked at (subagent transcripts) leaves through
@@ -699,11 +698,9 @@ RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budg
 RECORD_CACHE_BUDGET_FRACTION = 0.5
 RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
 #                                        a lab process decoded to 2.86 live heap bytes per source byte (_scan_jsonl_stream's
-#                                        docstring). The old kernel's 147 samples, 5 minutes to 145 hours of uptime (ending
-#                                        2026-10-01), agree: resident size in millions of kB = 3.44 + 2.85 x the cache's
-#                                        file GB, R^2 0.92, about 2.92 bytes of memory per file byte, a slope that also
-#                                        carries whatever grew beside the cache (the kernel at 5f3569d39 fit 2.94 in the
-#                                        same units over its first 11.5 hours). One figure for every entry: it fits the
+#                                        docstring). A running kernel's resident size, fitted against the cache's file
+#                                        bytes, gives a slope near this figure; that slope also carries whatever grew
+#                                        beside the cache. One figure for every entry: it fits the
 #                                        bulk, whole live leaves; content moves it, 1.44 to 7.7 by shape as measured (long
 #                                        text rows low, small metadata rows high; tests/test_record_cache_real_budget.py
 #                                        pins two mixes). ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, over 0 and at
@@ -893,7 +890,27 @@ def record_cache_stats() -> dict:
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
         out["wholeReadsByStage"] = {k: dict(v) for k, v in bys.items()} if isinstance(bys, dict) else {}
-        return out
+    with _SWALLOWED_LOCK:
+        out["swallowed"] = dict(_SWALLOWED)
+    return out
+
+
+_SWALLOWED = {}                   # "site:ExceptionType" -> raises a handler kept from its caller (note_swallowed)
+_SWALLOWED_LOCK = threading.Lock()
+
+
+def note_swallowed(site, exc, path):
+    """A raise that a handler keeps from its caller (the returned-agent drop's witness check, the spend guard's agent folds;
+    2026-10-02): counted under recordCache.swallowed on /perf by site and exception type, and said on stderr at the first,
+    tenth, hundredth (each power of ten) of each, since these handlers run on every jobs pass. A raise that persists would
+    otherwise return those agents to the old retention with no trace. The line names the file `path` and, since both
+    handlers call this inside their except block, the frame that raised."""
+    k = "%s:%s" % (site, type(exc).__name__)
+    with _SWALLOWED_LOCK:
+        n = _SWALLOWED[k] = _SWALLOWED.get(k, 0) + 1
+    if n == 10 ** (len(str(n)) - 1):
+        sys.stderr.write("record cache: %s raised %s (%d so far) on %s: %s\n%s"
+                         % (site, type(exc).__name__, n, path, exc, traceback.format_exc()))
 
 
 # What a held record weighs in memory against its bytes on disk (the kernel memory diagnosis, 2026-10-01): the lab's records-only
@@ -1065,8 +1082,8 @@ def _env_or(name, default, scale=1):
         return default
 
 
-# 8 MiB, was 64 KB (2026-09-11, the day the checkpoints shipped): 31 leaves' bgAll states sat over 64 KB and every boot
-# cold-refolded them whole, 1.74 GB read in the first pusher cycle (65 s of tick jobs); a document of a few MB reads in
+# 8 MiB, was 64 KB (2026-09-11, the day the checkpoints shipped): every leaf whose bgAll state sat over 64 KB was
+# cold-refolded whole at every boot, each one read whole in the first pusher cycle; a document of a few MB reads in
 # milliseconds. ROMP_CKPT_FOLD_CAP_KB sets it outright.
 _CKPT_FOLD_CAP = _env_or("ROMP_CKPT_FOLD_CAP_KB", 8 * 1024 * 1024, 1024)
 #                                   bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
@@ -1160,6 +1177,57 @@ def fold_cursor_appendable(cache, path):
         ent = _JSONL_CACHE.get(str(path))
     cur = cache.get(str(path))
     return ent is not None and cur is not None and cur[1] == ent[6]
+
+
+def fold_steps_in_hand(cache, name, path, new=True):
+    """Whether fold `name` (its cursor dict `cache`) over `path` would step only records the reader already holds, never a
+    whole read, over an entry that holds records: the fold's cursor stands at that entry's generation inside its records (a
+    hit, or an append), or the file's pending restore carries a complete state for the fold inside them (a tail restored from
+    the document), or, with `new`, the entry is the whole file (a first fold over it reads nothing). False when the reader
+    holds no entry for the path, or an empty one, and while a parse's assembly entry holds the entry's very records list
+    (the subagent viewer's, _asm_holds_records), which a parse rebuilt since the file's last append does: a drop there
+    frees nothing, and a stepping fold's drop would leave the viewer's next rebuild a whole read. The spend guard asks before it folds an agent file it priced (2026-10-01), so its
+    fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds. A pending
+    restore whose count for the fold does not read as an int is a corrupt document, counted and removed as the restore
+    counts it (review round ten, 2026-10-04: a count json read as infinity raised out of the gate at every jobs pass, and
+    the document stayed with nothing recorded), and a restored tail the reader holds for the path is let go with it, so
+    the caller's next read takes the file whole from zero (review round eleven, 2026-10-04: the fallback removes every
+    fold's restored state, and the guard asks once per fold, so the folds it asked after the corrupt one found a tail with
+    no cursor and no state at that pass and at every later one, and a returned agent's tail stayed). A tail only, of the
+    generation the gate looked at, whichever read stored it, an append's longer tail included (review round twelve,
+    2026-10-05): a whole entry stays, for the assembly pin and the quiet drop to decide as before, since a pop of one a
+    viewer's parse read freed nothing and left the viewer's next rebuild a whole read; and an entry of another generation,
+    from a read the gate never looked at, stays. Such a tail has lost its saved restore and the document with the fallback,
+    so the guard never lets it go. Its records stay until the count cap or the byte budget evicts it, or a reader that
+    drops a returned subagent's records reads it whole (the card's own readers, or the guard's within ten minutes of the
+    file's last write); a whole read by any other reader swaps the tail for the whole file, which then stays the same way
+    (review rounds thirteen and fourteen, 2026-10-05: memory only; it takes a corrupt document and another read restoring
+    the tail between the gate's look and the fallback)."""
+    key = str(path)
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(key)
+    if ent is None or not ent[4]:
+        return False
+    base, total = ent[5], ent[5] + len(ent[4])
+    cur = cache.get(key)
+    if cur is not None and cur[1] == ent[6]:
+        ok = base <= cur[0] <= total
+    elif new and base == 0:
+        ok = True
+    else:
+        with _CKPT_LOCK:
+            pend = _CKPT_PENDING.get(key)
+            f = (pend.get("folds") or {}).get(name) if isinstance(pend, dict) and pend.get("gen") == ent[6] else None
+        try:
+            ok = isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
+        except (KeyError, TypeError, ValueError, OverflowError) as e:   # a count that is no int (OverflowError: one json read as
+            _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e))   #  infinity) is a corrupt document, counted and removed
+            with _JSONL_CACHE_LOCK:                                     #  once, as the restore counts it; a TAIL of the generation
+                c = _JSONL_CACHE.get(key)                               #  looked at goes with it, so the next read takes the file
+                if c is not None and c[5] > 0 and c[6] == ent[6]:       #  whole and the folds start over it; a whole entry stays,
+                    _cache_pop_locked(key)                              #  for the assembly pin and the quiet drop to decide
+            return False
+    return ok and not _asm_holds_records(key, ent[4])
 
 
 def name_fold_cache(cache, name):
@@ -1627,7 +1695,9 @@ def _write_then_drop(key, ent, pop=True):
     checkpoints.converge.dropDeferred. A file whose standing document is over half the cycle's cap never fits a fresh cycle
     (the take is twice the document's size), so its drop stays owed at every cycle until the reader's bounds or the owed
     table's bound evict the entry, a limit the quiet drop already had before the release existed. Then, with `pop`, the
-    very entry `ent` goes through the pin (_drop_unless_pinned_locked).
+    very entry `ent` goes through the pin (_drop_unless_pinned_locked); a `pop` of "witness" (a returned agent's quiet fold
+    that stepped nothing, _drop_quiescent_entry) is never owed over the budget, and goes only when _document_at_witness
+    says the next fold restores from the document over a zero-byte tail.
     Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the cache no longer holds `ent`, or
     "stayed" without `pop`."""
     try:
@@ -1650,7 +1720,7 @@ def _write_then_drop(key, ent, pop=True):
             oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
             with _CKPT_LOCK:
                 _CKPT_STATS["converge"]["dropDeferred"] += 1
-                if pop:
+                if pop is True:                           # a "witness" pop is never owed: the next quiet fold takes it
                     _DROP_OWED[key] = time.time()
                     if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
                         oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
@@ -1667,6 +1737,8 @@ def _write_then_drop(key, ent, pop=True):
             wrote = True
             with _CKPT_LOCK:
                 _CKPT_STATS["converge"]["dropWrites"] += 1
+    if pop == "witness":                                  # a returned agent's fold that stepped nothing: the entry goes only
+        pop = _document_at_witness(key, ent)              #  when the next fold restores from the document over a zero-byte tail
     if not pop:
         return wrote, "stayed"
     hold = _asm_hold_of(key, ent)                         # a whole assembly entry folding over it keeps it (_drop_unless_pinned,
@@ -2003,10 +2075,10 @@ def checkpoint_write_dirty(paths=None, budget_s=None):
 
 
 def checkpoint_write_dirty_paths(paths=None, budget_s=None):
-    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle). The budget is
-    keyed on the paths ATTEMPTED, as the converge pass's is: under a lasting fault every write fails (a checkpoints directory
-    the kernel cannot search or write, a full disk), each after its encode, and a budget that tripped only after a written
-    path let the exit drain attempt every dirty one."""
+    """checkpoint_write_dirty, returning the paths written (the converge pass skips them at its next look: the kernel's
+    `_ckpt_just_take`). The budget is keyed on the paths ATTEMPTED, as the converge pass's is: under a lasting fault every
+    write fails (a checkpoints directory the kernel cannot search or write, a full disk), each after its encode, and a
+    budget that tripped only after a written path let the exit drain attempt every dirty one."""
     out = []
     t0 = time.monotonic()
     for i, p in enumerate(checkpoint_dirty() if paths is None else [str(p) for p in paths]):
@@ -2661,6 +2733,11 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     cache once this fold has stepped them, when the file has not changed for _DROP_AFTER_QUIESCENT_S (a subagent
     that returned; the user's rule: nothing stays resident that nobody looks at). The cursor and its checkpoint stand;
     a later fold of an unchanged file re-reads it once, a growing file keeps its records (see _drop_quiescent_entry).
+    "returned" (a subagent's OWN transcript, 2026-10-01) does that and more: a fold that finds nothing new drops the
+    quiescent entry too, once the file's document stands at the entry's witness (_document_at_witness). A subagent the
+    kernel follows live writes its last record while its file is still fresh, so its last stepping fold kept the entry and
+    every later fold found nothing new: under "quiescent" its whole entry stayed for the kernel's life. Never for a
+    session's leaf, which the judges read whole again if it leaves memory.
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
@@ -2723,9 +2800,10 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
                 on("hit" if kind is None else kind)
             if kind is not None:
                 cache[key] = hit                          # a restore at the witness: the cursor stands, nothing stepped
-            if drop_after == "quiescent" and ent is not None:
-                _drop_quiescent_entry(key, ent, pop=False)   # T362: the document is written here too; the entry stays, since
-            #                                                   nothing was stepped (unless a deferred drop is owed)
+            if drop_after in ("quiescent", "returned") and ent is not None:   # T362: the document is written here too; the
+                _drop_quiescent_entry(key, ent, pop="witness" if drop_after == "returned" else False)   #  entry stays, since
+            #                                                   nothing was stepped (unless a deferred drop is owed), except under
+            #                                                   "returned", where it goes once its document stands at the witness
             return _fold_eof_fragment(key, ent, state0, step)   # unchanged records; a newline-less tail may still sit past them
         if g0 == gen and base <= n0 < total:
             state, start = copy.deepcopy(state0), n0 - base
@@ -2790,7 +2868,7 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     if on is not None:
         on(kind)
     out = _fold_eof_fragment(key, ent, state, step)
-    if drop_after == "quiescent" and ent is not None:
+    if drop_after in ("quiescent", "returned") and ent is not None:
         _drop_quiescent_entry(key, ent)
     return out
 
@@ -2801,8 +2879,11 @@ def _drop_quiescent_entry(key, ent, pop=True):
     once a fold has stepped them: the fold's cursor (and its checkpoint) stands, the file's bytes leave memory. Only the
     very entry this fold read is dropped (another thread's newer entry is left alone); a file still changing keeps its
     records, since its next append would otherwise re-read it whole. Without `pop` (a fold that stepped nothing: a hit or
-    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. Returns
-    True when the document was written here."""
+    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. `pop`
+    "witness" (a drop_after="returned" fold that stepped nothing, 2026-10-01): the write runs as without `pop`, and the
+    entry then goes only when _document_at_witness says the next fold restores from the document over a zero-byte tail;
+    such a drop is never owed for the budget nor taken under a hold (the next quiet fold takes it). Returns True when the
+    document was written here."""
     try:
         if time.time() - float(ent[0]) < _DROP_AFTER_QUIESCENT_S:
             return False
@@ -2810,7 +2891,7 @@ def _drop_quiescent_entry(key, ent, pop=True):
         return False
     held = getattr(_DROP_HOLD, "held", None)
     if held is not None:                                  # the converge pass is healing and priming this leaf on this thread: held,
-        held[key] = held.get(key, False) or pop           #  paid once after (pay_held_drops), with the pop if any fold stepped
+        held[key] = held.get(key, False) or pop is True   #  paid once after (pay_held_drops), with the pop if any fold stepped
         return False
     with _CKPT_LOCK:
         if key in _DROP_OWED:                             # a drop deferred for the budget is taken at the next fold over the file
@@ -2821,6 +2902,66 @@ def _drop_quiescent_entry(key, ent, pop=True):
     # refuse them (a heal on the cycle re-read them whole). The write, its budget and its deferral, and the pop through the
     # assembly pin are _write_then_drop's, shared with the explicit release at the end of a file's use (release_records).
     return _write_then_drop(key, ent, pop=pop)[0]
+
+
+def _document_at_witness(key, ent):
+    """Whether a fold that stepped nothing may drop `ent` (drop_after="returned"): the entry holds records (an empty restored
+    tail frees nothing, and dropping it would make every later fold a restore), the path is not dirty, and the file's fold
+    document stands at the entry's witness, the very count, offset, guard bytes, size and mtime, carrying a complete state
+    at that count for every fold whose cursor sits at the entry's generation. The next fold over the file then restores
+    from the document over a zero-byte tail, never a whole read. False with checkpoints off (no document), for a document
+    behind the entry (a lagging fold's cut), and for a cursor of this generation that lags or is missing from the document
+    (an over-the-cap or cold fold included). A cursor of another generation is not checked here: when the document carries
+    its state at a count inside the entry's records, the cut sits at that count and the document is not at the witness;
+    when it does not, its fold reads the file once at its next run, as any fold does after a drop. False too while a
+    parse's assembly entry holds this very records list (the subagent viewer's): the pop would free nothing, and the
+    parse's next rebuild would read the file whole and parse it in full. The test is by identity, so it holds only for a
+    parse rebuilt since the file's last append. A parse built before it keeps an older list at the same generation, a
+    whole entry, so the assembly pin holds the drop back (_write_then_drop, counted under recordCache.pinnedKept; under
+    droppedHeld when the pin check raises). The viewer's last close releases that parse wherever the close lands
+    (the kernel's _release_subagent_view, called by closeSubagent, by the socket's teardown, and by the pusher's re-check
+    after a render, one that raised included), so it does not hold the records past the viewer; a release that raises is
+    counted and said (release_failed) and leaves the parse to the assembly cache's bound. A reader that wants the whole
+    file and holds no such entry pays one whole read after each drop, so a reader of agent files that runs every cycle
+    takes a tail (the folds' rule)."""
+    try:
+        recs = ent[4]
+        if not recs:
+            return False
+        with _CKPT_LOCK:
+            if key in _FOLD_DIRTY:
+                return False
+        doc = _ckpt_doc_shared(key)
+        if not isinstance(doc, dict):
+            return False
+        total, gen = int(ent[5]) + len(recs), ent[6]
+        if (int(doc["count"]), int(doc["offset"]), int(doc["size"]), float(doc.get("mtime") or 0), doc.get("guard") or "") \
+                != (total, int(ent[2]), int(ent[1]), float(ent[0]), bytes(ent[3]).hex()):
+            return False
+        folds = doc.get("folds") or {}
+        for name, cache in list(_FOLD_REG.items()):
+            cur = cache.get(key)
+            if cur is None or cur[1] != gen:
+                continue
+            f = folds.get(name)
+            if cur[0] != total or not (isinstance(f, dict) and "state" in f and int(f.get("count", -1)) == total):
+                return False
+        return not _asm_holds_records(key, recs)
+    except Exception as e:
+        note_swallowed("dropWitness", e, key)             # the entry stays: memory, never a wrong answer
+        return False
+
+
+def _asm_holds_records(key, recs):
+    """Whether an assembly entry's adapter holds `recs`, this very list, as `key`'s records (the subagent viewer's parse of an
+    agent file). One identity test per entry, on a snapshot taken under _ASM_LOCK alone."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    for e in entries:
+        src = getattr(e.get("ad"), "_src", None) if isinstance(e, dict) else None
+        if isinstance(src, dict) and src.get(key) is recs:
+            return True
+    return False
 
 
 _UNPINNED = object()
@@ -6557,9 +6698,9 @@ _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for
 #                                          is not a string in a version-6 document is refused (`rows`), never read by a second road;
 #                                          the first row is decoded at load and must be a JSON object
 # Materialized pre-cut atoms resident across every session (the lazy index's LRU): MemTotal / 32 KiB, never under 500,000
-# (3.9 million on a 118 GiB machine); ROMP_ASM_INDEX_CAP sets it outright. At 20,000 (2026-09-11, the day the index
-# shipped) 50 sessions' 4,080 restored turns materialized 1.2 million atoms and evicted 1.19 million of them in 150 s,
-# every chat build cold at 5.6 s: a ceiling under the working set is a thrash, not a saving.
+# (about 1.05 million on a 32 GiB machine, 4.2 million on a 128 GiB one); ROMP_ASM_INDEX_CAP sets it outright. At
+# 20,000 (2026-09-11, the day the index shipped) the restored turns of many sessions evicted nearly every atom they
+# materialized within minutes, and every chat build ran cold: a ceiling under the working set is a thrash, not a saving.
 #                                       7: the cut is the boundary before the last SETTLED turn, not only a compaction's (stage one b, 2026-09-15):
 #                                          every v6 document is refused once (`version`) at the deploy boot and rewritten at the next settle
 #                                       8: a parallel tool batch's branch beside the spine is kept (FileAdapter._batch_head, 2026-09-23): its
@@ -6570,10 +6711,9 @@ _MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() //
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (weakref.ref(LazyAtoms), row): eviction drops the memo, never a field
 #                                       in place. The list is held WEAKLY (measured 2026-09-15): a strong reference here kept every
 #                                       superseded generation's atoms, and through them its LazyIndex, rows and document, resident until
-#                                       they aged past the cap (every restore mints a new index; 262 restores over 22 sessions sat the LRU
-#                                       at its cap of 1,026,886 entries with 275,385 evictions: about 1.2 to 2.0 GiB of mostly dead
-#                                       generations, the resident count times the 1.3 to 2.1 KB an atom measured by tracemalloc over real
-#                                       indexes, and up to 275,385 live atoms evicted by stale ones, each a rebuild on its next read). Now a
+#                                       they aged past the cap (every restore mints a new index, so a busy day's restores sat the LRU at its
+#                                       cap holding mostly dead generations, 1.3 to 2.1 KB an atom as tracemalloc measured over real indexes,
+#                                       and live atoms evicted by stale ones were each rebuilt on their next read). Now a
 #                                       dropped tree's entries die with it and expire at the old end (_mat_trim), and a dropped assembly
 #                                       entry releases its index's at once (LazyIndex.release). No weakref callback: one fires at any
 #                                       decref, under this lock included, and the lock is not reentrant; dead entries expire lazily.
@@ -6697,11 +6837,11 @@ class LazyIndex:
             _LIVE_INDEXES.add(self)                       #  "set changed size during iteration" and /perf answered 500 (1597 low 1)
 
     def _row(self, k):
-        """The one row decode every accessor uses (build, text_flags, uuid_of, user_facts; uuids through uuid_of): a row that
-        does not decode to a JSON object refuses the DOCUMENT to the truth (1610 round three, mediums 1 and 2): noted `rows`
-        once (counted, said once per leaf, the document unlinked by the note), the leaf's assembly entry dropped so the next
-        parse is the whole parse, and this read alone raises LazyIndexError. A checkpoint is a cache: every road that decodes
-        a row can find it corrupt, and none of them may crash its reader twice or answer from one row fewer."""
+        """The one row decode every accessor uses (build, text_flags, uuid_of, user_facts, tool_ids; uuids through uuid_of): a
+        row that does not decode to a JSON object refuses the DOCUMENT to the truth (1610 round three, mediums 1 and 2):
+        noted `rows` once (counted, said once per leaf, the document unlinked by the note), the leaf's assembly entry dropped
+        so the next parse is the whole parse, and this read alone raises LazyIndexError. A checkpoint is a cache: every road
+        that decodes a row can find it corrupt, and none of them may crash its reader twice or answer from one row fewer."""
         with _MAT_LOCK:
             _ASM_INDEX_STATS["rowDecodes"] += 1
         try:
@@ -6714,7 +6854,11 @@ class LazyIndex:
             raise LazyIndexError("session %s row %d: %s" % (self.rompuuid[:8], k, e)) from e
 
     def build(self, k):
-        row = self._row(k)
+        return self._build_row(self._row(k))
+
+    def _build_row(self, row):
+        """The atom a decoded row restores to, a pure function of the row: build after its decode, and tool_ids for the
+        rows that carry no lazy marker."""
         if row.get("syn"):                                # a synthesized atom (idle, a salvaged reply): its message inline, if any
             a = dict(row.get("s") or {})
             if "m" in row:
@@ -6723,6 +6867,16 @@ class LazyIndex:
         a = _restore_prefix_atoms([row], self.rompuuid, self.records, self.fsids, self.source_files)[0]
         a.pop("_seq", None)                               # the read-order tiebreak: the section fixed the order (parse_session pops it too)
         return a
+
+    def tool_ids(self, k):
+        """Row k's tool_use ids and tool_result tool_use_ids (atom_tool_ids: falsy ones dropped) from one decode. A row with a
+        lazy marker answers from the marker's tu and tr scalars and builds nothing: the built atom carries that marker whole
+        (_restore_prefix_atoms), so it would answer the same. A row without one (an inline body, a synthesized atom, a
+        boundary) is built for this read and the atom dropped, never stored in a slot or registered in the LRU. A broken row
+        refuses the document and raises here, as a build does (_row)."""
+        row = self._row(k)
+        lz = row.get("lz")
+        return atom_tool_ids({"lazy": lz} if lz is not None else self._build_row(row))
 
     def _refuse_rows(self, detail):
         """A row that passed the load's shape check but does not decode to an object: the document is noted `rows` (counted once
@@ -6910,6 +7064,29 @@ class LazyAtoms(list):
 
     def rows(self):
         return list(self._rows)
+
+    def tool_ids(self):
+        """Every tool_use id and tool_result tool_use_id the atoms carry (falsy ones dropped), as a frozenset kept on the list
+        after the first call: the rows never change (release() resets slots, not rows), and the list is shared by every parse
+        its assembly entry serves (_asm_serve), so the set outlives the call. The reader is the settle gate's background hold
+        (the judge's _awaiting_bg_hold), which looks for the turn naming a running launch without walking the atoms. A built
+        slot is read where it sits (list.__getitem__: no lock, no LRU touch, as user_facts reads it; a hydrated atom carries
+        the ids its marker carried); an unbuilt one answers from one row decode (LazyIndex.tool_ids). Nothing is stored in a
+        slot or registered, so neither the LRU nor asmIndex.materialized sees this read. Two threads computing the set at once
+        store equal sets."""
+        got = self.__dict__.get("_tool_ids")
+        if got is None:
+            out = set()
+            for i, r in enumerate(self._rows):
+                a = list.__getitem__(self, i)
+                if a is _UNMAT:
+                    out |= self._index.tool_ids(r)        # a turn's list is minted over a LazyIndex (_pre_turns_of); the one
+                    #                                       stand-in index in tests (build and uuid_of, no tool_ids) serves
+                    #                                       lane tests, which never ask a list for its tool ids
+                else:
+                    out |= atom_tool_ids(a)
+            got = self._tool_ids = frozenset(out)
+        return got
 
     # ── the list surface ──
     def _unbuilt(self):
@@ -7226,16 +7403,15 @@ _HYDRATED = {}                     # uuid -> (the body fields a fill of any kind
 _HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
 _HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 48), 1024 * 1024)
 #                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 48, never under 256 MiB
-#                                    (about 661 MiB on a 31 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
-#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
-#                                    kernel's memo held about 66,700 records from 2.7 to 9.5 hours, then grew: 77,144 records and
-#                                    302 MiB of lines (4,107 bytes a line) at 11.7 hours, nothing evicted. As decoded body fields
-#                                    that is an estimated 550 to 615 MiB, a wide band, since an entry weighs 0.55 of its line
-#                                    for a Read result and up to 4.6 for a question's answers. This cap holds that set by the
-#                                    estimate and binds as it grows; a 64th would bind within the first day to save at most 165
-#                                    MiB more. An LRU thrashes once the records read again and again outgrow it, and the size of
-#                                    that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here) thrashed on
-#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    (about 683 MiB on a 32 GiB machine, 2.7 GiB on a 128 GiB one). It was max(1 GiB, MemTotal /
+#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 32 GiB machine. A running
+#                                    kernel's memo held a steady set for hours, then grew, with nothing evicted. As decoded body
+#                                    fields its size is an estimate in a wide band, since an entry weighs 0.55 of its line for a
+#                                    Read result and up to 4.6 for a question's answers. This cap holds that set by the estimate
+#                                    and binds as it grows; a 64th would bind sooner and save little more. An LRU thrashes once
+#                                    the records read again and again outgrow it, and the size of that set is unmeasured. 64 MB
+#                                    of line bytes thrashed on 2026-09-11, before the per-cycle walkers moved onto the lazy
+#                                    scalars (T358).
 #                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
 #                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
 #                                    memo's serves and evictions
@@ -7415,7 +7591,7 @@ _DOC_MEMO_PARSE_MULTIPLE = 4.5     # what a parsed fold document weighs resident
 #                                    what it says
 _DOC_MEMO_BYTES = [0]              # the memoized documents' resident weight: size on disk times the multiple, summed
 _DOC_MEMO_CAP = _env_or("ROMP_DOC_MEMO_CAP_MB", max(64 * 1024 ** 2, _machine_memory_bytes() // 512), 1024 * 1024)
-#                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (236 MiB on a 118 GiB machine; a count
+#                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (256 MiB on a 128 GiB machine; a count
 #                                    cap said nothing about bytes and held whole documents for files no writer touched again), reported
 #                                    under checkpoints.docMemo
 _DOC_INDEX = {}                    # path -> (document file's _doc_sig, {fold name: count, or None when not an int}) for every entry
@@ -8479,6 +8655,15 @@ def atom_tool_results(atom):
     if lz is not None:
         return list(lz.get("tr") or [])
     return [b.get("tool_use_id") for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+
+def atom_tool_ids(atom):
+    """The set of an atom's tool_use ids and tool_result tool_use_ids (atom_tool_uses, atom_tool_results: a lazy atom answers
+    from its marker, no hydration), falsy ones dropped: an id the settle gate can look up is never falsy (_bg_step registers a
+    background task only under a truthy one)."""
+    out = {x for x, _n in atom_tool_uses(atom) if x}
+    out.update(x for x in atom_tool_results(atom) if x)
+    return out
 
 
 def postal_mids(content, ids=None):

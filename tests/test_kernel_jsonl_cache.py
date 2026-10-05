@@ -285,8 +285,9 @@ class DropAfterQuiescentFold(unittest.TestCase):
 
     def test_the_kernel_drops_only_its_subagent_folds_and_reports_the_cache(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        for name in ("agentLaunchIds", "agentGist", "agentLaunches"):
-            self.assertIn('ckpt="%s", drop_after="quiescent")' % name, src, "the %s fold drops a returned agent's records" % name)
+        for name, policy in (("agentLaunchIds", "returned"), ("agentGist", "returned"), ("agentLaunches", "quiescent")):
+            self.assertIn('ckpt="%s", drop_after="%s")' % (name, policy), src, "the %s fold drops a returned agent's records" % name)
+        #   an agent's own file drops on a quiet fold too ("returned"); the launch fold reads PARENT leaves and keeps "quiescent"
         self.assertNotIn('ckpt="bgAll", drop_after', src, "a LEAF fold never drops: the live session's records stay warm")
         self.assertIn('"recordCache": em.record_cache_stats(),', src, "/perf carries the record cache")
         unit = open(os.path.join(BIN, "romp-service")).read()
@@ -357,13 +358,13 @@ class WholeReadsByCaller(unittest.TestCase):
 
 
 class RecordCacheDefaultBudget(unittest.TestCase):
-    """The budget shipped at 1 GiB (2026-09-11) and sat below a 50-session working set: every build re-read whole transcripts
-    (14.9 GB in 3.5 min, 132 s pusher cycles). The default is half of the machine's memory, never under 4 GiB of file bytes
-    (since 2026-10-01 the budget is in memory, so the floor is 4 GiB times the decoded multiple)."""
+    """The budget shipped at 1 GiB (2026-09-11) and sat below a busy machine's working set: every build re-read whole
+    transcripts and the pusher's cycles stretched with them. The default is half of the machine's memory, never under
+    4 GiB of file bytes (since 2026-10-01 the budget is in memory, so the floor is 4 GiB times the decoded multiple)."""
 
     def test_half_of_the_machine(self):
-        text = "MemTotal:       123634396 kB\nMemFree:        1 kB\n"
-        self.assertEqual(em._record_cache_default_budget_bytes(text), int(123634396 * 1024 * 0.5))
+        text = "MemTotal:       134217728 kB\nMemFree:        1 kB\n"
+        self.assertEqual(em._record_cache_default_budget_bytes(text), int(134217728 * 1024 * 0.5))
 
     def test_never_under_four_gib_of_file_bytes(self):
         floor = int(4 * 1024 ** 3 * em._RECORD_CACHE_MULTIPLE)

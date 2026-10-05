@@ -117,22 +117,32 @@ class SpendRate(unittest.TestCase):
         self.assertEqual(km._spend_window_usd(self.leaf, NOW + 5000, 600, PRICES), 0.0)
         self.assertEqual(km._spend_window_usd(os.path.join(self.td.name, "absent.jsonl"), NOW, 600, PRICES), 0.0)
 
-    def test_the_window_reads_the_cache_entry_with_a_tail_accepted_never_the_whole_file_road(self):
+    def test_the_window_reads_the_leaf_and_a_subagent_file_with_a_tail_accepted(self):
         """After a restart the assembly checkpoint restores a transcript as a TAIL entry (the records past its cut); the
         whole-file road would upgrade every live transcript to a full re-read on the guard's first cycle (the checkpoint's
-        served tests measure those bytes). The window reads the entry with tail_ok, and never calls the whole-file road."""
+        served tests measure those bytes). The window reads the session's own transcript with tail_ok and never calls the
+        whole-file road for it, nor for an agent file whose restored tail reaches back past the window's start; an agent file
+        whose tail does not is read whole once (tests/test_returned_agent_drop.py: the memo-end, window-floor and
+        fresh-process tests). Whether the leaf's tail prices the window right is not this test's claim."""
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_t", out_tokens=1000, in_tokens=0)])
         sub = Path(self.leaf).with_suffix("") / "subagents"
         write_jsonl(sub / "agent-1.jsonl", [assistant(NOW - 50, "msg_s", out_tokens=1000, in_tokens=0)], mtime=NOW - 50)
         calls = []
-        real = km.em._read_jsonl_entry
+        real, real_inc = km.em._read_jsonl_entry, km.em._read_jsonl_incremental
         def entry(path, on_fail=None, tail_ok=False, tail_from=None):
             calls.append((os.path.basename(str(path)), tail_ok)); return real(path, on_fail=on_fail, tail_ok=tail_ok, tail_from=tail_from)
+        def incremental(path, on_fail=None):              # a fold's read (the tail flag up) passes; the whole-file road does not
+            if not getattr(km.em._TAIL_OK, "flag", False):
+                raise AssertionError("the whole-file road")
+            return real_inc(path, on_fail=on_fail)
         with mock.patch.object(km.em, "_read_jsonl_entry", side_effect=entry), \
-             mock.patch.object(km.em, "_read_jsonl_incremental", side_effect=AssertionError("the whole-file road")):
+             mock.patch.object(km.em, "_read_jsonl_incremental", side_effect=incremental):
             usd = km._spend_window_usd(self.leaf, NOW, 600, PRICES)
         self.assertAlmostEqual(usd, 2 * 1000 * 25e-6, places=9)
-        self.assertEqual(sorted(calls), sorted([(os.path.basename(self.leaf), True), ("agent-1.jsonl", True)]), "each file once, a tail accepted")
+        # each file read once by the guard's own scan, a tail accepted, and the agent file once more by the launch-ids fold the
+        # guard runs after pricing it (2026-10-01), which accepts a tail too
+        self.assertEqual(sorted(calls), sorted([(os.path.basename(self.leaf), True), ("agent-1.jsonl", True), ("agent-1.jsonl", True)]),
+                         "every read accepts a tail")
 
     def test_an_unpriced_model_counts_at_the_dearest_row_and_a_record_without_usage_counts_nothing(self):
         write_jsonl(self.leaf, [assistant(NOW - 100, "msg_x", out_tokens=1000, model="mystery-9", in_tokens=0),
@@ -216,7 +226,8 @@ class Memo(unittest.TestCase):
         km._spend_file_rows(self.leaf, NOW - 600, PRICES, None)
         ent = km.em._read_jsonl_entry(self.leaf, tail_ok=True)
         self.assertEqual(km._SPEND_ROWS_CACHE[self.leaf][0], (ent[0], ent[1], ent[5]), "mtime, size, base (LOW a)")
-        self.assertEqual(len(km._SPEND_ROWS_CACHE[self.leaf]), 4, "and the last use, for the cap")
+        self.assertEqual(len(km._SPEND_ROWS_CACHE[self.leaf]), 5, "the last use, for the cap, and where the scanned records end")
+        self.assertEqual(km._SPEND_ROWS_CACHE[self.leaf][4], ent[2])
         with mock.patch.object(km, "SPEND_GUARD_ROWS_CACHE_MAX", 4):
             others = []
             for i in range(3):                             # the leaf's entry plus three: at the cap

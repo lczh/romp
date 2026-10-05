@@ -550,7 +550,7 @@ class _PerfStats:
     JOBS = ("beginCheckpointCycle", "sessionsListing", "applyPendingOps", "artifactsSignal", "turnNotify", "liftSpentAwaiting", "deathSweep", "endOnIdle", "deferralSweep",
             "autoNudge", "interruptBlock", "persistTickSeen", "persistIntrMarks", "persistSpendTrees", "persistCheckpoints", "convergeCheckpoints", "bootRowBackstop",
             "kernelSample", "autoPauseOnLimit", "usagePoll", "retryUpgrade", "autoPauseOnSpend", "spendGuard", "autoResumeRetry", "apiHealth",
-            "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes", "heldWorking")   # the tick jobs, each a `jobs.<job>` stage (T398)
+            "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes", "heldWorking", "checkpointFirstSight")   # the tick jobs, each a `jobs.<job>` stage (T398)
     STAGES = ("prelude", "jobs", "push", "push.chat", "push.feed", "push.timeline", "push.send", "push.warm", "push.feedFirst",
               "jobsPass", "jobs.prelude", "timelineBuild") \
         + tuple("jobs." + j for j in JOBS)   # every stage a fresh snapshot lists at zero: the cycle's prelude, the containers, the sub-stages
@@ -1280,6 +1280,7 @@ class _PerfStats:
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
                           ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
                           ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report),
+                          ("bgHold", jd.bg_hold_stats),   # the settle gate's background hold: its walks and the turns they read
                           ("intrMarks", _intr_marks_memo_report), ("deadWait", lambda: dict(_DEAD_WAIT_STATS)),
                           ("tickSeen", _tick_seen_report),
                           ("statesOverlay", _states_overlay_report),
@@ -6743,12 +6744,140 @@ def _write_view_order(order):
 # The same opaque-data contract. The object is the browser's (tab-groups.ts TabFolds: collapsed, expanded,
 # pinned, and the rename memory the pins rest on); this kernel checks that it IS an object and that it is
 # bounded, and reads nothing inside it. Tag names, session ids and host prefixes are all the viewer's to
-# interpret, exactly as the arrangement's are. Last write wins, as there.
+# interpret, exactly as the arrangement's are. Last write wins, as there. Beside the object the frame names
+# the publish it reflects (`foldsBy`, kept in memory, never in the file: the note below).
 _VIEW_FOLDS_CAP = 256 * 1024             # bytes of JSON: the browser's own state is a few hundred; this only stops a
 #                                          client bug growing the file without limit, and it REFUSES rather than trims
 #                                          (a cut object is not a smaller fold state, it is a different one)
 _view_folds_lkg = [None]                 # last known good, as _view_order_lkg
 _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": the frame then carries no folds half
+
+# WHICH PUBLISH A FRAME REFLECTS (2026-09-29). A page that folded two groups inside one round trip heard this
+# kernel's answer to the first fold after it had published the second, took that older state for another
+# device's word, and reopened the second group; every pane of that browser shares one cached copy, so a
+# sibling pane hearing the answer first did the same to the browser's copy, and a change waiting in the
+# browser was merged over it and lost the second fold here for good. Recognizing the answer by its content
+# cannot work: a publish that changes nothing gets no answer, a refused one gets a warning, and a push is
+# built from the store when it is sent. So a page names each publish ({browser, n}: an id its browser keeps
+# and a counter every pane of that browser shares), this kernel keeps the name of the LAST publish it handled
+# beside the folds and serves it on the frame as `foldsBy`, and a page passes over a frame naming one of its
+# own publishes older than one it has sent since (tab-groups.ts hearSharedFolds). The last handled publish
+# counts whether it was written, unchanged or refused, since any of them is what the page last said here. A
+# browser's publish older than one already handled from that browser (two panes, two sockets, landing out of
+# order) is dropped: it would put back a state that browser has already replaced (a lower number whose count
+# proves it newer is not older: the note below). Memory only, never in
+# view-folds.json, whose object stays the browser's byte for byte; a restarted kernel names nothing until the
+# next publish, so until then no frame is passed over for its name (its count starts again too: the note below).
+#
+# HOW FAR THIS KERNEL HAS GOT (2026-09-30). The name says whose publish a frame reflects, which cannot say whether
+# THIS browser's latest publish had landed when a frame naming another device, or nothing, was built: an
+# arrangement push built just before a fold landed carries the folds without it. And a browser whose record came
+# back older numbers its publishes under the one kept here, which a page learns only from a frame naming it. So
+# this kernel also counts the fold publishes it TAKES in this life (_view_folds_taken: every one not dropped,
+# whether written, unchanged or refused, stamped or not) and serves the count on every frame as `foldsSeq`
+# ({boot, n}, read with the folds in one step), and a page sends with each publish the highest count its
+# browser had received (`by.received`). A frame whose count is at or below that of a publish still out was built
+# before that publish was taken, and the page passes it over; and a publish numbered under the kept one is
+# still taken when it says its browser had received a frame built after the kept one was taken (the count
+# the kept one was taken at), since only a newer state can say that.
+#
+# THE TAKES NUMBERED ABOVE A PUBLISH (2026-09-30, the second review round; a list since 2026-10-01, the third). A
+# publish taken on its count that way replaces the kept n with its own smaller one, so an older publish of the same
+# browser numbered between the two (a pane's fold on a slow socket, whose sibling's later fold landed first, while a
+# tab in another renderer process whose copy of the record lacked both published on the later fold's count) was taken
+# as newer and put the kernel back to that older state. Keeping the largest n taken beside the kept one closed that
+# only while the largest was taken after the browser's record last came back older. One taken before (the browser
+# killed before its storage was written) was taken at a count under every count the returned browser sends, so it held
+# nothing back, and this kernel judged that browser's publishes on the kept n alone. So for each browser this kernel
+# keeps the (n, count) pairs it took that no later take numbered at or above them has replaced: a take removes every
+# pair with n at or under its own and appends its own, so n runs descending down the list and the count ascending,
+# the largest n held is the first pair and the kept (latest taken) one the last. A publish numbered under a pair is
+# judged against the pair with the smallest n above its own: the last such in the list, which is the most recent take
+# numbered above it and, of those, the one taken at the highest count. It is taken only on a received count of this
+# kernel life at or above that pair's count, which says its browser had received a frame built after every take
+# numbered above it. Otherwise it is an overtaken state: dropped, logged under that pair ("kept", "largest", or
+# "between" for a pair at neither end), and answered with the kernel's frame (the setViewFolds branch). A record that
+# came back older still lands: its connect push was built after every pair then held was taken, so its publishes carry
+# a count at or above all of them, and its quick successive publishes, numbered upward, each replace the one before.
+# Within one renderer process, while storage writes succeed, a dropped publish is an older state, and it carries
+# nothing the later one lacks unless a frame was heard between the two that replaced the browser's copy without it
+# (another device's publish, taken before this one landed): a sibling pane's publish made over that frame and landing
+# first is then kept, and this one is dropped with its change. A tab in another renderer process that publishes inside
+# the storage delay can have its own change dropped too. The answer shows the poster's tab the kernel's folds, its
+# change undone, unless that tab passes the frame over: a drop under a pair above the kept one is answered by a frame
+# that can name the kept n, at or under the dropped one's, which a tab holding a standing entry above that n takes for
+# its own older state.
+#
+# THE CAP ON THE PAIRS (2026-10-01). The list grows only on a take numbered under the kept one, which only a page with
+# a lagging record makes (one that came back older, or a tab in another renderer process inside the storage delay), and
+# a take at or above a pair removes it, so a real browser holds one pair, or a few: each such take adds one, and the
+# list is that one pair shorter again only once a take is numbered at or above the pair that take was numbered under (a
+# take numbered between the two replaces the added pair with its own and leaves the length as it was). For a tab inside
+# the storage delay that is the next take from a tab whose copy of the record is current, or that tab's own once its
+# copy catches up. After a record that came back older it comes only once the browser's numbers pass the largest taken
+# before the return, and each further return of that kind before then (another device having published between, so no
+# frame named the browser's last number) adds one more. _VIEW_FOLDS_PAIRS_CAP (16) only bounds what a buggy or hostile
+# page can make this kernel hold: 256 browsers by 16 pairs. Past it the FIRST pair is forgotten, the largest n held,
+# taken longest ago. Forgetting a pair removes a reason to drop and adds none (a publish is dropped only under a pair
+# still held, at that pair's own count), so at the publish it judges the cap can only make this kernel TAKE one it
+# would have dropped, the base's last write wins. What is lost at it is the drop of a publish numbered between that
+# pair's n and the next pair's, made before its browser received any frame built after that oldest take. Once taken,
+# that publish is held as a pair like any other, so a later publish numbered under it, made before its browser received
+# a frame built after it, is dropped under it, even where the full list would have taken it.
+_view_folds_by = [None]                  # the {browser, n} of the last setViewFolds handled, None when it carried none
+_view_folds_seen = {}                    # browser -> its pairs, [[n, count], ...]: its takes that no later take at or
+#                                          above replaced, n descending and the count ascending, so the last pair is its
+#                                          kept (latest taken) publish and the first the largest n held; re-inserted on
+#                                          each update
+_VIEW_FOLDS_SEEN_CAP = 256               # browsers remembered; past it the one heard from longest ago is forgotten
+_VIEW_FOLDS_PAIRS_CAP = 16               # pairs held per browser; past it the first (the largest n, the oldest take) goes
+_view_folds_taken = [0]                  # fold publishes taken in this kernel life (_BOOT_ID): the frame's foldsSeq.n
+
+
+class _ViewFoldsDropped(Exception):
+    """A setViewFolds _write_view_folds dropped as an overtaken state of its browser: nothing was written, counted or
+    re-stamped. Carries what the log line names: the browser, the dropped publish's n and received count (None when
+    it carried none), the pair it was dropped under, the one with the smallest n above its own (`under`: "kept", the
+    latest taken from that browser, "largest", the largest n held from it, or "between", a pair at neither end of the
+    list), and that pair's n and the count it was taken at. Deliberately not a _StateUnreadable or _StateUnwritable: a
+    drop is no fault of the store, and the poster is answered with a frame, never a warning."""
+
+    def __init__(self, browser, n, received, under, pair_n, pair_at):
+        super().__init__("browser %r n=%d, %s n=%d taken at %d" % (browser[:8], n, under, pair_n, pair_at))
+        self.browser, self.n, self.received = browser, n, received
+        self.under, self.pair_n, self.pair_at = under, pair_n, pair_at
+
+
+def _view_folds_by_of(raw):
+    """The publish stamp a setViewFolds carries, {"browser": str, "n": int}, or None when there is none or it is
+    malformed (then the publish counts as unstamped): browser a string of 1 to 64 characters, n an int (never a
+    bool) from 1 to 2**53, the largest integer a page's number holds exactly."""
+    if not isinstance(raw, dict):
+        return None
+    b, n = raw.get("browser"), raw.get("n")
+    if not isinstance(b, str) or not 1 <= len(b) <= 64:
+        return None
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 2 ** 53:
+        return None
+    return {"browser": b, "n": n}
+
+
+def _view_folds_received_of(raw):
+    """The count a setViewFolds says its browser had received, `by.received` ({"boot": str, "n": int}, a frame's
+    foldsSeq as the page kept it), or None when there is none or it is malformed (then the publish carries no
+    count): boot a string of 1 to 64 characters, n an int (never a bool) from 0 to 2**53. Read only when `by` is a
+    dict; it counts for anything only beside a valid name (_write_view_folds reads it for the drop alone)."""
+    if not isinstance(raw, dict):
+        return None
+    r = raw.get("received")
+    if not isinstance(r, dict):
+        return None
+    b, n = r.get("boot"), r.get("n")
+    if not isinstance(b, str) or not 1 <= len(b) <= 64:
+        return None
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 2 ** 53:
+        return None
+    return {"boot": b, "n": n}
 
 
 def _view_folds_path():
@@ -6776,17 +6905,54 @@ def _view_folds_served():
     return raw
 
 
-def _write_view_folds(folds):
+def _write_view_folds(folds, by=None, received=None):
     """Publish the viewer's fold state. Raises _StateUnwritable on a failed publish (and on an object over the
     cap, which is refused whole rather than cut), so the gesture is refused loudly. Returns whether anything
     CHANGED: every browser of this kernel republishes the state it was just served when a rename moves a pin
-    the same way on each, and an unchanged state is not worth a push."""
-    if not isinstance(folds, dict):
-        raise _StateUnwritable(_view_folds_path(), "not an object")
-    text = json.dumps(folds, sort_keys=True)
-    if len(text) > _VIEW_FOLDS_CAP:
-        raise _StateUnwritable(_view_folds_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FOLDS_CAP))
-    with _view_order_lock:                           # one lock for the viewer's store, both files
+    the same way on each, and an unchanged state is not worth a push.
+
+    `by` is the publish's stamp (_view_folds_by_of), None for a page that sends none, and `received` the count
+    its browser had received (_view_folds_received_of). Under the store's lock, before anything else: a stamped
+    publish numbered under a pair held for its browser (_view_folds_seen: its takes that no later take at or above
+    them replaced) is judged against the pair with the smallest n above its own, and DROPPED, raising
+    _ViewFoldsDropped with nothing touched (no write, no count, the stamp and the browsers remembered as they were),
+    unless `received` is of this kernel life and at or above the count that pair was taken at. A drop is an
+    overtaken state: a publish made before its browser received any frame built after a later-numbered publish of
+    its own was taken. Within one renderer process, while storage writes succeed, that is an older state, and it
+    carries nothing the later one lacks unless a frame was heard between the two that replaced the browser's copy
+    without it (another device's publish, taken before this one landed): a sibling pane's publish made over that
+    frame and landing first is then kept, and this one is dropped with its change. A tab in another renderer process
+    that publishes inside the storage delay can have its own change dropped too. The answer then shows the poster's
+    tab the kernel's folds, its change undone, unless that tab passes it over (a drop under a pair above the kept
+    one: the frame can name the kept n, under an entry standing there). Every other publish is TAKEN: the count
+    rises by one; a stamped one removes its browser's pairs numbered at or under its own and appends its own with
+    the count it took (the first pair forgotten past _VIEW_FOLDS_PAIRS_CAP), so its n is the kept one (lower than
+    before when the received count proved it newer) beside the largest n held; and its stamp becomes the one the
+    next frame serves, whatever the write then does (unchanged, refused or written); an unstamped publish clears the
+    stamp, since its frame reflects a publish nobody named. The notes above _view_folds_by have the why."""
+    with _view_order_lock:                           # one lock for the viewer's store, both files, the stamp and the count
+        pairs = _view_folds_seen.get(by["browser"], []) if by is not None else []   # read only: a take builds a new list
+        above = next((p for p in reversed(pairs) if p[0] > by["n"]), None)   # the smallest n above: n runs descending
+        if above is not None and not (
+                received is not None and received["boot"] == _BOOT_ID and received["n"] >= above[1]):
+            under = "kept" if above is pairs[-1] else "largest" if above is pairs[0] else "between"
+            raise _ViewFoldsDropped(by["browser"], by["n"], received, under, above[0], above[1])
+        _view_folds_taken[0] += 1
+        if by is not None:
+            at = _view_folds_taken[0]
+            pairs = [p for p in pairs if p[0] > by["n"]] + [[by["n"], at]]
+            while len(pairs) > _VIEW_FOLDS_PAIRS_CAP:
+                del pairs[0]
+            _view_folds_seen.pop(by["browser"], None)
+            _view_folds_seen[by["browser"]] = pairs
+            while len(_view_folds_seen) > _VIEW_FOLDS_SEEN_CAP:
+                del _view_folds_seen[next(iter(_view_folds_seen))]
+        _view_folds_by[0] = dict(by) if by else None
+        if not isinstance(folds, dict):
+            raise _StateUnwritable(_view_folds_path(), "not an object")
+        text = json.dumps(folds, sort_keys=True)
+        if len(text) > _VIEW_FOLDS_CAP:
+            raise _StateUnwritable(_view_folds_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FOLDS_CAP))
         try:
             raw = _read_state_json(_view_folds_path(), expect=dict)
         except _StateUnreadable:
@@ -13526,13 +13692,17 @@ def _LEAF_FOLDS():
             (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
 
 
-def _heal_cold_folds(leaf):
+def _heal_cold_folds(leaf, dropped_out=None):
     """At a SETTLE write (never the exit drain and its budget): a leaf fold that began cold in this process for want of a state
     in its document (em.drop_cold_cursors drops those cursors: reason "cold", never "over") is refolded whole once, so the write
     that follows carries its complete state and the next boot restores it warm (T359: the kernel's background-task view stayed
     a tail-only state boot after boot, each write recording the cursor alone and every boot blaming the cap). An over-the-cap
-    fold is left cold: a heal would only be written cursor-only again. Returns the names healed."""
+    fold is left cold: a heal would only be written cursor-only again. Returns the names healed; `dropped_out`, when given,
+    receives the names this call's drop took, healed or not (the converge pass counts its unhealed folds from them: the
+    settle write's heal on the jobs thread can run over the same leaf at once, and each drop takes a fold once)."""
     dropped = set(em.drop_cold_cursors(leaf))   # no cursor: the fold reads the leaf whole once and is complete again
+    if dropped_out is not None:
+        dropped_out.extend(sorted(dropped))
     if not dropped:
         return []
     names = {id(c): n for n, c in em._FOLD_REG.items()}
@@ -13571,7 +13741,19 @@ def _stored_tree(path, sid):
     return hit[1] if hit else None
 
 
-_CKPT_JUST_WRITTEN = set()          # the paths the settle write took this cycle; the converge pass skips them (T360 review, low 4)
+_CKPT_JUST_WRITTEN = set()          # the paths the settle write took since the converge pass last looked; the pass skips them (T360 review, low 4)
+_CKPT_JUST_LOCK = threading.Lock()  # the hand-off's lock (2026-10-05): the settle write adds on the jobs thread and the converge pass takes on the
+#                                     pusher's, and a take is a copy and a clear, so without it a write landing between the two is dropped unseen
+
+
+def _ckpt_just_take():
+    """The converge pass's side of the hand-off: the paths the settle write (_persist_checkpoints, on the jobs thread) took since
+    the pass last looked, copied and cleared in one step under _CKPT_JUST_LOCK. A settle write landing mid-take waits for the
+    clear and is kept for the pass's next look, never cleared unseen."""
+    with _CKPT_JUST_LOCK:
+        taken = set(_CKPT_JUST_WRITTEN)
+        _CKPT_JUST_WRITTEN.clear()
+    return taken
 
 
 def _begin_checkpoint_cycle():
@@ -13586,7 +13768,9 @@ def _begin_checkpoint_cycle():
 
 
 def _converge_checkpoints(now):
-    """The converge pass (T360), one per pusher cycle after the settle writes: the dirty documents that lack a complete
+    """The converge pass (T360), one per pusher cycle near its end, against the cycle's checkpoint byte budget (which is why it
+    stays on the pusher while the settle writes run on the jobs thread; it skips the paths they took since its last look,
+    _ckpt_just_take): the dirty documents that lack a complete
     state this process now holds (em.checkpoint_converge_candidates: a fold missing from the document because it never ran
     in the writing process, a legacy bare cursor, a tail-only one) are written now, independent of settle evidence, so a
     boot's whole reads pay once and the next boot restores every fold that ran. Bounded per cycle by CKPT_CONVERGE_MS of
@@ -13598,14 +13782,12 @@ def _converge_checkpoints(now):
     so an idle session's document is written once and then left alone. A quiescent leaf (T361) is refused unless the boot's
     own whole read is still resident, in which case the prime's launch fold writes its document at the quiescence drop from
     that read (`viaDrop`), no read of the pass's own. Returns the documents written."""
+    just_written = _ckpt_just_take()                       # taken on every road below, as each of them cleared the set before
     if CKPT_CONVERGE_MS <= 0:
-        _CKPT_JUST_WRITTEN.clear()
         return 0                                           # off (ROMP_CKPT_CONVERGE_MS=0): neither the fold documents nor the assembly ones
     t0 = time.monotonic()
-    if not em.checkpoint_has_work():
-        _CKPT_JUST_WRITTEN.clear()                         # nothing dirty and nothing cold: the fold work costs no lock and no stat
+    if not em.checkpoint_has_work():                       # nothing dirty and nothing cold: the fold work costs no lock and no stat
         return _converge_assembly(now, t0)                 #  (T361); the assembly step has its own done table (T376)
-    just_written = set(_CKPT_JUST_WRITTEN); _CKPT_JUST_WRITTEN.clear()
     cands = [p for p in em.checkpoint_converge_candidates() if p not in just_written and not _converge_skipped(p)]
     if not cands:
         return _converge_assembly(now, t0)
@@ -13630,15 +13812,17 @@ def _converge_checkpoints(now):
         #                                                    it resident): the idle leaf converges once and leaves the candidate set;
         #                                                    with the drop write off there is nothing to gain, so it is refused and
         #                                                    the boot's read kept
-        cold = [k for k, r in em.cold_fold_reasons(p).items() if r == "cold"]
         with em.hold_quiescent_drops():                    # a heal whose last fold is the launch fold would otherwise pop the entry
             if p in leaves:                                #  mid-heal, before the prime ran (review, low 2)
                 before = _read_bytes_of(p)
-                healed = _heal_cold_folds(p)               # drops every tail-only cursor, reruns the five leaf folds
+                mine = []                                  # the cold folds THIS heal's drop takes, each under the event model's lock
+                healed = _heal_cold_folds(p, mine)         # drops every tail-only cursor, reruns the five leaf folds
                 if healed:
                     got = _read_bytes_of(p) - before
                     em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); em.checkpoint_cycle_charge(got)
-                unhealed = [k for k in cold if k not in healed]
+                unhealed = [k for k in mine if k not in healed]   # what THIS heal dropped and could not rerun (review, 2026-10-05):
+                #                                            a fold the settle write's heal on the jobs thread took first is that
+                #                                            heal's to rerun, finished or still reading the leaf, never this pass's
                 if em.entry_whole_resident(p) and _prime_leaf_folds(p):
                     em.converge_stat("primed")
             else:
@@ -13841,6 +14025,33 @@ def _read_bytes_of(p):
     return rb.get(p, 0) or rb.get(os.path.realpath(p), 0)
 
 
+def _ckpt_settle_key(sid):
+    """A session's settle evidence as the settle write compares it: its turn-end key and its states log's stat. One reader
+    for the write and its first sight, so the two can never differ in shape and make every session due at once."""
+    return (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
+
+
+def _checkpoint_first_sight(now):
+    """The settle write's FIRST SIGHT, taken at the jobs pass's START (the review of 2026-10-05): for a session neither table
+    holds, its settle evidence (_ckpt_settle_key) goes into _CKPT_SETTLE_SEEN and its leaf's stat into _CKPT_PERIODIC_SEEN,
+    and nothing is written. The settle write (_persist_checkpoints) runs LAST in the pass and took first sight there itself,
+    tens of seconds into a boot's first pass, so a turn that settled during that pass was recorded as first sight and its
+    documents waited for the next settle, a leaf move past CKPT_PERIOD_S, or the exit drain (a crash before either left the
+    next boot the older document and the longer tail). Taken here, a move during the pass is new evidence at its end. At
+    the pass's start rather than at boot: the pass's discover memo (_sessions) is open here and its jobs read it anyway, so
+    this adds no sweep (main(), where the boot runs, has no such scope), and a session first seen after the boot is covered
+    by the same rule. A session either table already holds costs a dict lookup."""
+    mono = time.monotonic()
+    for s in _sessions(now):
+        sid, leaf = s.get("sid"), s.get("path")
+        if not sid or not leaf:
+            continue
+        if sid not in _CKPT_SETTLE_SEEN:
+            _CKPT_SETTLE_SEEN[sid] = _ckpt_settle_key(sid)
+        if sid not in _CKPT_PERIODIC_SEEN:
+            _CKPT_PERIODIC_SEEN[sid] = (_stat_key(leaf), mono)
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
@@ -13851,14 +14062,25 @@ def _persist_checkpoints(now):
     write, at most once per CKPT_PERIOD_S, so a turn that runs for an hour with no states-log row still keeps
     its checkpoints and assembly document close to current, and the exit path finds little left to write (the
     exit's own writes cost 4 to 6 s of a 20 s restart when they carried everything). Exit still writes everything
-    dirty (_drain_and_exit). Returns how many files were written."""
+    dirty (_drain_and_exit). Returns how many files were written.
+    WHO runs this (2026-10-05): the jobs thread, as the LAST job of its pass (_jobs_pass). It was a job of the pusher's
+    cycle, where each write (a fold document's carry, which can re-read the document it replaces, and an assembly
+    document's build) ran inside the cycle and held up the next dashboard frame, though nothing in a frame reads it and it
+    never charges the cycle's checkpoint byte budget itself (a quiescence drop one of its folds meets takes from it in one
+    locked step, as a drop on any thread does). The pusher no longer runs it, but a frame can still wait on it: a CPU-bound
+    write shares the interpreter lock with every frame built meanwhile, and a build that parses the same leaf waits on the
+    leaf's writer lock while its assembly document is written (at most the whole write the pusher used to pay). The
+    converge pass stays on the pusher, since it spends that budget; the paths written here reach it under _CKPT_JUST_LOCK
+    (_ckpt_just_take). FIRST SIGHT is taken at the pass's START (_checkpoint_first_sight, the review of 2026-10-05), so a
+    turn that settles while the pass runs is new evidence here; the first-sight branches below serve a caller that runs
+    this alone. _CKPT_SETTLE_SEEN and _CKPT_PERIODIC_SEEN are written on the jobs thread alone."""
     written = 0
     mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
         if not sid or not leaf:
             continue
-        key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
+        key = _ckpt_settle_key(sid)
         seen = _CKPT_SETTLE_SEEN.get(sid)
         if seen is None:
             # first sight: the settle evidence predates this kernel life, so it is not NEW; record it and write nothing
@@ -13888,7 +14110,9 @@ def _persist_checkpoints(now):
                 em.drop_cold_cursors(_p)       #  whole once, complete again (T359 review, low 3; the leaf's folds heal above)
         if mine:
             wrote = em.checkpoint_write_dirty_paths(sorted(mine))
-            written += len(wrote); _CKPT_JUST_WRITTEN.update(wrote)
+            written += len(wrote)
+            with _CKPT_JUST_LOCK:              # handed to the converge pass, which takes the set on the pusher's thread
+                _CKPT_JUST_WRITTEN.update(wrote)
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
             if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
@@ -13912,9 +14136,9 @@ def _persist_checkpoints(now):
 def _asm_refresh_maybe(leaf, sid):
     """Start the leaf's assembly document refresh on a thread of its own when it is due (em.asm_refresh_claim: a restored entry
     whose tail past its document's cut has reached the churn bound's share; one refresh at a time). The refresh is a whole
-    parse and a document write, seconds of work for a 100 MB leaf, so it never runs on the pusher: the claim is a dict read
-    and a stat here, and the thread leaves the leaf's restored entry and its readers alone (em.asm_refresh_document). Returns
-    whether a refresh was started."""
+    parse and a document write, seconds of work for a 100 MB leaf, so it never runs on the caller's thread (the jobs pass's
+    settle write, and the pusher before it): the claim is a dict read and a stat here, and the thread leaves the leaf's
+    restored entry and its readers alone (em.asm_refresh_document). Returns whether a refresh was started."""
     human = _display_sdk_human(sid)
     if not em.asm_refresh_claim(leaf, sid, human):
         return False
@@ -34783,9 +35007,17 @@ def _agent_launch_ids(agent_path):
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
     file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="quiescent")
+        return _agent_launch_ids_fold(agent_path)
     except Exception:
         return set()
+
+
+def _agent_launch_ids_fold(agent_path):
+    """The launch-ids fold over one agent's own file, raising: _agent_launch_ids wraps it, and the spend guard calls it after
+    pricing the file from a read of its own, behind the gate em.fold_steps_in_hand, so a raise reaches the guard's handler
+    and is counted and said (2026-10-02). Its drop policy is "returned" (2026-10-01): a returned agent's records leave memory
+    at the first fold that finds nothing new."""
+    return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="returned")
 
 
 def _agent_steps(agent_path):
@@ -34797,12 +35029,20 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since, _gist_of) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="quiescent")
+        st = _agent_gist_fold(agent_path)
     except Exception:
         return None
     if not st["since"]:
         return None
     return st
+
+
+def _agent_gist_fold(agent_path):
+    """The card's steps fold over one agent's own file, with no chat-build bookkeeping: _agent_steps folds through it, and so
+    does the spend guard (2026-10-01), to catch up a card's cursor that stopped short of the file's end when the chat stopped
+    being built before the agent returned (a closed tab, a sleeping laptop); a cursor behind the entry holds the returned
+    agent's drop, and nothing else would ever move it."""
+    return em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="returned")
 
 
 def _stamp_steps(ev, st):
@@ -35057,20 +35297,70 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
 def _push_subagents(clients, now, live_map):
     """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
     cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
-    no polling loop of its own — and costs a stat per open viewer when nothing changed."""
+    no polling loop of its own — and costs a stat per open viewer when nothing changed. A viewer that closed, or whose
+    socket went away, while its render ran (both on the handler thread) is not sent the frame, and the background-task
+    cursor and the parse that render left are released here, in case the close's own release ran before the render made
+    them (2026-10-02). A render that raised is re-checked the same way, since it may have left both before it raised
+    (round six of the fold's review)."""
     for c in clients:
         for (ssid, aid) in list((c.get("subagents") or {}).keys()):
+            built = False
             try:
                 fr, pre = _subagent_frame_cached(ssid, aid, now, live_map)
+                built = True
             except Exception:
                 sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
+            if not c.get("alive", True) or (ssid, aid) not in (c.get("subagents") or {}):
+                _subagent_viewer_closed(ssid, aid)    # closed during the render, built or raised: the cursor it left goes,
+                _release_subagent_view(ssid, aid)     #  and the parse that render rebuilt, or it would pin the records
                 continue
-            _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
+            if built:
+                _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
+
+
+def _subagent_viewer_closed(sid, agent_id):
+    """A subagent viewer closed (closeSubagent, its socket went away, or the pusher found it closed after its render, one
+    that raised included; 2026-10-02): the background-task cursor its render left on the agent's own file
+    (_bg_scan_all_cached, run for a task notification or a nested background launch in that file) is popped, unless
+    another client still has the same viewer open. No card reader steps that cursor. The spend guard, where it passes
+    the file (a live session, a ceiling above 0, the file in the window, no parse keeping the records:
+    _spend_fold_agent), steps it where it stands at the entry's
+    generation or where the file's document restores it after a restart, and a close that lands inside the guard's step
+    can leave the cursor that step stores, which the guard then keeps current. Where the guard does not pass the file,
+    once the agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good
+    (em._document_at_witness). The fold is also retired from the file's checkpoint document (em._retire_fold), since a
+    document written while the viewer was open records the cursor's count and the next write would carry it forward from
+    disk, holding the cut there; guarded as rewound_memo_forget guards its retirement (a cursor popped, or the document
+    lists the fold, read from disk when no fold of this process has loaded it, as for a viewer loaded before a restart and
+    closed after it), so a clean path stays clean (round two, 2026-10-02)."""
+    try:
+        with _clients_lock:
+            if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
+                return
+        try:
+            ppath = _path_of(sid, int(time.time()))
+            apath = _subagent_file(ppath, agent_id) if ppath else None
+        except Exception:
+            return    # a failed lookup is said once, by _release_subagent_view, which every close calls beside this one
+        if apath is not None:
+            key = str(apath)
+            had = _bgall_cache.pop(key, None) is not None
+            with em._CKPT_LOCK:
+                shapes = em._CKPT_DOC_FOLDS.get(key)
+            if shapes is None:
+                shapes = em._doc_folds_on_disk(key)
+            if had or "bgAll" in (shapes or {}):
+                em._retire_fold(key, "bgAll")
+    except Exception:
+        sys.stderr.write("subagent viewer close %s/%s: %s\n" % (sid, agent_id, traceback.format_exc()))
 
 
 def _release_subagent_view(sid, agent_id):
-    """closeSubagent (2026-10-01): when no client still views this agent, its file's parse slot for this session and its
-    assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
+    """The release at a subagent viewer's close, called from the three places a close lands: closeSubagent (2026-10-01),
+    the socket's teardown for every viewer it had open, and the pusher's re-check after a render (one that raised
+    included) for a viewer that closed, or whose socket went away, while that render ran (_push_subagents; 2026-10-02,
+    and round six of the fold's review). When no client still views this agent, its file's parse slot for this session
+    and its assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
     until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
     memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records. A release that
     raises, the agent file's path lookup included, is noted once per file (em.release_failed; once per agent id when the
@@ -43868,6 +44158,19 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _chat_dep_scope.deps["postal_key"], _chat_dep_scope.deps["pidx"], _chat_dep_scope.deps["msum"] = _pk, _pidx, _msum
     events = _hydrate_postal(events, _pidx, sid, captions=_msum)   # swap postal traffic for clean in/out cards (no boilerplate)
     _stamp_interrupt_causes(events)                     # a restart/crash resume notice names the seam's cause
+    # The parse's turn index of each turn in this build's list, for the `turn` stamp below. The list is the live-merged one, which
+    # can hold synthetic turns of stale echoes (_place_stale_echoes, `echoTurn`: at most one per idle gap, holding every echo placed
+    # in it) that the parse's list does not hold, so every index past such turns is higher than the parse's by the number of them
+    # before it. An echo turn maps to the parse turn before it, the turn _turn_index_of_events gives
+    # its rows; one before every parse turn maps to -1. The live turn _merge_live_atoms makes for a session with no transcript turn
+    # yet (no `echoTurn`) counts as turn 0. None: the two lists are the same length, so no echo turn is in this one (an echo turn
+    # always makes the merged list the longer) and the indexes are the parse's own.
+    _parse_ix = None
+    if len(_turns) != len(parsed.get("turns") or ()):
+        _parse_ix, _n = [], -1
+        for _t in _turns:
+            _n += 0 if _t.get("echoTurn") else 1
+            _parse_ix.append(_n)
     for ev in events:
         # tlId = the timeline atom a chat hover lights: a message/prompt → the DOT (segment promptId),
         # work (assistant/tool/sent message) → the BAR (segment workId). Falls back to the segment id.
@@ -43875,13 +44178,17 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         anchors = seg_anchors.get(seg)
         is_prompt = ev.get("kind") in ("user", "teammate") or (ev.get("kind") == "postal-service" and ev.get("direction") == "in")
         ev["tlId"] = ((anchors[0] if is_prompt else anchors[1]) or seg) if anchors else seg
-        # `turn` = the turn of this build's turn list the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01): the
-        # numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a peer's message or a
-        # nudge opened counts as one, as here; counting the typed rows alone read about half the turns on a session that
-        # takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the raw
-        # event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries none.
+        # `turn` = the parse's index of the turn the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01; an echo
+        # turn's rows take the parse turn before it, and the live turn of a session with no transcript turn yet counts as 0,
+        # both above): the numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a
+        # peer's message opened counts as one, as here; counting the typed rows alone read about half the turns on a session
+        # that takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the
+        # raw event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries
+        # none, and nor do the rows of an echo turn that comes before every parse turn.
         _tn = _raw_turn.get(id(ev), _raw_turn.get(ev.get("uuid")))
-        if _tn is not None:
+        if _tn is not None and _parse_ix is not None and _tn < len(_parse_ix):
+            _tn = _parse_ix[_tn]
+        if _tn is not None and _tn >= 0:
             ev["turn"] = _tn
         if ev.get("askAnswer") and not ev.get("askAnswerFilled"):
             # AskUserQuestion whose record carried NO structured answers map (an old transcript) →
@@ -49884,7 +50191,8 @@ def _spend_can_spend(tm):
     tm = tm or {}
     return tm.get("state") == "working" or bool(tm.get("subagents")) or bool(tm.get("bgTasks"))
 _SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
-_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd), ...], last use): the window rows, memoized on the stamp
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd, message id), ...], last use, end): the window
+#                                     rows, memoized on the stamp; `end` is the offset the scanned records end at (a half line not counted)
 SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
 #                                     thousands of finished agent files, each a window row list nobody asks for again)
 SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
@@ -50252,7 +50560,18 @@ def _spend_window_files(leaf, since, now=None, stat=True):
     return [key] + [p for p, mt in m["files"].items() if mt >= since]
 
 
-def _spend_file_rows(f, since, prices, dearest):
+def _spend_tail_covers(records, floor):
+    """Whether a tail entry's records reach back past `floor`: its first stamped record is older, so nothing before the
+    document's cut can be in the window (a transcript is chronological, the premise of the scan's own break)."""
+    for o in records:
+        if isinstance(o, dict):
+            t = _msg_epoch(o)
+            if t is not None:
+                return t < floor
+    return False
+
+
+def _spend_file_rows(f, since, prices, dearest, agent=False):
     """One file's (t, usd) rows at or after `since`, from the record cache, memoized on the file's (mtime, size) stamp:
     a file that did not change since its last scan serves its rows without a walk (LOW 2 of the review). The scan runs
     from the tail back to SPEND_GUARD_MEMO_SLACK_S before `since`, so the memo also serves the next cycles, whose windows
@@ -50260,7 +50579,30 @@ def _spend_file_rows(f, since, prices, dearest):
     largest usage; a record whose model the table cannot place is priced at the table's dearest row (a guard errs high).
     The reader's entry is taken with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores
     a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
-    transcript on the guard's first cycle; the window wants the newest records, which a tail holds."""
+    transcript on the guard's first cycle; the window wants the newest records, which a tail holds.
+    `agent` (an agent transcript beside the leaf, never the leaf; 2026-10-01): a returned agent's entry leaves the record
+    cache (the agent folds' drop_after="returned", which _spend_fold_agent runs after this read has priced the file), so a
+    memo scanned from the WHOLE file is served on a stat while the reader holds no entry for the path, instead of the
+    guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
+    read whole once when its first stamped record is not older than the window's floor, since the records before the
+    document's cut may then be in the window (a fresh process restoring a file the window still covers), and a window
+    priced from the tail alone would read low. Except where the memo ends at a record the tail holds (the offset the memo's
+    records end at, kept beside its stamp, is that record's start, _spend_tail_index; a half-written last line is left
+    out, its record priced once whole) and reaches back to the window's start: an agent that resumed after its
+    drop, which a LIVE agent's silence of over two minutes is (a long tool call, a long response), at its first record
+    and at every one after while the reader holds the tail. Then only the records past the memo's end are priced and the
+    memo's rows from its floor on are kept beside them, a response logged on both sides counted once at its largest usage
+    by its message id, so a resume costs the new records, not a whole read and decode of the file."""
+    if agent:
+        hit = _SPEND_ROWS_CACHE.get(f)
+        if hit is not None and hit[0][2] == 0 and hit[1] <= since and f not in em._JSONL_CACHE:
+            try:
+                st = os.stat(f)
+            except OSError:
+                st = None
+            if st is not None and (st.st_mtime, st.st_size) == hit[0][:2]:
+                _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time(), hit[4])
+                return _spend_rows_since(hit[2], since)
     ent = em._read_jsonl_entry(f, tail_ok=True)
     if ent is None:
         _SPEND_ROWS_CACHE.pop(f, None)
@@ -50268,14 +50610,25 @@ def _spend_file_rows(f, since, prices, dearest):
     stamp = (ent[0], ent[1], ent[5])                     # mtime, size, and the entry's BASE (the round-two review's LOW a):
     #   a tail entry accepted after a restart holds the records past the checkpoint's cut, and a later whole-file
     #   upgrade of the same file (base 0) changes what the window can see without moving mtime or size; the base in
-    #   the stamp invalidates the memo the moment the entry's shape changes, not when the file next grows
+    #   the stamp invalidates the memo the moment the entry's base goes DOWN, not when the file next grows. A base that
+    #   went UP over the same bytes (a drop, then a tail restored at the document's cut) is served: the memo saw them all
     hit = _SPEND_ROWS_CACHE.get(f)
-    if hit is not None and hit[0] == stamp and hit[1] <= since:
-        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
-        return [r for r in hit[2] if r[0] >= since]
+    if hit is not None and hit[0][:2] == stamp[:2] and hit[0][2] <= stamp[2] and hit[1] <= since:
+        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time(), hit[4])
+        return _spend_rows_since(hit[2], since)
     floor = since - SPEND_GUARD_MEMO_SLACK_S
-    best, rows = {}, []
-    for o in reversed(ent[4]):
+    prior, start = None, 0
+    if agent and ent[5] > 0 and not _spend_tail_covers(ent[4], floor):
+        at = _spend_tail_index(ent, hit[4]) if hit is not None and hit[1] <= since else None   # where the memo's records end,
+        #                                                                                      a half-written line not counted
+        if at is not None:
+            prior, start = hit, at                       # the memo ends at the tail's record `at`: only the records past it are priced
+        else:
+            ent = em._read_jsonl_entry(f) or ent         # the whole file, once (the tail upgraded in place, its generation kept)
+            stamp = (ent[0], ent[1], ent[5])
+    best, rows, recs = {}, [], ent[4]
+    for n in range(len(recs) - 1, start - 1, -1):
+        o = recs[n]
         if not isinstance(o, dict):
             continue
         t = _msg_epoch(o)
@@ -50301,12 +50654,23 @@ def _spend_file_rows(f, since, prices, dearest):
             i = best.get(mid)
             if i is None:
                 best[mid] = len(rows)
-                rows.append((t, c))
+                rows.append((t, c, mid))
             elif c > rows[i][1]:
-                rows[i] = (rows[i][0], c)
+                rows[i] = (rows[i][0], c, mid)
         else:
-            rows.append((t, c))
-    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
+            rows.append((t, c, None))
+    if prior is not None:                                # the memo's rows from the later floor on join the tail's; a message id on
+        floor = max(floor, prior[1])                     #  both sides of the cut stays one row at its largest usage and the tail's
+        for r in prior[2]:                               #  time, as one scan of the whole file counts it
+            if r[0] < floor:
+                continue
+            i = best.get(r[2]) if r[2] else None
+            if i is None:
+                rows.append(r)
+            elif r[1] > rows[i][1]:
+                rows[i] = (rows[i][0], r[1], r[2])
+        stamp = (ent[0], ent[1], prior[0][2])            # the memo's base: the rows saw what it saw, the records before the cut
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time(), int(ent[2]))
     if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
         # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
         # never again; without a bound a kernel life would hold one list per agent it ever priced. Down to three
@@ -50315,17 +50679,80 @@ def _spend_file_rows(f, since, prices, dearest):
         keep = SPEND_GUARD_ROWS_CACHE_MAX * 3 // 4
         for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - keep]:
             _SPEND_ROWS_CACHE.pop(k, None)
-    return [r for r in rows if r[0] >= since]
+    return _spend_rows_since(rows, since)
+
+
+def _spend_rows_since(rows, since):
+    """The (t, usd) pairs of memo rows (t, usd, message id) at or after `since`."""
+    return [(r[0], r[1]) for r in rows if r[0] >= since]
+
+
+def _spend_tail_index(ent, size):
+    """The index of the tail entry's first held record that starts at byte `size`, where a row memo's scanned records
+    ended (its scan saw every record before it), or len(records) when the held records end there; None when no
+    held record starts there (the memo ends before the tail begins, or inside a line). Searched from the newest record,
+    since a memo is usually a cycle or a few behind its file."""
+    recs = ent[4]
+    offs = ent[7] if len(ent) > 7 else None
+    if offs is None or len(offs) < 2 * len(recs):
+        return None
+    if int(ent[2]) == size:
+        return len(recs)
+    for i in range(len(recs) - 1, -1, -1):
+        o = int(offs[2 * i])
+        if o == size:
+            return i
+        if o < size:
+            return None
+    return None
 
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
     """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
-    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh)."""
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh). Every agent file is
+    then folded (_spend_fold_agent, 2026-10-01): the guard's read of a workflow agent, which has no card, was the only one,
+    and with no fold over it a returned agent's records stayed in the record cache for the kernel's life. The leaf, the first
+    file, is never folded here."""
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
-    return sum(c for f in _spend_window_files(leaf, since, now, stat=stat) for _t, c in _spend_file_rows(f, since, prices, dearest))
+    total = 0
+    for i, f in enumerate(_spend_window_files(leaf, since, now, stat=stat)):
+        for _t, c in _spend_file_rows(f, since, prices, dearest, agent=i > 0):
+            total += c
+        if i > 0:
+            _spend_fold_agent(f)
+    return total
+
+
+def _spend_fold_agent(f):
+    """The spend guard's folds over an agent file it priced (2026-10-01), so the records its read holds leave memory under the
+    agent folds' rule (drop_after="returned"), each fold only where it steps the records the reader holds (em.fold_steps_in_hand:
+    never a file the reader let go, never a tail pulled whole, never while a viewer's parse rebuilt since the file's last
+    append holds the same records, where a drop would free nothing and cost the viewer's next rebuild a whole read). The
+    launch-ids fold, the agent-file fold with
+    the smallest state, runs over a whole entry, its own cursor, or a restored tail whose document carries its state (a
+    restart before the exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the
+    drop has a cursor and a document to restore from. The card's steps fold runs only over its own cursor or document
+    state: it catches up a card whose chat stopped being built before the agent returned, whose cursor behind the entry
+    would hold the drop for good, and it never starts a steps state for a workflow agent. Before both, the subagent viewer's
+    background-task fold runs only over its own cursor or document state: a viewer open at the exit drain leaves that state
+    in the document behind the file's end, and the next process retires it only if that viewer, loaded before the restart,
+    is closed (round two, 2026-10-02). A fold that raises costs at most memory, never the guard's rate, and is counted and
+    said (em.note_swallowed): the launch-ids fold is called raising (_agent_launch_ids_fold), not through
+    _agent_launch_ids, which answers set() on a raise. Each fold has a try of its own (round three, 2026-10-02): with one
+    try around all three, a fold whose raise repeats every pass skipped the folds after it at every pass, and a returned
+    agent whose card's chat stopped being built kept its whole entry, where a later fold would have stepped its cursor up
+    to the file's end and dropped it."""
+    for cache, name, new, fold in ((_bgall_cache, "bgAll", False, _bg_scan_all_cached),
+                                   (_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", True, _agent_launch_ids_fold),
+                                   (_AGENT_GIST_CACHE, "agentGist", False, _agent_gist_fold)):
+        try:
+            if em.fold_steps_in_hand(cache, name, f, new=new):
+                fold(f)
+        except Exception as e:
+            em.note_swallowed("spendGuardFold", e, f)
 
 
 def _spend_guard_seed():
@@ -56601,10 +57028,12 @@ KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSes
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
-#   chatTurn — every chat event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
-#             2026-10-01), the numbering the history spans, tailLo and the gaps count in. The page counts turns off it (the
-#             px per turn a gap is drawn at, the turn a row names); an older page ignores the field, and a page on an older
-#             kernel counts its typed rows as before and files a turnCountTyped client-diag row saying so.
+#   chatTurn: every transcript event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
+#             2026-10-01), the numbering the history spans, tailLo and the gaps count in: the parse's turns. The page counts
+#             turns off it (the px per turn a gap is drawn at, the turn a row names); an older page
+#             ignores the field, and a page on an older kernel counts its typed rows as before and files at most one
+#             turnCountTyped client-diag row per session saying so; a local session's row measured before the page's first caps
+#             frame waits for it, so a page that never receives one files no turnCountTyped row for its local sessions.
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 #   applyNow: Apply now (2026-10-01), a pick waiting for a quiet session pushed through from its control — a page that
@@ -56650,13 +57079,28 @@ def _view_order_frame():
     the thing the 2026-07-31 ruling ruled out); `stored` says whether this kernel has an arrangement at
     all, which the client's migration turns on (view-order.ts viewOrderToPublish). Sent to a client on
     its `ready` -- the connect push -- and to every client the moment a setViewOrder CHANGES the store,
-    which is the event the viewer's other devices converge on. Nothing periodic reads it.
+    which is the event the viewer's other devices converge on; and to one client, with nothing changed, when
+    the kernel drops that client's setViewFolds as an overtaken state (2026-09-30), the answer that shows its
+    page the kernel's folds at once unless the page passes it over (a drop under a pair held above the kept
+    publish of its browser: the frame can name the kept n). Nothing periodic reads it.
 
     `folds` rides beside them (2026-09-23): the viewer's fold state (_view_folds_served), an object, or null
     when this kernel has none, which is what a browser carrying folds of its own publishes against
     (tab-groups.ts foldsToPublish). A change to either half is a change to this one frame, pushed on the
     same slot, so the folds converge on the same event the arrangement does (a setViewFolds that CHANGES
     the store).
+
+    `foldsBy` rides beside `folds` (2026-09-29): the {browser, n} stamp of the last setViewFolds this kernel
+    handled when the state was read, present only when that publish carried one, so a page can tell its own
+    earlier publish coming back from another device's word. After a refusal it names the refused publish,
+    whose folds were never kept, so the folds served are older than the publish it names (the note above
+    _view_folds_by).
+
+    `foldsSeq` rides beside `folds` too (2026-09-30), whenever the folds half does, an object or null: {boot:
+    _BOOT_ID, n: the fold publishes this kernel life has taken}, so a page can tell a frame built before its
+    own publish was taken from one built after it, whoever the frame names (the second note above
+    _view_folds_by). The folds, the stamp and the count are read under the store's lock in one acquisition, so
+    the three describe the same moment.
 
     `files` rides beside them too (2026-09-30): the viewer's file tabs (_view_files_served), an object, or null when
     this kernel keeps none (file-tabs.ts hearSharedFileTabs publishes a browser's own against that), on the same
@@ -56666,7 +57110,10 @@ def _view_order_frame():
     what it is showing for that half rather than adopting a guess (federation.ts reads a half only when it
     is present); None, no frame at all, when no half can be said."""
     served = _view_order_served()
-    folds = _view_folds_served()
+    with _view_order_lock:                           # the folds, the stamp that names them and the count, as one read
+        folds = _view_folds_served()
+        by = _view_folds_by[0]
+        taken = _view_folds_taken[0]
     files = _view_files_served()
     if served is None and folds is _VIEW_FOLDS_UNKNOWN and files is _VIEW_FOLDS_UNKNOWN:
         return None
@@ -56675,6 +57122,9 @@ def _view_order_frame():
         fr["order"], fr["stored"] = served
     if folds is not _VIEW_FOLDS_UNKNOWN:
         fr["folds"] = folds
+        if by:
+            fr["foldsBy"] = dict(by)
+        fr["foldsSeq"] = {"boot": _BOOT_ID, "n": taken}
     if files is not _VIEW_FOLDS_UNKNOWN:
         fr["files"] = files
     return fr
@@ -56682,7 +57132,8 @@ def _view_order_frame():
 
 def _send_view_order(c, fr=None):
     """One client's copy, on its own dedup slot: a client already holding this arrangement byte for byte
-    is sent nothing, so the connect push and the change push cannot double up on it."""
+    is sent nothing, so the connect push, the change push and the answer to a dropped setViewFolds (the
+    setViewFolds branch, 2026-09-30) cannot double up on it."""
     try:
         if fr is None:
             fr = _view_order_frame()
@@ -56694,7 +57145,11 @@ def _send_view_order(c, fr=None):
 
 def _broadcast_view_order():
     """The change event: every connected client learns the new arrangement now. Built ONCE and handed to
-    each client's dedup slot -- the viewer that posted it holds it already and is skipped there."""
+    each client's dedup slot. The viewer that posted the change is sent it too: its slot holds the last
+    frame this kernel sent it, not the state its page published, so the new frame differs there as it does
+    everywhere else. That echo is how a page hears its own publish land, `foldsBy` is how it tells the
+    echo of an earlier publish from newer news (2026-09-29, the note above _view_folds_by), and `foldsSeq` how
+    it tells a frame built before its latest publish was taken, whoever that frame names (2026-09-30)."""
     try:
         fr = _view_order_frame()
     except Exception:
@@ -67402,7 +67857,12 @@ def _pusher_cycle_jobs(now, live_map, any_client):
     else (the sweeps, the reminder walk, the interrupt tick, the persists, the pause and retry family) runs on the JOBS thread
     (_jobs_pass, 2026-09-13): the housekeeping's cold reads at boot held the browser's first frames behind a 30 to 60 s first
     cycle (the user asked why the reminder walk had to finish before the UI showed at all), and their writers already end in
-    _mark_views_dirty, which wakes this loop, so nothing they decide waits for anything here."""
+    _mark_views_dirty, which wakes this loop, so nothing they decide waits for anything here. The checkpoint settle write
+    (_persist_checkpoints) followed on 2026-10-05: it feeds no frame and never charges the budget itself (a quiescence drop
+    its folds meet takes from it in one locked step, from any thread), and here every write it made ran inside the cycle
+    and delayed the next frame. Off this thread a write can still slow frames, by less: a CPU-bound write shares the
+    interpreter lock with every frame built meanwhile, and a build that parses the same leaf waits on the leaf's writer
+    lock while its assembly document is written. The converge pass, which spends the budget, stays."""
     _t_jobs = time.monotonic()            # /perf: this function minus the _push_all below is the `jobs` stage
     if not _PERF_STATS._mine():
         _PERF_STATS.cycle_begin()         # a caller that did not open the cycle (a test driving the jobs alone) opens it here
@@ -67441,11 +67901,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
     except Exception:
         sys.stderr.write("turn-notify: %s\n" % traceback.format_exc())
     # (the WS keepalive lives on its own _heartbeat thread — NOT here — so a slow push can't starve it)
-    try:                                  # the folds' checkpoints, written for a session at its settle or a states-log
-        _job_stage('persistCheckpoints', lambda: _persist_checkpoints(now))         # move (T323 stage 3): the next kernel folds the tails, not the files
-        _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))        # ...and the documents a boot's whole reads left dirty, bounded per cycle (T360)
+    try:                                  # the documents a boot's whole reads left dirty, bounded per cycle (T360) by the budget begun above;
+        _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))        # the settle writes are the jobs pass's last job (2026-10-05)
     except Exception:
-        sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
+        sys.stderr.write("checkpoint converge: %s\n" % traceback.format_exc())
     try:                                  # the boot row's backstop: written without attachDone once the bound has passed
         _job_stage('bootRowBackstop', lambda: _boot_row_backstop(now))
     except Exception:
@@ -67470,12 +67929,20 @@ def _jobs_pass(now, live_map):
     waits on these: at boot the walk and the interrupt tick read every session's transcript cold (24 s and 6 s on the 11:55 AM
     boot that decided it, 30 to 60 s first cycles all day), and the push sat behind them on one thread. Their writers end in
     _mark_views_dirty (a dirty mark plus the pusher's wake), so a card move a job decides rides the pusher's next cycle exactly
-    as it did when the job ran on that thread. The stage container is `jobsPass`; each job is still its `jobs.<name>` stage."""
+    as it did when the job ran on that thread. The stage container is `jobsPass`; each job is still its `jobs.<name>` stage.
+    The checkpoint settle write (_persist_checkpoints) closes the pass since 2026-10-05: on the pusher every write it made ran
+    inside the cycle and held up the next frame, and here, last, it holds up none of this pass's decisions, only the next
+    pass's start. Its first sight of each session opens the pass (_checkpoint_first_sight), so a turn that settles while the
+    pass runs is new evidence at its end."""
     _t_pass = time.monotonic()
     if not _PERF_STATS._mine():
         _PERF_STATS.cycle_begin("jobs")   # a caller that did not open the pass (a test driving the jobs alone) opens it here
     _own_stat = _files_stat_pass_open(live_map)   # the dirty set taken, the prelude's observers read, the pass's shared ten-file
     #                                               snapshot opened when the caller did not (closed below; the cycle's finally too)
+    try:                                  # the settle write's first sight of each session, at the START (review, 2026-10-05): the write
+        _job_stage('checkpointFirstSight', lambda: _checkpoint_first_sight(now))   # closes the pass, and a turn settling between the two
+    except Exception:                     #  is then new evidence there, not a first sight
+        sys.stderr.write("checkpoint first sight: %s\n" % traceback.format_exc())
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
         _job_stage('liftSpentAwaiting', lambda: _lift_spent_awaiting(now, live_map))   # so the nudge tick below never wakes a wait that already ended
     except Exception:
@@ -67561,6 +68028,10 @@ def _jobs_pass(now, live_map):
         _job_stage('heldWorking', lambda: _held_working_pass(now))
     except Exception:
         sys.stderr.write("held-working belt: %s\n" % traceback.format_exc())
+    try:                                  # the folds' checkpoints, written for a session at its settle or a moved leaf (T323 stage 3), LAST,
+        _job_stage('persistCheckpoints', lambda: _persist_checkpoints(now))   # so no decision of this pass waits on the write (2026-10-05)
+    except Exception:
+        sys.stderr.write("checkpoint persist: %s\n" % traceback.format_exc())
     _files_stat_pass_close(_own_stat)
     _PERF_STATS.stage("jobsPass", time.monotonic() - _t_pass)
 
@@ -78109,6 +78580,7 @@ class Handler(BaseHTTPRequestHandler):
                 client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
             if msg["type"] == "closeSubagent":
                 (client.get("subagents") or {}).pop((sid, aid), None)
+                _subagent_viewer_closed(sid, aid)
                 _release_subagent_view(sid, aid)          # the last viewer closed: the agent file's parse goes (2026-10-01)
                 return
             client.setdefault("subagents", {})[(sid, aid)] = True
@@ -78759,12 +79231,34 @@ class Handler(BaseHTTPRequestHandler):
             # A group folded or opened, or a member set to show through a fold, on ANY viewer of this kernel
             # (the user 2026-09-23, who wanted the phone to fold too and the folds shared like the order).
             # Kept WHOLE and OPAQUE beside the arrangement, and pushed on the same frame, so the phone and
-            # the desktop fold together. Last write wins.
+            # the desktop fold together. Last write wins. The publish's stamp (`by`, 2026-09-29) is kept for
+            # the frames that follow, whatever the write does, and a browser's publish that is only an older
+            # state of one already taken from it is dropped (_write_view_folds; the notes above _view_folds_by).
+            by_raw = msg.get("by")
             try:
-                changed = _write_view_folds(msg["folds"])
+                changed = _write_view_folds(msg["folds"], _view_folds_by_of(by_raw), _view_folds_received_of(by_raw))
+            except _ViewFoldsDropped as d:
+                # An overtaken state: the kernel keeps the later one. Two panes' sockets landing out of order drop
+                # an older state, which carries nothing the kept one lacks unless a frame was heard between the two
+                # that replaced the browser's copy without it (another device's publish, taken before this one
+                # landed): the sibling pane's publish made over that frame landed first and is kept, and this one is
+                # dropped with its change. A tab in another renderer process that publishes inside the storage delay
+                # can have its own change dropped here too. Logged, and answered with the kernel's frame on the
+                # poster's own dedup slot, which is nothing when that slot already holds it (the later publish's
+                # push), so a page whose publish this was shows the kernel's folds at once, its change undone, unless
+                # it passes that frame over (a drop under a pair above the kept one: the frame can name the kept
+                # number). The line names that pair: "kept", "largest", or "between" for one at neither end. No warn:
+                # out-of-order panes drop publishes legitimately, and a warn would be false. The browser id and the
+                # received boot are the page's own strings, so both go in with %r and a newline in either cannot
+                # forge a second line.
+                sys.stderr.write("romp-kernel: setViewFolds dropped: browser %r n=%d received=%s, %s n=%d taken at %d\n"
+                                 % (d.browser[:8], d.n, "%r:%d" % (d.received["boot"], d.received["n"]) if d.received else "none",
+                                    d.under, d.pair_n, d.pair_at))
+                _send_view_order(client)
             except (_StateUnreadable, _StateUnwritable) as e:
                 # refused out loud: the group sits folded on this page and would silently spring back on
-                # the next reload, and no other device would ever hear of it
+                # the next reload, and no other device would ever hear of it. (A drop, above, is not this: it is
+                # a state the kernel has already replaced with a later one of the same browser's.)
                 sys.stderr.write("romp-kernel: setViewFolds refused: %s\n" % e)
                 _reply(client, {"type": "warn", "text": "Couldn't save the folded groups: %s" % e})
             else:
@@ -79458,6 +79952,9 @@ class Handler(BaseHTTPRequestHandler):
             _board_pane_gone(client)               # the cold timeline build may be waiting on this board pane's first frame
             with _clients_lock:
                 _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
+            for _sv in list((client.get("subagents") or {}).keys()):
+                _subagent_viewer_closed(*_sv)         # its open viewers close with it: the cursor and, below, the parse
+                _release_subagent_view(*_sv)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's

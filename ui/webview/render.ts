@@ -138,7 +138,7 @@ import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR,
-         holdAnswered, holdForPassage, synthSuperseded, existingThreadFor } from "./comments";
+         holdAnswered, holdForPassage, synthSuperseded, existingThreadFor, type PassageAt } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
@@ -1030,6 +1030,7 @@ const refusalUndo = new Map<string, () => void>();
 // tracks — its blob meets the gate like any other arrival, and nothing is re-pinned (onViewsAck).
 function onKernelCaps(m: { caps?: unknown; viewsSeq?: unknown }) {
   kernelCaps = new Set(Array.isArray(m.caps) ? m.caps.filter((c): c is string => typeof c === "string") : []);
+  typedTurnsCapsArrived();
   const adopted = capsAdopts(rejectedViews, m.viewsSeq);
   if (adopted && rejectedViews) adoptBase(rejectedViews);
   announcedViewsSeq = adopted ? null : announcedSeq(m.viewsSeq);
@@ -7482,7 +7483,7 @@ function showSelectionMenu(e: MouseEvent) {
   // with no Ctrl, Alt or Meta it names on every page, though only the shell's dispatcher runs one.
   const aim = commentAim();
   if (typeof aim === "object") {
-    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), commentKeyHint() || undefined);
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY, aim.at), commentKeyHint() || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7494,7 +7495,30 @@ function showSelectionMenu(e: MouseEvent) {
 
 // Comment on the selection from the keyboard or the palette (chat.commentSelection, the user 2026-09-30, who wanted a key
 // for it): exactly what the menu's Comment opens, through the same gate (commentAim) and the same openCommentComposer.
-type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number };
+type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number; at?: PassageAt };
+/** Where a selection range sits in a turn's rendered prose (the text turnProse joins): its [start, end) offsets, clamped to
+ *  the turn's prose and trimmed of edge whitespace; null when the session's view holds no .md body for the turn, or when
+ *  nothing of its prose is left after the clamp and the trim. openCommentComposer hands it to holdForPassage and
+ *  existingThreadFor. */
+function selectionAt(sid: string, uuid: string, r: Range): PassageAt | null {
+  const body = views.get(sid)?.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"] .md`);
+  if (!body) return null;
+  const whole = document.createRange();
+  whole.selectNodeContents(body);
+  const prose = whole.toString();                  // the text nodes' data in order: turnProse's text
+  const off = (node: Node, offset: number): number => {
+    const c = whole.comparePoint(node, offset);    // before the body, inside it, or after it
+    if (c) return c < 0 ? 0 : prose.length;
+    const head = document.createRange();
+    head.setStart(body, 0);
+    head.setEnd(node, offset);
+    return head.toString().length;
+  };
+  let start = off(r.startContainer, r.startOffset), end = off(r.endContainer, r.endOffset);
+  while (start < end && /\s/.test(prose[start])) start++;
+  while (end > start && /\s/.test(prose[end - 1])) end--;
+  return start < end ? { start, end } : null;
+}
 /** The passage a new comment anchors to, and where its box opens: the transcript selection in a real turn
  *  (transcriptSelection's uuid) on the active session, the box's corner just under the selection's box, since the
  *  keyboard has no pointer to open it at (the menu's pick uses its own). "none" when nothing in a turn is selected;
@@ -7510,7 +7534,9 @@ function commentAim(): CommentAim | "none" | "session" {
   // text, and its turn's uuid is that session's, never the active one's
   if (!r || !views.get(activeId)?.el.contains(r.startContainer)) return "none";
   const b = r.getBoundingClientRect();
-  return { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
+  const at = selectionAt(activeId, q.uuid, r);
+  return at ? { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6, at }
+    : { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
 }
 /** The command's run. `held` is the aim the palette captured as it opened (its input took the focus since, which may
  *  have moved the selection); absent, the live selection is read. A held aim whose tab is no longer the one shown, or
@@ -7521,14 +7547,19 @@ function commentOnSelection(held?: CommentAim | "none" | "session"): void {
   else if (typeof aim === "object" && (isProvisionalId(aim.sid) || !liveSession(aim.sid))) aim = "session";
   if (aim === "none") { ephemeralWarnToast("Select some text in the chat to comment on it."); return; }
   if (aim === "session") { ephemeralWarnToast("This session isn't ready for comments yet."); return; }
-  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y);
+  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y, aim.at);
 }
-/** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. */
+/** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. Its `at` is
+ *  optional; when present it must be a pair of integers. */
 function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
   if (v === "none" || v === "session") return v;
   const a = v as Partial<CommentAim> | null;
-  return a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
-    && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
+  if (!(a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
+        && Number.isFinite(a.x) && Number.isFinite(a.y))) return "none";
+  if (a.at === undefined) return { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! };
+  const at = a.at as Partial<PassageAt> | null;
+  return at && typeof at === "object" && Number.isInteger(at.start) && Number.isInteger(at.end)
+    ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y!, at: { start: at.start!, end: at.end! } } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
 // The chat's own commands whose capture handler (the nav trail's or the jump moves', below) answers chord `ch`: those
@@ -10318,7 +10349,7 @@ let commentPopPos: { x: number; y: number } | null = null;
 let cmtPopPosMine = false;
 // the selection a Comment gesture was redirected from to the thread already on its passage (the user 2026-10-01): the
 // thread's box offers "New thread instead", which opens the comment box on exactly this selection
-let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number } | null = null;
+let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null } | null = null;
 // the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
 // ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
 let cmtPopApplied: { w: number; h: number } | null = null;
@@ -10787,21 +10818,26 @@ function turnProse(sid: string, uuid: string): string | null {
   return text;
 }
 
-/** Comment on a passage. `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. */
-function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number, fresh = false): void {
+/** Comment on a passage. `at`: where in the turn's prose the selection sits, when the gesture knows it (selectionAt).
+ *  `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. */
+function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number, at?: PassageAt | null, fresh = false): void {
   const prose = turnProse(sid, uuid);
   // the passage's own send still unanswered (its mark still the optimistic one): the box re-opens ON that send, never as a
   // fresh composer, so a click outside and a second Comment on the passage cannot send the same words twice (2026-10-01).
   // "The passage" is the same turn with overlapping text (samePassage)
-  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact, prose);
+  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact, prose, at);
   const live = !!held && (commentThreads.get(sid) || []).some((t) => t.tid === "pending:" + held.createId);
   // …and a passage that already HAS a thread opens that thread (the user 2026-10-01: one passage never silently grows a
   // second thread), with "New thread instead" in its box for the time a second one is meant
-  const existing = !live && !fresh ? existingThreadFor(commentThreads.get(sid) || [], uuid, exact, prose) : null;
+  const existing = !live && !fresh ? existingThreadFor(commentThreads.get(sid) || [], uuid, exact, prose, at) : null;
   commentPopPos = { x, y };
   cmtPopPosMine = false;                       // a selection point, not the user's placement (the thread layout ignores it)
   if (existing) {
-    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y });
+    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y, at });
+    // …with the caret in its reply box, so the next keys go there and not to the chat's message box. Once, here, and not
+    // in renderCommentPopover's focus line: a clause there would take the caret back on every full rebuild while the box
+    // is open, and a box already open is refreshed in place, which returns before that line.
+    (document.querySelector("#cmt-pop .cmt-input") as HTMLTextAreaElement | null)?.focus();
     return;
   }
   cmtRedirect = null;
@@ -10815,7 +10851,7 @@ function openCommentComposer(sid: string, uuid: string, exact: string, x: number
 }
 
 function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
-                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number }): void {
+                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null }): void {
   openCommentKey = { sid, tid };
   pendingCommentAnchor = null;
   cmtRedirect = redirect && redirect.tid === tid ? redirect : null;   // only a Comment gesture's redirect offers "New thread instead"
@@ -13556,8 +13592,13 @@ function layoutLimitPx(): number {
   return h;
 }
 if (typeof window !== "undefined") window.addEventListener("resize", () => { layoutLimit = null; });
-/** The most px the page's gaps may stand for together: their share of the measured layout limit (chat-regions.ts GAPS_SHARE). */
-function gapsMaxPx(): number { return layoutLimitPx() * GAPS_SHARE; }
+/** The most px the page's gaps may stand for together: their share of the measured layout limit (chat-regions.ts GAPS_SHARE), or the
+ *  figure a served lab holds it at (__rompGapsBound, 2026-10-02: UnreachableEndInsideAGapSettles holds it at the fallback's share, so a gap
+ *  stands past the measured limit where the layout clamps, the case a fill's quiet gaps exist for, which no lab reaches at the measured
+ *  share). */
+let gapsBoundHeld: number | null = null;
+function gapsMaxPx(): number { return gapsBoundHeld ?? layoutLimitPx() * GAPS_SHARE; }
+if (typeof window !== "undefined") (window as any).__rompGapsBound = (px: number | null): void => { gapsBoundHeld = typeof px === "number" && px > 0 ? px : null; };
 /** The gap units' heights, by unit: each its own estimate (turns x px-per-turn), not the average row (T386 stage 2). */
 function gapUnitsOf(items: DisplayItem[], pxPerTurn: number | undefined): Map<number, number> | undefined {
   const gu = new Map<number, number>();
@@ -13621,29 +13662,59 @@ function measureRows(v: View): void {
     if (m.px != null) { v.pxPerTurn = m.px; if (m.road === "typed") noteTypedTurns(v, m.turns, rows.length); }
   }
 }
-/** The sessions this page counted by typed rows (turnCountTyped), one client-diag row each per page load. */
+/** The sessions this page counted by typed rows (turnCountTyped), at most one client-diag row each per page load: filed at the measure,
+ *  or, for a local session measured before the page's first caps frame, held in typedTurnsHeld until that frame arrives, so a page that
+ *  never receives a caps frame files no turnCountTyped row for its local sessions. A held row marks its session here too, so a
+ *  rebuilt view of that session files no second row, before the frame or after it. */
 const typedTurnsSaid = new Set<string>();
+/** Whether a caps frame has reached this page. A local session's cause is read off kernelCaps, which is empty until the first one, and the
+ *  kernel sends that frame after its connect push (kernel.py _send_caps), so a local session's row measured before it is held in
+ *  typedTurnsHeld until it arrives (typedTurnsCapsArrived), and is never filed if none arrives. The first caps frame raises
+ *  the flag and nothing lowers it, so once a caps frame has reached the page, a local session first measured after a redial files its row
+ *  at once, its cause read off the caps the page last heard, which may be the previous kernel's: after a caps frame has answered the
+ *  bundle's ready, the page sends its local kernel no other ready (the bundle posts it once, and the pane shim posts it again only while
+ *  no caps frame has answered it), so no redial earns another caps frame. */
+let typedTurnsCapsHeard = false;
+const typedTurnsHeld: { sid: string; typed: number; rows: number }[] = [];
 /** The px per turn was measured off TYPED rows (2026-10-01): none of the rows carried the kernel's turn (`turn`, caps chatTurn), so the
- *  gaps are drawn from the page's own count, which misses every turn a peer's message opened. Said once per session, in client-diag, with
- *  why: a remote host the page holds no caps for, an older local kernel (no chatTurn), or a local kernel that announced chatTurn and sent
- *  rows without it (a bug, or a view holding only rows the page injected). */
+ *  gaps are drawn from the page's own count, which misses every turn a peer's message opened. Said at most once per session, in
+ *  client-diag, with why: a remote host the page holds no caps for, an older local kernel (its caps frame has no chatTurn), or a local
+ *  kernel that announced chatTurn and sent rows without it (a bug, or a view holding only rows the page injected). A local session's row
+ *  measured before the page's first caps frame waits for it (typedTurnsCapsHeard), so a page that never receives one files none for its
+ *  local sessions. */
 function noteTypedTurns(v: View, typed: number, rows: number): void {
   let sid = "";
   for (const [id, w] of views) if (w === v) { sid = id; break; }
   if (!sid || typedTurnsSaid.has(sid)) return;
   typedTurnsSaid.add(sid);
+  if (hostOf(sid) === "" && !typedTurnsCapsHeard) { typedTurnsHeld.push({ sid, typed, rows }); return; }
+  fileTypedTurns(sid, typed, rows);
+}
+function fileTypedTurns(sid: string, typed: number, rows: number): void {
   const cause = hostOf(sid) !== "" ? "remote" : kernelCaps.has("chatTurn") ? "unstamped" : "olderKernel";
   chatDiagRow("turnCountTyped", { sid, cause, typed, rows });
 }
+/** The kernel's caps frame arrived (onKernelCaps, once it has set kernelCaps): the rows held for it are filed with the cause it gives. */
+function typedTurnsCapsArrived(): void {
+  typedTurnsCapsHeard = true;
+  for (const r of typedTurnsHeld.splice(0)) fileTypedTurns(r.sid, r.typed, r.rows);
+}
 
+/** Where the top spacer starts in scroll space (below #content's top padding), 0 when the view has none: the origin of every walk over
+ *  the units hidden above the window (hiddenUnitTop, unitAtScroll, turnUnderTop, yOfTurn, preJumpIntoGap), so they agree on where a
+ *  hidden unit stands (2026-10-02: four walked from 0 and one from the spacer, so a pre-jump to the head gap's start wrote scrollTop 0, 8 px
+ *  above the gap, where no turn is named and a fill could neither anchor on the point nor ask for the reader's page). */
+function topSpacerY(v: View, content: HTMLElement): number {
+  const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
+  return top ? top.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop : 0;
+}
 /** The estimated top, in scroll space, of a unit hidden in a spacer (the same walk unitAtScroll maps a position by: each hidden unit its
  *  own height, a gap's estimate else the average), or null when it is not hidden. */
 function hiddenUnitTop(v: View, content: HTMLElement, u: number): number | null {
   const avg = v.avgTurnH ?? 60;
   if (u < (v.winStart ?? 0)) {
-    const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
-    if (!top) return null;
-    let y = top.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
+    if (!v.el.querySelector(".tx-spacer-top")) return null;
+    let y = topSpacerY(v, content);
     for (let k = 0; k < u; k++) y += v.gapUnits?.get(k) ?? avg;
     return y;
   }
@@ -13664,10 +13735,10 @@ function unitAtScroll(v: View, content: HTMLElement): number {
   const cTop = content.getBoundingClientRect().top;
   const yOf = (e: HTMLElement) => e.getBoundingClientRect().top - cTop + st;   // position in scroll space
   const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
-  const topH = top ? top.offsetHeight : 0;
-  if (st < topH) {   // in the top spacer: walk the hidden units by their own heights (a gap's estimate, else the average)
-    if (!v.gapUnits) return Math.max(0, Math.floor(st / avg));
-    let y = 0;
+  const topH = top ? top.offsetHeight : 0, topY = topSpacerY(v, content);
+  if (st < topY + topH) {   // in the top spacer: walk the hidden units by their own heights (a gap's estimate, else the average) from where it starts
+    if (!v.gapUnits) return Math.max(0, Math.floor((st - topY) / avg));
+    let y = topY;
     for (let u = 0; u < (v.winStart ?? 0); u++) { y += v.gapUnits.get(u) ?? avg; if (st < y) return u; }
     return Math.max(0, (v.winStart ?? 1) - 1);
   }
@@ -16127,13 +16198,13 @@ function preJumpIntoGap(sid: string, t: number | null | undefined, rec: WindowAs
       if (!g.classList.contains("tx-gap-loading")) { g.classList.add("tx-gap-loading"); g.appendChild(gapGlyph()); }
       y = g.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop + frac * g.offsetHeight;
     } else {
-      // the gap sits inside a spacer: its place is the hidden units' heights before it (the walk unitAtScroll takes), and the
-      // re-window the write provokes renders it with its glyph
+      // the gap sits inside a spacer: its place is the hidden units' heights before it (the walk unitAtScroll takes: for a gap above the
+      // window, from where the top spacer starts, topSpacerY), and the re-window the write provokes renders it with its glyph
       const items = displayItems(s);
       const idx = items.findIndex((it) => it.kind === "gap" && it.lo === r.lo && it.hi === r.hi);
       if (idx < 0) { landTrail.push("pre-jump-noitem"); return; }
       const avg = v.avgTurnH ?? 60, own = hiddenHeight(v, idx, idx + 1, avg);
-      if (idx < (v.winStart ?? 0)) y = hiddenHeight(v, 0, idx, avg) + frac * own;
+      if (idx < (v.winStart ?? 0)) y = topSpacerY(v, content) + hiddenHeight(v, 0, idx, avg) + frac * own;
       else { const bot = v.el.querySelector(".tx-spacer-bot") as HTMLElement | null; y = content.scrollHeight - (bot ? bot.offsetHeight : 0) + hiddenHeight(v, v.winEnd ?? idx, idx, avg) + frac * own; }
     }
     v.stick = false;   // a navigation's move ends follow mode (else the re-window the write provokes lands the reader back at the bottom)
@@ -20432,9 +20503,12 @@ function gapElement(s: Session, it: { lo: number; hi: number }, v: View): HTMLEl
   gapObserver?.observe(g);
   return g;
 }
-// A gap element a FILL built (2026-10-01): its first observation is the page's own rebuild, not the reader, so it asks nothing; the
-// fill's completion asks for a reader still parked in a gap (fillInPlace). Asking on it walked a gap that could not leave the viewport
-// (a layout past the browser's limit) one page per reply, for as long as pages came.
+// A gap element a FILL built (2026-10-01; since 2026-10-02 only while the layout stands at the measured limit, layoutLimitPx): its first
+// observation is the page's own rebuild, not the reader, so it asks nothing; the fill's completion asks for a reader still parked in a gap
+// (fillInPlace). Asking on it walked a gap that could not leave the viewport (a layout past the browser's limit) one page per reply, for as
+// long as pages came. Below the measured limit a fill's gaps are not quiet (2026-10-02): a gap the fill leaves on screen next to the page it
+// brought asks on its first observation like any gap, else the rest of the pane stayed blank, with no loader and nothing asked, until the
+// reader scrolled again.
 const quietGaps = new WeakSet<Element>();
 let fillBuilding = false;
 /** Ask for the page a gap element in view stands for, by where the reader is against it: INSIDE it (both its edges off the viewport, a
@@ -20556,12 +20630,12 @@ function turnUnderTop(v: View, s: Session, items: DisplayItem[], turns: number[]
     if (tr != null && tr !== "") return Number(tr) + (top - y0) / h;
   }
   const spacer = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
-  const topH = spacer ? spacer.offsetHeight : 0;
-  if (top < topH) {
-    const avg = v.avgTurnH ?? 60; let y = 0;
+  const topH = spacer ? spacer.offsetHeight : 0, topY = topSpacerY(v, content);
+  if (spacer && top < topY + topH) {   // the walk starts where the spacer does (topSpacerY); a top in the padding above it is its start
+    const at = Math.max(top, topY), avg = v.avgTurnH ?? 60; let y = topY;
     for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
       const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
-      if (top < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((top - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
+      if (at < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((at - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
       y += h;
     }
   }
@@ -20578,7 +20652,7 @@ function yOfTurn(v: View, s: Session, items: DisplayItem[], turns: number[], con
     const tr = c.dataset.turn; if (tr == null || tr === "" || Number(tr) !== whole) continue;   // the row names its turn (round six)
     return c.getBoundingClientRect().top - cTop + st + c.offsetHeight * Math.min(1, Math.max(0, t - whole));
   }
-  const avg = v.avgTurnH ?? 60; let y = 0;
+  const avg = v.avgTurnH ?? 60; let y = topSpacerY(v, content);   // a hidden unit: the spacer's walk, from where the spacer starts
   for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
     const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
     if (it.kind === "gap" && t >= it.lo && t < it.hi) return y + h * ((t - it.lo) / (it.hi - it.lo));
@@ -20591,6 +20665,11 @@ function fillInPlace(sid: string, v: View | undefined): void {
   const content = document.getElementById("content"), s = sessions.get(sid);
   if (!content || !v || !s || sid !== activeId) { showActive(); return; }
   const topBefore = content.scrollTop;
+  // the layout stands at the measured limit (layoutLimitPx: the probe's reading, or the fallback where the probe reads 0), read once before
+  // either rebuild: only there are this fill's gap elements quiet (quietGaps), so below the limit a gap it leaves on screen asks on its first
+  // observation like any gap (askGapElement: the page at its edge in view, or, for a reader inside it, the page under the viewport top;
+  // nothing while a page of it is on the wire) (2026-10-02)
+  const atLimit = content.scrollHeight >= layoutLimitPx() - 1;
   const keep = captureScrollAnchor(content, v);
   // a row anchors the fill when it INTERSECTS the viewport, whatever the sign of its top (round four, medium 1: a partially visible
   // top row, the normal state after any wheel, is an anchor too); a reader with no row on screen (a jump to the head, a cancelled
@@ -20616,7 +20695,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
     if (u < 0) u = unitAtScroll(v, content);
   }
   v.stick = false;   // a fill never follows the tail: the reader is where they are
-  fillBuilding = true;   // the gap elements this rebuild makes are the page's own (quietGaps)
+  fillBuilding = atLimit;   // the gap elements this rebuild makes are the page's own (quietGaps), at the limit only
   try {
     if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
     else syncView(sid);
@@ -20637,7 +20716,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
   if (pointBefore != null && !rowOnScreen(v, content)) {
     const u2 = unitOfTurn(items, turnsNow, Math.floor(pointBefore));
     if (u2 >= 0) {
-      fillBuilding = true;
+      fillBuilding = atLimit;
       try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting"); }
       finally { fillBuilding = false; }
       const y2 = yOfTurn(v, s, items, turnsNow, content, pointBefore);
@@ -20646,8 +20725,8 @@ function fillInPlace(sid: string, v: View | undefined): void {
   }
   // the fill's own completion meets a parked reader (2026-10-01): the turn under the viewport top before the fill is still in a gap (the
   // page that landed was another's, or the reader's gap was busy with it) and the reader has not moved, so the page holding it is asked
-  // now. A fill that brought that turn asks nothing: the rebuilt gap's first observation is quiet, so a gap that cannot leave the view
-  // (a layout past the browser's limit) is not walked one page per reply.
+  // now. A fill that brought that turn asks nothing here: below the measured limit a rebuilt gap left on screen asks on its first
+  // observation, and at the limit that observation is quiet, so a gap that cannot leave the view is not walked one page per reply.
   if (pointBefore != null && s.regions) { const gp = gapAt(s.regions, Math.floor(pointBefore)); if (gp) requestTurns(sid, gp, "inside", pointBefore); }
   if (activeId) applyCommentMarks(activeId);
   scheduleRailSticky();
@@ -21791,8 +21870,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     }
     // …and the FOLDS riding beside it (2026-09-23): the migration and the adoption every page runs (tab-groups.ts
     // hearSharedFolds; an adoption repaints through TABGROUPS_EVENT), after which this webview publishes its folds
-    // through its host pipe, as it publishes its arrangement
-    if ("folds" in m) hearSharedFolds(m.folds, (f) => vscodeApi?.postMessage({ type: "setViewFolds", folds: f }), setFoldsPublisher);
+    // through its host pipe, as it publishes its arrangement, each publish named (`by`) so the frame's `foldsBy` tells
+    // this browser's own earlier publish coming back from another device's word (2026-09-29), and the frame's count
+    // (`foldsSeq`) a frame built before this browser's latest publish landed (2026-09-30)
+    if ("folds" in m) hearSharedFolds(m.folds, (f, by) => vscodeApi?.postMessage({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) }), setFoldsPublisher, m.foldsBy, m.foldsSeq);
   }
   else if (m.type === "renamed" && m.id && typeof m.name === "string") {
     notePendingMeta(pendingTabMeta, m.id, { name: m.name });   // kernel truth — hold it against a push built pre-rename
@@ -21804,9 +21885,11 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     if (ackShip && !shipOwner(ackShip)) return;   // a duplicate of a ship already retired (a reconnect
     //                                               re-ship raced the original ack) — attaching it again
     //                                               would double the file on whatever tab is active (T215)
-    const cbox = document.getElementById("cmt-pop")?.querySelector(".cmt-input") as HTMLTextAreaElement | null;
+    // an editable box only: a path that lands while the sent view's read-only box is open goes on to the chat's attachment
+    // strip below
+    const cbox = document.getElementById("cmt-pop")?.querySelector(".cmt-input:not([readonly])") as HTMLTextAreaElement | null;
     if (cbox) {
-      // a comment popover is open — its own clip shipped this file, so the path lands in ITS box
+      // an editable comment box is open: the path lands in it
       retirePendingShip(m.path, ackShip);
       cbox.value = (cbox.value ? cbox.value.trimEnd() + " " : "") + m.path + " ";
       cbox.dispatchEvent(new Event("input"));   // the draft listener persists it
@@ -23509,7 +23592,7 @@ setupSettings();
     },
     cmtclose: () => closeCommentPop(),
     // "New thread instead" in a thread a Comment gesture was redirected to: the comment box, on the selection the gesture had
-    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, true); },
+    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, r.at, true); },
     cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture
