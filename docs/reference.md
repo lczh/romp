@@ -5128,17 +5128,56 @@ restart)`; otherwise `signal, not requested through the manager`, which means
 no request was on record when the kernel read the file, not that the sender
 is known. The sender's pid is never recorded; a Python signal handler does not
 receive it. A kernel whose manager disappears writes a row with action
-`parent-gone` before it exits. `restart-cuts.jsonl` gets one row per exit
-naming the turns the drain cut and the reason: the audit row's `action:
+`parent-gone` before it exits. `restart-cuts.jsonl` gets one cut row per exit (and a done row when the exit completes, described below)
+naming the turns the drain cuts and the reason: the audit row's `action:
 reason`, the `signal` row's reason, or `parent-gone: the manager exited; the
 kernel followed it`. When the helper that files the `signal` row fails (a
 `ROMP_MANAGER_PID` the kernel cannot use as a pid), no `signal` row is written,
-and the cut row carries the plain `signal, not requested through the manager`
-verdict plus a `reasonError` naming the fault, so the missing row is explained
+and the exit's done row carries a `reasonError` naming the fault, with the plain
+`signal, not requested through the manager` verdict as its `finalReason` when the cut row's provisional verdict differs, so the missing row is explained
 on disk. A second SIGTERM during the drain is ignored; the first
 writes the row. The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
+
+The exit runs against one deadline measured from the moment the SIGTERM
+handler starts: `EXIT_DEADLINE_S`, 40 percent of the manager's grace
+(`ROMP_SHUTDOWN_GRACE_MS`) and at most 4 s, so 3.2 s at the manager's 8 s
+(`ROMP_EXIT_DEADLINE_S` sets it outright). The
+rest of the grace is for what the exit cannot bound: the handler's own start,
+one item's overrun per phase, and the process teardown. The handler first turns
+automatic garbage collection off, freezes the heap, switches the freeze
+controller off and stands the loops and tick jobs down (a settle write the jobs
+pass is running leaves before its next session). It then sends the restarting frame, reads who asked, signals the judges' child
+and writes the cut row, before any other exit work: `t` is the handler's start, `cutTurns` the turns the
+drain is about to cut (the backend's `would_cut`, the drain's own predicate,
+plus the Codex turns), `stopped` the backend's session count, and
+`expectsDone: true`. For a signal with no request on record the row's reason is
+a provisional verdict read without waiting (the manager's pid already gone or
+its stop note already written). The memos and the session listing follow and run whole, counted against the
+deadline; then the fold priming, the checkpoint writes (the leaves just primed
+first) and the assembly documents, each capped by its `ROMP_EXIT_*_BUDGET_S`
+share and ending by the deadline less the drain's reserve
+(`EXIT_DRAIN_BUDGET_S`, 35 percent of the deadline), plus the one item in
+flight, so an overrun shrinks the later phases; the drain is handed what the
+deadline has left, at least 0.25 s. After the drain the unrequested verdict is
+decided as before (its wait and its `signal` row), and a done row is appended:
+`exitDone: true`, `cutT` (the cut row's `t`), the drain's `stopped`,
+`unjoined` and `reaped`, `drainCutTurns` when the turns cut differ from the
+prediction, `drainError` and `reasonError` when those faults happened,
+`finalReason` when the late verdict differs from the cut row's, `phases`
+(`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
+priming-to-assembly window as older cut rows carried it, `drainS`), the
+checkpoint counts, `deadlineS` and `elapsedS`. The done row carries no
+`cutTurns`, `reason` or `auditT`, so every reader that keys on those reads the
+cut row alone; `romp restart-metrics` joins the pair on the pid and `cutT`, and
+a cut row with `expectsDone` and no done row reads as `exitDone: false`, an
+exit killed after its row. Because the cut row's `t` is now the handler's start
+rather than the end of the drain, a restart's `outageS` reads longer by the
+exit's own length than it did before this change. Each phase logs one line,
+`romp-kernel: exit <phase> <s> s (window <s> s; <s> s left of the <s> s
+deadline)`, and the last says `romp-kernel: exit done in <s> s of the <s> s
+grace`.
 
 Two more ledgers there record what restarts do to the sessions, appended by
 the SDK backend and read by `romp restart-metrics` (below). `session-events.jsonl`
@@ -5183,7 +5222,7 @@ background task's notification, a scheduled prompt) has no feed, so its row
 carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
 kept, so each pair stays under 64 MB; the reader reads both. The restart rows
 of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
-sampled at its exit (the cut row) and at its settled boot (the boot row), so
+sampled as its exit starts (the cut row) and at its settled boot (the boot row), so
 the kernel's growth between restarts is a series without a sampler of its own.
 And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
 parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's
@@ -5560,8 +5599,8 @@ Bounds and counters, all on `/perf` under `judge`:
   parent-death signal, asked for between fork and exec through a pointer the kernel bound at import, so the forked child
   does no work of its own); the kernel's exit road ends it first in every case: the quit and the SIGTERM go out at once,
   even with a pass in flight (that pass is lost and counted), and the bounded waits (a tenth of the manager's SIGTERM
-  grace before the kill, a twentieth after) run on their own thread beside the exit's stages, which already spend the
-  grace less a margin; after its cut row the exit joins that thread with what the grace has left and kills outright
+  grace before the kill, a twentieth after) run on their own thread beside the exit's stages, which end by the exit's
+  deadline; after its done row the exit joins that thread with what the deadline has left and kills outright
   whatever still stands,
   so the exit stays inside the grace whatever the child does. A boot sweep that cannot list the state root leaves the
   sweep unmarked and the first request retries it.

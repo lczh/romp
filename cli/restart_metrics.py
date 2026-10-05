@@ -8,8 +8,10 @@ the READER: it reads the state directory's ledgers and the running kernel's rout
 
 Sources, and what each stamp is (every stamp is an EVENT's time, never the clock at read time):
   restart-cuts.jsonl     one row per kernel exit (cutTurns: the sessions whose in-flight turn the drain
-                         interrupted; stopped, unjoined, reaped; reason) and one bootSettled row per boot
-                         (firstServe, reconcileDone, settleS, outageS = firstServe minus the previous cut's t)
+                         interrupted; stopped, unjoined, reaped; reason), written at the exit's start since
+                         2026-10-05 with `expectsDone`, and then a done row (exitDone, cutT) after the drain that
+                         fold_exit_done joins to it; and one bootSettled row per boot (firstServe, reconcileDone,
+                         settleS, outageS = firstServe minus the previous cut's t)
   restart-audit.jsonl    the requests and notes around a restart; the manager's `quiet-window` row is the
                          parked deploy's wait from parked to restart (waitedS) and whether the fifteen-minute
                          backstop fired (backstop)
@@ -162,11 +164,72 @@ def bucket_bounds(key: str, kind: str, tz=None) -> tuple[float, float]:
 
 
 # ── the ledgers, parsed ─────────────────────────────────────────────────────────────────────────────────
+DONE_FIELDS = ("ckptWritten", "ckptLeft", "primed", "primeSkipped", "asmSkipped", "deadlineS", "elapsedS")
+
+
+def fold_exit_done(rows: list) -> list:
+    """restart-cuts.jsonl with each exit's DONE row folded into its cut row (the kernel's exit path, 2026-10-05). The
+    kernel writes the cut row at the exit's START (what it knew before the drain, `expectsDone`) and a done row after
+    the drain (`exitDone`, `cutT` = the cut row's t, the drain's stopped / unjoined / reaped, `drainCutTurns` when the
+    turns cut differ from the row's prediction, drainError / reasonError, `finalReason` when the late verdict differs,
+    `phases` and the checkpoint counts). Two append-only rows, because the ledger is shared by every kernel under the
+    root and a rewrite could drop a sibling's append. A done row joins the newest cut row before it with the same pid and
+    t == cutT; its fields override the cut row's, the phases' ckptS and drainS land where older cut rows carried them,
+    and the record gets exitDone True. A cut row with expectsDone and no done row is exitDone False (the exit was killed
+    after its row: the forced kill, visible where the old order lost the row), and an older row is exitDone None. Done
+    rows never stand as rows of their own (one whose cut row is missing is dropped); every other row passes unchanged.
+    Pure; the input is not modified."""
+    out, open_cuts = [], {}
+    for r in rows:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        if r.get("exitDone") is True and "cutTurns" not in r:
+            waiting = open_cuts.get((r.get("pid"), r.get("cutT"))) or []
+            if not waiting:
+                continue
+            c = out[waiting.pop()]
+            c["exitDone"] = True
+            for k in ("stopped", "unjoined", "reaped"):
+                if k in r:
+                    c[k] = r[k]
+            if isinstance(r.get("drainCutTurns"), list):
+                c["cutTurns"] = list(r["drainCutTurns"])
+            for k in ("drainError", "reasonError"):
+                if r.get(k):
+                    c[k] = r[k]
+            if "finalReason" in r:
+                c["reason"] = r["finalReason"]
+            ph = r.get("phases") if isinstance(r.get("phases"), dict) else {}
+            for k in ("ckptS", "drainS"):
+                if k in ph:
+                    c[k] = ph[k]
+            if ph:
+                c["phases"] = dict(ph)
+            for k in DONE_FIELDS:
+                if k in r:
+                    c[k] = r[k]
+            c["doneT"] = r.get("t")
+            continue
+        if "cutTurns" in r:
+            c = dict(r)
+            c["exitDone"] = False if r.get("expectsDone") else None
+            if r.get("expectsDone"):
+                open_cuts.setdefault((r.get("pid"), r.get("t")), []).append(len(out))
+            out.append(c)
+            continue
+        out.append(r)
+    return out
+
+
 def parse_restarts(rows: list[dict]) -> list[dict]:
-    """One record per kernel exit from restart-cuts.jsonl (rows carrying cutTurns), each joined with the
+    """One record per kernel exit from restart-cuts.jsonl (rows carrying cutTurns, each with its done row folded in
+    first: fold_exit_done), each joined with the
     boot that followed it: the bootSettled row whose prevCutT names it, else the first boot row after it.
     A boot the ledger shows with no preceding cut (a crash, a SIGKILL: no drain ran) becomes a record of its
-    own with `noCutRow` so the outage is still counted where the boot row measured it."""
+    own with `noCutRow` so the outage is still counted where the boot row measured it. `exitDone` is True for an exit
+    that wrote its done row, False for one killed after its cut row, None for a row from before the done row existed."""
+    rows = fold_exit_done(rows)
     cuts = sorted([r for r in rows if isinstance(r.get("t"), (int, float)) and "cutTurns" in r], key=lambda r: r["t"])
     boots = [r for r in rows if isinstance(r.get("t"), (int, float)) and r.get("bootSettled")]
     used = set()
@@ -195,7 +258,8 @@ def parse_restarts(rows: list[dict]) -> list[dict]:
                "stopped": int(c.get("stopped") or 0), "unjoined": int(c.get("unjoined") or 0),
                "reaped": int(c.get("reaped") or 0), "watchesArmed": int(c.get("watchesArmed") or 0),
                "auditT": c.get("auditT"), "drainError": c.get("drainError"), "reasonError": c.get("reasonError"),
-               "rssKb": c.get("rssKb"), "cpuS": c.get("cpuS")}   # the kernel's own size and CPU at its exit
+               "rssKb": c.get("rssKb"), "cpuS": c.get("cpuS"),   # the kernel's own size and CPU at its exit
+               "exitDone": c.get("exitDone")}                    # True: the exit completed; False: killed after its cut row
         if boot is not None:
             rec["boot"] = {"t": int(boot["t"]), "firstServe": boot.get("firstServe"),
                            "reconcileDone": boot.get("reconcileDone"), "settleS": boot.get("settleS"),
