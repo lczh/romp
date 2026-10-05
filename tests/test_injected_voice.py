@@ -133,6 +133,17 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
                  {"who": "assistant", "text": "Yes: write-through avoids the stale-read window and "
                                               "the extra invalidation pass; the cost is one write "
                                               "per update, which this workload absorbs."}]),
+            # …when the start of that discussion could not be read, and when it ran past the length cap (2026-10-05):
+            # what it says about what it left out is the person's voice too
+            "comment-thread merge (beginning unreadable)": km._merge_body(
+                "the caching layer should be write-through",
+                [{"who": "assistant", "text": "So write-through it is; the cost is one write per update."},
+                 {"who": "user", "text": "ok, note that in the design doc"}], gap=True),
+            "comment-thread merge (cut for length)": km._merge_body(
+                "the caching layer should be write-through",
+                [{"who": "user", "text": "should we make the cache write-through instead?"},
+                 {"who": "assistant", "text": "It depends on the read pattern. " * 2000},
+                 {"who": "user", "text": "ok, note that in the design doc"}]),
             # the spend guard's one message to a session over the hourly ceiling (T350, the user 2026-09-11)
             "spend ceiling": km._spend_ceiling_body(1240.0, 1000.0),
             "debt reminder (question)": km._debt_reminder_body(
@@ -355,7 +366,8 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
                         "comment thread opener (from before a summary)",
                         "comment thread opener (from before a summary, neither side)",
                         "the context from before a summary, with only the passage's other side before it",
-                        "comment-thread merge", "compaction suggestion", "spend ceiling",
+                        "comment-thread merge", "comment-thread merge (beginning unreadable)",
+                        "comment-thread merge (cut for length)", "compaction suggestion", "spend ceiling",
                         "relayed question", "relayed question (procedural why)",
                         "relayed question (with the conversation)",
                         "thread identity line", "fork identity line", "plain fork's first message"):

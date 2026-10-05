@@ -19609,100 +19609,165 @@ def _thread_parse(tsid, path, cut_uuid, floor_t, now):
 
 
 
-def _thread_messages(tsid, cut_uuid, floor_t=0):
-    """The side conversation: user/assistant text AFTER the fork cut in the thread's transcript,
-    oldest first, [{who, text, t}]. The fork copies parent history VERBATIM (same uuids), so
-    everything above `cut_uuid` on the active chain IS the thread's own exchange. mtime-cached —
-    a settled thread costs one stat per push. [] before the fork lands: while the reg still carries
-    forkOf (spent by the CLI init that pins the new fsid), lastSid points at the PARENT transcript,
-    and reading it here would present the parent's post-anchor conversation as the thread's own.
-    The exchange sits strictly AFTER the copied history, so a streaming thread reads only its own
-    records per push (_thread_own_records, from the cut record's line on; the pusher must not
-    reparse a whole copied conversation every 0.5s); the full parse is the fallback when the
-    transcript does not hold the cut.
+_THREAD_MSG_CAP = 4000         # the comments frame's per-record cap: the frame rides every push (the relay reads the whole text)
+_THREAD_REPLY_CAP = 8000       # …an agent reply spanning several records, once merged
+_THREAD_MSGS_SHOWN = 40        # …and the newest this many messages
 
-    A TIP-forked thread (cut_uuid "", the restart-seam fallback) has no cut record to stop at —
-    `floor_t` (the thread's createdT) bounds it instead: copied records carry their ORIGINAL
-    timestamps, strictly before the fork moment, so the time floor is the recorded boundary."""
+
+def _thread_exchange(tsid, cut_uuid, floor_t=0):
+    """The side conversation WHOLE, read from the thread's transcript: {"msgs": [{who, text, t}] oldest first, every
+    message uncapped and an agent reply spanning several records merged into one; "capped": the comments frame's copy of
+    them (_thread_messages); "sent": what romp added to the opening message; "gap": "" when the walk reached the point the
+    thread started from, else why it did not, in words for the person; "oldestT": the stamp of the oldest record it
+    reached}. What the relay hands the parent session, and the one walk the frame's projection is cut from.
+
+    The fork copies parent history VERBATIM (same uuids), so everything above `cut_uuid` on the active chain IS the
+    thread's own exchange. The chain is the event model's (em.FileAdapter): a context compaction writes its boundary
+    record with no parentUuid and the leaf before it in logicalParentUuid, and the adapter follows that link (repairing
+    one that names a record never written from the boundary's preservedSegment), so the walk crosses every compaction
+    the thread went through. Read by the record's own parentUuid alone, the walk ended at the newest boundary, and a
+    relay after an auto-compaction sent only the exchange since it (the user 2026-10-05, whose relay of a thirteen-
+    message discussion carried its last two). The compaction's summary record is not something either side said and
+    is left out (_comment_msg_text), and so is a prompt the CLI restored after a boundary (the event model's replay
+    classification, the copy the chat drops too). A message the person sent while the agent was working is no user
+    record but a queued_command attachment on the chain: it is theirs when the event model's atom for it names them
+    (_comment_spliced, the cut walk's reading).
+
+    [] before the fork lands: while the reg still carries forkOf (spent by the CLI init that pins the new fsid),
+    lastSid points at the PARENT transcript, and reading it here would present the parent's post-anchor conversation as
+    the thread's own. The exchange sits strictly AFTER the copied history, so a streaming thread reads only its own
+    records per push (_thread_own_records, from the cut record's line on; the pusher must not reparse a whole copied
+    conversation every 0.5s); the whole transcript is read when it does not hold the cut there. mtime-cached: a settled
+    thread costs one stat per push.
+
+    A TIP-forked thread (cut_uuid "", the restart-seam fallback) has no cut record to stop at; `floor_t` (the thread's
+    createdT) bounds it instead: copied records carry their ORIGINAL timestamps, strictly before the fork moment, so the
+    time floor is the recorded boundary.
+
+    Nothing is dropped quietly. A transcript that cannot be read, a cut it does not hold, and a chain that ends before
+    the thread's start (a record it links to is missing, or it has no link further back) each set "gap"; the relay says
+    so in what it sends and tells the person (_comment_merge)."""
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
-        return []
+        return {"msgs": [], "capped": [], "sent": "", "gap": "", "oldestT": 0}
     path = _thread_transcript_path(reg, tsid)
     try:
         st = os.stat(path)
-        mt, size = st.st_mtime, st.st_size
-    except OSError:
-        return []
+        mt = st.st_mtime
+    except OSError as e:
+        return {"msgs": [], "capped": [], "sent": "", "oldestT": 0,
+                "gap": "its transcript can't be read (%s)" % (e.strerror or e)}
     hit = _thread_msgs_cache.get(tsid)
     if hit and hit[0] == path and hit[1] == mt and hit[2] == (cut_uuid, floor_t):
-        return hit[3]
-    by_uuid = parent_of = leaf = None
+        return hit[5]
+    ad, road = None, "whole"
     # the thread's own records alone (_thread_own_records: from the cut record's line, or a tip fork's first record past
     # the copied history), whatever their size: the window this read before missed the cut once the exchange outgrew it,
     # and a tip fork never had a cut to look for, so both read the whole copied transcript at every change
     tail = _thread_own_records(tsid, path, cut_uuid, floor_t) if (cut_uuid or floor_t) else None
     if tail is not None and (not cut_uuid or any(r.get("uuid") == cut_uuid for r in tail)):
-        by_uuid = {r["uuid"]: r for r in tail if r.get("uuid")}
-        parent_of = {r["uuid"]: r.get("parentUuid") for r in tail if r.get("uuid")}
-        # the last uuid-bearing record IS the live leaf (the CLI appends the active branch —
-        # the same assumption sdk_backend.last_record_uuid rides for rewinds)
-        leaf = next((r["uuid"] for r in reversed(tail) if r.get("uuid")), None)
-    if by_uuid is None:
-        ad = em.FileAdapter([path], path)
-        by_uuid, parent_of, leaf = ad.by_uuid, ad.parent_of, ad.leaf_uuid
+        ad, road = em.FileAdapter([path], path, records={path: tail}), "tail"
+    if ad is None:
+        # the whole transcript, and after a resume that forked it (a fresh head in a new file, the resumeFork row the
+        # backend writes to the thread's states log) the files it was resumed from too, stitched across the seam: the
+        # thread's earlier records live there, and the chat's parse reads the same lineage (em.parse_session)
+        links = em.resume_fork_links(em._load_states(str(jd.STATESDIR / (tsid + ".jsonl"))))
+        ad = em.FileAdapter(em._lineage_closure(path, [path], links), path, resume_links=links)
+    by_uuid, parent_of = ad.by_uuid, ad.parent_of
+
+    def _done(ex):
+        if len(_thread_msgs_cache) > 512:
+            _thread_msgs_cache.clear()
+        _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), ex["capped"], ex["sent"], ex)
+        return ex
     if cut_uuid and cut_uuid not in by_uuid:
-        return []       # the cut isn't in this transcript (corrupt row?) — an empty popover beats
-        #                 presenting the copied parent history as the thread's own conversation
-    rows, u, hops = [], leaf, 0
+        # the cut isn't in this transcript (corrupt row?): nothing beats presenting the copied parent history as the
+        # thread's own conversation, and the gap says why there is nothing
+        return _done({"msgs": [], "capped": [], "sent": "", "oldestT": 0,
+                      "gap": "the point it was started from is not in its transcript"})
+    chain, u, hops, reached = [], ad.leaf_uuid, 0, False
+    while u is not None and hops < 500000:
+        if u == cut_uuid:
+            reached = True                          # copied history starts here: the parent's, not the thread's
+            break
+        r = by_uuid.get(u)
+        if r is None:
+            # off the records read: on a tip fork's own records, the copied history they follow; anywhere else, a link to
+            # a record the transcript does not hold
+            reached = road == "tail" and not cut_uuid
+            break
+        if not cut_uuid and floor_t and int(em.parse_z(r.get("timestamp")) or 0) < floor_t:
+            reached = True                          # tip fork: copied history keeps its original (older) stamps
+            break
+        chain.append(u)
+        u = parent_of.get(u); hops += 1
+    else:
+        reached = u is None and not cut_uuid and not floor_t   # no boundary given: the whole transcript, to its root
+    # a prompt the CLI restored after a compaction boundary is a copy of one already on the chain: the event model's own
+    # classification over the walked records (the chat drops the same copies)
+    replay_st = em._emit_state()
+    ad._prepass(em._chrono(ad, chain), replay_st)
+    replays = replay_st["replay"]
+    g = em.TranscriptGraph(ad)
+    rows = []
     # romp's own injections are not the user's words: anything wearing the `<!-- romp-` marker
     # (nudges, notices) plus the boot reconcile's continuation text (marker-less by design) must
     # not render as a 'you' bubble in the popover
     is_nudge = getattr(sys.modules.get("romp_sdk_backend"), "is_resume_nudge", None) or (lambda t: False)
-    while u is not None and hops < 500000:
-        if u == cut_uuid:
-            break                                   # copied history starts here — the parent's, not the thread's
-        r = by_uuid.get(u) or {}
-        if not cut_uuid and floor_t and int(em.parse_z(r.get("timestamp")) or 0) < floor_t:
-            break                                   # tip fork: copied history keeps its original (older) stamps
-        if r.get("type") in ("user", "assistant"):
-            txt = _comment_msg_text(r)
-            if r.get("type") == "user" and (em.SYSTEM_WRAPPER_RE.match(txt) or
-                                            (em._record_origin(r) or {}).get("kind") not in (None, "human")):
-                txt = ""                            # harness bookkeeping for the AGENT (a parent bg task died
-                #                                     with the fork) — never the user's own words (2026-08-17);
-                #                                     field-first since 2026-09-08: any origin-stamped injected
-                #                                     turn (a peer's message, a preamble-led notification) is
-                #                                     not "you" either
-            if r.get("type") == "user" and em.CMD_WRAP_RE.match(txt):
-                txt = ""                            # a slash command's invocation/output wrapper (the record BEGINS
-                                                    # with one — the event model's own anchored test; prose that merely
-                                                    # quotes a tag is the user's message): the CLI's bookkeeping, not
-                                                    # something the user SAID — it must not owe a reply (T237 review)
-            if txt and not is_nudge(txt) and not (r.get("type") == "user" and "<!-- romp-" in txt):
-                rows.append({"who": "you" if r.get("type") == "user" else "agent",
-                             "text": txt,           # capped below, AFTER the opener's strip: a frame with a long
-                             #                        quote or a pre-compaction context block runs past the cap, and
-                             #                        a strip of the capped text never reached the comment
-                             "t": int(em.parse_z(r.get("timestamp")) or 0)})
-        u = parent_of.get(u); hops += 1
-    rows.reverse()
+    for u in reversed(chain):
+        r = by_uuid[u]
+        if r.get("type") == "attachment":
+            if (r.get("attachment") or {}).get("type") == "queued_command":
+                said = _comment_spliced(g, u, is_nudge)    # sent while the agent worked: no user record but this
+                if said:
+                    rows.append({"who": "you", "text": said[1], "t": int(em.parse_z(r.get("timestamp")) or 0)})
+            continue
+        if r.get("type") not in ("user", "assistant") or u in replays:
+            continue
+        txt = _comment_msg_text(r)
+        if r.get("type") == "user" and (em.SYSTEM_WRAPPER_RE.match(txt) or
+                                        (em._record_origin(r) or {}).get("kind") not in (None, "human")):
+            txt = ""                                # harness bookkeeping for the AGENT (a parent bg task died
+            #                                         with the fork) — never the user's own words (2026-08-17);
+            #                                         field-first since 2026-09-08: any origin-stamped injected
+            #                                         turn (a peer's message, a preamble-led notification) is
+            #                                         not "you" either
+        if r.get("type") == "user" and em.CMD_WRAP_RE.match(txt):
+            txt = ""                                # a slash command's invocation/output wrapper (the record BEGINS
+            #                                         with one — the event model's own anchored test; prose that merely
+            #                                         quotes a tag is the user's message): the CLI's bookkeeping, not
+            #                                         something the user SAID — it must not owe a reply (T237 review)
+        if txt and not is_nudge(txt) and not (r.get("type") == "user" and "<!-- romp-" in txt):
+            rows.append({"who": "you" if r.get("type") == "user" else "agent",
+                         "text": txt,               # capped only in the frame's copy, AFTER the opener's strip: a
+                         #                            frame with a long quote or a pre-compaction context block runs
+                         #                            past the cap, and a strip of the capped text never reached the
+                         #                            comment
+                         "t": int(em.parse_z(r.get("timestamp")) or 0)})
     sent = ""
     if rows and rows[0]["who"] == "you":            # the opening message: show the comment, not its frame (which
         sent, rows[0]["text"] = _comment_opener_split(rows[0]["text"])   # the note shows: _thread_sent_fields)
+    msgs, capped = [], []                           # one assistant turn can span records: read as one reply
     for r in rows:
-        r["text"] = r["text"][:4000]
-    merged = []                                     # one assistant turn can span records — read as one reply
-    for r in rows:
-        if merged and merged[-1]["who"] == r["who"] == "agent":
-            merged[-1]["text"] = (merged[-1]["text"] + "\n\n" + r["text"])[:8000]
-            merged[-1]["t"] = r["t"] or merged[-1]["t"]
+        txt = r["text"][:_THREAD_MSG_CAP]
+        if msgs and msgs[-1]["who"] == r["who"] == "agent":
+            msgs[-1]["text"] = msgs[-1]["text"] + "\n\n" + r["text"]
+            msgs[-1]["t"] = r["t"] or msgs[-1]["t"]
+            capped[-1]["text"] = (capped[-1]["text"] + "\n\n" + txt)[:_THREAD_REPLY_CAP]
+            capped[-1]["t"] = r["t"] or capped[-1]["t"]
         else:
-            merged.append(r)
-    merged = merged[-40:]
-    if len(_thread_msgs_cache) > 512:
-        _thread_msgs_cache.clear()
-    _thread_msgs_cache[tsid] = (path, mt, (cut_uuid, floor_t), merged, sent)
-    return merged
+            msgs.append(dict(r))
+            capped.append(dict(r, text=txt))
+    gap = "" if reached else "its record breaks off before its first message"
+    oldest = int(em.parse_z(by_uuid[chain[-1]].get("timestamp")) or 0) if chain else 0
+    return _done({"msgs": msgs, "capped": capped[-_THREAD_MSGS_SHOWN:], "sent": sent, "gap": gap, "oldestT": oldest})
+
+
+def _thread_messages(tsid, cut_uuid, floor_t=0):
+    """The side conversation as the comments frame ships it, [{who, text, t}] oldest first: _thread_exchange's messages
+    with each record's text capped at _THREAD_MSG_CAP characters (an agent reply spanning records at _THREAD_REPLY_CAP)
+    and the newest _THREAD_MSGS_SHOWN kept, since the frame rides every push. The relay reads _thread_exchange whole."""
+    return _thread_exchange(tsid, cut_uuid, floor_t)["capped"]
 
 
 def _thread_opener_sent(tsid):
@@ -20738,10 +20803,41 @@ def _comment_reply(parent_sid, tid, text):
 MERGE_BODY_CAP = 48000  # the relay sends the WHOLE exchange (T145, the user 2026-08-28: it looked
 #                           like only part of the thread merged — the old 6000 trimmed any real
 #                           discussion); this cap is a pathological-thread backstop only, and the
-#                           trim marker still says so honestly when it fires
+#                           trim note still says so honestly when it fires
+
+# What the relay says when it had to leave something out (injected-voice rules: the person handing over the record of a
+# discussion; tests/test_injected_voice.py renders both). The GAP lead replaces "Here is how it went:" when the walk could
+# not reach the start of the thread (_thread_exchange's gap); the TRIM note marks where the length cap cut the middle.
+MERGE_GAP_LEAD = "Here is how it went. I couldn't retrieve the beginning, so this starts partway through:"
+MERGE_TRIM_NOTE = "… (I cut part of the discussion here; it was too long to paste whole)"
 
 
-def _merge_body(exact, msgs):
+def _merge_trim(lines, cap=MERGE_BODY_CAP):
+    """`lines`, the relay's (prefix, text) lines oldest first, joined, held to about `cap` characters by cutting from the
+    MIDDLE: the first line always goes whole (on a first relay it is the person's opening message, the question the
+    whole discussion is about: the user 2026-10-05), then as many of the newest lines as fit after MERGE_TRIM_NOTE, which
+    marks the cut; when not even the newest one fits whole, its end does. Before this the cap kept the last `cap`
+    characters, and a long thread's relay lost the question first."""
+    joined = lambda ls: "\n\n".join(p + t for p, t in ls)
+    convo = joined(lines)
+    if len(convo) <= cap or len(lines) < 2:
+        return convo
+    head, rest = lines[0], lines[1:]
+    budget = cap - len(head[0] + head[1]) - len(MERGE_TRIM_NOTE) - 4
+    kept = []
+    for p, t in reversed(rest):
+        if len(p + t) + 2 > budget:
+            break
+        kept.append((p, t))
+        budget -= len(p + t) + 2
+    kept.reverse()
+    if not kept and budget > len(rest[-1][0]) + 1:
+        p, t = rest[-1]
+        kept = [(p, "…" + t[-(budget - len(p) - 1):])]
+    return "\n\n".join([joined([head]), MERGE_TRIM_NOTE] + ([joined(kept)] if kept else []))
+
+
+def _merge_body(exact, msgs, gap=False):
     """The RELAY handoff (the user 2026-08-23 as 'merge'; renamed + machine-dressed by T145): send a
     side discussion back into the main conversation. Injected-voice rules apply to the PROSE (repo
     CLAUDE.md): the agent reading this has never heard of romp, so it reads as the person it works
@@ -20749,7 +20845,11 @@ def _merge_body(exact, msgs):
     about — no machinery named, no reply slots. The MARKER TAIL is for the READER's chat: romp moved
     this content on the user's behalf, so it renders machine-attributed (the T130 class), never as
     the user's own typed bubble (their 2026-08-28 complaint). prose() in the voice test splits at
-    the first marker, so the voice audit covers exactly what the agent reads."""
+    the first marker, so the voice audit covers exactly what the agent reads.
+
+    `gap`: the start of the discussion could not be read (_thread_exchange), so what follows begins partway through
+    and the body says so (MERGE_GAP_LEAD) rather than passing a fragment off as the whole. Over MERGE_BODY_CAP the
+    middle is cut, never the first message (_merge_trim)."""
     quote = (exact or "").strip()
     lines = []
     for m in msgs or []:
@@ -20759,14 +20859,12 @@ def _merge_body(exact, msgs):
         # the projection's who is "you"/"agent" ("user" accepted for older fixtures) — the first lab
         # run of this path shipped every line as "Them:", and the parent model read the incoherent
         # log as fabricated and refused it (T145 lab find)
-        lines.append(("Me: " if m.get("who") in ("you", "user") else "Them: ") + t)
-    convo = "\n\n".join(lines)
-    if len(convo) > MERGE_BODY_CAP:
-        convo = "… (earlier discussion trimmed)\n\n" + convo[-MERGE_BODY_CAP:]
+        lines.append(("Me: " if m.get("who") in ("you", "user") else "Them: ", t))
+    convo = _merge_trim(lines)
     parts = ["I took a side discussion with another assistant about this passage of your earlier work:"]
     if quote:
         parts.append("\n".join("> " + ln for ln in quote.splitlines()[:6]))
-    parts.append("Here is how it went:")
+    parts.append(MERGE_GAP_LEAD if gap else "Here is how it went:")
     parts.append(convo)
     parts.append("Treat what we settled there as my direction: fold it into your understanding and "
                  "account for it in everything you do on this from here on.")
@@ -20778,13 +20876,19 @@ def _merge_body(exact, msgs):
     return "\n\n".join(parts) + "\n\n<!-- romp-injected --><!-- romp-tag: relay -->"
 
 
-def _comment_merge(parent_sid, tid):
+def _comment_merge(parent_sid, tid, notes=None):
     """Fold a thread's outcome back into the PARENT session (the user 2026-08-23): the thread's
     exchange lands in the parent as the person's own handoff (_merge_body), the thread settles to
     'merged', and its CLI shuts down like a resolve (the reg stays; history intact). With this a
     thread has its three exits: delete (discard), break out (own session), merge (feed back in).
     The CAS latch ('merging') keeps a racing resolve/delete from killing the CLI mid-read, exactly
-    the promote latch's rationale."""
+    the promote latch's rationale.
+
+    The exchange is the thread's WHOLE discussion (_thread_exchange: across every compaction, every message uncapped).
+    When part of it could not be read, nothing passes a fragment off as the whole: with nothing readable the relay is
+    refused with the reason; otherwise the body says its beginning is missing and `notes` (a list, when given) receives a
+    sentence for the person, which the socket handler shows beside the result. A body the length cap cut (_merge_trim)
+    gets its sentence there too."""
     prior, th = _comment_update_if(parent_sid, tid, ("open", "resolved"), status="merging")
     if th is None:
         return _comment_status_refusal(prior)
@@ -20796,7 +20900,8 @@ def _comment_merge(parent_sid, tid):
     # The latch is released on EVERY way out: a read that raised here left the row 'merging' for good (the user
     # 2026-09-30) — off the chat's scroll rail, its popover stuck on "Relaying…", every reply and relay refused.
     try:
-        msgs = _thread_messages(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
+        ex = _thread_exchange(th["sid"], th.get("cutUuid") or "", th.get("createdT") or 0)
+        msgs = ex["msgs"]
         # A LATER relay sends only the NEW tail (T145: the thread stays talkable after a relay, and
         # relaying again must not repeat what the session already has). relayedT is EVIDENCE time — the
         # last relayed message's own stamp, never wall clock (the design rule; wall clocks also skew
@@ -20804,9 +20909,15 @@ def _comment_merge(parent_sid, tid):
         floor = th.get("relayedT") or 0
         if floor:
             msgs = [m for m in msgs if (m.get("t") or 0) > floor]
+        # what the walk could not reach is older than everything it did: a later relay is missing nothing when the walk
+        # reached back to the last relay's floor
+        gap = ex["gap"] if ex["gap"] and not (floor and ex["oldestT"] and ex["oldestT"] <= floor) else ""
         if not any((m.get("text") or "").strip() for m in msgs):
+            if gap:
+                sys.stderr.write("comment relay refused (%s, thread %s): %s\n" % (parent_sid[:8], tid[:8], gap))
+                return _revert("the discussion could not be read for the relay: %s; nothing was sent." % gap)
             return _revert("nothing new to send back yet." if floor else "this thread has no discussion to send back yet.")
-        body = _merge_body(th.get("exact"), msgs)
+        body = _merge_body(th.get("exact"), msgs, gap=bool(gap))
         be = Sessions.backend_for(parent_sid)
     except Exception as e:
         return _revert("the discussion could not be read for the relay: %s" % e)
@@ -20816,6 +20927,13 @@ def _comment_merge(parent_sid, tid):
         return _revert("the merge message could not be delivered: %s" % e)
     if delivered is False:
         return _revert("the merge message was refused by the parent's backend; nothing was marked merged")
+    if gap:
+        sys.stderr.write("comment relay partial (%s, thread %s): %s\n" % (parent_sid[:8], tid[:8], gap))
+        if notes is not None:
+            notes.append("relayed without the start of the discussion: %s (the relayed message says so)." % gap)
+    if notes is not None and MERGE_TRIM_NOTE in body:
+        notes.append("relayed with part of the middle cut: the discussion ran past %d characters (the relayed message "
+                     "marks the cut)." % MERGE_BODY_CAP)
     _comment_update(parent_sid, tid,
                     # a thread the user CLOSED stays closed after its content is sent back (the user
                     # 2026-09-01) — "merged" is the talkable status, and resolved→relay→reply must
@@ -22782,9 +22900,10 @@ def _drive(msg, client):
     elif t == "commentMerge" and msg.get("tid"):
         # Fold the thread back into the session (the user 2026-08-23). LOUD on refusal; the comments
         # frame rides the next push and the popover adopts the merged title from it.
-        err = _comment_merge(sid, str(msg["tid"]))
-        if err:
-            client["send"](json.dumps({"type": "warn", "text": err}))
+        notes = []      # a relay that went with part of the discussion missing says so to the person too
+        err = _comment_merge(sid, str(msg["tid"]), notes=notes)
+        for text in ([err] if err else notes):
+            client["send"](json.dumps({"type": "warn", "text": text}))
     elif t == "commentResolve" and msg.get("tid"):
         err = _comment_resolve(sid, str(msg["tid"]))
         if err:
