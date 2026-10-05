@@ -49,6 +49,8 @@ EVENT_MODEL_ALLOWED = {
     "_bg_finish", "scan_bg_tasks_cached", "task_store_plan", "_load_postal_index", "postal_pairs", "injected_source",
     "strip_harness_preamble", "parse_teammate_message", "_absorbed", "_absorbed_atom", "_landing_t", "chain_verdicts",
     "_select_eclipsed_chains", "kept_uuids", "landed_text_uuids", "_adopt_detached_compactions", "_repair_compaction_stitches",
+    "_asm_names_compact",                               # the promptid gate's /compact reading, beside adoption's: raw transcript records
+    #                                                     only (the adapter's, the writer's rows, the gate's delta records; 2026-10-05)
     "_stitch_resume_forks", "active_path", "_prepass", "_emit_fold", "_ingest", "_asm_gates", "_asm_serve", "_assemble", "parse_session",
     "chain_membership", "file_rewound", "_membership_of", "_seed_from_doc", "_entry_current", "_carry_encode", "_carry_decode",
     "_LazyBody", "_LazyBody._refuse", "_Unhydrated", "_ckpt_encode", "_ckpt_decode", "_fold_eof_fragment", "_trailing_record",

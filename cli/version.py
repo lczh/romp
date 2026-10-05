@@ -70,19 +70,22 @@ def _probe_kernel():
 
 # A part that counts a share of another part's demotions, listed inside that part under the short name: (reason, part) ->
 # (the part it is a share of, the name it is listed under). The prompt-id gate counts boundarySeed only for a boundary
-# demotion whose prompt id a restored entry's seed named, so it is part of the boundary count, never beside it. A part named
-# `<part>:<name>` (the boundary arm's reasons, g:promptid:boundary:<reason>, 2026-10-05) is a share of <part> by its name, and
-# boundarySeed is then the older name of the nested `seed`, listed once.
+# demotion whose prompt id a restored entry's seed named, so it is part of the boundary count, never beside it. A kernel
+# that also counts the boundary arm's reasons (g:promptid:boundary:<reason>, 2026-10-05) counts the same demotions as the
+# nested `seed`, and boundarySeed is then not listed (_demotes).
 _DEMOTE_SHARES = {("promptid", "boundarySeed"): ("boundary", "seed")}
 
 
 def _demotes(stats):
     """The demotion counters of a road block as the report lists them: each `g:<reason>` with its count, and the
     `g:<reason>:<part>` counters that break that count down (the prompt-id gate's arms) in parentheses after it. Listed
-    flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03). A part
-    that is a share of another part (_DEMOTE_SHARES) is listed inside it, `boundary 3 (seed 2)`: the parts in a reason's
-    parentheses add up to the reason's count, and the pair inside a part is a share of that part, not a breakdown of it;
-    beside the arms, the seed's demotions were counted twice (review round two)."""
+    flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03). The parts
+    in a reason's parentheses add up to the reason's count. A part named `<part>:<name>` (the boundary arm's reasons,
+    g:promptid:boundary:<reason>, 2026-10-05) is listed inside <part> the same way, `boundary 6 (adopted 1, offpath 3, seed 1,
+    seedEpisode 1)`: a breakdown, the reasons inside a part adding up to that part's count. A part that is a share of another
+    part (_DEMOTE_SHARES) is listed inside it too, `boundary 3 (seed 2)`, as a share of that part, not a breakdown of it
+    (beside the arms, the seed's demotions were counted twice, review round two); boundarySeed is listed that way only when
+    the nested counter it duplicates, `boundary:seed`, is absent, as from a kernel that counts no reasons."""
     tops, parts = {}, {}
     for g, n in stats.items():
         if not (isinstance(g, str) and g.startswith("g:")) or not n:
@@ -100,7 +103,7 @@ def _demotes(stats):
         for part in sorted(arms):
             within = _DEMOTE_SHARES.get((name, part))
             if within is None and ":" in part:
-                within = tuple(part.split(":", 1))     # a nested part: a share of the part before its colon
+                within = tuple(part.split(":", 1))     # a nested part: listed inside the part before its colon
             if within is not None:
                 n = arms.pop(part)
                 if part not in nested and "%s:%s" % within in nested:

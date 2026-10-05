@@ -3745,11 +3745,9 @@ class FileAdapter:
             g = episodes.setdefault(pid, {"head_parent": self.parent_of.get(eu),
                                           "head_seq": self.seq_of.get(eu, 0),
                                           "splice": eu, "stdout": None, "compact": False})
-            m = COMMAND_NAME_ANY_RE.search(btext)
-            if m:
-                name = m.group(1).strip()
-                if (name if name.startswith("/") else "/" + name) == "/compact":
-                    g["compact"] = True              # the episode invokes /compact, not some other command
+            if _names_compact(btext, first=True):
+                g["compact"] = True                  # the episode invokes /compact, not some other command (its first tag:
+                #                                      the promptid gate reads every tag with the same reader, _asm_names_compact)
             if LOCAL_STDOUT_RE.match(btext) and g["stdout"] is None:
                 g["stdout"] = eu                     # first stdout wins — see the splice rule above
             g["splice"] = g["stdout"] or eu
@@ -6003,22 +6001,33 @@ def _asm_on_path(ad, u):
 
 _ASM_PID_REFUSALS = ("seed", "nosummary", "replaced", "parent", "adopted", "offpath", "seedEpisode")   # _asm_pid_refusal's
 #                                   reasons, in the order it tries them: each one's demotion counts as g:promptid:boundary:<reason>
+#                                   (the PromptIdAdoptable tests check every reason their shapes return against this list)
 _ASM_PID_EPISODE_VOUCHES = ("replaced", "parent", "offpath")   # the shapes the episode rule can vouch for (2026-10-05)
 
 
-def _asm_names_compact(r):
-    """Whether user record `r` names /compact as adoption reads an episode record (_adopt_detached_compactions: a <command-name>
-    tag anywhere in the record's text blocks, a bare name read with its leading slash). Every tag in the text is read where
-    adoption reads the first, so this says yes at least whenever adoption would."""
-    blocks = _content(r.get("message"))
-    text = (_text_of(blocks) if blocks else "") or ""
+def _names_compact(text, first=False):
+    """Whether a user record's text (its text blocks, joined) names /compact: a <command-name> tag whose name, read with a
+    leading slash when it has none, is /compact. The one reader of it, so its matcher and its name normalization cannot drift
+    apart between the two that ask (review of 2026-10-05, round one): adoption reads an episode record's FIRST tag (`first`,
+    _adopt_detached_compactions), and the promptid gate reads every tag (_asm_names_compact), so the gate says yes whenever
+    adoption does. tests/test_event_model_assembly.py runs adoption itself against the gate's reading."""
     if "<command-name>" not in text:
         return False
     for m in COMMAND_NAME_ANY_RE.finditer(text):
         name = m.group(1).strip()
         if (name if name.startswith("/") else "/" + name) == "/compact":
             return True
+        if first:
+            return False
     return False
+
+
+def _asm_names_compact(r):
+    """Whether user record `r` names /compact as the promptid gate reads it: any <command-name> tag in the record's text blocks,
+    the text adoption reads an episode record's first tag in (_names_compact). Raw transcript records only: the adapter's, the
+    writer's rows and the gate's delta records."""
+    blocks = _content(r.get("message"))
+    return _names_compact((_text_of(blocks) if blocks else "") or "")
 
 
 def _asm_pid_compact_episode(ad, pid):
@@ -6108,13 +6117,6 @@ def _asm_pid_refusal(ad, pid):
     return None, why
 
 
-def _asm_pid_adoptable(ad, pid):
-    """Whether the entry cannot vouch for a delta record wearing `pid`, a compaction summary's promptId, before the record itself
-    is read (_asm_pid_refusal's reason, as a bool). A record that the episode rule vouched for is still refused when it names
-    /compact itself (_asm_gates)."""
-    return _asm_pid_refusal(ad, pid)[0] is not None
-
-
 def _asm_doc_boundary_pids(ad, all_recs, cut_seq):
     """The prompt ids a document's gates name as boundary_pids (2026-10-03): those of the compaction summaries before the cut,
     every copy the pre-cut bytes carry (`all_recs`, the writer's (seq, record) pairs; _ingest adds each copy's). The writer
@@ -6137,20 +6139,20 @@ def _asm_doc_compact_pids(ad, all_recs, cut_seq):
     """The prompt ids a document's gates name as compact_pids (2026-10-05): those that a user record before the cut naming
     /compact wears (a compaction summary aside), every copy the pre-cut bytes carry, read as the episode rule reads a record on
     hand (_asm_names_compact). What _asm_pid_compact_episode's seed check asks: a restored entry holds the tail's records, and
-    this names the pre-cut episodes that could be /compact ones. The gates' prompt_ids, every prompt id
-    the writer had read, would not do: an entry restored from any document written after a turn opened (a restart, a dropped
-    entry restored again, the re-seat after a whole parse) would refuse that turn's every later record wearing an off-path
-    pair's id for the rest of the turn, as an entry restored from a document written before this field still does. A writer with a seed (the degenerate restored entry _asm_doc_boundary_pids names) carries its seed's
-    list for the records before its own document's cut, which all_recs does not hold."""
+    this names the pre-cut episodes that could be /compact ones. The gates' prompt_ids, every prompt id the writer had read,
+    would not do: an entry restored from any document written after a turn opened (a restart, a dropped entry restored again,
+    the re-seat after a whole parse) would refuse that turn's every later record wearing an off-path pair's id for the rest of
+    the turn, as an entry restored from a document written before this field still does. No seed term, as in
+    _asm_doc_boundary_pids: the writer refuses a restored entry with pre-cut atoms or turns, and it writes for the degenerate
+    one it does not refuse there only when each file's records reached the adapter from record zero (the offsets check
+    refuses a reader entry read from the cut, and lends a longer one only to an adapter that read from zero), so all_recs
+    holds the records before the cut on every road that reaches this line (review of 2026-10-05, round one: the term was
+    reached only through seeds a test set by hand)."""
     out = set()
     for sq, r in all_recs:
         if sq < cut_seq and r.get("type") == "user" and r.get("promptId") and not r.get("isCompactSummary") \
                 and _asm_names_compact(r):
             out.add(r["promptId"])
-    seed = getattr(ad, "seed", None)
-    if seed:
-        listed = seed.get("compact_pids")
-        out |= set(listed if listed is not None else (seed.get("prompt_ids") or ()))
     return out
 
 

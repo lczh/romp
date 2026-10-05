@@ -527,6 +527,40 @@ class GateDemotions(unittest.TestCase):
                 G.attline(T0 + 115, "and log the shard counts too", "q1", "e2"),
                 G.aline(T0 + 120, "querying the rebuilt index", "a4", "q1", tools=("Bash",), stop="tool_use")]
 
+    @staticmethod
+    def _golden_eclipse():
+        """The golden eclipse exactly, off the compacted turn's opener u2: the storm's two api_error records, the stop hook and
+        the next typed prompt hung on them, and its reply. Written after the compaction, it keeps the branch under the opener,
+        the pair included, so the pair is off the path but still kept."""
+        err = {"message": "429 rate_limit_error (synthetic)"}
+        return [G.sysline(T0 + 61, "api_error", "e1", "u2", level="error", error=err),
+                G.sysline(T0 + 75, "api_error", "e2", "e1", level="error", error=err),
+                G.sysline(T0 + 92, "stop_hook_summary", "sh1", "e2", hookCount=1),
+                G.uline(T0 + 120, "thanks - now page the search results", "u5", "sh1"),
+                G.aline(T0 + 130, "paging them", "a5", "u5")]
+
+    def _stream_steps(self, base_records, steps):
+        """Stream a clean base record by record, then append each of `steps` in one step, the trees compared with the whole
+        parse's at every parse; returns the road counters each step moved."""
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / (SID + ".jsonl")
+            kw = {"candidate_files": [str(path)], "states": None, "postal_log": [], "now": NOW}
+            path.write_text("")
+            for r in base_records:
+                with open(path, "a") as fh:
+                    fh.write(json.dumps(r) + "\n")
+                self._parse_both(path, kw)
+            out = []
+            for step in steps:
+                before = dict(emi._ASM_STATS)
+                with open(path, "a") as fh:
+                    for r in step:
+                        fh.write(json.dumps(r) + "\n")
+                self._parse_both(path, kw)
+                out.append({k: emi._ASM_STATS.get(k, 0) - before.get(k, 0) for k in set(before) | set(emi._ASM_STATS)
+                            if emi._ASM_STATS.get(k, 0) != before.get(k, 0)})
+            return out
+
     def test_tool_results_on_a_spur_off_an_auto_compactions_pair_fold(self):
         """Off the path (`offpath`): after the spur, every later tool result of the turn wears p9 and the pair is no ancestor of
         the leaf. The append folds, and the fold names the shape it saved."""
@@ -591,18 +625,51 @@ class GateDemotions(unittest.TestCase):
         p9's episode a /compact one ending on the path: adoption then splices the pair behind that record, which moves the
         boundary's parent and time while every record stays kept, so the fold's kept check cannot see it. The arm demotes, and
         the tree equals the whole parse's at every step."""
-        err = {"message": "429 rate_limit_error (synthetic)"}
-        recs = self._compacted_turn()[:-2] + [
-            G.sysline(T0 + 61, "api_error", "e1", "u2", level="error", error=err),
-            G.sysline(T0 + 75, "api_error", "e2", "e1", level="error", error=err),
-            G.sysline(T0 + 92, "stop_hook_summary", "sh1", "e2", hookCount=1),
-            G.uline(T0 + 120, "thanks - now page the search results", "u5", "sh1"),
-            G.aline(T0 + 130, "paging them", "a5", "u5")]
+        recs = self._compacted_turn()[:-2] + self._golden_eclipse()
         quoted = dict(G.uline(T0 + 140, "the notes say <command-name>/compact</command-name> ran here", "u6", "a5", ps=None),
                       promptId="p9", isMeta=True)
         moved = self._stream_then(recs, [quoted, G.aline(T0 + 150, "noted", "a6", "u6")])
         self.assertEqual((self._promptid_arms(moved)[":boundary"], self._boundary_reasons(moved), moved.get("g:kept", 0)),
                          (1, {"offpath": 1}, 0), "the record that names /compact is refused at the arm: %s" % moved)
+
+    def test_a_record_on_hand_that_names_compact_keeps_the_arm_refusing_beside_an_eclipsed_pair(self):
+        """The episode rule's scan of the records on hand, where only the served tree tells (review of 2026-10-05, round one).
+        x9, a meta record wearing p9 that quotes the /compact tag, hangs off the turn's first result before the golden eclipse,
+        which leaves it off the path and keeps it, with the pair. p9's episode is a /compact one ending on x9, off the path, so
+        adoption splices nothing. The append lands l9, a meta record wearing p9 that names nothing, on the path, and a reply
+        under it: the episode now ends on l9, and the cold parse splices the pair behind it while every record stays kept,
+        which the fold's kept check cannot see. Only the scan finds x9, so the arm refuses the append (`offpath`) and it parses
+        whole. A scan that skipped meta records, or read none, folded it and served the card as a turn of its own ahead of u5,
+        where the cold parse puts it after a5, opening the turn a6 joins. The tree equals the whole parse's at every step."""
+        x9 = dict(G.uline(T0 + 93, "the notes say <command-name>/compact</command-name> ran here", "x9", "r2", ps=None),
+                  promptId="p9", isMeta=True)
+        l9 = dict(G.uline(T0 + 140, "a note the harness kept for the turn", "l9", "a5", ps=None), promptId="p9", isMeta=True)
+        moved = self._stream_then(self._compacted_turn()[:-2] + [x9] + self._golden_eclipse(),
+                                  [l9, G.aline(T0 + 150, "noted", "a6", "l9")])
+        self.assertEqual((self._promptid_arms(moved)[":boundary"], self._boundary_reasons(moved), moved.get("g:kept", 0)),
+                         (1, {"offpath": 1}, 0), "the record on hand that names /compact keeps the arm refusing: %s" % moved)
+
+    def test_a_fold_the_attached_rule_saves_after_one_the_episode_rule_saved_names_no_shape(self):
+        """The shape tags speak for their own delta (review of 2026-10-05, round one): the gate sets them for every delta that
+        reaches the descent, so a fold the attached rule saves after one the episode rule saved counts no shape. The turn's
+        result past the spur folds on the episode rule (`offpath`); the next turn compacts automatically, attached, its
+        summary wearing that turn's id p10, and its next result, wearing p10, folds on the attached rule: one saved fold, no
+        shape."""
+        nxt = [dict(G.uline(T0 + 200, "now warm the notes-api ranking cache", "u6", "a5"), promptId="p10"),
+               G.aline(T0 + 210, "warming the cache", "a6", "u6", tools=("Bash",), stop="tool_use"),
+               dict(G.trline(T0 + 220, "tu_a6_0", "r6", "a6", content="cache warmed"), promptId="p10"),
+               G.compact_line(T0 + 230, "cb2", logical_parent="r6", trigger="auto"),
+               dict(G.compact_summary_line(T0 + 231, "cs2", parent="cb2"), promptId="p10"),
+               G.aline(T0 + 240, "checking the warmed cache", "a7", "cs2", tools=("Bash",), stop="tool_use")]
+        moved = self._stream_steps(self._compacted_turn() + self._spur(), [
+            [dict(G.trline(T0 + 130, "tu_a4_0", "r4", "a4", content="3 hits"), promptId="p9"),
+             G.aline(T0 + 140, "the index is migrated", "a5", "r4")]] + [[r] for r in nxt] + [
+            [dict(G.trline(T0 + 250, "tu_a7_0", "r7", "a7", content="cache hit rate 0.97"), promptId="p10"),
+             G.aline(T0 + 260, "the cache is warm", "a8", "r7")]])
+        self.assertEqual((moved[0].get("fold", 0), self._pass_shapes(moved[0])), (1, {"offpath": 1}),
+                         "the premise: the episode rule saved the first fold: %s" % moved[0])
+        self.assertEqual((moved[-1].get("fold", 0), moved[-1].get("fold:attachedPass", 0), self._pass_shapes(moved[-1])), (1, 1, {}),
+                         "the attached rule's fold names no shape: %s" % moved[-1])
 
     def test_skill_link_to_new_invocation_demotes(self):
         # the payload record references tu_skill_9 BEFORE any such invocation exists; when the
@@ -689,11 +756,32 @@ class PromptIdAdoptable(unittest.TestCase):
     shape), and one whose id a restored adapter's seed lists (`seedEpisode`: its document's compact_pids, or the prompt ids of
     a document written before that field)."""
 
+    # Texts the gate reads as naming /compact, and texts it does not (_asm_names_compact): the tag anywhere in a user record's
+    # text blocks, a bare name read with its slash, a later tag read too; a tool result's output is no text block, another
+    # command's name is no /compact, and a command's message tag alone names nothing.
+    NAMES_COMPACT = ["<command-name>/compact</command-name>",
+                     "<command-message>compact</command-message>\n<command-name>compact</command-name>",
+                     "quoted mid-text <command-name> /compact </command-name>",
+                     "<command-name>/usage</command-name> <command-name>/compact</command-name>"]
+    NAMES_NO_COMPACT = ["/compact", "<command-name>/compactor</command-name>", "<command-name>/usage</command-name>",
+                        "<command-message>compact</command-message>",
+                        [{"type": "tool_result", "tool_use_id": "t1", "content": "<command-name>/compact</command-name>"}]]
+
     def _adapter(self, records):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / (SID + ".jsonl")
             path.write_text("".join(json.dumps(r) + "\n" for r in records))
             return emi.FileAdapter([str(path)], str(path))
+
+    def _refusal(self, ad, pid):
+        """_asm_pid_refusal's (why, how), checked against the reasons the gate counts (_ASM_PID_REFUSALS, review of 2026-10-05,
+        round one): a refusal's reason is listed, and so is the shape the episode rule vouched for, which the gate counts as the
+        reason when the record itself names /compact. Every shape below asks through here, so a reason renamed or added
+        without the list fails."""
+        why, how = emi._asm_pid_refusal(ad, pid)
+        self.assertIn(why if why is not None else how, emi._ASM_PID_REFUSALS + (("attached",) if why is None else ()),
+                      "the reason or shape is one the gate counts")
+        return why, how
 
     def test_each_pair_shape_is_vouched_for_or_refused_under_its_reason(self):
         base = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")]
@@ -705,49 +793,46 @@ class PromptIdAdoptable(unittest.TestCase):
             dict(G.compact_summary_line(T0 + 91, "cs1", parent="cb1"), promptId="p9"),
             G.aline(T0 + 100, "checking the rebuilt index", "a3", "cs1", tools=("Bash",), stop="tool_use")])
         self.assertEqual(attached.summary_pids, {"p9": ["cs1"]}, "the ingest records the summary under its prompt id")
-        self.assertEqual(emi._asm_pid_refusal(attached, "p9"), (None, "attached"), "an automatic compaction's attached pair")
-        self.assertFalse(emi._asm_pid_adoptable(attached, "p9"), "an automatic compaction's attached pair: its pid folds")
-        self.assertEqual(emi._asm_pid_refusal(attached, "p-unknown"), ("nosummary", None), "a pid with no summary on record")
-        self.assertTrue(emi._asm_pid_adoptable(attached, "p-unknown"), "a pid with no summary on record demotes")
+        self.assertEqual(self._refusal(attached, "p9"), (None, "attached"), "an automatic compaction's attached pair")
+        self.assertEqual(self._refusal(attached, "p-unknown"), ("nosummary", None), "a pid with no summary on record")
         attached.seed = {"boundary_pids": {"p9"}}     # as a restored adapter whose document names the pid
-        self.assertEqual(emi._asm_pid_refusal(attached, "p9"), ("seed", None),
+        self.assertEqual(self._refusal(attached, "p9"), ("seed", None),
                          "a pid the restore seed names demotes, whatever the tail's summaries say: a pre-cut summary may wear it")
         side, _so = G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a1")
         adopted = self._adapter(base + side[:4])      # the wrapper is the leaf: the pair is spliced after it
         self.assertIn("cbc", adopted._adopted, "the premise: the live manual compact's pair is adopted")
         self.assertTrue(emi._asm_on_path(adopted, "cbc"), "the premise: the splice puts it on the path")
-        self.assertEqual(emi._asm_pid_refusal(adopted, "pc"), ("adopted", None),
+        self.assertEqual(self._refusal(adopted, "pc"), ("adopted", None),
                          "an adopted pair's pid demotes: a later episode record moves it")
         hidden = self._adapter(base + side[:2] + [G.uline(T0 + 130, "a plain next ask", "u3", "a1")])
         self.assertNotIn("cbc", hidden._adopted, "the premise: no episode adopts the pair")
         self.assertFalse(emi._asm_on_path(hidden, "cbc"), "the premise: the detached pair is off the path")
-        self.assertEqual(emi._asm_pid_refusal(hidden, "pc"), (None, "offpath"),
+        self.assertEqual(self._refusal(hidden, "pc"), (None, "offpath"),
                          "a detached pair with no /compact episode on record: the episode rule vouches (the gate still refuses "
                          "a record that names /compact itself)")
         # as a restored adapter: its document's writer had read records wearing the id (the turn's own), and compact_pids
         # lists the ids that a record before the cut naming /compact wears (2026-10-05)
         hidden.seed = {"boundary_pids": set(), "prompt_ids": {"pc"}, "compact_pids": set()}
-        self.assertEqual(emi._asm_pid_refusal(hidden, "pc"), (None, "offpath"),
+        self.assertEqual(self._refusal(hidden, "pc"), (None, "offpath"),
                          "no record before the cut wearing the id names /compact: the episode rule vouches, whatever prompt ids "
                          "the document's writer had read")
         hidden.seed = {"boundary_pids": set(), "prompt_ids": {"pc"}, "compact_pids": {"pc"}}
         self.assertEqual(emi._asm_pid_compact_episode(hidden, "pc"), "seed", "the seed's list is what said so")
-        self.assertEqual(emi._asm_pid_refusal(hidden, "pc"), ("seedEpisode", None),
+        self.assertEqual(self._refusal(hidden, "pc"), ("seedEpisode", None),
                          "a record before the cut wearing the id names /compact, and the restored adapter cannot read it: the "
                          "pair demotes, counted apart from its shape")
         hidden.seed = {"boundary_pids": set(), "prompt_ids": {"pc"}}           # a document written before compact_pids
-        self.assertEqual(emi._asm_pid_refusal(hidden, "pc"), ("seedEpisode", None),
+        self.assertEqual(self._refusal(hidden, "pc"), ("seedEpisode", None),
                          "a document without compact_pids is read by its prompt ids, every id its writer had read: it demotes")
         hidden.seed = {"boundary_pids": set(), "prompt_ids": {"p-other"}}
-        self.assertEqual(emi._asm_pid_refusal(hidden, "pc"), (None, "offpath"), "and vouches for an id they do not hold")
+        self.assertEqual(self._refusal(hidden, "pc"), (None, "offpath"), "and vouches for an id they do not hold")
         rewound = self._adapter(base + side + [G.uline(T0 + 130, "a plain next ask", "u3", "a1")])
         self.assertNotIn("cbc", rewound._adopted, "the premise: the /compact was rewound away with its episode")
         self.assertFalse(emi._asm_on_path(rewound, "cbc"), "the premise: the pair is off the path")
-        self.assertEqual(emi._asm_pid_refusal(rewound, "pc"), ("offpath", None),
+        self.assertEqual(self._refusal(rewound, "pc"), ("offpath", None),
                          "a detached pair whose id a /compact episode wears: an episode record could adopt it")
-        self.assertTrue(emi._asm_pid_adoptable(rewound, "pc"))
         rewound.seed = {"boundary_pids": set(), "prompt_ids": {"pc"}, "compact_pids": {"pc"}}
-        self.assertEqual((emi._asm_pid_compact_episode(rewound, "pc"), emi._asm_pid_refusal(rewound, "pc")),
+        self.assertEqual((emi._asm_pid_compact_episode(rewound, "pc"), self._refusal(rewound, "pc")),
                          ("episode", ("offpath", None)), "a /compact episode on hand is counted under the pair's shape, "
                          "whatever the seed lists")
 
@@ -777,8 +862,7 @@ class PromptIdAdoptable(unittest.TestCase):
                 self.assertIn("cbc", ad._adopted, "the premise: the manual compact's pair is adopted")
                 self.assertNotIn("cba", ad._adopted, "the premise: the automatic pair is not")
                 self.assertTrue(emi._asm_on_path(ad, "cba"), "the premise: the automatic pair is attached")
-                self.assertTrue(emi._asm_pid_adoptable(ad, "pc"), "the adopted pair wearing the id demotes it (%s)" % order)
-                self.assertEqual(emi._asm_pid_refusal(ad, "pc"), ("adopted", None), "named by its reason (%s)" % order)
+                self.assertEqual(self._refusal(ad, "pc"), ("adopted", None), "named by its reason (%s)" % order)
 
     @staticmethod
     def _quoting_compact(t, uuid, parent, pid):
@@ -800,9 +884,9 @@ class PromptIdAdoptable(unittest.TestCase):
         self.assertEqual((ad.summary_pids, ad.parent_of.get("cs1"), ad.by_uuid["r2"].get("type")), ({"p9": ["cs1"]}, "r2", "user"),
                          "the premise: the summary hangs off a user record")
         self.assertTrue(emi._asm_on_path(ad, "r2"), "the premise: that record is on the path")
-        self.assertEqual(emi._asm_pid_refusal(ad, "p9"), (None, "parent"), "no /compact episode wears the id: vouched for")
+        self.assertEqual(self._refusal(ad, "p9"), (None, "parent"), "no /compact episode wears the id: vouched for")
         ad = self._adapter(recs + [self._quoting_compact(T0 + 110, "w9", "a3", "p9")])
-        self.assertEqual(emi._asm_pid_refusal(ad, "p9"), ("parent", None), "a /compact episode wears the id: it demotes")
+        self.assertEqual(self._refusal(ad, "p9"), ("parent", None), "a /compact episode wears the id: it demotes")
 
     def test_a_summary_replaced_by_a_later_copy_of_its_uuid_is_vouched_for_by_its_episode(self):
         """A later record reusing the summary's uuid replaces it (last write wins): the uuid the adapter recorded under the id is
@@ -821,23 +905,39 @@ class PromptIdAdoptable(unittest.TestCase):
         self.assertIsNot(ad.by_uuid["cs1"].get("isCompactSummary"), True, "the premise: the later copy replaced the summary")
         self.assertEqual(ad.parent_of.get("cs1"), "cb1", "the premise: the copy hangs on the boundary")
         self.assertTrue(emi._asm_on_path(ad, "cb1") and "cb1" not in ad._adopted, "the premise: the boundary is attached")
-        self.assertEqual(emi._asm_pid_refusal(ad, "p9"), (None, "replaced"), "no /compact episode wears the id: vouched for")
+        self.assertEqual(self._refusal(ad, "p9"), (None, "replaced"), "no /compact episode wears the id: vouched for")
         ad = self._adapter(recs + [self._quoting_compact(T0 + 110, "w9", "cs1", "p9")])
-        self.assertEqual(emi._asm_pid_refusal(ad, "p9"), ("replaced", None), "a /compact episode wears the id: it demotes")
+        self.assertEqual(self._refusal(ad, "p9"), ("replaced", None), "a /compact episode wears the id: it demotes")
 
     def test_the_episode_reads_compact_as_adoption_does(self):
-        """What makes an episode a /compact one to the gate (_asm_names_compact), read as adoption reads a record
-        (_adopt_detached_compactions) and wider, so it says yes at least whenever adoption would: the <command-name> tag
-        anywhere in a user record's text blocks, a bare name read with its slash, and a later tag in the same text read too; a
-        tool result's output is no text block, and another command's name is no /compact."""
+        """What makes an episode a /compact one to the gate (_asm_names_compact), read with adoption's reader
+        (_names_compact) and wider, every tag where adoption reads the first, so it says yes at least whenever adoption would:
+        the texts the class lists."""
         def rec(content):
             return {"type": "user", "uuid": "x", "message": {"role": "user", "content": content}}
-        yes = ["<command-name>/compact</command-name>", "<command-message>compact</command-message>\n<command-name>compact</command-name>",
-               "quoted mid-text <command-name> /compact </command-name>", "<command-name>/usage</command-name> <command-name>/compact</command-name>"]
-        no = ["/compact", "<command-name>/compactor</command-name>", "<command-name>/usage</command-name>",
-              [{"type": "tool_result", "tool_use_id": "t1", "content": "<command-name>/compact</command-name>"}]]
-        self.assertEqual([emi._asm_names_compact(rec(c)) for c in yes], [True] * len(yes))
-        self.assertEqual([emi._asm_names_compact(rec(c)) for c in no], [False] * len(no))
+        self.assertEqual([emi._asm_names_compact(rec(c)) for c in self.NAMES_COMPACT], [True] * len(self.NAMES_COMPACT))
+        self.assertEqual([emi._asm_names_compact(rec(c)) for c in self.NAMES_NO_COMPACT], [False] * len(self.NAMES_NO_COMPACT))
+
+    def test_adoption_never_reads_compact_where_the_gate_does_not(self):
+        """The gate is safe only while it reads /compact wherever adoption does (review of 2026-10-05, round one), so this runs
+        adoption itself. Per listed text, an adapter holds a live manual /compact's detached pair, its summary wearing pc, and
+        an on-path record wearing pc with that text: adoption splices the pair behind the record only when it reads the text as
+        a /compact episode, and then the gate's reading of the record must say yes. A widening of adoption's reading alone
+        (another tag, another source, another name) adopts on a text where the gate reads no /compact, and this fails; the
+        command-message-only text is the widening the review planted. Adoption reads the first tag only, so the text whose
+        first tag is another command's adopts nothing."""
+        base = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")]
+        side, _so = G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a1")    # side[:2]: the detached pair, its summary wearing pc
+        adopted = []
+        for c in self.NAMES_COMPACT + self.NAMES_NO_COMPACT:
+            rec = dict(G.uline(T0 + 130, c, "w9", "a1", ps=None), promptId="pc")
+            ad = self._adapter(base + side[:2] + [rec])
+            adopted.append("cbc" in ad._adopted)
+            with self.subTest(text=c):
+                if "cbc" in ad._adopted:
+                    self.assertTrue(emi._asm_names_compact(rec), "adoption read /compact in this record, so the gate must too")
+        self.assertEqual(adopted[:len(self.NAMES_COMPACT)], [True, True, True, False],
+                         "the premise: adoption splices the pair behind each text whose first tag names /compact")
 
     def test_the_documents_gates_name_the_summaries_before_its_cut(self):
         """What the seed check reads (_asm_doc_boundary_pids, 2026-10-03): a document's gates name the prompt ids of the summaries
@@ -862,8 +962,7 @@ class PromptIdAdoptable(unittest.TestCase):
     def test_the_documents_gates_name_the_ids_a_pre_cut_compact_wears(self):
         """What the episode rule's seed check reads (_asm_doc_compact_pids, 2026-10-05): the prompt ids that a user record before
         the cut naming /compact wears, a rewound manual /compact's included, and never the ids the turn's own records wear, which
-        the gates' prompt_ids holds. A writer with a seed carries its seed's list, or that seed's prompt ids when its own
-        document predates the field."""
+        the gates' prompt_ids holds."""
         side, _so = G.manual_compact_lines(T0 + 20, T0 + 30, "c", parent="a1")
         records = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")] + side[2:] + [
             G.uline(T0 + 40, "never mind, back to the search page size", "u2", "a1"),
@@ -880,12 +979,6 @@ class PromptIdAdoptable(unittest.TestCase):
                          "a cut before the turn names the rewound /compact's id alone, not the turn's")
         self.assertEqual(emi._asm_doc_compact_pids(ad, recs, ad.seq_of["w9"] + 1), {"pc", "pd"},
                          "a cut past a record that names /compact names its id too")
-        ad.seed = {"compact_pids": {"px"}, "prompt_ids": {"px", "py"}}
-        self.assertEqual(emi._asm_doc_compact_pids(ad, recs, ad.seq_of["u3"]), {"pc", "px"},
-                         "a seeded writer carries its seed's list for the records before its own document's cut")
-        ad.seed = {"prompt_ids": {"px", "py"}}
-        self.assertEqual(emi._asm_doc_compact_pids(ad, recs, ad.seq_of["u3"]), {"pc", "px", "py"},
-                         "and that seed's prompt ids when its document predates the field")
 
 
 class PostalHeal(unittest.TestCase):
