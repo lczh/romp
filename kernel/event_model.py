@@ -1201,9 +1201,11 @@ def fold_steps_in_hand(cache, name, path, new=True):
     2026-10-05): a whole entry stays, for the assembly pin and the quiet drop to decide as before, since a pop of one a
     viewer's parse read freed nothing and left the viewer's next rebuild a whole read; and an entry of another generation,
     from a read the gate never looked at, stays. Such a tail has lost its saved restore and the document with the fallback,
-    so the guard never lets it go, and its records stay until a reader that wants the whole file reads it or the count cap
-    or the byte budget evicts it (review round thirteen, 2026-10-05: memory only; it takes a corrupt document and another
-    read restoring the tail between the gate's look and the fallback)."""
+    so the guard never lets it go. Its records stay until the count cap or the byte budget evicts it, or a reader that
+    drops a returned subagent's records reads it whole (the card's own readers, or the guard's within ten minutes of the
+    file's last write); a whole read by any other reader swaps the tail for the whole file, which then stays the same way
+    (review rounds thirteen and fourteen, 2026-10-05: memory only; it takes a corrupt document and another read restoring
+    the tail between the gate's look and the fallback)."""
     key = str(path)
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(key)

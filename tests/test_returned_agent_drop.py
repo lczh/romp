@@ -34,10 +34,11 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     string, null) or missing, and lets the tail go with it, so the file is read whole once and dropped, for a workflow agent
     and for a card's subagent whose chat is no longer built, whether the launch-ids count or the viewer's background-task
     count was bad (a tail of the generation the gate looked at, a longer one an append put in its place included; a whole
-    entry or one of another generation another read put there stays, such a tail without its saved state, which went with
-    the document, until a whole read or an eviction takes it; and a whole entry a viewer's parse read, its steps count
-    bad, stays through the fallback and leaves at a later quiet drop, its document written), re-scans its memo when a
-    tail entry becomes the whole file, and pays no whole read for a half-written record;
+    entry or one of another generation another read put there stays at that pass, and what such a tail does after it,
+    without its saved state, is described at the gate in kernel/event_model.py and not pinned here; and a whole entry a
+    viewer's parse read, its steps count bad, stays through the fallback and leaves at a later quiet drop, its document
+    written), re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written
+    record;
     a raise in the drop's witness check or the guard's folds (its launch-ids fold included) is counted and said with the
     file and the frame, at the 1st, 10th, 100th and 1000th raise, and a guard fold that raises at every pass does not keep
     the folds after it from dropping a returned agent;
