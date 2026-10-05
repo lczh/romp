@@ -70,7 +70,9 @@ def _probe_kernel():
 
 # A part that counts a share of another part's demotions, listed inside that part under the short name: (reason, part) ->
 # (the part it is a share of, the name it is listed under). The prompt-id gate counts boundarySeed only for a boundary
-# demotion whose prompt id a restored entry's seed named, so it is part of the boundary count, never beside it.
+# demotion whose prompt id a restored entry's seed named, so it is part of the boundary count, never beside it. A part named
+# `<part>:<name>` (the boundary arm's reasons, g:promptid:boundary:<reason>, 2026-10-05) is a share of <part> by its name, and
+# boundarySeed is then the older name of the nested `seed`, listed once.
 _DEMOTE_SHARES = {("promptid", "boundarySeed"): ("boundary", "seed")}
 
 
@@ -94,10 +96,16 @@ def _demotes(stats):
     for name in sorted(set(tops) | set(parts)):
         s = "%s %d" % (name, tops.get(name, 0))
         arms, shares = dict(parts.get(name) or {}), {}
+        nested = {p for p in arms if ":" in p}
         for part in sorted(arms):
             within = _DEMOTE_SHARES.get((name, part))
+            if within is None and ":" in part:
+                within = tuple(part.split(":", 1))     # a nested part: a share of the part before its colon
             if within is not None:
-                shares.setdefault(within[0], []).append("%s %d" % (within[1], arms.pop(part)))
+                n = arms.pop(part)
+                if part not in nested and "%s:%s" % within in nested:
+                    continue                           # an older name the nested counter carries too: listed once
+                shares.setdefault(within[0], []).append("%s %d" % (within[1], n))
                 arms.setdefault(within[0], 0)
         if arms:
             s += " (%s)" % ", ".join("%s %d%s" % (p, n, " (%s)" % ", ".join(shares[p]) if p in shares else "")

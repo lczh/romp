@@ -2963,11 +2963,30 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   adoption could still move, with `g:promptid:boundarySeed` the part of
   those whose id a restored entry's document names (a document names the
   prompt ids of the summaries before its cut), where the entry cannot tell
-  whether that boundary is attached, and `g:promptid:passedDemote` for a
+  whether that boundary is attached, and `g:promptid:boundary:<reason>`
+  the same demotions again by the reason the entry could not vouch for the
+  id: `seed` (the same count as `boundarySeed`, its older name),
+  `nosummary` (no summary wearing the id on record), `adopted` (an
+  adoption spliced a pair wearing it, as a live manual /compact's), and
+  `replaced` (a later record reused the summary's uuid), `parent` (the
+  summary hangs off a record that is no compaction boundary) or `offpath`
+  (the boundary is off the conversation's path), these three only when a
+  record wearing the id names /compact, one the entry holds or the new
+  record itself, and `seedEpisode` for a pair of those three shapes when
+  no such record is on hand but the entry was restored from a document
+  that lists the id: a document's gates carry `compact_pids`, the prompt
+  ids that a user record before its cut naming /compact wears, and a
+  document written before that field (an optional one, so the document's
+  version is unchanged) is read by its prompt ids, every id its writer had
+  read, the open turn's included, which only refuses more. Otherwise
+  adoption has no episode to splice the pair behind, and the gate lets the
+  record through (2026-10-05).
+  `g:promptid:passedDemote` counts a
   delta in which the gate let a record wearing a summary's prompt id
   through, because every summary wearing its id hangs off a boundary on the
   conversation's path that
-  adoption did not splice, as an automatic compaction's does, and which a
+  adoption did not splice, as an automatic compaction's does, or because no
+  /compact episode wears it, and which a
   compaction in it, the descent (a rewind and an api_error retry alike) or
   a parallel batch's kept check then refused: it parses whole, as it did
   before the gate let such records through, and never takes the restore
@@ -2984,7 +3003,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   document, under the whole parse's `full:demoted`), never under
   `fold:attachedPass`. The deltas
   the gate let through that folded count under `fold:attachedPass`, the
-  folds it saved),
+  folds it saved, and under `fold:attachedPass:<shape>` (`replaced`,
+  `parent`, `offpath`) when the gate let a record through because no
+  /compact episode wears the id, for a pair of that shape),
   `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
