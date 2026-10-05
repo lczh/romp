@@ -66452,7 +66452,8 @@ _JOBS_GATE = {"asked": "", "modeKey": None, "rec": {}, "lost": {}, "gen": {}, "f
 #   "gateFault": the gate's own fault left that run unobserved); gen: sid ->
 #   the passes whose dirty set named that session alone; floorSeen: (sid, path) -> the standing stat a floor re-stat was counted
 #   against; tree: sid -> the spend guard's simulated sixty-second floor; last: job -> the last observed pass's verdict, as /perf
-#   jobs.gate.lastPass shows it ("closed", "open:<reason>", "owed:<reason>"). The jobs thread is the one writer.
+#   jobs.gate.lastPass shows it ("closed", "open:<reason>", "owed:<reason>", or "unobserved" after a gate fault). The jobs
+#   thread is the one writer.
 _JOBS_GATE_MISSING = object()
 
 
