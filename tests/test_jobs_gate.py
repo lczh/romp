@@ -294,7 +294,8 @@ class _GateLab(unittest.TestCase):
                             else list(getattr(km, nm))) for nm in self.CONTAINERS}
         saved_misc = (km._PREV_ALIVE, dict(km._FILES_STAT_DIRTY, sids=set(km._FILES_STAT_DIRTY["sids"])),
                       dict(km._FILES_STAT_OBSERVED), dict(km._JOBS_GATE, rec={}, lost={}), dict(km._TICK_SEEN),
-                      set(km._JOBS_GATE["said"]), set(km._JOBS_GATE["warned"]), list(km._SDK_BOOT_PROBLEMS))
+                      set(km._JOBS_GATE.setdefault("said", set())), set(km._JOBS_GATE.setdefault("warned", set())),
+                      list(km._SDK_BOOT_PROBLEMS))
 
         def restore():
             for nm, v in saved_slots.items():
@@ -326,7 +327,8 @@ class _GateLab(unittest.TestCase):
         km._FILES_STAT_OBSERVED.clear()
         km._FILES_STAT_OBSERVED.update({"postal": None, "rows": {}, "jdAll": None, "jdBy": {}, "sig": None, "sigMsgs": None})
         km._jobs_gate_reset()
-        km._JOBS_GATE["modeKey"], km._JOBS_GATE["asked"], km._JOBS_GATE_MODE[0] = km._JOBS_GATE_BOOT_KEY, "", "shadow"
+        # (the getattr: the red-first run drives these tests over the kernel the review ran, which had no boot key)
+        km._JOBS_GATE["modeKey"], km._JOBS_GATE["asked"], km._JOBS_GATE_MODE[0] = getattr(km, "_JOBS_GATE_BOOT_KEY", None), "", "shadow"
         km._JOBS_GATE["said"].clear(); km._JOBS_GATE["warned"].clear()
         km._PERF_STATS.reset()
 
