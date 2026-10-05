@@ -34758,9 +34758,17 @@ def _agent_launch_ids(agent_path):
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
     file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="quiescent")
+        return _agent_launch_ids_fold(agent_path)
     except Exception:
         return set()
+
+
+def _agent_launch_ids_fold(agent_path):
+    """The launch-ids fold over one agent's own file, raising: _agent_launch_ids wraps it, and the spend guard calls it after
+    pricing the file from a read of its own, behind the gate em.fold_steps_in_hand, so a raise reaches the guard's handler
+    and is counted and said (2026-10-02). Its drop policy is "returned" (2026-10-01): a returned agent's records leave memory
+    at the first fold that finds nothing new."""
+    return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="returned")
 
 
 def _agent_steps(agent_path):
@@ -34772,12 +34780,20 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since, _gist_of) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="quiescent")
+        st = _agent_gist_fold(agent_path)
     except Exception:
         return None
     if not st["since"]:
         return None
     return st
+
+
+def _agent_gist_fold(agent_path):
+    """The card's steps fold over one agent's own file, with no chat-build bookkeeping: _agent_steps folds through it, and so
+    does the spend guard (2026-10-01), to catch up a card's cursor that stopped short of the file's end when the chat stopped
+    being built before the agent returned (a closed tab, a sleeping laptop); a cursor behind the entry holds the returned
+    agent's drop, and nothing else would ever move it."""
+    return em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="returned")
 
 
 def _stamp_steps(ev, st):
@@ -35032,20 +35048,70 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
 def _push_subagents(clients, now, live_map):
     """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
     cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
-    no polling loop of its own — and costs a stat per open viewer when nothing changed."""
+    no polling loop of its own — and costs a stat per open viewer when nothing changed. A viewer that closed, or whose
+    socket went away, while its render ran (both on the handler thread) is not sent the frame, and the background-task
+    cursor and the parse that render left are released here, in case the close's own release ran before the render made
+    them (2026-10-02). A render that raised is re-checked the same way, since it may have left both before it raised
+    (round six of the fold's review)."""
     for c in clients:
         for (ssid, aid) in list((c.get("subagents") or {}).keys()):
+            built = False
             try:
                 fr, pre = _subagent_frame_cached(ssid, aid, now, live_map)
+                built = True
             except Exception:
                 sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
+            if not c.get("alive", True) or (ssid, aid) not in (c.get("subagents") or {}):
+                _subagent_viewer_closed(ssid, aid)    # closed during the render, built or raised: the cursor it left goes,
+                _release_subagent_view(ssid, aid)     #  and the parse that render rebuilt, or it would pin the records
                 continue
-            _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
+            if built:
+                _send_client(c, ("subagent", ssid, aid), fr, pre=pre)
+
+
+def _subagent_viewer_closed(sid, agent_id):
+    """A subagent viewer closed (closeSubagent, its socket went away, or the pusher found it closed after its render, one
+    that raised included; 2026-10-02): the background-task cursor its render left on the agent's own file
+    (_bg_scan_all_cached, run for a task notification or a nested background launch in that file) is popped, unless
+    another client still has the same viewer open. No card reader steps that cursor. The spend guard, where it passes
+    the file (a live session, a ceiling above 0, the file in the window, no parse keeping the records:
+    _spend_fold_agent), steps it where it stands at the entry's
+    generation or where the file's document restores it after a restart, and a close that lands inside the guard's step
+    can leave the cursor that step stores, which the guard then keeps current. Where the guard does not pass the file,
+    once the agent writes on, a cursor behind the entry would hold the returned agent's quiet drop for good
+    (em._document_at_witness). The fold is also retired from the file's checkpoint document (em._retire_fold), since a
+    document written while the viewer was open records the cursor's count and the next write would carry it forward from
+    disk, holding the cut there; guarded as rewound_memo_forget guards its retirement (a cursor popped, or the document
+    lists the fold, read from disk when no fold of this process has loaded it, as for a viewer loaded before a restart and
+    closed after it), so a clean path stays clean (round two, 2026-10-02)."""
+    try:
+        with _clients_lock:
+            if any((sid, agent_id) in (c.get("subagents") or {}) for c in _clients):
+                return
+        try:
+            ppath = _path_of(sid, int(time.time()))
+            apath = _subagent_file(ppath, agent_id) if ppath else None
+        except Exception:
+            return    # a failed lookup is said once, by _release_subagent_view, which every close calls beside this one
+        if apath is not None:
+            key = str(apath)
+            had = _bgall_cache.pop(key, None) is not None
+            with em._CKPT_LOCK:
+                shapes = em._CKPT_DOC_FOLDS.get(key)
+            if shapes is None:
+                shapes = em._doc_folds_on_disk(key)
+            if had or "bgAll" in (shapes or {}):
+                em._retire_fold(key, "bgAll")
+    except Exception:
+        sys.stderr.write("subagent viewer close %s/%s: %s\n" % (sid, agent_id, traceback.format_exc()))
 
 
 def _release_subagent_view(sid, agent_id):
-    """closeSubagent (2026-10-01): when no client still views this agent, its file's parse slot for this session and its
-    assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
+    """The release at a subagent viewer's close, called from the three places a close lands: closeSubagent (2026-10-01),
+    the socket's teardown for every viewer it had open, and the pusher's re-check after a render (one that raised
+    included) for a viewer that closed, or whose socket went away, while that render ran (_push_subagents; 2026-10-02,
+    and round six of the fold's review). When no client still views this agent, its file's parse slot for this session
+    and its assembly entry (an adapter over every record of the agent's transcript, its atoms) are released; before, they stayed
     until the caches' count caps reached them. The record entry is left to the agent folds' own quiet drop, and the frame
     memo (a rendered tail) to its bound. A reopen parses the file once again, from the reader's records. A release that
     raises, the agent file's path lookup included, is noted once per file (em.release_failed; once per agent id when the
@@ -49856,7 +49922,8 @@ def _spend_can_spend(tm):
     tm = tm or {}
     return tm.get("state") == "working" or bool(tm.get("subagents")) or bool(tm.get("bgTasks"))
 _SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
-_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd), ...], last use): the window rows, memoized on the stamp
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd, message id), ...], last use, end): the window
+#                                     rows, memoized on the stamp; `end` is the offset the scanned records end at (a half line not counted)
 SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
 #                                     thousands of finished agent files, each a window row list nobody asks for again)
 SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
@@ -50221,7 +50288,18 @@ def _spend_window_files(leaf, since, now=None, stat=True):
     return [key] + [p for p, mt in m["files"].items() if mt >= since]
 
 
-def _spend_file_rows(f, since, prices, dearest):
+def _spend_tail_covers(records, floor):
+    """Whether a tail entry's records reach back past `floor`: its first stamped record is older, so nothing before the
+    document's cut can be in the window (a transcript is chronological, the premise of the scan's own break)."""
+    for o in records:
+        if isinstance(o, dict):
+            t = _msg_epoch(o)
+            if t is not None:
+                return t < floor
+    return False
+
+
+def _spend_file_rows(f, since, prices, dearest, agent=False):
     """One file's (t, usd) rows at or after `since`, from the record cache, memoized on the file's (mtime, size) stamp:
     a file that did not change since its last scan serves its rows without a walk (LOW 2 of the review). The scan runs
     from the tail back to SPEND_GUARD_MEMO_SLACK_S before `since`, so the memo also serves the next cycles, whose windows
@@ -50229,7 +50307,30 @@ def _spend_file_rows(f, since, prices, dearest):
     largest usage; a record whose model the table cannot place is priced at the table's dearest row (a guard errs high).
     The reader's entry is taken with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores
     a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
-    transcript on the guard's first cycle; the window wants the newest records, which a tail holds."""
+    transcript on the guard's first cycle; the window wants the newest records, which a tail holds.
+    `agent` (an agent transcript beside the leaf, never the leaf; 2026-10-01): a returned agent's entry leaves the record
+    cache (the agent folds' drop_after="returned", which _spend_fold_agent runs after this read has priced the file), so a
+    memo scanned from the WHOLE file is served on a stat while the reader holds no entry for the path, instead of the
+    guard entering the dropped file again every cycle it stays in the window; and a TAIL entry the memo cannot serve is
+    read whole once when its first stamped record is not older than the window's floor, since the records before the
+    document's cut may then be in the window (a fresh process restoring a file the window still covers), and a window
+    priced from the tail alone would read low. Except where the memo ends at a record the tail holds (the offset the memo's
+    records end at, kept beside its stamp, is that record's start, _spend_tail_index; a half-written last line is left
+    out, its record priced once whole) and reaches back to the window's start: an agent that resumed after its
+    drop, which a LIVE agent's silence of over two minutes is (a long tool call, a long response), at its first record
+    and at every one after while the reader holds the tail. Then only the records past the memo's end are priced and the
+    memo's rows from its floor on are kept beside them, a response logged on both sides counted once at its largest usage
+    by its message id, so a resume costs the new records, not a whole read and decode of the file."""
+    if agent:
+        hit = _SPEND_ROWS_CACHE.get(f)
+        if hit is not None and hit[0][2] == 0 and hit[1] <= since and f not in em._JSONL_CACHE:
+            try:
+                st = os.stat(f)
+            except OSError:
+                st = None
+            if st is not None and (st.st_mtime, st.st_size) == hit[0][:2]:
+                _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time(), hit[4])
+                return _spend_rows_since(hit[2], since)
     ent = em._read_jsonl_entry(f, tail_ok=True)
     if ent is None:
         _SPEND_ROWS_CACHE.pop(f, None)
@@ -50237,14 +50338,25 @@ def _spend_file_rows(f, since, prices, dearest):
     stamp = (ent[0], ent[1], ent[5])                     # mtime, size, and the entry's BASE (the round-two review's LOW a):
     #   a tail entry accepted after a restart holds the records past the checkpoint's cut, and a later whole-file
     #   upgrade of the same file (base 0) changes what the window can see without moving mtime or size; the base in
-    #   the stamp invalidates the memo the moment the entry's shape changes, not when the file next grows
+    #   the stamp invalidates the memo the moment the entry's base goes DOWN, not when the file next grows. A base that
+    #   went UP over the same bytes (a drop, then a tail restored at the document's cut) is served: the memo saw them all
     hit = _SPEND_ROWS_CACHE.get(f)
-    if hit is not None and hit[0] == stamp and hit[1] <= since:
-        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
-        return [r for r in hit[2] if r[0] >= since]
+    if hit is not None and hit[0][:2] == stamp[:2] and hit[0][2] <= stamp[2] and hit[1] <= since:
+        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time(), hit[4])
+        return _spend_rows_since(hit[2], since)
     floor = since - SPEND_GUARD_MEMO_SLACK_S
-    best, rows = {}, []
-    for o in reversed(ent[4]):
+    prior, start = None, 0
+    if agent and ent[5] > 0 and not _spend_tail_covers(ent[4], floor):
+        at = _spend_tail_index(ent, hit[4]) if hit is not None and hit[1] <= since else None   # where the memo's records end,
+        #                                                                                      a half-written line not counted
+        if at is not None:
+            prior, start = hit, at                       # the memo ends at the tail's record `at`: only the records past it are priced
+        else:
+            ent = em._read_jsonl_entry(f) or ent         # the whole file, once (the tail upgraded in place, its generation kept)
+            stamp = (ent[0], ent[1], ent[5])
+    best, rows, recs = {}, [], ent[4]
+    for n in range(len(recs) - 1, start - 1, -1):
+        o = recs[n]
         if not isinstance(o, dict):
             continue
         t = _msg_epoch(o)
@@ -50270,12 +50382,23 @@ def _spend_file_rows(f, since, prices, dearest):
             i = best.get(mid)
             if i is None:
                 best[mid] = len(rows)
-                rows.append((t, c))
+                rows.append((t, c, mid))
             elif c > rows[i][1]:
-                rows[i] = (rows[i][0], c)
+                rows[i] = (rows[i][0], c, mid)
         else:
-            rows.append((t, c))
-    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
+            rows.append((t, c, None))
+    if prior is not None:                                # the memo's rows from the later floor on join the tail's; a message id on
+        floor = max(floor, prior[1])                     #  both sides of the cut stays one row at its largest usage and the tail's
+        for r in prior[2]:                               #  time, as one scan of the whole file counts it
+            if r[0] < floor:
+                continue
+            i = best.get(r[2]) if r[2] else None
+            if i is None:
+                rows.append(r)
+            elif r[1] > rows[i][1]:
+                rows[i] = (rows[i][0], r[1], r[2])
+        stamp = (ent[0], ent[1], prior[0][2])            # the memo's base: the rows saw what it saw, the records before the cut
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time(), int(ent[2]))
     if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
         # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
         # never again; without a bound a kernel life would hold one list per agent it ever priced. Down to three
@@ -50284,17 +50407,80 @@ def _spend_file_rows(f, since, prices, dearest):
         keep = SPEND_GUARD_ROWS_CACHE_MAX * 3 // 4
         for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - keep]:
             _SPEND_ROWS_CACHE.pop(k, None)
-    return [r for r in rows if r[0] >= since]
+    return _spend_rows_since(rows, since)
+
+
+def _spend_rows_since(rows, since):
+    """The (t, usd) pairs of memo rows (t, usd, message id) at or after `since`."""
+    return [(r[0], r[1]) for r in rows if r[0] >= since]
+
+
+def _spend_tail_index(ent, size):
+    """The index of the tail entry's first held record that starts at byte `size`, where a row memo's scanned records
+    ended (its scan saw every record before it), or len(records) when the held records end there; None when no
+    held record starts there (the memo ends before the tail begins, or inside a line). Searched from the newest record,
+    since a memo is usually a cycle or a few behind its file."""
+    recs = ent[4]
+    offs = ent[7] if len(ent) > 7 else None
+    if offs is None or len(offs) < 2 * len(recs):
+        return None
+    if int(ent[2]) == size:
+        return len(recs)
+    for i in range(len(recs) - 1, -1, -1):
+        o = int(offs[2 * i])
+        if o == size:
+            return i
+        if o < size:
+            return None
+    return None
 
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
     """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
-    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh)."""
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh). Every agent file is
+    then folded (_spend_fold_agent, 2026-10-01): the guard's read of a workflow agent, which has no card, was the only one,
+    and with no fold over it a returned agent's records stayed in the record cache for the kernel's life. The leaf, the first
+    file, is never folded here."""
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
-    return sum(c for f in _spend_window_files(leaf, since, now, stat=stat) for _t, c in _spend_file_rows(f, since, prices, dearest))
+    total = 0
+    for i, f in enumerate(_spend_window_files(leaf, since, now, stat=stat)):
+        for _t, c in _spend_file_rows(f, since, prices, dearest, agent=i > 0):
+            total += c
+        if i > 0:
+            _spend_fold_agent(f)
+    return total
+
+
+def _spend_fold_agent(f):
+    """The spend guard's folds over an agent file it priced (2026-10-01), so the records its read holds leave memory under the
+    agent folds' rule (drop_after="returned"), each fold only where it steps the records the reader holds (em.fold_steps_in_hand:
+    never a file the reader let go, never a tail pulled whole, never while a viewer's parse rebuilt since the file's last
+    append holds the same records, where a drop would free nothing and cost the viewer's next rebuild a whole read). The
+    launch-ids fold, the agent-file fold with
+    the smallest state, runs over a whole entry, its own cursor, or a restored tail whose document carries its state (a
+    restart before the exit drain refreshed the agent's document, a running agent's entry the count cap evicted), so the
+    drop has a cursor and a document to restore from. The card's steps fold runs only over its own cursor or document
+    state: it catches up a card whose chat stopped being built before the agent returned, whose cursor behind the entry
+    would hold the drop for good, and it never starts a steps state for a workflow agent. Before both, the subagent viewer's
+    background-task fold runs only over its own cursor or document state: a viewer open at the exit drain leaves that state
+    in the document behind the file's end, and the next process retires it only if that viewer, loaded before the restart,
+    is closed (round two, 2026-10-02). A fold that raises costs at most memory, never the guard's rate, and is counted and
+    said (em.note_swallowed): the launch-ids fold is called raising (_agent_launch_ids_fold), not through
+    _agent_launch_ids, which answers set() on a raise. Each fold has a try of its own (round three, 2026-10-02): with one
+    try around all three, a fold whose raise repeats every pass skipped the folds after it at every pass, and a returned
+    agent whose card's chat stopped being built kept its whole entry, where a later fold would have stepped its cursor up
+    to the file's end and dropped it."""
+    for cache, name, new, fold in ((_bgall_cache, "bgAll", False, _bg_scan_all_cached),
+                                   (_AGENT_LAUNCH_IDS_CACHE, "agentLaunchIds", True, _agent_launch_ids_fold),
+                                   (_AGENT_GIST_CACHE, "agentGist", False, _agent_gist_fold)):
+        try:
+            if em.fold_steps_in_hand(cache, name, f, new=new):
+                fold(f)
+        except Exception as e:
+            em.note_swallowed("spendGuardFold", e, f)
 
 
 def _spend_guard_seed():
@@ -77177,6 +77363,7 @@ class Handler(BaseHTTPRequestHandler):
                 client.setdefault("sent", {}).pop(("subagent", sid, aid), None)
             if msg["type"] == "closeSubagent":
                 (client.get("subagents") or {}).pop((sid, aid), None)
+                _subagent_viewer_closed(sid, aid)
                 _release_subagent_view(sid, aid)          # the last viewer closed: the agent file's parse goes (2026-10-01)
                 return
             client.setdefault("subagents", {})[(sid, aid)] = True
@@ -78548,6 +78735,9 @@ class Handler(BaseHTTPRequestHandler):
             _board_pane_gone(client)               # the cold timeline build may be waiting on this board pane's first frame
             with _clients_lock:
                 _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
+            for _sv in list((client.get("subagents") or {}).keys()):
+                _subagent_viewer_closed(*_sv)         # its open viewers close with it: the cursor and, below, the parse
+                _release_subagent_view(*_sv)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's

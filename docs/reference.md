@@ -1707,12 +1707,25 @@ it) if a write would improve it with a state the process holds (the pass's
 rule, `_path_needs_write`; a dirty path counts here and not for the pass, and a
 fold cold for want of a state counts for the pass, which heals it, and not
 here, where it would only be written cold again), before the entry is popped,
-and on a hit or a restore at the witness the entry stays as it always has. The
+and on a hit or a restore at the witness the entry stays as it always has,
+except over a subagent's own transcript (its card's folds, which the spend
+guard also runs over each agent file after pricing it from a read of its own,
+catching up a card's cursor that stopped short of the file's end, and ahead of
+them the background-task state an open viewer of the agent left, which closing
+that viewer retires so a later write does not carry it forward): there a fold
+that finds nothing new also pops an entry holding records once the file's
+document stands at the entry's witness with every current fold's state, so a
+returned agent whose last record was folded while its file was fresh leaves
+memory too. An open viewer's parse keeps the entry either way: a parse rebuilt
+since the file's last append holds the very records list, so the pop waits,
+and an older one is a whole assembly entry, which the assembly pin keeps
+(counted `recordCache.pinnedKept`) until the viewer closes. The
 write is charged to the pusher cycle's byte budget, which the kernel begins at
 each cycle's start and the pass shares near its end; over the budget the write
 and the drop wait with the entry held (`converge.dropDeferred`), the drop then
 owed and paid at the next cycle's start with the room that cycle has, oldest
-first, or by the next fold over the file, whichever comes first. A document
+first, or by the next fold over the file, whichever comes first; a subagent's
+quiet pop is never owed and waits for the next fold that finds nothing new. A document
 already whole is never rewritten at a later drop (`converge.dropWrites` counts
 the writes), and a dropped file's next fold restores its cursor from the
 document over a tail read instead of reading the file whole, provided the
@@ -3035,8 +3048,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
   for the documents written at the reader's quiescence drop (and at the record
-  drops of the events that end a file's use) and the drops
-  deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
+  drops of the events that end a file's use) and the drops deferred for the
+  shared budget (a cycle, or for a subagent's quiet pop until the next fold
+  that finds nothing new), `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
@@ -3163,7 +3177,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
   `droppedBytes` (the quiescence drop, the files a dead timeline lane
   releases, a leaf a second /clear retired, and the session's first file at
-  its first /clear when the new leaf's parse does not read it), `pinnedKept` (drops that kept an entry because a whole assembly
+  its first /clear when the new leaf's parse does not read it; a subagent's
+  quiet drop is held back while a viewer's parse built before the file's last
+  append still stands, a whole entry the assembly pin keeps, counted below), `pinnedKept` (drops that kept an entry because a whole assembly
   entry still folds over its generation and its next parse after a drop would be
   whole again: its leaf has no document a restore would take, or a restore here
   refused it; the drop would have freed nothing that entry does not hold, so the
@@ -3212,7 +3228,14 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   builder's cold build, any other mark the `asmIndex.materializedByStage`
   list names, a job's finer part as `jobs.<job>.<part>`, and `none` for a
   thread with no mark (T401); `asmCheckpoint.hydratedByStage`
-  does the same for the hydration rows.
+  does the same for the hydration rows; `swallowed` counts raises two handlers
+  keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
+  returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
+  spend guard's agent folds, each in a try of its own, so a raise does not skip
+  the ones after it and the file's records stay only when no later fold drops
+  them), each said on
+  stderr, with the file and the traceback, at its first, tenth and hundredth
+  raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
   row fails its shape check at load, or fails its decode at the first read
@@ -5229,13 +5252,23 @@ or delete.
 
 ## The spend ceiling
 
-Every pusher cycle the kernel reads each live session's spend rate: the
+Every jobs pass the kernel reads each live session's spend rate: the
 dollars its transcript and the agent transcripts beside it (the subagents and
 workflow agents it fanned out) record over the last ten minutes, priced by the
 same per-model table the cost view uses, scaled to an hour. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
-check reads nothing new; only an agent file that changed inside the window is
-read. The ceiling is the `spend-ceiling-usd-per-hour` setting, a bare value
+check reads little that is new: an agent file that changed inside the window is
+read, and after a restart an agent file inside the window whose restored tail
+does not reach back to the window's start is read whole once, since its records
+from before the checkpoint's cut may be in the window. After pricing an agent
+file, the check runs the file's agent folds over the records it holds, first
+the background-task state an open viewer of the agent left; once the
+agent has been quiet for two minutes they write the file's checkpoint document,
+charged to the pusher cycle's byte budget, and let its records leave memory. A
+session's own transcript restored from its assembly checkpoint is priced from
+the records past the checkpoint's cut, so for up to ten minutes after a restart
+the rate can leave out what that session spent before the cut. The ceiling is
+the `spend-ceiling-usd-per-hour` setting, a bare value
 file under the state directory read at each check: 1000 dollars an hour with
 no file, any number in the file, and `0` disables the guard. When a session's
 rate crosses the ceiling, once per crossing, the kernel interrupts its turn

@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, weakref
+import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, traceback, weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -893,7 +893,27 @@ def record_cache_stats() -> dict:
         out["wholeReads"] = {k: dict(v) for k, v in table.items()} if isinstance(table, dict) else {}
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
         out["wholeReadsByStage"] = {k: dict(v) for k, v in bys.items()} if isinstance(bys, dict) else {}
-        return out
+    with _SWALLOWED_LOCK:
+        out["swallowed"] = dict(_SWALLOWED)
+    return out
+
+
+_SWALLOWED = {}                   # "site:ExceptionType" -> raises a handler kept from its caller (note_swallowed)
+_SWALLOWED_LOCK = threading.Lock()
+
+
+def note_swallowed(site, exc, path):
+    """A raise that a handler keeps from its caller (the returned-agent drop's witness check, the spend guard's agent folds;
+    2026-10-02): counted under recordCache.swallowed on /perf by site and exception type, and said on stderr at the first,
+    tenth, hundredth (each power of ten) of each, since these handlers run on every jobs pass. A raise that persists would
+    otherwise return those agents to the old retention with no trace. The line names the file `path` and, since both
+    handlers call this inside their except block, the frame that raised."""
+    k = "%s:%s" % (site, type(exc).__name__)
+    with _SWALLOWED_LOCK:
+        n = _SWALLOWED[k] = _SWALLOWED.get(k, 0) + 1
+    if n == 10 ** (len(str(n)) - 1):
+        sys.stderr.write("record cache: %s raised %s (%d so far) on %s: %s\n%s"
+                         % (site, type(exc).__name__, n, path, exc, traceback.format_exc()))
 
 
 # What a held record weighs in memory against its bytes on disk (the kernel memory diagnosis, 2026-10-01): the lab's records-only
@@ -1160,6 +1180,57 @@ def fold_cursor_appendable(cache, path):
         ent = _JSONL_CACHE.get(str(path))
     cur = cache.get(str(path))
     return ent is not None and cur is not None and cur[1] == ent[6]
+
+
+def fold_steps_in_hand(cache, name, path, new=True):
+    """Whether fold `name` (its cursor dict `cache`) over `path` would step only records the reader already holds, never a
+    whole read, over an entry that holds records: the fold's cursor stands at that entry's generation inside its records (a
+    hit, or an append), or the file's pending restore carries a complete state for the fold inside them (a tail restored from
+    the document), or, with `new`, the entry is the whole file (a first fold over it reads nothing). False when the reader
+    holds no entry for the path, or an empty one, and while a parse's assembly entry holds the entry's very records list
+    (the subagent viewer's, _asm_holds_records), which a parse rebuilt since the file's last append does: a drop there
+    frees nothing, and a stepping fold's drop would leave the viewer's next rebuild a whole read. The spend guard asks before it folds an agent file it priced (2026-10-01), so its
+    fold never enters a file the reader let go, nor pulls a restored tail whole, nor drops records a viewer holds. A pending
+    restore whose count for the fold does not read as an int is a corrupt document, counted and removed as the restore
+    counts it (review round ten, 2026-10-04: a count json read as infinity raised out of the gate at every jobs pass, and
+    the document stayed with nothing recorded), and a restored tail the reader holds for the path is let go with it, so
+    the caller's next read takes the file whole from zero (review round eleven, 2026-10-04: the fallback removes every
+    fold's restored state, and the guard asks once per fold, so the folds it asked after the corrupt one found a tail with
+    no cursor and no state at that pass and at every later one, and a returned agent's tail stayed). A tail only, of the
+    generation the gate looked at, whichever read stored it, an append's longer tail included (review round twelve,
+    2026-10-05): a whole entry stays, for the assembly pin and the quiet drop to decide as before, since a pop of one a
+    viewer's parse read freed nothing and left the viewer's next rebuild a whole read; and an entry of another generation,
+    from a read the gate never looked at, stays. Such a tail has lost its saved restore and the document with the fallback,
+    so the guard never lets it go. Its records stay until the count cap or the byte budget evicts it, or a reader that
+    drops a returned subagent's records reads it whole (the card's own readers, or the guard's within ten minutes of the
+    file's last write); a whole read by any other reader swaps the tail for the whole file, which then stays the same way
+    (review rounds thirteen and fourteen, 2026-10-05: memory only; it takes a corrupt document and another read restoring
+    the tail between the gate's look and the fallback)."""
+    key = str(path)
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(key)
+    if ent is None or not ent[4]:
+        return False
+    base, total = ent[5], ent[5] + len(ent[4])
+    cur = cache.get(key)
+    if cur is not None and cur[1] == ent[6]:
+        ok = base <= cur[0] <= total
+    elif new and base == 0:
+        ok = True
+    else:
+        with _CKPT_LOCK:
+            pend = _CKPT_PENDING.get(key)
+            f = (pend.get("folds") or {}).get(name) if isinstance(pend, dict) and pend.get("gen") == ent[6] else None
+        try:
+            ok = isinstance(f, dict) and "state" in f and base <= int(f["count"]) <= total
+        except (KeyError, TypeError, ValueError, OverflowError) as e:   # a count that is no int (OverflowError: one json read as
+            _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e))   #  infinity) is a corrupt document, counted and removed
+            with _JSONL_CACHE_LOCK:                                     #  once, as the restore counts it; a TAIL of the generation
+                c = _JSONL_CACHE.get(key)                               #  looked at goes with it, so the next read takes the file
+                if c is not None and c[5] > 0 and c[6] == ent[6]:       #  whole and the folds start over it; a whole entry stays,
+                    _cache_pop_locked(key)                              #  for the assembly pin and the quiet drop to decide
+            return False
+    return ok and not _asm_holds_records(key, ent[4])
 
 
 def name_fold_cache(cache, name):
@@ -1627,7 +1698,9 @@ def _write_then_drop(key, ent, pop=True):
     checkpoints.converge.dropDeferred. A file whose standing document is over half the cycle's cap never fits a fresh cycle
     (the take is twice the document's size), so its drop stays owed at every cycle until the reader's bounds or the owed
     table's bound evict the entry, a limit the quiet drop already had before the release existed. Then, with `pop`, the
-    very entry `ent` goes through the pin (_drop_unless_pinned_locked).
+    very entry `ent` goes through the pin (_drop_unless_pinned_locked); a `pop` of "witness" (a returned agent's quiet fold
+    that stepped nothing, _drop_quiescent_entry) is never owed over the budget, and goes only when _document_at_witness
+    says the next fold restores from the document over a zero-byte tail.
     Returns (wrote, outcome): outcome "dropped", "kept" (pinned), "deferred", None when the cache no longer holds `ent`, or
     "stayed" without `pop`."""
     try:
@@ -1650,7 +1723,7 @@ def _write_then_drop(key, ent, pop=True):
             oldest = None                                 #  taken in one step, or deferred (the drop owed) when it does not fit
             with _CKPT_LOCK:
                 _CKPT_STATS["converge"]["dropDeferred"] += 1
-                if pop:
+                if pop is True:                           # a "witness" pop is never owed: the next quiet fold takes it
                     _DROP_OWED[key] = time.time()
                     if len(_DROP_OWED) > _DROP_OWED_MAX:  # over the bound the OLDEST owed drop is paid by its pop alone (round
                         oldest = next(iter(_DROP_OWED))   #  two, low 1: a cleared mark left its entry neither paid nor popped)
@@ -1667,6 +1740,8 @@ def _write_then_drop(key, ent, pop=True):
             wrote = True
             with _CKPT_LOCK:
                 _CKPT_STATS["converge"]["dropWrites"] += 1
+    if pop == "witness":                                  # a returned agent's fold that stepped nothing: the entry goes only
+        pop = _document_at_witness(key, ent)              #  when the next fold restores from the document over a zero-byte tail
     if not pop:
         return wrote, "stayed"
     hold = _asm_hold_of(key, ent)                         # a whole assembly entry folding over it keeps it (_drop_unless_pinned,
@@ -2661,6 +2736,11 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     cache once this fold has stepped them, when the file has not changed for _DROP_AFTER_QUIESCENT_S (a subagent
     that returned; the user's rule: nothing stays resident that nobody looks at). The cursor and its checkpoint stand;
     a later fold of an unchanged file re-reads it once, a growing file keeps its records (see _drop_quiescent_entry).
+    "returned" (a subagent's OWN transcript, 2026-10-01) does that and more: a fold that finds nothing new drops the
+    quiescent entry too, once the file's document stands at the entry's witness (_document_at_witness). A subagent the
+    kernel follows live writes its last record while its file is still fresh, so its last stepping fold kept the entry and
+    every later fold found nothing new: under "quiescent" its whole entry stayed for the kernel's life. Never for a
+    session's leaf, which the judges read whole again if it leaves memory.
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
@@ -2723,9 +2803,10 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
                 on("hit" if kind is None else kind)
             if kind is not None:
                 cache[key] = hit                          # a restore at the witness: the cursor stands, nothing stepped
-            if drop_after == "quiescent" and ent is not None:
-                _drop_quiescent_entry(key, ent, pop=False)   # T362: the document is written here too; the entry stays, since
-            #                                                   nothing was stepped (unless a deferred drop is owed)
+            if drop_after in ("quiescent", "returned") and ent is not None:   # T362: the document is written here too; the
+                _drop_quiescent_entry(key, ent, pop="witness" if drop_after == "returned" else False)   #  entry stays, since
+            #                                                   nothing was stepped (unless a deferred drop is owed), except under
+            #                                                   "returned", where it goes once its document stands at the witness
             return _fold_eof_fragment(key, ent, state0, step)   # unchanged records; a newline-less tail may still sit past them
         if g0 == gen and base <= n0 < total:
             state, start = copy.deepcopy(state0), n0 - base
@@ -2790,7 +2871,7 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     if on is not None:
         on(kind)
     out = _fold_eof_fragment(key, ent, state, step)
-    if drop_after == "quiescent" and ent is not None:
+    if drop_after in ("quiescent", "returned") and ent is not None:
         _drop_quiescent_entry(key, ent)
     return out
 
@@ -2801,8 +2882,11 @@ def _drop_quiescent_entry(key, ent, pop=True):
     once a fold has stepped them: the fold's cursor (and its checkpoint) stands, the file's bytes leave memory. Only the
     very entry this fold read is dropped (another thread's newer entry is left alone); a file still changing keeps its
     records, since its next append would otherwise re-read it whole. Without `pop` (a fold that stepped nothing: a hit or
-    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. Returns
-    True when the document was written here."""
+    a restore at the witness) only the T362 write below runs and the entry stays, as it always has on that path. `pop`
+    "witness" (a drop_after="returned" fold that stepped nothing, 2026-10-01): the write runs as without `pop`, and the
+    entry then goes only when _document_at_witness says the next fold restores from the document over a zero-byte tail;
+    such a drop is never owed for the budget nor taken under a hold (the next quiet fold takes it). Returns True when the
+    document was written here."""
     try:
         if time.time() - float(ent[0]) < _DROP_AFTER_QUIESCENT_S:
             return False
@@ -2810,7 +2894,7 @@ def _drop_quiescent_entry(key, ent, pop=True):
         return False
     held = getattr(_DROP_HOLD, "held", None)
     if held is not None:                                  # the converge pass is healing and priming this leaf on this thread: held,
-        held[key] = held.get(key, False) or pop           #  paid once after (pay_held_drops), with the pop if any fold stepped
+        held[key] = held.get(key, False) or pop is True   #  paid once after (pay_held_drops), with the pop if any fold stepped
         return False
     with _CKPT_LOCK:
         if key in _DROP_OWED:                             # a drop deferred for the budget is taken at the next fold over the file
@@ -2821,6 +2905,66 @@ def _drop_quiescent_entry(key, ent, pop=True):
     # refuse them (a heal on the cycle re-read them whole). The write, its budget and its deferral, and the pop through the
     # assembly pin are _write_then_drop's, shared with the explicit release at the end of a file's use (release_records).
     return _write_then_drop(key, ent, pop=pop)[0]
+
+
+def _document_at_witness(key, ent):
+    """Whether a fold that stepped nothing may drop `ent` (drop_after="returned"): the entry holds records (an empty restored
+    tail frees nothing, and dropping it would make every later fold a restore), the path is not dirty, and the file's fold
+    document stands at the entry's witness, the very count, offset, guard bytes, size and mtime, carrying a complete state
+    at that count for every fold whose cursor sits at the entry's generation. The next fold over the file then restores
+    from the document over a zero-byte tail, never a whole read. False with checkpoints off (no document), for a document
+    behind the entry (a lagging fold's cut), and for a cursor of this generation that lags or is missing from the document
+    (an over-the-cap or cold fold included). A cursor of another generation is not checked here: when the document carries
+    its state at a count inside the entry's records, the cut sits at that count and the document is not at the witness;
+    when it does not, its fold reads the file once at its next run, as any fold does after a drop. False too while a
+    parse's assembly entry holds this very records list (the subagent viewer's): the pop would free nothing, and the
+    parse's next rebuild would read the file whole and parse it in full. The test is by identity, so it holds only for a
+    parse rebuilt since the file's last append. A parse built before it keeps an older list at the same generation, a
+    whole entry, so the assembly pin holds the drop back (_write_then_drop, counted under recordCache.pinnedKept; under
+    droppedHeld when the pin check raises). The viewer's last close releases that parse wherever the close lands
+    (the kernel's _release_subagent_view, called by closeSubagent, by the socket's teardown, and by the pusher's re-check
+    after a render, one that raised included), so it does not hold the records past the viewer; a release that raises is
+    counted and said (release_failed) and leaves the parse to the assembly cache's bound. A reader that wants the whole
+    file and holds no such entry pays one whole read after each drop, so a reader of agent files that runs every cycle
+    takes a tail (the folds' rule)."""
+    try:
+        recs = ent[4]
+        if not recs:
+            return False
+        with _CKPT_LOCK:
+            if key in _FOLD_DIRTY:
+                return False
+        doc = _ckpt_doc_shared(key)
+        if not isinstance(doc, dict):
+            return False
+        total, gen = int(ent[5]) + len(recs), ent[6]
+        if (int(doc["count"]), int(doc["offset"]), int(doc["size"]), float(doc.get("mtime") or 0), doc.get("guard") or "") \
+                != (total, int(ent[2]), int(ent[1]), float(ent[0]), bytes(ent[3]).hex()):
+            return False
+        folds = doc.get("folds") or {}
+        for name, cache in list(_FOLD_REG.items()):
+            cur = cache.get(key)
+            if cur is None or cur[1] != gen:
+                continue
+            f = folds.get(name)
+            if cur[0] != total or not (isinstance(f, dict) and "state" in f and int(f.get("count", -1)) == total):
+                return False
+        return not _asm_holds_records(key, recs)
+    except Exception as e:
+        note_swallowed("dropWitness", e, key)             # the entry stays: memory, never a wrong answer
+        return False
+
+
+def _asm_holds_records(key, recs):
+    """Whether an assembly entry's adapter holds `recs`, this very list, as `key`'s records (the subagent viewer's parse of an
+    agent file). One identity test per entry, on a snapshot taken under _ASM_LOCK alone."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    for e in entries:
+        src = getattr(e.get("ad"), "_src", None) if isinstance(e, dict) else None
+        if isinstance(src, dict) and src.get(key) is recs:
+            return True
+    return False
 
 
 _UNPINNED = object()
