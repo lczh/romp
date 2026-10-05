@@ -2752,28 +2752,39 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `wouldRunMs` and `wouldRunCpuMs` (what an enforcing pass would still run),
   `closedMs` and `closedCpuMs` (the runs it called closed with nothing to
   show for them: the saving), `tickMs` and `tickCpuMs` (the gate's own
-  observation, never inside a job's `cpuByJob`; it reads the pass's alive
-  sessions first, a cost the first job paid before), `gateFaults`, `marks`
+  observation, never inside a job's `cpuByJob`. The observation makes a few
+  reads before the job they serve: the pass's alive sessions at the first
+  job's turn, and the nudge ledger and the working notes when their caches
+  miss. That cost moves out of those jobs' `cpuByJob` and their
+  `jobs.<job>` stage walls into these two, `liftSpentAwaiting` dropping
+  most; it changes what is measured, not what the jobs do), `gateFaults`
+  (a fault of the gate's own, which leaves that run unobserved and no
+  record, so the job's next pass is owed), `marks`
   (`session`: dirty-set entries naming one session, which open that
   session's file readers even when a re-stat looks the same; `all`: passes
   with a box-wide mark, which only re-stat), and `floorCaught` (by file
   position, a floor re-stat that found a file moved with no mark: a writer
   that never said so). `byJob`, per job: `ticks`, `open` and `owed` by reason
-  (an input's name, `due`, `first`, `fault`, `unrecorded`, `undeclared`, or
-  a job's own reason such as `canSpend` or `yield`), `closed`, `closedMs`,
-  `closedCpuMs`, `runMs`, `runCpuMs`, `projectedCpuMsPerHour`, `wrongQuiet`
+  (an input's name, `due`, `first`, `fault`, `gateFault`, `unrecorded`,
+  `undeclared`, or a job's own reason such as `canSpend` or `yield`),
+  `closed`, `closedMs`, `closedCpuMs`, `runMs`, `runCpuMs`,
+  `projectedCpuMsPerHour`, `wrongQuiet`
   (a job called closed that acted, raised, or found its own memo moved while
   none of its inputs did: a signal its declaration lacks, by evidence) and
   `raced` (its memo moved and so did a declared input while it ran: the next
   pass would have opened it). `wrongQuietLast` keeps the newest sixteen, and
   `lastPass` each job's verdict on the newest observed pass (`closed`,
-  `open:<reason>` or `owed:<reason>`).
+  `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate fault).
   `today` and `projected` give `periodMs`, `passesPerHour` and `cpuMsPerHour`:
   `today` over the observed passes less the gate's cost, `projected` with
   the closed runs taken out, so the period shortens, passes per hour rise
   and every job owed on each pass is counted at that faster pace; judge by
-  the hour, never by the pass. `treeFloor` simulates the spend guard's
-  check for agent files no event announces at once a minute (`floorS`):
+  the hour, never by the pass. `projected`, and each job's
+  `projectedCpuMsPerHour` with it, is a ceiling: it counts every run not
+  called closed at the faster pace, including the runs an input or a due
+  opened, which an enforcing loop runs at that event's own rate.
+  `treeFloor` simulates the spend guard's check for agent files no event
+  announces at once a minute (`floorS`):
   `unsignaled` moves the per-pass poll found with no signal for the
   session, `signaled` the rest, `checks` and `caught` the floor's stats and
   the ones that found a move, `signalCaught` the ones a later signal found
