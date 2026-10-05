@@ -362,8 +362,8 @@ class RecordCacheDefaultBudget(unittest.TestCase):
     4 GiB of file bytes (since 2026-10-01 the budget is in memory, so the floor is 4 GiB times the decoded multiple)."""
 
     def test_half_of_the_machine(self):
-        text = "MemTotal:       123634396 kB\nMemFree:        1 kB\n"
-        self.assertEqual(em._record_cache_default_budget_bytes(text), int(123634396 * 1024 * 0.5))
+        text = "MemTotal:       134217728 kB\nMemFree:        1 kB\n"
+        self.assertEqual(em._record_cache_default_budget_bytes(text), int(134217728 * 1024 * 0.5))
 
     def test_never_under_four_gib_of_file_bytes(self):
         floor = int(4 * 1024 ** 3 * em._RECORD_CACHE_MULTIPLE)

@@ -3295,8 +3295,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entries that expire, and `resident` counts those too until they do:
   before this (measured 2026-09-15) a strong reference kept every superseded
   generation's atoms, and its whole index behind them, resident until they
-  aged past the cap, about 1.2 GiB on a box whose LRU sat exactly at its cap
-  of a million entries, and live atoms evicted by stale ones were rebuilt),
+  aged past the cap, so an LRU at its cap held mostly dead generations, and
+  live atoms evicted by stale ones were rebuilt),
   `evictions` (a live entry past the cap: its slot's memo dropped, never a
   field in place), `expired` (an entry whose list has been collected, dropped
   when it reaches the cap or when a live list registers a slot under the id the

@@ -3,13 +3,13 @@
 
 The shared reader keeps each transcript's decoded records in one cache (_JSONL_CACHE), under a count cap and a byte
 budget of half of MemTotal. Each entry weighed its FILE bytes, but decoded records take about 2.85 bytes of memory per
-file byte: the reader's own lab figure is 2.86 live heap bytes per source byte, and a running kernel's resident size
-against the cache's file bytes agrees in rough terms. So half of memory in file bytes meant nearly three times as much
-in decoded records (about 46 GiB on a 32 GiB machine) and could not bind before the machine swapped: the cache's file
-bytes sat far under it while the kernel grew into swap. The budget now compares the held file bytes times the decoded
-multiple (RECORD_CACHE_DECODED_MULTIPLE; ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, and 1 restores the file-byte
-budget) with the same half of memory, so half of memory means half of real memory. /perf keeps `bytes` in file bytes
-and adds `realBytes` and `decodedMultiple`.
+file byte: the reader's own lab figure is 2.86 live heap bytes per source byte, and a running kernel's resident size,
+fitted against the cache's file bytes, gives a slope near it. So half of memory in file bytes meant nearly three times
+as much in decoded records (about 46 GiB on a 32 GiB machine) and could not bind before the machine swapped: the cache's
+file bytes sat far under it while the kernel grew into swap. The budget now compares the held file bytes times the
+decoded multiple (RECORD_CACHE_DECODED_MULTIPLE; ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, and 1 restores the
+file-byte budget) with the same half of memory, so half of memory means half of real memory. /perf keeps `bytes` in file
+bytes and adds `realBytes` and `decodedMultiple`.
 
 Two things keep it from thrashing (the 2026-09-11 lesson: a budget under the files read every cycle misses on every
 read). The floor stays 4 GiB of FILE bytes (the floor times the multiple, in memory), so wherever it binds (a machine

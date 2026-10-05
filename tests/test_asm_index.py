@@ -536,8 +536,8 @@ class CapsSizedToTheMachine(unittest.TestCase):
     caches are one shared pool sized to the machine, never a small literal."""
 
     def test_the_index_cap_is_a_fraction_of_the_machine_with_a_floor(self):
-        text = "MemTotal:       123634396 kB\n"
-        self.assertEqual(em._machine_memory_bytes(text), 123634396 * 1024)
+        text = "MemTotal:       134217728 kB\n"
+        self.assertEqual(em._machine_memory_bytes(text), 134217728 * 1024)
         self.assertEqual(em._machine_memory_bytes("garbage"), 0, "unreadable: zero, so the floors apply")
         self.assertGreaterEqual(em._MAT_CAP, 500_000)
         self.assertGreaterEqual(em._HYDRATED_CAP, 256 * 1024 ** 2)   # real memory since 2026-10-01 (tests/test_hydrated_memo.py)
