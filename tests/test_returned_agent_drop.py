@@ -1540,7 +1540,8 @@ class SpendGuard(Base):
         self.assertEqual((st3.get("pinnedKept", 0) - st2.get("pinnedKept", 0), st3["dropped"] - st2["dropped"]), (0, 1))
         self.assertEqual(self.doc(ap)["folds"]["agentLaunchIds"]["count"], 101, "its document stands")
         self.assertEqual(em.checkpoint_stats()["fallbacks"].get("corrupt", 0) - fb0, 1, "counted corrupt once")
-        self.assertEqual(self.guard_whole_reads(), {}, "the guard never read the file whole")
+        self.assertEqual(self.guard_whole_reads(), {"zero<-_spend_file_rows": 1},
+                         "the guard's one whole read is the session leaf's first, at the first pass; it never read the agent file whole")
 
     def test_the_row_memo_rescans_when_its_tail_entry_becomes_the_whole_file(self):
         f = str(self.proj / "11111111-2222-4333-8444-0000000000e1.jsonl")
