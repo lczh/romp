@@ -1478,15 +1478,18 @@ def _jobs_gate_run():
     return getattr(_JOBS_GATE_TL, "run", None)
 
 
-def _jobs_gate_note(evidence):
+def _jobs_gate_note(evidence, sid=None):
     """The running job ACTED (views, mark, push, send, problem, spendRow, write) or its own memo said an input moved (miss,
-    neverSeen, clockParse, load): the detector's evidence. A job the gate called closed that notes one is a wrongQuiet (a missing
-    signal), or `raced` when only a memo moved and one of the job's declared inputs moved after the gate observed it, as the next
-    pass's gate will see it (_jobs_gate_raced)."""
+    neverSeen, clockParse, load): the detector's evidence. A memo that is one session's names it (`sid`), so the raced test reads
+    that session's inputs alone; a memo note with no session reads every session's. A job the gate called closed that notes an
+    act is a wrongQuiet (a missing signal); one whose only evidence is a moved memo is a wrongQuiet too, unless a declared input
+    of that memo's session moved after the gate observed it with a signal the next pass's gate will see (raced, _jobs_gate_raced)."""
     run = _jobs_gate_run()
     if run is not None:
         try:
             run["acts"][evidence] = run["acts"].get(evidence, 0) + 1
+            if evidence not in _JOBS_GATE_ACTS:
+                run["memo"].add(None if sid is None else str(sid))   # None: no session named, every session's inputs
         except Exception:
             pass
 
@@ -5771,6 +5774,8 @@ def _relay_tick(now, alive_ids=None):
                 f.unlink(missing_ok=True)
             else:
                 _jobs_gate_due(mt + 61)                    # (the jobs pass's gate, shadow: the first second this file is swept)
+        except FileNotFoundError:
+            continue                                       # renamed into its entry (or swept) between the glob and the stat: no fault
         except OSError:
             _jobs_gate_owe("fault")                        # (the jobs pass's gate, shadow: a stat or unlink that failed is retried)
     by_sid = {}
@@ -5799,7 +5804,7 @@ def _relay_tick(now, alive_ids=None):
                 continue                                   # nothing it reads has moved since a pass that changed nothing,
                                                            #   and no hold of its has ended
             if held and held[0] != key:
-                _jobs_gate_note("miss")                    # (the jobs pass's gate, shadow: the relay's own quiet key moved)
+                _jobs_gate_note("miss", sid)               # (the jobs pass's gate, shadow: the relay's own quiet key for sid moved)
             sent, quiet = _relay_store(sid, ents, now, alive_ids)
             n += sent
             if quiet and key is not None:
@@ -13071,22 +13076,23 @@ _TICK_SEEN_STATS = {}   # job -> {"hits", "misses", "neverSeen", "noTranscript",
 #   matched key that a clock leg refused to serve (a flip due, a None flip, the closer toggle): not a hit, not a miss
 
 
-def _tick_seen_bump(job, key, n=1):
+def _tick_seen_bump(job, key, n=1, sid=None):
     with _TICK_SEEN_LOCK:
         j = _TICK_SEEN_STATS.setdefault(job, {"hits": 0, "misses": 0, "neverSeen": 0, "noTranscript": 0, "clockParse": 0, "missBy": {}})
         j[key] += n
     if key == "noTranscript":
         _jobs_gate_owe(key)                    # the jobs pass's gate (shadow): a session with no transcript is evaluated every pass,
-    elif key != "hits":                        #  and a memo that refused to serve is the detector's evidence
-        _jobs_gate_note(key)
+    elif key != "hits":                        #  and a memo that refused to serve is the detector's evidence, for its session `sid`
+        _jobs_gate_note(key, sid)
 
 
-def _tick_key_miss_by(job, st, prev):
+def _tick_key_miss_by(job, st, prev, sid=None):
     """Count a miss with a previous entry: which of the key's positions differed (one comparison per (mtime_ns, size) pair of
     the key: ten for the tick's ten-file key, eighteen for the walk's, which adds the asker rows; nothing else). A key of
     another length than the recorded one counts once under `shape`, as does a previous entry that is not a sequence (an
-    observation counter is never the raising path); a differing element past the ten files is `askerRow`."""
-    _jobs_gate_note("miss")                    # the jobs pass's gate (shadow): the job's own key moved
+    observation counter is never the raising path); a differing element past the ten files is `askerRow`. `sid`: the session
+    whose key it is, for the jobs pass's gate."""
+    _jobs_gate_note("miss", sid)               # the jobs pass's gate (shadow): the job's own key for that session moved
     with _TICK_SEEN_LOCK:
         j = _TICK_SEEN_STATS.setdefault(job, {"hits": 0, "misses": 0, "neverSeen": 0, "noTranscript": 0, "clockParse": 0, "missBy": {}})
         j["misses"] += 1
@@ -13229,13 +13235,13 @@ def _tick_job_check(job, s, st=None):
     with _TICK_SEEN_LOCK:
         prev = _TICK_SEEN.get(key)
     if prev is None:
-        _tick_seen_bump(job, "neverSeen")
+        _tick_seen_bump(job, "neverSeen", sid=s.get("sid"))
         _jobs_gate_key(s.get("sid"), False)
         return False, st                      # never evaluated by any kernel on record: evaluate once
     if st == prev:
         _tick_seen_bump(job, "hits")
         return True, st
-    _tick_key_miss_by(job, st, prev)          # which position moved: the boot read decodes it (memos.tickSeen.byJob[job].missBy)
+    _tick_key_miss_by(job, st, prev, sid=s.get("sid"))   # which position moved: the boot read decodes it (memos.tickSeen.byJob[job].missBy)
     _jobs_gate_key(s.get("sid"), False)
     return False, st
 
@@ -13403,23 +13409,23 @@ def _nudge_look_check(s, now):
     with _TICK_SEEN_LOCK:
         prev = _TICK_SEEN.get(("auto-nudge", str(s.get("sid") or "")))
     if prev is None:
-        _tick_seen_bump("auto-nudge", "neverSeen")
+        _tick_seen_bump("auto-nudge", "neverSeen", sid=sid)
         return False, st, None
     if not isinstance(prev, (list, tuple)) or len(prev) != len(st) + 2 or tuple(prev[:len(st)]) != tuple(st):
-        _tick_key_miss_by("auto-nudge", tuple(st), tuple(prev[:-2]) if isinstance(prev, (list, tuple)) else prev)   # the walk's key
-        return False, st, None                                                                   #  beside the tick jobs' (memos.tickSeen)
+        _tick_key_miss_by("auto-nudge", tuple(st), tuple(prev[:-2]) if isinstance(prev, (list, tuple)) else prev, sid=sid)   # the
+        return False, st, None                                                         #  walk's key beside the tick jobs' (memos.tickSeen)
     flip, verdict = prev[len(st)], prev[len(st) + 1]
     if verdict == "closer-unsettled" and not jd.CLOSER_ON:
-        _tick_seen_bump("auto-nudge", "clockParse")   # a matched key the clock legs refuse to serve: a parse, not a hit (round two)
-        return False, st, None                        # recorded under the closer toggle, read with it off (an import-time toggle,
-    #                                                   not a file): evaluate (round five, low c)
+        _tick_seen_bump("auto-nudge", "clockParse", sid=sid)   # a matched key the clock legs refuse to serve: a parse, not a hit
+        return False, st, None                        # (round two); recorded under the closer toggle, read with it off (an
+    #                                                   import-time toggle, not a file): evaluate (round five, low c)
     if flip is None:
         _NUDGE_WALK_STATS["unbounded"] += 1
-        _tick_seen_bump("auto-nudge", "clockParse")
+        _tick_seen_bump("auto-nudge", "clockParse", sid=sid)
         return False, st, None
     if flip >= 0 and now >= flip:
         _NUDGE_WALK_STATS["clockDue"] += 1
-        _tick_seen_bump("auto-nudge", "clockParse")
+        _tick_seen_bump("auto-nudge", "clockParse", sid=sid)
         return False, st, None
     _tick_seen_bump("auto-nudge", "hits")             # counted on the one return that skips
     if flip >= 0:
@@ -15080,7 +15086,7 @@ def _lift_spent_awaiting(now, live_map):
                 _lift_gate_stats["skip"] += 1
                 continue                              # the same inputs were ruled on last cycle
             _lift_gate_stats["load"] += 1
-            _jobs_gate_note("load")                   # (the jobs pass's gate, shadow: the lift's own fingerprint moved)
+            _jobs_gate_note("load", sid)              # (the jobs pass's gate, shadow: the lift's own fingerprint for sid moved)
             _lift_seen[sid] = gate                    # recorded now; a ruling that RAISES forgets it below,
             #                                           so the next cycle retries instead of skipping
             # PHASE 1, the probe: the shared read-only view. A FrozenStore is the cache's answer; anything
@@ -39009,9 +39015,11 @@ def _compacting_optimistic(sid, session, now):
     for turn in session["turns"]:
         for a in turn["atoms"]:
             if a.get("type") == "system" and a.get("subtype") == "compact_boundary" and (a.get("t") or 0) >= t0:
-                _compact_clicked.pop(sid, None)
+                _jobs_gate_note("write")      # (the jobs pass's gate, shadow: the click map, an input the interrupt tick declares,
+                _compact_clicked.pop(sid, None)   #  written by the job running here, if one is)
                 return False
     if now - t0 > 180:
+        _jobs_gate_note("write")              # (the same: the cap's pop is a write)
         _compact_clicked.pop(sid, None)
         return False
     return True
@@ -66725,12 +66733,34 @@ def _jobs_gate_observe(spec, tick, fresh=None):
     return v
 
 
+_JOBS_GATE_BACKENDS = (lambda: _sdk(), lambda: _codex())   # the backends the race read asks for live rows (_jg_live_rows), in
+#                                                             Sessions.live's merge order (a later backend's row wins a sid)
+
+
+def _jg_live_rows():
+    """Each backend's live sessions, read directly for the race read: {sid: (state, since)}, shaped as Sessions.live shapes the
+    two fields, or None when a backend's read raised. Never Sessions.live itself: its stand-down counts a failed read under
+    /version's liveReadFailures and serves the backend's last rows, the liveness read's own bookkeeping, which a measurement
+    must not add to (a raise here names every session instead, _jobs_gate_next)."""
+    out = {}
+    for get in _JOBS_GATE_BACKENDS:
+        try:
+            be = get()
+            if not be:
+                continue
+            for sid, st in (be.live_sessions() or {}).items():
+                out[str(sid)] = (st.get("state", ""), _num(str(st.get("since") or "")))
+        except Exception:
+            return None
+    return out
+
+
 def _jobs_gate_next():
     """What the NEXT pass's prelude will observe of the sessions' files, read now and taken from nothing (_files_stat_pass_open
     takes them, this only reads): (the sids it will name alone, whether it will name every session). Its own reads, each against
     the baseline this pass's prelude left: the dirty set and its all flag (the in-process writers' marks since then), the judge
     module's write counts by session and in total, each live row's state, since and live-tail revision (from the backends now,
-    not the pass's snapshot), and the postal log's stat."""
+    _jg_live_rows, not the pass's snapshot; a backend whose read raised names every session), and the postal log's stat."""
     with _FILES_STAT_LOCK:
         sids, every = set(_FILES_STAT_DIRTY["sids"]), bool(_FILES_STAT_DIRTY["all"])
     try:
@@ -66750,14 +66780,13 @@ def _jobs_gate_next():
         prev = _FILES_STAT_OBSERVED["jdBy"]
         sids.update(str(sid) for sid, n in by.items() if prev.get(sid) != n)
         sids.update(str(sid) for sid in prev if sid not in by)
-    try:
-        live = Sessions.live()
-    except Exception:
-        live, every = {}, True                       # unreadable: when unsure, every session
+    live = _jg_live_rows()
+    if live is None:
+        live, every = {}, True                       # a backend's read raised: when unsure, every session
     rows = _FILES_STAT_OBSERVED["rows"]
-    for sid, row in (live or {}).items():
+    for sid, (state, since) in live.items():
         try:
-            cur = ((row or {}).get("state"), (row or {}).get("since"), Sessions.live_rev(sid))
+            cur = (state, since, Sessions.live_rev(sid))
         except Exception:
             cur = None
         if cur is None or cur != rows.get(sid):
@@ -66765,21 +66794,42 @@ def _jobs_gate_next():
     return sids, every
 
 
+def _jg_scoped(ch, val, scope):
+    """A re-observed channel's value as the raced test compares it for the sessions in `scope` (None: every session): a registry
+    row by those sessions' entries, the judge's write counts by those sessions (its shared total kept whole), the compaction
+    clicks by those sessions. A box-wide file and any other in-memory value is every session's input and stays whole."""
+    if scope is None:
+        return val
+    if ch == "regs" and isinstance(val, dict):
+        return {k: x for k, x in val.items() if k in scope}
+    if ch == "mem:jdWrites" and isinstance(val, tuple) and len(val) == 2 and isinstance(val[1], tuple):
+        return (val[0], tuple(p for p in val[1] if str(p[0]) in scope))
+    if ch == "mem:compactClicked" and isinstance(val, tuple):
+        return tuple(p for p in val if p[0] in scope)
+    return val
+
+
 def _jobs_gate_raced(run, tick):
-    """Whether a declared input of a run called closed moved after the gate observed it, as the next pass's gate will see it:
-    then a memo that moved during the run was a race (the next pass opens the job: later, not lost), else a wrongQuiet. A box,
-    an in-memory value or a registry row is observed again. A files channel moved when the next prelude will name one of its
-    sessions alone (a mark, a judge write, a moved row: its generation opens the job), or will name every session (a box-wide
-    mark, the postal log, the judge's shared writes) and a re-stat of a session whose view was a stat of this pass finds its
-    positions moved. A standing view is never re-statted: it cannot tell a write during the run from one before the pass, which
-    no signal announced and the next pass would miss too. The live rows and the membership are the pass's snapshot, which no
-    job moves. A run's own writes never reach this test: each is an act (a mark, a write, a send), and an act is never raced."""
+    """Whether a run called closed whose only evidence is a moved memo RACED (a declared input moved after the gate observed it,
+    with a signal the next pass's gate will see, so that gate opens the job: later, not lost) or is a wrongQuiet. The rule is
+    the signal's: raced needs an input observed again that moved (a box-wide file, an in-memory value, a registry row) or, on a
+    files channel, a next prelude that names the session alone (a mark, a judge write, or a live row's state, since or
+    live-tail revision naming it: its generation opens the job) or names every session (a box-wide mark, the postal log, a
+    shared judge write) while a re-stat of a view this pass took finds its positions moved. A write no such signal covers is a
+    miss even when something else brings the job back next pass (the floor's re-stat, a later reader's stat refreshing the
+    standing entry, an all-sessions mark over a standing view): a standing view is never re-statted, since it cannot tell a
+    write during the run from one before the pass. A memo that names its session (the run's `memo`, _jobs_gate_note) is tested
+    on that session's inputs alone (_jg_scoped): another session's input moving is not why it moved. The live rows and the
+    membership are the pass's snapshot, which no job moves. A run's own writes never reach this test: each is an act (a mark,
+    a write, a send), and an act is never raced."""
     v = run.get("v") or {}
+    memo = run.get("memo") or {None}
+    scope = None if None in memo else memo           # None: a memo note named no session, so every session's inputs count
     nxt = None
     for ch, val in v.items():
         kind, _, arg = ch.partition(":")
         if kind in ("box", "mem", "regs"):
-            if _jobs_gate_observe({"inputs": (ch,)}, tick).get(ch) != val:
+            if _jg_scoped(ch, _jobs_gate_observe({"inputs": (ch,)}, tick).get(ch), scope) != _jg_scoped(ch, val, scope):
                 return True
         elif kind == "files":
             if nxt is None:
@@ -66788,7 +66838,7 @@ def _jobs_gate_raced(run, tick):
             idx = [_JOBS_GATE_POSITIONS.index(p) for p in arg.split(",")]
             for s in _jobs_gate_alive(tick):
                 sid = str(s["sid"])
-                if sid not in val:
+                if sid not in val or (scope is not None and sid not in scope):
                     continue
                 if sid in sids:
                     return True
@@ -66992,7 +67042,7 @@ def _jobs_gate_predict(name, tick):
     a due it noted has come, consumed by a run at or after it), owed (it has no record, it left work owing, its own predicate says
     so, or it is undeclared) or closed. The inputs are observed here, BEFORE the job reads them, and are what its record keeps."""
     run = {"job": name, "acts": {}, "owed": set(), "dues": [], "flips": [], "pending": set(), "tree": set(), "spec": None,
-           "v": None, "verdict": "owed", "reason": "undeclared", "fresh": set()}
+           "v": None, "verdict": "owed", "reason": "undeclared", "fresh": set(), "memo": set()}
     spec = _JOBS_INPUTS.get(name)
     if spec is None:
         return run
@@ -67099,13 +67149,15 @@ def _jobs_gate_close(run, wall, cpu, raised):
 
 def _jobs_gate_settle(run, tick, wall, cpu, raised):
     """The run's outcome against its verdict. A job called closed that ACTED (a write, a mark, a send, a row, a raise) is a
-    wrongQuiet with its evidence; one whose own memo moved while none of its declared inputs did is one too; one whose memo moved
-    while a declared input moved after the gate observed it, as the next pass's gate will see it, is `raced` (that gate opens it:
-    later, not lost; _jobs_gate_raced). Then the record: a run that raised, or noted a fault, leaves NONE (the fault-boundary
-    rule: the next pass evaluates it as if it never completed); any other keeps the inputs observed before it ran, what it left
-    owing (an evaluation left unrecorded among it) and its earliest due after this pass. A job called closed with no evidence
-    adds its wall and CPU to closedMs / closedCpuMs, what enforcement would save; every other run's go to runMs / runCpuMs,
-    what an enforcing pass would still spend."""
+    wrongQuiet with its evidence. One whose only evidence is a moved memo is `raced` when an input of the memo's session moved
+    after the gate observed it with a signal the next pass's gate will see (an input observed again that moved, a prelude
+    signal naming the session, or one naming every session over a view this pass took that a re-stat finds moved: that gate
+    opens it, later, not lost; _jobs_gate_raced), and a wrongQuiet otherwise: a write no signal covers is a miss even when the
+    floor, a later stat or an all-sessions mark brings the job back. Then the record: a run that raised, or noted a fault,
+    leaves NONE (the fault-boundary rule: the next pass evaluates it as if it never completed); any other keeps the inputs
+    observed before it ran, what it left owing (an evaluation left unrecorded among it) and its earliest due after this pass.
+    A job called closed with no evidence adds its wall and CPU to closedMs / closedCpuMs, what enforcement would save; every
+    other run's go to runMs / runCpuMs, what an enforcing pass would still spend."""
     name, spec, now, verdict = run["job"], run["spec"], tick["now"], run["verdict"]
     acts = dict(run["acts"])
     if raised:

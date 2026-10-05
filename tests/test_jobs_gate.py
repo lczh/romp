@@ -94,6 +94,23 @@ class _FakeBackend:
         return True
 
 
+class _LabLive:
+    """A backend as the race read asks it for its live sessions (_jg_live_rows): the lab's live map in a backend's own shape (a
+    since as the SDK backend ships it, a string), or a raise while `fail` holds an exception."""
+
+    def __init__(self, test):
+        self.test, self.fail, self.reads = test, None, 0
+
+    def live_sessions(self):
+        self.reads += 1
+        if self.fail is not None:
+            raise self.fail
+        return {sid: {"state": row.get("state", ""), "since": str(row.get("since") or "")} for sid, row in self.test.live.items()}
+
+    def owns(self, sid):
+        return False
+
+
 class Census(unittest.TestCase):
     """T1: the inputs table and the pass agree, and every channel a spec names is one the gate can observe."""
 
@@ -183,6 +200,7 @@ class FaultCensus(unittest.TestCase):
         ("_end_on_idle_sweep", "Exception", 0): "the request stands: the sweep is owed every pass while one does (requests)",
         ("_auto_nudge_pass", "OSError", 0): "the postal log's stat: absent reads as empty, and box:postal is the walk's own input",
         ("_relay_tick", "Exception", 0): "a malformed entry is dropped, its unlink noted as a write: nothing is left to retry",
+        ("_relay_tick", "FileNotFoundError", 0): "a temp file gone by its stat (renamed into its entry, or swept): nothing to retry",
         ("_relay_store", "Exception", 0): "an entry's fault makes its store's pass not quiet: the walk is owed under relay",
         ("_dead_wait_sweep", "OSError", 0): "the boot's catch-up listing: the transition is spent at the base too",
         ("_dead_wait_sweep", "Exception", 0): "a peer-death conversion: the death transition is spent at the base too",
@@ -289,6 +307,10 @@ class _GateLab(unittest.TestCase):
             p = mock.patch.object(km.Sessions, attr, staticmethod(fn))   # the backends' live rows, as the next prelude reads them
             p.start()
             self.addCleanup(p.stop)
+        self.backend = _LabLive(self)                                 # ... and as the race read asks each backend for them
+        p = mock.patch.object(km, "_JOBS_GATE_BACKENDS", (lambda: test.backend,), create=True)   # (create: the red-first run's
+        p.start()                                                     #  kernel, the review's, had no such table)
+        self.addCleanup(p.stop)
         saved_slots = {nm: getattr(km, nm)[0] for nm in self.LIST_SLOTS}
         saved_boxes = {nm: (type(getattr(km, nm)), list(getattr(km, nm).items()) if isinstance(getattr(km, nm), dict)
                             else list(getattr(km, nm))) for nm in self.CONTAINERS}
@@ -817,7 +839,7 @@ class Owed(_GateLab):
         self.assertFalse(armed[0], "the write raised")
         last = self.last()
         self.assertEqual([j for j in self.declared() if last.get(j) != "closed"], [], last)
-        self.assertEqual((g["gateFaults"], g["wouldSkipPass"] >= g0["wouldSkipPass"]), (0, True))
+        self.assertEqual((g["gateFaults"], g["wouldSkipPass"]), (0, g0["wouldSkipPass"] + 1), "every job closed: the pass counts")
 
     def test_a_turn_that_finds_a_run_still_open_is_unobserved_and_no_skip(self):
         """A job's turn on a thread whose last observed run never closed (here a stage opened inside a job, the shape a stale run
@@ -835,23 +857,24 @@ class Owed(_GateLab):
         self.assertIn("jobs gate (probe)", err.getvalue())
 
     def test_a_fault_in_the_passs_close_is_counted_and_said_once(self):
-        """The pass's close never raises; its own fault counts one gateFault and names its exception type once."""
+        """The pass's close never raises; its own fault counts one gateFault on every pass it faults, and stderr names its
+        exception type once: two passes fault, two gateFaults, one line."""
         km = self.km
         self.add_session()
         self.quiet()
         g0 = self.gate()["gateFaults"]
         real = km._PERF_STATS.gate_update
-        armed = [True]
+        armed = [2]
 
         def gate_update(fn):
             if armed[0] and getattr(fn, "__qualname__", "") == "_jobs_gate_tick_close.<locals>.put":
-                armed[0] = False
+                armed[0] -= 1
                 raise RuntimeError("a synthetic close fault")
             return real(fn)
         with mock.patch.object(km._PERF_STATS, "gate_update", gate_update), redirect_stderr(io.StringIO()) as err:
-            g = self.passes()
-        self.assertFalse(armed[0])
-        self.assertEqual(g["gateFaults"] - g0, 1)
+            g = self.passes(2)
+        self.assertEqual(armed[0], 0, "both passes' closes faulted")
+        self.assertEqual(g["gateFaults"] - g0, 2)
         self.assertEqual(err.getvalue().count("the pass's close raised RuntimeError"), 1, err.getvalue())
 
     def test_an_evaluation_left_unrecorded_is_owed_and_a_recorded_one_is_not(self):
@@ -945,11 +968,15 @@ class Inputs(_GateLab):
 
 
 class Detector(_GateLab):
-    """The evidence: an act is a wrongQuiet; a memo that moved is one only when none of the job's declared inputs moved after the
-    gate observed it, as the next pass's gate will see it (_jobs_gate_raced), else it raced (that pass opens the job: later, not
-    lost). The files roads below run in the interrupt tick, a job that reads the session's own files and not the postal log; a
-    walk ahead of it takes the pass's shared snapshot as the real walk's key does. Each road's write lands on another thread
-    while the job runs, announced the one way the road names; the unannounced write before the pass stays a wrongQuiet."""
+    """The evidence: an act is a wrongQuiet; a memo that moved is raced only when an input of the memo's session moved after the
+    gate observed it with a signal the next pass's gate will see (an input observed again, a prelude signal naming the session,
+    or one naming every session over a view this pass took that a re-stat finds moved: _jobs_gate_raced), and a wrongQuiet
+    otherwise, whatever later brings the job back. The files roads first run in the interrupt tick, a job that reads the
+    session's own files and not the postal log, with a walk ahead of it taking the pass's shared snapshot as the real walk's key
+    does (the re-stat's first road: the snapshot's own stat); then the lift's road (the gate's own stat at the pass's first job)
+    and the walk's (the pass's fresh cache, the lift quiet); then the inputs observed again and the live row's since on a closed
+    walk; then a memo that names its session. Each write lands on another thread while the job runs, announced the one way its
+    test names; a write no signal covers stays a wrongQuiet."""
 
     def _walk(self, fn):
         p = mock.patch.object(self.km, "_auto_nudge_tick", fn)
@@ -1070,8 +1097,200 @@ class Detector(_GateLab):
         self.assertEqual(self._race(lambda store: km._files_stat_mark(), before=self._grow), ({"miss": 1}, {}))
 
     def test_an_unannounced_write_during_the_run_stays_a_wrong_quiet(self):
-        """Another process's write during the run with no signal at all: the next pass serves the standing stat too."""
+        """The rule is the signal's, not the next pass's outcome: another process's write during the run with no signal at all
+        is a miss. Here the next pass serves the standing stat too (the walk's snapshot ahead of the tick took the stat before
+        the write); on the lift's road the walk's later stat brings the lift back on the next pass, and the write is a miss
+        there all the same (test_on_the_lifts_road_an_unannounced_write_is_a_miss_though_the_next_pass_opens_it)."""
         self.assertEqual(self._race(self._grow, fresh=True), ({"miss": 1}, {}))
+
+    # ── the re-stat's other two roads: the gate's own stat at the lift's turn, the pass's fresh cache at the walk's ──
+    def _lift_race(self, road, fresh):
+        """The REAL lift, called closed, quiet first (a walk after it takes the pass's shared snapshot, as the real walk's key
+        does); on the next pass another thread does `road(store)` from inside the lift's dispatch scan, which runs before the
+        lift's fingerprint, so the lift loads. `fresh`: the floor has passed, so the gate's view at the lift's turn, the pass's
+        first job, is the gate's own stat (no reader has taken the snapshot yet); else the standing stat. Returns the lift's
+        (wrongQuiet, raced) on that pass."""
+        km, jd = self.km, self.km.jd
+        self.add_session()
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        store = jd.GOALDIR / (SID + ".json")
+        store.write_text(json.dumps({"nodes": {}, "rev": 1}))
+        real_scan = km._bg_scan_all_cached
+        armed = [None]
+
+        def scan(path):
+            fn, armed[0] = armed[0], None
+            if fn is not None:
+                th = threading.Thread(target=fn)
+                th.start()
+                th.join()
+            return real_scan(path)
+        self.stub("_bg_scan_all_cached", scan)
+        self.real("_lift_spent_awaiting")
+        self._walk(lambda now, live_map: [km._session_files_stat(s) for s in km._alive_sessions(now, live_map)])
+        self.quiet()
+        self.assertEqual(self.last()["liftSpentAwaiting"], "closed")
+        w0, r0 = self.wrong("liftSpentAwaiting"), self.raced("liftSpentAwaiting")
+        if fresh:
+            km._FILES_STAT_STANDING[(SID, self.sessions[0]["path"])][1] -= km.NUDGE_FLOOR_S + 1
+        armed[0] = lambda: road(store)
+        self.passes()
+        self.assertIsNone(armed[0], "the write ran inside the lift's scan")
+        self.assertEqual(self.last()["liftSpentAwaiting"], "closed", "called closed: the write came after the gate looked")
+        return _delta(self.wrong("liftSpentAwaiting"), w0), _delta(self.raced("liftSpentAwaiting"), r0)
+
+    def test_on_the_lifts_road_a_box_wide_mark_past_the_floor_is_a_race(self):
+        km = self.km
+        self.assertEqual(self._lift_race(lambda store: (self._grow(store), km._files_stat_mark()), fresh=True), ({}, {"load": 1}))
+
+    def test_on_the_lifts_road_a_shared_judge_write_past_the_floor_is_a_race(self):
+        """The lift declares no judge counter: the shared write reaches it through its files alone (a postal write would not
+        test this road, since the lift declares the postal log and observes it again)."""
+        jd = self.km.jd
+        self.assertEqual(self._lift_race(lambda store: (self._grow(store), jd._session_file_written(None)), fresh=True),
+                         ({}, {"load": 1}))
+
+    def test_on_the_lifts_road_a_box_wide_mark_inside_the_floor_is_a_miss(self):
+        """Inside the floor the lift's view is the standing stat, which cannot tell this write from one before the pass."""
+        km = self.km
+        self.assertEqual(self._lift_race(lambda store: (self._grow(store), km._files_stat_mark()), fresh=False), ({"load": 1}, {}))
+
+    def test_on_the_lifts_road_an_unannounced_write_is_a_miss_though_the_next_pass_opens_it(self):
+        """Past the floor, the walk's stat after the lift refreshes the standing entry with the write, so the next pass opens
+        the lift; the write, which no signal covered, is a miss all the same."""
+        self.assertEqual(self._lift_race(self._grow, fresh=True), ({"load": 1}, {}))
+        self.passes()
+        self.assertEqual(self.last()["liftSpentAwaiting"], "open:files", "a later stat brought the lift back")
+
+    def _walk_race(self, road, fresh):
+        """The walk called closed with the lift quiet, and the shared snapshot taken only after the walk (by the interrupt tick),
+        so at the walk's turn no reader has taken it: past the floor the walk's view is the gate's own stat from the lift's turn,
+        kept in the pass's fresh cache; inside it, the standing stat. On the race pass another thread does `road(store)` while
+        the walk runs, before it notes its memo moved. Returns the walk's (wrongQuiet, raced) on that pass."""
+        km, jd = self.km, self.km.jd
+        self.add_session()
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        store = jd.GOALDIR / (SID + ".json")
+        store.write_text(json.dumps({"nodes": {}, "rev": 1}))
+        armed = [None]
+
+        def walk(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is None:
+                return
+            th = threading.Thread(target=fn)
+            th.start()
+            th.join()
+            km._jobs_gate_note("miss")
+        self._walk(walk)
+        self.stub("_interrupt_block_tick", lambda now, live_map: [km._session_files_stat(s) for s in km._alive_sessions(now, live_map)])
+        self.quiet()
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
+        if fresh:
+            km._FILES_STAT_STANDING[(SID, self.sessions[0]["path"])][1] -= km.NUDGE_FLOOR_S + 1
+        armed[0] = lambda: road(store)
+        self.passes()
+        self.assertIsNone(armed[0])
+        self.assertEqual(self.last()["autoNudge"], "closed", "called closed: the write came after the gate looked")
+        return _delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)
+
+    def test_on_the_walks_road_a_box_wide_mark_past_the_floor_is_a_race(self):
+        """A box-wide mark, not the postal log or a shared judge write: the walk declares both and observes them again."""
+        km = self.km
+        self.assertEqual(self._walk_race(lambda store: (self._grow(store), km._files_stat_mark()), fresh=True), ({}, {"miss": 1}))
+
+    def test_on_the_walks_road_a_box_wide_mark_inside_the_floor_is_a_miss(self):
+        km = self.km
+        self.assertEqual(self._walk_race(lambda store: (self._grow(store), km._files_stat_mark()), fresh=False), ({"miss": 1}, {}))
+
+    # ── the inputs observed again, and the live row's since, each moved on another thread during a closed walk ──
+    def _walk_moves(self, move):
+        """Quiet, then one pass on which the walk, called closed, has another thread do `move()` and then notes its memo moved.
+        Returns the walk's (wrongQuiet, raced) on that pass."""
+        km = self.km
+        self.add_session()
+        armed = [None]
+
+        def walk(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is None:
+                return
+            th = threading.Thread(target=fn)
+            th.start()
+            th.join()
+            km._jobs_gate_note("miss")
+        self._walk(walk)
+        self.quiet()
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
+        armed[0] = move
+        self.passes()
+        self.assertIsNone(armed[0])
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        return _delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)
+
+    def test_a_box_wide_file_observed_again_is_a_race(self):
+        clears = self.root / "cleared.jsonl"
+        self.assertEqual(self._walk_moves(lambda: clears.write_text('{"id": "g1", "op": "clear"}\n')), ({}, {"miss": 1}))
+
+    def test_an_in_memory_input_observed_again_is_a_race(self):
+        jd = self.km.jd
+        self.assertEqual(self._walk_moves(lambda: jd._active_change.__setitem__(0, jd._active_change[0] + 1)), ({}, {"miss": 1}))
+
+    def test_a_registry_row_observed_again_is_a_race(self):
+        jd = self.km.jd
+
+        def reg():
+            jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+            (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"sid": SID, "alive": True}))
+        self.assertEqual(self._walk_moves(reg), ({}, {"miss": 1}))
+
+    def test_a_live_row_whose_since_moved_is_a_race(self):
+        self.assertEqual(self._walk_moves(lambda: self.live[SID].__setitem__("since", 2)), ({}, {"miss": 1}))
+
+    # ── a memo that names its session ──
+    def test_a_memo_naming_its_session_is_raced_by_that_sessions_inputs_alone(self):
+        """Memo evidence names its session. Two sessions alive, and the REAL tick-seen check reports api's key moved (its memo
+        stale behind the gate's back) while, on another thread, the other session's live-tail revision moves, or a judge saves
+        the other session's store: neither is an input of api's, so the miss is a wrongQuiet. api's own revision is a race."""
+        km, jd = self.km, self.km.jd
+        self.add_session(SID, "api")
+        self.add_session(SID2, "web")
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        (jd.GOALDIR / (SID2 + ".json")).write_text(json.dumps({"nodes": {}, "rev": 1}))
+        armed = [None]
+
+        def tick(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is None:
+                return
+            th = threading.Thread(target=fn)
+            th.start()
+            th.join()
+            km._TICK_SEEN[("interrupt-block", SID)] = tuple([0.0] * 20)     # api's memo, stale: the real check notes api's miss
+            km._tick_job_check("interrupt-block", dict(self.sessions[0]))
+        self.stub("_interrupt_block_tick", tick)
+
+        def judge():
+            st = jd.load_goals(SID2)
+            st["note"] = "a judge's write for web"
+            jd.save_goals(SID2, st)
+        self.quiet()
+        for label, move, want in (("web's revision", lambda: self.revs.__setitem__(SID2, 1), ({"miss": 1}, {})),
+                                  ("web's store", judge, ({"miss": 1}, {})),
+                                  ("api's revision", lambda: self.revs.__setitem__(SID, 1), ({}, {"miss": 1}))):
+            for _ in range(4):
+                if self.last().get("interruptBlock") == "closed":
+                    break
+                self.passes()
+            self.assertEqual(self.last()["interruptBlock"], "closed", label)
+            w0, r0 = self.wrong("interruptBlock"), self.raced("interruptBlock")
+            armed[0] = move
+            self.passes()
+            self.assertIsNone(armed[0], label)
+            self.assertEqual(self.last()["interruptBlock"], "closed", label)
+            self.assertEqual((_delta(self.wrong("interruptBlock"), w0), _delta(self.raced("interruptBlock"), r0)), want, label)
 
 
 class TickSeen(_GateLab):
@@ -1121,6 +1340,110 @@ class TickSeen(_GateLab):
         self.passes()
         self.assertEqual((_delta(self.wrong("interruptBlock"), w0), set(self.rec("interruptBlock")["owed"])),
                          ({}, {"noTranscript", "unrecorded"}))
+
+
+class TheClickMap(_GateLab):
+    """The interrupt tick's compaction check (the REAL _compacting_now, over a cached parse of the test's and no backend that
+    brackets its own compaction) pops the click map the tick declares (mem:compactClicked) when the parse shows the
+    compaction's boundary, and at the 180 s cap. Each pop is a write, an act: a closed run that popped the map is a wrongQuiet,
+    never raced by its own write."""
+
+    def setUp(self):
+        super().setUp()
+        km = self.km
+        self.add_session()
+        self.parse = {"turns": []}
+        self.stub("_parse_cached", lambda path: self.parse)
+        p = mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: None))
+        p.start()
+        self.addCleanup(p.stop)
+        self.armed = [None]
+
+        def tick(now, live_map):
+            note, self.armed[0] = self.armed[0], None
+            if note is None:
+                return
+            km._compacting_now(SID, tm=live_map.get(SID), path=self.sessions[0]["path"])
+            if note:
+                km._jobs_gate_note(note)                                # the tick's own memo moved too
+        self.stub("_interrupt_block_tick", tick)
+        km._compact_clicked[SID] = float(T0)                            # a /compact the kernel sent at T0
+        self.quiet(T0 + 1)
+        self.assertEqual(self.last()["interruptBlock"], "closed")
+
+    def test_the_boundary_pop_is_a_write_so_the_closed_run_is_a_wrong_quiet(self):
+        km = self.km
+        w0, r0 = self.wrong("interruptBlock"), self.raced("interruptBlock")
+        self.parse = {"turns": [{"atoms": [{"type": "system", "subtype": "compact_boundary", "t": T0 + 5}]}]}   # behind the gate
+        self.armed[0] = "miss"
+        self.passes(1, T0 + 10)
+        self.assertNotIn(SID, km._compact_clicked, "the boundary ended the compaction")
+        self.assertEqual(self.last()["interruptBlock"], "closed")
+        self.assertEqual((_delta(self.wrong("interruptBlock"), w0), _delta(self.raced("interruptBlock"), r0)),
+                         ({"write": 1, "miss": 1}, {}), "the run's own pop is an act, never the race its memo would read")
+
+    def test_the_caps_pop_is_a_write(self):
+        km = self.km
+        seen = self.spy()
+        self.armed[0] = ""
+        self.passes(1, T0 + 181)
+        self.assertNotIn(SID, km._compact_clicked, "the 180 s cap ended it")
+        self.assertEqual(self.last()["interruptBlock"], "open:due", "the cap's instant is the tick's due")
+        self.assertEqual(self.acts(seen, "interruptBlock"), {"write": 1})
+
+
+class TheRaceRead(_GateLab):
+    """The race read asks each backend for its live sessions directly (_jg_live_rows), so a backend whose read raises names
+    every session for the raced test and adds nothing to the liveness read's own failure count (/version's liveReadFailures,
+    which Sessions.live's stand-down keeps). The real backends' table and the real liveness read, over an SDK backend whose
+    read raises."""
+
+    def test_a_raising_backend_read_names_every_session_and_counts_no_live_read_failure(self):
+        km, jd = self.km, self.km.jd
+        self.add_session()
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        store = jd.GOALDIR / (SID + ".json")
+        store.write_text(json.dumps({"nodes": {}, "rev": 1}))
+        be = _LabLive(self)
+        be.fail = RuntimeError("a synthetic registry fault")
+        self.stub("_sdk", lambda: be)
+        self.stub("_codex", lambda: None)
+        if _REAL_GATE_BACKENDS is not None:
+            self.stub("_JOBS_GATE_BACKENDS", _REAL_GATE_BACKENDS)
+        p = mock.patch.object(km.Sessions, "live", _REAL_SESSIONS_LIVE)
+        p.start()
+        self.addCleanup(p.stop)
+        fails = km._LIVE_READ_FAILS
+        saved = (fails["count"], dict(fails["last"]), dict(km._LIVE_LAST_ROWS))
+
+        def restore():
+            fails["count"] = saved[0]
+            fails["last"].clear()
+            fails["last"].update(saved[1])
+            km._LIVE_LAST_ROWS.clear()
+            km._LIVE_LAST_ROWS.update(saved[2])
+        self.addCleanup(restore)
+        armed = [None]
+
+        def walk(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is not None:
+                th = threading.Thread(target=fn)
+                th.start()
+                th.join()
+            km._jobs_gate_note("miss")
+        self.stub("_auto_nudge_tick", walk)
+        with redirect_stderr(io.StringIO()):
+            self.quiet()
+            n0, reads0, w0 = fails["count"], be.reads, self.wrong("autoNudge")
+            self.passes(5)
+            self.assertEqual(fails["count"] - n0, 0, "the race read added nothing to liveReadFailures")
+            self.assertGreaterEqual(be.reads - reads0, 5, "the race read asked the backend on each pass, and the read raised")
+            self.assertEqual(_delta(self.wrong("autoNudge"), w0), {"miss": 5}, "nothing moved: a miss on each pass")
+            r0 = self.raced("autoNudge")
+            armed[0] = lambda: Detector._grow(store)
+            self.passes()
+        self.assertEqual(_delta(self.raced("autoNudge"), r0), {"miss": 1}, "the raise named every session; the re-stat found the store")
 
 
 class Acts(_GateLab):
@@ -1673,13 +1996,36 @@ class Relay(_RelayWorld):
         self.assertEqual((self.last()["autoNudge"], tmp.exists()), ("open:due", False))
         self.assertEqual(self.acts(seen, "autoNudge").get("write"), 1)
 
-    def test_a_temp_file_that_cannot_be_statted_owes_a_fault(self):
-        jd = self.km.jd
+    def test_a_temp_file_gone_by_its_stat_owes_nothing_and_a_refused_stat_or_unlink_owes_a_fault(self):
+        """A name the sweep's glob listed that is gone by its stat (a judge thread renaming its temp file into the entry it wrote
+        lands between the two; a dangling name stands in for it here) is no fault, so the walk keeps its record and closes. An
+        error that persists, the stat or the unlink refused, owes a fault on every pass it stands."""
+        km, jd = self.km, self.km.jd
         d = jd._relay_queue_dir()
         d.mkdir(parents=True, exist_ok=True)
-        os.symlink(str(self.root / "no-such-target"), str(d / ".tmp-g2-0-dangling"))   # a dangling name: its stat raises
-        self.passes()
-        self.assertEqual(self.km._JOBS_GATE["lost"].get("autoNudge"), "fault")
+        gone = d / ".tmp-g2-0-renamed"
+        os.symlink(str(self.root / "no-such-target"), str(gone))       # listed, and nothing there by the stat
+        self.quiet()
+        self.assertEqual((self.last()["autoNudge"], km._JOBS_GATE["lost"].get("autoNudge")), ("closed", None), "no fault")
+        gone.unlink()
+        denied = d / ".tmp-g2-0-denied"
+        denied.write_text("{}")
+        os.utime(denied, (T0 - 100, T0 - 100))                          # old enough that the sweep unlinks it
+        cls = type(denied)
+        for op in ("stat", "unlink"):
+            real = getattr(cls, op)
+
+            def refused(path, *a, _real=real, **k):
+                if path.name == denied.name:
+                    raise PermissionError(13, "a synthetic refusal", str(path))
+                return _real(path, *a, **k)
+            with mock.patch.object(cls, op, refused):
+                for _ in range(2):
+                    self.passes(1, T0)
+                    self.assertEqual(km._JOBS_GATE["lost"].get("autoNudge"), "fault", "%s refused: owed while it stands" % op)
+            self.assertTrue(denied.exists(), op)
+        self.passes(1, T0)
+        self.assertFalse(denied.exists(), "the refusal gone, the sweep takes it")
 
     def test_a_malformed_entrys_drop_is_an_act(self):
         jd = self.km.jd
@@ -1820,8 +2166,11 @@ class TheKnob(_GateLab):
 
     def test_the_first_pass_reads_the_knob_so_the_default_is_the_reads_whatever_the_boot_literal(self):
         """The mode key starts at a sentinel no stat equals and no missing file equals, so the first pass reads the knob: with no
-        file the default is shadow even from a literal that said off."""
+        file the default is shadow even from a literal that said off. The starting value is the kernel's own, read when this
+        module was imported, before any pass (the drive below sets the sentinel itself, so it alone would pass on any start)."""
         km = self.km
+        self.assertEqual(_AT_IMPORT["modeKey"], km._JOBS_GATE_BOOT_KEY, "the kernel starts at the sentinel: %r" % (_AT_IMPORT,))
+        self.assertIsNotNone(km._JOBS_GATE_BOOT_KEY, "a missing file's key (None) must not equal the start")
         self.add_session()
         km._JOBS_GATE_MODE[0] = "off"
         km._JOBS_GATE["modeKey"] = km._JOBS_GATE_BOOT_KEY
@@ -1954,13 +2303,26 @@ class TreeFloor(_GateLab):
         self.assertEqual(unsignaled() - n0, 3, "the spread re-stat")
 
 
-_ORIGINALS = {}
-
-
-def setUpModule():
+def _capture_originals():
+    """The real functions behind the lab's quiet stubs, taken from the shared kernel module. A test module that assigns a stub
+    and restores it late (tests/test_jobs_thread_split.py's walk stubs, whose cleanup default is read after the assignment)
+    leaves its stub on the shared module, so these are taken when this module is imported, before any module's test runs, and
+    a function that is not the kernel's own is refused loudly, never handed to a test as the real one."""
     km = kernel_module()
+    out = {}
     for name in tuple(QUIET) + ("_auto_nudge_tick", "_retry_upgrade_tick"):
-        _ORIGINALS[name] = getattr(km, name)
+        fn = getattr(km, name)
+        if getattr(fn, "__module__", None) != km.__name__:
+            raise RuntimeError("tests/test_jobs_gate.py: the kernel's %s is %r, not the kernel's own function: a stub another "
+                               "module left in place (the originals must be taken before any test runs)" % (name, fn))
+        out[name] = fn
+    return out
+
+
+_ORIGINALS = _capture_originals()           # at import: before any module's test, so no module's leftover stub is taken
+_AT_IMPORT = {"modeKey": kernel_module()._JOBS_GATE["modeKey"]}   # the knob's stat key as the kernel starts, before any pass
+_REAL_GATE_BACKENDS = getattr(kernel_module(), "_JOBS_GATE_BACKENDS", None)   # the race read's own backends (TheRaceRead)
+_REAL_SESSIONS_LIVE = kernel_module().Sessions.__dict__["live"]                 # the liveness read, as the class defines it
 
 
 if __name__ == "__main__":

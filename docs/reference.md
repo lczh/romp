@@ -2777,17 +2777,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `projectedCpuMsPerHour`, `unobserved` (runs the gate left unobserved: its own
   fault, or a turn that found another observed run still open on the jobs
   thread), `wrongQuiet`
-  (a job called closed that acted, raised, or found its own memo moved while
-  none of its inputs did: a signal its declaration lacks, by evidence; the
+  (a job called closed that acted, raised, or found its own memo moved with
+  no signal for its inputs: a signal its declaration lacks, by evidence; the
   acts are `views`, `mark`, `push`, `send`, `problem`, `spendRow`, `write`, a
   declared file written with no mark, and `raised`, and an act is never
-  raced) and `raced` (its memo moved and so did a declared input after the
-  gate looked, as the next pass's gate will see it: a box or an in-memory
-  input observed again, a mark, a judge write or a moved live row naming the
-  session, or a box-wide mark, the postal log or a shared judge write with a
-  re-stat of a session whose view was a stat of that pass, never a standing
-  one, which cannot tell a write during the run from one before the pass;
-  the next pass would have opened it). `wrongQuietLast` keeps the newest
+  raced) and `raced` (its memo moved and an input of the memo's session
+  moved after the gate looked, with a signal the next pass's gate will see:
+  a box-wide file, an in-memory input or a registry row observed again; a
+  mark, a judge write or a moved live row naming the session; or a box-wide
+  mark, the postal log or a shared judge write with a re-stat of a view
+  that pass took. A write no such signal covers stays a `wrongQuiet` even
+  when the floor, a later stat or an all-sessions mark brings the job back:
+  a standing view is never re-statted, since it cannot tell a write during
+  the run from one before the pass. A memo names its session, so another
+  session's input moving never makes it raced). `wrongQuietLast` keeps the newest
   sixteen, and `lastPass` each job's verdict on the newest observed pass
   (`closed`, `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate
   fault).
