@@ -642,11 +642,11 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
                                   # plus messages.jsonl now share the slots, and an evicted LEAF slot also demotes
                                   # the assembly cache's identity gate to a full parse.
 # A BYTE budget beside the count (the kernel memory work, 2026-09-11): the count bounded slots, never memory, and the
-# working set is files of every size (a 177 MB leaf and a 2 KB states log take one slot each), so the kernel climbed to
-# 5 to 8 GB between restarts holding every live and subagent transcript's records. Each entry weighs the bytes it
+# working set is files of every size (a large leaf and a small states log take one slot each), so the kernel climbed
+# between restarts holding every live and subagent transcript's records. Each entry weighs the bytes it
 # holds (the file size less a tail entry's offset), and the budget counts those bytes DECODED, times
-# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 31 GiB machine meant about 48 GB of
-# records, so it never bound, while the kernel grew to 16.4 GB resident plus swap); past the budget the least
+# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 32 GiB machine meant about 46 GiB of
+# records, so it never bound, while the kernel grew into swap); past the budget the least
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
 # never refused, the budget then holds that one entry. Counters under /perf recordCache, where `bytes` stays file
@@ -676,20 +676,19 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
 # machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
 # memory we have; kept, in real units, on 2026-10-01), never under 4 GiB of FILE bytes (2026-09-11, the day the budget
-# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running 50 sessions is their live
-# leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: 18 entries
-# filled the 1 GiB, every build re-read whole transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one
-# pusher cycle of 132 s, chat builds of 3 s each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache.
+# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running many sessions is their
+# live leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: a
+# few leaves filled the 1 GiB, every build re-read whole transcripts, pusher cycles and chat builds slowed to a crawl,
+# and glibc's arenas kept the churn, the process resident far over its 1 GiB cache.
 # An LRU under reads that cycle through more than it holds misses on EVERY read; it does not degrade partway. So the
 # floor is a working-set bound and stays in the working set's unit, file bytes (in memory, the floor times the
 # multiple): wherever it binds (a machine under about 23 GiB, or one without /proc/meminfo, such as macOS) the cache
 # still holds 4 GiB of file bytes, what the floor has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which
-# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 31 GiB machine in real units
-# binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of file bytes at 12.2 hours of uptime, after
-# a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine the budget can bind after about a day,
-# later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus 2.9 bytes per cached file byte), past the
-# point where the machine it ran on began swapping it (about 14 GB, at 11.8 hours): half of memory caps this cache only
-# past swap there, and a budget tight enough to bind before swap sits at the working set, the thrash above. Once it
+# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 32 GiB machine in real units
+# binds at about 5.6 GiB of file bytes (16 / 2.85). A busy machine's cache reaches that only after a long uptime, and by
+# then the process holds those records decoded beside everything else it keeps, near or past the point where the
+# machine starts swapping: half of memory caps this cache only near swap on a busy machine, and a budget tight enough
+# to bind before swap sits at the working set, the thrash above. Once it
 # binds it evicts the least recently used entries, cold ones first, which is safe while the files read every cycle (live
 # leaves and their lineage) stay under the binding point; past it the thrash returns, and budgetRereads (an evicted path
 # read back) shows it on /perf. What is not needed until looked at (subagent transcripts) leaves through
@@ -699,11 +698,9 @@ RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budg
 RECORD_CACHE_BUDGET_FRACTION = 0.5
 RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
 #                                        a lab process decoded to 2.86 live heap bytes per source byte (_scan_jsonl_stream's
-#                                        docstring). The old kernel's 147 samples, 5 minutes to 145 hours of uptime (ending
-#                                        2026-10-01), agree: resident size in millions of kB = 3.44 + 2.85 x the cache's
-#                                        file GB, R^2 0.92, about 2.92 bytes of memory per file byte, a slope that also
-#                                        carries whatever grew beside the cache (the kernel at 5f3569d39 fit 2.94 in the
-#                                        same units over its first 11.5 hours). One figure for every entry: it fits the
+#                                        docstring). A running kernel's resident size against the cache's file bytes
+#                                        agrees in rough terms, a slope that also carries whatever grew beside the
+#                                        cache. One figure for every entry: it fits the
 #                                        bulk, whole live leaves; content moves it, 1.44 to 7.7 by shape as measured (long
 #                                        text rows low, small metadata rows high; tests/test_record_cache_real_budget.py
 #                                        pins two mixes). ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, over 0 and at
@@ -6558,7 +6555,7 @@ _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for
 #                                          the first row is decoded at load and must be a JSON object
 # Materialized pre-cut atoms resident across every session (the lazy index's LRU): MemTotal / 32 KiB, never under 500,000
 # (3.9 million on a 118 GiB machine); ROMP_ASM_INDEX_CAP sets it outright. At 20,000 (2026-09-11, the day the index
-# shipped) 50 sessions' 4,080 restored turns materialized 1.2 million atoms and evicted 1.19 million of them in 150 s,
+# shipped) the restored turns of many sessions materialized 1.2 million atoms and evicted 1.19 million of them in 150 s,
 # every chat build cold at 5.6 s: a ceiling under the working set is a thrash, not a saving.
 #                                       7: the cut is the boundary before the last SETTLED turn, not only a compaction's (stage one b, 2026-09-15):
 #                                          every v6 document is refused once (`version`) at the deploy boot and rewritten at the next settle
