@@ -856,13 +856,15 @@ class PusherRecords(unittest.TestCase):
         now = int(time.time())
         km._cached_feed(now, {}, "sig-a")                    # nothing warmed: a rebuild
         km._cached_feed(now, {}, "sig-a")                    # unchanged sig: served from the cache
-        km._cached_timeline(now, {}, "sig-a")
+        km._timeline_build_cold(now, {}, "sig-a")            # a cold slot is filled by the timeline builder's build (2026-10-03)
         km._cached_timeline(now, {}, "sig-a", connect=True)  # a connecting page never rebuilds
+        km._built_timeline[2] = 0.0                          # a moved signature past REBUILD_MIN_S: the pusher's stale rebuild,
+        km._cached_timeline(now, {}, "sig-b")                # the timeline build of every cycle after the boot, counted too
         b1 = km._PERF_STATS.snapshot()["builds"]
         self.assertEqual(b1["feed"]["built"] - b0["feed"]["built"], 1)
         self.assertEqual(b1["feed"]["cached"] - b0["feed"]["cached"], 1)
         self.assertGreaterEqual(b1["feed"]["ms"], b0["feed"]["ms"])
-        self.assertEqual(b1["timeline"]["built"] - b0["timeline"]["built"], 1)
+        self.assertEqual(b1["timeline"]["built"] - b0["timeline"]["built"], 2, "the builder's cold build and the stale rebuild")
         self.assertEqual(b1["timeline"]["cached"] - b0["timeline"]["cached"], 1)
 
     @staticmethod

@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from romp_load import load_source
@@ -395,16 +396,22 @@ class CommentsStoreMemo(unittest.TestCase):
                      "ledger": None, "events": []}
             chat = {"app": "chat", "alive": True, "sent": {}, "send": lambda s: None}
             lanes = {"app": "timeline", "alive": True, "sent": {}, "send": lambda s: None}
-            sent, subagents = [], []
+            sent, subagents, owed = [], [], [None]
 
             def cycle():
                 """One push to a chat page and a timeline page (a first connect: the timeline's live lanes are built in
-                the cycle). Returns the keys sent, the session's comments frames and each timeline frame's squares."""
+                the cycle, as the cold lanes, and its bars are owed to the timeline builder, which no test starts).
+                Returns the keys sent, the session's comments frames and each timeline frame's squares; the owe is read
+                from the fresh event each cycle patches in (only the builder clears the kernel's own)."""
                 del sent[:], subagents[:]
+                owed[0] = threading.Event()
                 with mock.patch.object(km, "_alive_sessions", lambda now, tm: [dict(sess)]), \
                         mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: [dict(sess)]), \
                         mock.patch.object(km, "_timeline_sessions", lambda now, lm, live_only=False: [dict(sess)]), \
                         mock.patch.object(km, "_built_timeline", [None, None, 0.0, 0.0]), \
+                        mock.patch.object(km, "_tl_cold_lanes", [None]), \
+                        mock.patch.object(km, "_tl_partial", [None]), \
+                        mock.patch.object(km, "_TL_OWED", owed[0]), \
                         mock.patch.object(km, "_live_map", lambda: dict(live)), \
                         mock.patch.object(km, "_sdk", lambda: None), \
                         mock.patch.object(km, "build_session", lambda sid, now, live_map=None, **kw: dict(frame)), \
@@ -428,7 +435,7 @@ class CommentsStoreMemo(unittest.TestCase):
                     self.assertEqual(subagents, [1], "the chat stage went on past the comments loop")
                     self.assertIn(("working",), keys, "and so did the feed")
                     self.assertEqual(squares, [[[]]], "the timeline frame went out, with no squares on the lane")
-                    self.assertIn(("timelinebars",), keys, "and the push reached its send stage")
+                    self.assertTrue(owed[0].is_set(), "and the push reached its timeline ask: the cold build is owed")
                     keys, comments, squares = cycle()
                     self.assertEqual(comments, [{"type": "comments", "id": SID, "threads": [{"tid": "t1"}, {"tid": "t2"}]}],
                                      "the next cycle sends the threads")
