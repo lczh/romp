@@ -79441,7 +79441,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
         _phase("asmS", "assembly", _t, _asm_end - _t, "%d left unwritten, %d busy" % (_asm_skipped, _asm_busy))
         _phases["ckptS"] = round(time.monotonic() - _t_prime, 2)   # the window older cut rows carried as ckptS
         _t = time.monotonic()
-        _drain_timeout = max(0.25, _end - _t)   # what the deadline has left: an overrun above shrank the phases, never this
+        _drain_timeout = max(0.25, _end - _t)   # what the deadline has left: only an item in flight at the line shrinks this
         try:
             if be is not None and hasattr(be, "drain"):
                 res = be.drain(_drain_timeout)
