@@ -5,11 +5,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findExact, findAnchorRange, sliceRanges, prunePending, markSkipsParent,
          newCommentCreate, commentCreateFrame, holdAnswered, holdForPassage, synthSuperseded, samePassage, existingThreadFor,
          threadTakesReplies,
          type CommentThread, type CommentCreate } from "./comments";
 import { compactDisplay } from "./compact";
+
+const requireCjs = createRequire(__filename);
 
 const th = (over: Partial<CommentThread>): CommentThread => ({
   tid: "t1", anchorUuid: "a1", exact: "the passage", status: "open", createdT: 0,
@@ -161,7 +164,9 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kern
 const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_backend.py"), "utf8");
 
 test("the selection menu offers Comment, gated on a real transcript turn (commentAim: the gate the comment key shares)", () => {
-  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY\)/);
+  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at\)/,
+               "the menu's Comment hands on the selection's live range (test_comment_layout_existing_served.py runs it: the menu "
+               + "road of its repeated-phrase test, repeatInsideMenu)");
   assert.match(UI, /if \(!q\?\.uuid\) return "none";\n\s*if \(!activeId \|\| isProvisionalId\(activeId\) \|\| !liveSession\(activeId\)\) return "session";/);
 });
 
@@ -907,6 +912,8 @@ test("a second Comment on the same passage finds the send still unanswered there
   assert.equal(holdForPassage([a], SID, "a1", "jitter of ten percent", prose), a, "overlapping in the turn's prose");
   assert.equal(holdForPassage([a], SID, "a1", "cap the delay", prose), null, "another passage of the same reply is another comment");
   assert.equal(holdForPassage([a], SID, "a2", "exponential backoff with jitter"), null, "same words in another reply");
+  assert.equal(holdForPassage([a], "bbbbbbbb-1111-2222-3333-444444444444", "a1", "exponential backoff with jitter", prose), null,
+               "the same turn uuid in another session");
 });
 
 test("the optimistic mark stays until the frame lists the thread ITS create made — not any thread on the same reply", () => {
@@ -952,7 +959,9 @@ test("the send is one per gesture, and the box shows it at once (source pins)", 
 test("a second Comment on a passage whose send is unanswered re-opens on that send (source pin)", () => {
   const open = UI.slice(UI.indexOf("function openCommentComposer("));
   const body = open.slice(0, open.indexOf("\nfunction ", 10));
-  assert.match(body, /const held = holdForPassage\(cmtCreateInFlight\.values\(\), sid, uuid, exact, prose\);/);
+  assert.match(body, /const held = holdForPassage\(cmtCreateInFlight\.values\(\), sid, uuid, exact, prose, at\);/,
+               "the check for a send in flight reads the live range (executed by the test 'New thread instead carries the "
+               + "selection's live range' and by test_comment_layout_existing_served.py's in-flight repeat test)");
   assert.match(body, /const live = !!held && \(commentThreads\.get\(sid\) \|\| \[\]\)\.some\(\(t\) => t\.tid === "pending:" \+ held\.createId\);/,
                "only while its mark is still the optimistic one: once its thread is listed the passage opens a fresh box (no trap on a lost ack)");
   assert.match(body, /sent: \{ createId: held\.createId, text: held\.text,/);
@@ -1035,17 +1044,178 @@ test("the thread a Comment opens instead: same turn, overlapping, talkable, the 
                "an optimistic mark is the in-flight send's, which re-opens its own sent view");
 });
 
+// A phrase that REPEATS in the turn: each text is located at its first occurrence. `at` is where it was selected (render.ts
+// selectionAt); a passage is also the same when the live range overlaps it. Synthetic text only.
+const REPEATS = "The importer warms the cache before the first request. Each export then refills the cache from the database, "
+  + "and the worker drains the queue. After a restart the worker drains the queue again.";
+const THREAD_ON = "Each export then refills the cache from the database, and the worker drains the queue";
+const nth = (hay: string, text: string, n: number) => {
+  let at = -1;
+  for (let i = 0; i <= n; i++) at = hay.indexOf(text, at + 1);
+  assert.ok(at >= 0, text + " #" + n);
+  return { start: at, end: at + text.length };
+};
+
+test("a repeated phrase is the same passage when it was selected inside the other, or when its first occurrence is", () => {
+  const inside = nth(REPEATS, "the cache", 1), outside = nth(REPEATS, "drains the queue", 1);
+  assert.ok(nth(REPEATS, "the cache", 0).end <= REPEATS.indexOf(THREAD_ON), "the first \"the cache\" is outside the passage");
+  assert.ok(outside.start >= REPEATS.indexOf(THREAD_ON) + THREAD_ON.length, "the second \"drains the queue\" is outside the passage");
+  assert.equal(samePassage(REPEATS, THREAD_ON, "the cache", inside), true, "selected inside the passage, though its first occurrence is not");
+  assert.equal(samePassage(REPEATS, THREAD_ON, "the cache"), false, "with no live range the first occurrence decides");
+  assert.equal(samePassage(REPEATS, THREAD_ON, "drains the queue", outside), true,
+               "selected outside: its first occurrence is inside the passage");
+  assert.equal(samePassage(REPEATS, THREAD_ON, "warms the cache", nth(REPEATS, "warms the cache", 0)), false, "neither: two passages");
+  assert.equal(samePassage(REPEATS, "the first request", ". Each export", nth(REPEATS, ". Each export", 0)), false,
+               "a live range that only touches the passage's end is another passage");
+  assert.equal(samePassage(REPEATS, ". Each export", "the first request", nth(REPEATS, "the first request", 0)), false,
+               "a live range that only touches the passage's start is another passage");
+  assert.equal(samePassage(REPEATS, "Each export", "The importer", { start: 0, end: 12 }), false, "ranges apart stay apart");
+});
+
+test("a live range that is not a real range inside the turn's prose is ignored, as if none were given", () => {
+  // each malformed range sits on the passage, so accepting it would say true. One case per check atIn makes on a range: an
+  // empty one, a negative start, a fractional start, a fractional end, an end past the prose. null and undefined are the
+  // missing-range guard's cases, not ranges
+  const inside = nth(REPEATS, "the cache", 1);
+  assert.equal(samePassage(REPEATS, THREAD_ON, "the cache", inside), true, "the control: the real range there counts");
+  for (const at of [{ start: inside.start, end: inside.start }, { start: -1, end: inside.end }, { start: inside.start + 0.5, end: inside.end },
+                    { start: inside.start, end: inside.end + 0.5 }, { start: 0, end: REPEATS.length + 1 }, null, undefined] as
+                    Array<{ start: number; end: number } | null | undefined>)
+    assert.equal(samePassage(REPEATS, THREAD_ON, "the cache", at), false, JSON.stringify(at));
+  assert.equal(samePassage(null, THREAD_ON, "the cache", nth(REPEATS, "the cache", 1)), true,
+               "no prose at hand: containment");
+});
+
+test("the thread a Comment opens and the send it re-opens both read the live range", () => {
+  const inside = nth(REPEATS, "the cache", 1), outside = nth(REPEATS, "drains the queue", 1);
+  const t2 = th({ tid: "t-two", anchorUuid: "a3", exact: THREAD_ON, createdT: 10 });
+  assert.equal(existingThreadFor([t2], "a3", "the cache", REPEATS, inside)?.tid, "t-two", "selected inside its highlight");
+  assert.equal(existingThreadFor([t2], "a3", "the cache", REPEATS), null, "no live range: the first occurrence, outside");
+  assert.ok(outside.start >= REPEATS.indexOf(THREAD_ON) + THREAD_ON.length, "the second \"drains the queue\" is outside the passage");
+  assert.equal(existingThreadFor([t2], "a3", "drains the queue", REPEATS, outside)?.tid, "t-two", "selected outside: its first occurrence is inside");
+  const held = newCommentCreate({ sid: SID, uuid: "a3", exact: THREAD_ON }, "does the refill block exports?", "");
+  assert.equal(holdForPassage([held], SID, "a3", "the cache", REPEATS, inside), held, "a send in flight on the passage re-opens");
+  assert.equal(holdForPassage([held], SID, "a3", "the cache", REPEATS), null);
+});
+
+test("several threads match, or several sends: the one the selection was made inside comes before one only its first occurrence meets", () => {
+  const inside = nth(REPEATS, "the cache", 1), first = nth(REPEATS, "the cache", 0);
+  const t2 = th({ tid: "t-two", anchorUuid: "a3", exact: THREAD_ON, createdT: 10 });
+  const t3 = th({ tid: "t-three", anchorUuid: "a3", exact: "warms the cache", createdT: 20 });   // newer, on the first occurrence
+  assert.ok(first.start >= REPEATS.indexOf("warms the cache") && first.end <= REPEATS.indexOf("warms the cache") + 15
+            && inside.start >= REPEATS.indexOf(THREAD_ON), "the first occurrence lies in t-three's passage, the second in t-two's");
+  assert.equal(existingThreadFor([t2, t3], "a3", "the cache", REPEATS, inside)?.tid, "t-two", "selected inside the older thread");
+  assert.equal(existingThreadFor([t3, t2], "a3", "the cache", REPEATS, inside)?.tid, "t-two", "whatever the list's order");
+  assert.equal(existingThreadFor([t2, { ...t3, createdT: 5 }], "a3", "the cache", REPEATS, inside)?.tid, "t-two",
+               "and with the thread on the first occurrence the older one");
+  assert.equal(existingThreadFor([t2, t3], "a3", "the cache", REPEATS, first)?.tid, "t-three", "selected at the first occurrence: the thread there");
+  assert.equal(existingThreadFor([t2, t3], "a3", "the cache", REPEATS)?.tid, "t-three", "no live range: the first occurrence alone");
+  const t4 = th({ tid: "t-four", anchorUuid: "a3", exact: "refills the cache", createdT: 30 });   // nested in t-two's passage
+  assert.equal(existingThreadFor([t2, t3, t4], "a3", "the cache", REPEATS, inside)?.tid, "t-four", "the newest of the threads selected inside");
+  const a = newCommentCreate({ sid: SID, uuid: "a3", exact: "warms the cache" }, "is the warm-up timed?", "");
+  const b = newCommentCreate({ sid: SID, uuid: "a3", exact: THREAD_ON }, "does the refill block exports?", "");
+  assert.equal(holdForPassage([a, b], SID, "a3", "the cache", REPEATS, inside), b, "the send selected inside, though sent second");
+  assert.equal(holdForPassage([b, a], SID, "a3", "the cache", REPEATS, inside), b);
+  assert.equal(holdForPassage([a, b], SID, "a3", "the cache", REPEATS), a, "no live range: the first occurrence's send");
+  const c = newCommentCreate({ sid: SID, uuid: "a3", exact: "refills the cache" }, "how often?", "");
+  assert.equal(holdForPassage([b, c], SID, "a3", "the cache", REPEATS, inside), b, "the first sent of the sends selected inside");
+});
+
+// A passage that runs past the end of its turn: its part in the turn is one word, too short for findAnchorRange to locate,
+// so only containment can match it. Its words after the turn hold "retry cap".
+const CROSS = "anyway.\n\nWhich sync path is the retry cap on?";
+const RETRY_CAP = { start: PROSE.indexOf("retry cap"), end: PROSE.indexOf("retry cap") + "retry cap".length };
+
+test("a passage the turn's prose cannot locate is matched by containment when the selection has a live range", () => {
+  assert.equal(findAnchorRange(PROSE, CROSS), null, "the precondition: the prose cannot locate the passage");
+  assert.equal(samePassage(PROSE, CROSS, "retry cap", RETRY_CAP), true);
+  assert.equal(existingThreadFor([th({ tid: "t-cross", anchorUuid: "a2", exact: CROSS })], "a2", "retry cap", PROSE, RETRY_CAP)?.tid,
+               "t-cross");
+});
+
+test("among threads, and among sends, a match by containment comes after one whose passage the live range meets", () => {
+  const located = th({ tid: "t-located", anchorUuid: "a2", exact: "Keep the retry cap at two minutes", createdT: 10 });
+  const cross = th({ tid: "t-cross", anchorUuid: "a2", exact: CROSS, createdT: 20 });
+  assert.equal(existingThreadFor([located, cross], "a2", "retry cap", PROSE, RETRY_CAP)?.tid, "t-located", "though the other is newer");
+  assert.equal(existingThreadFor([cross, located], "a2", "retry cap", PROSE, RETRY_CAP)?.tid, "t-located", "in either list order");
+  const a = newCommentCreate({ sid: SID, uuid: "a2", exact: CROSS }, "which path?", "");
+  const b = newCommentCreate({ sid: SID, uuid: "a2", exact: "Keep the retry cap at two minutes" }, "why two?", "");
+  assert.equal(holdForPassage([a, b], SID, "a2", "retry cap", PROSE, RETRY_CAP), b, "though the other was sent first");
+});
+
+test("a live range may end at the prose's last character", () => {
+  const prose = "cache the list. Then we cache the list";
+  const at = { start: prose.lastIndexOf("cache the list"), end: prose.length };
+  assert.equal(samePassage(prose, "we cache the list", "cache the list"), false, "the precondition: its first occurrence is outside");
+  assert.equal(samePassage(prose, "we cache the list", "cache the list", at), true);
+});
+
 test("a Comment on a passage with a thread opens it, and its box offers New thread instead (source pins)", () => {
   const open = UI.slice(UI.indexOf("function openCommentComposer("));
   const body = open.slice(0, open.indexOf("\nfunction ", 10));
-  assert.match(body, /const existing = !live && !fresh \? existingThreadFor\(commentThreads\.get\(sid\) \|\| \[\], uuid, exact, prose\) : null;/);
-  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y \}\);/);
+  assert.match(body, /const existing = !live && !fresh \? existingThreadFor\(commentThreads\.get\(sid\) \|\| \[\], uuid, exact, prose, at\) : null;/,
+               "the thread lookup reads the live range (executed by the test 'New thread instead carries the selection's live "
+               + "range' and by test_comment_layout_existing_served.py's repeated-phrase, tie, next-turn and rail-stamp tests)");
+  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y, at \}\);/,
+               "the redirect keeps the live range for New thread instead (the test 'New thread instead carries the selection's live range' runs it)");
   const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
   const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
   assert.match(popBody, /if \(th && cmtRedirect && cmtRedirect\.tid === th\.tid\) \{[\s\S]{0,700}nb\.textContent = "New thread instead";[\s\S]{0,200}nb\.dataset\.act = "cmtnewthread";/);
-  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, true\); \},/,
-               "delegated on the body (click-safe), onto exactly the selection the gesture had");
+  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, r\.at, true\); \},/,
+               "delegated on the body (click-safe), onto the selection the gesture had and its live range (the test 'New thread instead carries the selection's live range' runs r.at)");
   assert.match(UI, /cmtRedirect = redirect && redirect\.tid === tid \? redirect : null;/, "a mark click or a rail jump offers no such action");
+});
+
+// openCommentComposer, openCommentPopover and the New thread instead action, run from render.ts's own source with the page
+// around them stubbed (comment-key.test.ts runs commentAim the same way)
+const liftUi = (name: string): string => {
+  const i = UI.indexOf(`function ${name}(`);
+  assert.ok(i > 0, name);
+  let depth = 0, j = UI.indexOf("{\n", i);
+  for (; j < UI.length; j++) { if (UI[j] === "{") depth++; else if (UI[j] === "}") { depth--; if (!depth) break; } }
+  return UI.slice(i, j + 1);
+};
+
+test("New thread instead carries the selection's live range, so it opens the comment box on the selection and not another send's box", () => {
+  // two sends in flight on one reply: `a` on the phrase's first copy, its mark still the optimistic one; `b` on the passage
+  // the phrase is selected inside, its thread already listed while its ack is still owed
+  const inside = nth(REPEATS, "the cache", 1);
+  const a = newCommentCreate({ sid: SID, uuid: "a3", exact: "warms the cache" }, "is the warm-up timed?", "");
+  const b = newCommentCreate({ sid: SID, uuid: "a3", exact: THREAD_ON }, "does the refill block exports?", "");
+  const threads = [th({ tid: "pending:" + a.createId, anchorUuid: "a3", exact: a.exact, createdT: 20 }),
+                   th({ tid: "t-b", anchorUuid: "a3", exact: THREAD_ON, createdT: 10 })];
+  assert.equal(holdForPassage([a, b], SID, "a3", "the cache", REPEATS), a, "the premise: with no live range, the send on the first copy");
+  const act = UI.match(/cmtnewthread: (\(\) => \{ const r = cmtRedirect;[^\n]*\}),\n/);
+  assert.ok(act, "the New thread instead action");
+  const ts = [liftUi("openCommentComposer"), liftUi("openCommentPopover"), "const cmtnewthread = " + act![1] + ";"].join("\n");
+  const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;
+  const shown: Array<{ open: unknown; anchor: any }> = [];
+  const env = {
+    turnProse: () => REPEATS, holdForPassage, existingThreadFor, cmtCreateInFlight: new Map([[a.createId, a], [b.createId, b]]),
+    commentThreads: new Map([[SID, threads]]), pickThreadColor: () => "#888", applyCommentMarks: () => {}, vscodeApi: undefined,
+    document: { querySelector: () => null }, shown,
+  };
+  const page = new Function("env", "const { turnProse, holdForPassage, existingThreadFor, cmtCreateInFlight, commentThreads, pickThreadColor, "
+    + "applyCommentMarks, vscodeApi, document } = env;\n"
+    + "let commentPopPos = null, cmtPopPosMine = false, cmtRedirect = null, pendingCommentAnchor = null, openCommentKey = null;\n"
+    + "const renderCommentPopover = () => { env.shown.push({ open: openCommentKey, anchor: pendingCommentAnchor }); };\n"
+    + src + "\nreturn { openCommentComposer, cmtnewthread };")(env) as { openCommentComposer: (...args: unknown[]) => void; cmtnewthread: () => void };
+  page.openCommentComposer(SID, "a3", "the cache", 100, 200, inside);
+  assert.deepEqual([shown[0]?.open, shown[0]?.anchor], [{ sid: SID, tid: "t-b" }, null], "the Comment opens b's thread");
+  page.cmtnewthread();
+  const box = shown[1]?.anchor;
+  assert.deepEqual([shown.length, box?.exact, box?.sent], [2, "the cache", undefined],
+                   "New thread instead opens the comment box on the selection, not a's sent box: " + JSON.stringify(box));
+});
+
+test("renderCommentPopover's focus line has no redirect clause (source pin)", () => {
+  // the caret and the rebuild that must not take it back are executed by test_comment_layout_existing_served.py
+  const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
+  const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
+  const focusLines = popBody.split("\n").filter((l) => /\.focus\(\)/.test(l));
+  assert.ok(focusLines.length > 0, "the box's own focus line is where this pin looks");
+  for (const l of focusLines)
+    assert.doesNotMatch(l, /cmtRedirect/, "no redirect clause in the box's focus line");
 });
 
 test("the thread layout honours only the user's own spot: a selection point places a new comment box alone (source pins)", () => {

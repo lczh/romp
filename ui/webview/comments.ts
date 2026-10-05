@@ -284,30 +284,56 @@ export function holdAnswered(holds: Iterable<CommentCreate>, sid: string, uuid: 
   return all.find((c) => c.sid === sid && c.uuid === uuid) || null;
 }
 
+/** Where a selection sits in its turn's rendered prose (the text turnProse joins): [start, end) offsets into it. */
+export type PassageAt = { start: number; end: number };
+
+/** `at` when its offsets are integers with 0 <= start < end <= len, else null. */
+function atIn(at: PassageAt | null | undefined, len: number): PassageAt | null {
+  if (!at || !Number.isInteger(at.start) || !Number.isInteger(at.end)) return null;
+  return at.start >= 0 && at.start < at.end && at.end <= len ? at : null;
+}
+
 /** THE SAME PASSAGE, at the anchor level (2026-10-01, the user's call: a Comment on a passage that already has a thread
  *  opens that thread). Two selections are the same passage when they anchor to the same turn (the caller compares the
  *  anchor uuids) and their texts OVERLAP in that turn's rendered prose: each is located the way its highlight is drawn
  *  (findAnchorRange, the full text or its longest word-prefix in the turn, first occurrence) and the two [start, end)
- *  ranges share at least one character. Touching ranges ("…two minutes" / " on every…") are two passages. When the
- *  turn's prose is not at hand (the turn is scrolled out of the window) or either text cannot be found in it, the
- *  fallback is containment of the whitespace-normalized texts: one passage holding the other is the same passage, which
- *  never claims an overlap it cannot see. */
-export function samePassage(prose: string | null | undefined, a: string, b: string): boolean {
-  if (prose) {
-    const ra = findAnchorRange(prose, a), rb = findAnchorRange(prose, b);
-    if (ra && rb) return ra.start < rb.end && rb.start < ra.end;
-  }
-  const na = normalize(a).norm, nb = normalize(b).norm;
-  return !!na && !!nb && (na.includes(nb) || nb.includes(na));
+ *  ranges share at least one character. Touching ranges ("…the first request" / ". Each export…") are two passages.
+ *  `at` is where `b` was selected in the prose, when the gesture knows it: `b` is also the same passage when that range
+ *  overlaps `a`'s, whether or not `b`'s text is found. Without the prose, or with `a` not found in it, or with `b` not
+ *  found and no such range, the fallback is containment of the whitespace-normalized texts: one holding the other is the
+ *  same passage. */
+export function samePassage(prose: string | null | undefined, a: string, b: string, at?: PassageAt | null): boolean {
+  return passageMatch(prose, a, b, at) > 0;
 }
 
-/** The create already in flight on the same passage (same session, same turn, overlapping text: samePassage), or null.
- *  A second Comment on a passage whose first send has not been answered yet is the same comment, not a new one: the box
- *  re-opens on that send instead of opening empty-handed with the words already sent, which is how a click outside the
- *  box, a re-select and an Enter made a second thread in the same words (2026-10-01). */
+/** samePassage's answer, ranked for the callers that choose among several matches: 2 when the live range overlaps `a`'s
+ *  range, 1 for any other match (the first occurrences, or the containment fallback), 0 for none. */
+function passageMatch(prose: string | null | undefined, a: string, b: string, at?: PassageAt | null): 0 | 1 | 2 {
+  if (prose) {
+    const ra = findAnchorRange(prose, a), rb = findAnchorRange(prose, b), live = atIn(at, prose.length);
+    if (ra && live && ra.start < live.end && live.start < ra.end) return 2;
+    if (ra && rb) return ra.start < rb.end && rb.start < ra.end ? 1 : 0;
+  }
+  const na = normalize(a).norm, nb = normalize(b).norm;
+  return na && nb && (na.includes(nb) || nb.includes(na)) ? 1 : 0;
+}
+
+/** The create already in flight on the same passage (same session, same turn, overlapping text: samePassage, with the
+ *  selection's live range `at` when known), or null. While the send it returns still waits for its thread (its
+ *  optimistic row still listed), a second Comment on the passage is the same comment, not a new one: the box re-opens on
+ *  that send instead of opening empty-handed with the words already sent, which is how a click outside the box, a
+ *  re-select and an Enter made a second thread in the same words (2026-10-01). Where several sends match, one whose
+ *  passage the live range overlaps comes before one matched by first occurrence or containment; the first sent wins
+ *  within each rank. */
 export function holdForPassage(holds: Iterable<CommentCreate>, sid: string, uuid: string, exact: string,
-                               prose?: string | null): CommentCreate | null {
-  return Array.from(holds).find((c) => c.sid === sid && c.uuid === uuid && samePassage(prose, c.exact, exact)) || null;
+                               prose?: string | null, at?: PassageAt | null): CommentCreate | null {
+  let best: CommentCreate | null = null, rank = 0;
+  for (const c of holds) {
+    if (c.sid !== sid || c.uuid !== uuid) continue;
+    const m = passageMatch(prose, c.exact, exact, at);
+    if (m > rank) { best = c; rank = m; }
+  }
+  return best;
 }
 
 /** A thread that can still take a reply: open, or relayed (merged, and merging on its way there; T145 keeps a relayed
@@ -319,13 +345,17 @@ export function threadTakesReplies(status: CommentThread["status"]): boolean {
 
 /** The thread a new Comment on this passage should open instead of a new one (the user 2026-10-01: one passage never
  *  silently grows a second thread): a talkable thread anchored to the same turn whose passage overlaps the selection
- *  (samePassage). The newest such thread when there are several (two marks nest on one passage). Null when none. */
-export function existingThreadFor(threads: CommentThread[], uuid: string, exact: string, prose?: string | null): CommentThread | null {
-  let best: CommentThread | null = null;
+ *  (samePassage, with the selection's live range `at` when known). Where several match, one whose passage the live range
+ *  overlaps comes before one matched by first occurrence or containment; the newest wins within each rank (two marks nest
+ *  on one passage). Null when none. */
+export function existingThreadFor(threads: CommentThread[], uuid: string, exact: string, prose?: string | null,
+                                  at?: PassageAt | null): CommentThread | null {
+  let best: CommentThread | null = null, rank = 0;
   for (const t of threads) {
     if (t.tid.startsWith("pending:") || t.anchorUuid !== uuid || !threadTakesReplies(t.status)) continue;
-    if (!samePassage(prose, t.exact, exact)) continue;
-    if (!best || (t.createdT || 0) >= (best.createdT || 0)) best = t;
+    const m = passageMatch(prose, t.exact, exact, at);
+    if (!m || m < rank) continue;
+    if (!best || m > rank || (t.createdT || 0) >= (best.createdT || 0)) { best = t; rank = m; }
   }
   return best;
 }

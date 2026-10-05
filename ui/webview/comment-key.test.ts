@@ -308,7 +308,7 @@ function chatDocument(platform: string, overrides: Record<string, string> = {}, 
 // from that world; the globals are set to the same world for a line that calls keyHint instead (a keybindings function
 // that reads them), as the line did at #39
 const MENU_HINT = (() => {
-  const m = /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY\), (.+?) \|\| undefined\);/.exec(RENDER);
+  const m = /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at\), (.+?) \|\| undefined\);/.exec(RENDER);
   assert.ok(m, "the menu's Comment line");
   return m[1];
 })();
@@ -914,16 +914,18 @@ test("the palette's chips: Comment's goes blank while its chord runs another com
 
 // ── the command, executed from render.ts's own source ─────────────────────────────────────────────
 const lift = (name: string): string => liftFrom(RENDER, name);
-type Aim = { sid: string; uuid: string; text: string; x: number; y: number };
+type Aim = { sid: string; uuid: string; text: string; x: number; y: number; at?: { start: number; end: number } };
 type World = {
   activeId: string | null;
   sel: { text: string; uuid: string | null } | null;            // what transcriptSelection returns
   live?: boolean;                                                // liveSession(activeId) answers
   rect?: { left: number; bottom: number };                       // the selection's box
   elsewhere?: boolean;                                           // the selection sits in another tab's (hidden) view
+  at?: { start: number; end: number } | null;                    // what selectionAt reads off the live range (none: null)
 };
 function chat(w: World) {
   const opened: Array<[string, string, string, number, number]> = [];
+  const ats: unknown[] = [];                                     // the live range each open was handed
   const toasts: string[] = [];
   const ts = [lift("commentAim"), lift("commentOnSelection"), lift("heldCommentAim")].join("\n");
   const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;   // the types go, the logic runs as shipped
@@ -934,13 +936,14 @@ function chat(w: World) {
     liveSession: (id: string) => (w.live === false ? undefined : { id }),
     window: { getSelection: () => ({ rangeCount: 1, getRangeAt: () => ({ startContainer: "the passage", getBoundingClientRect: () => w.rect || { left: 0, bottom: 0 } }) }) },
     views: new Map([[w.activeId, { el: { contains: (n: unknown) => n === "the passage" && !w.elsewhere } }]]),
-    openCommentComposer: (sid: string, uuid: string, exact: string, x: number, y: number) => { opened.push([sid, uuid, exact, x, y]); },
+    openCommentComposer: (sid: string, uuid: string, exact: string, x: number, y: number, at?: unknown) => { opened.push([sid, uuid, exact, x, y]); ats.push(at); },
     ephemeralWarnToast: (msg: string) => { toasts.push(msg); },
+    selectionAt: () => w.at ?? null,
   };
-  const api = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, views, openCommentComposer, ephemeralWarnToast } = env;\n"
+  const api = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, views, openCommentComposer, ephemeralWarnToast, selectionAt } = env;\n"
     + "let activeId = env.activeId;\n" + src + "\nreturn { commentAim, commentOnSelection, heldCommentAim };")(env) as {
     commentAim: () => Aim | "none" | "session"; commentOnSelection: (held?: unknown) => void; heldCommentAim: (v: unknown) => Aim | "none" | "session" };
-  return { ...api, opened, toasts };
+  return { ...api, opened, ats, toasts };
 }
 const SID = "11111111-2222-3333-4444-555555555555", UUID = "22222222-3333-4444-5555-666666666666";
 const PASSAGE = "The notes-api export streams rows through a bounded buffer.";
@@ -988,11 +991,56 @@ test("a palette run uses the aim captured as the palette opened, whatever the se
   assert.equal(c.heldCommentAim("session"), "session");
 });
 
+test("the aim carries where in the turn the selection sits, through the palette's message too; an aim with an `at` that is not a pair of integers is refused", () => {
+  // openCommentComposer hands it to holdForPassage and existingThreadFor. test_comment_layout_existing_served.py runs
+  // the key and the menu on the real chat page, and the palette's run from the aim the lab posts to the chat's message
+  // handler
+  const at = { start: 61, end: 70 };
+  const k = chat({ activeId: SID, sel: { text: "the cache", uuid: UUID }, rect: { left: 90, bottom: 210 }, at });
+  k.commentOnSelection();
+  assert.deepEqual([k.opened, k.ats], [[[SID, UUID, "the cache", 90, 216]], [at]], "the key's run hands it on");
+  const captured = k.commentAim();
+  assert.deepEqual(captured, { sid: SID, uuid: UUID, text: "the cache", x: 90, y: 216, at });
+  const c = chat({ activeId: SID, sel: null });
+  c.commentOnSelection(c.heldCommentAim(JSON.parse(JSON.stringify(captured))));
+  assert.deepEqual([c.opened, c.ats], [[[SID, UUID, "the cache", 90, 216]], [at]], "the palette's held aim hands it on");
+  assert.deepEqual(chat({ activeId: SID, sel: { text: PASSAGE, uuid: UUID } }).commentAim(), { sid: SID, uuid: UUID, text: PASSAGE, x: 0, y: 6 },
+                   "no range in the turn's prose: the aim has none");
+  for (const bad of [{ start: "1", end: 9 }, { start: 1 }, null, 7, { start: 1.5, end: 9 }])
+    assert.equal(c.heldCommentAim({ ...(captured as Aim), at: bad }), "none", "malformed at: " + JSON.stringify(bad));
+});
+
+test("a selection in a turn with no .md body gives an aim with no live range, and no range is made", () => {
+  // commentAim with the real selectionAt and cssEscape (the harness above stubs selectionAt): the view holds no .md body
+  // for the turn, and the document stand-in fails the test if selectionAt makes a range
+  const asked: string[] = [];
+  const ts = [lift("commentAim"), lift("selectionAt"), lift("cssEscape")].join("\n");
+  const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;
+  const env = {
+    activeId: SID,
+    transcriptSelection: () => ({ text: "List the export files", uuid: UUID }),
+    isProvisionalId: () => false,
+    liveSession: (id: string) => ({ id }),
+    window: { getSelection: () => ({ rangeCount: 1, getRangeAt: () => ({ startContainer: "the card", getBoundingClientRect: () => ({ left: 80, bottom: 700 }) }) }) },
+    views: new Map([[SID, { el: { contains: (n: unknown) => n === "the card", querySelector: (q: string) => { asked.push(q); return null; } } }]]),
+    document: { createRange: () => { throw new Error("selectionAt made a range for a turn with no .md body"); } },
+  };
+  const commentAim = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, views, document } = env;\n"
+    + "let activeId = env.activeId;\n" + src + "\nreturn commentAim;")(env) as () => Aim | "none" | "session";
+  assert.deepEqual(commentAim(), { sid: SID, uuid: UUID, text: "List the export files", x: 80, y: 706 });
+  // one query, for that turn's .md body and not the whole turn, whatever the selector's spelling: offsets over the whole turn
+  // would count text that is not its prose (the rail stamp among it). test_comment_layout_existing_served.py's next-turn
+  // test runs selectionAt on a real turn
+  assert.equal(asked.length, 1, "one query: " + JSON.stringify(asked));
+  assert.ok(asked[0].includes(UUID) && /\.md\b/.test(asked[0]), "it looked for the turn's .md body in the session's view: " + asked[0]);
+});
+
 test("the wiring: the menu's Comment names the key, the chat's capture handler answers it, the shell's message runs it", () => {
   // the menu line's pick keeps its pointer (MENU_HINT reads the line whole), and its sub-line, the line's own hint
   // expression, is executed by the menu test above and end to end in the served comment-key lab (cases 5, 6, 11, 13, 14, 17)
   assert.ok(MENU_HINT.length > 0);
   const h = listenerSrc(COMMENT_KEY).src;
+  assert.match(RENDER, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at\), /, "the menu's pick hands on where the selection sits");
   assert.match(h, /if \(!\(e\.ctrlKey \|\| e\.altKey \|\| e\.metaKey\) \|\| e\.repeat \|\| e\.isComposing\) return;/);
   // what the handler takes, that it listens in the capture phase (keyHandler asserts the flag it registers with) and that
   // it reads the store per press are executed on its own lifted source above (keyHandler and the tests that use it)

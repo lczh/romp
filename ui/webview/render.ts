@@ -138,7 +138,7 @@ import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as
   endCtxBarClick, metaColor, modeIconSvg, riskyMode, prettyMode, prettyFast, fastAvailable, metaCurrent, metaDots, rampOn } from "./status-controls";   // the status line's controls, one renderer for the chat's line, the popovers and the settings card's preview (T415 part two)
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR,
-         holdAnswered, holdForPassage, synthSuperseded, existingThreadFor } from "./comments";
+         holdAnswered, holdForPassage, synthSuperseded, existingThreadFor, type PassageAt } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
@@ -7482,7 +7482,7 @@ function showSelectionMenu(e: MouseEvent) {
   // with no Ctrl, Alt or Meta it names on every page, though only the shell's dispatcher runs one.
   const aim = commentAim();
   if (typeof aim === "object") {
-    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY), commentKeyHint() || undefined);
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY, aim.at), commentKeyHint() || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7494,7 +7494,30 @@ function showSelectionMenu(e: MouseEvent) {
 
 // Comment on the selection from the keyboard or the palette (chat.commentSelection, the user 2026-09-30, who wanted a key
 // for it): exactly what the menu's Comment opens, through the same gate (commentAim) and the same openCommentComposer.
-type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number };
+type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number; at?: PassageAt };
+/** Where a selection range sits in a turn's rendered prose (the text turnProse joins): its [start, end) offsets, clamped to
+ *  the turn's prose and trimmed of edge whitespace; null when the session's view holds no .md body for the turn, or when
+ *  nothing of its prose is left after the clamp and the trim. openCommentComposer hands it to holdForPassage and
+ *  existingThreadFor. */
+function selectionAt(sid: string, uuid: string, r: Range): PassageAt | null {
+  const body = views.get(sid)?.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"] .md`);
+  if (!body) return null;
+  const whole = document.createRange();
+  whole.selectNodeContents(body);
+  const prose = whole.toString();                  // the text nodes' data in order: turnProse's text
+  const off = (node: Node, offset: number): number => {
+    const c = whole.comparePoint(node, offset);    // before the body, inside it, or after it
+    if (c) return c < 0 ? 0 : prose.length;
+    const head = document.createRange();
+    head.setStart(body, 0);
+    head.setEnd(node, offset);
+    return head.toString().length;
+  };
+  let start = off(r.startContainer, r.startOffset), end = off(r.endContainer, r.endOffset);
+  while (start < end && /\s/.test(prose[start])) start++;
+  while (end > start && /\s/.test(prose[end - 1])) end--;
+  return start < end ? { start, end } : null;
+}
 /** The passage a new comment anchors to, and where its box opens: the transcript selection in a real turn
  *  (transcriptSelection's uuid) on the active session, the box's corner just under the selection's box, since the
  *  keyboard has no pointer to open it at (the menu's pick uses its own). "none" when nothing in a turn is selected;
@@ -7510,7 +7533,9 @@ function commentAim(): CommentAim | "none" | "session" {
   // text, and its turn's uuid is that session's, never the active one's
   if (!r || !views.get(activeId)?.el.contains(r.startContainer)) return "none";
   const b = r.getBoundingClientRect();
-  return { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
+  const at = selectionAt(activeId, q.uuid, r);
+  return at ? { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6, at }
+    : { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
 }
 /** The command's run. `held` is the aim the palette captured as it opened (its input took the focus since, which may
  *  have moved the selection); absent, the live selection is read. A held aim whose tab is no longer the one shown, or
@@ -7521,14 +7546,19 @@ function commentOnSelection(held?: CommentAim | "none" | "session"): void {
   else if (typeof aim === "object" && (isProvisionalId(aim.sid) || !liveSession(aim.sid))) aim = "session";
   if (aim === "none") { ephemeralWarnToast("Select some text in the chat to comment on it."); return; }
   if (aim === "session") { ephemeralWarnToast("This session isn't ready for comments yet."); return; }
-  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y);
+  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y, aim.at);
 }
-/** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. */
+/** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. Its `at` is
+ *  optional; when present it must be a pair of integers. */
 function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
   if (v === "none" || v === "session") return v;
   const a = v as Partial<CommentAim> | null;
-  return a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
-    && Number.isFinite(a.x) && Number.isFinite(a.y) ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! } : "none";
+  if (!(a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
+        && Number.isFinite(a.x) && Number.isFinite(a.y))) return "none";
+  if (a.at === undefined) return { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! };
+  const at = a.at as Partial<PassageAt> | null;
+  return at && typeof at === "object" && Number.isInteger(at.start) && Number.isInteger(at.end)
+    ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y!, at: { start: at.start!, end: at.end! } } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
 // The chat's own commands whose capture handler (the nav trail's or the jump moves', below) answers chord `ch`: those
@@ -10317,7 +10347,7 @@ let commentPopPos: { x: number; y: number } | null = null;
 let cmtPopPosMine = false;
 // the selection a Comment gesture was redirected from to the thread already on its passage (the user 2026-10-01): the
 // thread's box offers "New thread instead", which opens the comment box on exactly this selection
-let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number } | null = null;
+let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null } | null = null;
 // the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
 // ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
 let cmtPopApplied: { w: number; h: number } | null = null;
@@ -10786,21 +10816,26 @@ function turnProse(sid: string, uuid: string): string | null {
   return text;
 }
 
-/** Comment on a passage. `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. */
-function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number, fresh = false): void {
+/** Comment on a passage. `at`: where in the turn's prose the selection sits, when the gesture knows it (selectionAt).
+ *  `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. */
+function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number, at?: PassageAt | null, fresh = false): void {
   const prose = turnProse(sid, uuid);
   // the passage's own send still unanswered (its mark still the optimistic one): the box re-opens ON that send, never as a
   // fresh composer, so a click outside and a second Comment on the passage cannot send the same words twice (2026-10-01).
   // "The passage" is the same turn with overlapping text (samePassage)
-  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact, prose);
+  const held = holdForPassage(cmtCreateInFlight.values(), sid, uuid, exact, prose, at);
   const live = !!held && (commentThreads.get(sid) || []).some((t) => t.tid === "pending:" + held.createId);
   // …and a passage that already HAS a thread opens that thread (the user 2026-10-01: one passage never silently grows a
   // second thread), with "New thread instead" in its box for the time a second one is meant
-  const existing = !live && !fresh ? existingThreadFor(commentThreads.get(sid) || [], uuid, exact, prose) : null;
+  const existing = !live && !fresh ? existingThreadFor(commentThreads.get(sid) || [], uuid, exact, prose, at) : null;
   commentPopPos = { x, y };
   cmtPopPosMine = false;                       // a selection point, not the user's placement (the thread layout ignores it)
   if (existing) {
-    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y });
+    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y, at });
+    // …with the caret in its reply box, so the next keys go there and not to the chat's message box. Once, here, and not
+    // in renderCommentPopover's focus line: a clause there would take the caret back on every full rebuild while the box
+    // is open, and a box already open is refreshed in place, which returns before that line.
+    (document.querySelector("#cmt-pop .cmt-input") as HTMLTextAreaElement | null)?.focus();
     return;
   }
   cmtRedirect = null;
@@ -10814,7 +10849,7 @@ function openCommentComposer(sid: string, uuid: string, exact: string, x: number
 }
 
 function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
-                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number }): void {
+                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null }): void {
   openCommentKey = { sid, tid };
   pendingCommentAnchor = null;
   cmtRedirect = redirect && redirect.tid === tid ? redirect : null;   // only a Comment gesture's redirect offers "New thread instead"
@@ -21803,9 +21838,11 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     if (ackShip && !shipOwner(ackShip)) return;   // a duplicate of a ship already retired (a reconnect
     //                                               re-ship raced the original ack) — attaching it again
     //                                               would double the file on whatever tab is active (T215)
-    const cbox = document.getElementById("cmt-pop")?.querySelector(".cmt-input") as HTMLTextAreaElement | null;
+    // an editable box only: a path that lands while the sent view's read-only box is open goes on to the chat's attachment
+    // strip below
+    const cbox = document.getElementById("cmt-pop")?.querySelector(".cmt-input:not([readonly])") as HTMLTextAreaElement | null;
     if (cbox) {
-      // a comment popover is open — its own clip shipped this file, so the path lands in ITS box
+      // an editable comment box is open: the path lands in it
       retirePendingShip(m.path, ackShip);
       cbox.value = (cbox.value ? cbox.value.trimEnd() + " " : "") + m.path + " ";
       cbox.dispatchEvent(new Event("input"));   // the draft listener persists it
@@ -23496,7 +23533,7 @@ setupSettings();
     },
     cmtclose: () => closeCommentPop(),
     // "New thread instead" in a thread a Comment gesture was redirected to: the comment box, on the selection the gesture had
-    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, true); },
+    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, r.at, true); },
     cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture
