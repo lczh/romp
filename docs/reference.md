@@ -148,7 +148,10 @@ What moves with the session:
   subagent and workflow files beside it, into the new folder's project
   directory under `~/.claude/projects/`; Romp moves the session's earlier
   transcripts (its `/clear` episodes and resume forks) the same way, so history
-  and search keep working.
+  and search keep working. A session born as a fork also names the transcript
+  it was forked from, which belongs to the session it came from: that file stays
+  where its owner writes it, and the fork's earlier-conversation fold reads it
+  from there.
 - The session's name, colour, mailbox, goals, cards and captions, all keyed by
   the session id rather than the folder.
 - What the agent sees. Claude Code tells the model where it now is and loads

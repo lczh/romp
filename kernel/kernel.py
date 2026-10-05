@@ -44494,8 +44494,7 @@ def build_episode(sid, now):
         return {"type": "chatEpisode", "id": sid, "events": [],
                 "error": "No earlier conversation is recorded for this session."}
     prev, cur = rows[-2], rows[-1]
-    cur_path = _path_of(sid)
-    path = (Path(cur_path).parent / ((prev.get("fsid") or "") + ".jsonl")) if cur_path else None
+    path = _episode_file(sid, prev.get("fsid") or "")
     if not path or not prev.get("fsid") or not path.exists():
         return {"type": "chatEpisode", "id": sid, "events": [],
                 "error": "The pre-clear transcript file is missing (%s), so the cleared conversation "
@@ -44505,6 +44504,32 @@ def build_episode(sid, now):
     truncated = max(0, len(evs) - EPISODE_EVENT_CAP)
     return {"type": "chatEpisode", "id": sid, "events": evs[-EPISODE_EVENT_CAP:],
             "truncated": truncated, "clearedAt": cur.get("t")}
+
+
+def _episode_file(sid, fsid):
+    """Where an earlier episode's transcript `fsid` of session `sid` lives: beside the session's current transcript (its
+    own /clear episodes and resume forks, which its moves carry), else, for a session born as a fork, beside its PARENT's
+    current transcript (2026-10-05): the first episode row of a fork is the parent's transcript, which is the parent's
+    and stays in the parent's folder when either of them moves (sdk_backend.movable_fsids). The first candidate when
+    neither holds the file, for the caller's loud missing-file error; None when the session has no transcript."""
+    if not fsid:
+        return None
+    cur_path = _path_of(sid)
+    cands = [Path(cur_path).parent / (fsid + ".jsonl")] if cur_path else []
+    reg = _thread_reg(sid)
+    ff = reg.get("forkedFrom") if isinstance(reg.get("forkedFrom"), dict) else {}
+    parent = str(ff.get("sid") or reg.get("threadOf") or "")
+    if parent and parent != sid:
+        try:
+            pp = _path_of(parent)
+        except Exception:
+            pp = None
+        if pp:
+            cands.append(Path(pp).parent / (fsid + ".jsonl"))
+    for c in cands:
+        if c.exists():
+            return c
+    return cands[0] if cands else None
 
 
 # ───────────────────────── feed clear / undo (inbox-zero) ─────────────────────────
@@ -57315,8 +57340,10 @@ def _key_in_transcript(sid, key, now):
     turns: they are genuinely not part of the current session, so the page sets them aside (rebased). Reads the CACHED
     _parse's turns only, pre-cut turns' uuids included (t["uuids"], no body), so it never re-reads the leaf whole (the
     proto-2 read budget, test_chat_proto2_served); _parse's own candidate set already covers the resume-fork lineage,
-    so a resume that keeps its older turns keeps the key. Any doubt (no session row, a synthetic key, a parse fault)
-    answers True: keep the rows (content that exists is never dropped, the user 2026-09-19)."""
+    so a resume that keeps its older turns keeps the key. Any doubt (no session row, a synthetic key, a parse fault, a
+    parse that does not begin where its conversation does: _parse_starts_whole) answers True: keep the rows (content
+    that exists is never dropped, the user 2026-09-19). Every absent key is said once with its outcome
+    (_note_held_key_absent)."""
     try:
         u = str(key or "").split("#", 1)[0]   # a second event of a record (uuid#n) rides its record's uuid
         if not _UUIDISH_RE.match(u):   # only a record uuid is CHECKED; every other key shape is kept: an overlay card's
@@ -57325,14 +57352,113 @@ def _key_in_transcript(sid, key, now):
         sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
         if sess is None:
             return True
-        for t in _parse(sess["path"], sid, now)["turns"]:
+        turns = _parse(sess["path"], sid, now)["turns"]
+        for t in turns:
             src = t.get("uuids") if t.get("pre") else [a.get("uuid") for a in (t.get("atoms") or [])]
             for tu in (src or []):
                 if tu and str(tu).split("#", 1)[0] == u:
                     return True
-        return False
+        # Absent from the parse. That proves the turns were ABANDONED (a rewind's branch, a /clear's old episode) only
+        # when the parse begins where the conversation does; a parse whose first record links to a parent no file it reads
+        # holds is history gone missing from where the parse looks, and answers True (2026-10-05: another session's move
+        # renamed a live session's transcript away, its CLI went on in a fresh file at the old path, and this check read
+        # the 3,000 held turns as abandoned and the page set them aside under "this session was continued").
+        whole, why = _parse_starts_whole(sid, sess["path"])
+        _note_held_key_absent(sid, u, len(turns), sum(1 for t in turns if t.get("pre")),
+                              _parse_mode.get(sess["path"], "?"), why, rebased=whole)
+        return not whole
     except Exception:
         return True
+
+
+_FIRST_LINK_MEMO = {}       # (path, dev, ino) -> (first record's uuid, its parent link or None, end offset of its line)
+_HELD_ABSENT_SAID = set()   # (sid, key, outcome) already said by _note_held_key_absent
+
+
+def _first_record_link(path):
+    """(uuid, parent) of the first uuid-bearing record of `path`: `parent` its parentUuid, else its logicalParentUuid (the
+    compaction stitch), None for a conversation's real first record; or None when it cannot be told (no file, no record
+    within the first 2,048 lines). Memoized on the file's (path, device, inode) with the line's end offset: a transcript is
+    append-only, so its first record never changes while that inode stands, and a file renamed away with a fresh one
+    created at the path is a new inode and is read again (judge.transcript_head memoizes on the path alone)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    k = (str(path), st.st_dev, st.st_ino)
+    hit = _FIRST_LINK_MEMO.get(k)
+    if hit is not None and st.st_size >= hit[2]:
+        return hit[0], hit[1]
+    got = None
+    try:
+        with open(path, "rb") as fh:
+            end = 0
+            for _n, line in zip(range(2048), fh):
+                end += len(line)
+                if b'"uuid"' not in line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("uuid"):
+                    got = (str(r["uuid"]), r.get("parentUuid") or r.get("logicalParentUuid") or None, end)
+                    break
+    except OSError:
+        return None
+    if got is None:
+        return None
+    if len(_FIRST_LINK_MEMO) > 4096:
+        _FIRST_LINK_MEMO.clear()
+    _FIRST_LINK_MEMO[k] = got
+    return got[0], got[1]
+
+
+def _parse_starts_whole(sid, leaf):
+    """(True, where) when the parse of `leaf` begins at its conversation's real first record, so a record absent from it
+    is absent from the conversation; (False, why) when it cannot be shown to. The conversation's first file is found as
+    the parse's lineage closure finds it (the states resumeFork rows, walked back from the leaf beside it, judge
+    _anchor_reachable's walk), and its first record read (one bounded head read, memoized per inode: never the leaf
+    whole, the proto-2 read budget). A record with no parent link begins the conversation. One that links back is whole
+    only when the parse also reads the session's anchor file and that file begins at a record with none (the back-link
+    lands in the conversation's first file); otherwise it links to history no file the parse reads holds."""
+    leaf = Path(leaf)
+    links = jd._resume_links(sid)
+    if links is None:
+        return False, "the states log could not be read"
+    stem, first, hops = leaf.stem, leaf, 0
+    while stem in links:
+        if hops >= 16:
+            return False, "the resume lineage runs past 16 files"
+        stem = links[stem]
+        hops += 1
+        first = leaf.with_name(stem + ".jsonl")
+    head = _first_record_link(first)
+    if head is None:
+        return False, "no first record readable in %s" % first.name
+    if head[1] is None:
+        return True, "the conversation begins in %s" % first.name
+    anchor = leaf.with_name(sid + ".jsonl")
+    if anchor.name != first.name and str(anchor) in jd._judge_candidates(sid, [str(leaf)]):
+        ah = _first_record_link(anchor)
+        if ah is not None and ah[1] is None:
+            return True, "%s links back into %s, where the conversation begins" % (first.name, anchor.name)
+    return False, "the first record of %s links to %s, which no file the parse reads holds" % (first.name, head[1])
+
+
+def _note_held_key_absent(sid, key, n_turns, n_pre, road, why, rebased):
+    """One stderr line per (session, key, outcome) when a page's held tail key is absent from the parse: whether the frame
+    carries `rebased` and why, and where the lookup looked (the parse's turns, restored pre-cut ones counted apart, and
+    the road that served it), so a set-aside is diagnosable from the log. The key is a record uuid; no content."""
+    k = (sid, key, bool(rebased))
+    if k in _HELD_ABSENT_SAID:
+        return
+    if len(_HELD_ABSENT_SAID) > 4096:
+        _HELD_ABSENT_SAID.clear()
+    _HELD_ABSENT_SAID.add(k)
+    sys.stderr.write("chat2: held key %s of %s is not in the parse (%d turns, %d restored pre-cut, road %s); %s: %s\n"
+                     % (key, sid[:8], n_turns, n_pre, road, why,
+                        "rebased, the page sets the held run aside" if rebased else "kept, no rebased"))
 
 
 def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):

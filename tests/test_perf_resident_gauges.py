@@ -244,6 +244,13 @@ class Base(unittest.TestCase):
         self.proj.mkdir(parents=True)
         self.paths, self.leaves, self.asm_keys, self.mat = [], [], [], []
         km._HEAP_SAID.clear()
+        # every parse here reads the postal log too, and the record-cache pins below count its entries: the log is pinned to a
+        # file that never exists (2026-10-05). The shared event model binds MESSAGES_LOG at each load from the environment as
+        # it stands then, so in a whole-suite shard it can name another module's root that holds a written postal log, and
+        # that log's record entry sat beside the leaf's (red whenever a shard's composition put such a module first)
+        _msgs = mock.patch.object(em, "MESSAGES_LOG", self.td / "no-postal-log.jsonl")
+        _msgs.start()
+        self.addCleanup(_msgs.stop)
 
     def tearDown(self):
         for p in self.leaves:
