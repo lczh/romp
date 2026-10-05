@@ -1280,11 +1280,8 @@ class Detector(_GateLab):
         for label, move, want in (("web's revision", lambda: self.revs.__setitem__(SID2, 1), ({"miss": 1}, {})),
                                   ("web's store", judge, ({"miss": 1}, {})),
                                   ("api's revision", lambda: self.revs.__setitem__(SID, 1), ({}, {"miss": 1}))):
-            for _ in range(4):
-                if self.last().get("interruptBlock") == "closed":
-                    break
-                self.passes()
-            self.assertEqual(self.last()["interruptBlock"], "closed", label)
+            self.passes(3)                                              # the case before settles: its moved input opens the
+            self.assertEqual(self.last()["interruptBlock"], "closed", label)   #  tick once, and the passes after close it
             w0, r0 = self.wrong("interruptBlock"), self.raced("interruptBlock")
             armed[0] = move
             self.passes()
