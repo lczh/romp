@@ -496,6 +496,9 @@ class NudgeWalkParseGate(unittest.TestCase):
             "_NUDGE_ASKER_ROWS_MAX",                # a constant
             "_views_dirty", "_pusher_wake",         # the writers' dirty mark and the pusher's wake (_mark_views_dirty): outputs of a
             #                                         block filed or lifted, never inputs to the verdict
+            "_JOBS_GATE_TL",                        # the jobs pass's gate in shadow: the thread-local record of the job running on this
+            #                                         thread, which the road's hooks write their notes into (a due, an act, an owed
+            #                                         reason): an output, never an input to the verdict
             "_INTR_MARKS_DISK", "_INTR_MARKS_DISK_LOCK", "_INTR_MARKS_DISK_DIRTY",   # the persisted interrupt-marks memo (T401 (3)
             #                                         target 3): rows keyed on the transcript's stat, the states log's cut pair (both
             #                                         keyed files) and the parse's own sdk-ownership bit (jd._sdk_owned, the input

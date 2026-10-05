@@ -253,7 +253,7 @@ class Marks(_GateLab):
         km._files_stat_mark(SID)
         g = self.passes()
         last = self.last()
-        opened = {j for j, v in last.items() if v != "closed"}
+        opened = {j for j, v in last.items() if v != "closed" and j in km._JOBS_INPUTS}   # (an undeclared job is owed every pass)
         self.assertEqual(opened, self.FILE_READERS, last)
         for job in self.FILE_READERS:
             self.assertEqual(last[job], "open:files", job)
@@ -272,7 +272,7 @@ class Marks(_GateLab):
         g0 = self.gate()
         km._files_stat_mark()
         g = self.passes()
-        self.assertEqual({j for j, v in self.last().items() if v != "closed"}, set(), self.last())
+        self.assertEqual({j for j, v in self.last().items() if v != "closed" and j in km._JOBS_INPUTS}, set(), self.last())
         self.assertEqual(g["marks"]["all"] - g0["marks"]["all"], 1, "the box-wide mark is counted under marks.all")
         self.assertEqual(g["marks"]["session"], g0["marks"]["session"])
 
