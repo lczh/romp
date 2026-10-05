@@ -642,11 +642,11 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
                                   # plus messages.jsonl now share the slots, and an evicted LEAF slot also demotes
                                   # the assembly cache's identity gate to a full parse.
 # A BYTE budget beside the count (the kernel memory work, 2026-09-11): the count bounded slots, never memory, and the
-# working set is files of every size (a 177 MB leaf and a 2 KB states log take one slot each), so the kernel climbed to
-# 5 to 8 GB between restarts holding every live and subagent transcript's records. Each entry weighs the bytes it
+# working set is files of every size (a large leaf and a small states log take one slot each), so the kernel's resident
+# size climbed between restarts, holding every live and subagent transcript's records. Each entry weighs the bytes it
 # holds (the file size less a tail entry's offset), and the budget counts those bytes DECODED, times
-# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 31 GiB machine meant about 48 GB of
-# records, so it never bound, while the kernel grew to 16.4 GB resident plus swap); past the budget the least
+# RECORD_CACHE_DECODED_MULTIPLE (2026-10-01: weighed in file bytes, half of a 32 GiB machine meant about 46 GiB of
+# records, so it never bound, while the kernel grew into swap); past the budget the least
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
 # never refused, the budget then holds that one entry. Counters under /perf recordCache, where `bytes` stays file
@@ -676,20 +676,19 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # never touches this cache, and a file only the judges read goes cold between their passes. The default is HALF of the
 # machine's memory PER PROCESS (a judges child, when on, computes its own) (the user's direction, 2026-09-11, to use the
 # memory we have; kept, in real units, on 2026-10-01), never under 4 GiB of FILE bytes (2026-09-11, the day the budget
-# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running 50 sessions is their live
-# leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: 18 entries
-# filled the 1 GiB, every build re-read whole transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one
-# pusher cycle of 132 s, chat builds of 3 s each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache.
+# shipped at 1 GiB of file bytes, about 2.9 GiB decoded): the working set of a devbox running many sessions is their
+# live leaves, read by every build in every pusher cycle, and a budget below it does not save memory, it thrashes: a
+# few leaves filled the 1 GiB, every build re-read whole transcripts, pusher cycles and chat builds slowed to a crawl,
+# and glibc's arenas kept the churn, the process resident far over its 1 GiB cache.
 # An LRU under reads that cycle through more than it holds misses on EVERY read; it does not degrade partway. So the
 # floor is a working-set bound and stays in the working set's unit, file bytes (in memory, the floor times the
 # multiple): wherever it binds (a machine under about 23 GiB, or one without /proc/meminfo, such as macOS) the cache
 # still holds 4 GiB of file bytes, what the floor has held since 2026-09-11; a Linux machine between 8 and 23 GiB, which
-# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 31 GiB machine in real units
-# binds at about 5.9 GB of file bytes. The kernel at 5f3569d39 held 3.4 GB of file bytes at 12.2 hours of uptime, after
-# a busy afternoon of about 0.2 GB an hour (2026-10-01), so on such a machine the budget can bind after about a day,
-# later if growth slows. The kernel is then about 21 GB resident (3.5 GB plus 2.9 bytes per cached file byte), past the
-# point where the machine it ran on began swapping it (about 14 GB, at 11.8 hours): half of memory caps this cache only
-# past swap there, and a budget tight enough to bind before swap sits at the working set, the thrash above. Once it
+# held half its memory in file bytes before 2026-10-01, now holds those 4 GiB. Half of a 32 GiB machine in real units
+# binds at about 5.6 GiB of file bytes (16 / 2.85). A busy machine's cache reaches that only after a long uptime, and by
+# then the process holds those records decoded beside everything else it keeps, near or past the point where the
+# machine starts swapping: half of memory caps this cache only near swap on a busy machine, and a budget tight enough
+# to bind before swap sits at the working set, the thrash above. Once it
 # binds it evicts the least recently used entries, cold ones first, which is safe while the files read every cycle (live
 # leaves and their lineage) stay under the binding point; past it the thrash returns, and budgetRereads (an evicted path
 # read back) shows it on /perf. What is not needed until looked at (subagent transcripts) leaves through
@@ -699,11 +698,9 @@ RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3   # FILE bytes: the default budg
 RECORD_CACHE_BUDGET_FRACTION = 0.5
 RECORD_CACHE_DECODED_MULTIPLE = 2.85   # bytes of memory per file byte a held entry takes decoded: a 37.7 MB transcript in
 #                                        a lab process decoded to 2.86 live heap bytes per source byte (_scan_jsonl_stream's
-#                                        docstring). The old kernel's 147 samples, 5 minutes to 145 hours of uptime (ending
-#                                        2026-10-01), agree: resident size in millions of kB = 3.44 + 2.85 x the cache's
-#                                        file GB, R^2 0.92, about 2.92 bytes of memory per file byte, a slope that also
-#                                        carries whatever grew beside the cache (the kernel at 5f3569d39 fit 2.94 in the
-#                                        same units over its first 11.5 hours). One figure for every entry: it fits the
+#                                        docstring). A running kernel's resident size, fitted against the cache's file
+#                                        bytes, gives a slope near this figure; that slope also carries whatever grew
+#                                        beside the cache. One figure for every entry: it fits the
 #                                        bulk, whole live leaves; content moves it, 1.44 to 7.7 by shape as measured (long
 #                                        text rows low, small metadata rows high; tests/test_record_cache_real_budget.py
 #                                        pins two mixes). ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, over 0 and at
@@ -1085,8 +1082,8 @@ def _env_or(name, default, scale=1):
         return default
 
 
-# 8 MiB, was 64 KB (2026-09-11, the day the checkpoints shipped): 31 leaves' bgAll states sat over 64 KB and every boot
-# cold-refolded them whole, 1.74 GB read in the first pusher cycle (65 s of tick jobs); a document of a few MB reads in
+# 8 MiB, was 64 KB (2026-09-11, the day the checkpoints shipped): every leaf whose bgAll state sat over 64 KB was
+# cold-refolded whole at every boot, each one read whole in the first pusher cycle; a document of a few MB reads in
 # milliseconds. ROMP_CKPT_FOLD_CAP_KB sets it outright.
 _CKPT_FOLD_CAP = _env_or("ROMP_CKPT_FOLD_CAP_KB", 8 * 1024 * 1024, 1024)
 #                                   bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
@@ -6701,9 +6698,9 @@ _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for
 #                                          is not a string in a version-6 document is refused (`rows`), never read by a second road;
 #                                          the first row is decoded at load and must be a JSON object
 # Materialized pre-cut atoms resident across every session (the lazy index's LRU): MemTotal / 32 KiB, never under 500,000
-# (3.9 million on a 118 GiB machine); ROMP_ASM_INDEX_CAP sets it outright. At 20,000 (2026-09-11, the day the index
-# shipped) 50 sessions' 4,080 restored turns materialized 1.2 million atoms and evicted 1.19 million of them in 150 s,
-# every chat build cold at 5.6 s: a ceiling under the working set is a thrash, not a saving.
+# (about 1.05 million on a 32 GiB machine, 4.2 million on a 128 GiB one); ROMP_ASM_INDEX_CAP sets it outright. At
+# 20,000 (2026-09-11, the day the index shipped) the restored turns of many sessions evicted nearly every atom they
+# materialized within minutes, and every chat build ran cold: a ceiling under the working set is a thrash, not a saving.
 #                                       7: the cut is the boundary before the last SETTLED turn, not only a compaction's (stage one b, 2026-09-15):
 #                                          every v6 document is refused once (`version`) at the deploy boot and rewritten at the next settle
 #                                       8: a parallel tool batch's branch beside the spine is kept (FileAdapter._batch_head, 2026-09-23): its
@@ -6714,10 +6711,9 @@ _MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() //
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (weakref.ref(LazyAtoms), row): eviction drops the memo, never a field
 #                                       in place. The list is held WEAKLY (measured 2026-09-15): a strong reference here kept every
 #                                       superseded generation's atoms, and through them its LazyIndex, rows and document, resident until
-#                                       they aged past the cap (every restore mints a new index; 262 restores over 22 sessions sat the LRU
-#                                       at its cap of 1,026,886 entries with 275,385 evictions: about 1.2 to 2.0 GiB of mostly dead
-#                                       generations, the resident count times the 1.3 to 2.1 KB an atom measured by tracemalloc over real
-#                                       indexes, and up to 275,385 live atoms evicted by stale ones, each a rebuild on its next read). Now a
+#                                       they aged past the cap (every restore mints a new index, so a busy day's restores sat the LRU at its
+#                                       cap holding mostly dead generations, 1.3 to 2.1 KB an atom as tracemalloc measured over real indexes,
+#                                       and live atoms evicted by stale ones were each rebuilt on their next read). Now a
 #                                       dropped tree's entries die with it and expire at the old end (_mat_trim), and a dropped assembly
 #                                       entry releases its index's at once (LazyIndex.release). No weakref callback: one fires at any
 #                                       decref, under this lock included, and the lock is not reentrant; dead entries expire lazily.
@@ -7407,16 +7403,15 @@ _HYDRATED = {}                     # uuid -> (the body fields a fill of any kind
 _HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
 _HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 48), 1024 * 1024)
 #                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 48, never under 256 MiB
-#                                    (about 661 MiB on a 31 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
-#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
-#                                    kernel's memo held about 66,700 records from 2.7 to 9.5 hours, then grew: 77,144 records and
-#                                    302 MiB of lines (4,107 bytes a line) at 11.7 hours, nothing evicted. As decoded body fields
-#                                    that is an estimated 550 to 615 MiB, a wide band, since an entry weighs 0.55 of its line
-#                                    for a Read result and up to 4.6 for a question's answers. This cap holds that set by the
-#                                    estimate and binds as it grows; a 64th would bind within the first day to save at most 165
-#                                    MiB more. An LRU thrashes once the records read again and again outgrow it, and the size of
-#                                    that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here) thrashed on
-#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    (about 683 MiB on a 32 GiB machine, 2.7 GiB on a 128 GiB one). It was max(1 GiB, MemTotal /
+#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 32 GiB machine. A running
+#                                    kernel's memo held a steady set for hours, then grew, with nothing evicted. As decoded body
+#                                    fields its size is an estimate in a wide band, since an entry weighs 0.55 of its line for a
+#                                    Read result and up to 4.6 for a question's answers. This cap holds that set by the estimate
+#                                    and binds as it grows; a 64th would bind sooner and save little more. An LRU thrashes once
+#                                    the records read again and again outgrow it, and the size of that set is unmeasured. 64 MB
+#                                    of line bytes thrashed on 2026-09-11, before the per-cycle walkers moved onto the lazy
+#                                    scalars (T358).
 #                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
 #                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
 #                                    memo's serves and evictions
@@ -7596,7 +7591,7 @@ _DOC_MEMO_PARSE_MULTIPLE = 4.5     # what a parsed fold document weighs resident
 #                                    what it says
 _DOC_MEMO_BYTES = [0]              # the memoized documents' resident weight: size on disk times the multiple, summed
 _DOC_MEMO_CAP = _env_or("ROMP_DOC_MEMO_CAP_MB", max(64 * 1024 ** 2, _machine_memory_bytes() // 512), 1024 * 1024)
-#                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (236 MiB on a 118 GiB machine; a count
+#                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (256 MiB on a 128 GiB machine; a count
 #                                    cap said nothing about bytes and held whole documents for files no writer touched again), reported
 #                                    under checkpoints.docMemo
 _DOC_INDEX = {}                    # path -> (document file's _doc_sig, {fold name: count, or None when not an int}) for every entry

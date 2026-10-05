@@ -2,15 +2,15 @@
 """The lazy assembly index's materialized-atom LRU holds each turn's atom list WEAKLY, and a dropped assembly entry releases
 its index's entries at once (measured 2026-09-15). The LRU mapped (id(atoms), row) to (atoms, row): a strong reference to
 the LazyAtoms, and through it to the LazyIndex, its rows and its document, for every materialized atom, evicted only past
-the cap; every restore mints a new index, so 262 restores over 22 sessions sat the LRU exactly at its cap of 1,026,886
-entries holding mostly superseded generations (about 1.2 GiB at 1.3 to 2.1 KB an atom), and live atoms evicted by stale
-ones were rebuilt (7.4 M row decodes). Pinned here: a tree nobody holds is collected with its index and its entries expire
-at the next pass over the cap; an assembly entry that is dropped or replaced (the whole parse's put over a full cache, the
-demotion, the refused row) releases its index's entries and the current index's memo is untouched; a retained old view
-rebuilds a released slot through its own index, registers again, and takes nothing with it when it goes; the eviction pass
-tells a live entry (evictions) from a collected list's (expired) and touches no live slot for the latter; the LRU touch
-still orders evictions; an atom handed out is a fixed value across an eviction and a release; two threads building one
-slot share one object and one entry; a dead entry under a reused id is absent to the new list. Synthetic documents only."""
+the cap; every restore mints a new index, so a busy day's restores sat the LRU at its cap holding mostly superseded
+generations (1.3 to 2.1 KB an atom), and live atoms evicted by stale ones were rebuilt. Pinned here: a tree nobody holds
+is collected with its index and its entries expire at the next pass over the cap; an assembly entry that is dropped or
+replaced (the whole parse's put over a full cache, the demotion, the refused row) releases its index's entries and the
+current index's memo is untouched; a retained old view rebuilds a released slot through its own index, registers again,
+and takes nothing with it when it goes; the eviction pass tells a live entry (evictions) from a collected list's
+(expired) and touches no live slot for the latter; the LRU touch still orders evictions; an atom handed out is a fixed
+value across an eviction and a release; two threads building one slot share one object and one entry; a dead entry under
+a reused id is absent to the new list. Synthetic documents only."""
 import copy
 import gc
 import json

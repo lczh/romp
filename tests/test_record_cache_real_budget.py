@@ -3,14 +3,13 @@
 
 The shared reader keeps each transcript's decoded records in one cache (_JSONL_CACHE), under a count cap and a byte
 budget of half of MemTotal. Each entry weighed its FILE bytes, but decoded records take about 2.85 bytes of memory per
-file byte: the reader's own lab figure is 2.86 live heap bytes per source byte, and the old kernel's 147 samples, 5
-minutes to 145 hours of uptime (about six days), agree, fitting resident size in millions of kB = 3.44 + 2.85 x the
-cache's file GB (R^2 0.92), about 2.92 bytes of memory per file byte. So on a 31 GiB machine the budget meant about
-48 GB of decoded records and could not bind before the machine swapped: the cache's figure in the last sample, 3.72 GB
-of file bytes, was under a quarter of it, while the kernel grew to 16.4 GB resident plus swap. The budget now compares
-the held file bytes times the decoded multiple (RECORD_CACHE_DECODED_MULTIPLE; ROMP_RECORD_CACHE_DECODED_MULTIPLE
-overrides it, and 1 restores the file-byte budget) with the same half of memory, so half of memory means half of real
-memory. /perf keeps `bytes` in file bytes and adds `realBytes` and `decodedMultiple`.
+file byte: the reader's own lab figure is 2.86 live heap bytes per source byte, and a running kernel's resident size,
+fitted against the cache's file bytes, gives a slope near it. So half of memory in file bytes meant nearly three times
+as much in decoded records (about 46 GiB on a 32 GiB machine) and could not bind before the machine swapped: the cache's
+file bytes sat far under it while the kernel grew into swap. The budget now compares the held file bytes times the
+decoded multiple (RECORD_CACHE_DECODED_MULTIPLE; ROMP_RECORD_CACHE_DECODED_MULTIPLE overrides it, and 1 restores the
+file-byte budget) with the same half of memory, so half of memory means half of real memory. /perf keeps `bytes` in file
+bytes and adds `realBytes` and `decodedMultiple`.
 
 Two things keep it from thrashing (the 2026-09-11 lesson: a budget under the files read every cycle misses on every
 read). The floor stays 4 GiB of FILE bytes (the floor times the multiple, in memory), so wherever it binds (a machine
@@ -19,8 +18,8 @@ the floor has held since 2026-09-11. And budgetRereads counts an evicted path re
 budget has started to thrash once it binds; budgetRereadBytes counts what those reads decoded again, a tail restored
 first and the whole read that upgrades it both.
 
-Pinned here: eviction by real weight under a small budget; a working set of 3.72 GB of file bytes under this machine's
-default evicts nothing, and the default binds only past budget / multiple; the floor in file bytes, with and without
+Pinned here: eviction by real weight under a small budget; a working set under a synthetic 32 GiB machine's default
+evicts nothing, and the default binds only past budget / multiple; the floor in file bytes, with and without
 procfs, on the real read path too; budgetRereads stays zero under cold churn past a hot set that fits and equals the
 evictions when the hot set does not fit, and a re-read that comes back as a tail counts its upgrade's bytes; the
 multiple's default (on a plain load too), its override, the values refused, and a multiple of 1 restoring the old
@@ -60,14 +59,11 @@ os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XD
 em = load_source("romp_event_model_real_budget", os.path.join(BIN, "romp-event-model"))
 
 MEASURED = 2.85                                   # the constant's figure: the lab's 2.86 heap bytes per file byte, rounded
-#                                                   to the nearest 0.05 (the six-day fit's 2.85 is millions of kB per file
-#                                                   GB, about 2.92 bytes per byte)
+#                                                   to the nearest 0.05
 MiB = 1024 ** 2
 GiB = 1024 ** 3
-BOX_MEMINFO = "MemTotal:       32860372 kB\n"     # a 31 GiB machine: the one the six-day series ran on
-WORKING_SET_FILE_BYTES = 3_720_000_000            # a snapshot, not a ceiling: the old kernel's cache at 145 hours of uptime;
-#                                                   the kernel at 5f3569d39 held 3.4 GB at 12.2 hours and 4.0 GB at 15.4
-#                                                   hours, its count cap full since 12.5 (2026-10-01)
+BOX_MEMINFO = "MemTotal:       33554432 kB\n"     # a synthetic 32 GiB machine
+WORKING_SET_FILE_BYTES = 3_500_000_000            # a synthetic working set under the default's binding point
 FLOOR_FILE_BYTES = 4 * GiB                        # the default's floor, in FILE bytes
 SID = "11111111-2222-3333-4444-0000b0d9e7a1"     # this module's own placeholder session ids
 SID2 = "11111111-2222-3333-4444-0000b0d9e7a2"
@@ -192,7 +188,7 @@ class RealUnitBudget(_CacheCase):
 
     def test_a_large_working_set_does_not_evict_under_this_machines_default(self):
         budget = em._record_cache_default_budget_bytes(BOX_MEMINFO)
-        self.assertEqual(budget, 16_824_510_464, "half of this machine's memory")
+        self.assertEqual(budget, 17_179_869_184, "half of this machine's memory")
         em._JSONL_CACHE_BUDGET_BYTES = budget
         subagents = [("notes-api/subagents/agent-%03d.jsonl" % i, 650_000) for i in range(100)]
         largest = 286_000_000
@@ -205,19 +201,19 @@ class RealUnitBudget(_CacheCase):
         self.assertEqual(st["entries"], 133)
         self.assertAlmostEqual(st["bytes"], WORKING_SET_FILE_BYTES, delta=64)
         self.assertEqual(st["realBytes"], int(st["bytes"] * MEASURED))
-        self.assertLess(st["realBytes"], budget, "about 10.6 GB decoded under 16.8 GB")
+        self.assertLess(st["realBytes"], budget, "about 9.3 GiB decoded under 16 GiB")
 
     def test_the_default_binds_only_past_budget_over_the_multiple(self):
         budget = em._record_cache_default_budget_bytes(BOX_MEMINFO)
         em._JSONL_CACHE_BUDGET_BYTES = budget
         leaf = 100_000_000
         fit = int(budget / MEASURED) // leaf
-        self.assertEqual(fit, 59, "the budget binds at about 5.9 GB of file bytes on this machine")
+        self.assertEqual(fit, 60, "the budget binds at about 5.6 GiB of file bytes on this machine (16 / 2.85)")
         for i in range(fit):
             self._insert("notes-api/leaf-%02d.jsonl" % i, leaf)
-        self.assertEqual(self._evicted(), 0, "59 leaves of 100 MB fit")
+        self.assertEqual(self._evicted(), 0, "60 leaves of 100 MB fit")
         self._insert("notes-api/leaf-%02d.jsonl" % fit, leaf)
-        self.assertEqual(self._evicted(), 1, "the 60th evicts one (the file-byte budget would have held 168)")
+        self.assertEqual(self._evicted(), 1, "the 61st evicts one (the file-byte budget would have held 171)")
         self.assertNotIn("notes-api/leaf-00.jsonl", em._JSONL_CACHE, "the least recently used went")
         self.assertEqual(len(em._JSONL_CACHE), fit)
         self.assertLessEqual(em.record_cache_stats()["realBytes"], budget)
@@ -233,7 +229,7 @@ class RealUnitBudget(_CacheCase):
         for i in range(3):
             self._insert("notes-api/tests-%d.jsonl" % i, 1000)
         st = em.record_cache_stats()
-        self.assertEqual(st["bytes"], 3000, "bytes stays the held FILE bytes: the kernel's samples and the six-day fit read it")
+        self.assertEqual(st["bytes"], 3000, "bytes stays the held FILE bytes, the unit of the floor and the working set")
         self.assertEqual(st["realBytes"], int(3000 * MEASURED), "realBytes: the same entries decoded, the budget's unit")
         self.assertEqual(st["decodedMultiple"], MEASURED, "the multiple in force")
         self.assertEqual(st["budgetBytes"], em._JSONL_CACHE_BUDGET_BYTES)
@@ -763,7 +759,7 @@ class DecodedMultiple(unittest.TestCase):
 
     def test_a_multiple_of_one_restores_the_file_byte_budget(self):
         """The undo after deploy: ROMP_RECORD_CACHE_DECODED_MULTIPLE=1 on a fresh load gives main's default exactly (the
-        floor of 4 GiB on an 8 GB machine, half of MemTotal on a 31 GiB one) and weighs file bytes. Review find,
+        floor of 4 GiB on an 8 GB machine, half of MemTotal on a 32 GiB one) and weighs file bytes. Review find,
         2026-10-01: a floor weighed at the constant instead of the multiple in force passed every test."""
         env = {k: v for k, v in os.environ.items() if k != "ROMP_RECORD_CACHE_BUDGET_MB"}
         env["ROMP_RECORD_CACHE_DECODED_MULTIPLE"] = "1"
@@ -771,7 +767,7 @@ class DecodedMultiple(unittest.TestCase):
             fresh = load_source("romp_event_model_real_budget_one", os.path.join(BIN, "romp-event-model"))
         self.assertEqual(fresh._RECORD_CACHE_MULTIPLE, 1.0)
         self.assertEqual(fresh._record_cache_default_budget_bytes("MemTotal:  8000000 kB\n"), 4 * GiB, "main's floor")
-        self.assertEqual(fresh._record_cache_default_budget_bytes(BOX_MEMINFO), max(4 * GiB, 32860372 * 1024 // 2), "main's half")
+        self.assertEqual(fresh._record_cache_default_budget_bytes(BOX_MEMINFO), max(4 * GiB, 33554432 * 1024 // 2), "main's half")
         self.assertEqual(fresh._record_cache_default_budget_bytes("garbage"), 4 * GiB, "main's floor without MemTotal")
         fresh._JSONL_CACHE_BUDGET_BYTES = 10 * MiB
         with fresh._JSONL_CACHE_LOCK:
