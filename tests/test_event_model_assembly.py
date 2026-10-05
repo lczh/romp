@@ -673,6 +673,22 @@ class GateDemotions(unittest.TestCase):
                 self.assertEqual((self._promptid_arms(moved)[":boundary"], self._pass_shapes(moved)), (0, {"offpath": 1}),
                                  "the episode rule vouched for the append: %s" % moved)
 
+    def test_a_record_whose_summary_flag_is_truthy_but_not_true_leaves_the_episode_rule_vouching(self):
+        """The per-record half reads a delta record's summary flag as the shared filter does, by truth (_compact_episode_pid,
+        review of 2026-10-05, round two). The record is the eclipse case's u6 above, a meta record wearing p9 that quotes the
+        /compact tag mid-text, with isCompactSummary set to 1, truthy but not True, and a reply under it. Adoption leaves a user
+        record whose flag is truthy out of every episode, so p9's episode is still not a /compact one and the cold parse
+        splices nothing: the episode rule vouches (`offpath`), the append folds, and the tree equals the whole parse's at every
+        step. A per-record half that read the flag by "is True", as it did before the shared filter, refused the record at the
+        arm and parsed the append whole, though adoption never puts that record in an episode."""
+        recs = self._compacted_turn()[:-2] + self._golden_eclipse()
+        flagged = dict(G.uline(T0 + 140, "the notes say <command-name>/compact</command-name> ran here", "u6", "a5", ps=None),
+                       promptId="p9", isMeta=True, isCompactSummary=1)
+        moved = self._stream_then(recs, [flagged, G.aline(T0 + 150, "noted", "a6", "u6")], expect_full=False)
+        self.assertEqual((self._promptid_arms(moved), self._pass_shapes(moved), moved.get("full", 0)),
+                         ({"": 0, ":boundary": 0, ":wrapper": 0, ":boundarySeed": 0, ":passedDemote": 0, "fold:attachedPass": 1},
+                          {"offpath": 1}, 0), "the episode rule vouched for the record flagged 1: %s" % moved)
+
     def test_a_fold_the_attached_rule_saves_after_one_the_episode_rule_saved_names_no_shape(self):
         """The shape tags speak for their own delta (review of 2026-10-05, round one): the gate sets them for every delta that
         reaches the descent, so a fold the attached rule saves after one the episode rule saved counts no shape. The turn's
