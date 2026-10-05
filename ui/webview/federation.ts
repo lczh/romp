@@ -1317,9 +1317,12 @@ export class FederationManager {
       // migration and adoption (tab-groups.ts hearSharedFolds), and the adoption's announce is what repaints the strip
       // and the Sessions pane of this document; its cache write is what repaints the other panes (`storage`). From
       // here on, on THIS connection, this page publishes its folds, the slot every bundle on it reads (the view-order
-      // slot's pattern); a drop withdraws it with the arrangement's (unhearViewOrder).
+      // slot's pattern); a drop withdraws it with the arrangement's (unhearViewOrder). Each publish carries its name
+      // (`by`) and the frame names the last publish the kernel handled (`foldsBy`), so this browser's own earlier publish
+      // coming back is told from another device's word (2026-09-29, tab-groups.ts TABGROUPS_PUBLISHES_KEY), and its count
+      // of taken publishes (`foldsSeq`) tells a frame built before this browser's latest publish landed (2026-09-30).
       if ("folds" in m) {
-        hearSharedFolds(m.folds, (f) => this.outbound({ type: "setViewFolds", folds: f }), (fn) => { w.__rompPublishViewFolds = fn; });
+        hearSharedFolds(m.folds, (f, by) => this.outbound({ type: "setViewFolds", folds: f, ...(by ? { by } : {}) }), (fn) => { w.__rompPublishViewFolds = fn; }, m.foldsBy, m.foldsSeq);
       }
       // …and the FILE TABS (2026-09-30): the same hearing, on the same frame (file-tabs.ts hearSharedFileTabs); a kernel
       // from before them sends no half, and this page's tabs then stay this browser's
