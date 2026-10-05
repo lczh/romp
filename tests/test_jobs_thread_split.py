@@ -315,7 +315,8 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
     records the paths it wrote in _CKPT_JUST_WRITTEN; the converge pass (the pusher's, against the cycle's byte budget) skips
     them and empties the set. The two now run at once, so the add and the take share _CKPT_JUST_LOCK: the take copies and
     clears in one step, and a write landing in between waits for the clear and is kept for the pass's next look. Beside it,
-    what the move put on the jobs pass: the settle write's first sight at the pass's start, and each half's own fault line.
+    what the move put on the jobs pass: the settle write's first sight at the pass's start (the settle key and the leaf's
+    stat, each taken once per session), and the fault lines of first sight and of each half.
     Synthetic sids and paths; every collaborator of the two functions is stubbed, so nothing is read or written."""
 
     SID_A = "11111111-2222-3333-4444-555555555501"
@@ -380,6 +381,18 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
                      _files_stat_pass_close=lambda opened: None)
         self.assertGreater(len(quiet), 20, sorted(quiet))
         return quiet
+
+    def _cycles_and_passes(self, patches, between=None, n=3):
+        """The pusher's cycle, then the jobs thread's pass, `n` times, one thread each as in the kernel, under `patches` (the
+        quiet jobs and the world a test sets); `between(i)` runs before the i-th cycle, where the world moves between passes."""
+        km = self.km
+        with mock.patch.multiple(km, **patches), \
+                concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="jobs-probe") as jobs:
+            for i in range(n):
+                if between is not None:
+                    between(i)
+                km._pusher_cycle_jobs(NOW + i, {}, False)
+                jobs.submit(km._jobs_pass, NOW + i, {}).result(timeout=30)
 
     def test_a_path_the_jobs_pass_wrote_is_skipped_by_the_pushers_converge_pass(self):
         """The jobs pass on a thread of its own (the jobs thread's place), then the pusher's jobs on this one, every job of both
@@ -512,6 +525,64 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertEqual(self.persisted, [self.LEAF_A], "the settle during the boot's first pass was written, once, and only it")
         self.assertEqual(km._CKPT_SETTLE_SEEN[self.SID_A][0], 2, "and its key recorded as written")
 
+    def test_a_leaf_that_grows_during_the_boots_first_pass_is_written_at_that_passs_end(self):
+        """First sight's other half (the review's round two): the leaf's stat, the periodic trigger's evidence, is taken at the
+        pass's START beside the settle key. No turn ends here and the states log stands (the settle key is fixed), the period
+        is 0, and web's leaf grows during the first pass's reminder walk; api's stands. The settle write at the pass's end
+        sees web's leaf moved since its first sight and writes that document, once, and api's not at all. With the leaf's
+        first sight left to the write, at the pass's end, the growth fell before it and the leaf waited for its next move."""
+        km = self.km
+        patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
+        leaf = {"size": 1}
+
+        def walk(now, live_map):
+            leaf["size"] = 2                                        # web's leaf grows while the first pass runs
+        patches.update(_auto_nudge_tick=walk, CKPT_PERIOD_S=0,
+                       _stat_key=lambda path: ("synthetic", leaf["size"] if str(path) == self.LEAF_A else 1))
+        self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}, {"sid": self.SID_B, "path": self.LEAF_B}]
+        self._cycles_and_passes(patches)
+        self.assertEqual(leaf["size"], 2, "the walk ran: the leaf grew during the first pass")
+        self.assertEqual(self.persisted, [self.LEAF_A], "the growth during the boot's first pass was written, once, and only it")
+        self.assertEqual(km._CKPT_PERIODIC_SEEN[self.SID_A][0], ("synthetic", 2), "and the leaf's stat recorded as written")
+
+    def test_a_turn_that_settles_between_two_passes_is_written_at_the_next_passs_end(self):
+        """First sight records only a session the table does not hold. Web's turn-end key moves from 1 to 2 BETWEEN the first
+        pass and the second (before the pusher's second cycle); api's stands. The second pass's start leaves web's recorded
+        key alone, so the settle write at its end sees the move and writes web's document, once. A first sight retaken at
+        every pass's start would record 2 there and the write would find nothing new: a turn that settled between one pass's
+        write and the next pass's start would get no settle write, for any session."""
+        km = self.km
+        patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
+        turn = {"key": 1}
+
+        def between(i):
+            if i == 1:
+                turn["key"] = 2                                     # web's turn settles after the first pass's write
+        patches["_turn_end_key"] = lambda sid, reg=None: turn["key"] if sid == self.SID_A else 1
+        self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}, {"sid": self.SID_B, "path": self.LEAF_B}]
+        self._cycles_and_passes(patches, between)
+        self.assertEqual(self.persisted, [self.LEAF_A], "the settle between the passes was written, once, and only it")
+        self.assertEqual(km._CKPT_SETTLE_SEEN[self.SID_A][0], 2, "and its key recorded as written")
+
+    def test_a_leaf_that_grows_between_two_passes_is_written_at_the_next_passs_end(self):
+        """The same for the leaf's stat: the settle key fixed and the period at 0, web's leaf grows BETWEEN the first pass and
+        the second; api's stands. The second pass's start leaves web's recorded stat alone, so the settle write at its end
+        sees the leaf moved and writes web's document, once. A leaf stat retaken at every pass's start would record the
+        growth there with a fresh stamp and the write would find the leaf unmoved; and since the stamp would reset each
+        pass, the periodic trigger could never fire within a pass shorter than the period."""
+        km = self.km
+        patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
+        leaf = {"size": 1}
+
+        def between(i):
+            if i == 1:
+                leaf["size"] = 2                                    # web's leaf grows after the first pass's write
+        patches.update(CKPT_PERIOD_S=0, _stat_key=lambda path: ("synthetic", leaf["size"] if str(path) == self.LEAF_A else 1))
+        self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}, {"sid": self.SID_B, "path": self.LEAF_B}]
+        self._cycles_and_passes(patches, between)
+        self.assertEqual(self.persisted, [self.LEAF_A], "the growth between the passes was written, once, and only it")
+        self.assertEqual(km._CKPT_PERIODIC_SEEN[self.SID_A][0], ("synthetic", 2), "and the leaf's stat recorded as written")
+
     def test_a_settle_write_that_raises_is_caught_and_named_and_the_pass_still_closes(self):
         """A raise from the settle write through the REAL jobs pass, every other job quiet: nothing escapes the pass (an escape
         is counted under jobs.passFailed, backed off, and skips the files-stat close and the jobsPass stage), stderr names the
@@ -533,6 +604,35 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertNotIn("checkpoint converge: ", err.getvalue(), "the line names its own half")
         self.assertEqual(closed, [False], "the files-stat close ran")
         self.assertIn("jobsPass", [c.args[0] for c in stage.call_args_list], "and the pass closed its stage")
+
+    def test_a_first_sight_that_raises_is_caught_and_named_and_the_jobs_after_it_run(self):
+        """A raise from the settle write's first sight through the REAL jobs pass, every other job quiet: nothing escapes the
+        pass, stderr names first sight and neither checkpoint half, and the jobs after it still run, the reminder walk, the
+        interrupt tick, the held-working check and the settle write among them. First sight opens the pass, so a raise that
+        escaped it would end every pass there while its cause lasted, each counted under jobs.passFailed and backed off."""
+        km = self.km
+        quiet = self._quiet(set())
+        ran, closed = [], []
+
+        def boom(now):
+            raise RuntimeError("synthetic first-sight fault")
+
+        def job(name):
+            return lambda *a, **k: ran.append(name)
+        quiet.update(_checkpoint_first_sight=boom, _lift_spent_awaiting=job("liftSpentAwaiting"), _auto_nudge_tick=job("autoNudge"),
+                     _interrupt_block_tick=job("interruptBlock"), _held_working_pass=job("heldWorking"),
+                     _persist_checkpoints=job("persistCheckpoints"), _files_stat_pass_close=lambda opened: closed.append(opened))
+        err = io.StringIO()
+        with mock.patch.multiple(km, **quiet), mock.patch.object(km.sys, "stderr", err), \
+                concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="jobs-probe") as jobs:
+            jobs.submit(km._jobs_pass, NOW, {}).result(timeout=30)   # re-raises here if the fault escaped the pass
+        self.assertIn("checkpoint first sight: ", err.getvalue(), err.getvalue()[-400:])
+        self.assertIn("RuntimeError: synthetic first-sight fault", err.getvalue())
+        self.assertNotIn("checkpoint persist: ", err.getvalue(), "the line names its own job")
+        self.assertNotIn("checkpoint converge: ", err.getvalue(), "the line names its own job")
+        self.assertEqual(ran, ["liftSpentAwaiting", "autoNudge", "interruptBlock", "heldWorking", "persistCheckpoints"],
+                         "the jobs after it ran, the settle write last")
+        self.assertEqual(closed, [False], "and the files-stat close")
 
     def test_a_converge_pass_that_raises_is_caught_and_named_and_the_jobs_after_it_run(self):
         """A raise from the converge pass through the REAL pusher jobs, every other job quiet: nothing escapes the cycle's jobs,

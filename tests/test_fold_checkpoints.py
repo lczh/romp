@@ -911,6 +911,7 @@ class KernelFolds(Base):
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
         cv = em.checkpoint_stats()["converge"]
         self.assertEqual(cv["heals"], 1); self.assertGreaterEqual(cv["healBytes"], size, "the heal's whole read is counted against the budget")
+        self.assertEqual(cv["unhealed"], 0, "the fold the heal reran is not also counted unhealed: %s" % cv)
         self.assertIn("state", self.doc(self.leaf)["folds"]["bgAll"]); self.assertEqual(em.cold_fold_reasons(self.leaf), {})
         self.assertEqual(km._converge_checkpoints(TS0 + 601), 0)
         self.fresh_process()
@@ -919,13 +920,14 @@ class KernelFolds(Base):
         self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("bgAll", 0), before + 1)
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2)
 
-    def test_a_heal_the_settle_write_lands_between_the_list_and_the_heal_is_not_counted_unhealed(self):
-        """The review of 2026-10-05: the converge pass (the pusher's) lists the leaf's cold folds, heals, and counted as
+    def test_a_heal_the_settle_write_lands_before_the_passs_own_heal_is_not_counted_unhealed(self):
+        """The review of 2026-10-05: the converge pass (the pusher's) listed the leaf's cold folds, healed, and counted as
         unhealed every listed fold its own heal did not rerun. The settle write's heal runs on the jobs thread since that
-        change and can land between the two: the pass's heal then finds nothing cold, and the fold, complete again, read as
-        one unhealed. A stub lands the jobs thread's heal there, deterministically (the real heal on a thread of its own,
-        joined, then the pass's own). Counted after the heal now, from what is still cold or has no cursor: none unhealed,
-        no heal of the pass's own, and the fold complete and written."""
+        change and could land between the two: the pass's heal then found nothing cold, and the fold, complete again, read
+        as one unhealed. A stub lands the jobs thread's heal just before the pass's own, deterministically (the real heal on
+        a thread of its own, joined, then the pass's own). The pass reads no cold list before its heal now: it counts what
+        its own heal's drop took and could not rerun (`_heal_cold_folds(p, mine)`), here nothing, so none unhealed, no heal
+        of the pass's own, and the fold complete and written."""
         self._converge_world({"bgAll": "bare"})
         km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)
         self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
