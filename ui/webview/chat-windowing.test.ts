@@ -52,7 +52,7 @@ test("sizeSpacers sizes BOTH spacers by hidden-unit count × avg, caching only a
 
 test("unitAtScroll maps a spacer by avg height and a rendered row by its data-unit", () => {
   assert.match(RENDER, /function unitAtScroll\(v: View, content: HTMLElement\): number/);
-  assert.match(RENDER, /if \(st < topH\) \{[^\n]*\n\s*if \(!v\.gapUnits\) return Math\.max\(0, Math\.floor\(st \/ avg\)\);/, "in the top spacer: the average when no gap sits in it, else a walk over the hidden units' heights (T386 stage 2)");
+  assert.match(RENDER, /if \(st < topY \+ topH\) \{[^\n]*\n\s*if \(!v\.gapUnits\) return Math\.max\(0, Math\.floor\(\(st - topY\) \/ avg\)\);/, "in the top spacer (from where it starts, topSpacerY: chat-regions.test.ts): the average when no gap sits in it, else a walk over the hidden units' heights (T386 stage 2)");
   assert.match(RENDER, /if \(st < t0 \+ c\.offsetHeight\) return lastUnit;/);                  // straddling a rendered row
   assert.match(RENDER, /return \(v\.winEnd \?\? 0\) \+ Math\.floor\(\(st - bTop\) \/ avg\);/);  // in the bottom spacer
 });

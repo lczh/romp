@@ -112,7 +112,11 @@ test("every gap height render.ts draws goes through the bound (2026-10-01): the 
   assert.match(RENDER, /"gap\|" \+ it\.lo \+ "\|" \+ it\.hi \+ "\|" \+ it\.before \+ "\|" \+ gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn, gapsMaxPx\(\)\) \+ "\|"/, "a gap unit's signature names the figure it is drawn at, so a change repaints it");
   assert.equal((RENDER.match(/v\.gapUnits\?\.get\(u\) \?\? gapHeight\(it, gapTurnPx\(items, v\.pxPerTurn, gapsMaxPx\(\)\)\)/g) || []).length, 2, "the two scroll walks' fallbacks");
   // the bound is a share of the limit MEASURED by a fixed probe, forgotten on a resize (a zoom change is one)
-  assert.match(RENDER, /function gapsMaxPx\(\): number \{ return layoutLimitPx\(\) \* GAPS_SHARE; \}/, "the share of the measured limit");
+  assert.match(RENDER, /function gapsMaxPx\(\): number \{ return gapsBoundHeld \?\? layoutLimitPx\(\) \* GAPS_SHARE; \}/, "the share of the measured limit (a served lab may hold another figure)");
+  // the held figure has ONE writer, the lab's hook: one assignment to it in render.ts, any assignment operator at any spacing (the
+  // declaration's initializer reads `gapsBoundHeld: number | null = null`, not counted), and it sits in the hook's body
+  assert.equal((RENDER.match(/\bgapsBoundHeld\s*(?:\?\?|\|\||&&|\*\*|<<|>>>?|[-+*\/%&|^])?=(?!=)/g) || []).length, 1, "one assignment to the held figure in render.ts");
+  assert.match(RENDER, /\(window as any\)\.__rompGapsBound = \(px: number \| null\): void => \{ gapsBoundHeld = /, "…in the lab's hook (__rompGapsBound)");
   assert.match(RENDER, /probe\.style\.cssText = "position:fixed;[^"]*height:1000000000px;[^"]*";\s*\n\s*document\.body\.appendChild\(probe\);\s*\n\s*const h = probe\.offsetHeight;\s*\n\s*probe\.remove\(\);/, "the probe: fixed, a billion px asked, the clamp read back, removed in the same task");
   assert.match(RENDER, /window\.addEventListener\("resize", \(\) => \{ layoutLimit = null; \}\);/, "a resize forgets the measure");
 });
@@ -133,10 +137,51 @@ test("the loops an unreachable end ran settle: each side acts on new information
   // reader; a reader's gesture over a gap in view asks; a reader inside a gap asks the page under them
   assert.match(RENDER, /if \(fillBuilding\) quietGaps\.add\(g\);\s*\n\s*gapObserver\?\.observe\(g\);/, "a fill-built gap element is marked quiet");
   assert.match(RENDER, /if \(quietGaps\.has\(g\)\) \{ quietGaps\.delete\(g\); continue; \}/, "…and its first observation asks nothing");
+  // …at the measured limit only (layoutLimitPx, 2026-10-02): the fill reads once, before either rebuild, whether the layout stands at the
+  // measured limit, and both its rebuilds mark their gaps quiet by that reading; below the limit a gap the fill leaves on screen asks on its
+  // first observation like any gap (one under the page the fill brought asks for the next page). Source pins on where the reading sits.
+  // Executed in tests/test_long_history_height_browser.py: the first rebuild's mark below the limit by LongHistoryHeight's near-end drop leg,
+  // the reading at the limit by UnreachableEndInsideAGapSettles, and the completion's ask (pinned below) by that class's parked leg, where
+  // the fill's gaps are quiet (below the limit, in LongHistoryHeight's parked leg, the rebuilt gap's first observation asks the same page,
+  // so that leg passes without the completion's ask). Pinned by source text only: the second rebuild's mark (the re-window when no row is
+  // left on screen; no assertion observes its mark), and the reading's 1 px tolerance (the 12x lab stands 1 px past the limit, so a reading
+  // without it reads the same there)
+  const fill = RENDER.slice(RENDER.indexOf("function fillInPlace("), RENDER.indexOf("\n}\n", RENDER.indexOf("function fillInPlace(")));
+  assert.match(fill, /const atLimit = content\.scrollHeight >= layoutLimitPx\(\) - 1;/, "the fill reads whether the layout stands at the measured limit");
+  assert.ok(fill.indexOf("const atLimit =") >= 0 && fill.indexOf("const atLimit =") < fill.indexOf("fillBuilding = atLimit"), "…before either rebuild");
+  assert.equal((fill.match(/fillBuilding = atLimit;[^\n]*\n\s*try \{/g) || []).length, 2, "both rebuilds (the window around the reader, and the re-window when no row is left on screen) mark their gaps quiet by that reading, each inside a try");
+  assert.equal((fill.match(/finally \{ fillBuilding = false; \}/g) || []).length, 2, "…and clear the mark however the rebuild ends");
+  assert.doesNotMatch(RENDER, /fillBuilding = true/, "no rebuild marks its gaps quiet whatever the layout");
   assert.match(RENDER, /if \(pointBefore != null && s\.regions\) \{ const gp = gapAt\(s\.regions, Math\.floor\(pointBefore\)\); if \(gp\) requestTurns\(sid, gp, "inside", pointBefore\); \}/, "the fill's completion asks the page holding the parked reader's turn");
   assert.match(RENDER, /if \(cls === "gesture" && gv && activeId\) askGapsInView\(activeId, gv, c\);/, "a reader's gesture asks for the gaps in view");
   assert.match(RENDER, /if \(gr\.height > 0 && gr\.top < rootTop - 0\.5 && gr\.bottom > rootBottom \+ 0\.5\) requestTurns\(sid, \{ lo, hi \}, "inside", lo \+ \(hi - lo\) \* \(\(rootTop - gr\.top\) \/ gr\.height\)\);/, "inside a gap: the turn under the viewport top");
   assert.match(RENDER, /const span = edge === "inside" && at != null \? pageAt\(gap, at, s\.pageTurns \?\? 16\) : pagesToAsk\(gap, edge === "top" \? "top" : "bottom", s\.pageTurns \?\? 16\);/, "…asked as the page holding it");
+});
+
+test("every walk over the units hidden above the window starts where the top spacer does (2026-10-02)", () => {
+  // topSpacerY (below #content's top padding) is the origin of all five: four walked from 0 and hiddenUnitTop from the spacer, so a pre-jump
+  // to the head gap's start rested 8 px above the gap, where no turn is named. Source pins on the walks' origin. Executed: preJumpIntoGap's
+  // by tests/test_landing_notice_browser.py road 16 (a cancelled jump into the hidden head gap rests where the thread's content starts, its
+  // point named); turnUnderTop's (its origin, a top in the padding read as the spacer's start, and the spacer's last 8 px) by
+  // tests/test_history_regions_browser.py ServedHiddenHeadPoint. The origins of unitAtScroll and yOfTurn are pinned by source text only:
+  // aligned with the others, each moves a mapping by the padding's 8 px
+  const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+  const body = (sig: string) => { const i = RENDER.indexOf(sig); assert.ok(i >= 0, sig + " is in render.ts"); return RENDER.slice(i, RENDER.indexOf("\n}\n", i)); };
+  assert.match(RENDER, /function topSpacerY\(v: View, content: HTMLElement\): number \{\s*\n\s*const top = v\.el\.querySelector\("\.tx-spacer-top"\) as HTMLElement \| null;\s*\n\s*return top \? top\.getBoundingClientRect\(\)\.top - content\.getBoundingClientRect\(\)\.top \+ content\.scrollTop : 0;/, "the origin: the spacer's own place in scroll space");
+  const hut = body("function hiddenUnitTop("), uas = body("function unitAtScroll("), tut = body("function turnUnderTop("), yot = body("function yOfTurn("), pj = body("function preJumpIntoGap(");
+  assert.match(hut, /let y = topSpacerY\(v, content\);\s*\n\s*for \(let k = 0; k < u; k\+\+\)/, "hiddenUnitTop");
+  assert.match(uas, /topY = topSpacerY\(v, content\);\s*\n\s*if \(st < topY \+ topH\)/, "unitAtScroll: inside the spacer by where it starts");
+  assert.match(uas, /return Math\.max\(0, Math\.floor\(\(st - topY\) \/ avg\)\);\s*\n\s*let y = topY;/, "…and walks from there, by its own heights or the average");
+  assert.match(tut, /topY = topSpacerY\(v, content\);\s*\n\s*if \(spacer && top < topY \+ topH\)/, "turnUnderTop: inside the spacer by where it starts");
+  assert.match(tut, /const at = Math\.max\(top, topY\), avg = v\.avgTurnH \?\? 60; let y = topY;/, "…walks from there, a top in the padding above it read as its start");
+  assert.match(yot, /let y = topSpacerY\(v, content\);/, "yOfTurn's hidden walk");
+  assert.match(pj, /if \(idx < \(v\.winStart \?\? 0\)\) y = topSpacerY\(v, content\) \+ hiddenHeight\(v, 0, idx, avg\) \+ frac \* own;/, "preJumpIntoGap's hidden road");
+  const walks: [string, string][] = [["unitAtScroll", uas], ["turnUnderTop", tut], ["yOfTurn", yot]];
+  for (const [name, b] of walks) {
+    const starts = Array.from(b.matchAll(/let y = ([^;]+);/g), (m) => m[1]);
+    assert.ok(starts.length > 0, name + " has a walk to read");
+    for (const at of starts) assert.ok(["topY", "topSpacerY(v, content)", "bTop"].includes(at), name + " starts a walk at " + at + ", not at a spacer's own place");
+  }
 });
 
 test("the page a gap asks for: scrolling up meets the bottom edge (the last aligned page, clipped to the gap); scrolling down the top edge", () => {

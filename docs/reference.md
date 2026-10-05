@@ -4051,8 +4051,10 @@ announces `chatProto2` in its `caps`:
   turn under the viewport top, and a re-window keeps the reader's offset into
   a hidden unit, so the jump stays where it was dropped; where the end is still
   out of reach (rows taller than the limit) the page settles: a re-window never
-  runs again on the echo of its own write, a gap element a fill rebuilt asks
-  nothing on its first observation, and the fill itself asks for the page under
+  runs again on the echo of its own write, a gap element a fill rebuilt while
+  the layout stands at the measured limit asks nothing on its first observation
+  (below the limit a gap a fill leaves on screen next to its page asks for a
+  page of it, so the pane fills), and the fill itself asks for the page under
   a reader still parked in a gap; a fill anchors on the
   first row that intersects the viewport, whatever the sign of its top; with
   no row on screen (or that row gone from the rebuild) it names the point
