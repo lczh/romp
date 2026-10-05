@@ -388,7 +388,7 @@ def _unkeyed_field_permits():
         return at, at + len(src)
     text = Path(inspect.getsourcefile(km._chat_build_sig)).read_text(encoding="utf-8")
     key = (span(km._chat_sig_deps)[1], span(km._chat_build_sig)[1])
-    gate = next(((i, i + 1) for i, l in enumerate(text.splitlines(), 1) if l.startswith("_JOBS_GATE_ROW_FIELDS = (")), None)
+    gate = next(((i, i + 1) for i, l in enumerate(text.split("\n"), 1) if l.startswith("_JOBS_GATE_ROW_FIELDS = (")), None)
     ctx = (key, span(km._compact_suggest_tick), span(km.Sessions.live)) + ((gate,) if gate else ())
     return text, {"lastTool": (key,), "ctxTokens": ctx}
 
