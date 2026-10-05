@@ -13748,8 +13748,10 @@ def _persist_checkpoints(now):
     session, so a pass running when SIGTERM lands finishes the one session it is writing and stops, rather than writing the
     same dirty set the exit's own checkpoint phase writes (two writers on one interpreter lock). The exit does not wait for it:
     a fold document both write ends as one whole document (each write stages to a tmp of its own thread and renames it into
-    place), an assembly document of the same leaf waits on the leaf's writer lock for the one write in flight, and whatever
-    the pass leaves is still dirty for the exit's phase."""
+    place), the exit's assembly document of the same leaf waits on the leaf's writer lock for what is left of its own window
+    and skips the leaf when the write in flight outlasts it, and whatever the pass leaves is still dirty for the exit's phase.
+    The session in flight starts no document refresh once the stand-down is set (_asm_refresh_maybe starts a whole-leaf
+    parse on a thread of its own, which would compete with the exit for the interpreter lock until the process ends)."""
     written = 0
     mono = time.monotonic()
     for s in _sessions(now):
@@ -13796,7 +13798,7 @@ def _persist_checkpoints(now):
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
         #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
         #                                          atom); never a parse of its own (the settle reads no leaf whole)
-            elif settle_due:
+            elif settle_due and not _EXIT_STAND_DOWN.is_set():   # the exit has begun: no whole-leaf parse thread starts now
                 _asm_refresh_maybe(leaf, sid)  # a RESTORED entry writes nothing above: at its settle, once the tail past its
         #                                          document's cut has reached the churn bound's share, the document is refreshed
         #                                          from a whole parse on a thread of its own (2026-10-01: a session restored at
@@ -30104,26 +30106,36 @@ def _kernel_sample_tick(now=None):
 # at most 4 s, so 2.0 s at the default and 3.2 s at the manager's 8 s. The rest of the grace holds what the exit cannot bound:
 # the handler's own entry (the main thread wakes from the server's select and takes the interpreter lock), one item's
 # overrun per phase, and the process teardown after the exit call, which grows with the kernel's size. The SDK drain's
-# reserve (EXIT_DRAIN_BUDGET_S, 35 percent of the deadline) is held back from the start: every phase before the drain ends
+# reserve (EXIT_DRAIN_BUDGET_S, 35 percent of the deadline and never under EXIT_DRAIN_FLOOR_S, the top of the drain times
+# recorded with session hosts on, nor over the deadline) is held back from the start: every phase before the drain ends
 # by the pre-drain line (the deadline less the reserve), so an overrun shrinks the later best-effort phases, never the
-# drain, and the drain is handed what the deadline has left. The three phase budgets are CAPS inside the work window
+# drain, and the drain is handed what the deadline has left. The reserve is smaller than the drain's old share of the grace
+# (1.12 s at the manager's 8 s, where the old share was 2.625 s; 0.9 s at the default 5 s, where it was 1.575 s): the
+# drain is handed every second the earlier phases leave, but a slow drain past its reserve now meets the deadline sooner
+# than it met the old share. The three phase budgets are CAPS inside the work window
 # before the drain (priming 15 percent, checkpoint writes 45, assembly documents 25; the rest is the memos and the listing).
 # Before this the four budgets were shares of the grace that summed to 94 percent of it, counted from the drain's own start
 # (after the broadcast and the audit read), with the memos, the listing and the reap left out, and the cut row was written
 # last: a busy exit met the SIGKILL and lost the one row that would have said so. An explicit ROMP_EXIT_DEADLINE_S or
-# ROMP_EXIT_*_BUDGET_S still sets one outright (a phase budget as its cap). _drain_and_exit reads the module values at call
-# time, so a test patches them.
+# ROMP_EXIT_*_BUDGET_S still sets one outright (a phase budget as its cap). The environment is read ONCE, when the module
+# loads (_EXIT_BUDGETS below); _drain_and_exit reads the module values at call time, so a test patches them.
 EXIT_GRACE_S = float(os.environ.get("ROMP_SHUTDOWN_GRACE_MS", "5000")) / 1000.0
+
+
+EXIT_DRAIN_FLOOR_S = 0.9                  # the drain's reserve is never under this: the top of the drain times recorded with session
+#                                           hosts on (0.1 to 0.9 s), so the default 5 s grace's 0.7 s share is raised to it
 
 
 def _exit_budgets(grace_s, env=None):
     """The exit's deadline and budgets in seconds for a SIGTERM grace of `grace_s`, read from `env` (the process environment
     by default): {deadline, drain, work, prime, ckpt, asm}. `work` is the window before the drain (the deadline less the
     drain's reserve, never below zero); the three phase budgets are shares of it and caps, each phase also ending at the
-    pre-drain line. Pure, so the shares are pinned for any grace without loading a kernel per value."""
+    pre-drain line. The reserve is 35 percent of the deadline, floored at EXIT_DRAIN_FLOOR_S and capped at the deadline; an
+    explicit ROMP_EXIT_DRAIN_BUDGET_S sets it outright. Pure, so the shares are pinned for any grace without loading a kernel
+    per value; the module calls it once, at load."""
     env = os.environ if env is None else env
     deadline = float(env.get("ROMP_EXIT_DEADLINE_S") or min(4.0, 0.40 * float(grace_s)))
-    drain = float(env.get("ROMP_EXIT_DRAIN_BUDGET_S") or 0.35 * deadline)
+    drain = float(env.get("ROMP_EXIT_DRAIN_BUDGET_S") or min(deadline, max(EXIT_DRAIN_FLOOR_S, 0.35 * deadline)))
     work = max(0.0, deadline - drain)
     return {"deadline": deadline, "drain": drain, "work": work,
             "prime": float(env.get("ROMP_EXIT_PRIME_BUDGET_S") or 0.15 * work),
@@ -30133,7 +30145,7 @@ def _exit_budgets(grace_s, env=None):
 
 _EXIT_BUDGETS = _exit_budgets(EXIT_GRACE_S)
 EXIT_DEADLINE_S = _EXIT_BUDGETS["deadline"]             # every phase of the exit ends by the handler's entry plus this (plus one item)
-EXIT_DRAIN_BUDGET_S = _EXIT_BUDGETS["drain"]            # held back for the SDK drain (0.1 to 0.9 s measured with session hosts on)
+EXIT_DRAIN_BUDGET_S = _EXIT_BUDGETS["drain"]            # held back for the SDK drain (0.1 to 0.9 s measured with session hosts on; floored there)
 EXIT_PRIME_BUDGET_S = _EXIT_BUDGETS["prime"]            # the exit's fold priming, a cap
 EXIT_CKPT_WRITE_BUDGET_S = _EXIT_BUDGETS["ckpt"]        # its fold checkpoint writes, a cap
 EXIT_ASM_BUDGET_S = _EXIT_BUDGETS["asm"]                # its assembly-document writes, a cap
@@ -30164,11 +30176,12 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phas
            "reason": str(audit_reason or "")}
     if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints and assembly documents
         row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # written), drainS (the sessions closed)
-    row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU at the end of its life
+    row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU when the row is built (the exit's start, 2026-10-05)
     return row
 
 
 EXIT_DONE_PHASES = ("rowS", "memosS", "listS", "primeS", "writeS", "asmS", "ckptS", "drainS")
+EXIT_DONE_COUNTS = ("ckptWritten", "ckptLeft", "primed", "primeSkipped", "asmSkipped", "asmBusy")
 
 
 def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="", phases=None, counts=None,
@@ -30182,19 +30195,23 @@ def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="",
     happened, `finalReason` only when the verdict decided after the drain differs from the row's (the manager's stop note
     landing during the drain), the phases' seconds (EXIT_DONE_PHASES: rowS the cut row, memosS, listS the session listing,
     primeS, writeS the checkpoint writes, asmS, ckptS the window from the priming's start to the assembly documents' end as
-    older cut rows carried it, drainS), the checkpoint counts, and the deadline and the seconds the exit had taken. It carries
+    older cut rows carried it, drainS), the checkpoint counts (EXIT_DONE_COUNTS; asmBusy the assembly documents skipped
+    because the leaf's key lock stayed taken past the phase's end), and the deadline and the seconds the exit had taken. A
+    drain that raised (`err`) leaves stopped, unjoined, reaped and drainCutTurns out: it returned nothing, so the cut row's
+    prediction stands and the record says drainError. It carries
     none of cutTurns, reason, auditT, bootSettled or bootHealth, so every reader that keys on those reads the cut row alone,
     exactly as before (_append_boot_settled's prevCutT, _consumed_audit_t, _last_deploy_restart_t, the CLI's readers); the
     fold that joins the two is cli/restart_metrics.py's fold_exit_done. Append-only on purpose: the ledger is shared by every
     kernel under the root, and a rewrite of the cut row could drop a sibling's concurrent append."""
     d = drain_res if isinstance(drain_res, dict) else {}
     row = {"t": int(now if now is not None else time.time()), "pid": os.getpid(), "exitDone": True,
-           "cutT": cut_row.get("t"),
-           "stopped": int(d.get("stopped") or 0),
-           "unjoined": int(d.get("unjoined") or 0),
-           "reaped": int(d.get("reaped") or 0)}
-    if list(cut_turns or []) != list(cut_row.get("cutTurns") or []):
-        row["drainCutTurns"] = list(cut_turns or [])
+           "cutT": cut_row.get("t")}
+    if not err:                         # a drain that RAISED returned nothing: its counts and the turns it cut are unknown, so
+        row.update(stopped=int(d.get("stopped") or 0),   # the done row leaves them out and the cut row's prediction (and
+                   unjoined=int(d.get("unjoined") or 0),   #  session count) stands, where an empty list and 0 stopped
+                   reaped=int(d.get("reaped") or 0))       #  overrode a prediction that named a cut
+        if list(cut_turns or []) != list(cut_row.get("cutTurns") or []):
+            row["drainCutTurns"] = list(cut_turns or [])
     if err:
         row["drainError"] = err.strip().splitlines()[-1][:200]
     if reason_err:
@@ -30204,7 +30221,7 @@ def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="",
     if isinstance(phases, dict):
         row["phases"] = {k: phases[k] for k in EXIT_DONE_PHASES if k in phases}
     if isinstance(counts, dict):
-        row.update({k: int(v) for k, v in counts.items() if k in ("ckptWritten", "ckptLeft", "primed", "primeSkipped", "asmSkipped")})
+        row.update({k: int(v) for k, v in counts.items() if k in EXIT_DONE_COUNTS})
     if deadline_s is not None:
         row["deadlineS"] = round(float(deadline_s), 2)
     if elapsed_s is not None:
@@ -30214,8 +30231,9 @@ def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="",
 
 def _kernel_process_sample() -> dict:
     """{rssKb, cpuS} of THIS kernel process (T304): its resident size and CPU seconds, sampled at the two
-    events the restart ledger already records, the exit (the cut row: the process at the end of its life)
-    and the settled boot (the boot row: the process just born), so the kernel's own growth between restarts
+    events the restart ledger already records, the exit (the cut row: the process as its exit starts, since the cut row
+    is written before the exit's work, 2026-10-05) and the settled boot (the boot row: the process just born), so the
+    kernel's own growth between restarts
     is a series with no sampler of its own. _process_stats reads /proc (macOS: ru_maxrss, the peak). Never
     raises; an unreadable process is an empty dict, and the row simply lacks the two fields."""
     try:
@@ -30227,13 +30245,16 @@ def _kernel_process_sample() -> dict:
 
 def _append_restart_cut(row):
     """Best-effort append in a dying process: flushed line-buffered write, never raises — the
-    ledger must not be able to break the restart itself (the audit's discipline)."""
+    ledger must not be able to break the restart itself (the audit's discipline). Returns whether the
+    line landed (the exit path, 2026-10-05: an exit whose cut row failed to append writes its late full
+    row after the drain instead of a done row no reader could join)."""
     try:
         with open(RESTART_CUTS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
             f.flush()
+        return True
     except Exception:
-        pass
+        return False
 
 
 _BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t, "censusDone": t, "attachDone": t} — see _mark_boot
@@ -30574,10 +30595,17 @@ def _consumed_audit_t():
     restart it asked for must not name a later, anonymous cut too: a quiet p2p row stays inside its
     20-minute window long after its restart landed, so an unaudited SIGTERM 15 minutes later
     inherited its reason and even counted as a deploy for the cool-down (T240 review)."""
+    return _consumed_audit()[0]
+
+
+def _consumed_audit():
+    """(t, pid) of the audit row the NEWEST cut row already joined and of the kernel that wrote that cut row ((0, None)
+    for none): _consumed_audit_t's walk, with the consumer's pid, so the reader can tell a request this kernel's
+    predecessor spent from one a sibling kernel under the same root spent on the same restart (_recent_restart_audit)."""
     try:
         lines = RESTART_CUTS_FILE.read_text().strip().splitlines()
     except Exception:
-        return 0
+        return 0, None
     for line in reversed(lines[-50:]):
         try:
             r = json.loads(line)
@@ -30587,8 +30615,8 @@ def _consumed_audit_t():
             # the newest cut that CONSUMED a row — walked back past anonymous cuts (a service stop, a
             # Ctrl+C, a bare kill), which used to reset consumption to 0 and let the next anonymous cut
             # re-inherit the still-in-window row (review find: rows alternated consumed/anonymous/consumed)
-            return int(r["auditT"])
-    return 0
+            return int(r["auditT"]), r.get("pid")
+    return 0, None
 
 
 def _recent_restart_reason(window=90, now=None, started=None):
@@ -30639,7 +30667,13 @@ def _recent_restart_audit(window=90, now=None, started=None):
         may still hold it), a restart or `refresh` note as the park's delivery. The settled rule reads
         predecessors' parks only;
       - a row with an action is a request and wins, unless a cut row already consumed it: spent on the
-        cut it asked for, this cut is anonymous;
+        cut it asked for, this cut is anonymous. The exception is a request ANOTHER kernel's cut row
+        consumed while the manager's note for THIS pid lies above it: one restart signaled both kernels
+        under the root, and since the exit path (2026-10-05) a sibling's cut row lands milliseconds after
+        its signal, before this kernel reads the tail, where it used to land after the sibling's drain.
+        The request still answers then, and this cut row consumes it too, as both did before. A later,
+        separate signal the manager noted for this kernel alone, inside the window and above a request a
+        sibling spent, is read the same way: the rows cannot tell the two apart;
       - a `when: quiet` request is pending until the restart it asked for lands, up to the far manager's
         15-minute backstop, so its window is RESTART_EXPECT_MAX_S and it names a cut well past the
         immediate window (T238); any other row older than the window ends the walk;
@@ -30674,7 +30708,7 @@ def _recent_restart_audit(window=90, now=None, started=None):
         tail = (jd.STATE / "restart-audit.jsonl").read_text().strip().splitlines()
         if not tail:
             return None
-        consumed = _consumed_audit_t()
+        consumed, consumed_pid = _consumed_audit()
         t0 = int(now if now is not None else time.time())
         born = int(_STARTED if started is None else started)
         via_manager = None                                  # the newest manager-sigterm note about us, if any
@@ -30718,6 +30752,9 @@ def _recent_restart_audit(window=90, now=None, started=None):
             if t0 - rec["t"] > win:
                 break                                       # older rows are older still
             spent = bool(consumed) and rec["t"] == consumed  # a cut row already joined it (auditT)
+            if spent and consumed_pid not in (None, os.getpid()) and isinstance(via_manager, dict) \
+                    and via_manager.get("pid") == os.getpid():
+                spent = False                               # a sibling's cut spent it on the restart whose note for us lies above
             if rec["t"] < born:
                 # a predecessor's row; only a parked quiet request survives the kernel that filed it
                 if quiet and not park_settled and not spent:
@@ -79264,7 +79301,11 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
     handed what the deadline has left (at least 0.25 s); after it the unrequested verdict is decided exactly as before (its
     wait, its `signal` row) and the DONE row (_exit_done_row) records the drain's result, the phases and that verdict when
     it differs; the judges' child is joined with what the deadline has left. One line per phase on the log
-    (_exit_phase_log). A cut row that cannot be built at the start is written after the drain as before, with no done row.
+    (_exit_phase_log). A cut row that cannot be built at the start, or whose append fails (_append_restart_cut returns
+    False), is written after the drain from the drain's own result, as the exit's one row: complete (`exitDone`, the phases
+    and counts), its t the handler's entry, and no done row. The checkpoint writes start only before their line (no write
+    starts past it), and the assembly documents wait for a leaf's key lock only until their line, a wait that runs out
+    counted as `asmBusy`.
     The quiesce (_exit_quiesce) runs first, and the whole body sits inside one try whose finally reaches the process exit,
     so no raise leaves a kernel with collection off and its loops stopped holding the port until the SIGKILL."""
     if t0 is None:
@@ -79295,7 +79336,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
             _exit_log("romp-kernel: ending the judges' child failed\n")
         # the CUT ROW, first, with everything knowable before the drain: a SIGKILL anywhere after this line still leaves it
         _t = time.monotonic()
-        cut_row = None
+        cut_row, _cut_landed = None, False
         try:
             provisional = reason
             if not reason and signum is not None:
@@ -79318,7 +79359,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
             if planned_err:
                 cut_row["cutTurnsError"] = planned_err       # the prediction could not be read; the done row names what was cut
             cut_row["expectsDone"] = True                    # a done row follows when the exit completes (_exit_done_row)
-            _append_restart_cut(cut_row)
+            _cut_landed = _append_restart_cut(cut_row)       # False: the line never landed, so the late full row stands in for it
         except Exception:
             cut_row = None
             _exit_log("romp-kernel: the exit's cut row could not be built at its start; it is written after the drain: %s\n"
@@ -79372,7 +79413,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
             _first = [p for p in dict.fromkeys(_primed) if p in _held]
             _taken = set(_first)
             _ckpt_order = _first + [p for p in _dirty if p not in _taken]
-            _ckpt_n = em.checkpoint_write_dirty(paths=_ckpt_order, budget_s=max(0.0, _write_end - time.monotonic()))
+            if time.monotonic() < _write_end:   # no write STARTS past the pre-drain line or a spent cap (the writer always attempts
+                #                                 its first path, so a zero budget there still wrote one whole document)
+                _ckpt_n = em.checkpoint_write_dirty(paths=_ckpt_order, budget_s=max(0.0, _write_end - time.monotonic()))
             _ckpt_left = len(em.checkpoint_dirty())
         except Exception:
             _exit_log("romp-kernel: the exit's checkpoint writes failed: %s\n" % traceback.format_exc().strip().splitlines()[-1][:200])
@@ -79380,16 +79423,21 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
         _phase("writeS", "checkpoints", _t, _write_end - _t, "%d written, %d left dirty" % (_ckpt_n, _ckpt_left))
         _t = time.monotonic()
         _asm_end = min(_t + float(EXIT_ASM_BUDGET_S), _pre_drain)
-        _asm_skipped = 0
+        _asm_skipped = _asm_busy = 0
         try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
             for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; BOUNDED (the periodic
                 if time.monotonic() > _asm_end:   # writer keeps them close; what is left waits for the next settle)
                     _asm_skipped += 1; continue
-                em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_stored_tree(_s["path"], _s["sid"]))   # the store's
-        except Exception:                     #  tree gives the turns section (stage 4c); a turnless document is rewritten with its turns at the next settle
+                _why = []                     # the leaf's key lock is waited for only until the phase's end: its holder can be another
+                #                               thread's whole document write (14 s at 110 MB in a lab), longer than the grace
+                em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_stored_tree(_s["path"], _s["sid"]),
+                                        reason_out=_why, lock_timeout=max(0.0, _asm_end - time.monotonic()))   # the store's
+                if "busy" in _why:            #  tree gives the turns section (stage 4c); a turnless document is rewritten with its turns
+                    _asm_busy += 1            #  at the next settle; a busy leaf keeps its standing document until its next settle
+        except Exception:
             pass
-        _counts.update(asmSkipped=_asm_skipped)
-        _phase("asmS", "assembly", _t, _asm_end - _t, "%d left unwritten" % _asm_skipped)
+        _counts.update(asmSkipped=_asm_skipped, asmBusy=_asm_busy)
+        _phase("asmS", "assembly", _t, _asm_end - _t, "%d left unwritten, %d busy" % (_asm_skipped, _asm_busy))
         _phases["ckptS"] = round(time.monotonic() - _t_prime, 2)   # the window older cut rows carried as ckptS
         _t = time.monotonic()
         _drain_timeout = max(0.25, _end - _t)   # what the deadline has left: an overrun above shrank the phases, never this
@@ -79423,14 +79471,19 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
                         reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
                         _exit_log("romp-kernel: the signal's reason helper failed, the cut row carries the "
                                   "plain verdict and reasonError: %s\n" % reason_err)
+                if cut_row is not None and not _cut_landed:
+                    cut_row = None            # built but never on disk: a done row would join nothing, so the late full row is written
                 if cut_row is not None:
                     done = _exit_done_row(cut_row, res, list(_d.get("cutTurns") or []) + _codex_cut_turns(), reason,
                                           err=err, reason_err=reason_err, phases=_phases, counts=_counts,
                                           deadline_s=_deadline_s, elapsed_s=time.monotonic() - t0)
                     _append_restart_cut(done)
-                else:                         # the row could not be built at the start: written now, as before, with no done row
+                else:                         # no cut row on disk from the start (unbuilt, or its append failed): written now, from
+                    #                           the drain's own result, as the one row of this exit, complete (exitDone: no done row
+                    #                           follows it, and every reader reads it as an exit that finished), its t the entry's
                     row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
                                            audit_reason=reason, phases=_phases)
+                    row["t"] = int(t0_wall)           # the outage clock starts at the handler's entry, as the early row's does
                     row["cutTurns"].extend(_codex_cut_turns())   # the Codex work this exit cuts too: open turns and running compactions (2026-09-22, 2026-09-23)
                     if audit:
                         row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
@@ -79438,6 +79491,10 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
                         row["drainError"] = err.strip().splitlines()[-1][:200]
                     if reason_err:
                         row["reasonError"] = reason_err     # the reason helper's fault: no `signal` row was filed
+                    row["exitDone"] = True
+                    row["phases"] = {k: _phases[k] for k in EXIT_DONE_PHASES if k in _phases}
+                    row.update({k: int(v) for k, v in _counts.items() if k in EXIT_DONE_COUNTS})
+                    row["deadlineS"], row["elapsedS"] = round(_deadline_s, 2), round(time.monotonic() - t0, 2)
                     _append_restart_cut(row)
             except Exception:
                 _exit_log("romp-kernel: cut ledger failed: %s\n" % traceback.format_exc())

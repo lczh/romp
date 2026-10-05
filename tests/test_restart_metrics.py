@@ -255,6 +255,59 @@ class BootJoin(unittest.TestCase):
         self.assertIs(new.pop("exitDone", None), True)
         self.assertEqual(new, old, "the late verdict and the drain's count are the record's")
 
+    def test_the_record_carries_the_exits_timings_and_the_predictions_fault(self):
+        """The done row's phases and counts reach the record (the reader folded them and kept none: the review's round two),
+        a cut row's cutTurnsError rides along, and the exit's late full row (a cut row carrying exitDone itself) is complete."""
+        rows = [{"t": 1000, "pid": 7, "cutTurns": [], "stopped": 2, "expectsDone": True, "cutTurnsError": "RuntimeError: synthetic"},
+                {"t": 1003, "pid": 7, "exitDone": True, "cutT": 1000, "stopped": 2,
+                 "phases": {"rowS": 0.0, "primeS": 0.3, "ckptS": 0.9, "drainS": 0.4},
+                 "ckptWritten": 4, "ckptLeft": 2, "primed": 1, "primeSkipped": 1, "asmSkipped": 0, "asmBusy": 1,
+                 "deadlineS": 3.2, "elapsedS": 2.9},
+                {"t": 2000, "pid": 8, "cutTurns": [{"sid": SID, "name": "web"}], "stopped": 1, "exitDone": True,
+                 "phases": {"drainS": 0.2}, "ckptS": 0.5, "drainS": 0.2, "deadlineS": 3.2}]   # a late full row
+        a, b = rm.parse_restarts(rows)
+        self.assertEqual(a["phases"], {"rowS": 0.0, "primeS": 0.3, "ckptS": 0.9, "drainS": 0.4})
+        self.assertEqual((a["ckptWritten"], a["ckptLeft"], a["primed"], a["primeSkipped"], a["asmSkipped"], a["asmBusy"],
+                          a["deadlineS"], a["elapsedS"]), (4, 2, 1, 1, 0, 1, 3.2, 2.9))
+        self.assertEqual((a["exitDone"], a["cutTurnsError"]), (True, "RuntimeError: synthetic"))
+        self.assertEqual((b["exitDone"], b["cutTurns"], b["phases"], b["deadlineS"]), (True, 1, {"drainS": 0.2}, 3.2),
+                         "the late full row is an exit that finished, not an older kernel's row")
+        self.assertIsNone(b["cutTurnsError"])
+
+    def test_a_killed_exit_is_measured_never_clean_and_counted_apart(self):
+        """An exit killed after its cut row (no done row) counts the turns its cut row predicted and is never clean: with an
+        empty prediction the head read it as a clean restart. When its prediction failed too (cutTurnsError) its turns are
+        unknown, as a crash boot's are, so it leaves both sides of the rate. The rate, over a completed exit and cut rows
+        with no done row, with and without the fault."""
+        web, api = {"sid": SID, "name": "web"}, {"sid": SID2, "name": "api"}
+        completed = [{"t": D0 + 100, "pid": 7, "cutTurns": [], "stopped": 1, "expectsDone": True},
+                     {"t": D0 + 102, "pid": 7, "exitDone": True, "cutT": D0 + 100, "stopped": 1, "drainCutTurns": [web]}]
+        killed = {"t": D0 + 200, "pid": 8, "cutTurns": [api], "stopped": 1, "expectsDone": True}            # predicted one cut
+        killed_empty = {"t": D0 + 300, "pid": 9, "cutTurns": [], "stopped": 1, "expectsDone": True}         # predicted none
+        killed_fault = {"t": D0 + 400, "pid": 10, "cutTurns": [], "stopped": 1, "expectsDone": True,
+                        "cutTurnsError": "RuntimeError: synthetic predicate fault"}                         # no prediction
+
+        def bucket(rows):
+            (b,) = rm.build_buckets(rm.parse_restarts(rows), [], [], [], [], [], {}, "week", "2026-09-10", TZ)
+            return b
+        b = bucket(completed + [killed, killed_empty])
+        self.assertEqual((b["restarts"], b["cutTurns"], b["cleanRestarts"], b["killedExits"], b["measuredRestarts"],
+                          b["unmeasuredRestarts"]), (3, 2, 0, 2, 3, 0),
+                         "the killed exits are measured by their predictions, and neither is clean (the head counted one)")
+        self.assertEqual(b["cutTurnsPerRestart"], 0.67, "2 turns over 3 measured restarts")
+        b = bucket(completed + [killed_fault])
+        self.assertEqual((b["restarts"], b["cutTurns"], b["cleanRestarts"], b["killedExits"], b["measuredRestarts"],
+                          b["unmeasuredRestarts"]), (2, 1, 0, 1, 1, 1),
+                         "with no prediction the killed exit's turns are unknown: out of the measured restarts")
+        self.assertEqual(b["cutTurnsPerRestart"], 1.0, "1 turn over the 1 measured restart (the head: 0.5, and 1 clean)")
+        b = bucket([dict(completed[0], cutTurnsError="RuntimeError: synthetic"), completed[1]])
+        self.assertEqual((b["measuredRestarts"], b["cutTurnsPerRestart"]), (1, 1.0),
+                         "a completed exit's drain result stands in for a failed prediction: measured")
+        present = {k: {"present": True} for k in ("restartCuts", "restartAudit", "sessionEvents", "turns")}
+        text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
+                           "buckets": [bucket(completed + [killed, killed_empty])], "live": {"skipped": True}})
+        self.assertIn("clean restarts 0 · boots with no cut row 0 · killed after the cut row 2", text)
+
     def test_rotated_predecessor_is_read_first(self):
         state = Path(tempfile.mkdtemp())
         _write(state, "turns.jsonl.1", [{"t": 1, "sid": SID}])
@@ -365,7 +418,8 @@ class Document(unittest.TestCase):
         self.assertIn("continuation notices 3 · redo turns 1 · redo cost $0.50 of $15.50 in the window · redo tokens 3,700", text)
         self.assertIn("feed to result n=2 p50 10.0 s p90 37.0 s", text)
         self.assertIn("machine cuts crash 1, restart 1", text)
-        self.assertIn("kernel process at its exits: resident n=2 p50 2048 MB p90 4096 MB max 4096 MB · cpu n=2 p50 300 s", text)
+        self.assertIn("kernel process as its exits began: resident n=2 p50 2048 MB p90 4096 MB max 4096 MB · cpu n=2 p50 300 s", text)
+        self.assertNotIn("killed after the cut row", text, "no exit was killed after its row: the count is left off the line")
         self.assertIn("live: skipped", text)
         self.assertIn("note: Redo cost", text)
         self.assertNotIn("MISSING", text)

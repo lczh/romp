@@ -1258,6 +1258,32 @@ class RequestOnRecord(unittest.TestCase):
                              "reason": "stop", "trigger": "stop"})
                 self.assertEqual(self._reason(), "manager-sigterm: stop", "the note answers, not the verdict")
 
+    def test_a_request_a_sibling_kernels_cut_spent_still_names_this_kernels_cut_under_its_own_note(self):
+        # one restart-all signals two kernels under one root: the manager notes each pid before its SIGTERM, and the sibling's
+        # cut row, written at its exit's START (2026-10-05), consumes the request milliseconds later, before this kernel reads
+        # the tail. With the manager's note for THIS pid above the request, the request still names this cut (the base read it
+        # before the sibling's row landed, after its drain); with no such note, or spent by this pid's own cut, it stays spent
+        sib = os.getpid() + 100000
+        request = {"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update", "pid": 7}
+        sib_note = {"t": 1001, "action": "manager-sigterm", "kernel": "aux", "pid": sib, "reason": "restart", "trigger": "restart-all"}
+        our_note = {"t": 1001, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(), "reason": "restart",
+                    "trigger": "restart-all"}
+
+        def spent_by(pid):
+            km.RESTART_CUTS_FILE.write_text(json.dumps({"t": 1001, "pid": pid, "cutTurns": [], "auditT": 1000,
+                                                        "expectsDone": True}) + "\n")
+        spent_by(sib)
+        self._write(request, sib_note, our_note)
+        self.assertEqual(self._reason(), "kernel-asks-manager-restart-all: self-update",
+                         "the sibling spent it on the restart whose note for this pid lies above it")
+        self.assertEqual((km._recent_restart_audit(window=90, now=1002, started=900) or {}).get("t"), 1000,
+                         "and the row comes back, so this cut row consumes it too")
+        self._write(request, sib_note)
+        self.assertEqual(self._reason(), "", "no note for this pid above it: the spent request names nothing")
+        spent_by(os.getpid())
+        self._write(request, sib_note, our_note)
+        self.assertEqual(self._reason(), "manager-sigterm: restart-all", "spent by this pid's own cut: the note answers")
+
 
 class ParentGone(unittest.TestCase):
     """_parent_watch: the manager that spawned the kernel is gone, and the kernel follows it. That exit
@@ -1419,6 +1445,33 @@ class CodexCutTurns(unittest.TestCase):
         rows = self._exit(sdk=LiveDrain(), codex=cx)
         self.assertEqual(len(rows), 1, "the exit still writes its one row")
         self.assertEqual(rows[0]["cutTurns"], [{"sid": SID, "name": "web"}], "with the SDK drain's cuts in it")
+
+    def test_the_codex_turns_are_in_the_cut_row_as_written(self):
+        # the folded record takes the done row's list, which reads the Codex turns again after the drain, so the tests above
+        # pass with the cut row's own Codex turns missing; an exit killed before its done row leaves the cut row alone, and
+        # that row as it landed on disk must carry them (with a prediction from the SDK backend and without one)
+        cx = mock.Mock(spec=["inflight_turns"])
+        codex = {"sid": self.CX_SID, "name": "api", "backend": "codex"}
+        cx.inflight_turns.return_value = [codex]
+        web = {"sid": SID, "name": "web"}
+
+        class Predicting:
+            sessions = {SID: object()}
+
+            def would_cut(inner):
+                return [dict(web)]
+
+            def drain(inner, timeout):
+                return {"cutTurns": [dict(web)], "stopped": 1}
+        for sdk, want in ((Predicting(), [web, codex]), (LiveDrain(), [codex])):
+            with self.subTest(sdk=type(sdk).__name__):
+                if km.RESTART_CUTS_FILE.exists():
+                    km.RESTART_CUTS_FILE.unlink()
+                km._EXIT_ONCE = threading.Lock()
+                self._exit(sdk=sdk, codex=cx)
+                first = _raw_rows(km.RESTART_CUTS_FILE)[0]
+                self.assertEqual(first["cutTurns"], want, "the Codex turns in the cut row as written, before the drain")
+                self.assertIs(first.get("expectsDone"), True, "the row an exit killed before its done row leaves")
 
 
 class ExitPath(unittest.TestCase):
@@ -1584,11 +1637,15 @@ class ExitPath(unittest.TestCase):
                     gc.callbacks.remove(hook)
                 stand = getattr(km, "_EXIT_STAND_DOWN", None)
                 inner.state = (gc.isenabled(), km._GC_FREEZE.enabled, km._LOOPS_STOP.is_set(), stand is not None and stand.is_set())
+                inner.frozen = gc.get_freeze_count()
                 return {"cutTurns": []}
         be = Cycles()
         _fire(self, be, quiesce=None)
         self.assertEqual(starts, [], "no collection started during the drain (the base collected %d times)" % len(starts))
         self.assertEqual(be.state, (False, False, True, True), "collector off, controller off, loops stopped, the stand-down set")
+        self.assertGreater(be.frozen, frozen_before, "and the heap frozen: every object tracked when the exit began moved to the "
+                                                     "permanent generation, so a collection anyone still issues walks only what "
+                                                     "the exit allocates")
 
     def test_the_quiesce_comes_before_the_broadcast_and_the_broadcast_before_the_drain(self):
         order = []
@@ -1661,13 +1718,19 @@ class ExitPath(unittest.TestCase):
                 raise RuntimeError("synthetic early-row fault")
             return real(*a, **k)
         t = self._request()
+        before = time.time()
         with mock.patch.object(km, "_restart_cut_row", side_effect=flaky):
-            _fire(self, LiveDrain())
+            _fire(self, LiveDrain(), broadcast=lambda *a, **k: time.sleep(1.1))   # the row is built after the clock has moved
         raw = _raw_rows(km.RESTART_CUTS_FILE)
         self.assertEqual([r.get("cutTurns") for r in raw], [[{"sid": SID, "name": "web"}]], raw)
         self.assertNotIn("expectsDone", raw[0])
         self.assertEqual(raw[0]["auditT"], t)
         self.assertEqual(len(calls), 2)
+        self.assertIs(raw[0].get("exitDone"), True, "the exit's one row is complete: no done row follows it")
+        self.assertIn("drainS", raw[0].get("phases") or {}, "and carries the phases a done row would have")
+        self.assertIn("deadlineS", raw[0])
+        self.assertLessEqual(raw[0]["t"], int(before + 0.1), "its t is the handler's entry, as the early row's would be")
+        self.assertIs(FOLD(raw)[0]["exitDone"], True, "the reader reads it as an exit that finished, not an older kernel's")
 
     def test_the_leaves_primed_at_exit_are_written_before_any_other_dirty_file(self):
         # the priming exists so a leaf's checkpoint carries a cursor for every fold; written in the store's sorted order, the
@@ -1796,6 +1859,304 @@ class ExitPath(unittest.TestCase):
         with mock.patch.object(km, "_exit_log", side_effect=RuntimeError("synthetic log fault")):
             _fire(self, LiveDrain(), quiesce=lambda: quiesced.append(1))   # asserts os._exit(0) was reached, once
         self.assertTrue(quiesced, "the exit had quiesced before the fault")
+
+    # ── the review of 2026-10-05, round two ────────────────────────────────────────────────────────────────────────────
+    def _reset(self):
+        if km.RESTART_CUTS_FILE.exists():
+            km.RESTART_CUTS_FILE.unlink()
+        km._EXIT_ONCE = threading.Lock()
+        km._TERMINATING[0] = False
+
+    def _work(self, sessions=(), prime=None, dirty=None, write=None, asm=None, deadline=None, reserve=None, caps=None):
+        """The exit's work patched, as one context: the session listing, the priming, the dirty checkpoints and their writer,
+        the assembly writer, and the exit's deadline, reserve and caps (by module name). Unnamed parts do nothing."""
+        ps = [mock.patch.object(km, "_sessions", lambda now, *a, **k: list(sessions)),
+              mock.patch.object(km, "_prime_leaf_folds", prime or (lambda leaf: False)),
+              mock.patch.object(km.em, "checkpoint_dirty", lambda: list(dirty or [])),
+              mock.patch.object(km, "_stored_tree", lambda leaf, sid: None),
+              mock.patch.object(km, "_display_sdk_human", lambda sid: False)]
+        if write is not None:
+            ps.append(mock.patch.object(km.em, "checkpoint_write", write))
+        if asm is not None:
+            ps.append(mock.patch.object(km.em, "asm_checkpoint_write", asm))
+        if deadline is not None:
+            ps.append(mock.patch.object(km, "EXIT_DEADLINE_S", deadline, create=True))
+        if reserve is not None:
+            ps.append(mock.patch.object(km, "EXIT_DRAIN_BUDGET_S", reserve))
+        for name, value in (caps or {}).items():
+            ps.append(mock.patch.object(km, name, value))
+        stack = contextlib.ExitStack()
+        for p in ps:
+            stack.enter_context(p)
+        return stack
+
+    def _done(self):
+        done = [r for r in _raw_rows(km.RESTART_CUTS_FILE) if r.get("exitDone") and "cutTurns" not in r]
+        self.assertEqual(len(done), 1, _raw_rows(km.RESTART_CUTS_FILE))
+        return done[0]
+
+    def test_no_checkpoint_write_starts_past_the_pre_drain_line(self):
+        # the writer always attempts its first path (checkpoint_write_dirty_paths), so the exit calls it only while its window
+        # is open: a priming item that ran past the line, a reserve as long as the deadline, or a zero checkpoint cap leaves
+        # every dirty file to the next writer, where the head started one more whole write past the line in each case
+        sess = self._sessions("web")
+        dirty = ["/synthetic/ckpt/%02d.jsonl" % i for i in range(5)]
+        for label, prime_s, deadline, reserve, cap in (("a priming item past the line", 0.6, 1.0, 0.6, 5.0),
+                                                         ("the reserve at the deadline", 0.0, 1.0, 1.0, 5.0),
+                                                         ("a zero checkpoint cap", 0.0, 2.0, 0.5, 0.0)):
+            with self.subTest(label):
+                self._reset()
+                starts = []
+
+                def write(p, force=False):
+                    starts.append(time.monotonic())
+                    return True
+                with self._work(sessions=sess, prime=lambda leaf: time.sleep(prime_s) or True, dirty=dirty, write=write,
+                                asm=lambda *a, **k: False, deadline=deadline, reserve=reserve,
+                                caps={"EXIT_PRIME_BUDGET_S": 5.0, "EXIT_CKPT_WRITE_BUDGET_S": cap, "EXIT_ASM_BUDGET_S": 5.0}):
+                    entry = time.monotonic()
+                    _fire(self, LiveDrain())
+                self.assertEqual([round(t - entry, 2) for t in starts], [], "no write started past the line")
+                done = self._done()
+                self.assertEqual((done["ckptWritten"], done["ckptLeft"]), (0, 5), "every dirty file left for the next writer")
+
+    def test_an_assembly_write_waits_for_a_held_leaf_lock_only_until_the_line(self):
+        # another thread holds the leaf's key lock across the exit (a settle or converge document write, the display parse, a
+        # fold): the exit's own document for that leaf waits for the lock only until the line, then skips it as busy, and the
+        # drain starts by the line; a holder that lets go inside the window is still waited for and nothing is busy. The head
+        # waited out the whole hold (the real writer here: the lock is the only thing patched around it)
+        sess = self._sessions("web")
+        leaf, sid = sess[0]["path"], sess[0]["sid"]
+        lock = km.em._asm_key_lock((os.path.realpath(leaf), sid, False))
+        ckdir = tempfile.mkdtemp()
+        for label, hold_s, busy in (("held past the line", 3.0, 1), ("let go inside the window", 0.15, 0)):
+            with self.subTest(label):
+                self._reset()
+                taken, release, calls = threading.Event(), threading.Event(), []
+
+                def holder():
+                    with lock:
+                        taken.set()
+                        release.wait(hold_s)
+                th = threading.Thread(target=holder, name="lock-holder", daemon=True)
+                th.start()
+                self.assertTrue(taken.wait(5))
+
+                class Timed:
+                    def drain(inner, timeout):
+                        calls.append(time.monotonic())
+                        return {"cutTurns": [], "stopped": 0}
+                try:
+                    with self._work(sessions=sess, deadline=1.0, reserve=0.4,
+                                    caps={"EXIT_PRIME_BUDGET_S": 5.0, "EXIT_CKPT_WRITE_BUDGET_S": 5.0, "EXIT_ASM_BUDGET_S": 5.0}), \
+                         mock.patch.object(km.em, "_CKPT_DIR_FN", lambda: Path(ckdir)):
+                        entry = time.monotonic()
+                        _fire(self, Timed())
+                finally:
+                    release.set()
+                    th.join(10)
+                self.assertEqual(self._done().get("asmBusy"), busy)
+                self.assertLessEqual(calls[0] - entry, 0.6 + 0.25, "the drain starts by the line (0.6 s) and slack: %.2f s"
+                                     % (calls[0] - entry))
+
+    def test_the_priming_and_assembly_phases_skip_at_their_cap_and_at_the_line(self):
+        # three sessions whose priming and assembly writes take 0.25 s each. Caps past the deadline: the pre-drain line (0.35 s
+        # after the entry) is what stops both loops, and the drain starts by the line plus the one item in flight. Caps below
+        # the line: each loop stops at its own cap. Either way leaves are skipped and counted (above 0, not exact: the item in
+        # flight when the bound passes decides how many)
+        sess = self._sessions("web", "api", "tests")
+        item = 0.25
+        for label, deadline, reserve, cap in (("caps past the deadline", 0.7, 0.35, 5.0), ("caps below the line", 3.0, 1.0, 0.3)):
+            with self.subTest(label):
+                self._reset()
+                calls = []
+
+                class Timed:
+                    def drain(inner, timeout):
+                        calls.append(time.monotonic())
+                        return {"cutTurns": [], "stopped": 0}
+                with self._work(sessions=sess, prime=lambda leaf: time.sleep(item) or True,
+                                asm=lambda *a, **k: time.sleep(item) or False, deadline=deadline, reserve=reserve,
+                                caps={"EXIT_PRIME_BUDGET_S": cap, "EXIT_CKPT_WRITE_BUDGET_S": cap, "EXIT_ASM_BUDGET_S": cap}):
+                    entry = time.monotonic()
+                    _fire(self, Timed())
+                done = self._done()
+                self.assertGreater(done["primeSkipped"], 0, "the priming stopped before its last session: %r" % done)
+                self.assertGreater(done["asmSkipped"], 0, "and so did the assembly documents: %r" % done)
+                line = deadline - reserve
+                self.assertLessEqual(calls[0] - entry, line + item + 0.15,
+                                     "the drain starts by the line plus one item: %.2f s" % (calls[0] - entry))
+
+    def test_a_drain_that_raises_leaves_the_prediction_and_the_session_count_standing(self):
+        web = {"sid": SID, "name": "web"}
+
+        class Raising:
+            sessions = {SID: object()}
+
+            def would_cut(inner):
+                return [dict(web)]
+
+            def drain(inner, timeout):
+                raise RuntimeError("synthetic drain fault")
+        self._request()
+        _fire(self, Raising())
+        cut, done = _raw_rows(km.RESTART_CUTS_FILE)
+        self.assertIn("RuntimeError: synthetic drain fault", done["drainError"])
+        for k in ("stopped", "unjoined", "reaped", "drainCutTurns"):
+            self.assertNotIn(k, done, "the drain returned nothing: no %s on its done row" % k)
+        rec = FOLD([cut, done])[0]
+        self.assertEqual((rec["cutTurns"], rec["stopped"], rec["drainError"], rec["exitDone"]), ([web], 1, done["drainError"], True),
+                         "the prediction and the session count stand (the head wrote an empty list and 0 stopped over them)")
+
+    def test_a_cut_row_whose_append_fails_is_written_after_the_drain_as_the_exits_one_row(self):
+        real, calls = km._append_restart_cut, []
+
+        def first_fails(row):
+            calls.append(dict(row))
+            return False if len(calls) == 1 else real(row)   # the cut row's line never lands (a full disk, an unwritable ledger)
+        t = self._request()
+        with mock.patch.object(km, "_append_restart_cut", side_effect=first_fails):
+            _fire(self, LiveDrain())
+        raw = _raw_rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(raw), 1, raw)
+        self.assertEqual((raw[0].get("cutTurns"), raw[0].get("auditT"), raw[0].get("exitDone")), ([{"sid": SID, "name": "web"}], t, True),
+                         "the late full row, from the drain's own result, where the head wrote a done row no reader joins")
+        self.assertNotIn("expectsDone", raw[0])
+        self.assertEqual([r.get("expectsDone") for r in calls[:1]], [True], "the early row was built and its append failed")
+
+    def test_the_session_in_flight_starts_no_document_refresh_once_the_stand_down_is_set(self):
+        # the stand-down is read at the settle write's loop top; the session in flight could still start a document refresh (a
+        # whole-leaf parse on a thread of its own) after the quiesce. The stand-down lands during this session's assembly write
+        stand = km._EXIT_STAND_DOWN
+        sess = self._sessions("web")
+        refreshed, land = [], []
+
+        def asm_write(*a, **k):
+            if land:
+                stand.set()                    # the exit's quiesce, while this session's write runs
+            return False                       # a restored entry: nothing written, so the refresh branch is next
+        with mock.patch.object(km, "_sessions", lambda now, *a, **k: list(sess)), \
+             mock.patch.object(km, "_ckpt_settle_key", lambda sid: ("moved",)), \
+             mock.patch.object(km, "_stat_key", lambda p: ("synthetic", 1)), \
+             mock.patch.object(km, "_heal_cold_folds", lambda leaf, dropped_out=None: []), \
+             mock.patch.object(km, "_prime_leaf_folds", lambda leaf: True), \
+             mock.patch.object(km, "_session_fold_files", lambda sid, leaf: {leaf}), \
+             mock.patch.object(km.em, "checkpoint_dirty", lambda: []), \
+             mock.patch.object(km.em, "asm_checkpoint_write", asm_write), \
+             mock.patch.object(km, "_asm_refresh_maybe", lambda leaf, sid: refreshed.append(leaf)), \
+             mock.patch.object(km, "_display_sdk_human", lambda sid: False), \
+             mock.patch.object(km, "_stored_tree", lambda leaf, sid: None):
+            for during in (False, True):
+                stand.clear()
+                land[:] = [1] if during else []
+                with mock.patch.dict(km._CKPT_SETTLE_SEEN, {s["sid"]: ("before",) for s in sess}, clear=True), \
+                     mock.patch.dict(km._CKPT_PERIODIC_SEEN, {}, clear=True):
+                    km._persist_checkpoints(0)
+        stand.clear()
+        self.assertEqual(refreshed, [sess[0]["path"]], "the refresh started with the stand-down clear, and not once it was set")
+
+    def test_the_pusher_sends_no_frame_under_the_stand_down(self):
+        stand = km._EXIT_STAND_DOWN
+        pushed = []
+        with mock.patch.object(km, "_job_stage", lambda name, thunk: None), \
+             mock.patch.object(km, "_push_all", lambda live_map=None: pushed.append(dict(live_map))):
+            for set_ in (False, True):
+                (stand.set if set_ else stand.clear)()
+                km._pusher_cycle_jobs(0, {"standDown": set_}, True)
+        stand.clear()
+        self.assertEqual(pushed, [{"standDown": False}], "a client connected: pushed with the stand-down clear, not under it")
+
+    def test_a_prediction_that_raises_leaves_a_cut_row_that_says_so(self):
+        class Unpredictable:
+            sessions = {SID: object()}
+
+            def would_cut(inner):
+                raise RuntimeError("synthetic predicate fault")
+
+            def drain(inner, timeout):
+                return {"cutTurns": [{"sid": SID, "name": "web"}], "stopped": 1}
+        _fire(self, Unpredictable())
+        cut, done = _raw_rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(cut["cutTurns"], [], "nothing predicted")
+        self.assertIn("RuntimeError: synthetic predicate fault", cut.get("cutTurnsError", ""), "and the row says why")
+        self.assertEqual(done["drainCutTurns"], [{"sid": SID, "name": "web"}], "the done row names what the drain cut")
+
+    def test_the_cut_rows_time_is_the_handlers_entry(self):
+        # the outage clock (the next boot's prevCutT and outageS) starts at the handler's entry, not when the row is built: a
+        # broadcast of 1.1 s puts the row's build in a later second
+        before = time.time()
+        _fire(self, LiveDrain(), broadcast=lambda *a, **k: time.sleep(1.1))
+        cut = _raw_rows(km.RESTART_CUTS_FILE)[0]
+        self.assertGreaterEqual(cut["t"], int(before))
+        self.assertLessEqual(cut["t"], int(before + 0.1), "the entry's second, not the row's (%s, entry %.2f)" % (cut["t"], before))
+
+    def test_the_done_row_leaves_out_a_turn_list_equal_to_the_prediction(self):
+        web, api = {"sid": SID, "name": "web"}, {"sid": self.SIDS["api"], "name": "api"}
+        for cut_by_drain, want in (([web], None), ([web, api], [web, api])):
+            with self.subTest(cut_by_drain=len(cut_by_drain)):
+                self._reset()
+
+                class Predicting:
+                    sessions = {SID: object()}
+
+                    def would_cut(inner):
+                        return [dict(web)]
+
+                    def drain(inner, timeout):
+                        return {"cutTurns": [dict(x) for x in cut_by_drain], "stopped": 1}
+                _fire(self, Predicting())
+                self.assertEqual(self._done().get("drainCutTurns"), want,
+                                 "named only when the drain cut something other than the prediction")
+
+    def test_a_stop_note_already_on_record_names_the_cut_row_a_stop(self):
+        # the shared tail reached with no request (an empty reason with a signal) while the manager, alive, has already noted
+        # its stop of this kernel: the provisional verdict reads the note, so the cut row AS WRITTEN says the manager was
+        # stopped (the folded record cannot show it: the late verdict would say the same)
+        with open(self.AUDIT, "a") as f:
+            f.write(json.dumps({"t": int(time.time()), "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(),
+                                "reason": "stop", "trigger": "stop"}) + "\n")
+        with mock.patch.dict(os.environ, {"ROMP_MANAGER_PID": str(os.getpid())}), \
+             mock.patch.object(km, "_sdk_backend", LiveDrain()), \
+             mock.patch.object(km, "_exit_quiesce", lambda: None, create=True), \
+             mock.patch.object(km.os, "_exit", side_effect=SystemExit) as ex:
+            with self.assertRaises(SystemExit):
+                km._drain_and_exit("", signum=signal.SIGTERM, what="SIGTERM")
+        ex.assert_called_once_with(0)
+        cut, done = _raw_rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(cut["reason"], km.SIGNAL_REASON_MANAGER_STOPPED, "the stop note was visible at the row's write")
+        self.assertNotIn("finalReason", done, "and the late verdict agrees")
+
+    def test_the_drain_is_handed_its_floor_when_the_deadline_is_spent(self):
+        # a 0.35 s broadcast spends a 0.2 s deadline before the drain begins: the drain still gets its 0.25 s floor
+        calls = []
+
+        class Timed:
+            def drain(inner, timeout):
+                calls.append(timeout)
+                return {"cutTurns": [], "stopped": 0}
+        with self._work(deadline=0.2, reserve=0.1):
+            _fire(self, Timed(), broadcast=lambda *a, **k: time.sleep(0.35))
+        self.assertEqual(calls, [0.25])
+
+    def test_the_judges_child_is_joined_after_the_done_row_with_what_the_deadline_has_left(self):
+        seen = []
+
+        class End:
+            def finish(inner, remaining):
+                seen.append(([bool(r.get("exitDone")) for r in _raw_rows(km.RESTART_CUTS_FILE)], remaining))
+
+        class Child:
+            def end(inner, background=False):
+                return End() if background else None
+        with mock.patch.object(km, "_JUDGE_CHILD", Child()), self._work(deadline=2.0, reserve=0.9):
+            entry = time.monotonic()
+            _fire(self, LiveDrain())
+            took = time.monotonic() - entry
+        self.assertEqual(len(seen), 1, "joined once")
+        rows, remaining = seen[0]
+        self.assertEqual(rows, [False, True], "both rows on disk when the join ran")
+        self.assertGreater(remaining, 0.0)
+        self.assertLessEqual(remaining, 2.0 - took + 0.05, "with what the deadline had left (%.2f s, the exit took %.2f s)" % (remaining, took))
 
 
 if __name__ == "__main__":

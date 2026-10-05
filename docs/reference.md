@@ -5136,7 +5136,11 @@ kernel followed it`. When the helper that files the `signal` row fails (a
 and the exit's done row carries a `reasonError` naming the fault, with the plain
 `signal, not requested through the manager` verdict as its `finalReason` when the cut row's provisional verdict differs, so the missing row is explained
 on disk. A second SIGTERM during the drain is ignored; the first
-writes the row. The manager's log says `exited without a restart request
+writes the row. When one restart signals two kernels under the same state
+root, the first kernel's cut row consumes the request within milliseconds; the
+second still names that request, not its own `manager-sigterm` note, as long
+as the manager's note for the second kernel's pid sits above the request in
+the audit file. The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
 
@@ -5158,17 +5162,34 @@ its stop note already written). The memos and the session listing follow and run
 deadline; then the fold priming, the checkpoint writes (the leaves just primed
 first) and the assembly documents, each capped by its `ROMP_EXIT_*_BUDGET_S`
 share and ending by the deadline less the drain's reserve
-(`EXIT_DRAIN_BUDGET_S`, 35 percent of the deadline), plus the one item in
-flight, so an overrun shrinks the later phases; the drain is handed what the
-deadline has left, at least 0.25 s. After the drain the unrequested verdict is
+(`EXIT_DRAIN_BUDGET_S`, 35 percent of the deadline and never under 0.9 s, the
+top of the drain times recorded with session hosts on, nor over the deadline),
+plus the one item in flight, so an overrun shrinks the later phases. No
+checkpoint write starts past that line or once its cap is spent, and an
+assembly document waits for its leaf's lock only until the line: a leaf whose
+lock another thread holds longer is skipped and counted as `asmBusy`, and
+keeps its standing document until its next settle. The drain is handed what
+the deadline has left, at least 0.25 s. The reserve is smaller than the
+drain's share of the grace before this change (1.12 s at the manager's 8 s,
+where the share was 2.625 s; 0.9 s at the default 5 s, where it was 1.575 s),
+so a drain slower than its reserve meets the deadline sooner than it met the
+old share. The deadline, the reserve and the caps are read from the
+environment once, when the kernel starts. After the drain the unrequested verdict is
 decided as before (its wait and its `signal` row), and a done row is appended:
 `exitDone: true`, `cutT` (the cut row's `t`), the drain's `stopped`,
 `unjoined` and `reaped`, `drainCutTurns` when the turns cut differ from the
-prediction, `drainError` and `reasonError` when those faults happened,
+prediction (a drain that raised returned nothing, so its done row has neither
+the counts nor the list, and the cut row's prediction stands), `drainError`
+and `reasonError` when those faults happened,
 `finalReason` when the late verdict differs from the cut row's, `phases`
 (`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
 priming-to-assembly window as older cut rows carried it, `drainS`), the
-checkpoint counts, `deadlineS` and `elapsedS`. The done row carries no
+checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`,
+`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row that could
+not be built at the start, or whose append failed, is written after the drain
+instead, from the drain's own result, as the exit's one row: `t` is still the
+handler's start, and it carries `exitDone: true`, the phases and the counts,
+with no done row. The done row carries no
 `cutTurns`, `reason` or `auditT`, so every reader that keys on those reads the
 cut row alone; `romp restart-metrics` joins the pair on the pid and `cutT`, and
 a cut row with `expectsDone` and no done row reads as `exitDone: false`, an
@@ -5333,8 +5354,12 @@ state directory's ledgers (`restart-cuts.jsonl`, `restart-audit.jsonl`,
 `spend.json` for the day's total dollars) and from the running kernel's
 `GET /version` and `GET /perf`; it loads no kernel module and writes nothing.
 The text form prints one screen per window: restarts and the turns they cut
-(with the clean restarts and the boots that had no cut row, a crash respawn,
-whose cut count is unknown; the per-restart rate divides by the measured
+(with the clean restarts, the boots that had no cut row, a crash respawn,
+whose cut count is unknown, and the exits killed after their cut row, which
+count the turns their cut row predicted and are never clean; an exit whose
+prediction failed (`cutTurnsError`) with no drain result to stand in for it,
+killed or with a drain that raised, cut an unknown number too; the
+per-restart rate divides the measured restarts' turns by the measured
 restarts alone),
 the reasons, the outage from exit to first serve and the reconcile settle (from
 the `bootSettled` rows), the quiet windows' waits and backstop firings (from
@@ -5348,7 +5373,7 @@ so), turn latency from the feed pop to the result and to the first output (from
 state log's `working` and `waiting` rows (one-second resolution, the only
 latency available for turns before `turns.jsonl` existed), the machine cuts by
 cause (a state-log pair broken by a machine cut is not a turn), and the kernel
-process's resident memory and CPU at its exits. The live
+process's resident memory and CPU as its exits began. The live
 block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
 Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
 CPU, resident size and the pusher's idle-cycle share, and lists any
@@ -5369,7 +5394,9 @@ unless `--tz` names a zone; weeks are counted in local dates, so a clock change
 inside a week moves no boundary off local midnight. The header names the machine `this machine`
 unless `--label` says otherwise, so no hostname reaches the text by default. A
 missing ledger is named at the top, never a silent zero. `--json` prints the whole document (`schema` 1): `restarts`
-(each cut row joined to the boot that followed it), `quietWindows` (each
+(each cut row joined to the boot that followed it, with `exitDone`,
+`cutTurnsError`, and the exit's `phases` and checkpoint counts from its done
+row), `quietWindows` (each
 joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
 metric above per window, with capped latency samples for the distribution
 figure), `sources`, and `live` (with `duplicateClis`, `threads`,

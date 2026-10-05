@@ -157,8 +157,12 @@ class ExitPhases(unittest.TestCase):
 
     def test_the_exit_bounds_every_phase_by_one_deadline_and_times_them(self):
         # the exit path (2026-10-05): one deadline from the handler's entry; each phase before the drain ends by its cap AND by
-        # the pre-drain line (the deadline less the drain's reserve), and the drain gets what the deadline has left. The
-        # behavior is driven in tests/test_restart_cuts.py (ExitPath); these are the lines that implement it
+        # the pre-drain line (the deadline less the drain's reserve), and the drain gets what the deadline has left. These pin
+        # the lines that implement it; each is also driven in tests/test_restart_cuts.py ExitPath: the line and the checkpoint
+        # writes by test_one_deadline_from_the_handlers_entry_holds_the_drains_reserve and
+        # test_no_checkpoint_write_starts_past_the_pre_drain_line, the priming's and the assembly documents' caps and line by
+        # test_the_priming_and_assembly_phases_skip_at_their_cap_and_at_the_line, the drain's floor by
+        # test_the_drain_is_handed_its_floor_when_the_deadline_is_spent
         import inspect
         src = inspect.getsource(km._drain_and_exit)
         self.assertIn("_pre_drain = _end - float(EXIT_DRAIN_BUDGET_S)", src, "the drain's reserve is held back from the start")
@@ -232,13 +236,16 @@ class AttachTimedOutNamesTheAttaches(unittest.TestCase):
 class ExitBudgetsScaleWithTheGrace(unittest.TestCase):
     def test_the_deadline_and_the_caps_follow_the_manager_grace(self):
         # the exit path (2026-10-05): one deadline, 40 percent of the grace and at most 4 s; the drain's reserve 35 percent of
-        # it; the three caps shares of the window before the drain. _exit_budgets is what the module's load computes, for any
-        # grace and environment, so each grace value is read here without loading a kernel per value
-        for grace, deadline in ((5.0, 2.0), (8.0, 3.2), (20.0, 4.0)):
+        # it, never under the 0.9 s top of the drain times recorded with session hosts on (the review's round two: 0.7 s at the
+        # default 5 s grace was under it) nor over the deadline; the three caps shares of the window before the drain.
+        # _exit_budgets is what the module's load computes, for any grace and environment, so each grace value is read here
+        # without loading a kernel per value
+        self.assertEqual(km.EXIT_DRAIN_FLOOR_S, 0.9)
+        for grace, deadline, drain in ((5.0, 2.0, 0.9), (8.0, 3.2, 1.12), (20.0, 4.0, 1.4), (2.0, 0.8, 0.8)):
             b = km._exit_budgets(grace, env={})
             self.assertAlmostEqual(b["deadline"], deadline, places=6, msg="grace %s" % grace)
-            self.assertAlmostEqual(b["drain"], 0.35 * deadline, places=6)
-            self.assertAlmostEqual(b["work"], 0.65 * deadline, places=6)
+            self.assertAlmostEqual(b["drain"], drain, places=6, msg="grace %s" % grace)
+            self.assertAlmostEqual(b["work"], deadline - drain, places=6)
             self.assertLessEqual(b["prime"] + b["ckpt"] + b["asm"] + b["drain"], b["deadline"] + 1e-9,
                                  "the caps and the reserve fit inside the deadline at %s s" % grace)
         b = km._exit_budgets(8.0, env={"ROMP_EXIT_DEADLINE_S": "3", "ROMP_EXIT_DRAIN_BUDGET_S": "1", "ROMP_EXIT_CKPT_WRITE_BUDGET_S": "0.5"})

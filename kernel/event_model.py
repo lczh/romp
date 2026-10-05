@@ -7814,14 +7814,25 @@ class _DocWriterScope:
     length, so no fold changes the entry while the writer reads it, and the entry marked `docWriter` meanwhile (set once the
     lock is taken, cleared before it is released). The writer only reads the graph (its own flags aside), so a reader of the
     graph that must not wait out a multi-second write (14 s at 110 MB in a lab: the comment cut, with_display_graph) reads
-    beside it while the mark it saw stands (2026-10-01)."""
+    beside it while the mark it saw stands (2026-10-01). `timeout` (seconds, None = wait as long as it takes) bounds the wait
+    for the lock: the exit's assembly phase passes what is left of its window (2026-10-05), since the holder can be another
+    thread's whole write of a length the exit does not set. A wait that runs out leaves `held` False, takes nothing and marks
+    nothing; the caller checks `held` and skips."""
 
-    def __init__(self, key):
+    def __init__(self, key, timeout=None):
         self.key = key
+        self.timeout = timeout
+        self.held = False
 
     def __enter__(self):
         self.lock = _asm_key_lock(self.key)
-        self.lock.acquire()
+        if self.timeout is None:
+            self.held = self.lock.acquire()
+        else:
+            self.held = self.lock.acquire(timeout=max(0.0, float(self.timeout)))
+        if not self.held:
+            self.entry = None
+            return self
         with _ASM_LOCK:
             self.entry = _ASM_CACHE.get(self.key)
         self.tok = object()
@@ -7830,13 +7841,16 @@ class _DocWriterScope:
         return self
 
     def __exit__(self, *exc):
+        if not self.held:
+            return False
         if self.entry is not None and self.entry.get("docWriter") is self.tok:
             self.entry.pop("docWriter", None)
         self.lock.release()
         return False
 
 
-def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", from_entry=None):
+def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", from_entry=None,
+                         lock_timeout=None):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a whole parse replaces the entry), no compaction boundary in
     the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
@@ -7844,7 +7858,10 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
     `reason_out` when a list is given (the converge pass reads its refusal there; T376 review). `who` names the caller
     in the blip line (the settle, the converge pass), said once per leaf and reason. An entry it wrote from is marked for
     re-seat: the next parse restores the entry from this document (2026-09-24). `from_entry`, when given, is the whole entry
-    to write from in place of the leaf's own (the document refresh's private parse, asm_refresh_document)."""
+    to write from in place of the leaf's own (the document refresh's private parse, asm_refresh_document). `lock_timeout`
+    bounds the wait for the leaf's key lock (None: as long as it takes, every caller but the exit): a wait that runs out
+    writes nothing and is counted as a `busy` skip, whatever the holder is doing (a settle or converge write, a fold, the
+    display parse), and the leaf keeps its standing document until its next settle (the exit path, 2026-10-05)."""
     cp = _asm_ckpt_file(leaf_path)
     if cp is None:
         return False
@@ -7854,8 +7871,11 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             reason_out.append(reason)
         return _asm_ckpt_skip(reason)
     key = (os.path.realpath(str(leaf_path)), str(rompuuid), bool(sdk_human))
-    with (_DocWriterScope(key) if from_entry is None else _NO_LOCK):   # a private entry is nobody else's: the leaf's readers never
-        #                                                                  wait on the refresh's write (they took the key lock for it)
+    with (_DocWriterScope(key, timeout=lock_timeout) if from_entry is None else _NO_LOCK) as _scope:   # a private entry is nobody
+        #                                                                  else's: the leaf's readers never wait on the refresh's
+        #                                                                  write (they took the key lock for it)
+        if not getattr(_scope, "held", True):
+            return _skip("busy")                # the key lock stayed taken past the caller's bound: nothing read, nothing written
         if from_entry is not None:
             entry = from_entry
         else:

@@ -36,7 +36,8 @@ def cycles(cut_rows, last=None):
     """Pair each cut row with the boot row that followed it (by time); the newest `last` pairs. Since 2026-10-05 the kernel
     writes the cut row at the exit's start and a done row after the drain (exitDone, cutT = the cut row's t, its phases):
     the exit's ckptS, drainS and stopped come from the done row when there is one, and exitDone says whether the exit
-    completed (False: killed after its cut row; None: a row from an older kernel, whose own ckptS and drainS are read)."""
+    completed (False: killed after its cut row; None: a row from an older kernel, whose own ckptS and drainS are read; a
+    cut row carrying exitDone itself is the exit's late full row, complete with no done row)."""
     cuts = [r for r in cut_rows if "cutTurns" in r]
     boots = [r for r in cut_rows if r.get("bootSettled")]
     dones = {(r.get("pid"), r.get("cutT")): r for r in cut_rows if r.get("exitDone") is True and "cutTurns" not in r}
@@ -46,7 +47,7 @@ def cycles(cut_rows, last=None):
         d = dones.get((c.get("pid"), c.get("t")))
         ph = (d.get("phases") if d and isinstance(d.get("phases"), dict) else None) or {}
         out.append({"cutT": c.get("t"), "pid": c.get("pid"), "ckptS": ph.get("ckptS", c.get("ckptS")), "drainS": ph.get("drainS", c.get("drainS")),
-                    "exitDone": True if d else (False if c.get("expectsDone") else None),
+                    "exitDone": True if d or c.get("exitDone") is True else (False if c.get("expectsDone") else None),
                     "cutTurns": len((d.get("drainCutTurns") if d and isinstance(d.get("drainCutTurns"), list) else c.get("cutTurns")) or []),
                     "stopped": d.get("stopped") if d else c.get("stopped"), "exitRssMb": round((c.get("rssKb") or 0) / 1024),
                     "outageS": b.get("outageS") if b else None, "censusS": b.get("censusS") if b else None,
