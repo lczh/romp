@@ -300,6 +300,9 @@ class BootJoin(unittest.TestCase):
                           b["unmeasuredRestarts"]), (2, 1, 0, 1, 1, 1),
                          "with no prediction the killed exit's turns are unknown: out of the measured restarts")
         self.assertEqual(b["cutTurnsPerRestart"], 1.0, "1 turn over the 1 measured restart (the head: 0.5, and 1 clean)")
+        b = bucket(completed + [dict(killed_fault, cutTurns=[api])])     # a Codex turn read, the SDK prediction failed
+        self.assertEqual((b["cutTurns"], b["measuredRestarts"], b["cutTurnsPerRestart"]), (2, 1, 1.0),
+                         "an unmeasured exit's known turns count as cut, and leave the rate's top with its bottom")
         b = bucket([dict(completed[0], cutTurnsError="RuntimeError: synthetic"), completed[1]])
         self.assertEqual((b["measuredRestarts"], b["cutTurnsPerRestart"]), (1, 1.0),
                          "a completed exit's drain result stands in for a failed prediction: measured")
