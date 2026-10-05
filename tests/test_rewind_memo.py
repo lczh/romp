@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
-from test_asm_checkpoint import em, G, SID, NOW, Harness, kernel_module, compacting_variant   # noqa: E402  the harness and the golden builders
+from test_asm_checkpoint import em, G, SID, NOW, Harness, kernel_module, compacting_variant, _turns_after   # noqa: E402  the harness and the golden builders
 
 
 class RewoundMemo(Harness):
@@ -100,7 +100,7 @@ class RewoundMemo(Harness):
         km = kernel_module(); jd = km.jd
         src = inspect.getsource(jd._per_file_rewound)
         self.assertIn("em.file_rewound(fp, rompuuid=fsid", src, "the leaf: the document's pre-cut verdicts and the tail")
-        self.assertIn("em.rewound_uuids(fp, drop=fp not in lineage and not _sdk_owned(fp.stem))", src, "a dead file: the memo, its entry dropped; a lineage file or a registered session's own file resident")
+        self.assertIn("em.rewound_uuids(fp, drop=fp not in lineage and not _own_file_in_use(fp))", src, "a dead file: the memo, its entry dropped; a lineage file or a registered session's own file its parse reads resident")
         self.assertLess(src.index("if fp == leaf and em.asm_document_seeds(fp):"), src.index("em.rewound_uuids(fp, drop="),
                         "the leaf road decided first, and only for a leaf with an assembly document")
 
@@ -126,9 +126,10 @@ class RewoundMemo(Harness):
         self.assertEqual(em.rewound_memo_stats()["walked"], 1)
         self.assertTrue(em.checkpoint_stats()["fallbacks"], "the fallback counted: %s" % em.checkpoint_stats()["fallbacks"])
 
-    def _lineage(self):
-        """A live session that has cleared: its anchor <fsid>.jsonl (a rewound branch inside, idle past the quiescence window)
-        and a fresh leaf beside it, the judge's state rebound to a temp dir; returns (jd, anchor, leaf, fsid)."""
+    def _lineage(self, head_parent="a3"):
+        """A live session that has forked: its anchor <fsid>.jsonl (a rewound branch inside, idle past the quiescence window)
+        and a new leaf beside it whose head links back into the anchor's last record (`head_parent`; None is a /clear's
+        parentless head), the judge's state rebound to a temp dir; returns (jd, anchor, leaf, fsid)."""
         jd = kernel_module().jd
         fsid = "7a391000-2222-4333-8444-000000000391"                   # private synthetic sids (the goal-store fixture rule)
         other = "7a391000-2222-4333-8444-000000000392"
@@ -143,15 +144,16 @@ class RewoundMemo(Harness):
         anchor.write_text("\n".join(json.dumps(r) for r in records()) + "\n")
         old = time.time() - 600; os.utime(anchor, (old, old))
         leaf = td / (other + ".jsonl")
-        leaf.write_text(json.dumps(G.uline(NOW, "continues after the clear", "u_leaf_0", None)) + "\n")
+        leaf.write_text(json.dumps(G.uline(NOW, "continues after the fork", "u_leaf_0", head_parent)) + "\n")
         return jd, anchor, leaf, fsid
 
     def test_a_live_sessions_anchor_stays_resident_and_the_scan_reads_nothing_after_the_first_pass(self):
-        """Round one, medium: the chain walk reads a cleared session's anchor whole first at every reconcile pass; the memo
+        """Round one, medium: the chain walk reads a forked session's anchor whole first at every reconcile pass; the memo
         then walked it, popped its entry as quiescent, and the next pass's chain walk read it whole again, every pass (head:
-        1239 then 1303 bytes per pass, the entry popped each time). The anchor is a live session's own file: the memo keeps
-        it resident, and the scan reads nothing after the first pass."""
+        1239 then 1303 bytes per pass, the entry popped each time). The anchor is a live session's own file its parse reads
+        (the leaf links back into it): the memo keeps it resident, and the scan reads nothing after the first pass."""
         jd, anchor, leaf, fsid = self._lineage()
+        self.assertEqual(len(jd._judge_candidates(fsid, [str(leaf)])), 2, "premise: the parse reads the anchor")
         self.fresh_process(); jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._RECON_MEMO.clear()
         key = str(anchor); size = os.path.getsize(anchor)
         deltas, resident = [], []
@@ -170,6 +172,86 @@ class RewoundMemo(Harness):
         self.assertGreaterEqual(deltas[0], size, "the first pass read the anchor whole, the chain walk's read: %r" % deltas)
         self.assertEqual(deltas[1:], [0, 0], "no read of the anchor at the later passes: %r" % deltas)
         self.assertEqual(resident, [True, True, True], "the anchor's entry stays resident: %r" % resident)
+
+    def test_a_clear_sessions_anchor_is_walked_once_then_served_from_its_document_and_left_out_of_memory(self):
+        """The /clear twin (2026-10-03): no parse reads the anchor of a /clear's leaf, so the chain walk no longer reads it
+        whole at every pass and nothing needs its records resident. The scan walks it once (the per-file scan covers the
+        anchor whether or not it is a candidate), its memo goes into its fold document at the quiescence drop, and the later
+        passes are served from the document at the guard bytes' cost, its records out of memory."""
+        jd, anchor, leaf, fsid = self._lineage(head_parent=None)
+        saved_owner = jd._SDK_OWNER_FN                                   # the registry road answers here (a kernel loaded earlier in
+        jd._SDK_OWNER_FN = None                                          #  the process leaves its backend hook)
+        self.addCleanup(setattr, jd, "_SDK_OWNER_FN", saved_owner)
+        self.fresh_process(); jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._RECON_MEMO.clear()
+        key = str(anchor); size = os.path.getsize(anchor)
+        deltas, records = [], []
+        for i in range(3):
+            with open(leaf, "a") as fh:
+                fh.write(json.dumps(G.uline(NOW + 10 * (i + 1), "one more line on the leaf %d" % i, "u_leaf_%d" % (i + 1), "u_leaf_%d" % i)) + "\n")
+            before = em.read_bytes_report().get(key, 0)
+            jd.reconcile_rewound_goals(fsid, str(leaf), NOW + 100 + i)
+            deltas.append(em.read_bytes_report().get(key, 0) - before)
+            with em._JSONL_CACHE_LOCK:
+                ent = em._JSONL_CACHE.get(key)
+            records.append(len(ent[4]) if ent is not None else 0)
+        st = em.rewound_memo_stats()
+        self.assertEqual((st["walked"], st["served"], st["stale"]), (4, 2, 2), "the anchor walked once and served twice: %s" % st)
+        self.assertGreaterEqual(deltas[0], size, "the first pass's scan read the anchor whole, once: %r" % deltas)
+        self.assertTrue(all(d <= 4 * em._JSONL_TAIL_GUARD for d in deltas[1:]), "then the guard bytes alone: %r" % deltas)
+        self.assertEqual(records, [0, 0, 0], "no record of the anchor stays in memory: %r" % records)
+        self.assertEqual(jd._judge_candidates(fsid, [str(leaf)]), [str(leaf)], "the leaf parses alone")
+
+    def _registered_parent(self, last_head_parent):
+        """A registered parent session whose reg names a new leaf (lastSid) beside its anchor, the new leaf's head linking
+        back into the anchor (`last_head_parent`) or parentless (None), and a fork child whose episode log names the
+        parent's anchor; returns (jd, anchor, child leaf, child sid)."""
+        jd = kernel_module().jd
+        saved_owner = jd._SDK_OWNER_FN
+        jd._SDK_OWNER_FN = None
+        self.addCleanup(setattr, jd, "_SDK_OWNER_FN", saved_owner)
+        parent, plast, fork = ("7a391000-2222-4333-8444-0000000003a1", "7a391000-2222-4333-8444-0000000003a2",
+                               "7a391000-2222-4333-8444-0000000003a3")
+        td = Path(tempfile.mkdtemp()); (td / "state").mkdir()
+        saved = jd.STATE; jd._rebind_state(td / "state")
+        def restore():
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._rebind_state(saved); shutil.rmtree(td, ignore_errors=True)
+        self.addCleanup(restore)
+        records, _sent = G.SINGLE_FILE["rewind_off_path"]
+        anchor = td / (parent + ".jsonl")
+        anchor.write_text("\n".join(json.dumps(r) for r in records()) + "\n")
+        old = time.time() - 600; os.utime(anchor, (old, old))
+        (td / (plast + ".jsonl")).write_text(json.dumps(G.uline(NOW, "the parent's new leaf", "u_plast_0", last_head_parent)) + "\n")
+        leaf = td / (fork + ".jsonl")
+        leaf.write_text(json.dumps(G.uline(NOW, "the fork's own first line", "u_fork_0", None)) + "\n")
+        (jd.STATE / "sdk").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "sdk" / (parent + ".json")).write_text(json.dumps({"spawnedAt": NOW, "lastSid": plast}))
+        jd.EPIDIR.mkdir(parents=True, exist_ok=True)
+        (jd.EPIDIR / (fork + ".jsonl")).write_text(json.dumps({"head": "u_fork_0", "fsid": parent, "t": NOW}) + "\n")
+        return jd, anchor, leaf, fork
+
+    def test_a_registered_parents_anchor_stays_resident_while_its_own_parse_reads_it(self):
+        """A registered session that forked with a head linking back reads its anchor at every pass: another session's scan
+        must not drop it (round two, low 2, now with a diverged lastSid)."""
+        jd, anchor, leaf, fork = self._registered_parent("a3")
+        self.assertIn(str(anchor), jd._judge_candidates(Path(anchor).stem, [str(anchor.with_name("7a391000-2222-4333-8444-0000000003a2.jsonl"))]))
+        self.fresh_process()
+        out, fails = jd._per_file_rewound(fork, [str(leaf)])
+        self.assertEqual(fails, 0); self.assertTrue(out, "the anchor's rewound branch is in the fork's scan")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIsNotNone(em._JSONL_CACHE.get(str(anchor)), "its own parse reads it: resident under the fork's scan")
+
+    def test_a_registered_parents_anchor_no_parse_reads_is_dropped_after_its_memo(self):
+        """A registered session that /cleared no longer reads its anchor (2026-10-03): a bare registration kept that file
+        resident for the process's life. Another session's scan walks it, writes its memo and lets its records go."""
+        jd, anchor, leaf, fork = self._registered_parent(None)
+        self.fresh_process()
+        out, fails = jd._per_file_rewound(fork, [str(leaf)])
+        self.assertEqual(fails, 0); self.assertTrue(out, "the anchor's rewound branch is in the fork's scan")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIsNone(em._JSONL_CACHE.get(str(anchor)), "no parse reads it: dropped after its memo is written")
+        self.assertIn("rewoundUuids", json.loads(em._ckpt_file(str(anchor)).read_text())["folds"], "the memo reached the disk first")
+        self.assertNotIn(str(anchor), jd._judge_candidates(Path(anchor).stem, [str(anchor.with_name("7a391000-2222-4333-8444-0000000003a2.jsonl"))]),
+                         "the parent's own parse does not read it")
 
     def test_the_memo_is_stored_at_the_walks_own_witness_not_the_caches_after_it(self):
         """Round one, low 1: the witness was re-fetched from the cache after the walk; an append and a refresh between the two
@@ -335,6 +417,73 @@ class RewoundMemo(Harness):
         with em._JSONL_CACHE_LOCK:
             self.assertIsNotNone(em._JSONL_CACHE.get(path), "a session's own file: never dropped")
 
+    def test_a_clear_leafs_one_file_document_takes_the_leaf_road_and_reads_only_the_tail_after_an_append(self):
+        """2026-10-03, the recurring whole read: a /clear's leaf parsed beside the session's anchor, so its assembly document
+        was written over two files, asm_document_seeds answered False and the per-file scan took the memo road; the memo is
+        stale at every append and walks the leaf from record zero, which over the tail entry a boot's restore left is the
+        whole file read again (upgrade<-_per_file_rewound), and over a whole entry every record walked again. The leaf parses
+        alone now, its document is one-file, and the scan takes the leaf road: the document's pre-cut verdicts and the tail
+        read from the cut, after an append as at the first pass."""
+        jd = kernel_module().jd
+        fsid, fork = "7a391000-2222-4333-8444-0000000003b1", "7a391000-2222-4333-8444-0000000003b2"
+        td = Path(tempfile.mkdtemp()).resolve(); (td / "state").mkdir()
+        saved = jd.STATE; jd._rebind_state(td / "state")
+        saved_owner = jd._SDK_OWNER_FN; jd._SDK_OWNER_FN = None
+        def restore():
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear(); jd._rebind_state(saved); shutil.rmtree(td, ignore_errors=True)
+            jd._SDK_OWNER_FN = saved_owner
+        self.addCleanup(restore)
+        anchor = td / (fsid + ".jsonl")                                   # the pre-clear conversation
+        anchor.write_text("".join(json.dumps(r) + "\n" for r in [
+            G.uline(NOW - 9000, "how does the notes-api page its index?", "pre_u1", None),
+            G.aline(NOW - 8990, "By cursor, fifty notes a page.", "pre_a1", "pre_u1", stop="end_turn")]))
+        recs = G.SINGLE_FILE["rewind_off_path"][0]()                     # the /clear's conversation: a parentless head, a rewind
+        recs = compacting_variant(recs + _turns_after(recs, "clr", 30), "clr")   # thirty settled turns, then a compaction and two
+        leaf = td / (fork + ".jsonl")                                     #  more: the document's cut sits near the end
+        leaf.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        for f in (anchor, leaf):
+            old = time.time() - 600; os.utime(f, (old, old))
+        t_next = max(em.parse_z(r.get("timestamp")) or 0 for r in recs) + 60
+
+        def append(k, parent):
+            with open(leaf, "a") as fh:                                   # the session at work
+                fh.write(json.dumps(G.uline(t_next + k, "one more ask on the leaf %d" % k, "u_more_%d" % k, parent)) + "\n")
+            return "u_more_%d" % k
+        self.fresh_process(); jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+        tree = jd.parsed_session(fsid, [str(leaf)], NOW)                 # the judges' and the display's one parse: its whole entry
+        self.assertTrue(em.asm_checkpoint_write(str(leaf), fsid, False, tree=tree), em.asm_checkpoint_stats())   # the settle's write
+        self.fresh_process(); jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()     # the next boot
+        modes = []
+        jd.parsed_session(fsid, [str(leaf)], NOW, asm_mode_out=modes)
+        self.assertEqual(modes, ["restore"], "the boot restores the leaf: its reader entry is the tail from the cut")
+        last = append(0, recs[-1]["uuid"])
+        jd.parsed_session(fsid, [str(leaf)], NOW + 60)                   # the display folds the append
+        with em._JSONL_CACHE_LOCK:
+            em._RECORD_CACHE_STATS["wholeReads"] = {}
+        size, before = os.path.getsize(leaf), em.read_bytes_report().get(str(leaf), 0)
+        out, fails = jd._per_file_rewound(fsid, jd._judge_candidates(fsid, [str(leaf)]))
+        read = em.read_bytes_report().get(str(leaf), 0) - before
+        upgrades = {k: v for k, v in em.record_cache_stats()["wholeReads"].items() if k.startswith("upgrade<-")}
+        self.assertEqual(upgrades, {}, "the leaf's tail entry was never read whole: %s" % em.record_cache_stats()["wholeReads"])
+        self.assertLess(read, size // 4, "the scan read the leaf's tail, not the whole file: %d of %d bytes" % (read, size))
+        self.assertEqual(fails, 0)
+        self.assertTrue({"u2", "a2"} <= out, "the leaf's own rewind is found on the seeded road: %r" % sorted(out))
+        with em._CKPT_LOCK:
+            walked0 = em._REWOUND_STATS["walked"]
+        append(1, last)                                                   # the next append: the leaf is not walked again
+        jd.parsed_session(fsid, [str(leaf)], NOW + 120)
+        before = em.read_bytes_report().get(str(leaf), 0)
+        out2, fails2 = jd._per_file_rewound(fsid, jd._judge_candidates(fsid, [str(leaf)]))
+        read2 = em.read_bytes_report().get(str(leaf), 0) - before
+        with em._CKPT_LOCK:
+            walked = em._REWOUND_STATS["walked"] - walked0
+        self.assertEqual((fails2, walked), (0, 0), "no memo walk after the append: the leaf takes the seeded road, the anchor's "
+                                                    "memo is served")
+        self.assertLess(read2, size // 4, "the tail again: %d of %d bytes" % (read2, size))
+        self.assertTrue({"u2", "a2"} <= out2)
+        self.assertEqual(jd._judge_candidates(fsid, [str(leaf)]), [str(leaf)], "the mechanism: the leaf parses alone")
+        self.assertTrue(em.asm_document_seeds(str(leaf)), "and its document is one-file, which seeds the one-file walk")
+
     def test_a_leaf_with_an_assembly_document_keeps_the_leaf_road(self):
         """The seeded walk over the document's pre-cut verdicts and the tail (T323 stage 4a) stays the leaf's road when a document
         stands; the memo is for the leaf that has none."""
@@ -482,7 +631,8 @@ class RewoundMemo(Harness):
         self.assertEqual(str(anchor), path, "the leaf IS <fsid>.jsonl here; a second file makes the lineage two files")
         leaf2 = Path(path).with_name("7a391000-2222-4333-8444-000000000388.jsonl")   # outside _own_leaf's sid range
         leaf2.write_text(json.dumps(G.uline(NOW + 5, "after the clear", "u_after", None)) + "\n")
-        files = jd._judge_candidates(fsid, [str(leaf2)]); self.assertEqual(len(files), 2)
+        files = jd._judge_candidates(fsid, [str(leaf2)]); self.assertEqual(len(files), 1)   # a /clear's leaf parses alone (2026-10-03):
+        #                                                                                       the scan walks the anchor all the same
         jd._per_file_rewound(fsid, files)                                 # the memo road for the anchor: the memo stored
         self.assertIn(path, em._REWOUND_CACHE)
         em.fold_records({}, path, list, lambda st, r: st, ckpt="surviveFold")
@@ -517,7 +667,7 @@ class RewoundMemo(Harness):
         self.assertIn("rewoundUuids", em._RETIRED_FOLDS.get(path, set()))
         leaf2 = Path(path).with_name("7a391000-2222-4333-8444-000000000387.jsonl")   # the session clears: the leaf becomes the anchor
         leaf2.write_text(json.dumps(G.uline(NOW + 5, "after the clear", "u_after2", None)) + "\n")
-        files = jd._judge_candidates(fsid, [str(leaf2)]); self.assertEqual(len(files), 2)
+        files = jd._judge_candidates(fsid, [str(leaf2)]); self.assertEqual(len(files), 1)   # the leaf alone; the scan walks the anchor
         jd._per_file_rewound(fsid, files)                                   # the memo road stores a fresh cursor for the anchor
         self.assertNotIn(path, em._RETIRED_FOLDS, "the store cleared the stale retirement")
         em.fold_records({}, path, list, lambda st, r: st, ckpt="pfFold"); self.assertTrue(em.checkpoint_write(path))

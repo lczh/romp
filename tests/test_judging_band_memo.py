@@ -446,8 +446,9 @@ class Bound(_Band):
 
 
 class Interleaving(_Band):
-    """(d) Two calls that overlap (a connect push builds the timeline outside the pusher's lock) read one slot each
-    and rebind it whole: whichever writes last, the next build reads a consistent snapshot and yields the cold
+    """(d) Two calls that overlap (the timeline builder's phase one builds the live bars outside _TL_BUILD_LOCK, as a
+    cold connect push did until 2026-10-03) read one slot each and rebind it whole: whichever writes last, the next
+    build reads a consistent snapshot and yields the cold
     result. The race is driven deterministically: the slot is restored to what the second call would have read
     had it started before the first finished."""
 

@@ -272,6 +272,7 @@ class StringRowsAndRestoreSplit(Harness):
             "uuid_of": lambda la, k: la._index.uuid_of(la._rows[k]),
             "uuids": lambda la, k: la.uuids(),
             "user_facts (the tally)": lambda la, k: km_._interrupt_marks_facts([{"id": "t", "t": 0, "atoms": la}]),
+            "tool_ids (the background hold)": lambda la, k: la.tool_ids(),
         }
         for name, road in roads.items():
             with self.subTest(road=name):
@@ -1858,7 +1859,7 @@ class ReadersOverRestoredHydrateOnlyWhatTheyNeed(Harness):
             self.assertFalse(km._echo_holdable(bad), "%r" % bad)
         self.assertIn("_echo_holdable(", inspect.getsource(km._echo_floor))
         self.assertIn("_echo_floor(", inspect.getsource(km._echo_landing_atoms))
-        frame = inspect.getsource(km._comments_frame)
+        frame = inspect.getsource(km._comment_frame_entry)   # the frame's per-thread row
         self.assertIn("_echo_holdable(", frame)
         self.assertNotIn('not a.get("dropped") and not a.get("_landed")', frame, "the clauses live in the predicate alone")
 
@@ -2010,6 +2011,219 @@ class KernelOverRestored(Harness):
                 got = json.loads(json.dumps(self.answers(tree), default=str))   # every reader hydrated what it needed
                 self.assertEqual(got, cold)
                 self.assertGreater(em.asm_checkpoint_stats()["hydratedAtoms"], 0, "the readers hydrated on demand")
+
+
+BG_FSID = "11111111-2222-3333-4444-777777777777"   # a private synthetic fsid: the hold's ghost gate reads no other module's registry file
+BG_TID = "toolu_bg_load_test"
+
+
+def _bg_records():
+    """A background launch (a Bash run_in_background tool_use), its ack and the turn's end, then one more settled turn: with a
+    compaction appended (compacting_variant), the launch's turn is a pre-cut turn restored from the document."""
+    t = G.T0
+    launch = {"type": "assistant", "timestamp": G.iso(t + 30), "uuid": "bg_a1", "parentUuid": "bg_u1",
+              "message": {"role": "assistant", "stop_reason": "tool_use", "content": [
+                  {"type": "text", "text": "Starting the notes-api load test in the background."},
+                  {"type": "tool_use", "id": BG_TID, "name": "Bash",
+                   "input": {"command": "./load-test.sh", "run_in_background": True, "description": "load test"}}]}}
+    return [G.uline(t, "run the notes-api load test in the background", "bg_u1"),
+            launch,
+            G.trline(t + 31, BG_TID, "bg_r1", "bg_a1", content="Command running in background with ID: b1"),
+            G.aline(t + 40, "The load test is running; I will report when it finishes.", "bg_a2", "bg_r1"),
+            G.uline(t + 100, "meanwhile, tidy the notes-api README", "bg_u2", "bg_a2"),
+            G.aline(t + 110, "Tidied the README.", "bg_a3", "bg_u2")]
+
+
+def _ix_row(k, **kw):
+    """A synthetic document row for a LazyIndex: identity scalars under `s`, plus whatever the case adds (a lazy marker `lz`,
+    an inline message `m`, `syn`)."""
+    r = {"i": k, "s": {"uuid": "11111111-2222-3333-4444-%012d" % k, "type": "assistant", "t": 1000 + k}}
+    r.update(kw)
+    return json.dumps(r, separators=(",", ":"))
+
+
+def _ix_marker(**kw):
+    """A lazy marker: an assistant atom's by default, with the tool scalars (`tu`, `tr`) the case gives."""
+    return dict({"k": "a", "h": "00000000", "nt": False}, **kw)
+
+
+class PreCutToolIds(Harness):
+    """2026-10-03: the settle gate's background hold (the judge's _awaiting_bg_hold) looks for the newest turn
+    naming a running launch. A pre-cut turn answers from the tool ids its atom list carries (LazyAtoms.tool_ids): a built
+    slot read where it sits, an unbuilt row from its lazy scalars after one decode, an inline or synthesized row built for
+    the read and dropped. So the hold stores no atom in a slot and registers none, and once a list has answered it decodes
+    no row again."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.km = kernel_module()
+        cls.jd = cls.km.jd
+
+    @staticmethod
+    def _ids(atoms):
+        """The truthy tool ids a turn's atoms carry, read atom by atom: the whole parse's answer."""
+        out = set()
+        for a in atoms:
+            out.update(x for x, _n in em.atom_tool_uses(a) if x)
+            out.update(x for x in em.atom_tool_results(a) if x)
+        return out
+
+    def test_a_pre_cut_turns_ids_equal_the_whole_parses_same_turn(self):
+        cases = [(name,) + tuple(G.SINGLE_FILE[name]) for name in COMPACTING]
+        cases.append(("bg", lambda: compacting_variant(_bg_records(), "bg"), None))
+        checked = 0
+        for name, records, sent in cases:
+            with self.subTest(scenario=name):
+                path = self.write("ids-" + name, records(), sent=sent)
+                self.fresh(); whole = self.parse(path)
+                want = {t["id"]: self._ids(t["atoms"]) for t in whole["turns"]}
+                self.assertTrue(self.doc(path), "a document is written: %s" % em.asm_checkpoint_stats())
+                self.fresh(); modes = []
+                tree = self.parse(path, modes)
+                self.assertEqual(modes, ["restore"])
+                pre = [t for t in tree["turns"] if t.get("pre")]
+                self.assertTrue(pre, "the cut leaves turns before it")
+                for t in pre:
+                    self.assertEqual(t["atoms"].tool_ids(), want[t["id"]], "pre-cut turn %s" % t["id"])
+                    checked += len(want[t["id"]])
+        self.assertGreater(checked, 0, "some pre-cut turn carries tool ids")
+
+    def test_the_list_reads_built_slots_in_place_and_each_unbuilt_row_once_and_stores_nothing(self):
+        row, marker = _ix_row, _ix_marker
+        rows = [row(0, lz=marker(tu=[["tu-a", "Bash"]])),                    # a call, from the marker's scalars
+                row(1, lz=marker(k="u", tr=["tu-z"])),                       # a result whose call sits in an older turn
+                row(2, i=-1, syn=1, m={"role": "assistant", "content": [     # a synthesized atom: its message inline, built
+                    {"type": "tool_use", "id": "tu-s", "name": "Read", "input": {}}]}),
+                row(3, i=-1, m={"role": "user", "content": [                 # an inline body with no marker, built
+                    {"type": "tool_result", "tool_use_id": "tu-m", "content": "ok"}]}),
+                row(4, lz=marker(tu=[[None, "Bash"]], tr=[""])),             # falsy ids: no running launch carries one
+                row(5, lz=marker(tu=[["tu-b", "Edit"]]))]                    # built before the read
+        ix = em.LazyIndex({"atoms": rows, "records": [], "fsids": []}, SID, self.td / "ids.jsonl")
+        atoms = em.LazyAtoms(ix, range(len(rows)))
+        self.assertEqual(em.atom_tool_uses(atoms[5]), [("tu-b", "Edit")], "slot 5 built through the list, as a reader builds it")
+        enters, real = [], em._MAT_LOCK
+
+        class Counting:                                    # the index lock, counted: a read through _at takes it for the LRU touch
+            def __enter__(self):
+                enters.append(1)
+                return real.__enter__()
+
+            def __exit__(self, *a):
+                return real.__exit__(*a)
+        st0 = em.asm_index_stats()
+        with mock.patch.object(em, "_MAT_LOCK", Counting()):
+            got = atoms.tool_ids()
+        st1 = em.asm_index_stats()
+        self.assertEqual(got, frozenset({"tu-a", "tu-z", "tu-s", "tu-m", "tu-b"}))
+        self.assertEqual(st1["materialized"], st0["materialized"], "nothing built through the list")
+        self.assertEqual(st1["rowDecodes"] - st0["rowDecodes"], 5, "each unbuilt row decoded once, the built slot read in place")
+        self.assertEqual(len(enters), 5, "the lock taken once per row decode (its counter) and never for the built slot")
+        self.assertEqual([list.__getitem__(atoms, i) is em._UNMAT for i in range(len(rows))], [True] * 5 + [False],
+                         "no slot stored")
+        self.assertIs(atoms.tool_ids(), got, "the set is kept on the list")
+        self.assertEqual(em.asm_index_stats()["rowDecodes"], st1["rowDecodes"], "the second call decodes nothing")
+
+    def test_marker_rows_answer_from_their_scalars_and_restore_no_atom(self):
+        """A row with a lazy marker answers from the marker's tu and tr, never through _restore_prefix_atoms. Building it
+        instead would store nothing and register nothing, so `materialized` would not move and `rowDecodes` would count
+        the same one decode per row: a spy on the restore is what sees such a build, and the index's own build through the
+        spy shows the spy is in the road."""
+        rows = [_ix_row(0, lz=_ix_marker(tu=[["tu-a", "Bash"]])),                 # a call
+                _ix_row(1, lz=_ix_marker(k="u", tr=["tu-a"])),                    # its result
+                _ix_row(2, lz=_ix_marker(tu=[["tu-b", "Read"]]))]                 # another call
+        ix = em.LazyIndex({"atoms": rows, "records": [], "fsids": []}, SID, self.td / "markers.jsonl")
+        atoms = em.LazyAtoms(ix, range(len(rows)))
+        calls, real = [], em._restore_prefix_atoms
+
+        def spy(*a, **kw):
+            calls.append(len(a[0]))
+            return real(*a, **kw)
+        with mock.patch.object(em, "_restore_prefix_atoms", spy):
+            got = atoms.tool_ids()
+            restored = len(calls)
+            ix.build(0)
+        self.assertEqual(got, frozenset({"tu-a", "tu-b"}))
+        self.assertEqual(restored, 0, "marker rows answer from their scalars: no atom restored")
+        self.assertEqual(len(calls), 1, "the index's own build restores through the spy")
+
+    def test_a_newer_unswept_pre_cut_turn_making_an_ordinary_call_does_not_hold(self):
+        """Only the running launches' ids count as hits. The launch's turn A is swept; the newer turn B, unswept and a pre-cut
+        list over a synthetic index, makes an ordinary call and gets its result. B names no running launch, so it decides
+        nothing, and A, swept, answers: no hold. Green on the pre-change code, whose whole-session map gave the same answer;
+        tests/test_settle_awaits_background_tasks.py holds the same case with B a plain turn."""
+        jd = self.jd
+        path = self.write("bgread", _bg_records())
+        self.assertEqual([t["id"] for t in jd._bg_unresolved(path, NOW)], [BG_TID], "the load test still runs at NOW")
+        launch_turn = {"id": "tA", "atoms": _bg_records()[1:3]}                   # the launch and its ack, a plain turn
+        rows = [_ix_row(0, lz=_ix_marker(tu=[["tu-read", "Read"]])),              # B's ordinary call
+                _ix_row(1, lz=_ix_marker(k="u", tr=["tu-read"]))]                 # and its result
+        ix = em.LazyIndex({"atoms": rows, "records": [], "fsids": []}, SID, self.td / "read.jsonl")
+        session = {"turns": [launch_turn, {"id": "tB", "atoms": em.LazyAtoms(ix, range(len(rows)))}]}
+        self.assertTrue(jd._awaiting_bg_hold(BG_FSID, path, session, {"nodes": {}, "closedTurns": []}, now=NOW),
+                        "nothing swept: the launch's turn A holds")
+        self.assertFalse(jd._awaiting_bg_hold(BG_FSID, path, session, {"nodes": {}, "closedTurns": ["tA"]}, now=NOW),
+                         "A swept; B names only an ordinary call, no running launch: no hold")
+
+    def test_the_hold_over_a_restored_tree_answers_as_the_whole_parse_and_stores_no_atom(self):
+        jd = self.jd
+        path = self.write("bghold", compacting_variant(_bg_records(), "bg"))
+        self.fresh(); whole = self.parse(path)
+        self.assertTrue(self.doc(path), "a document is written: %s" % em.asm_checkpoint_stats())
+        self.assertEqual([t["id"] for t in jd._bg_unresolved(path, NOW)], [BG_TID], "the load test still runs at NOW")
+        launch = [t["id"] for t in whole["turns"] if BG_TID in self._ids(t["atoms"])]
+        self.assertEqual(len(launch), 1, "one turn names the launch")
+        stores = ({"nodes": {}, "closedTurns": []}, {"nodes": {}, "closedTurns": [t["id"] for t in whole["turns"]]})
+        want = [jd._awaiting_bg_hold(BG_FSID, path, whole, s, now=NOW) for s in stores]
+        self.assertEqual(want, [True, False], "the whole parse: held while the launch's turn is unswept, not once it is")
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"])
+        self.assertIn(launch[0], [t["id"] for t in tree["turns"] if t.get("pre")], "the launch's turn is a pre-cut turn")
+        self.assertNotEqual(tree["turns"][-1]["id"], launch[0], "newer turns lie between it and the walk's start")
+        st0 = em.asm_index_stats()
+        got = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
+        st1 = em.asm_index_stats()
+        self.assertEqual(got, want, "the restored tree answers as the whole parse")
+        self.assertEqual(st1["materialized"] - st0["materialized"], 0, "no pre-cut atom built through the list and registered")
+        again = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
+        self.assertEqual(again, want)
+        self.assertEqual(em.asm_index_stats()["rowDecodes"], st1["rowDecodes"], "the lists kept their ids: no row decoded again")
+        h0 = jd.bg_hold_stats()                                   # the counters last: the pre-change code reds on the builds above
+        for s in stores:
+            jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW)
+        h1 = jd.bg_hold_stats()
+        self.assertEqual((h1["walks"] - h0["walks"], h1["exhausted"] - h0["exhausted"]), (2, 0))
+        self.assertGreater(h1["preTurns"] - h0["preTurns"], 0, "pre-cut turns answered from their lists' ids")
+
+    def test_the_hold_over_an_atoms_only_restore_answers_as_the_whole_parse(self):
+        """The production shape of a plain turn holding lazy atoms: a settle over a session no build has parsed writes the
+        document with no turns section (the atoms-only form), and its restore leaves every turn a plain list whose pre-cut
+        atoms carry their tool ids as scalars. The launch's turn names the launch in one lazy atom's `tu` and its ack in
+        another's `tr`, so this case needs both of the judge's lazy-atom lookups gone to go red;
+        tests/test_settle_awaits_background_tasks.py pins each lookup alone."""
+        jd = self.jd
+        path = self.write("bgatoms", compacting_variant(_bg_records(), "bga"))
+        self.fresh(); whole = self.parse(path)
+        self.assertTrue(em.asm_checkpoint_write(path, SID), "a document is written with no tree: %s" % em.asm_checkpoint_stats())
+        self.assertFalse(_doc(path).get("turns"), "no turns section: the atoms-only form")
+        self.assertEqual([t["id"] for t in jd._bg_unresolved(path, NOW)], [BG_TID], "the load test still runs at NOW")
+        stores = ({"nodes": {}, "closedTurns": []}, {"nodes": {}, "closedTurns": [t["id"] for t in whole["turns"]]})
+        want = [jd._awaiting_bg_hold(BG_FSID, path, whole, s, now=NOW) for s in stores]
+        self.assertEqual(want, [True, False], "the whole parse: held while the launch's turn is unswept, not once it is")
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"])
+        self.assertEqual([t["id"] for t in tree["turns"]], [t["id"] for t in whole["turns"]], "the same turns")
+        launch = [t for t in tree["turns"] if BG_TID in self._ids(t["atoms"])]
+        self.assertEqual(len(launch), 1, "one turn names the launch")
+        self.assertIs(type(launch[0]["atoms"]), list, "a plain list: the atoms-only restore mints no LazyAtoms")
+        naming = [a for a in launch[0]["atoms"] if BG_TID in self._ids([a])]
+        self.assertTrue(naming and all(a.get("lazy") is not None for a in naming), "every atom naming the launch is lazy")
+        self.assertEqual(sorted("tu" if BG_TID in [x for x, _n in em.atom_tool_uses(a)] else "tr" for a in naming), ["tr", "tu"],
+                         "the launch in one lazy atom's tu, its ack in another's tr")
+        self.assertNotEqual(tree["turns"][-1]["id"], launch[0]["id"], "newer turns lie between it and the walk's start")
+        got = [jd._awaiting_bg_hold(BG_FSID, path, tree, s, now=NOW) for s in stores]
+        self.assertEqual(got, want, "the atoms-only restore answers as the whole parse")
 
 
 class EventModelReaders(Harness):

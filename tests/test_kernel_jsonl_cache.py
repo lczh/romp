@@ -202,13 +202,13 @@ class RecordCacheByteBudget(unittest.TestCase):
         hot = self._file("hot.jsonl", 40)
         em._read_jsonl_incremental(hot)
         one = os.path.getsize(hot)
-        em._JSONL_CACHE_BUDGET_BYTES = int(one * 3.5)            # room for three such files, not four
+        em._JSONL_CACHE_BUDGET_BYTES = int(one * 3.5 * em._RECORD_CACHE_MULTIPLE)   # memory units: room for three such files decoded, not four
         cold = [self._file("cold%d.jsonl" % i, 40) for i in range(6)]
         for c in cold:
             em._read_jsonl_incremental(hot)                       # the hot file is USED between every cold read
             em._read_jsonl_incremental(c)
             self.assertTrue(self._ledger_ok())
-            self.assertLessEqual(em._JSONL_CACHE_BYTES[0], em._JSONL_CACHE_BUDGET_BYTES)
+            self.assertLessEqual(em._real_bytes(em._JSONL_CACHE_BYTES[0]), em._JSONL_CACHE_BUDGET_BYTES)
         self.assertIn(hot, em._JSONL_CACHE, "the hot file survived six cold reads under a three-file budget")
         self.assertLessEqual(len(em._JSONL_CACHE), 3)
         n = len(self.scans)
@@ -223,7 +223,8 @@ class RecordCacheByteBudget(unittest.TestCase):
     def test_an_entry_larger_than_the_whole_budget_still_inserts_alone(self):
         big = self._file("big.jsonl", 200); small = self._file("small.jsonl", 5)
         em._read_jsonl_incremental(small)
-        em._JSONL_CACHE_BUDGET_BYTES = os.path.getsize(big) // 2
+        em._JSONL_CACHE_BUDGET_BYTES = int(os.path.getsize(big) * em._RECORD_CACHE_MULTIPLE) // 2   # memory units: half of big decoded,
+        #                                                                                             whatever multiple is in force
         em._read_jsonl_incremental(big)
         self.assertIn(big, em._JSONL_CACHE, "a leaf is never refused")
         self.assertNotIn(small, em._JSONL_CACHE, "the budget then holds that one entry")
@@ -284,8 +285,9 @@ class DropAfterQuiescentFold(unittest.TestCase):
 
     def test_the_kernel_drops_only_its_subagent_folds_and_reports_the_cache(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        for name in ("agentLaunchIds", "agentGist", "agentLaunches"):
-            self.assertIn('ckpt="%s", drop_after="quiescent")' % name, src, "the %s fold drops a returned agent's records" % name)
+        for name, policy in (("agentLaunchIds", "returned"), ("agentGist", "returned"), ("agentLaunches", "quiescent")):
+            self.assertIn('ckpt="%s", drop_after="%s")' % (name, policy), src, "the %s fold drops a returned agent's records" % name)
+        #   an agent's own file drops on a quiet fold too ("returned"); the launch fold reads PARENT leaves and keeps "quiescent"
         self.assertNotIn('ckpt="bgAll", drop_after', src, "a LEAF fold never drops: the live session's records stay warm")
         self.assertIn('"recordCache": em.record_cache_stats(),', src, "/perf carries the record cache")
         unit = open(os.path.join(BIN, "romp-service")).read()
@@ -356,16 +358,18 @@ class WholeReadsByCaller(unittest.TestCase):
 
 
 class RecordCacheDefaultBudget(unittest.TestCase):
-    """The budget shipped at 1 GiB (2026-09-11) and sat below a 50-session working set: every build re-read whole transcripts
-    (14.9 GB in 3.5 min, 132 s pusher cycles). The default is a quarter of the machine's memory, never under 4 GiB."""
+    """The budget shipped at 1 GiB (2026-09-11) and sat below a busy machine's working set: every build re-read whole
+    transcripts and the pusher's cycles stretched with them. The default is half of the machine's memory, never under
+    4 GiB of file bytes (since 2026-10-01 the budget is in memory, so the floor is 4 GiB times the decoded multiple)."""
 
     def test_half_of_the_machine(self):
-        text = "MemTotal:       123634396 kB\nMemFree:        1 kB\n"
-        self.assertEqual(em._record_cache_default_budget_bytes(text), int(123634396 * 1024 * 0.5))
+        text = "MemTotal:       134217728 kB\nMemFree:        1 kB\n"
+        self.assertEqual(em._record_cache_default_budget_bytes(text), int(134217728 * 1024 * 0.5))
 
-    def test_never_under_four_gib(self):
-        self.assertEqual(em._record_cache_default_budget_bytes("MemTotal:  8000000 kB\n"), 4 * 1024 ** 3, "half of 8 GB is the floor")
-        self.assertEqual(em._record_cache_default_budget_bytes("garbage"), 4 * 1024 ** 3, "no MemTotal: the floor")
+    def test_never_under_four_gib_of_file_bytes(self):
+        floor = int(4 * 1024 ** 3 * em._RECORD_CACHE_MULTIPLE)
+        self.assertEqual(em._record_cache_default_budget_bytes("MemTotal:  8000000 kB\n"), floor, "half of 8 GB is under the floor")
+        self.assertEqual(em._record_cache_default_budget_bytes("garbage"), floor, "no MemTotal: the floor")
 
     def test_the_environment_sets_it_outright(self):
         src = open(em.__file__).read()

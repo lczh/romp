@@ -186,12 +186,74 @@ test("the VS Code timeline hears the kernel's FOLDS and, from then on, publishes
     assert.deepEqual(JSON.parse(store.get("romp:tabgroups:shared")!).collapsed, ["api"], "the kernel's folds adopted into this webview's store");
     assert.deepEqual(sent, [], "adopting publishes nothing");
     writeTabGroupsBlob({ on: true, collapsed: ["api", "web"], expanded: [], pinned: [], timeline: true });
-    assert.deepEqual(sent, [{ type: "setViewFolds", folds: { collapsed: ["api", "web"], expanded: [], pinned: [] } }], "heard: the view's fold goes to the kernel");
+    const browser = JSON.parse(store.get("romp:tabgroups:publishes") ?? "{}").browser;   // this browser's id, minted by its first publish
+    assert.deepEqual(sent, [{ type: "setViewFolds", folds: { collapsed: ["api", "web"], expanded: [], pinned: [] }, by: { browser, n: 1 } }],
+      "heard: the view's fold goes to the kernel, named (2026-09-29)");
     assert.equal(dispatchFrame({}, { type: "viewOrder", order: [], stored: true }), true, "a frame with no folds half (an older kernel): taken, nothing adopted");
   } finally {
     [g.localStorage, g.window] = saved;
     setFoldsPublisher(null);
     setViewOrderPublisher(null);   // the frame's arrangement half installed this webview's order publisher too
+  }
+});
+
+test("the VS Code timeline passes over the kernel's answer to its own earlier fold while a later one is out (2026-09-29)", () => {
+  // two folds inside one round trip: the answer to the first names it, and adopting it would reopen the second group
+  const g: any = globalThis;
+  const store = new Map<string, string>();
+  const saved = [g.localStorage, g.window];
+  g.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } };
+  g.window = new EventTarget();
+  const folds = (collapsed: string[]) => ({ collapsed, expanded: [], pinned: [] });
+  const shared = () => JSON.parse(store.get("romp:tabgroups:shared")!).collapsed;
+  try {
+    const { sent, post } = posts();
+    bridgeFunctions(post);
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds([]) });
+    writeTabGroupsBlob({ on: true, ...folds(["api"]), timeline: true });
+    writeTabGroupsBlob({ on: true, ...folds(["api", "web"]), timeline: true });
+    const [first, second] = sent.map((m: any) => m.by);
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["api"]), foldsBy: first });
+    assert.deepEqual(shared(), ["api", "web"], "the answer to the first: passed over, web stays folded");
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["api", "web"]), foldsBy: second });
+    assert.deepEqual(shared(), ["api", "web"], "the answer to the latest: what the view shows");
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["web"]), foldsBy: { browser: "f".repeat(32), n: 1 } });
+    assert.deepEqual(shared(), ["web"], "another device's word: taken");
+    assert.ok(first && second && first.browser === second.browser && first.n < second.n, "both publishes named, one browser: " + JSON.stringify(sent));
+  } finally {
+    [g.localStorage, g.window] = saved;
+    setFoldsPublisher(null);
+    setViewOrderPublisher(null);
+  }
+});
+
+test("the VS Code timeline hands the frame's count through: a push built before its fold landed is passed over, whoever it names (2026-09-30)", () => {
+  // a drag's push on the wire when the view folds api names another device's publish and lacks the fold; its count is the
+  // one the view had received when it published, so it is passed over
+  const g: any = globalThis;
+  const store = new Map<string, string>();
+  const saved = [g.localStorage, g.window];
+  g.localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } };
+  g.window = new EventTarget();
+  const folds = (collapsed: string[]) => ({ collapsed, expanded: [], pinned: [] });
+  const shared = () => JSON.parse(store.get("romp:tabgroups:shared")!).collapsed;
+  const LIFE = "4242.1700000000", OTHER = { browser: "f".repeat(32), n: 4 };
+  try {
+    const { sent, post } = posts();
+    bridgeFunctions(post);
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["web"]), foldsBy: OTHER, foldsSeq: { boot: LIFE, n: 7 } });
+    writeTabGroupsBlob({ on: true, ...folds(["web", "api"]), timeline: true });
+    assert.deepEqual(sent.map((m: any) => m.by.received), [{ boot: LIFE, n: 7 }], "the publish carries the count the view had received");
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["web"]), foldsBy: OTHER, foldsSeq: { boot: LIFE, n: 7 } });
+    assert.deepEqual(shared(), ["web", "api"], "the drag's push, built before the fold was taken: passed over, api stays folded");
+    const { browser, n } = sent[0].by;
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["web", "api"]), foldsBy: { browser, n }, foldsSeq: { boot: LIFE, n: 8 } });
+    dispatchFrame({}, { type: "viewOrder", order: [], stored: true, folds: folds(["api"]), foldsBy: { ...OTHER, n: 5 }, foldsSeq: { boot: LIFE, n: 9 } });
+    assert.deepEqual(shared(), ["api"], "and another device's later change is taken");
+  } finally {
+    [g.localStorage, g.window] = saved;
+    setFoldsPublisher(null);
+    setViewOrderPublisher(null);
   }
 });
 

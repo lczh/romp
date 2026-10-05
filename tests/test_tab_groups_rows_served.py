@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""T264 (the user 2026-09-08): in the tab strip's group-by-tag view every tag group starts on its own line —
-the tag chip at the left edge, its tabs after it (wrapping onto further rows as they need), the next group
-on a fresh line; the untagged trail opens its own line too, with no chip and no separator; a folded group
-is its header row alone.
+"""T264 (the user 2026-09-08): in the tab strip's group-by-tag view a tag group is one run — the tag chip, its
+tabs after it (wrapping onto further rows as they need) — and never a run of tabs with no chip ahead of it on
+its row; the untagged trail opens its own line, with no chip and no separator; a folded group is its header
+alone. Since 2026-10-01 (the user) the groups FLOW onto the rows as units: a group that fits the rest of a row
+stays on it, behind a short gutter when either side shows tabs; one that does not opens the next row whole;
+one wider than a row wraps inside itself (tests/test_tab_strip_flow_served.py drives the user's own shape).
 
-That layout is the gear's "One tag group per row in the tab strip" (`stripGroupRows`, on by default). The first
-test drives the page as shipped (nothing written to the settings store) and checks T264's geometry; the second
-writes the setting off before the page loads and checks the inline layout: no break element at all, each
-group's header followed by its tabs with nothing between, and the untagged trail behind a visible 13px divider.
+That layout is the gear's "Keep tag groups together in the tab strip" (`stripGroupRows`, on by default). The
+first test drives the page as shipped (nothing written to the settings store) and checks the geometry; the
+second writes the setting off before the page loads and checks the inline layout: no break element at all,
+each group's header followed by its tabs with nothing between, and the untagged trail behind a visible 13px
+divider.
 
 The served guard drives the real /chat page from a hermetic kernel: eight sessions under three tags of
-mixed sizes (one tag wide enough to wrap at the viewport) plus one untagged, one group folded by a header
-click. In the browser it reads the strip's geometry: every header is the first item of its row; the groups
-occupy disjoint row sets in strip order; a group's tabs share its header's row or a row below (its wrapped
-row starting at the left edge, never sharing a row with the next group); the folded header's row holds
-nothing else; the trail's tabs start their own row; no visible separator remains. Screenshots dark + light
-(the theme classes applyTheme sets) with NOTCH... no: TABROWS_SHOTS=<path-prefix>.
+mixed sizes (one tag wide enough to wrap at the viewport) plus one untagged, one group folded by default.
+In the browser it reads the strip's geometry: every group either opens a row at the left edge, below every
+earlier group's rows, or shares the last row of the group before it, after it; a group's first tab shares its
+header's row and a wrapped row of it starts at the left edge; the folded group renders no tab; the trail's
+tabs start their own row; no visible separator remains. Screenshots dark + light (the theme classes applyTheme
+sets) with TABROWS_SHOTS=<path-prefix>.
 
 Skips LOUDLY without the extension deps or a Playwright browser (CI installs none); the CI-safe pins ride
 ui/webview/tab-groups.test.ts and dragslot.test.ts. All fixtures synthetic (the notes-api demo world).
@@ -76,7 +79,7 @@ let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 640, height: 480 }, deviceScaleFactor: 2 });
-// the inline drive turns the one-group-per-row setting off before any page script runs, so the first paint reads
+// the inline drive turns the keep-groups-together setting off before any page script runs, so the first paint reads
 // it; the default drive writes nothing and exercises the shipped default
 if (cfg.rows === false) await page.addInitScript(() => { try { localStorage.setItem("romp:settings", JSON.stringify({ stripGroupRows: false })); } catch (e) {} });
 await page.goto(cfg.chat);
@@ -198,7 +201,7 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
 
     def _drive(self, script, name, rows=True):
         """rows: True drives the shipped default (nothing written to the settings store); False writes the
-        one-group-per-row setting off before the page loads."""
+        keep-groups-together setting off before the page loads."""
         cfg = os.path.join(self.lab, name + ".json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "rows": rows,
@@ -241,50 +244,53 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
         left = min(it["left"] for it in strip)
         secs = self._sections(items)
         self.assertEqual([g for g, _h, _t in secs], ["web", "infra", "archived", None], "%s: three groups in tag order, then the untagged trail: %r" % (label, secs))
-        rows_of = lambda tabs: sorted({t["top"] for t in tabs})
-        prev_max = -1
+        prev_max, prev_last = -1, None
         for g, head, tabs in secs:
-            if head is not None:
-                self.assertEqual(head["left"], left, "%s: the %r chip sits at the row's left edge: %r" % (label, g, head))
-                self.assertGreater(head["top"], prev_max, "%s: the %r header opens a row below every earlier group's rows: %r" % (label, g, head))
-                first_row = head["top"]
-            else:
+            run = ([head] if head is not None else []) + tabs
+            if head is None:
                 self.assertTrue(tabs, "%s: the untagged trail has its tab: %r" % (label, secs))
                 self.assertGreater(tabs[0]["top"], prev_max, "%s: the trail opens its own row: %r" % (label, tabs[0]))
                 self.assertEqual(tabs[0]["left"], left, "%s: the trail starts at the left edge, no separator ahead of it: %r" % (label, tabs[0]))
-                first_row = tabs[0]["top"]
-            rows = rows_of(tabs) or [first_row]
+            elif head["left"] == left:
+                self.assertGreater(head["top"], prev_max, "%s: the %r header opens a row below every earlier group's rows: %r" % (label, g, head))
+                if prev_last is not None:   # a group that opens a row stands behind a row break
+                    self.assertIn("tab-group-break", items[items.index(head) - 1]["cls"].split(), "%s: a break ahead of %r: %r" % (label, g, items))
+            else:
+                # the flow (2026-10-01): it shares the last row of the group before it, after that group's last item
+                self.assertIsNotNone(prev_last, "%s: the first group opens the strip at the left edge: %r" % (label, head))
+                self.assertEqual(head["top"], prev_last["top"], "%s: the %r header shares the row of the group before: %r" % (label, g, head))
+                self.assertGreater(head["left"], prev_last["left"], "%s: …after it: %r" % (label, head))
             if tabs and head is not None:
                 self.assertEqual(tabs[0]["top"], head["top"], "%s: the %r group's first tab shares the chip's row: %r" % (label, g, tabs[0]))
+            rows = sorted({t["top"] for t in run})
             for r in rows[1:]:   # a wrapped row of the same group starts at the left edge
-                first = min((t for t in tabs if t["top"] == r), key=lambda t: t["left"])
+                first = min((t for t in run if t["top"] == r), key=lambda t: t["left"])
                 self.assertEqual(first["left"], left, "%s: %r wraps onto a row starting at the left edge: %r" % (label, g, first))
-            prev_max = max(rows)
+            prev_max, prev_last = max(rows), max(run, key=lambda t: (t["top"], t["left"]))
         return secs
 
-    def test_every_group_starts_on_its_own_line_and_a_fold_leaves_the_header_row_alone(self):
+    def test_every_group_is_one_run_and_a_fold_leaves_the_header_alone(self):
         # the shipped default: nothing written to the settings store, so this is what a fresh browser shows
         r = self._drive(DRIVER, "rows")
         o, clicked, l = r["open"], r["clicked"], r["light"]
         # the world: eight visible tabs (the archived group starts folded, its one member hidden), three headers,
-        # no visible separator, one break per header after the first plus the trail's
+        # no visible separator; the trail's break always, plus one ahead of each group that opens a row (the flow)
         visible = [s for s in SESSIONS if s[2] != "archived"]
         self.assertEqual(len([i for i in o["items"] if i["id"]]), len(visible) + 1, "every visible session has its tab, the two-tag one twice: %r" % [i["name"] for i in o["items"]])
         self.assertEqual([h["group"] for h in o["heads"]], ["web", "infra", "archived"])
-        self.assertEqual(o["breaks"], 3, "a break before infra, before archived, and the trail's: %r" % o["breaks"])
         for sp in o["seps"]:
             self.assertEqual(sp["h"], 0, "the untagged boundary has no height — no separator is drawn: %r" % o["seps"])
         secs = self._check_rows(o, "open")
+        left = min(h["left"] for g, h, _t in secs if h is not None)
+        opened = [g for g, h, _t in secs[1:] if h is not None and h["left"] == left]
+        self.assertEqual(o["breaks"], len(opened) + 1, "a break ahead of each later group that opens a row (%r), and the trail's: %r" % (opened, o["breaks"]))
         web = next(t for g, _h, t in secs if g == "web")
         self.assertGreater(len({t["top"] for t in web}), 1, "the web group wraps onto a further row at this width (the case under test): %r" % web)
-        # FOLDED (the archived group, folded by default): its header's row holds nothing else, and the trail
+        # FOLDED (the archived group, folded by default): its header alone, no tab of it rendered, and the trail
         # below still opens its own line
         arch = next(h for h in o["heads"] if h["group"] == "archived")
         self.assertEqual((arch["folded"], arch["count"]), ("1", "1"), "archived is folded, its one member hidden: %r" % arch)
-        arch_head = next(h for g, h, _t in secs if g == "archived")
         self.assertEqual(next(t for g, _h, t in secs if g == "archived"), [], "folded: no archived tab rendered")
-        same_row = [i for i in o["items"] if i["top"] == arch_head["top"] and i["w"] > 0 and i["id"]]
-        self.assertEqual(same_row, [], "folded: the header row alone: %r" % same_row)
         # T284 (the user 2026-09-09): every header opens chip, caret, count, the feed's grouped headers' order
         # (name at the left, caret and count together at the right); the folded header's member pip comes
         # last, so the folded and the open row share one shape and the caret is always the chip's neighbour
@@ -312,7 +318,7 @@ class ServedGroupsOnOwnLines(unittest.TestCase):
         self._check_rows(l, "light")
 
     def test_with_the_setting_off_the_strip_flows_inline_no_breaks_and_the_trail_behind_its_divider(self):
-        # the gear's "One tag group per row in the tab strip" turned off (written to the settings store before the
+        # the gear's "Keep tag groups together in the tab strip" turned off (written to the settings store before the
         # page loads): the strip emits no row break, a group's header is followed by its tabs with nothing between,
         # and the untagged trail stands behind a visible 13px divider
         o = self._drive(DRIVER, "inline", rows=False)["open"]

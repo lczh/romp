@@ -219,6 +219,7 @@ def _rebind_state(path):
     _CAPTIONS_MEMO.clear(); _GOALARCH_MEMO.clear()   # ...and the per-file read memos
     _episode_memo.clear()   # ...and so are the episode-log reads
     _head_memo.clear()      # transcript heads are immutable per path, but a rebind swaps the whole world of paths
+    _RESUME_LINKS_MEMO.clear()   # the candidates' lineage read: keyed by sid on the old root's states logs
     _namefp_memo.clear()    # names-entry content is memoized per SID against same-second mtimes — across a
     #                         rebind that collides and serves the OLD root's project dir (found 2026-07-27:
     #                         the second test in a run discovered nothing, its fleet resolved into an rm'd tmpdir)
@@ -3148,9 +3149,15 @@ def _parse_store(fsid, cut, key, session, leaf, human, mode="full"):
     session's new leaf, drops the previous leaf's slots (_note_leaf), so one tree per session holds across clears;
     a parse stored under that retired leaf afterwards (a pass working from rows it snapshotted before the flip, an
     episode render of the pre-clear transcript) is handed back to its caller and not stored, since the release is
-    a one-shot and nothing would drop it again. A leaf discover never handed out (a subagent's agent file) is
-    never retired and stores as an override slot."""
+    a one-shot and nothing would drop it again. For the same reason the assembly entry such a parse installed for
+    this sid is released here as well (2026-10-01): the flip released the retired leaf's entry once, and a parse
+    after it put one back that nothing would release again before the cache's count cap. A leaf discover never
+    handed out (a subagent's agent file) is never retired and stores as an override slot."""
     if _leaf_retired(fsid, leaf):
+        try:
+            em.release_assembly(leaf, rompuuid=fsid)
+        except Exception as e:                    # noqa: BLE001 — a trim never fails the parse it rides
+            em.release_failed("retired parse", leaf, e, sid=fsid)
         return
     slot = (fsid, cut, str(leaf))
     with _PARSE_CACHE_LOCK:
@@ -3642,15 +3649,115 @@ def _pending_cut(fsid):
         return ""
 
 
+_RESUME_LINKS_MEMO = {}   # fsid -> ((st_mtime_ns, st_size) of states/<fsid>.jsonl, its resume links): the states log is
+#                          append-only, so a stat says whether the links read last are still the file's
+_RESUME_LINKS_MAX = 1024
+
+
+def _resume_links(fsid):
+    """{to_fsid: from_fsid} from the session's states log (em.resume_fork_links, the rows the lineage closure walks),
+    memoized on the log's stat. {} when the log does not exist; None when it exists and cannot be read, so the caller
+    keeps the anchor rather than guessing at a lineage it could not see."""
+    p = STATESDIR / (fsid + ".jsonl")
+    try:
+        st = os.stat(p)
+    except FileNotFoundError:
+        _RESUME_LINKS_MEMO.pop(fsid, None)
+        return {}
+    except OSError:
+        return None
+    k = (st.st_mtime_ns, st.st_size)
+    hit = _RESUME_LINKS_MEMO.get(fsid)
+    if hit is not None and hit[0] == k:
+        return hit[1]
+    errs = []
+    try:
+        links = em.resume_fork_links(list(em._read_jsonl_incremental(str(p), on_fail=errs.append)))
+    except Exception:                              # noqa: BLE001 — unreadable: unknown, never "no lineage"
+        return None
+    if errs:                                       # the reader answers [] for a log it could not open or read, as for an empty
+        return None                                #  one, and only on_fail tells the two apart. Not memoized: the stat is the
+        #                                            same once the log reads again, and the blind read's {} would be served
+    if len(_RESUME_LINKS_MEMO) >= _RESUME_LINKS_MAX:
+        try:
+            _RESUME_LINKS_MEMO.pop(next(iter(_RESUME_LINKS_MEMO)), None)   # the oldest entry; a racing writer's resize is harmless
+        except (StopIteration, RuntimeError):
+            pass
+    _RESUME_LINKS_MEMO[fsid] = (k, links)
+    return links
+
+
+def _anchor_reachable(fsid, leaf, anchor):
+    """Whether a parse of `leaf` can reach the session's anchor file. The recorded resume lineage is walked back from the
+    leaf (the states resumeFork rows the lineage closure walks, at most 16 hops) to the conversation's first file R. The
+    anchor is unreachable only when it is not on that walk and R starts at a head with no parent link and a parseable
+    stamp: the record a /clear opens a transcript with, which no record of R or of the files resumed from it chains past
+    (a /clear's file has fresh uuids and no back-link, a resume fork links only to its recorded predecessor, a compaction
+    stitches within its file). That is the predicate the kernel's episode boundary check settles cards on. Anything else
+    (a head that back-links, a lineage through the anchor, no head yet, an unparseable stamp, the hop cap, a states log
+    that cannot be read) answers True: the anchor stays a candidate, as it always was. So does a lineage whose leaf, or
+    a file resumed into on the way from R that is on disk, has no stamped head yet (a resume's new file holding only a
+    queue-operation line, a first record whose stamp does not parse): the floor parse_session and the chat put under
+    salvaged replies is the earliest head over those files and cannot be told without it, and the anchor's landed text
+    is then what keeps a pre-clear reply that landed there from coming back (review round one, 2026-10-03)."""
+    links = _resume_links(fsid)
+    if links is None:
+        return True
+    stem, first, hops, after = leaf.stem, leaf, 0, []
+    while stem in links:
+        if hops >= 16:
+            return True                            # the closure's own cap: a lineage it cannot finish walking
+        stem = links[stem]
+        hops += 1
+        if stem == anchor.stem:
+            return True                            # a resume lineage through the anchor: it IS the conversation's history
+        after.append(first)
+        first = leaf.with_name(stem + ".jsonl")
+    head = transcript_head(first)
+    if not (head and head.get("root") and head.get("t")):
+        return True
+    for fp in after:                               # the leaf, and each file resumed into after R that is on disk
+        if fp != leaf and not fp.exists():
+            continue                               # the closure skips a missing file, and so does its floor
+        h = transcript_head(fp)
+        if not (h and h.get("t")):
+            return True                            # no stamped head yet: the floor cannot be told, the anchor stays
+    return False
+
+
 def _judge_candidates(fsid, files):
     """The judge parse's candidate transcript set: the leaf plus the session's anchor <fsid>.jsonl
-    when the leaf is a fork (SDK /clear: discover hands the lastSid file under the stable romp sid).
-    Shared by parsed_session and the write-moment chain checks so both walk the same graph."""
+    when the leaf is a fork (SDK /clear: discover hands the lastSid file under the stable romp sid)
+    whose parse can reach the anchor (_anchor_reachable). Shared by parsed_session, the kernel's display
+    parse and the write-moment chain checks so all of them walk the same graph.
+
+    A conversation a /clear opened (its first file starts at a parentless head, no resume lineage runs
+    through the anchor) never links back into the anchor, so the anchor added nothing to what any of them
+    saw while every whole road read it, indexed it and kept it resident, and documents carried a row per
+    record of it (2026-10-03). It is left out there; the per-file dead-branch scan still walks it
+    (_per_file_rewound), and parse_session floors the salvaged replies at the first record the parse
+    reads, which the anchor's landed text used to do. A leaf whose head links back, or whose recorded
+    resume lineage runs through the anchor, keeps exactly [leaf, anchor], in that order."""
     leaf = Path(files[0])
     anchor = leaf.with_name(fsid + ".jsonl")
-    if anchor.name != leaf.name and anchor.exists():
+    if anchor.name != leaf.name and anchor.exists() and _anchor_reachable(fsid, leaf, anchor):
         return list(files) + [str(anchor)]
     return list(files)
+
+
+def conversation_floor(fsid, leaf):
+    """When the conversation the parse of `leaf` reads began (em._conversation_floor over _judge_candidates and the lineage
+    closure: the floor parse_session puts under salvaged replies), or None when it cannot be told. The kernel's chat build
+    floors its own salvaged-reply interleave at it, since that door deduped a pre-clear reply that landed by the parse's
+    landed-text uuids, which hold no uuid of an anchor the parse no longer reads (2026-10-03)."""
+    try:
+        links = _resume_links(fsid)
+        if links is None:
+            return None
+        cands = _judge_candidates(fsid, [str(leaf)])
+        return em._conversation_floor(em._lineage_closure(Path(leaf), cands, links))
+    except Exception:                                  # noqa: BLE001 — no floor: nothing is dropped on a guess
+        return None
 
 
 def _chain_key(path, cands, states):
@@ -3786,6 +3893,30 @@ def _sdk_owned(fsid):
         except Exception:
             pass
     return (STATE / "sdk" / (fsid + ".json")).exists()
+
+
+def _own_file_in_use(fp):
+    """Whether `fp` is a registered session's own file (<sid>.jsonl with a reg) that the session's CURRENT parse reads: the
+    session has not forked away from it (no diverged lastSid), its lastSid file is not on disk yet (discover hands out the
+    own file meanwhile), or it is among the candidates of the lastSid file's parse (a leaf whose head links back, or whose
+    recorded resume lineage runs through the anchor). The residency rules keep such a file's records (the episode scan's
+    drop, the leaf flip's release); a bare _sdk_owned kept every registered session's first file for the process's life, a
+    /clear's anchor that no parse reads included (2026-10-03). A lineage that cannot be read answers True: nothing is
+    dropped on a guess."""
+    fp = Path(fp)
+    sid = fp.stem
+    if not _sdk_owned(sid):
+        return False
+    last = _sdk_last_sid(sid)
+    if last is None:
+        return True
+    cur = fp.with_name(last + ".jsonl")
+    try:
+        if not cur.exists():
+            return True
+        return fp in {Path(c) for c in _judge_candidates(sid, [str(cur)])}
+    except Exception:                                  # noqa: BLE001 — unknown: kept, as before this rule
+        return True
 
 
 # ── the PASS FRAME (the user 2026-07-21): one frozen view of the EVIDENCE per judge pass ──
@@ -3952,9 +4083,10 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     leaf = str(files[0])                   # the transcript this parse is OF: part of the slot (an override parse of
     #                                        another file under the same sid never takes the live leaf's slot)
     # A FORKED leaf (SDK /clear: discover hands the lastSid file under the stable romp sid) parses with
-    # the session's anchor transcript among the candidates, so a fork whose chain back-links across files
-    # (a resume-style fork) keeps its history — the FileAdapter walk crosses files by design, and a /clear
-    # fork (parentUuid null at the head) still drops pre-clear history naturally.
+    # the session's anchor transcript among the candidates when the parse can reach it, so a fork whose
+    # chain back-links across files (a resume-style fork) keeps its history — the FileAdapter walk crosses
+    # files by design. A /clear fork (parentUuid null at the head, no resume lineage through the anchor)
+    # parses its own file alone (_judge_candidates, 2026-10-03): its walk never reached the anchor.
     files = _judge_candidates(fsid, files)
     # A PENDING bare rollback truncates the judge's world exactly as it truncates the display parse
     # (leaf_override — the wire note at _PENDING_CUT_FN): during the armed window plan_units never
@@ -6963,11 +7095,20 @@ def _per_file_rewound(fsid, files):
     "rewound-reconcile-file" category, distinguishable from a counted whole-session failure —
     never a stalled scan, and it is COUNTED: the returned set is PARTIAL on any failure, and the
     caller must not let a partial set become a memoized baseline or a zero-failure migration pass
-    (dead files never change, so a swallowed miss here would never re-open)."""
+    (dead files never change, so a swallowed miss here would never re-open).
+
+    The session's anchor <fsid>.jsonl is scanned whether or not it is a candidate (2026-10-03): a
+    /clear's leaf no longer parses with it (_judge_candidates), and for a session first observed after
+    its first /clear no episode row names it, so a rewind inside the pre-clear file was caught only
+    because the anchor rode the candidates. `lineage` is taken from the files handed in BEFORE the
+    anchor joins the scan list: an anchor no parse reads is a frozen file like a dead episode's."""
     out, seen, fails = set(), set(), 0
     leaf = Path(files[0])
     cands = [Path(f) for f in files]
-    lineage = set(cands)                                  # the live session's own files (the leaf, its /clear anchor): resident
+    lineage = set(cands)                                  # the files the session's parse reads (the leaf, an anchor it reaches): resident
+    anchor = leaf.with_name(fsid + ".jsonl")
+    if anchor.name not in {fp.name for fp in cands}:
+        cands.append(anchor)                              # the pre-clear file's own walk, a candidate or not (a missing file is skipped below)
     for row in episode_rows(fsid):
         fs = str(row.get("fsid") or "")
         if fs:
@@ -6985,8 +7126,9 @@ def _per_file_rewound(fsid, files):
             # permissions break into an empty list): a failed read, not an empty file, and it must count like one.
             if fp == leaf and em.asm_document_seeds(fp):  # the leaf road: the document's pre-cut verdicts and the tail read now.
                 em.rewound_memo_forget(fp)                #  asm_document_seeds reads the sidecar's own inputs list, so a document
-                #                                           written over a two-file lineage (a /clear anchor beside, or a resume
-                #                                           fork's from-file among its inputs) answers False there and the leaf takes
+                #                                           written over a two-file lineage (a back-linked fork's anchor beside, or a
+                #                                           resume fork's from-file among its inputs; a /clear's leaf documents alone
+                #                                           since 2026-10-03) answers False there and the leaf takes
                 #                                           the memo road (round one, low 1); the memo's cursor from the leaf's
                 #                                           documentless days is dropped at the flip so the checkpoint's cut follows the
                 #                                           live folds (low 2). Until 2026-09-15 a `len(files) == 1` guard sat beside
@@ -7017,14 +7159,16 @@ def _per_file_rewound(fsid, files):
                 #                                           and read the file whole at every boot, 104 MB on one): the walk once, its
                 #                                           verdict set memoized in the file's fold document and restored at the next
                 #                                           process; a leaf's memo is retired by its next append like any other's
-                out |= em.rewound_uuids(fp, drop=fp not in lineage and not _sdk_owned(fp.stem))   # the file's fold document,
-            #     ^ restored at the next process (T391); a live session's anchor keeps its records resident, since the chain walk
-            #       above reads it whole at every pass and a drop here made that a whole read per pass (round one, medium); so does
-            #       ANY registered session's own file (<sid>.jsonl with a reg): a fork's episode log names its parent's anchor,
-            #       and the fork's scan dropping it made the parent's chain walk read it whole once more per process, by pass
-            #       order (round two, low 2)
-            #     ^ the one-file walk asks for the leaf's document quietly: a lineage document (a /clear's anchor, a
-            #       resume fork) is not this walk's and stays the display's
+                out |= em.rewound_uuids(fp, drop=fp not in lineage and not _own_file_in_use(fp))   # the file's fold document,
+            #     ^ restored at the next process (T391); a live session's anchor its parse reads keeps its records resident, since
+            #       the chain walk above reads it whole at every pass and a drop here made that a whole read per pass (round one,
+            #       medium); so does a registered session's own file (<sid>.jsonl with a reg) while that session's own parse reads
+            #       it: a fork's episode log names its parent's anchor, and the fork's scan dropping it made the parent's chain walk
+            #       read it whole once more per process, by pass order (round two, low 2). An anchor no parse reads (a /clear's,
+            #       2026-10-03) drops after its walk like a dead episode's file, its memo written first
+            #     ^ the one-file walk asks for the leaf's document quietly: a lineage document (a resume fork's, over its
+            #       from-file, or a back-linked leaf's, over the anchor beside it) is not this walk's and stays the display's.
+            #       A /clear's leaf documents alone since 2026-10-03, so its document is the leaf road's
         except Exception as e:
             fails += 1
             _log_judge_error("romp", fsid, "rewound-reconcile-file",
@@ -7061,7 +7205,9 @@ def reconcile_rewound_goals(fsid, path, now):
     files = _judge_candidates(fsid, [str(path)])
     states = STATESDIR / (fsid + ".jsonl")
     epi = EPIDIR / (fsid + ".jsonl")
-    key_files = (list(files) + ([str(states)] if states.exists() else [])
+    anchor = Path(path).with_name(fsid + ".jsonl")    # the per-file scan walks the anchor, a candidate or not: so does the key
+    scanned = [str(anchor)] if anchor.name not in {Path(f).name for f in files} and anchor.exists() else []
+    key_files = (list(files) + scanned + ([str(states)] if states.exists() else [])
                  + ([str(epi)] if epi.exists() else []))
     try:
         key = _fileset_key(key_files)
@@ -9072,7 +9218,11 @@ def _note_leaf(sid, path_str):
     parent's live slot is not the child's to drop. The retired leaf is remembered so a parse stored under it AFTER
     the flip (a pass that snapshotted its rows before a mid-pass /clear) is refused by _parse_store rather than
     kept as a live slot; a leaf handed out again (the anchor, while a fresh lastSid names a file not yet on disk)
-    is current again and stores as before."""
+    is current again and stores as before. With the slots go this sid's assembly entry of the retired leaf and, when no
+    live lineage reads the file, its record entry (_release_retired_records, 2026-10-01). Those two do file I/O (a stat, a
+    sidecar read, a states read, a document write) inside discover, which every pane rides: a raise there is noted once per
+    file (em.release_failed) and the flip goes on: the release stops where it raised, what ran before it stays released (the
+    slots, and the assembly entry when the record drop or its lineage read raised), and the record drop is not retried."""
     with _LEAF_LOCK:
         prev = _LEAF_SEEN.get(sid)
         _LEAF_SEEN[sid] = path_str
@@ -9082,6 +9232,45 @@ def _note_leaf(sid, path_str):
             retired.add(prev)
     if prev is not None and prev != path_str:
         parse_cache_drop_leaf(prev, sid)
+        try:
+            em.release_assembly(prev, rompuuid=sid)   # and this sid's assembly entry of it (2026-10-01), which held every record
+            #                                           of the retired leaf until the cache's count cap
+            _release_retired_records(sid, prev, path_str)
+        except Exception as e:                        # noqa: BLE001 — a trim never fails discover
+            em.release_failed("leaf flip", prev, e, sid=sid,
+                              outcome=em.RELEASE_FAILED_OUTCOME + "; the record drop is not retried")
+
+
+def _release_retired_records(sid, prev, leaf):
+    """The record side of a leaf flip (2026-10-01): the retired leaf's reader entry goes when no live lineage of the session
+    reads it. After a first /clear the retired leaf is the session's anchor: a back-linked or resume-forked new leaf's parse
+    reads it and it stays, and since 2026-10-03 a /clear's new leaf does not (_judge_candidates), so it goes here, its fold
+    document written first like any released file's (the episode scan still walks it, from the memo the document carries;
+    when the new file has no record yet at the flip the rule keeps the anchor, and the drop is not retried).
+    After a second one it is the first clear's file: neither the new leaf's candidates nor its lineage closure name it, and
+    its whole entry (the judges read the leaf whole while it was current) stayed until the reader's LRU reached it. The
+    judges' episode scan still walks that file (the session's episode rows name it), and the flip runs inside discover,
+    BEFORE that scan: so the drop writes the file's fold document first when it lacks what this process holds, the scan's
+    rewound memo among it (em.release_records takes the quiet drop's write half), and the scan restores the memo from the
+    document at the guard bytes' cost (round one of the review: a pop with no write sent the scan back to the whole file,
+    and the entry it re-read stayed). A file discover hands out as ANY session's current leaf stays (a fork child's first
+    leaf is its parent's live transcript), so does a registered session's own file while that session's parse reads it
+    (_own_file_in_use), as the episode scan keeps it (_per_file_rewound), and so does a file a whole assembly entry still
+    folds over (em.release_records). A lineage that
+    cannot be read drops nothing, and the undone drop is counted and said (em.release_failed), never skipped in silence."""
+    try:
+        cands = _judge_candidates(sid, [leaf])
+        links = em.resume_fork_links(em._load_states(str(STATESDIR / (sid + ".jsonl"))))
+        keep = {str(f) for f in em._lineage_closure(Path(leaf), cands, links)}
+    except Exception as e:                         # noqa: BLE001 — the lineage could not be read: nothing is dropped on a guess
+        em.release_failed("leaf flip lineage", prev, e, sid=sid,
+                          outcome=em.RELEASE_FAILED_OUTCOME + "; the record drop is not retried")   # the assembly release ran
+        return
+    with _LEAF_LOCK:
+        keep.update(str(p) for p in _LEAF_SEEN.values())
+    if str(prev) in keep or _own_file_in_use(prev):
+        return
+    em.release_records([str(prev)], keep=keep)
 
 
 def _leaf_retired(sid, leaf):
@@ -9930,37 +10119,88 @@ def _awaiting_bg_hold(fsid, path, session, store, now=None):
         same placed-unstamped-is-a-service rule as the kernel's _bg_split, translated to judge-native
         events. A live awaitingWhy stamp re-affirms the hold past that audit; its lift releases it.
     Pre-verdict the hold is conservative (a launch whose turn nothing has swept always holds), matching
-    _bg_split's PENDING→awaited prior. `now`: the pass's clock for the expiry view (see _bg_unresolved)."""
-    tasks = _bg_unresolved(path, now)
-    if not tasks:
-        return False
-    sp = _cli_epoch(fsid)
-    tasks = [t for t in tasks if not (sp and t.get("t") and t["t"] < sp)]
-    if not tasks:
-        return False
-    nodes = store.get("nodes") or {}
-    if any(nd.get("awaitingWhy") and not nd.get("cleared") and not nd.get("nodeComplete")
-           for nd in nodes.values()):
-        return True                       # the closer affirmed a wait somewhere open — hold
-    swept = set(store.get("closedTurns") or [])
-    launch_turn = {}                      # tool_use id -> the turn that dispatched it (launch or its ack)
-    for turn in reversed(session.get("turns") or []):
-        for a in turn["atoms"]:
-            if a.get("lazy") is not None:         # an atom before the assembly cut carries its tool ids as scalars (T323 stage 4a)
-                for tid, _name in em.atom_tool_uses(a):
-                    launch_turn.setdefault(tid, turn.get("id"))
-                for tid in em.atom_tool_results(a):
-                    launch_turn.setdefault(tid, turn.get("id"))
-                continue
-            blocks = (a.get("message") or {}).get("content")
-            if not isinstance(blocks, list):
-                continue
-            for b in blocks:
-                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
-                    launch_turn.setdefault(b["id"], turn.get("id"))
-                elif isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
-                    launch_turn.setdefault(b["tool_use_id"], turn.get("id"))
-    return any(launch_turn.get(t["id"]) not in swept for t in tasks)
+    _bg_split's PENDING→awaited prior. `now`: the pass's clock for the expiry view (see _bg_unresolved).
+
+    A launch's turn is the NEWEST turn naming its id, as a tool_use or as a tool_result (its ack). The walk goes
+    newest first, looks up only the running launches' ids, and stops at the turn that decides: the first unswept
+    turn naming one of them holds; once every one is placed in a swept turn, nothing holds. A running launch no
+    turn names holds while None is not a swept turn id (always, in practice). A turn restored from an assembly
+    document (a pre-cut turn) answers from the ids its atom list carries (em.LazyAtoms.tool_ids), so none of its
+    atoms is stored in a slot or registered (a row without a marker is built for the read and dropped); a plain
+    turn's atoms are read here. Counted under /perf memos.bgHold."""
+    walked, turns, pre, plain, exhausted = False, 0, 0, 0, False
+    try:
+        tasks = _bg_unresolved(path, now)
+        if not tasks:
+            return False
+        sp = _cli_epoch(fsid)
+        tasks = [t for t in tasks if not (sp and t.get("t") and t["t"] < sp)]
+        if not tasks:
+            return False
+        nodes = store.get("nodes") or {}
+        if any(nd.get("awaitingWhy") and not nd.get("cleared") and not nd.get("nodeComplete")
+               for nd in nodes.values()):
+            return True                       # the closer affirmed a wait somewhere open — hold
+        swept = set(store.get("closedTurns") or [])
+        need = {t["id"] for t in tasks}       # the running launches not yet placed in a turn
+        walked = True
+        for turn in reversed(session.get("turns") or []):
+            turns += 1
+            atoms = turn["atoms"]
+            ids_of = getattr(atoms, "tool_ids", None)    # a pre-cut turn's lazy list (duck-typed: a test load rebinds the class)
+            if ids_of is not None:
+                pre += 1
+                hits = need.intersection(ids_of())
+            else:
+                hits = set()
+                for a in atoms:
+                    plain += 1
+                    if a.get("lazy") is not None:         # a lazy atom carries its tool ids as scalars (T323 stage 4a)
+                        hits.update(tid for tid, _name in em.atom_tool_uses(a) if tid in need)
+                        hits.update(tid for tid in em.atom_tool_results(a) if tid in need)
+                        continue
+                    blocks = (a.get("message") or {}).get("content")
+                    if not isinstance(blocks, list):
+                        continue
+                    for b in blocks:
+                        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                            if b["id"] in need:
+                                hits.add(b["id"])
+                        elif isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id"):
+                            if b["tool_use_id"] in need:
+                                hits.add(b["tool_use_id"])
+            if hits:
+                if turn.get("id") not in swept:
+                    return True                   # the newest turn naming a running launch is unswept: hold
+                need -= hits                      # placed in a swept turn: an older turn naming them decides nothing
+                if not need:
+                    return False
+        exhausted = True
+        return None not in swept                  # a running launch no turn names
+    finally:
+        _bg_hold_note(walked, turns, pre, plain, exhausted)
+
+
+_BG_HOLD_STATS = {"calls": 0, "walks": 0, "turns": 0, "preTurns": 0, "atoms": 0, "exhausted": 0}
+_BG_HOLD_LOCK = threading.Lock()     # the triage pool calls the hold from several threads at once
+
+
+def _bg_hold_note(walked, turns, pre, plain, exhausted):
+    """One call's tallies into the hold's counters, once per call: `walks` the calls that reached the walk, `turns`
+    the turns they visited, `preTurns` those answered from a pre-cut list's ids, `atoms` the plain atoms read,
+    `exhausted` the walks that ran out of turns with a running launch no turn names."""
+    with _BG_HOLD_LOCK:
+        s = _BG_HOLD_STATS
+        s["calls"] += 1
+        if walked:
+            for k, n in (("walks", 1), ("turns", turns), ("preTurns", pre), ("atoms", plain), ("exhausted", int(exhausted))):
+                s[k] += n
+
+
+def bg_hold_stats():
+    """A copy of the background hold's counters for /perf (memos.bgHold)."""
+    with _BG_HOLD_LOCK:
+        return dict(_BG_HOLD_STATS)
 
 
 def _session_settled(fsid, path, session, store, now=None):
@@ -20046,8 +20286,8 @@ def _dump_goals():
 # run_pass, the SAME function the in-process producer calls (round two: a copy of the producer had drifted three ways before
 # it ever ran). Every counter on the done line is a PER-PASS figure: wallMs, tierCpuMs and workerCpuMs are the pass's own,
 # and the recordCache, asmCheckpoint, parses, goalIo and tierGate blocks are the differences against the previous pass's snapshot (the
-# kernel feeds its /perf counters per pass) except their GAUGES (_SERVE_GAUGES: recordCache's entries, bytes, budgetBytes and
-# countCap; asmCheckpoint's asmDocMemo; tierGate's stamps), which ride as current values (restoreMs accumulates since boot and is differenced like
+# kernel feeds its /perf counters per pass) except their GAUGES (_SERVE_GAUGES: recordCache's entries, bytes, realBytes,
+# decodedMultiple, budgetBytes and countCap; asmCheckpoint's asmDocMemo; tierGate's stamps), which ride as current values (restoreMs accumulates since boot and is differenced like
 # every counter, so the line carries the pass's own restore time); `recovered` is this process's judge-module
 # recovery flag, consumed by the child
 # and acted on by the kernel (the give-up re-arm after a rate-limit storm ends). One pass at a time: a `pass` arriving before the previous `done` is answered `busy` and
@@ -20241,7 +20481,7 @@ def _serve_counter_blocks():
 
 
 _SERVE_GAUGES = {                                 # the keys of each block that are GAUGES (a current size, a cap), not counters:
-    "recordCache": ("entries", "bytes", "budgetBytes", "countCap"),   #  they ride as their current values, never as a difference
+    "recordCache": ("entries", "bytes", "realBytes", "decodedMultiple", "budgetBytes", "countCap"),   #  they ride as their current values, never as a difference
     "asmCheckpoint": ("asmDocMemo",),             # (round three); restoreMs is NOT one: _restore_ms accumulates since boot, so its
     "parses": (), "goalIo": (),                   #  per-pass difference is the pass's own restore time (round four)
     "tierGate": ("stamps",)}                      # the stamps held is a size, the per-tier counters are counters

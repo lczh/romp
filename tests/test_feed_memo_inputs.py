@@ -295,9 +295,10 @@ OFF_FEED = (
     "_branch_marker",              # the chat's recovery flush: forkedFrom
     "_comment_promote_inner",      # a comment thread's promotion: cwd, lastSid
     "_comment_reply",              # the comment reply drive: name
-    "_comments_frame",             # the comment threads frame (the push, the drive): alive, effort, forkOf, liveModel, model
+    "_comment_frame_entry",        # the comment threads frame's row (the push; a create's answer): alive, effort, forkOf, liveModel, model
     "_compact_suggest_tick",       # the compaction tick: threadOf
     "_dead_wait_corroborated",     # the dead-wait sweep and the wake: alive
+    "_episode_file",               # the earlier-conversation fold's transcript resolve (build_episode, loadEpisode): forkedFrom, threadOf
     "_death_boot_pass",            # main's boot pass over the registry: alive
     "_lift_decisions",             # the lift tick (_lift_spent_awaiting): bgLedgerEnded
     "_model_alias_boot_pass",      # main's model-alias migration, a rewrite of every record: model, name

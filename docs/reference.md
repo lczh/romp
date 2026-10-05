@@ -33,7 +33,7 @@ These are for scripting and for agents rather than daily use:
 |---|---|
 | `romp url` | Print only the tokened dashboard URL, for piping |
 | `romp sessions [--json]` | The fleet with each session's state, identity colours, directory and backend |
-| `romp perf [--interval <s>] [--json [--walk]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, and `--walk` fills its two heap-wide gauges; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
+| `romp perf [--interval <s>] [--json [--walk] [--paths]]`, `romp perf log on\|off` | The kernel's performance counters as rates over two snapshots (below); `--json` prints one raw snapshot, `--walk` fills its two heap-wide gauges, and `--paths` adds the whole per-file read table without them; `log on\|off` turns the `romp-perf` stderr log on or off without a restart |
 | `romp perf client [--minutes <n>] [--json]` | What the open dashboards' browsers spent on the frames they received (below): handler milliseconds per minute by frame type with window p50/p90/p99 and max, the worst minute's main-thread-free p90, long animation frames and their attributed callbacks, the worst minute, heap and DOM, the slowest frames, per dashboard and pane over the last `<n>` minutes (default 10) |
 | `romp api-health` | The API-health signal as JSON (see [The API-health signal](#the-api-health-signal)): per-credential, per-model-family retry and give-up rates over rolling windows, with a derived state |
 | `romp restart-metrics [--json] [--window day\|week] [--anchor D] [--since D] [--until D] [--tz Z] [--no-live]` | What kernel restarts do to the sessions (see [Restart metrics](#restart-metrics)): turns cut per restart and per window, outage and reconcile times, quiet-window waits, orphans and reaps, crash heals, redo cost, turn latency, per-session and kernel memory and CPU; a text summary per window, or the whole document as JSON |
@@ -45,12 +45,13 @@ These are for scripting and for agents rather than daily use:
 | `romp new --no-inherit <name>` | Run inside a romp session, `romp new` sends that session's stable id (`ROMP_SID`) as the new session's `parent` (marked `parentAuto`), and the kernel copies the parent's tags onto the child; inside a comment thread, the parent is the session the thread belongs to. This flag withholds the parent, so the new session starts outside them. A kernel that never ran the calling session creates the session untagged and echoes `parentIgnored`, which the CLI reports in one line. Raw POST /new callers pass `parent` (a live name or a known sid; an unknown one is a 400 unless `parentAuto` is set) and `tags` (a list of names); opening a name that already runs never inherits; a name that is being registered by another request right now is a 409 whose `error` says which door holds it |
 | `romp tag [<name>] [--add <session>…] [--remove <session>…] [--color <hex>] [--rename <new>] [--delete] [--host <kernel>]` | Session tags. Bare, it lists them; with a name, it merges one tag (created on first use). A tagged session leaves the untagged view, and its tab sits in that tag's section of the strip. `--host` edits an attached kernel's tag |
 | `romp interrupt <session>` | Interrupt whatever turn a session is taking |
+| `romp apply <session>` | Apply now, from the shell: a billing, effort, fast-mode, bypass-mode or per-session environment change still waiting for the session to go quiet relaunches its CLI at once, ending the work it waited on, and the session is told which background tasks ended (see [What survives a restart](#what-survives-a-restart)). A session with nothing waiting is left alone, and that exits 0 with a line saying so, so a script can run it over every session; a refusal exits 1 in the kernel's words. Raw `POST /apply` callers send `{"id"\|"name": <session>}` and read `{"ok": true, "applied": true}`, `{"ok": true, "applied": false, "why"}` or `{"ok": false, "error"}` |
 | `romp compact <session> [--wait] [--timeout <s>]` | Compact a session's context in place (Claude's `/compact`: summarize the history, keep the session's name, id, mailbox, and watches; on a Codex session, Codex's own compaction of the thread, which produces no summary text): the alternative to ending and recreating a long-lived session, and the external hand a session needs since it cannot `/compact` itself mid-turn. Quiet session → compacts now; open turn → queued, fires alone the moment the turn ends (the same safe path the chat's compact button uses). `--wait` blocks until the compaction has ended, polling the `/sessions` rows (the row's `compacting` bit is also the field to point a `romp watch` predicate at for scripted recycling); exits 1 honestly on timeout, and exits 1 with the end's words on stderr when a Codex compaction ended loudly instead of finishing (the failure exit reads what the Codex compaction's end leaves on the row, the record below and the notice; a failed Claude `/compact` leaves nothing on the row, so it reads as a clean end, never as a failure). On a Codex session the judgment reads the row's `compactEnd`, the record the backend keeps of its compaction bracket's ends: a counter every end advances, with the last end's kind, words and stamp. Done when the record is no longer the one baselined (the counter advanced, or the same count under a new stamp: every end advances the counter and takes a fresh stamp) and the last end is clean; exit 1 with the words when it is loud (a failed compaction, the thread or the app-server going away, the session ending, a turn Codex accepted while the compaction stood, so that no divider was written). The record is judged rather than the row's `launchError` because the next accepted turn clears that notice, and a message parked behind the compaction is delivered at the loud end, so the notice was erased within milliseconds, before the next poll, and the wait printed done over an uncompacted thread. The baseline is the row as the CLI read it before its request for a compaction that runs at once, and the first sample that reads not compacting for a queued one (the earliest ours could have fired, so the prior compaction's loud end is not attributed to ours); a kernel restart starts the record over (the record is in memory; the bracket's bit is kept in the session's registry row, and the restarted kernel records the compaction it finds still running there as a loud end whose outcome is unknown, beside a notice saying the same), and the wait reads that record by its identity from every baseline (the restarted kernel's record starts at one, so its count alone matches a baseline of one; the stamp tells them apart): the restart's loud end exits 1 with its words, a clean end since the restart is done, and a count back at zero (a restart that found no compaction running) leaves the rest of that wait judged as a row without the record; a row baselined without the record that carries one on a later sample (a kernel from before the record, replaced mid-wait by one with it) is judged from a baseline of no end, a count above zero by its kind and a count of zero on the bit and the notice as before; a row read quiet with no notice and the record unchanged from its baseline is reported at the timeout, with a line saying the compaction's end was never recorded or its record was lost to a kernel restart right after it (a kernel that died after a clean end saved its bit, so that the restarted one serves zero again from a zero baseline; or a kernel from before the record's restart end). A row without the record (a Claude session, whose compaction path keeps none; a kernel from before the record) is judged as before, on the compacting bit and the `launchError` a loud end leaves while the bit falls: a notice that is new against the same baseline and marked by the kernel as a compaction's end (the notice's `noRetry`, so a turn's own rejection or failure, which can land after a queued wait's arming sample, is never read as the compaction's) exits 1 with its words, whether or not the compacting sample was caught, and a notice standing at the baseline is not read as this one's; else the bit having been seen and then fallen is done. When the session list cannot be read before the request, the wait on a compaction that runs at once is refused on stderr and the compaction is still requested; a queued compaction's wait is not refused, since its baseline is the first sample after the request that reads not compacting, not the read before the request. A remote session's compaction is requested on its own kernel; `--wait` can't follow it from here and says so |
 | `romp end <session>` | End a session |
 | `romp move <session> <dir>` | Move a session's working directory to `<dir>` (the folder must already exist); the conversation, name, mail and history stay with the session. Quiet session → moves now; open turn → queued, fires when the turn ends. See [Moving a session to another folder](#moving-a-session-to-another-folder) |
 | `romp checkin <host>` / `romp checkout <host>` | Publish this machine to an attached hub, or withdraw it. The hub files this machine under the name it declares only when that name is a machine name (letters, digits, dots, hyphens or underscores, starting with a letter or digit, at most 128 characters). Any other declared name is refused with a 400 that states the rule and echoes nothing, is recorded nowhere, and is said once on both machines: on the hub, one stderr line and one Log entry under the `refused` kind, naming the value as a clipped repr; on this machine, one stderr line, one dial-log record and one Log entry carrying the hub's reason, after which the same name is not re-sent until it, or the hub's kernel, changes. A hub's `POST /tunnels/trust` for a host it has never seen (the remembered-hosts entry that tiers relayed mail by origin) holds the wider rule that registry's writers share, a machine name or an ssh alias (letters, digits, dots, hyphens, underscores, at-signs, colons or square brackets, not starting with a hyphen, at most 255 characters), because a hub keys an attached peer by its ssh alias and carries that alias when you set trust between two of your machines; anything else is refused the same way, on the hub, with nothing recorded. `ROMP_HOST_NAME` (the kernel) and `ROMP_POSTAL_HOST` (the postal bus) override the declared name only when they clear the same rule; an unusable value (a space, an at-sign, a trailing newline) is set aside once, on stderr or in the bus log, and the derived name (the short hostname, else the platform's machine name, else a minted id) is used |
 | `romp default-dir [PATH]` | The default working directory for new sessions; no argument prints it, `""` clears it |
-| `romp login add <label> --cmd '<shell line>'`, `romp login list`, `romp login remove <label>` | The stored Claude logins a session can be billed to beside the machine's own (see [Several Claude logins](#several-claude-logins)): `add` records the command that prints the login's setup-token on demand (`--op` is the 1Password shorthand for `op read`); `list` and `remove` print labels only, never a token |
+| `romp login add <label> --cmd '<shell line>'`, `romp login list`, `romp login remove <label>`, `romp login link <label> --same-as <host> [--on <host>]`, `romp login unlink <label> [--on <host>]` | The stored Claude logins a session can be billed to beside the machine's own (see [Several Claude logins](#several-claude-logins)): `add` records the command that prints the login's setup-token on demand; `list` and `remove` print labels only, never a token; `link` records that a stored login is the same Claude account as `<host>`'s sign-in (this machine's name or `local`, or a connected kernel's host), copied from that machine's kernel (`--on` names the connected kernel that holds the stored login when it is not this machine's), and `unlink` takes it back |
 | `romp debug [on\|off\|status]` | Judge debug mode, where rejection rows carry the full input and reply |
 | `romp refresh --quiet` | Refresh at the next quiet window instead — waits for the turns and background work a restart would cut to finish (15-min backstop); a session under a host keeps its turn across the restart, so it is not waited on. The ONLY door to the quiet window: a deploy (a peer's `romp update`, a release self-update, an automatic converge) restarts immediately, by the user's 2026-09-08 decision |
 | `romp down --wait <s>`, `romp down --now` | How long `romp down` waits for the turns it would cut to finish (0 to 600 seconds; default 5), or no wait at all |
@@ -128,7 +129,7 @@ yields nothing rather than an error.
 
 ### Notice cards: a feed card without a judge
 
-`romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [-b <board>] [-c <category>] [--body-file <path>] [--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]`, or the shorthand `romp card "title" "text"`, posts a **notice card** to the feed: a card the kernel makes from what you hand it, with no judge involved (design: plans/notice-cards.md). With no session named the card is **owner-less** and shows at the **top** of the feed under the name Notes, above every session's cards (outside a session that is the default; inside one `ROMP_SID` owns the card unless you pass `--no-session`); `-s <name>` gives it to a session. `-k` names the card: a second post under the same key is a **revision** (it replaces the earlier card on the board, and shows again even if you had dismissed the earlier one, since it carries new information, and its number counts the archived posts of the key too, so a dismissed card's id is never minted again); with no `-k` the command mints a key and prints it, so a later `romp card -k <key> ...` revises the card. The body is markdown, rendered through the chat's sanitizer; `--attach` names a file the card shows inline when it is an image (the kernel judges it as the hover preview does: your home or the session's folder, no secrets-shaped names, the size caps, and keeps a pinned copy of an image as posted; an owner-less card's attachment is judged against your home alone). A card leaves the board on your dismissal (Clear; Undo restores it, copying its rows back out of the archive when the retention pass has already moved them), on a revision, or at `--expires` seconds from the post. `--needs-you` files it under Needs you. The kernel keeps every post in `notices/<session>.jsonl` under the state directory (`notices/notes.jsonl` for owner-less cards) and archives dismissed, expired and superseded rows to `notices-archive/`; a home shows at most fifty live keys at once, the oldest superseded past that. The same door is `POST /notice` on the kernel (the `/watch` shape: `{"id"|"name", "key", "title", "body"?, "attachment"?, "needsYou"?, "expiresAt"?, "producer"?}`; with neither `id` nor `name` the card is owner-less; `{"id"|"name", "expire": "<key>"}` retires a card early), and producers inside romp call the kernel's `post_notice` in process. An owner-less card carries no actions. `-b <board>` files the card on a board of yours (`plans/card-boards.md`): an unknown board is created on first use with the category `-c` names (or `notes`), a category unknown to your board is added to it, and the posted line names the board and says when the post created it, so a typo in `-b` is a new board you can see at once (`romp board list` names it, `romp board remove` takes it away while no card stands on it). `-c` alone names a feed category (`working`, `needs_input`, `completed`). `--needs-you` on a board is that board's needs-you category, and is refused when its definition names none.
+`romp card -t <title> [-m <text>] [-k <key>] [-s <session> | --no-session] [-b <board>] [-c <category>] [--body-file <path>] [--attach <path>] [--needs-you] [--expires <seconds>] [--producer <label>]`, or the shorthand `romp card "title" "text"`, posts a **notice card** to the feed: a card the kernel makes from what you hand it, with no judge involved (design: plans/notice-cards.md). With no session named the card is **owner-less** and shows at the **top** of the feed under the name Notes, above every session's cards (outside a session that is the default; inside one `ROMP_SID` owns the card unless you pass `--no-session`); `-s <name>` gives it to a session. `-k` names the card: a second post under the same key is a **revision** (it replaces the earlier card on the board, and shows again even if you had dismissed the earlier one, since it carries new information, and its number counts the archived posts of the key too, so a dismissed card's id is never minted again); with no `-k` the command mints a key and prints it, so a later `romp card -k <key> ...` revises the card. The body is markdown, rendered through the chat's sanitizer; `--attach` names a file the card shows inline when it is an image (the kernel judges it as the hover preview does: your home or the session's folder, no secrets-shaped names, the size caps, and keeps a pinned copy of an image as posted; an owner-less card's attachment is judged against your home alone). A card leaves the board on your dismissal (Clear; Undo restores it, copying its rows back out of the archive when the retention pass has already moved them), on a revision, or at `--expires` seconds from the post. `--needs-you` files it under Needs you. The kernel keeps every post in `notices/<session>.jsonl` under the state directory (`notices/notes.jsonl` for owner-less cards) and archives dismissed, expired and superseded rows to `notices-archive/`; a home shows at most fifty live keys at once besides the cards of messages held for your approval, the oldest superseded past that (a card you post with `--producer postal` and no session is taken for one of those: it holds no slot, and the kernel expires it as it does the card of a message no longer held). The same door is `POST /notice` on the kernel (the `/watch` shape: `{"id"|"name", "key", "title", "body"?, "attachment"?, "needsYou"?, "expiresAt"?, "producer"?}`; with neither `id` nor `name` the card is owner-less; `{"id"|"name", "expire": "<key>"}` retires a card early), and producers inside romp call the kernel's `post_notice` in process. An owner-less card carries no actions. `-b <board>` files the card on a board of yours (`plans/card-boards.md`): an unknown board is created on first use with the category `-c` names (or `notes`), a category unknown to your board is added to it, and the posted line names the board and says when the post created it, so a typo in `-b` is a new board you can see at once (`romp board list` names it, `romp board remove` takes it away while no card stands on it). `-c` alone names a feed category (`working`, `needs_input`, `completed`). `--needs-you` on a board is that board's needs-you category, and is refused when its definition names none.
 
 ### Card boards: your own categories
 
@@ -147,7 +148,10 @@ What moves with the session:
   subagent and workflow files beside it, into the new folder's project
   directory under `~/.claude/projects/`; Romp moves the session's earlier
   transcripts (its `/clear` episodes and resume forks) the same way, so history
-  and search keep working.
+  and search keep working. A session born as a fork also names the transcript
+  it was forked from, which belongs to the session it came from: that file stays
+  where its owner writes it, and the fork's earlier-conversation fold reads it
+  from there.
 - The session's name, colour, mailbox, goals, cards and captions, all keyed by
   the session id rather than the folder.
 - What the agent sees. Claude Code tells the model where it now is and loads
@@ -534,7 +538,9 @@ click opens at once, leaving both the row and the flyout closes it), and on
 click. Switching reconnects the session to apply, with the same switching-dots
 the effort badge wears, and waits the same way for a quiet session: until then
 the row's sub-line reads "applying…", or "applies after 2 background tasks"
-when work the reconnect would end is still running.
+when work the reconnect would end is still running. While it waits, the flyout
+carries **Apply now** under the choices, behind a rule, its sub-line naming what
+it ends ("ends 2 background tasks").
 
 Below the session's choices, behind a rule, the flyout carries one entry,
 **Set default billing**, which opens a submenu holding exactly the same
@@ -652,15 +658,35 @@ the per-init check above confirms each one.
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and an `API` cell beside them carries the
-key-billed dollars (5-hour burn and month-to-date, numbers only). Hovering
-breaks the windows down by ACCOUNT: one block per distinct login (the account
-line as its head, the meters written once, since they are the account's
-allowance), beneath them one line naming the machines logged into it in the
-tab strip's quiet host dress, a machine whose own reading lagged the freshest
-named as lagging beside its name, and one updated-ago line per block (the
-oldest report of the group); two accounts are two blocks side by side; a
+key-billed dollars (5-hour burn and month-to-date, numbers only). On a
+machine with no sign-in of its own every turn counts as the key's, except a
+turn billed to a stored login: that spent a subscription seat, and its dollars
+are not the key's. Hovering
+breaks the windows down by ACCOUNT: one block per distinct login (headed by
+the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
+detail gives it, never its email; the meters written once, since they are the
+account's allowance), beneath them one line naming the machines logged into it
+in the tab strip's quiet host dress, a machine whose own reading lagged the
+freshest named as lagging beside its name, and one updated-ago line per block
+(the oldest report of the group); two accounts are two blocks side by side; a
 machine attached but not yet reporting is named after the blocks rather than
-given a column; the key spend stays one section for every machine. A click on the
+given a column; the key spend stays one section for every machine. An account
+that answers Claude Code's usage request with no 5-hour or weekly window (an
+enterprise seat metered by a monthly spend limit) is recorded as such and its
+block says `no 5-hour or weekly limits on this account`, with no bars, no age
+and no lagging note, even beside a machine on an older build still holding a
+reading from before; a usage request the endpoint cannot answer says nothing
+about the account and changes nothing. When that answer carries the seat's
+monthly spend limit, the block shows it instead as one `Monthly allowance`
+bar: the percent used and the date it resets, the first of the next month as
+Claude Code's own `/usage` screen dates it (the answer carries no reset date).
+A reading from before that reset shows no bar, only `reset <date>; no reading
+since`; an answer with no limit to measure against (none, or unlimited) leaves
+the one-line note. Under the spend's per-machine line, a
+`by account · 1 week` line splits the week the way the spend detail's By
+account summary does, one entry per account, a seat's dollars wearing `≈`; it
+shows only when something besides the key billed the week, and a machine whose
+older build sends no billing routes is counted out by name. A click on the
 readout opens the spend detail: a chart of spend over time stacked by session,
 and under it the list of sessions with their dollars, turns and tokens. The
 list follows the chart's range (one day by hour, seven days by hour, ninety
@@ -674,6 +700,40 @@ on the ranges where such a row shows. The
 key-billed dollars come from the sessions whose CLI reported a key source at init, judged
 against the declaration; a login turn's computed cost is dollars nobody pays
 and is left out.
+
+Beside the totals, the spend detail's **By account** summary says who billed
+the spend in the chart's range: one row per Claude account, then the API key,
+then whatever romp cannot name. A row names the account by its kind
+(`Enterprise seat`, `Personal plan`) and, in quieter words beside it, the
+routes that reached it: a machine's own sign-in (`laptop sign-in`) or a stored
+login's token (`token on server`), so one seat reached both ways is one row.
+Two routes are one account only when their identities say so: the account
+digest when both carry one (a machine's sign-in always does, read from Claude
+Code's own `~/.claude.json`; a stored login when its record holds one), else
+the organisation together with the kind word. Nothing else counts, the label
+and the email included: a stored login whose record holds neither is a row of
+its own under its label, noted `account not recorded`, and a login added with
+`romp login add` holds only its label and command, so it reads that way until
+you link it to a machine's sign-in (`romp login link`, see
+[Several Claude logins](#several-claude-logins)). A linked login is that
+sign-in's account under the same rules, its spend from before the link
+included, since what is linked is the login's record; the hover over the
+account's name says `Token on server linked by you to laptop's sign-in.`, since
+the link is your statement and romp has not verified it. Two
+accounts that would share a name are told apart by organisation, else by
+route. The email is in the hover over the account's name, never on the row. A
+machine's sign-in is named by the account signed in now, since the ledger does
+not stamp which account each turn billed; a machine signed out now reads as
+Unknown, as does spend from before the ledger tracked billing, and a machine
+on an older build is named under the summary with its dollars left out.
+
+Dollars billed to a subscription seat, through a sign-in or a stored login,
+are Claude Code's own cost for those turns at API prices. A seat is not billed
+per token, so these figures are estimates: they wear `≈`, the hover and a line
+under the summary say so, and a session row whose dollars include such turns
+wears the mark too. Key-billed dollars are what the key was billed and stay
+plain. A session billed to a stored login reads `bills <account>` beside its
+name, with the login's full label in the hover.
 
 The token count beside the dollars is every kind together: fresh input,
 output, cache writes, and cache reads. Cache reads are most of it: every API
@@ -801,7 +861,7 @@ distiller calls carry that login's helper too, so its analysis is subscription
 usage on that login; a session on the machine default is unchanged. A pasted
 token's label is the user's word: romp cannot read an account or an
 organisation out of a token it never sees, so a login added from the command
-line carries only the label typed for it. And the tool the command calls must
+line carries only the label typed for it, until it is linked (below). And the tool the command calls must
 work non-interactively for the user who runs romp (a signed-in secret manager
 CLI, for example), as the machine's key helper already must.
 
@@ -815,6 +875,40 @@ prints the labels, `romp login remove <label>` forgets a record (a label two
 records share is refused; name the id instead); the token stays wherever it
 was kept.
 
+A stored login can be linked to a machine's sign-in when they are one account.
+A setup-token cannot tell romp its account (it carries the `user:inference`
+scope alone, and Claude Code's profile endpoint refuses it), so one enterprise
+seat reached as one machine's sign-in and as a stored login on another machine
+would otherwise read as two accounts in the spend breakdown.
+`romp login link <label> --same-as <host>` records your statement that they
+are one: `<host>` is this machine's name (or `local`) or the host name of a
+connected kernel, and romp copies that machine's sign-in identity (the account
+and organisation digests, the organisation's name, the kind word and the
+email) from that machine's own kernel, through its `GET /logins`, onto the
+stored login's record under `identity`, marked `source: "linked"` with the host
+and the time. It refuses and writes nothing when that machine has no Claude
+sign-in, its sign-in cannot be read just now, its kernel is not connected or
+does not answer, or it runs an older build that does not report its sign-in's
+account; a record that already names its own account refuses too.
+`romp login unlink <label>` takes the link back.
+
+Attachments often run one way, one machine's ssh reaching the other's kernel
+and not back, so the machine holding the stored login may have no way to ask
+the other for its sign-in. Run the link from the machine that reaches both and
+add `--on <host>`, naming the connected kernel that holds the stored login:
+this kernel reads the sign-in itself and asks that kernel to record it, and
+`romp login unlink <label> --on <host>` takes it back the same way. For the
+sign-in of the machine you run it from, `--same-as local` names it.
+
+The link copies the account signed in there at that moment: if that machine
+later signs into another account, the two read apart again until you link
+anew. Surfaces say the link
+is yours: `romp login list` reads `linked by you to <host>'s sign-in`, the
+gear's row reads `same account as <host>'s sign-in, linked by you`, and the
+spend breakdown's hover says the same. The login menus show the linked email,
+organisation and kind beside the label, as for a login whose record holds
+them.
+
 Every surface that offers a billing pick lists every login the machine knows
 plus the API key: the new-session picker's Billing row (segmented buttons up
 to three choices, one dropdown beyond; an unavailable choice greyed with its
@@ -823,7 +917,10 @@ check-marked, an unavailable one greyed with the reason in its hover), the tab
 hover's Billing row and the submenu's sub-line (`Login (name@example.com ·
 Org · enterprise)` for the machine's own login, `Login (<label> · Org ·
 kind)` for a stored one, each piece only when known), and the gear's Account
-section, which lists the stored logins with a Remove each. The pick reaches
+section, which lists the stored logins with a Remove each, plus a `Same account
+as…` picker (this machine and every connected kernel) on a login that names no
+account, or an Unlink on a linked one. That list is the stored logins of the
+kernel serving the dashboard. The pick reaches
 the kernel as `login` (the machine's own), `key` or `login:<id>`; the
 registry's `auth` stays `login` | `key`, and a new `authLogin` field names the
 stored login, so every older reader keeps its meaning. A fork bills the same
@@ -1449,6 +1546,24 @@ message relaunch without waiting, and a setting still waiting to apply rides
 that relaunch; the session is then told which background tasks were cut off,
 with a request to check whether each is still running before relaunching it.
 
+A session whose monitors never let it go quiet would keep its setting waiting
+indefinitely, so the control the setting came from offers **Apply now** while it
+waits: the Billing flyout, the effort badge's picker, and the fast badge's for
+the first fast-mode opt-in. The row's sub-line names what it ends, from the
+status payload's `relaunchCuts` (the running turn, a question waiting on you,
+subagents, background tasks; a queued message survives the relaunch, so it is
+not named). A click with something to end confirms first, in Restart session's
+dialog shape; the relaunch then happens on Restart session's road, and a refusal
+comes back as a toast. `romp apply <session>` is the same from the shell. A
+bypass-mode or environment change has no pending mark on a control, so only the
+command reaches it.
+
+The notice a session gets when a relaunch cut its background tasks says what
+the person did: "I restarted Claude Code", "I rewound the conversation and
+restarted Claude Code", or "I restarted Claude Code to apply a settings change
+now", followed by the tasks it cut off. A relaunch no gesture asked for (a
+session host that died mid-handover) keeps the plain "a restart or crash".
+
 A setting still waiting for its relaunch survives a kernel restart. The kernel
 records which settings wait, and every launch records the settings it carried,
 which the session host keeps and reports back when a kernel attaches. A kernel
@@ -1507,6 +1622,55 @@ enumerates, which the checkpoint work that follows removes. `/perf`'s `parses`
 counts the cold parses, and `scripts/bench_boot_parse.py` measures a boot's
 cost against transcript size on synthetic worlds.
 
+The Sessions pane's first full build after a boot runs on its own thread, the
+timeline builder (`timeline-build`), never on the pusher or a page's connect.
+Until 2026-10-03 the pusher built it inside its cycle. After a restart with the
+pane open, that cycle could not end, and the next could not begin, until the
+build finished, so no pane got a frame from any later cycle (no new chat
+message, no card move, no next feed frame), and the Sessions pane got nothing
+from that cycle's timeline section; a reloaded pane also built live bars of its
+own beside it. Now, while no full build exists, every push sends the lanes of
+the live sessions (no transcript is parsed for them), built again only under
+the rule a cached build is rebuilt under, and owes the build. The builder makes
+the live sessions' bars first, marked `warming` so a pane with no bars yet
+keeps its loader rather than showing no activity, and sends them itself to
+every Sessions pane that already has its lanes, the moment they are built,
+through the same dedup the pusher uses, so the pusher's next push does not send
+them again. Then it makes the full build with the dead lanes, and wakes the
+pusher after each; the lanes stay the live sessions' until the full build lands,
+and once it has landed no pane is sent those lanes or the first bars again.
+Those lanes are dated by the liveness read they came from, not by when their
+build began, so of two builds the one from the newer read is what every pane
+ends up with, whichever finished first. They are also built at that read's
+clock, so a newer read's lanes never carry an older clock, or an earlier end
+for an open awaiting interval, than the lanes they replace. A connect sends its
+pane those lanes under its own clock when that is later, so a newer read's
+lanes can still reach that pane on an earlier clock, which the timeline view
+ignores. A pane that connects while the full build runs,
+or while it waits for the board, gets the first bars, built at the start of the
+builder's first phase and so possibly tens of seconds old, until the full build
+lands; the first phase is not run again for it.
+While a board is open, the full build starts only once the board's first feed
+frame has gone out (or the cold kernel's early feed frame failed to build, or
+the last board closed), so the two cold builds do not share the interpreter;
+with no board open it starts at once. The builder sends none of the full
+build's frames: the pusher's next push sends them. Once a full build exists,
+the pusher serves and rebuilds it as before. The rebuild floor never serves the
+builder's build: if anything a lane reads moved while it ran, the pusher's next
+cycle rebuilds it before sending its lanes, and a push already under way when
+it lands, whose liveness read is older than the build, serves it as it stands
+rather than rebuild it from that older read. A full build that lands after the
+live sessions' lanes were rebuilt on a later clock is rebuilt first too, by the
+pusher's next cycle (a push already under way serves it as it stands), since
+an awaiting lane's open interval ends at the build's clock.
+`/version`'s `views` counts each push's ask of the
+unbuilt timeline as `tlOwed` and each builder pass that raised as
+`tlBuildFailed`: the pass is said once per kind of error on stderr, the slot
+stays cold, the panes keep their lanes and the last bars they were sent, and
+the next owe retries both phases. The builder's time, less any wait for the
+board, is `/perf`'s `timelineBuild` stage and its reads count under the
+`timeline.build` stage mark.
+
 The kernel and the judges share one parse. Until 2026-09-11 each kept its own
 cache of parsed session trees (the kernel's keyed by transcript path, the
 judges' by session), so every live transcript was parsed twice per file
@@ -1538,7 +1702,10 @@ cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
 reads only the bytes past the offset and resumes each fold from its recorded
 state; a checkpoint that does not verify (its version, its path, a file that
 shrank, a rewrite under the guard, a corrupt document) falls back to a whole
-read, is counted per reason in `/perf` and said once on stderr. Every fold
+read, is counted per reason in `/perf` and said once on stderr. A document
+whose stat fails for any reason but its absence (a `checkpoints/` directory
+the kernel cannot search) reads as no document, so the file is read whole,
+and is said once on stderr with the error, its file left in place. Every fold
 holding a cursor inside the entry's held records is recorded at its own count
 (a fold stepped by builds rather than by the settle may lag the leaf), and the
 document's cut is the lowest of them, so the next kernel's tail read holds what
@@ -1575,20 +1742,44 @@ it) if a write would improve it with a state the process holds (the pass's
 rule, `_path_needs_write`; a dirty path counts here and not for the pass, and a
 fold cold for want of a state counts for the pass, which heals it, and not
 here, where it would only be written cold again), before the entry is popped,
-and on a hit or a restore at the witness the entry stays as it always has. The
+and on a hit or a restore at the witness the entry stays as it always has,
+except over a subagent's own transcript (its card's folds, which the spend
+guard also runs over each agent file after pricing it from a read of its own,
+catching up a card's cursor that stopped short of the file's end, and ahead of
+them the background-task state an open viewer of the agent left, which closing
+that viewer retires so a later write does not carry it forward): there a fold
+that finds nothing new also pops an entry holding records once the file's
+document stands at the entry's witness with every current fold's state, so a
+returned agent whose last record was folded while its file was fresh leaves
+memory too. An open viewer's parse keeps the entry either way: a parse rebuilt
+since the file's last append holds the very records list, so the pop waits,
+and an older one is a whole assembly entry, which the assembly pin keeps
+(counted `recordCache.pinnedKept`) until the viewer closes. The
 write is charged to the pusher cycle's byte budget, which the kernel begins at
 each cycle's start and the pass shares near its end; over the budget the write
 and the drop wait with the entry held (`converge.dropDeferred`), the drop then
 owed and paid at the next cycle's start with the room that cycle has, oldest
-first, or by the next fold over the file, whichever comes first. A document
+first, or by the next fold over the file, whichever comes first; a subagent's
+quiet pop is never owed and waits for the next fold that finds nothing new. A document
 already whole is never rewritten at a later drop (`converge.dropWrites` counts
 the writes), and a dropped file's next fold restores its cursor from the
 document over a tail read instead of reading the file whole, provided the
 document's cursor carries a state: against a state the process holds, a cursor
 without one (an over-cap, cold or legacy bare write) is refused and the fold
 reads whole as before, so a complete state is never replaced by a tail-only one.
+The record drops at the events that end a file's use (a leaf a second /clear
+retired, the session's first file at its first /clear when the new leaf's parse
+does not read it, a dead timeline lane's leaf and anchor) take the same write, budget
+and deferral with no two-minute wait, since the event says the file's use
+ended (a drop the budget defers is paid later through the quiet drop's own
+path, after that wait): the judges' episode scan after the second /clear, and
+the next named fold over a dead lane's leaf, restore from the document instead
+of reading the file whole again, while the file is unchanged. A session revived
+after its dead lane let go has its leaf read whole once on its first turn, by
+the judges' episode scan, while its anchor is not read whole.
 The knobs: `ROMP_CKPT_CONVERGE_MS=0` turns the pass off and the drop write with
-it (the drop then pops as it did before the write existed, except under the
+it (the drop then pops as it did before the write existed, unless a whole
+assembly entry pins it, counted `recordCache.pinnedKept`, and except under the
 incident scan's memo, which keeps a walked file's records resident when the
 document write is off, since its memo cannot reach the disk); `ROMP_CKPT_CONVERGE_MB`
 is the cycle budget both charge, and `0` turns the drop write off the same way
@@ -1618,7 +1809,9 @@ judges' flag is skipped and counted (`flagMismatch`), since the reader would
 delete a document under the wrong flag. A leaf with no compaction boundary has
 no cut and no document: it is read whole at every boot by design. `ROMP_ASM_CONVERGE=0` turns that step off, and so do the pass's
 own switch and a zero byte budget, as for the drop write. The owed table
-is bounded: over it the oldest owed drop is paid by its pop alone, and an owed
+is bounded: over it the oldest owed drop is paid by its pop alone (unless a
+whole assembly entry pins it: that entry stays, no longer owed, until the
+file's next quiet drop retries it), and an owed
 file since deleted has its entry popped when the cycle pays. A leaf unchanged for longer than the reader keeps a quiescent
 file's whole entry (two minutes) is refused by the pass and counted under
 `quiescent`: its heal would read the file whole every cycle and the write
@@ -2265,11 +2458,15 @@ goal-store loads and writes per second, judge passes and their durations,
 memory and thread count. `romp perf --json` prints one raw snapshot. Two
 fields cost time in proportion to the whole heap, `heap.allocatedBlocks` and
 `gc.frozen`, so a plain read leaves them `null` and only `GET /perf?walk=1`
-fills them; the plain read no longer walks the whole heap.
-`romp perf --json --walk` prints the snapshot with both filled. If the kernel
-restarted between the two snapshots the counters have started over, so the
-command says so and exits non-zero instead of printing negative rates; a
-refused token is reported as such, not as a dead kernel.
+fills them; the plain read no longer walks the whole heap. A plain read also
+cuts the per-file read table, `checkpoints.readByPath`, to the 50 paths with
+the most bytes. `GET /perf?paths=all` carries the whole table and walks
+nothing, and `?walk=1` carries it as well.
+`romp perf --json --walk` prints the snapshot with both filled and the whole
+table; `romp perf --json --paths` prints it with the whole table alone, so a
+sampler that diffs the table pays only its copy. If the kernel restarted between the two snapshots the counters have
+started over, so the command says so and exits non-zero instead of printing
+negative rates; a refused token is reported as such, not as a dead kernel.
 
 The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 
@@ -2298,10 +2495,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `thresholds` as lists, and `stats` (per generation: `collections`,
   `collected`, `uncollectable`), which is cumulative by nature; `tracing` says whether a tracemalloc tracer runs in
   this process. Then the caches that hold session content: `hydrated` (the
-  lazy bodies read on demand: `entries`, and `bytes`, the records' length on
-  disk, which `capBytes` bounds, a proxy that locates the holder without
-  sizing it: decoded bodies usually weigh more, but escaped text can make the
-  disk bytes exceed the decoded storage),
+  lazy bodies read on demand: `entries`, and `bytes`, the decoded size in
+  memory of the body fields kept plus an estimate of each entry's own
+  overhead (its tuple, key and table slot), which `capBytes` bounds; a body an atom
+  still holds counts there too, so while that atom lives an eviction frees
+  less than `bytes` drops; the cap is a 48th of physical memory, never under
+  256 MiB, and `ROMP_HYDRATED_CAP_MB` sets it outright),
   `assemblyEntries` (the assembly cache's entries), `parseSlots` (the one
   parse store's slots, one per session, cut and leaf), `lazyIndexes` (the
   lazy indexes alive, a weak count), `materializedLruSlots` (the
@@ -2318,17 +2517,79 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   of the preview data URLs; the cache has no cap, so this gauge is
   O(entries) over whatever it holds, a refused file counting as an entry of
   zero bytes). These occupancy gauges attribute a resident size to its
-  holders; they do not sum to it. The transcript record cache, the largest
-  resident holder when the kernel is large, is not among them: its occupancy
-  already rides this response under `recordCache` (`entries` and `bytes`
-  against `budgetBytes`), so a resident size these gauges leave unaccounted
-  for is read there first. The block reads a length or a counter per
-  cache, under the cache's own lock where its readers take one and over a
-  copied value list otherwise; on a plain read it walks neither the
-  allocator nor any object graph, collects nothing, evicts nothing, fills
-  nothing and reads no file. A gauge this process cannot read (an accessor
-  the runtime lacks, a container the source has not got, a cached entry of
-  a shape the gauge does not know) is `null`, said once on stderr.
+  holders; they do not sum to it. Four more are estimates in memory units,
+  each with a `bytes` figure (the memory diagnosis, 2026-10-01: the
+  kernel's resident size grew with about 2.85 times the record cache's
+  file bytes, and nothing on this response said so).
+  They overlap where their holders share objects, so they are not meant to
+  be summed either. `recordCacheResident` is the transcript record cache,
+  the largest resident holder when the kernel is large, whose occupancy also
+  rides this response under `recordCache` (`entries`, `bytes` on disk, and
+  `realBytes` against `budgetBytes`): here its entries are split into `classes`
+  (`wholeLeaf`, a transcript held from its first record; `tail`, a leaf's
+  records past a checkpoint's or an assembly document's cut; `subagent`;
+  `logs`, the files under the state root, where files under the Codex
+  backend's session transcripts or the Claude projects root are never logs
+  and fall into the three classes above), each with `entries`,
+  `fileBytes` (summing to `recordCache.bytes`) and `bytes`, the file bytes
+  times `multiple`, the decoded weight per byte on disk, the record cache's
+  own `decodedMultiple` (2.85 unless `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets
+  it: a lab read of
+  a real transcript measured 2.86 for the records alone, and a fit of the
+  kernel's resident size agrees, though that slope also takes in every holder that
+  grows with the same transcripts; a synthetic plain-ASCII transcript of
+  6,000 records read 3.01. Content moves it: one long plain-ASCII string,
+  such as a large tool result, weighs about 1.1 per byte, and emoji and
+  small metadata-heavy records about 4 to 5. The `logs` class is mixed:
+  states-log rows weigh about 9 per byte and body-heavy postal rows under 2,
+  so 2.85 under-reads the first and over-reads the second). `pinnedByAssembly` is the records an
+  assembly entry still holds after the record cache let them go (a drop, an
+  eviction by the count cap, a re-read that decoded a second copy, or a tail the reader
+  upgraded to the whole file, whose records the entry keeps after a fold
+  moves it onto the whole list): `lists`, `records`, `fileBytes` and
+  `bytes`. When the record cache drops a list the entry took or a fold moved
+  it onto, `recordCache.bytes` falls and this rises by the same file bytes
+  (by the list's bytes per record when the fold could not weigh it), the
+  drop's own counters being `recordCache.droppedHeldBytes` for those records
+  and `recordCache.pinnedKept` for a drop the assembly pin kept, which moves
+  neither figure, while an eviction by the count cap counts
+  its share only under `recordCache.evictedBytes`, never split into the drop
+  counters. A byte-budget eviction releases the assembly entries that read
+  the file (`recordCache.budgetReleased`), so it raises this only for a file
+  evicted during its own read or a build that read the file before the
+  eviction and installs after. A pop of a file that vanished or could not be
+  read (the record reader's, or an owed drop paid after its file went)
+  raises this too; its bytes go to no record-cache byte counter, except an
+  owed drop's, which go under `dropped` and `droppedBytes`, and
+  `recordCache.released` counts the pop as it counts every pop. A tail
+  left behind by an upgrade counts here while `recordCache.bytes` rises to
+  the whole file. It weighs records alone: the assembly entries' own atoms
+  and lookup maps are still only the count `assemblyEntries` (a whole
+  entry measured about 0.9 to 1.1 KB per record of its leaf on two
+  synthetic leaves, 0.3 to 4 bytes per file byte as the records run long
+  or short), so a `pinnedByAssembly` of 0 does not mean the entries are
+  free.
+  `builtAtoms` is the materialized atoms: `slots` (the LRU's length),
+  `live` (the atoms the live lazy indexes count as built in the LRU),
+  `overSlots` (how far `live` runs past `slots`, 0 unless a count drifted)
+  and `bytes`, the live atoms, at most one per slot, times `atomBytes`
+  (1,700, the middle of the 1.3 to 2.1 KB an atom measured) plus the slots
+  beyond them times `slotBytes` (220, the LRU entry a collected list leaves
+  until it expires). It weighs atoms as built: a
+  hydrated atom also holds its body, which `hydrated` counts only while its
+  memo holds it. `restoredIndexes` is the live lazy indexes: `indexes`,
+  `rows` and `rowBytes` (the encoded atom rows), `records` (the document's
+  record rows, counted once when several indexes share one document's list,
+  and also counted by the assembly document memo while it holds the
+  document) and `userFacts`. The block reads a length,
+  a counter or a number a holder keeps per cache, under the cache's own lock
+  where its readers take one and over a copied value list otherwise, and
+  the estimates never iterate a records list or an index's rows; on a plain
+  read it walks neither the allocator nor any object graph, collects
+  nothing, evicts nothing, fills nothing and reads no file. A gauge this
+  process cannot read (an accessor the runtime lacks, a container the source
+  has not got, a cached entry of a shape the gauge does not know) is `null`,
+  said once on stderr.
 - `gc`: the interpreter's garbage collections, counted and timed (2026-09-16:
   pusher cycles stalled for 9-33 s and a profile of the process caught a 9.2 s
   generation-2 collection charged to whichever stage happened to be running,
@@ -2394,7 +2655,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   a freeze is held, a busy cycle never judges an ended session. The
   sub-block carries `enabled`, `active` (whether a freeze is held now; named
   apart from the `frozen` count above, `gc.get_freeze_count()` on `?walk=1`),
-  `loadTrees` and `backstopFoldins` (the two thresholds), `busyRuns` (of the
+  `loadTrees` and `backstopFoldins` (the two thresholds), `gen2Threshold` (the
+  full-collection trigger the controller set, below, or `null` while the
+  stock one stands), `busyRuns` (of the
   runs, those a busy cycle made: a first freeze, load fold-ins and a busy
   backstop), `freezes` and
   `reclaims` (a freeze ran one collection and a reclaim ran one, EXCEPT a full
@@ -2430,7 +2693,36 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   for a measurement, and `ROMP_GC_FREEZE_LOAD_TREES` sets the load threshold (a
   value that is not a positive integer falls back to the default, said once and
   counted under `errors`, and it is floored at 1 so it cannot make the reconcile
-  fire every cycle). A request that arrives during a reconcile waits that
+  fire every cycle). While the freeze is on, the kernel also raises CPython's
+  full-collection trigger (the third of `thresholds`, stock 10) to 100 at boot,
+  and `gen2Threshold` reads it. CPython runs an automatic full collection once
+  generation 2 has seen more than that many generation-1 collections and the
+  objects promoted since the last full collection reach a quarter of what
+  survived it. Over a frozen heap what an automatic full collection leaves is
+  small, so with the stock 10 one can come every eleventh generation-1
+  collection, and on a loaded kernel most full collections are these automatic
+  ones (`gc.gen."2".collections` less `freeze.collections`). Raised, an
+  automatic full collection comes at most once per 101 generation-1
+  collections, and every fold-in, release and backstop (each a full
+  collection) restarts that count. `ROMP_GC_GEN2_THRESHOLD` sets it: a value
+  that is not an integer, or is above 2147483647 (the largest C int, the most
+  the collector takes), falls back to 100, said once and counted under
+  `errors` when that 100 is applied (where no trigger is raised, nothing is
+  said); any other is floored at 10, so it can only
+  raise the trigger. It is not applied with the freeze off or on a
+  free-threaded build, whose collector differs. After setting it the kernel
+  reads the third threshold back, and where the collector does not keep the
+  value it puts the old one back and `gen2Threshold` stays `null`. That check
+  reads the stored value, not what the collector does with it, so the
+  free-threaded build stays excluded: it stores the value, but its collector
+  was not seen to follow it. The raise was measured on a hermetic lab kernel's
+  own garbage (synthetic sessions under a load that saturates the pusher,
+  CPython 3.12, medians of four ten-minute windows per value). Raising the
+  trigger from 10 to 100 lengthened the worst automatic full collection from
+  429 to 513 ms and the worst fold-in from 310 to 451 ms, left peak memory
+  where it was (VmHWM 858 MiB at 10 and 851 at 100, inside the run-to-run
+  spread), and cut the summed generation-2 time from 118 to 37 s. A
+  request that arrives during a reconcile waits that
   one collection. The idle boundary is the best moment for the frozen-heap
   walks, not a guarantee none arrives; a busy cycle's fold-in walks only what an
   automatic full collection would have walked anyway. To read a slow cycle: find
@@ -2458,8 +2750,33 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `pass_cpu_ms_sum`, `pass_ms_p50`, `pass_ms_p90`, `pass_ms_ring_max`,
   `ring_n`, `passFailed` (a pass that raised out of the loop and was
   skipped), `splitFailed`, `firstPass` (the boot's first pass's stage split,
-  the shape of `pusher.firstCycle`) and `stageRing`. The pass's container
-  stage is `jobsPass`, its opening `jobs.prelude`; each job is still its
+  the shape of `pusher.firstCycle`), `stageRing` and `cpuByJob` (per job this
+  thread ran, by its `<job>` name: `runs`, one per call by the pass, a call
+  that returned early on the job's own pace or raised included, and `cpuMs`,
+  the thread's own CPU inside the job, which includes any collection the
+  interpreter ran on this thread during the job, a pause set by the heap and
+  not by the job. Both generation-2 tallies, `gc.gen."2"` and a ring row's
+  `n2` and `ms2`, count every thread's collections, so over an interval an
+  unmoved tally rules a collection out of a job's `cpuMs` and a moved one
+  does not put it there (the freeze controller's own collections, counted
+  under `gc.freeze.collections`, run on the pusher thread and reach a job
+  only as a wait in its wall; a job still open at the first read records its
+  CPU, any collection inside it included, only when it ends, so take the
+  tally from a read made before that job began or set such a job aside; a
+  read of `/perf?stacks=1` names the job open at that read, by the `jobs`
+  row's stage mark, though it samples the stacks after copying the counters
+  and building the rest of the snapshot, so a job that ended in between
+  shows as `null` or as a later job and its CPU arrives in the next read; a
+  plain read names none unless
+  the kernel runs with `ROMP_PERF_STACKS`);
+  compare `gc.gen."2"` or the kernel samples'
+  generation-2 tallies over the interval, and the ring rows only for the
+  passes the ring still holds (the newest 16 on a plain read, the whole ring
+  with `?ring=all`); the job's `jobs.<job>` stage is its wall, which also
+  counts its waits for a lock, the disk or a free core, so the two side by
+  side say which jobs worked and which waited; the pusher's jobs are not
+  counted). The pass's container stage is `jobsPass`,
+  its opening `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
   in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,
   turn notify, the checkpoint persist and converge, the boot row backstop,
@@ -2574,7 +2891,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   are process-wide, so a collection inside both windows is in both deltas and
   a sum would count it twice; the key is absent when neither split has one.
   The row also carries `parse`, the assembly's road counters at
-  the first cycle's end (T398): `serve`, `fold`, `restore` (with
+  the first cycle's end (T398): `serve`, `fold` (with `fold:attachedPass`,
+  the folds of a delta the `promptid` gate let through, described under
+  `full:demoted` below), `restore` (with
   `restore:afterDemote`, the restores taken over an entry the gates demoted
   instead of a whole parse, `restore:pastShare`, a compaction whose tail past
   the cut had reached an eighth of the pre-cut bytes, parsed whole so the
@@ -2667,17 +2986,55 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `descent` when the new leaf does not chain to the old through the delta
   (a parallel tool batch's results, each parented at its own call, fold instead;
   one that then moves an old record's kept membership counts under `kept` and
-  takes the restore road a descent takes),
+  takes the restore road a descent takes, unless the `promptid` gate let a
+  record of it through, counted under `g:promptid:passedDemote` below),
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
   `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
-  `boundary`, `summary`, `promptid`, `skill-link`, `ts`, `kept`, and
+  `boundary`, `summary`, `promptid` (a record repeating a prompt id in a way
+  that can re-classify records already read, its arm counted beside it:
+  `g:promptid:wrapper` for a command-wrapper record, `g:promptid:boundary`
+  for a record wearing a compaction summary's prompt id whose boundary an
+  adoption could still move, with `g:promptid:boundarySeed` the part of
+  those whose id a restored entry's document names (a document names the
+  prompt ids of the summaries before its cut), where the entry cannot tell
+  whether that boundary is attached, and `g:promptid:passedDemote` for a
+  delta in which the gate let a record wearing a summary's prompt id
+  through, because every summary wearing its id hangs off a boundary on the
+  conversation's path that
+  adoption did not splice, as an automatic compaction's does, and which a
+  compaction in it, the descent (a rewind and an api_error retry alike) or
+  a parallel batch's kept check then refused: it parses whole, as it did
+  before the gate let such records through, and never takes the restore
+  road (nor the re-seat, when it passed on a batch's link, so the kept
+  check rules). A compaction summary does not count as such a record in
+  its own delta, so a later compaction alone in its append restores as any
+  compaction does. A delta the gate let through that the stamp (`ts`),
+  `skill-link` or `uuid-known` gate then takes counts under that gate's
+  reason alone: a live manual /compact's raw twin, which `promptid` counted
+  before, counts under `ts`. A delta the gate let through that extends the
+  path on a whole entry marked for its re-seat is re-seated and counts as a
+  re-seat alone: under the `reseat` reason, and as a restore under `restore`
+  and `restore:afterDemote` when that restore serves (when it refuses the
+  document, under the whole parse's `full:demoted`), never under
+  `fold:attachedPass`. The deltas
+  the gate let through that folded count under `fold:attachedPass`, the
+  folds it saved),
+  `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
   here only when that restore refused the document),
   `full:noDocument`, `full:noDir` (no checkpoint directory), `full:refused` (a document that stood but did not verify,
-  its fallback reason counted), `bypass` (a pending cut armed on the session)
-  and `fallback`; the same block rides `asmCheckpoint.parse` on GET /perf,
+  its fallback reason counted), `bypass` (a pending cut armed on the session),
+  `fallback`, and `released` (assembly entries dropped at an event that ended
+  their file's use: a leaf a /clear or a resume fork retired, and again any
+  entry a later parse of that retired leaf installed, a dead timeline lane with
+  a document a restore would take, the last viewer of a subagent closing),
+  and `releaseFailed` (such a release that raised, stopping where it raised
+  with what ran before it still released, and once for each assembly entry
+  whose pin check raised at a record-cache drop, which counts that entry as
+  not pinning, the drop going ahead unless another entry pins it; said on
+  stderr once per file and outcome); the same block rides `asmCheckpoint.parse` on GET /perf,
   beside `asmCheckpoint.removed`, the checkpoint directory's removals and
   retirements per reason: a document file removed (a fallback's reason, or the
   boot sweep), a refusal mark the sweep retired from a version-old sidecar
@@ -2725,21 +3082,37 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `docReadBytes`, the documents the pass's writes read for their carry,
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropWrites` and `dropDeferred`
-  for the documents written at the reader's quiescence drop and the drops
-  deferred a cycle for the shared budget, `viaDrop` for the resident quiescent
+  for the documents written at the reader's quiescence drop (and at the record
+  drops of the events that end a file's use) and the drops deferred for the
+  shared budget (a cycle, or for a subagent's quiet pop until the next fold
+  that finds nothing new), `viaDrop` for the resident quiescent
   leaves the pass primed and the drop wrote), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
-  (what reading the checkpoint documents themselves cost since boot),
+  (what reading the checkpoint documents themselves cost since boot: a
+  running counter of bytes read, never memory held, so it climbs with every
+  re-read of a document),
   `fallbacks` per reason (`version`, `path`, `shrunk`, `guard`, `rewrite`,
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
-  boot, in total and per file), `docConsults` (fold documents loaded through the one
+  boot, in total and per file: running counters of bytes read; a plain read
+  carries the 50 paths with the most bytes, `readPaths` says how many paths
+  the whole table has, and `GET /perf?paths=all` carries every path, with
+  `readBytes` and `documentBytes` from the same copy, as `?walk=1` also
+  does), `docConsults` (fold documents loaded through the one
   validated read that the two boot restore paths, a write's carry and a
   retirement's consult share; at boot the restore paths dominate it, one per
-  checkpointed file), `docMemo` (the documents that read keeps for the write
-  that follows: `entries`, `bytes` as their RESIDENT weight, each file's size
+  checkpointed file; a write's carry skips the load when this process already
+  knows the document has nothing to give it: over a document this process last
+  wrote or loaded, unchanged on disk since by inode, modification time and
+  size, in which every state and over-the-cap cursor belongs to a fold the
+  writer holds or stands at a count the writer cannot record, a write reads
+  nothing),
+  `docMemo` (the documents that read keeps for the write that follows, and a
+  document a write wrote with an entry it carried from the disk, a state or an
+  over-the-cap cursor, kept for the next write's carry: `entries`, `bytes` as
+  their RESIDENT weight, each file's size
   on disk times `parseMultiple`, the measured 4.5 a parsed document weighs
   against its bytes on disk, and `capBytes`, a ceiling on that resident
   weight of MemTotal / 512 floored at 64 MiB, `ROMP_DOC_MEMO_CAP_MB`; the
@@ -2749,13 +3122,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   devbox boot); its verdict set per frozen file is now the fold `rewoundUuids`
   of that file's fold document, written from the walk's own read at the
   quiescence drop and restored at the next boot, so such a file is read whole
-  once (a live session's own files, its /clear anchor among them, stay
-  resident instead, since the chain walk reads them at every pass; a leaf
-  with no assembly document, one with no compaction boundary, takes the memo
-  road too, since the leaf road's seeded walk had nothing to seed and read it
-  whole at every boot, and so does every cleared or resume-forked session's
-  leaf, whose document is written over its lineage and cannot seed the
-  one-file walk). The
+  once (a live session's own files that its parse reads, the anchor of a leaf
+  whose head links back into it or whose resume lineage runs through it among
+  them, stay resident instead, since the chain walk reads them at every pass;
+  a /clear's anchor, which no parse of the new leaf reads, is walked once, its
+  memo written, and then dropped like a dead episode's file, and it is
+  released at the first clear's flip; a leaf with no assembly document, one
+  with no compaction boundary, takes the memo road too, since the leaf road's
+  seeded walk had nothing to seed and read it whole at every boot, and so does
+  every back-linked or resume-forked session's leaf, whose document is written
+  over its lineage and cannot seed the one-file walk, while a /clear's leaf
+  is documented alone and takes the seeded leaf road). The
   counters: the memo's answers (`served`), the walks it took (`walked`), the
   walks over a memo the file's growth or rewrite retired (`stale`; a file
   whose entry merely left memory and came back is walked, not stale; a growing
@@ -2776,32 +3153,124 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `judge-index`, `judge-triage` and the other tiers' pool workers, `pool`
   for an unprefixed pool worker, `thread` for a default name with no target,
   `pusher`, `producer`, `index`, `triage`, `parse-warm`, `boot-warm`,
-  `sdk-boot`, `first-cycle-sampler`, `jobs` (the housekeeping loop split off the pusher), `main`; never a
+  `sdk-boot`, `first-cycle-sampler`, `jobs` (the housekeeping loop split off the pusher),
+  `timeline-build` (the cold Sessions-pane build, off the pusher), `main`; never a
   session's name, sid, host or path (the ident
   keeps two workers sharing a kind apart). Each row has `self` (the thread building the
-  sample), `stage` (the thread's current stage mark: the pusher's
-  `jobs.<job>` or `push`, a handler's `connect`, `null` outside one) and
+  sample), `stage` (the thread's current stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, a handler's `connect`, the timeline builder's
+  `timeline.build`, any other mark the `asmIndex.materializedByStage` list
+  names, a job's finer part as `jobs.<job>.<part>`, `null` for a thread with
+  no mark) and
   `frames`, "function (file:line)" strings innermost last, at most 40; no
   locals, arguments or session content. Filled when the kernel runs with
   `ROMP_PERF_STACKS` set (a debugging aid for a served test on a runner
   nobody can log into) or when the request says `?stacks=1` (`romp perf
   stacks`, T401); `null` otherwise.
 - `recordCache`: the reader's record cache (the JSONL records held in memory):
-  `entries`, `bytes`, `budgetBytes`, `countCap`, `inserts`, `evictions`,
-  `evictedBytes`, `budgetEvictions`, `dropped` and `droppedBytes` (the
-  quiescence drop), `released` (every pop that removed an entry, whatever the
+  `entries`; `bytes`, the held entries' file bytes; `realBytes`, the same
+  entries decoded, `bytes` times `decodedMultiple` (bytes of memory per file
+  byte: 2.85 by default, what a transcript measured decoded in a lab, which
+  the kernel's resident size over its cached file bytes agrees with; content
+  moves it, 1.44 to 7.7 by shape as measured;
+  `ROMP_RECORD_CACHE_DECODED_MULTIPLE` sets it, over 0 and at most 1000, and
+  1 weighs file bytes as before 2026-10-01); `budgetBytes`, the byte budget
+  in memory, per process, which `realBytes` is weighed against, the least
+  recently used entries going past it (half of MemTotal; never under 4 GiB of file bytes,
+  which is 4 GiB times `decodedMultiple` in memory, so a machine under about
+  23 GiB, or one without `/proc/meminfo` such as macOS, holds 4 GiB of file
+  bytes (before 2026-10-01 a Linux machine over 8 GiB held half its memory
+  in file bytes); `ROMP_RECORD_CACHE_BUDGET_MB` sets it outright in
+  megabytes of memory). A budget eviction also releases every assembly
+  entry (a chat's copy) that read the evicted file, so the records' lists
+  go, though an idle session's parsed tree shares their text until the
+  parse store replaces or drops it and a shown tab's build memos of it go
+  at that tab's next build (its goal-tree memo at the next build that
+  walks its goals: a build that merges a live tail, runs while a rewind
+  is armed or reads an empty goal store keeps it), or when the tab is no
+  longer shown, and the live-merge memo, which the chat, feed and
+  timeline builds fill for any alive session, shown or not, keeps it
+  until a build merges a live tail over a newer parse or, at the next
+  push that serves a chat tab or the Outline pane, the session is
+  neither shown nor alive (its 512-entry cap ages out the oldest first);
+  a build that read the file before the
+  eviction and installs after it keeps what it read, and a file evicted
+  during its own read is not released. While the file is unchanged that
+  chat's display build is served from its parsed tree and rebuilds
+  nothing; a comment create rebuilds the entry once (for a chat parsed
+  whole, beside the parsed tree, so two copies stand until the parse
+  store replaces or drops that tree, a shown tab's build memos of it go
+  and the live-merge memo lets it go (as above), or the budget evicts
+  the file again; a chat whose stored parse fell
+  back to a plain parse installs nothing, and its creates read the
+  transcript, while one whose rebuild itself falls back after a release
+  parses again at each create until its files change), as does the first
+  build after an append (a restore from its document or a whole parse,
+  under `asmCheckpoint.parse`), and near the limit busy sessions may
+  rebuild repeatedly; `countCap`,
+  `inserts`, `evictions`, `evictedBytes`, `budgetEvictions`, `dropped` and
+  `droppedBytes` (the quiescence drop, the files a dead timeline lane
+  releases, a leaf a second /clear retired, and the session's first file at
+  its first /clear when the new leaf's parse does not read it; a subagent's
+  quiet drop is held back while a viewer's parse built before the file's last
+  append still stands, a whole entry the assembly pin keeps, counted below), `pinnedKept` (drops that kept an entry because a whole assembly
+  entry still folds over its generation and its next parse after a drop would be
+  whole again: its leaf has no document a restore would take, or a restore here
+  refused it; the drop would have freed nothing that entry does not hold, so the
+  bytes stay counted; a restored entry, or a whole one whose leaf has a document a
+  restore would take, never holds a drop back, and neither does a whole entry
+  whose pin check raised, counted under `asmCheckpoint.parse.releaseFailed`), `droppedHeld` and
+  `droppedHeldBytes` (the drops, of `dropped`, whose records an assembly entry
+  folding over that generation still holds until its next visit, a restored
+  entry, a whole one whose leaf has a document a restore would take, or a whole
+  one whose pin check raised, and the
+  bytes of those records: `bytes` fell by them while the memory stayed, so the
+  drops freed about `droppedBytes` less `droppedHeldBytes` of file bytes, that times
+  `decodedMultiple` in memory, and less again where an owed drop popped a file
+  that was gone while an assembly entry still holds its records, which only
+  `heap.pinnedByAssembly` shows), `budgetRereads` and
+  `budgetRereadBytes` (inserts of a path the byte budget had evicted, among
+  the last `countCap` it evicted, each counted once, and the file bytes
+  they read again, a tail restored first and the whole read that upgrades
+  it both counted, and a file rewritten after its eviction counted too:
+  near zero while the budget evicts only cold entries,
+  level with `budgetEvictions` once the files read every cycle no longer
+  fit and every read misses; after a change that lets the budget bind, read
+  them beside `budgetEvictions`, `wholeReads` and the restores and whole
+  parses under `asmCheckpoint.parse`), `budgetReleased` (the assembly
+  entries budget evictions released, several when one evicted lineage file
+  was read by several chats),
+  every byte counter in file bytes,
+  `released` (every pop that removed an entry, whatever the
   cause: an eviction, a re-read replacement, an OSError pop, a drop; a #1735
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
-  `shrunk` and `upgrade`, and the first calling function outside the event
-  model and the parse family), with `count` and `bytes`; a tail read, an
+  `shrunk` and `upgrade`, or `detached` for a whole read that leaves the
+  cache as it was, which is how a comment, edit or rewind after a /clear
+  learns which messages the session's first file holds, once per change of
+  that file, and the only way a comment reads that file again, where a
+  record of the new conversation links back into it; and the first calling
+  function outside the event model and the parse family), with `count` and
+  `bytes`; a tail read, an
   append and a restore's tail read are not whole reads and are not counted;
   `wholeReadsByStage` is the same table keyed `<stage>:<kind><-<caller>`,
-  the stage being the pusher thread's current tick job (`jobs.<job>`) or
-  `push`, `connect` for a fresh client's full push on its handler thread (a
-  browser reload or reconnect), `none` outside those (T401), and `asmCheckpoint.hydratedByStage`
-  does the same for the hydration rows.
+  the stage being the calling thread's stage mark: the jobs thread's
+  `jobs.<job>` while that job runs, the pusher's `push` or one of its own
+  `jobs.<job>`, `connect` for a fresh client's full push on its handler
+  thread (a browser reload or reconnect), `timeline.build` for the timeline
+  builder's cold build, any other mark the `asmIndex.materializedByStage`
+  list names, a job's finer part as `jobs.<job>.<part>`, and `none` for a
+  thread with no mark (T401); `asmCheckpoint.hydratedByStage`
+  does the same for the hydration rows; `swallowed` counts raises two handlers
+  keep from their callers, keyed `site:ExceptionType`: `dropWitness` (the
+  returned-agent drop's check, whose entry then stays) and `spendGuardFold` (the
+  spend guard's agent folds, each in a try of its own, so a raise does not skip
+  the ones after it and the file's records stay only when no later fold drops
+  them), each said on
+  stderr, with the file and the traceback, at its first, tenth and hundredth
+  raise and so on.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `rows` (a version-6 document whose atom
   row fails its shape check at load, or fails its decode at the first read
@@ -2823,7 +3292,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   place at equal length plus an append passes the 64-byte guard, like a
   same-size same-mtime rewrite),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
-  a cut), `hydratedBy` (those bytes per calling function), `restoreMs`, the
+  a cut: running counters since boot, which keep rising while the memo that
+  holds the bodies, `heap.hydrated`, sits at its cap), `hydratedBy` (those bytes per calling function), `restoreMs`, the
   restore's parts since boot in milliseconds to three decimals, each added on the
   return it names (`load`: the document read, decompressed, decoded and its
   file checks; `verify`: the turns section's identity and coverage, or the
@@ -2842,6 +3312,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reason), and `refresh`: the document refreshes a restored entry's settle
   started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
   time); the refresh's own parse counts under `parse` as `private`.
+  Two more count what the hydrated-body memo does: `hydratedHits`, the
+  fills it served without a read, and `hydratedEvicted`, the entries its
+  cap pushed out; a released leaf's bodies leave the memo uncounted. A memo
+  hit for an atom whose body another thread had
+  already written when this call looked is not counted, since that
+  thread's own read or hit counted the body.
 - `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
   come from: `materialized` atoms built from the document's rows since boot,
   `materializedBy` (per consumer), `materializedByStage` (the same builds
@@ -2858,8 +3334,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   first segment, or its first two under `/push`, `/tunnels` and `/usage`,
   whose roads differ by the second), `warm.parse`, `warm.boot`,
   `producer`, `revive`, `rewind.migration`, `rewind.holds`, `move`,
+  `asm.refresh` (the assembly document refresh's thread), `comment.create`
+  (the thread a comment's create runs on), `restart` (the restart and Apply
+  now doors), `judge.end` (the thread that reaps a judge child; not a tier's
+  mark, and it builds and hydrates nothing),
   `remote-ws`, `federation.push`, `federation.pull`, `federation.ask`,
-  `ask-poll`; `none` means the build ran on a thread with no mark, which
+  `ask-poll`, `timeline.build` (the timeline builder thread); `none` means the build ran on a thread with no mark, which
   should not happen: the kernel's thread census (every Thread, Timer and
   pool construction site in the kernel, the judge and the two session
   backends, walked by the ast, and every kernel callback the backends are
@@ -2873,15 +3353,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entries that expire, and `resident` counts those too until they do:
   before this (measured 2026-09-15) a strong reference kept every superseded
   generation's atoms, and its whole index behind them, resident until they
-  aged past the cap, about 1.2 GiB on a box whose LRU sat exactly at its cap
-  of a million entries, and live atoms evicted by stale ones were rebuilt),
+  aged past the cap, so an LRU at its cap held mostly dead generations, and
+  live atoms evicted by stale ones were rebuilt),
   `evictions` (a live entry past the cap: its slot's memo dropped, never a
   field in place), `expired` (an entry whose list has been collected, dropped
   when it reaches the cap or when a live list registers a slot under the id the
   dead one held, no slot touched either way), `released` (entries popped the moment the
   assembly entry that owned their index was dropped or replaced, rather than
   a million entries later at the cap), `rowDecodes` (document rows decoded,
-  a build's or a light read's), `userFacts` (below), and `restoredTurns`.
+  a build's or a light read's, a running counter since boot), `userFacts`
+  (below), and `restoredTurns` (pre-cut turns restored from documents, a
+  running counter since boot; what the live indexes hold is
+  `heap.restoredIndexes`).
 - `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
@@ -2936,10 +3419,24 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   id.
 - `stages_ms`: `prelude` (the cycle's opening: the liveness snapshot and the
   names), `jobs` (the cycle's tick jobs outside the push) and inside it one
-  `jobs.<job>` per tick job (`jobs.interruptBlock`, `jobs.autoNudge`,
-  `jobs.convergeCheckpoints` and the rest, T398), `push`, and inside it
+  `jobs.<job>` per job the pusher runs (`jobs.convergeCheckpoints`,
+  `jobs.applyPendingOps` and the rest, T398), `jobs.prelude` (the jobs
+  thread's opening: its liveness snapshot and names, timed beside its pass,
+  not inside it), `jobsPass` (the jobs thread's pass) and inside it one
+  `jobs.<job>` per job that thread runs (`jobs.interruptBlock`,
+  `jobs.autoNudge` and the rest), and inside a job its finer parts as
+  `jobs.<job>.<part>` (such as the nudge job's snapshot, looks and parse),
+  which that job's own stage already covers on the jobs thread (the pass
+  the dashboard's auto-nudge and compaction-suggestion toggles run at once,
+  on the socket's thread, records its parts with no job stage around
+  them, and that thread carries the nudge job's marks only until the pass
+  returns, when its own route's mark is put back), `push`,
+  and inside it
   `push.chat`, `push.feed`, `push.timeline`, `push.send`, `push.warm`,
-  `push.feedFirst`; a fresh snapshot lists every one at zero. The `push.*`
+  `push.feedFirst`; and `timelineBuild`, the timeline builder's passes (the
+  cold build after a boot, on a thread that opens no cycle, so it is in no
+  cycle's split); a fresh snapshot lists every one at zero except a job's
+  finer parts, which appear once the part has run. The `push.*`
   stages count every push, including the one a connecting page gets, so they
   can add up to more than `push`.
 - `builds`: `chat`, `feed`, `timeline`, each with `cached`, `built`, `ms`.
@@ -3304,7 +3801,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walks, and the walks that left a launch unresolved: an upper bound on what a
   negative walk cache would save), `idx_build` (placement indexes built, one
   per store object asked, a writer's private copy included) and the gauge
-  `entries` (sessions holding a map). `intrMarks` is the interrupt-marks
+  `entries` (sessions holding a map). `bgHold` is the settle gate's
+  background hold, which keeps a card from settling while the session waits
+  on a background task it launched: `calls`, `walks` (the calls that reached
+  the walk, the search for the newest turn naming a running launch),
+  `turns` (turns those walks read, newest first, stopping at the turn that
+  decides), `preTurns` (the read turns restored from an assembly document,
+  answered from the ids their rows carry: no atom is stored in a slot or
+  registered, and a row without a marker is built for the read and
+  dropped), `atoms` (atoms of the other read turns) and `exhausted` (walks
+  that met no turn naming some running launch, which then holds). A launch
+  in the turn that just ended costs its walk one turn. `intrMarks` is the
+  interrupt-marks
   memo behind the interrupt tick, the nudge tick and the feed's badge, one
   entry per (session, parse family) keyed on the parse object's identity and
   the machine-cut stamp (`hit`, `miss`, `evict` for entries released when a
@@ -3558,12 +4066,15 @@ announces `chatProto2` in its `caps`:
   TURN count times the rendered run's measured pixels per turn (a turn is a
   user row plus its reply and any tool rows; a per-display-unit average drew
   gaps half true), the turns counted the way the kernel numbers them: every
-  event carries `turn`, the index of the kernel turn it belongs to (the kernel
-  announces `chatTurn` in its `caps`), so a turn a peer session's message or a
-  nudge opened counts once (counted by typed rows alone, a session that takes
-  much mail read half its turns and drew its gaps twice their height; a page on
-  a kernel without the field still counts typed rows, and files one
-  `turnCountTyped` client-diag row per session saying why), lowered when the
+  transcript event carries `turn`, the index of the kernel turn it belongs to
+  (the kernel announces `chatTurn` in its `caps`), so a turn a peer session's
+  message opened counts once (counted by typed rows alone, a session
+  that takes much mail read half its turns and drew its gaps twice their
+  height; a page on a kernel without the field still counts typed rows, and
+  files at most one `turnCountTyped` client-diag row per session saying why; a
+  local session's row measured before the page's first caps frame waits for it,
+  so a page that never receives one files no `turnCountTyped` row for its local
+  sessions), lowered when the
   gaps together would stand taller than a quarter of the browser's layout
   limit: no box is laid out past a fixed height
   (2^25 px in Chromium divided by the device scale and the zoom, so 16,777,216
@@ -3575,8 +4086,10 @@ announces `chatProto2` in its `caps`:
   turn under the viewport top, and a re-window keeps the reader's offset into
   a hidden unit, so the jump stays where it was dropped; where the end is still
   out of reach (rows taller than the limit) the page settles: a re-window never
-  runs again on the echo of its own write, a gap element a fill rebuilt asks
-  nothing on its first observation, and the fill itself asks for the page under
+  runs again on the echo of its own write, a gap element a fill rebuilt while
+  the layout stands at the measured limit asks nothing on its first observation
+  (below the limit a gap a fill leaves on screen next to its page asks for a
+  page of it, so the pane fills), and the fill itself asks for the page under
   a reader still parked in a gap; a fill anchors on the
   first row that intersects the viewport, whatever the sign of its top; with
   no row on screen (or that row gone from the rebuild) it names the point
@@ -3630,7 +4143,7 @@ the pass's own, `failures` its tier crashes, and the five blocks (`recordCache` 
 gate counters per stage (`plan`, `group`, `close`, `distill`, `unblock`, `consolidate`): `ran`, `skipped`, `stamped`,
 `bypassed`, `incomplete`, `due_clock`, the admittance the pass ran under) are the DIFFERENCES against the previous pass's snapshot for every counter, so the kernel can feed its `/perf`
 counters per pass, while each block's GAUGES ride as their current values: in `recordCache` the keys `entries`, `bytes`
-(the cache's contents now), `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
+and `realBytes` (the cache's contents now), `decodedMultiple`, `budgetBytes` and `countCap` (its caps); in `asmCheckpoint` the key `asmDocMemo` (the document
 memo's size and cap); in `tierGate` the key `stamps` (the stage stamps held now); `parses` and `goalIo` carry counters only. `asmCheckpoint.restoreMs` is a counter like its neighbours (the restore's parts
 since boot, as described above), so the line carries the pass's own restore time. A non-numeric value (a name) rides as
 current too. `recovered` is the child's judge-module recovery flag (the once-per-storm
@@ -3800,9 +4313,25 @@ the viewer on the heading the viewer gave that id.
 
 The comments frame follows the same own-slot model. The `{type: "comments"}` frame carries a
 thread's anchorUuid, which the chat page joins with the anchored reply turn (`data-uuid`) to draw
-the reply's mark, and it reaches a page on three roads: the pusher's full cycle, the create
-handler's direct send when a comment is written, and the ready reset's re-send once a reconnecting
-page's listeners are up.
+the reply's mark, and it reaches a page on two roads: the pusher's full cycle and the ready reset's
+re-send once a reconnecting page's listeners are up. A create's answer (`commentCreated`) carries
+the new thread's row itself, built as the frame builds it, so the page lists and opens the thread
+before the next frame; a frame built from the store as it stood before a write is dropped at the
+send (each store write bumps a generation the pusher reads before it builds the frame), so it can
+never follow that answer and take the thread away again. The frame's read of the store, when it
+fails (a descriptor shortage, a read error, a truncated file or one that is not JSON), is never
+remembered as empty: the frame carries `error` in place of `threads`, the page keeps the threads it
+holds and says once that the read failed, until a readable frame ends the failure, and the next cycle
+reads the store again. A document write over a session's parse, which only reads it, does not hold
+the comment's walk.
+
+Creating a comment runs off the page's socket thread, so the page's other messages are read while
+it runs. The cut is found on the session's own parse (the chat's assembly entry, whole or restored
+from its document), reading back only the few records before the document's cut that the walk
+needs; it reads the transcript whole only when that parse cannot answer, and says so in the kernel
+log. A thread's transcript opens with the parent's history the fork copied in, and the popover reads
+only what follows the cut: the cut record's line is found once by reading back from the end, then
+checked by a few guard bytes per change.
 
 The chat page compiles one matcher per index (`glossary-links.ts`): every form
 (the term, its aliases, and their plurals by the everyday rule; nothing shorter
@@ -4763,13 +5292,23 @@ or delete.
 
 ## The spend ceiling
 
-Every pusher cycle the kernel reads each live session's spend rate: the
+Every jobs pass the kernel reads each live session's spend rate: the
 dollars its transcript and the agent transcripts beside it (the subagents and
 workflow agents it fanned out) record over the last ten minutes, priced by the
 same per-model table the cost view uses, scaled to an hour. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
-check reads nothing new; only an agent file that changed inside the window is
-read. The ceiling is the `spend-ceiling-usd-per-hour` setting, a bare value
+check reads little that is new: an agent file that changed inside the window is
+read, and after a restart an agent file inside the window whose restored tail
+does not reach back to the window's start is read whole once, since its records
+from before the checkpoint's cut may be in the window. After pricing an agent
+file, the check runs the file's agent folds over the records it holds, first
+the background-task state an open viewer of the agent left; once the
+agent has been quiet for two minutes they write the file's checkpoint document,
+charged to the pusher cycle's byte budget, and let its records leave memory. A
+session's own transcript restored from its assembly checkpoint is priced from
+the records past the checkpoint's cut, so for up to ten minutes after a restart
+the rate can leave out what that session spent before the cut. The ceiling is
+the `spend-ceiling-usd-per-hour` setting, a bare value
 file under the state directory read at each check: 1000 dollars an hour with
 no file, any number in the file, and `0` disables the guard. When a session's
 rate crosses the ceiling, once per crossing, the kernel interrupts its turn
@@ -5185,12 +5724,17 @@ first message of a side conversation about it, and **Quote** puts the passage in
 instead. **Ctrl+/** (**⌘/** on a Mac, the key code editors use to toggle a comment) opens the same
 box from the keyboard, just under the selection, from anywhere in the chat including the message
 box, where it types no "/" and opens no slash-command menu; the right-click menu shows the key
-under **Comment**. The key is the "/" character, however your layout types it: on a German
-keyboard, where "/" is Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on
-selection** does the same for the passage that was selected when you opened the palette. With
-nothing selected in a message, or in a session that has not finished starting or loading, it says
-so instead of opening anything. The key is a command in the shortcuts dialog and can be rebound
-there.
+under **Comment**. If you have given that key to another command in the shortcuts dialog, the
+dashboard runs that command on it instead, and the menu shows no key. In the file viewer's code
+editor (with **Allow file editing** on), wherever the viewer opens, **Ctrl+/** (**⌘/**) is
+otherwise left to the editor. The editor toggles a comment on the line in the languages it
+highlights, except JSON; in plain text, in any file it does not highlight, and in the editor's
+search box, it does nothing with the key.
+The key is the "/" character, however your layout types it: on a German keyboard, where "/" is
+Shift+7, it is Ctrl+Shift+7. The command palette's **Comment on selection** does the same for the
+passage that was selected when you opened the palette. With nothing selected in a message, or in a
+session that has not finished starting or loading, it says so instead of opening anything. The key
+is a command in the shortcuts dialog and can be rebound there.
 
 Selecting a passage also puts it in a quote chip above the message box, and the chip's row carries
 a **Comment** button before **Stage**, on every device. It opens the same box on the chip's passage,
@@ -5410,9 +5954,9 @@ the tab and pick **Show when folded** under **Tags**;
 the header's count then leaves that tab out; when every tab in a section is set to
 show, the folded header shows the full count and its tooltip says nothing is hidden. Pick it
 again to fold the tab with the rest. A tab set to show when folded keeps that setting when its
-group is renamed. The section of the tab you are reading folds like any other; its header marks
-that it holds the tab (the tag's name is underlined), and folded, the header stands in for the tab:
-focus lands on it, and the left and right arrows step from there. The `archived` section starts
+group is renamed. The section of the tab you are reading folds like any other, and the transcript stays on
+screen; folded, its header stands in for the tab: it wears the selected tab's box, focus lands on it,
+and the left and right arrows step from there. The `archived` section starts
 folded. Drag a header to reorder the groups, which
 reorders the tags on every surface (the timeline's tag table shows the same order). To move
 a tab into another group, right-click it and pick **Move to <tag>** under **Tags**: one click
@@ -5459,17 +6003,55 @@ sections: **Group by tag** in its Filter menu (off until you turn it on, per bro
 lanes out one section per tag in the same order, each session under every tag it carries and
 the untagged sessions behind a divider, with the tag's chip, the caret and the count on a row
 of its own; a section folded in either place is folded in both, and while grouped the lanes
-follow the tag order (dragging a lane pans, it does not reorder). A session reached from a card or the chat while its section is folded unfolds that section, in the strip too, and the arrow keys walk the rows on screen. The gear at the strip's right end, the same gear as the one at the bottom right of every romp page, opens the settings on the **Chat** tab. Its **Tab strip** section carries **Lock the tabs in place**, which freezes every tab move (a drag, a Move to, the Sessions pane's lanes) until you turn it off, and **State badge instead of the outline ring** (the state badge, above); the **Tab widgets** section next to it holds the per-widget rows. The strip's tag button, at the other end of the controls from the gear, shows no chips of its own: the tags show in the strip's sections when the tabs are grouped, and the button wears the accent while a filter is on. Every group starts on its own row; turning off
-the gear's **One tag group per row in the tab strip** lets the groups follow one another across the
-strip and wrap as they need, with the untagged sessions behind a thin divider, so a strip with many
-tags stays short. Folded groups that follow one another in the tag order share one row, since each is
-only its header; an open group always starts a row of its own, and so do the untagged sessions, so a
-folded group between two open ones keeps its row too. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
+follow the tag order (dragging a lane pans, it does not reorder). A session reached from a card or the chat while its section is folded unfolds that section, in the strip too, and the arrow keys walk the rows on screen. The gear at the strip's right end, the same gear as the one at the bottom right of every romp page, opens the settings on the **Chat** tab. Its **Tab strip** section carries **Lock the tabs in place**, which freezes every tab move (a drag, a Move to, the Sessions pane's lanes) until you turn it off, and **State badge instead of the outline ring** (the state badge, above); the **Tab widgets** section next to it holds the per-widget rows. The strip's tag button, at the other end of the controls from the gear, shows no chips of its own: the tags show in the strip's sections when the tabs are grouped, and the button wears the accent while a filter is on. The groups
+share rows in the tag order while they fit: a folded group is its header alone, an open group its
+header and its tabs, and a group that does not fit the rest of a row moves to the next row whole
+rather than splitting across two (one wider than the whole strip wraps onto rows of its own). Folded
+headers side by side sit as close as tabs; a short divider stands between two groups on a row when
+either shows tabs. The untagged sessions keep a row of their own at the end, which is where a dragged
+tab goes to lose its tags. Turning off
+the gear's **Keep tag groups together in the tab strip** lets the groups run on across the strip and
+wrap wherever a row fills, with the untagged sessions behind a thin divider. The **Status line** section, next to Tab widgets in the same Chat tab, does the same for the line above the composer: the folder and the git branch are on by default, the session's name and the host of a remote session are there to switch on, and in both sections the rows reorder by dragging a row's grip or with the arrow keys on it, each section previewing the result below its rows; in Tab widgets a line marking the session name's place divides the list, and a row dragged above or below it renders on that side of the name; the three rings around a tab are listed below those rows without a place in the order, since a ring has no side of the name.
+
+### The tag menu
+
+Right-click a tag to act on the tag itself. The menu opens on a group header in the strip, on a tag's row in a tab's
+**Tags** menu, and on the strip's filter chips; on a focused header the menu key (or Shift+F10) opens it from the keyboard,
+and on a phone a long press on a group heading in the session picker opens it over the list, where the browser reports a
+long press as a right-click (Android's does). The menu shows the tag's chip at the top, so it is clear which tag it acts on, then:
+
+- **Rename…**, and under it the session palette's swatches, the current colour ringed: a swatch recolours the tag.
+- **Fold group** or **Open group**, on a header only: the same fold as a click on the header. **Show overview**, on a
+  header only, shows the section at a glance (below); while it shows, the row reads **Close overview** and puts back the
+  session you were reading. The phone's menu has no overview row. **Show only this tag** filters the strip's tabs to its sessions (absent when the filter is already exactly
+  that tag). **Configure tags…** opens the tags dialog.
+- **Delete tag…**, whose sub-line counts the sessions that lose the tag.
+
+**Rename…** opened from a header turns the header's chip into a field holding the name: Enter or a click away renames,
+Escape cancels. Opened from a chip, or on a phone, where the header is hidden, it asks in a small dialog instead. A name
+another tag already has, here or on an attached kernel, is refused with the reason, since the two tags would make one
+group. A renamed tag keeps its id and its sessions. In the same write the kernel moves the new name into the old one's
+place in the tag order, so the group stays where you dragged it, and into every surface's filter that named the old one.
+Its fold and its tabs set to show when folded move with it on every device: the browser that renamed it moves them at
+once, so the group never flashes open, and every other browser follows when the renamed tag reaches it. A section the
+pane is showing at a glance goes on showing under the new name.
+
+**Delete tag…** asks first, saying how many sessions lose the tag; the sessions stay, with their other tags, and a
+session left with none moves to the ungrouped row. The kernel takes the name out of the tag order and the filters in the
+same write (a filter on that tag alone goes back to all tabs), and the group's fold and its show-when-folded tabs go with
+it, so a tag made later under the same name starts like any new one. A refused rename or delete puts the fold back.
+
+A tag is its name, so the menu acts on every tag of that name: the one on your kernel by its id, and each one kept by an
+attached kernel through that kernel, which applies it to its own store. Once it has answered yes, your kernel moves the
+name in its own order and filters too. A kernel from before this change applies the edit but not the move, and the page
+then writes the order and the filters itself, one write after the edit. Two limits: an edit for an attached kernel that
+is down is queued and lands when it comes back, without moving your order; and the feed keeps its own filter per browser
+tab, which still names the old tag after a rename until you change it.
 
 ### A tag section at a glance
 
-Clicking a tag section's header also shows the section in the transcript's place: one
-row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
+**Show overview** in a group header's tag menu, or **Show tag overview** in the command palette, shows the
+section in the transcript's place: one row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
 API error only you can clear, amber retrying an API error on its own, teal compacting, green waiting
 on background work, none while it is idle), a state chip when the state is worth a word, what it is
 doing now in a few words, and how long ago it last did anything. The chip is the one the bar under
@@ -5484,8 +6066,9 @@ working on shows the note as a quieter second line. Hover a row for its last mes
 its formatting; click one to open that session, which also opens its section if the section is
 folded (with several tags, the first folded group of them). The rows update as the sessions work and
 change only when something about a session changes; the **Needs you** chip follows the feed, one
-refresh behind it at most. The transcript comes back when you pick a session, press Escape, or click
-that header again while its section is open and holds the tab you are reading.
+refresh behind it at most. The transcript comes back when you pick a session, press Escape, or pick **Close overview** in the
+tag's menu. A click on a group header only folds or opens the group, and never changes what the pane
+shows (until 2026-10-02 it also opened this view).
 
 ### Coming back after a dropped connection
 
@@ -5800,11 +6383,11 @@ percentage of the session tokens, with the combined figure. Judge cost is what
 was logged; session cost is tokens priced from a table.
 
 **What the API is costing.** The bottom bar's spend readout opens **API
-spend**, which the palette reaches as **Token usage** too: **Totals**, **Spend
-over time** and **By session**, over one day by hour, seven days by hour (the
-default) or ninety days by day, measured in dollars or tokens, ordered by
-spend or in your own order, and optionally merged by tag. The panel's choices
-are kept in this browser.
+spend**, which the palette reaches as **Token usage** too: **Totals** with
+**By account** beside them, **Spend over time** and **By session**, over one
+day by hour, seven days by hour (the default) or ninety days by day, measured
+in dollars or tokens, ordered by spend or in your own order, and optionally
+merged by tag. The panel's choices are kept in this browser.
 
 ## When a session's tab disappears
 

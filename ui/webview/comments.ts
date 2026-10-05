@@ -55,7 +55,10 @@ export type CommentThread = {
 export const CMT_SENT_GIST = "What romp sent with your comment";
 export const CMT_SENT_GIST_PRIOR = "What romp sent with your comment, including the turns around it (from before the summary)";
 
-export type CommentsFrame = { type: "comments"; id: string; threads: CommentThread[] };
+// A frame whose store the kernel could not read carries `error` in place of `threads`.
+export type CommentsFrame =
+  | { type: "comments"; id: string; threads: CommentThread[] }
+  | { type: "comments"; id: string; error: string };
 
 /** Threads grouped by the turn they anchor to — what the mark/badge pass walks per rendered view. */
 export function threadsByAnchor(threads: CommentThread[]): Map<string, CommentThread[]> {
@@ -252,7 +255,10 @@ export function prunePending(pending: { text: string; t: number }[], msgs: Comme
  *  two comments, and a memo keyed on the words alone answered the second with the first thread and
  *  wrote its name nowhere (review, 2026-09-09). */
 export type CommentCreate = { sid: string; uuid: string; exact: string; text: string; name: string;
-  model: string; effort: string; fast: string; color: string; createId: string; tries: number };
+  model: string; effort: string; fast: string; color: string; createId: string; tries: number;
+  /** the thread ids the page knew on the session at the send: a thread on this passage that is NOT among them is
+   *  the one this create made (synthSuperseded) */
+  prior?: string[] };
 
 /** One id per send gesture: the moment and a random tail, in the same shape as a provisional tab's id.
  *  Random, not a counter: a reloaded viewer starts its counters over, and the kernel's memo outlives it. */
@@ -268,6 +274,105 @@ export function newCommentCreate(anchor: { sid: string; uuid: string; exact: str
   return { sid: anchor.sid, uuid: anchor.uuid, exact: anchor.exact, text, name, model: anchor.model || "",
            effort: anchor.effort || "", fast: anchor.fast || "", color: anchor.color || "",
            createId: mintCreateId(), tries: 0 };
+}
+
+/** The held create an ack or a refusal answers. The kernel echoes the gesture's createId, so the answer names exactly
+ *  one send; an older kernel echoes only the anchor turn, and then the oldest create held on that session and turn is
+ *  the one (the order the kernel's door handles them in). Keyed by the createId and not the turn (2026-10-01): two
+ *  comments on two passages of one reply used to share a slot, so the first ack retired the second create's hold and
+ *  adopted the first thread into whichever box was open on the session, the user's half-typed second comment included. */
+export function holdAnswered(holds: Iterable<CommentCreate>, sid: string, uuid: string, createId?: unknown): CommentCreate | null {
+  const all = Array.from(holds);
+  if (typeof createId === "string" && createId) return all.find((c) => c.createId === createId) || null;
+  return all.find((c) => c.sid === sid && c.uuid === uuid) || null;
+}
+
+/** Where a selection sits in its turn's rendered prose (the text turnProse joins): [start, end) offsets into it. */
+export type PassageAt = { start: number; end: number };
+
+/** `at` when its offsets are integers with 0 <= start < end <= len, else null. */
+function atIn(at: PassageAt | null | undefined, len: number): PassageAt | null {
+  if (!at || !Number.isInteger(at.start) || !Number.isInteger(at.end)) return null;
+  return at.start >= 0 && at.start < at.end && at.end <= len ? at : null;
+}
+
+/** THE SAME PASSAGE, at the anchor level (2026-10-01, the user's call: a Comment on a passage that already has a thread
+ *  opens that thread). Two selections are the same passage when they anchor to the same turn (the caller compares the
+ *  anchor uuids) and their texts OVERLAP in that turn's rendered prose: each is located the way its highlight is drawn
+ *  (findAnchorRange, the full text or its longest word-prefix in the turn, first occurrence) and the two [start, end)
+ *  ranges share at least one character. Touching ranges ("…the first request" / ". Each export…") are two passages.
+ *  `at` is where `b` was selected in the prose, when the gesture knows it: `b` is also the same passage when that range
+ *  overlaps `a`'s, whether or not `b`'s text is found. Without the prose, or with `a` not found in it, or with `b` not
+ *  found and no such range, the fallback is containment of the whitespace-normalized texts: one holding the other is the
+ *  same passage. */
+export function samePassage(prose: string | null | undefined, a: string, b: string, at?: PassageAt | null): boolean {
+  return passageMatch(prose, a, b, at) > 0;
+}
+
+/** samePassage's answer, ranked for the callers that choose among several matches: 2 when the live range overlaps `a`'s
+ *  range, 1 for any other match (the first occurrences, or the containment fallback), 0 for none. */
+function passageMatch(prose: string | null | undefined, a: string, b: string, at?: PassageAt | null): 0 | 1 | 2 {
+  if (prose) {
+    const ra = findAnchorRange(prose, a), rb = findAnchorRange(prose, b), live = atIn(at, prose.length);
+    if (ra && live && ra.start < live.end && live.start < ra.end) return 2;
+    if (ra && rb) return ra.start < rb.end && rb.start < ra.end ? 1 : 0;
+  }
+  const na = normalize(a).norm, nb = normalize(b).norm;
+  return na && nb && (na.includes(nb) || nb.includes(na)) ? 1 : 0;
+}
+
+/** The create already in flight on the same passage (same session, same turn, overlapping text: samePassage, with the
+ *  selection's live range `at` when known), or null. While the send it returns still waits for its thread (its
+ *  optimistic row still listed), a second Comment on the passage is the same comment, not a new one: the box re-opens on
+ *  that send instead of opening empty-handed with the words already sent, which is how a click outside the box, a
+ *  re-select and an Enter made a second thread in the same words (2026-10-01). Where several sends match, one whose
+ *  passage the live range overlaps comes before one matched by first occurrence or containment; the first sent wins
+ *  within each rank. */
+export function holdForPassage(holds: Iterable<CommentCreate>, sid: string, uuid: string, exact: string,
+                               prose?: string | null, at?: PassageAt | null): CommentCreate | null {
+  let best: CommentCreate | null = null, rank = 0;
+  for (const c of holds) {
+    if (c.sid !== sid || c.uuid !== uuid) continue;
+    const m = passageMatch(prose, c.exact, exact, at);
+    if (m > rank) { best = c; rank = m; }
+  }
+  return best;
+}
+
+/** A thread that can still take a reply: open, or relayed (merged, and merging on its way there; T145 keeps a relayed
+ *  thread talkable). A resolved thread is closed for good and a promoted one is its own session now: a new comment on
+ *  their passage starts a new thread. */
+export function threadTakesReplies(status: CommentThread["status"]): boolean {
+  return status === "open" || status === "merged" || status === "merging";
+}
+
+/** The thread a new Comment on this passage should open instead of a new one (the user 2026-10-01: one passage never
+ *  silently grows a second thread): a talkable thread anchored to the same turn whose passage overlaps the selection
+ *  (samePassage, with the selection's live range `at` when known). Where several match, one whose passage the live range
+ *  overlaps comes before one matched by first occurrence or containment; the newest wins within each rank (two marks nest
+ *  on one passage). Null when none. */
+export function existingThreadFor(threads: CommentThread[], uuid: string, exact: string, prose?: string | null,
+                                  at?: PassageAt | null): CommentThread | null {
+  let best: CommentThread | null = null, rank = 0;
+  for (const t of threads) {
+    if (t.tid.startsWith("pending:") || t.anchorUuid !== uuid || !threadTakesReplies(t.status)) continue;
+    const m = passageMatch(prose, t.exact, exact, at);
+    if (!m || m < rank) continue;
+    if (!best || m > rank || (t.createdT || 0) >= (best.createdT || 0)) { best = t; rank = m; }
+  }
+  return best;
+}
+
+/** Has this frame got the thread a held create made? A thread on the same anchor turn with the same passage that the
+ *  page did not know when the create was sent (its `prior`). Until then the create's optimistic mark stays: an earlier
+ *  thread elsewhere in the same reply is NOT it (2026-10-01: the old rule retired the mark on any thread anchored to
+ *  the turn, so a second comment on a reply that already had one lost its highlight on the next frame and kept it off
+ *  until the kernel answered). The kernel caps a stored passage at 2000 characters, so a row holding that cap of the
+ *  sent passage is the same passage. */
+export function synthSuperseded(threads: CommentThread[], held: CommentCreate): boolean {
+  const prior = new Set(held.prior || []);
+  return threads.some((t) => t.anchorUuid === held.uuid && !prior.has(t.tid)
+    && (t.exact === held.exact || (t.exact.length >= 1990 && held.exact.startsWith(t.exact))));
 }
 
 /** The commentCreate frame for a held create: the send and every re-post of it build the same one, so

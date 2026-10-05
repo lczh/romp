@@ -312,6 +312,22 @@ class TwoTabAttribution(unittest.TestCase):
             for sid in (stray, alive, SID_B):
                 km._merge_sets_memo.pop(sid, None)
 
+    def test_only_a_push_to_a_chat_tab_or_the_outline_drops_a_dead_sessions_merge_sets(self):
+        # the sweep that drops a session neither shown nor alive runs inside the block a chat client or an Outline client
+        # (the app id that block tests for) opens; a push to the timeline alone keeps the entry. The record cache's
+        # release text names that condition (docs/reference.md, recordCache), so the behavior it states is pinned here,
+        # not only its wording
+        stray = "66666666-7777-8888-9999-aaaaaaaaaaa9"
+        outline = {"app": "fleet", "alive": True, "sent": {}, "send": lambda s: None}
+        km._merge_sets_memo[stray] = ({"turns": []}, ())
+        try:
+            km._push([self.tl])
+            self.assertIn(stray, km._merge_sets_memo, "a push to the timeline alone keeps the entry")
+            km._push([outline])
+            self.assertNotIn(stray, km._merge_sets_memo, "a push to the Outline alone drops it")
+        finally:
+            km._merge_sets_memo.pop(stray, None)
+
     def test_the_sweep_drops_the_ledger_memo_of_a_tab_no_longer_shown_and_keeps_this_cycles_threads(self):
         stray = "66666666-7777-8888-9999-aaaaaaaaaaa9"
         thread = "66666666-7777-8888-9999-aaaaaaaaaaa7"

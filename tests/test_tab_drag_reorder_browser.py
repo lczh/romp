@@ -23,8 +23,9 @@ classic strip (and T264's own tests) never showed it. Present since T264 (74412c
 layout in which the trail has a row of its own); a fix in the simulation (a zero-width row opener adding no
 gap) was tried and reverted here, and it lands every one of these drops under the cursor.
 
-This lab drives the real /chat page of a hermetic kernel: twenty sessions, three under one tag (the group's
-row), two under a second tag (its own row) and fifteen in no tag (the trail's row), REAL mouse drags (page.mouse
+This lab drives the real /chat page of a hermetic kernel: twenty sessions, three under one tag and two under a
+second (the groups' row: since 2026-10-01 the two open groups share it, the second behind a gutter) and fifteen in
+no tag (the trail's row), REAL mouse drags (page.mouse
 down, a run of moves across the strip, up over the target tab), the tab order read from the DOM and from the
 persisted arrangement (romp:vieworder:shared, the kernel's arrangement as this browser caches it). The classic theme
 is the control; the yatharth theme is set the way the
@@ -42,8 +43,10 @@ would read one too low and every trail drop would miss); a drop released between
 trail's head in the global order, and (since the gesture below) JOINS the first of the two, whose row that slot
 ends; a drop released ahead of the FIRST header is the strip's head, not the ungrouped row, and takes no tag off;
 a header dragged across the shared row still reorders the groups; and with one of the two opened again the folded
-one keeps a row of its own between the open group's row and the trail's. Then the same packed layout under the
-classic theme (gap 0).
+one shares the open group's row behind a gutter (the user 2026-10-01: groups flow onto rows as units). Then the same
+packed layout under the classic theme (gap 0). Before the folds, with both groups open on one row, a trail tab
+released over the left part of the second header joins the FIRST group, landing at the end of its run ahead of the
+gutter.
 
 DRAGGING A TAB INTO AND OUT OF A GROUP (the user 2026-09-23; the move, 2026-09-30): the place a tab is dropped states
 where it should appear now. A group IS a tag, so a drop inside another group's row MOVES the session there (that tag
@@ -60,15 +63,13 @@ the DOM alone. The cue is measured mid-gesture too: the group about to be joined
 that would clear tags names them all before the release — the whole safety, since there is no undo stack — and a
 drag that only reorders shows neither.
 
-THE OPEN SESSION IS CHOSEN, AND A HEADER IS READ BEFORE IT IS PRESSED (2026-09-29). A header's click folds its group
-except on an OPEN group whose section the pane shows and which holds the open session: that click is the way back to
-the transcript and folds nothing (render.ts makeGroupHead, pinned by tab-snapshot-pane.test.ts). The page used to open
-whichever session's frame reached it first, and when the header's group contained that session at a re-fold's click (a
-grouped session, or one a drop had moved into the group), the re-fold waited out its bound for a fold that by design
-never comes, always at one of the two re-folds that follow an open. So the saved state names a trail session that no
-recorded gesture drags, drops on or renames (PINNED, asserted from the driver's record), each fold click first reads
-what the header says its click does (the way back is taken only when the header shows every state that makes it one,
-and tallied: the main run expects none), and a last phase meets the way back on purpose.
+THE OPEN SESSION IS CHOSEN, AND A HEADER IS READ BEFORE IT IS PRESSED (2026-09-29). Until 2026-10-02 a header's click
+folded its group except on an OPEN group whose section the pane showed and which held the open session: that click was
+the way back to the transcript and folded nothing. Since then a header's click only folds or opens (the user 2026-10-02;
+render.ts makeGroupHead, pinned by tab-snapshot-pane.test.ts) and the way back is gone. The saved state still names a
+trail session that no recorded gesture drags, drops on or renames (PINNED, asserted from the driver's record), each
+fold click still reads what the header says its click does and tallies any way back it meets (none expected anywhere
+now), and a last phase folds the group holding the open session on purpose: one click folds it.
 
 Each case records the row layout (every tab's left/top/width), the release point and the landing rect, and
 expects the tab to sit where the pointer was released: after every other tab on the release row whose
@@ -78,9 +79,8 @@ strip's rebuilds) says, when a case fails, whether a drop reached the strip at a
 extension deps or a Playwright browser. SYNTHETIC fixtures only (the notes-api demo world, host TESTHOST,
 placeholder sids). TAB_DRAG_DIST=<dir> serves another tree's UI bundle (the bisect's before);
 TAB_DRAG_DUMP=<path> writes the whole measurement; TAB_DRAG_SHOTS=<prefix> writes strip screenshots of the packed layouts;
-TAB_DRAG_ACTIVE=<name> opens another session than PINNED (a qa member meets the way back at the re-fold after the
-unfolded shape; an infra member, or backup, a trail session at boot that the first drop between the two folded
-headers moves into infra, at the fold ahead of the folded-header join)."""
+TAB_DRAG_ACTIVE=<name> opens another session than PINNED (a qa member, or an infra member, or backup, a trail session at
+boot that the first drop between the two folded headers moves into infra: each once met the way back, which is gone)."""
 import json
 import os
 import re
@@ -438,15 +438,14 @@ await page.waitForFunction((n) => { const names = Array.from(document.querySelec
 //    headers pack onto ONE row and the trail is the row below; the trail's drags still land under the cursor (the
 //    virtual layout has the packed row as one row, as the strip does), a drop between the two headers lands at the
 //    trail's head, a header dragged across the shared row still reorders the groups, and with one group opened again
-//    the folded one keeps a row of its own. Then the same under the classic theme.
+//    the folded one shares its row behind a gutter. Then the same under the classic theme.
 // A HEADER'S CLICK, READ BEFORE IT IS PRESSED (2026-09-29). The header says what its click does in data-act, from the state it
-// rendered (render.ts makeGroupHead): "toggle-group" folds or opens, and "show-transcript" is THE WAY BACK, the click on an
-// open group the pane shows that holds the open session, which puts the transcript back and folds nothing (pinned by
-// tab-snapshot-pane.test.ts). A blind click there waited out the bound for a fold that never comes, and a second blind click
-// on a header that DID fold would open it again, so the header is read first. The way back is taken only when the header
-// shows every state that makes it one (shown, open, holding the open session), and tallied; show-transcript on any other
-// header is a regression and throws with what the header showed. Then the fold's own click, on a header offering the fold
-// from the opposite state, and the wait for the fold's render (its members' tabs gone, or back), each bound named on expiry.
+// rendered (render.ts makeGroupHead): "toggle-group" folds or opens. Until 2026-10-02 an open group the pane showed, holding
+// the open session, offered "show-transcript" instead, THE WAY BACK, which put the transcript back and folded nothing; a
+// header's click only folds since then (pinned by tab-snapshot-pane.test.ts), so a header offering it is a regression: taken
+// and tallied when the header shows every state that once made it one (shown, open, holding the open session), so the
+// assertions name it, and thrown with what the header showed otherwise. Then the fold's own click, on a header offering the
+// fold from the opposite state, and the wait for the fold's render (its members' tabs gone, or back), each bound named on expiry.
 const headState = (name) => page.evaluate((n) => {
   const h = document.querySelector(`#tabs .tab-group-head[data-group="${n}"]`), a = document.querySelector("#tabs .tab.active");
   return h ? { act: h.dataset.act || "", folded: h.dataset.folded || "", cls: h.className, current: h.getAttribute("aria-current"),
@@ -525,6 +524,15 @@ async function dragToHead(label, fromRow, fromIdx, group, frac, opts) {
   if (!src || !tgt) { cases.push({ label, skipped: "no such tab or header: rows=" + JSON.stringify(pre.rows.map((r) => r.map((t) => t.name))) }); return; }
   await runDrag(label, pre, src, { name: "#" + group, left: tgt.left, w: tgt.w, top: tgt.top, h: tgt.h }, frac, opts);
 }
+// 3b. OPEN GROUPS SHARE A ROW (the user 2026-10-01): infra and qa, both open, fit one row at this width, qa behind a
+//     gutter (render.ts flowStripRows). The slot before qa's header (its left part, past the gutter) is the END of the
+//     group before, so a trail tab released there joins infra and lands at the end of infra's run, ahead of the gutter,
+//     never between the gutter and qa's chip (the dragover's isLead)
+L = await layout();
+out.sharedRow = shape(L);
+out.sharedGroups = L.items.filter((i) => i.group).map((h) => h.group);
+await dragToHead("shared row: trail, 3rd tab to the slot BEFORE the second group's header (left part of it)", L.rows.length - 1, 2, out.sharedGroups[1], 0.25, { tagWrite: true });
+L = await layout();
 const groups = L.items.filter((i) => i.group).map((h) => h.group);   // in strip order (tagOrder)
 await foldGroup(groups[0], true);
 await foldGroup(groups[1], true);
@@ -543,7 +551,7 @@ await dragToHead("packed: trail, 3rd tab to the slot BETWEEN the two folded head
 // is the plain reorder it has always been (the guard against a mis-aimed drop stripping a tag)
 await dragToHead("packed: trail, 3rd tab to the slot BEFORE the first folded header (the strip's head)", trail, 2, groups[0], 0.25);
 await dragHead("packed: the second header dragged onto the first (the groups swap)", groups[1], groups[0]);
-// one of the two opened again: the open group's row, the folded one's own row, the trail's
+// one of the two opened again: the open group's row, which the folded one shares behind a gutter, and the trail's
 L = await layout();
 const order = L.items.filter((i) => i.group).map((h) => h.group);
 await foldGroup(order[0], false);
@@ -615,17 +623,17 @@ L = await layout();
 const keeper = L.tabs.filter((t) => t.copy === open0[0]).map((t) => t.name)[0];
 await dragCopy("leave: a group's tab released ahead of the first header keeps its tag", keeper, open0[0],
                { head: open0[0] }, 0.25);
-// 6i. a FOLDED group's bare header (its members hidden, its own row — not a packed one): a release on it joins
+// 6i. a FOLDED group's bare header (its members hidden; beside the open group, behind a gutter): a release on it joins
 await foldGroup(open0[1], true);
 L = await layout();
 const folder = L.rows[trailRow()][4].name;
 out.foldedJoin = { group: open0[1], joiner: folder };
 await dragCopy("join: a tab dragged onto a FOLDED group's header joins it", folder, "", { head: open0[1] }, 0.75, { tagWrite: true });
 out.joinEnd = { tags: tagsOf(), rows: (await layout()).rows.map((r) => r.map((t) => t.name)) };
-// 7. THE WAY BACK, MET ON PURPOSE (2026-09-29): the one header click that folds nothing, so foldGroup's reading of it is
-//    exercised whatever session the main run opened. A pick of one of qa's members (a pick also ends the pane's section
-//    view, setActive) makes qa's header the holder of the open session; a fold and an open put qa's section in the pane,
-//    open; the re-fold's header then offers the way back, which is taken exactly once, and the click after it folds.
+// 7. THE GROUP HOLDING THE OPEN SESSION, FOLDED ON PURPOSE: until 2026-10-02 this was where the way back met a click (a
+//    fold and an open put qa's section in the pane, and the re-fold's header offered the transcript back instead of the
+//    fold). A pick of one of qa's members makes qa's header the holder of the open session; a fold and an open, then
+//    the re-fold, which now offers the fold and folds on its one click, with no section view put up by any of them.
 const wbCase = { group: "qa", setup: [], wayBacks: [] };
 out.wayBackCase = wbCase;
 try {   // recorded, not thrown: every case above already has its result, and a throw here would fail them all with this phase
@@ -641,6 +649,7 @@ try {   // recorded, not thrown: every case above already has its result, and a 
   wbCase.offered = await headState("qa");   // what the re-fold's header offers before the press
   await foldGroup("qa", true, wbCase.wayBacks);
   wbCase.after = await headState("qa");
+  wbCase.view = await page.evaluate(() => ({ snap: document.body.classList.contains("snap-mode"), shown: !!document.querySelector("#tabs .tab-group-head.snap-shown") }));
 } catch (e) { wbCase.error = String((e && e.stack) || e); }
 out.cases = cases;
 fs.writeFileSync(cfg.out, JSON.stringify(out));   // a file, not stdout: the per-case logs outgrow one pipe write
@@ -834,25 +843,30 @@ class ServedTabDragReorder(unittest.TestCase):
         self.assertGreater(c["ev"]["drop"], 0, "%s: no drop reached the strip; the browser refused the release and the drag was cancelled" % c["label"] + table)
         self.assertEqual(c["actual"], c["expected"],
                          "%s: the tab landed at index %d, the cursor was over slot %d" % (c["label"], c["actual"], c["expected"]) + table)
-        # the persisted arrangement (the global order) carries the order the strip shows within every row: the strip
-        # sections it by tag, so the rows are compared one by one
+        # the persisted arrangement (the global order) carries the order the strip shows within every group: the strip
+        # sections it by tag, so the groups are compared one by one (by group, not by row: since 2026-10-01 groups that
+        # fit share a row, in tag order, so a row can hold two groups whose members interleave in the global order)
         self.assertIsInstance(c["stored"], list, "the drop persisted an arrangement" + table)
-        for row in c["postRows"]:
-            names = [t.split("@")[0] for t in row]
-            self.assertEqual([n for n in c["stored"] if n in names], names, "the stored order and the strip's row disagree" + table)
+        for group, names in c["inGroups"].items():
+            self.assertEqual([n for n in c["stored"] if n in names], names, "the stored order and the strip's %r group disagree" % group + table)
 
     # ── the layouts ──
-    def test_both_themes_show_the_group_row_above_the_trail_row(self):
+    def test_both_themes_show_the_groups_row_above_the_trail_row(self):
+        # the two open groups fit one row at this width, so they share it (the user 2026-10-01), qa behind a gutter;
+        # the trail keeps a row of its own below
         r = self._run()
         for key, theme, gap in (("grouped", "classic", "0px"), ("yatharth", "yatharth", "3px")):
             g = r[key]
             self.assertEqual(g["theme"], theme, "%s: the body wears the theme the settings store names: %r" % (key, g))
             self.assertEqual(g["gap"], gap, "%s: the strip's column gap under that theme: %r" % (key, g["bar"]))
             rows = g["rows"]
-            self.assertGreaterEqual(len(rows), 3, "%s: the two groups and the trail wrap onto separate rows: %r" % (key, g))
-            self.assertEqual(sorted(rows[0]), sorted(TAGGED), "%s: row 0 is the infra group: %r" % (key, rows))
-            self.assertEqual(sorted(rows[1]), sorted(QA), "%s: row 1 is the qa group: %r" % (key, rows))
+            self.assertEqual(len(rows), 2, "%s: the groups' row and the trail's: %r" % (key, g))
+            self.assertEqual(rows[0], [n for n in rows[0] if n in TAGGED] + [n for n in rows[0] if n in QA], "%s: row 0 is the infra group, then the qa group: %r" % (key, rows))
+            self.assertEqual(sorted(rows[0]), sorted(TAGGED + QA), "%s: …all of both: %r" % (key, rows))
             self.assertEqual(sorted(rows[-1]), sorted(TRAIL), "%s: the last row is the trail: %r" % (key, rows))
+            heads = [i for i, it in enumerate(g["items"]) if it.startswith("[tab-group-head")]
+            self.assertEqual(len(heads), 2, "%s: two headers: %r" % (key, g["items"]))
+            self.assertTrue(g["items"][heads[1] - 1].startswith("[tab-group-gutter]"), "%s: a gutter leads the second group in mid-row: %r" % (key, g["items"]))
 
     # ── the classic theme: the control ──
     def test_classic_trail_row_drag_to_the_first_slot(self):
@@ -935,23 +949,48 @@ class ServedTabDragReorder(unittest.TestCase):
     def test_two_folded_groups_share_one_row_under_the_classic_theme(self):
         self._assert_packed("packedClassic")
 
-    def test_an_open_neighbour_keeps_its_own_row_and_so_does_the_lone_folded_group(self):
+    def test_an_open_neighbour_shares_its_row_with_the_folded_group_behind_a_gutter(self):
+        # an open group no longer takes a row to itself (the user 2026-10-01): the folded header after it fits the rest
+        # of that row, so it sits there, behind the gutter that ends the open group's run of tabs
         r = self._run()
         g = r["unfolded"]
         heads = g["heads"]
         detail = "\n  heads %r\n  breaks %r\n  rows %r\n  items %r" % (heads, g["breaks"], g["rows"], g["items"])
         self.assertEqual([h["collapsed"] for h in heads], [False, True], "the first group open, the second folded" + detail)
-        self.assertLess(heads[0]["top"], heads[1]["top"], "the folded header is on a row BELOW the open group's header: nothing to pack with" + detail)
-        self.assertEqual(len(g["breaks"]), 2, "a break ahead of the folded header and the trail's" + detail)
+        self.assertEqual(heads[0]["top"], heads[1]["top"], "the folded header shares the open group's row" + detail)
+        self.assertEqual(len(g["breaks"]), 1, "one break, the trail's: none ahead of the folded header" + detail)
+        self.assertTrue(g["breaks"][0]["sep"], "…and it is the trail's" + detail)
         self.assertEqual(len(g["rows"]), 2, "two rows of tabs: the open group's and the trail's" + detail)
         # membership as the strip reports it (see _assert_packed): the drag into and out of a group rewrites it
         open_members = g["members"].get(heads[0]["group"], [])
         self.assertEqual(sorted(g["rows"][0]), sorted(open_members), "the open group's row holds its members" + detail)
         self.assertEqual(sorted(g["rows"][1]), sorted(g["members"].get("trail", [])), "the trail's row holds the rest" + detail)
         tops = self._tab_tops(g)
-        self.assertEqual({tops[n] for n in open_members}, {heads[0]["top"]}, "the open group's members sit on their header's own row" + detail)
-        self.assertLess(heads[1]["top"], min(tops[n] for n in g["members"].get("trail", [])), "the folded header's row is above the trail's" + detail)
-        self.assertEqual([n for n, t in tops.items() if t == heads[1]["top"]], [], "the lone folded header's row holds nothing else" + detail)
+        self.assertEqual({tops[n] for n in open_members}, {heads[0]["top"]}, "the open group's members sit on their header's row" + detail)
+        gutter = next(i for i, it in enumerate(g["items"]) if it.startswith("[tab-group-gutter]"))
+        second = [i for i, it in enumerate(g["items"]) if it.startswith("[tab-group-head")][1]
+        self.assertEqual(gutter, second - 1, "a gutter right ahead of the folded header" + detail)
+        self.assertGreater(heads[1]["left"], max(float(it.split("@")[1].split(",")[0]) for it in g["items"] if it.split("@")[0] in open_members),
+                           "…after the open group's last tab" + detail)
+
+    def test_shared_row_drop_before_the_second_groups_header_joins_the_first(self):
+        # the slot before a header that shares a row is the END of the group before it (the gutter stands between): the
+        # trail tab released over the left part of the second header joins the first group, at the end of its run
+        r = self._run()
+        c = self._case("shared row: trail, 3rd tab to the slot BEFORE")
+        table = self._table(c)
+        first, second = r["sharedGroups"]
+        sr = r["sharedRow"]
+        self.assertEqual(sr["heads"][0]["top"], sr["heads"][1]["top"], "both open groups on one row before the drag" + table)
+        self.assertGreater(c["ev"]["drop"], 0, "the drop reached the strip" + table)
+        self.assertTrue(c["wrote"], "the kernel's store answered the drag's tag write" + table)
+        self.assertEqual(c["tags"]["before"], [], "an untagged trail tab was dragged" + table)
+        self.assertEqual(c["tags"]["after"], [first], "…and it moved into the first group, not the second" + table)
+        self.assertEqual(c["cue"]["ring"], [first], "that group's header wore the accent ring before the release" + table)
+        self.assertEqual(c["inGroups"][first][-1], c["from"]["name"], "it sits at the end of the first group's run" + table)
+        names = [it.split("@")[0] for it in c["items"]]
+        at = names.index(c["from"]["name"])
+        self.assertEqual(names[at + 1], "[tab-group-gutter]", "…right ahead of the gutter, never between the gutter and the second chip" + table)
 
     def test_packed_row_trail_drag_1st_to_3rd(self):
         self._assert_landed_under_cursor(self._case("packed: trail, 1st tab to the 3rd"))
@@ -1157,10 +1196,10 @@ class ServedTabDragReorder(unittest.TestCase):
             self.assertEqual(norm(end[name]), norm(want),
                              "%s holds what it held, plus only the session the last case deliberately joined" % name + detail)
 
-    # ── THE OPEN SESSION AND THE WAY BACK (2026-09-29) ──
-    # A header's click folds its group, except the way back: on an open group the pane shows, holding the open session,
-    # the click puts the transcript back and folds nothing. The page opens a chosen session (never the first frame's),
-    # the main run's fold clicks meet no way back, and the last phase meets one on purpose.
+    # ── THE OPEN SESSION AND THE FOLD (2026-09-29; the way back gone 2026-10-02) ──
+    # A header's click folds or opens its group and does nothing else (the user 2026-10-02): no click is a way back to
+    # the transcript any more. The page opens a chosen session (never the first frame's), the main run's fold clicks meet
+    # no way back, and the last phase folds the group holding the open session on one click.
     def test_the_page_opens_the_pinned_session(self):
         r = self._run()
         o = r["opened"]
@@ -1179,22 +1218,21 @@ class ServedTabDragReorder(unittest.TestCase):
 
     def test_no_fold_click_of_the_main_run_meets_the_way_back(self):
         r = self._run()
-        self.assertEqual(r["wayBack"], [], "no header's group contains the open session, so every header click of the main run"
-                         " folds or opens; a way back here means the header's group contained the open session at that click"
-                         " (a grouped session, or one a drop moved into a group): %r, opened %r" % (r["wayBack"], r["opened"]))
+        self.assertEqual(r["wayBack"], [], "every header click of the main run folds or opens; a way back here is a regression,"
+                         " since a header's click only folds (2026-10-02): %r, opened %r" % (r["wayBack"], r["opened"]))
 
-    def test_the_way_back_is_one_click_and_the_click_after_it_folds(self):
+    def test_the_group_holding_the_open_session_folds_on_one_click(self):
         c = self._run()["wayBackCase"]
         detail = "\n  %r" % (c,)
-        self.assertIsNone(c.get("error"), "the way-back phase ran to its end" + detail)
-        self.assertTrue(c["picked"], "the pick opened a qa member and ended the pane's section view" + detail)
+        self.assertIsNone(c.get("error"), "the phase ran to its end" + detail)
+        self.assertTrue(c["picked"], "the pick opened a qa member" + detail)
         self.assertEqual(c["setup"], [], "the fold and the open ahead of the re-fold are plain fold clicks" + detail)
-        self.assertEqual(c["offered"]["act"], "show-transcript",
-                         "open, shown in the pane and holding the open session, the header offers the way back" + detail)
-        self.assertEqual(c["wayBacks"], [{"group": "qa", "folded": True, "active": c["member"]}],
-                         "the re-fold took the way back exactly once, on qa's header, with the picked member open" + detail)
-        self.assertEqual(c["after"]["folded"], "1", "…and the click after it folded the group" + detail)
+        self.assertEqual((c["offered"]["act"], c["offered"]["folded"]), ("toggle-group", "0"),
+                         "open and holding the open session, the header offers the fold, never a way back (2026-10-02)" + detail)
+        self.assertEqual(c["wayBacks"], [], "no click met a way back" + detail)
+        self.assertEqual(c["after"]["folded"], "1", "the one click folded the group" + detail)
         self.assertIn("collapsed", c["after"]["cls"].split(), "…as the header renders it" + detail)
+        self.assertEqual(c["view"], {"snap": False, "shown": False}, "and no section view came up: the click folds and nothing else" + detail)
 
 
 class PinnedSessionRecordCheck(unittest.TestCase):

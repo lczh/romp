@@ -66,6 +66,12 @@ is the sessions with no tags. Before you let go, the label under the tab names
 the tags coming off. Dragging it back restores only the tag of the group it
 lands in. Dragging a group's header still reorders the groups.
 
+Right-click a group's header, or a tag in a tab's **Tags** menu, for that
+tag's own menu: rename it, change its colour, fold or open the group, show only
+its sessions, or delete it. A renamed tag keeps its sessions, its place in the
+order and its fold. Deleting one asks first, and its sessions stay without it.
+On a phone, press and hold a group's heading.
+
 What a session needs from you sits in a box above its composer, folded to a
 header with the count. Click the header to see the items, again for the full
 context under each. A question offers **Reply** and **Clear**, a held message its

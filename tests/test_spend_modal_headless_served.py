@@ -33,6 +33,8 @@ sys.path.insert(0, HERE)
 import test_spend_detail as _sd   # noqa: E402  the same synthetic world (the module, not its classes:
 #                                   an imported TestCase would be collected here a second time)
 write_ledger, WEB, API, TESTS = _sd.write_ledger, _sd.WEB, _sd.API, _sd.TESTS
+ACCT = "a1a1a1a1a1a1"            # an invented account digest
+PLID = "%012x" % 0x0A0B0C0D0E0F  # an invented stored-login record id on the peer
 
 
 def _node_path():
@@ -72,6 +74,19 @@ class SpendModalServed(unittest.TestCase):
         km._auth_key_present = lambda: True
         (state / "usage.json").write_text(json.dumps({"apiKey": True}))
         write_ledger(state, extra_sids=20)     # enough sessions to scroll the pane (T247e)
+        # The By account summary (2026-10-01): this machine's own sign-in is an enterprise seat (a synthetic identity), api
+        # bills the API key, and the peer below reaches the SAME seat through a stored login, so the summary reads one
+        # "Enterprise seat" row across both hosts, the key's dollars plain and the seat's marked as estimates
+        self._saved_ident = km._machine_identity
+        km._machine_identity = lambda: {"state": "ok", "acct": ACCT, "org": "Example Org", "orgDigest": "c3c3c3c3c3c3",
+                                        "kind": "enterprise", "email": "dev@example.com"}
+        led = json.loads((state / "spend.json").read_text())
+        for b in list(led["hours"].values()) + list(led["days"].values()):
+            a = (b.get("bySid") or {}).get(API)
+            if a:
+                a["key"] = {"usd": a["usd"], "turns": a["turns"], "tok": a["tok"]}
+                b["key"] = dict(a["key"])
+        (state / "spend.json").write_text(json.dumps(led))
         (state / "session-order.json").write_text(json.dumps([API, WEB]))   # the tab strip's order: api before web (T247f)
         # T247g: two tags — "team" (web + api) and "ops" (api + the peer's worker): api is under both
         (state / "timeline-views.json").write_text(json.dumps({"active": "all", "tags": [
@@ -82,7 +97,18 @@ class SpendModalServed(unittest.TestCase):
         km._remotes.clear()
         sd = _sd.SpendDetail("test_the_route_and_the_shell_are_wired")
         off = int((time.localtime(_sd.NOW).tm_gmtoff or 0) // 60) + 180
-        peer_port = sd._peer_server.__func__(self, sd._peer_payload.__func__(self, off))
+        pp = sd._peer_payload.__func__(self, off)
+        # the peer is a current build: its worker's turns and key dollars per bucket, its billing routes, and the worker
+        # billed to a stored login whose record carries the seat's account digest
+        for rng, per in (("hours", 1), ("days", 30)):
+            w = pp[rng]["stacks"][0]
+            w["turns"], w["keyUsd"] = [per if v else 0 for v in w["usd"]], [0.0] * len(w["usd"])
+            pp[rng]["routes"] = [{"host": "PEERHOST", "route": "login:" + PLID, "usd": w["usd"], "turns": w["turns"]}]
+        un = pp["hours"]["stacks"][1]
+        pp["hours"]["routes"].append({"host": "PEERHOST", "route": "untracked", "usd": un["usd"], "turns": [1 if v else 0 for v in un["usd"]]})
+        pp["billing"] = [{"route": "login:" + PLID, "label": "enterprise", "display": "enterprise", "acct": ACCT}, {"route": "untracked"}]
+        pp["sessions"][0].update({"login": "enterprise", "loginId": PLID, "loginLabel": "enterprise"})
+        peer_port = sd._peer_server.__func__(self, pp)
         km._remotes["PEERHOST"] = {"host": "PEERHOST", "status": "up", "local_port": peer_port, "token": "peer-tok",
                                    "usage": {"apiKey": True, "spend": {"day": {"usd": 1}}}}
         km._remotes["OLDHOST"] = {"host": "OLDHOST", "status": "up", "local_port": sd._peer_server.__func__(self, status=404), "token": "peer-tok",
@@ -142,6 +168,8 @@ class SpendModalServed(unittest.TestCase):
              km._claude_account, km._auth_key_present, km.time) = self._saved
             km._remotes.clear()
             km._remotes.update(getattr(self, "_saved_remotes", {}))
+            if hasattr(self, "_saved_ident"):
+                km._machine_identity = self._saved_ident
             self.td.cleanup()
 
     def test_click_opens_the_modal_with_table_and_stacked_histogram_and_escape_closes_it(self):
@@ -299,6 +327,28 @@ class SpendModalServed(unittest.TestCase):
         self.assertEqual(o["mobile"]["btn"]["font"], "11px", o["mobile"]["btn"])
         self.assertEqual(o["mobile"]["btn"]["opacity"], "1", o["mobile"]["btn"])
         self.assertIs(o["mobile"]["btn"]["inAge"], False)
+        # 2026-10-01: the By account summary — one row per Claude account over the range shown, the seat reached from both
+        # hosts one row with its routes beside its name, the key plain, Unknown last; the email only in the hover words
+        ac = o["accts"]
+        self.assertEqual([r["name"] for r in ac["rows"]], ["Enterprise seat", "API key", "Unknown"], ac)
+        seat, key = ac["rows"][0], ac["rows"][1]
+        self.assertIn("TESTHOST sign-in, token on PEERHOST", seat["text"])
+        self.assertTrue(seat["usd"].startswith("\u2248$"), "seat dollars wear the estimate mark: " + seat["usd"])
+        self.assertTrue(key["usd"].startswith("$"), "key dollars stay plain: " + key["usd"])
+        self.assertNotIn("@", " ".join(r["text"] for r in ac["rows"]), "no email on a label")
+        self.assertIn("dev@example.com", seat["tip"], "the email is in the hover words")
+        self.assertIn("dev@example.com", ac["seatTip"], "…which the modal's own tooltip shows on hover")
+        self.assertIn("not billed per token", ac["estTip"], "the mark's reason, in the modal's own tooltip on hover")
+        self.assertTrue(any("not billed per token" in n for n in ac["notes"]), "…and once under the summary")
+        self.assertLess(ac["top"], ac["listTop"], "By account sits above the session list")
+        self.assertEqual(ac["dayRows"][0]["name"], "Enterprise seat", "a range switch re-sums the summary")
+        self.assertNotEqual(ac["dayRows"][0]["usd"], seat["usd"])
+        self.assertTrue(any(r.startswith("PEERHOST:worker") and "bills Enterprise seat" in r for r in rows), "a stored-login row bills its account by name")
+        self.assertFalse(any("By login" in n for n in o["out"]["notes"]))
+        web = next(r for r in rows if r.startswith("TESTHOST:web"))
+        api = next(r for r in rows if r.startswith("TESTHOST:api"))
+        self.assertIn("\u2248$", web, "web's turns are the seat's: marked")
+        self.assertNotIn("\u2248", api, "api billed the key: plain")
         own = [e for e in o["errs"] if "rsp" in e or "Spend" in e or "spend" in e]
         self.assertEqual(own, [], "no page errors from the modal's own code")
 

@@ -68,6 +68,44 @@ def _probe_kernel():
     return ("down", None)
 
 
+# A part that counts a share of another part's demotions, listed inside that part under the short name: (reason, part) ->
+# (the part it is a share of, the name it is listed under). The prompt-id gate counts boundarySeed only for a boundary
+# demotion whose prompt id a restored entry's seed named, so it is part of the boundary count, never beside it.
+_DEMOTE_SHARES = {("promptid", "boundarySeed"): ("boundary", "seed")}
+
+
+def _demotes(stats):
+    """The demotion counters of a road block as the report lists them: each `g:<reason>` with its count, and the
+    `g:<reason>:<part>` counters that break that count down (the prompt-id gate's arms) in parentheses after it. Listed
+    flat, a prompt-id demotion appeared once under its reason and again under each part that named it (2026-10-03). A part
+    that is a share of another part (_DEMOTE_SHARES) is listed inside it, `boundary 3 (seed 2)`: the parts in a reason's
+    parentheses add up to the reason's count, and the pair inside a part is a share of that part, not a breakdown of it;
+    beside the arms, the seed's demotions were counted twice (review round two)."""
+    tops, parts = {}, {}
+    for g, n in stats.items():
+        if not (isinstance(g, str) and g.startswith("g:")) or not n:
+            continue
+        name, _, part = g[2:].partition(":")
+        if part:
+            parts.setdefault(name, {})[part] = n
+        else:
+            tops[name] = n
+    out = []
+    for name in sorted(set(tops) | set(parts)):
+        s = "%s %d" % (name, tops.get(name, 0))
+        arms, shares = dict(parts.get(name) or {}), {}
+        for part in sorted(arms):
+            within = _DEMOTE_SHARES.get((name, part))
+            if within is not None:
+                shares.setdefault(within[0], []).append("%s %d" % (within[1], arms.pop(part)))
+                arms.setdefault(within[0], 0)
+        if arms:
+            s += " (%s)" % ", ".join("%s %d%s" % (p, n, " (%s)" % ", ".join(shares[p]) if p in shares else "")
+                                     for p, n in sorted(arms.items()))
+        out.append(s)
+    return ", ".join(out)
+
+
 def report():
     lines = ["romp     sha=%s  (working tree the kernel loads from)" % (_git_sha() or "?")]
     kind, k = _probe_kernel()
@@ -82,18 +120,17 @@ def report():
             # fallback term keeps an all-fallback kernel VISIBLE: _asm_full counts "full" as its
             # last act, so a kernel whose every parse errors into fallback has fold+full == 0.
             rate = 100.0 * pa.get("fold", 0) / max(1, pa.get("fold", 0) + pa.get("full", 0))
-            gates = ", ".join("%s %d" % (g[2:], n) for g, n in sorted(pa.items())
-                              if g.startswith("g:") and n)
-            lines.append("parse    fold %.0f%% (%d fold / %d full / %d served)%s%s%s"
+            gates = _demotes(pa)
+            lines.append("parse    fold %.0f%% (%d fold / %d full / %d served)%s%s%s%s"
                          % (rate, pa.get("fold", 0), pa.get("full", 0), pa.get("serve", 0),
                             "  fallbacks=%d" % pa["fallback"] if pa.get("fallback") else "",
                             ("  demotes: " + gates) if gates else "",
+                            "  attachedPass=%d" % pa["fold:attachedPass"] if pa.get("fold:attachedPass") else "",
                             "  ts-repair=%d" % pa["ts-repair"] if pa.get("ts-repair") else ""))
         cf = k.get("chatfold") or {}                     # absent on kernels older than the chat fold
         if cf.get("fold", 0) + cf.get("full", 0) + cf.get("fallback", 0) > 0:
             rate = 100.0 * cf.get("fold", 0) / max(1, cf.get("fold", 0) + cf.get("full", 0))
-            gates = ", ".join("%s %d" % (g[2:], n) for g, n in sorted(cf.items())
-                              if g.startswith("g:") and n)
+            gates = _demotes(cf)
             lines.append("chat     fold %.0f%% (%d fold / %d full)%s%s"
                          % (rate, cf.get("fold", 0), cf.get("full", 0),
                             "  fallbacks=%d" % cf["fallback"] if cf.get("fallback") else "",

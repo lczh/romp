@@ -222,8 +222,8 @@ var GEAR_HTML =
   "<div id=rs-chatscheme style='position:relative;margin-top:5px'></div>" +
   '</span></div>' +
   '<label class=rs-row><input type=checkbox id=rs-striprows checked>' +
-  '<span><b>One tag group per row in the tab strip</b>' +
-  '<span class=rs-sub>With the tabs grouped by tag, each group starts on its own row with its tag at the left edge. Off, the groups follow one another across the strip and wrap as they need, so many tags do not mean many rows.</span>' +
+  '<span><b>Keep tag groups together in the tab strip</b>' +
+  '<span class=rs-sub>With the tabs grouped by tag, groups share a row while they fit, and a group that does not fit moves to the next row whole instead of splitting across two. The untagged sessions keep a row of their own at the end. Off, the groups run on and wrap wherever a row fills, with the untagged sessions behind a thin divider.</span>' +
   '</span></label>' +
   // BOXES BELOW THE TRANSCRIPT (the user 2026-09-23, who looked for the switch and did not find it under Display): the Needs you box's
   // switch in a section of its own, named for where the box sits, so a scan of the section heads lands on it. plans/needs-you.md, phase
@@ -1252,13 +1252,52 @@ function initGear(post, opts) {
       name.textContent = r.display || r.label || r.id;
       name.title = name.textContent;
       row.appendChild(name);
+      // a LINK (2026-10-01) is the user's own statement that this login is some machine's signed-in account, so the spend
+      // breakdown counts the two as one account: said as theirs ("linked by you"), never as something romp verified
+      var ln = r.linked && typeof r.linked === 'object' && r.linked.host ? r.linked : null;
       var note = r.why ? r.why
         : r.expiresSoon ? 'token expires ' + lgWhen(r.expiresAt)
+        : ln ? ''
         : (typeof r.addedAt === 'number' ? 'added ' + lgDate(r.addedAt) : '');
+      if (ln) note = (note ? note + ' \u00b7 ' : '') + 'same account as ' + lgSignIn(ln.host) + ', linked by you';
       var st = document.createElement('span');
       st.className = 'rs-note' + (r.why ? ' rs-login-bad' : (r.expiresSoon ? ' rs-login-warn' : ''));
       st.textContent = note;
+      st.title = note;
       row.appendChild(st);
+      if (ln) {
+        var ul = document.createElement('button');
+        ul.type = 'button';
+        ul.className = 'rs-login-rm rs-login-unlink';
+        ul.textContent = 'Unlink';
+        ul.title = 'Take the link back: this login is a row of its own in the spend breakdown again.';
+        ul.addEventListener('click', function () {
+          ul.disabled = true; ul.textContent = 'Unlinking\u2026';
+          lgPost({ unlink: r.id }, st, ul, 'Unlink');
+        });
+        row.appendChild(ul);
+      } else if (!r.ownAccount) {
+        // the machines whose sign-in this login could be: this one and every connected kernel. romp copies the picked
+        // sign-in's account from that machine's own kernel and refuses, in the row, when it has none or does not answer
+        var sel = document.createElement('select');
+        sel.className = 'rs-login-link';
+        sel.title = 'Say this login is the same Claude account as a machine\'s sign-in, so the spend breakdown counts them as one account. romp copies that sign-in\'s account; it cannot read a token\'s account itself.';
+        var o0 = document.createElement('option');
+        o0.value = ''; o0.textContent = 'Same account as\u2026';
+        sel.appendChild(o0);
+        [selfName || 'local'].concat((kernels || []).map(function (k) { return k.host; })).forEach(function (h) {
+          if (!h) return;
+          var o = document.createElement('option');
+          o.value = h; o.textContent = lgSignIn(h);
+          sel.appendChild(o);
+        });
+        sel.addEventListener('change', function () {
+          if (!sel.value) return;
+          sel.disabled = true; st.className = 'rs-note'; st.textContent = 'Linking\u2026';
+          lgPost({ link: { login: r.id, sameAs: sel.value } }, st, sel, '');
+        });
+        row.appendChild(sel);
+      }
       var rm = document.createElement('button');
       rm.type = 'button';
       rm.className = 'rs-login-rm';
@@ -1273,6 +1312,21 @@ function initGear(post, opts) {
       row.appendChild(rm);
       lgL.appendChild(row);
     });
+  }
+  // a machine's sign-in in the row's words: this machine's own, or a connected kernel's by its host name
+  function lgSignIn(h) { return (!h || h === 'local' || h === selfName) ? 'this machine\'s sign-in' : h + '\'s sign-in'; }
+  // link / unlink: the kernel's POST /logins answers ok (the list re-reads) or the refusal, said in the row's note with
+  // the control restored, so a host with no sign-in or one not answering is never a silent nothing
+  function lgPost(body, st, ctl, label) {
+    function refused(why) {
+      st.className = 'rs-note rs-login-bad'; st.textContent = why; st.title = why;
+      ctl.disabled = false;
+      if (ctl.tagName === 'SELECT') ctl.value = ''; else ctl.textContent = label;
+    }
+    fetch(ku('/logins'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.ok) lgFetchLogins(); else refused((d && d.error) || 'refused'); })
+      .catch(function () { refused('the kernel did not answer; try again'); });
   }
   function lgFetchLogins() {
     if (!lgL) return;

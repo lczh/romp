@@ -105,8 +105,9 @@ function lift(): (hooks: Hooks) => Api {
     let vanishedId = null, vanishedWhy = null;   // the unfocused pane's memory of what vanished and why (T357)
     let collapsedTabIds = new Set(), draggedGroup = null, provisionalId = null, provisionalTags = [];
     // stripGroupRows mirrors the default. Its break site is never reached here: FakeEl has no childElementCount,
-    // so the gate's childElementCount operand is undefined whatever the setting (and the packed bit after it is
-    // never read), hence no makeRowBreak stub. Give FakeEl a childElementCount and this prelude needs one.
+    // so the gate's childElementCount operand is undefined whatever the setting, hence no makeRowBreak stub. Give
+    // FakeEl a childElementCount and this prelude needs one. The flow onto rows measures a laid-out strip, which
+    // FakeEl is not: stubbed below (tab-groups.test.ts executes flowGroups itself).
     let settings = { tabCtx: "over50", stripGroupRows: true, theme: "classic", colormap: "aurora", tabWidgets: { on: {}, order: [], opts: {} } };
     const H = HOOKS;
     // the tab-title widgets (T379): a faithful stand-in for the registry's composition over the real tab-state rules, so the
@@ -175,7 +176,7 @@ function lift(): (hooks: Hooks) => Api {
     const tagMenuButton = () => el("span", "tag-btn"); const openTagMenu = () => {}; const postLens = () => {}; const vscodeApi = null;
     const GEAR_GLYPH = "\u26ed"; const openRowsMenu = () => {};   // the strip's gear (T379) and its menu (T405): built, its press outside this harness   // the tab lock (T395): the strip builds the button; its press is outside this slice
     const TAG_BTN_BORDER_CSS = "var(--card-border, rgba(255,255,255,0.10))";   // the tag button's themed border the lock borrows (T395)
-    const syncTagFilter = () => { H.tagSyncs++; }; const paintTabRowLines = () => { H.rowPaints++; }; const ensureTabRowObserver = () => {};
+    const syncTagFilter = () => { H.tagSyncs++; }; const paintTabRowLines = () => { H.rowPaints++; }; const ensureTabRowObserver = () => {}; const flowStripRows = () => {};
     const focusActiveTab = () => {}; const syncNoSessionsPlaceholder = (v, t) => { H.aftermaths.push([v, t]); };
   `;
   const epilogue = `
@@ -273,7 +274,7 @@ test("every input the strip paints repaints it, once, when it changes", () => {
     ["the order", () => { api.set({ order: ["b", "a", "p"] }); }],
     ["a tab hidden by the views filter", () => { H.hidden.add("p"); }],
     ["the context-gauge setting", () => { settings.tabCtx = "always"; }],
-    ["the one-group-per-row setting", () => { settings.stripGroupRows = false; }],
+    ["the keep-groups-together setting", () => { settings.stripGroupRows = false; }],
     ["the theme", () => { settings.theme = "yatharth"; }],
     ["the colormap", () => { settings.colormap = "hawaii"; }],
     ["the + tab's key hint", () => { H.keyHint = "Open a session (J)"; }],

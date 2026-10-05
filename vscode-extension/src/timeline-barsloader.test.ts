@@ -47,7 +47,7 @@ test("the loader is the full ROMP wordmark — R, m, p letters + the reverse-spi
   assert.match(SRC, /mk\('R', '#1EA1EB'\)/);
   assert.match(SRC, /mk\('m', '#54B204'\)/);
   assert.match(SRC, /mk\('p', '#4EA8A9'\)/);
-  assert.match(SRC, /o\.src = mediaUrl\('romp-swirl-o\.svg'\)/);
+  assert.match(SRC, /o\.src = swirlOUrl\(\);/, "the o is the inline swirl (ui/timeline-loader-swirl.test.ts runs it)");
   assert.match(SRC, /@keyframes tl-rl-spin\{to\{transform:rotate\(-360deg\)\}\}/);
   assert.match(SRC, /rl-dots/);
 });

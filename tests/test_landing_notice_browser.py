@@ -5,7 +5,7 @@ the gap where the target will be, the loading glyph in the empty space; the land
 ONLY cancel: the target and the notice go, the reply still inserts its run in place, and the view does not move. Served, on the
 window lab's hermetic kernel (a synthetic transcript longer than the wire tail: the deep target is in the head gap at boot).
 
-Roads, ten fresh pages (the socket death first, then the notice roads, then the answered-question anchor, the cancel-then-click road, the fault road, three roads on the per-ask records: two cancels, a cancelled origin, a lost cancelled frame, then an older fetch in flight and the pipe's down edge): the deep link landing with the notice (the words, the pre-jump write, the window ask, the landing, the notice
+Roads, fourteen fresh pages (the socket death first, then the notice roads, then the answered-question anchor, the cancel-then-click road, the fault road, three roads on the per-ask records: two cancels, a cancelled origin, a lost cancelled frame, then an older fetch in flight and the pipe's down edge; later, two cancelled jumps into the hidden head gap and the notice's one-shot pulse): the deep link landing with the notice (the words, the pre-jump write, the window ask, the landing, the notice
 gone); then a second deep link with its ask HELD at the socket, the notice clicked (a locateDiag row filed as cancelled, the notice
 gone, the view still), the ask released (the run inserts, the view still where the reader was).
 
@@ -203,14 +203,22 @@ await reboot();
 // Parked head-gap page asks (loadTurns) keep the gap whole (CI, 2026-09-14: a rebuild at the gap's top re-asked its first page).
 await page.evaluate(() => { window.__hold.add("loadTurns"); });
 const auqUser7 = "11111111-2222-3333-4444-" + pad(2 * 100), auqAnswer7 = "66666666-7777-8888-9999-" + pad(2 * 100);
+const nFocus7a = await page.evaluate(() => window.__sent.length);
 await page.evaluate((frame) => window.postMessage(frame, "*"), { type: "focus", id: cfg.sid, anchor: auqUser7, anchorT: cfg.base + 2 * 100 });   // turn 100: its window (about turns 40 to 160) leaves the head gap above it
 await page.waitForFunction((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), auqAnswer7, { timeout: 15000 }).catch(() => {});
 await page.waitForFunction(() => { const n = document.querySelector(".tx-landing-notice"); return !n || getComputedStyle(n).display === "none"; }, null, { timeout: 10000 }).catch(() => {});
 await painted();
-const gestureToTop7 = () => page.evaluate((u) => { const c = document.getElementById("content"); const t = document.querySelector(`#content .turn[data-uuid="${u}"]`); if (c) c.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 4 })); if (t && c) c.scrollTop += t.getBoundingClientRect().top - c.getBoundingClientRect().top; }, auqAnswer7);   // the wheel (the reader's input) then the scroll it drives: a gesture the settle yields to, so the answer stays under the top
+// the wheel (the reader's input) then the scroll it drives: a gesture the settle yields to, so the answer stays under the top. Returns whether
+// the landing was still settling when the gesture came, read in the same evaluation (2026-09-29): the settle ends on its own 1.2 s after the
+// landing and files its row then, so a runner that stalls past that before the gesture has nothing left to yield (a superseded row does not
+// count: the newer landing's settle is the one open)
+const gestureToTop7 = (n) => page.evaluate((a) => { const open = !window.__sent.slice(a.n).some((m) => m.type === "locateDiag" && "settled" in m && !m.superseded); const c = document.getElementById("content"); const t = document.querySelector(`#content .turn[data-uuid="${a.u}"]`); if (c) c.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 4 })); if (t && c) c.scrollTop += t.getBoundingClientRect().top - c.getBoundingClientRect().top; return open; }, { u: auqAnswer7, n });
 const nWr7a = await page.evaluate(() => window.__sent.length);
-await gestureToTop7();
-await page.waitForFunction((n) => window.__sent.slice(n).some((m) => m.type === "locateDiag" && "settled" in m), nWr7a, { timeout: 15000 }).catch(() => {});   // the gesture's takeover ends the settle: its landing row files
+const openAtGesture7a = await gestureToTop7(nFocus7a);
+// the gesture's takeover ends the settle: its landing row files. Recorded and asserted (2026-09-29): the no-realign read below means
+// something only once the settle has ended, since a realign comes during it
+const settled7a = await page.waitForFunction((n) => window.__sent.slice(n).some((m) => m.type === "locateDiag" && "settled" in m), nWr7a, { timeout: 15000 })
+  .then(() => true, (e) => { if (e && e.name === "TimeoutError") return false; throw e; });
 await painted();
 const top7a = await rowAtTop();
 const turnAttr7a = await page.evaluate((u) => { const t = document.querySelector(`#content .turn[data-uuid="${u}"]`); return t ? (t.dataset.turn === undefined ? null : t.dataset.turn) : "absent"; }, auqAnswer7);
@@ -445,6 +453,80 @@ await page.waitForFunction((u) => !!document.querySelector(`#content .turn[data-
 await page.waitForFunction(() => { const n = document.querySelector(".tx-landing-notice"); return !n || getComputedStyle(n).display === "none"; }, null, { timeout: 10000 }).catch(() => {});
 await painted();
 const after14 = { asked: await page.evaluate((n) => window.__sent.slice(n).filter((m) => m.type === "loadAround").length, sentAt14), busy: await page.evaluate((n) => window.__sent.slice(n).filter((m) => m.type === "locateDiag").flatMap((m) => m.trail || []).filter((w) => w === "pointer-fetch-busy").length, sentAt14), target: await onScreen(deep14) };
+// ROAD 16 (2026-10-02; a fresh page): ONE deep link into the head gap while the gap is hidden in the top spacer, its ask held, the notice
+// clicked away. No run stands above the head gap, so the pre-jump puts the reader at the gap's start, and that start is where the top spacer
+// starts, below #content's top padding: the reader rests ON the gap, where the point under the viewport top is named. It used to rest 8 px
+// above it, in the padding (one walk took the spacer's offset, four took 0), where no turn is named: a fill could not anchor on the point
+// and a fill's completion could not ask for the reader's page (road 10 went red on that null point). Page asks (loadTurns) are held with
+// the window's, so the head gap is still a gap at the cancel. The released window then loads the head with no landing move, and the reader
+// moves by less than a turn, the point named. That late leg does not show how a fill anchors: at turn 0 with no run above it, anchoring on
+// the point and keeping scrollTop put the reader in the same place. Road 6 executes the anchoring on the point (its fill straddles a reader
+// at turn 117 and moves scrollTop to keep the point).
+await reboot();
+const deep16 = "11111111-2222-3333-4444-" + pad(2 * 60);   // turn 60: the reply's window (WIRE_CHUNK events around it: the run [0, 122) here) waits until the cancel is read
+const headHidden16 = await page.evaluate(() => { const rs = (typeof window.__rompRegions === "function" && window.__rompRegions()) || [];   // the premise at the click
+  return { spacer: !!document.querySelector("#content .tx-spacer-top"), headGap: rs.length > 0 && rs[0].kind === "gap" && rs[0].lo === 0,
+           headEl: Array.from(document.querySelectorAll("#content .tx-gap")).some((g) => Number(g.dataset.lo) === 0) }; });
+await page.evaluate(() => { window.__hold.add("loadAround"); window.__hold.add("loadTurns"); });
+const asked16 = await clickCancel(deep16, cfg.base + 2 * 60);
+await painted(); await quiet();
+const held16 = await page.evaluate(() => (window.__heldRaw || []).map((d) => JSON.parse(d).type));   // the window's ask, and the head page's if the page asked it
+// where the thread's content starts in scroll space (its first child: the head gap's element, which the pre-jump's re-window renders)
+const headTop16 = () => page.evaluate((sid) => { const c = document.getElementById("content"); const t = document.querySelector('#content .thread[data-session="' + sid + '"]'); const f = t && t.firstElementChild; return f ? f.getBoundingClientRect().top - c.getBoundingClientRect().top + c.scrollTop : null; }, cfg.sid);
+const gapEls16 = () => page.evaluate(() => Array.from(document.querySelectorAll("#content .tx-gap")).map((g) => [Number(g.dataset.lo), Number(g.dataset.hi)]));
+const regions16 = () => page.evaluate(() => (typeof window.__rompRegions === "function" ? (window.__rompRegions() || []).map((r) => [r.kind, r.lo, r.hi]) : null));
+const cancel16 = { top: await page.evaluate(() => document.getElementById("content").scrollTop), headTop: await headTop16(), point: await pointNow(), guess: (await writes("land-guess")).slice(-1)[0] || null,
+  gaps: await gapEls16(), regions: await regions16(), trail: await page.evaluate(() => (typeof window.__rompLandTrail === "function" ? window.__rompLandTrail().slice(-8) : null)) };
+const sentAt16 = await page.evaluate(() => window.__sent.length), runN16 = await runN7();
+await page.evaluate(() => { window.__hold.delete("loadAround"); window.__hold.delete("loadTurns"); });
+const rel16 = await page.evaluate(() => window.__release());
+await page.waitForFunction((n0) => ((typeof window.__rompRegions === "function" && window.__rompRegions()) || []).filter((r) => r.kind === "run").reduce((a, r) => a + r.n, 0) > n0, runN16, { timeout: 15000 }).catch(() => {});
+await painted();
+// rows on screen (the window's, from the head)
+await page.waitForFunction(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); return Array.from(c.querySelectorAll(".turn[data-uuid]")).some((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top && b.top < cr.bottom; }); }, null, { timeout: 8000 }).catch(() => {});
+await painted();
+const late16 = { top: await page.evaluate(() => document.getElementById("content").scrollTop), point: await pointNow(),
+  rows: await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); return Array.from(c.querySelectorAll(".turn[data-uuid]")).filter((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top && b.top < cr.bottom; }).length; }),
+  asks: await page.evaluate((n) => window.__sent.slice(n).filter((m) => m.type === "loadTurns").map((m) => [m.lo, m.hi]), sentAt16),
+  landWrites: await page.evaluate((n) => window.__sent.slice(n).filter((m) => m.type === "clientDiag" && m.what === "scrollwrite" && m.data && m.data.writer === "land-on").map((m) => [m.data.before, m.data.after]), sentAt16),
+  gaps: await gapEls16(), regions: await regions16() };
+// ROAD 17 (a fresh page): ONE deep link into the head gap while the gap is hidden in the top spacer, at turn 170, whose window (WIRE_CHUNK
+// events around it) stops short of turn 0; every ask held, and frames let run after the head gap's element is rendered, before the notice is
+// clicked away. The window's ask is released alone and page asks (loadTurns) stay held, so a page ask made once the window's run is in waits
+// at the socket, where it is read; then the page asks are released.
+await reboot();
+const deep17 = "11111111-2222-3333-4444-" + pad(2 * 170);
+const headHidden17 = await page.evaluate(() => { const rs = (typeof window.__rompRegions === "function" && window.__rompRegions()) || [];   // the premise at the deep link
+  return { spacer: !!document.querySelector("#content .tx-spacer-top"), headGap: rs.length > 0 && rs[0].kind === "gap" && rs[0].lo === 0,
+           headEl: Array.from(document.querySelectorAll("#content .tx-gap")).some((g) => Number(g.dataset.lo) === 0) }; });
+const headEl17 = () => page.evaluate(() => Array.from(document.querySelectorAll("#content .tx-gap")).some((g) => Number(g.dataset.lo) === 0));
+const heldAsks17 = () => page.evaluate(() => (window.__heldRaw || []).map((d) => { const m = JSON.parse(d); return m.type === "loadTurns" ? [m.type, m.lo, m.hi] : [m.type]; }));
+const rowsOn17 = () => page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); return Array.from(c.querySelectorAll(".turn[data-uuid]")).filter((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top && b.top < cr.bottom; }).map((e) => e.dataset.uuid); });
+await page.evaluate(() => { window.__hold.add("loadAround"); window.__hold.add("loadTurns"); });
+const before17 = await heldN();
+await page.evaluate((frame) => window.postMessage(frame, "*"), { type: "focus", id: cfg.sid, anchor: deep17, anchorT: cfg.base + 2 * 170 });
+await page.waitForFunction((n) => (window.__heldRaw || []).length > n, before17, { timeout: 8000 }).catch(() => {});
+await page.waitForFunction(() => Array.from(document.querySelectorAll("#content .tx-gap")).some((g) => Number(g.dataset.lo) === 0), null, { timeout: 5000 }).catch(() => {});
+await painted(); await painted(); await page.waitForTimeout(300); await painted();
+const headElAtClick17 = await headEl17();
+await page.waitForFunction(() => { const n = document.querySelector(".tx-landing-notice"); return !!n && getComputedStyle(n).display !== "none"; }, null, { timeout: 5000 }).catch(() => {});
+await page.evaluate(() => { const n = document.querySelector(".tx-landing-notice"); if (n) { const r = n.getBoundingClientRect(); n.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 })); } });
+await page.waitForFunction(() => { const n = document.querySelector(".tx-landing-notice"); return !n || getComputedStyle(n).display === "none"; }, null, { timeout: 5000 }).catch(() => {});
+await painted(); await quiet(); await page.waitForTimeout(1000); await painted();
+const cancel17 = { headEl: headElAtClick17, held: await heldAsks17(), regions: await regions16(),
+  notice: await page.evaluate(() => { const n = document.querySelector(".tx-landing-notice"); return !!n && getComputedStyle(n).display !== "none"; }) };
+const runN17 = await runN7();
+await page.evaluate(() => { window.__hold.delete("loadAround"); });
+const rel17 = await page.evaluate(() => window.__release());
+await page.waitForFunction((n0) => ((typeof window.__rompRegions === "function" && window.__rompRegions()) || []).filter((r) => r.kind === "run").reduce((a, r) => a + r.n, 0) > n0, runN17, { timeout: 15000 }).catch(() => {});
+await painted();
+await page.waitForFunction(() => (window.__heldRaw || []).some((d) => { const m = JSON.parse(d); return m.type === "loadTurns" && m.lo === 0; }), null, { timeout: 8000 }).catch(() => {});
+const window17 = { runN: await runN7(), regions: await regions16(), held: await heldAsks17(), rows: await rowsOn17() };
+await page.evaluate(() => { window.__hold.delete("loadTurns"); });
+const relPages17 = await page.evaluate(() => window.__release());
+await page.waitForFunction(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); return Array.from(c.querySelectorAll(".turn[data-uuid]")).some((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top && b.top < cr.bottom; }); }, null, { timeout: 8000 }).catch(() => {});
+await painted();
+const late17 = { regions: await regions16(), rows: await rowsOn17() };
 // ROAD 15 (the follow-up after PR 1584, low 1; a fresh page): the notice's pulse is ONE-SHOT. A real second click on the anchor a landing is on
 // the wire for pulses the notice once (round eleven, low b); the class must leave on the animation's end, so a LATER landing that re-shows the
 // one reused notice element does not replay a pulse it did not earn (before the fix the class stayed and the display flip restarted the
@@ -493,8 +575,9 @@ await noticeHidden(); await painted();
 const targetB15 = await onScreen(deepB15);
 await page.waitForTimeout(700);                                                       // past the cut animation's own length: a listener the hide did not remove would still be there
 const afterCut15 = await page.evaluate(() => ({ add: window.__aeAdd, remove: window.__aeRemove, cls: !!document.querySelector(".tx-landing-notice.pulse"), shown: (() => { const n = document.querySelector(".tx-landing-notice"); return !!n && getComputedStyle(n).display !== "none"; })() }));
-process.stdout.write("RESULT:" + JSON.stringify({ listeners15, cut15, afterCut15, first15, pulsed15, afterEnd15, targetA15, reshow15, targetB15, inGap6, regions13, hadFrame13, heldIn13a, heldIn13, heldOlder13, askState13, trail13, toast13, target13, asks13, before14, down14, after14, askedA10, askedB10, asks10, before10, relA10, afterA10, relB10, afterB10, runN10a, runN10b, runN10c, writes10, originA11, askedA11, foundB11, askedB11, noticeB11, atAsk11, afterMissing11, writes11, askedA12, reask12, target12, trail12, askedA8, afterCancel8, askedB8, busy8, toast8, noticeB8, released8, targetB8, residentA8, runN8Before, runN8After, asked9, fault9, rows9, top9Before, writes9, pxPerTurn9, heldAsk6, point6Before, point6After, fillWrites6, after6, head4, filled4, afterDrop5: { notice: afterDrop5.notice }, askBefore5, heldRaw5, askState5, winBefore5, winAtDeath5, redialed5, recvAfter5, sentAfter5, flushAsk5, reask5, landed5, top7a, turnAttr7a, point7a, realign7a, rowB7Before, pointB7Before, rowB7Held, pointB7Held, rowB7After, pointB7After, held7b, askState7b, fillWrites7b, runNBefore7b, runNAfter7b, asked3, nospan3, boot: { gaps: boot.gaps, atBottom: boot.atBottom, notice: boot.notice, regions: await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null)) }, asked1: { notice: asked1.notice, noticeText: asked1.noticeText, top: asked1.top, gaps: asked1.gaps, loadAround: heldAsk1 }, trace1, released1, guess1, trace2,
+process.stdout.write("RESULT:" + JSON.stringify({ listeners15, cut15, afterCut15, first15, pulsed15, afterEnd15, targetA15, reshow15, targetB15, inGap6, regions13, hadFrame13, heldIn13a, heldIn13, heldOlder13, askState13, trail13, toast13, target13, asks13, before14, down14, after14, askedA10, askedB10, asks10, before10, relA10, afterA10, relB10, afterB10, runN10a, runN10b, runN10c, writes10, originA11, askedA11, foundB11, askedB11, noticeB11, atAsk11, afterMissing11, writes11, askedA12, reask12, target12, trail12, askedA8, afterCancel8, askedB8, busy8, toast8, noticeB8, released8, targetB8, residentA8, runN8Before, runN8After, asked9, fault9, rows9, top9Before, writes9, pxPerTurn9, heldAsk6, point6Before, point6After, fillWrites6, after6, head4, filled4, afterDrop5: { notice: afterDrop5.notice }, askBefore5, heldRaw5, askState5, winBefore5, winAtDeath5, redialed5, recvAfter5, sentAfter5, flushAsk5, reask5, landed5, top7a, turnAttr7a, point7a, realign7a, settled7a, openAtGesture7a, rowB7Before, pointB7Before, rowB7Held, pointB7Held, rowB7After, pointB7After, held7b, askState7b, fillWrites7b, runNBefore7b, runNAfter7b, asked3, nospan3, boot: { gaps: boot.gaps, atBottom: boot.atBottom, notice: boot.notice, regions: await page.evaluate(() => (typeof window.__rompRegions === "function" ? window.__rompRegions() : null)) }, asked1: { notice: asked1.notice, noticeText: asked1.noticeText, top: asked1.top, gaps: asked1.gaps, loadAround: heldAsk1 }, trace1, released1, guess1, trace2,
   landed1: { notice: landed1.notice, gaps: landed1.gaps, turns: landed1.turns, top: landed1.top, strip: landed1.strip, regions: regionsLanded }, target1, rows1,
+  headHidden16, asked16, held16, cancel16, rel16, late16, headHidden17, cancel17, runN17, rel17, window17, relPages17, late17,
   asked2: { notice: asked2.notice, noticeText: asked2.noticeText, top: asked2.top }, clicked2: { notice: clicked2.notice, top: clicked2.top, gaps: clicked2.gaps }, rows2, released2,
   late2: { notice: late2.notice, top: late2.top, gaps: late2.gaps, turns: late2.turns, regions: regionsLate }, noticeHit, regionsClicked, rowClicked2, rowLate2, point2Clicked, point2Late, chClicked2: clicked2.ch, target2, deep2Turn: 190, bootTop: boot.top }) + "\n");
 await browser.close();
@@ -582,6 +665,8 @@ class ServedLandingNotice(WindowLab):
         # the message line-height (whole device px since the raster fix): the point names the turn by position, never a uuid lookup.
         r = self._result()
         answer = "66666666-7777-8888-9999-%012d" % 200
+        self.assertTrue(r["openAtGesture7a"], "the reader's scroll came while the landing was still settling (inside its 1.2 s window); a stalled runner reads here, not as a missing row")
+        self.assertTrue(r["settled7a"], "the reader's gesture ended the landing's settle (its landing row filed) before the rows were read: %r" % r["settled7a"])
         self.assertIsNotNone(r["top7a"], "a row sat under the viewport top after the reader's scroll")
         self.assertEqual(r["top7a"]["uuid"], answer, "the reader's scroll put the answered question (its answer's tool_result uuid) under the viewport top: %r" % r["top7a"])
         self.assertTrue(isinstance(r["turnAttr7a"], str) and r["turnAttr7a"].isdigit(), "the row names its own turn (data-turn), read by position, never a uuid lookup: %r" % r["turnAttr7a"])
@@ -765,6 +850,53 @@ class ServedLandingNotice(WindowLab):
         self.assertFalse(n["notice"], "the span-less reply brought the notice down: %r" % n)
         self.assertIsNotNone(n["toast"], "…and told the reader, never dropped them silently: %r" % n)
         self.assertIn("older version", n["toast"], "the toast says the host is older: %r" % n["toast"])
+
+    def test_a_cancelled_jump_to_the_head_gap_rests_on_the_gap_where_its_point_is_named_and_the_late_reply_loads_it(self):
+        # the #68 follow-up (2026-10-02): every walk over the units hidden above the window starts where the top spacer does, so the pre-jump
+        # into the hidden head gap writes the gap's start (below #content's top padding) and the re-window keeps the reader there, on the gap,
+        # where the point under the viewport top is named; the late window then loads the head with no landing move, and the reader moves by
+        # less than a turn, the point named. At turn 0 with no run above it, a fill that anchors on the point and one that keeps scrollTop
+        # leave the reader in the same place, so this leg checks that the reader moves by less than a turn, not how the fill anchors (road 6
+        # executes that: its fill straddles a reader at turn 117 and moves scrollTop to keep the point)
+        r = self._result()
+        h = r["headHidden16"]
+        self.assertTrue(h["spacer"] and h["headGap"] and not h["headEl"], "the head gap was hidden in the top spacer at the click, with no element of its own (the road's premise): %r" % h)
+        held = r["held16"]
+        self.assertEqual(held.count("loadAround"), 1, "the deep link asked once, held at the socket: %r" % held)
+        self.assertTrue(set(held) <= {"loadAround", "loadTurns"} and r["rel16"] == len(held), "…and every parked ask was released: %r, %r released" % (held, r["rel16"]))
+        c = r["cancel16"]
+        self.assertTrue(c["regions"] and c["regions"][0][:2] == ["gap", 0], "the head gap is still a gap at the cancel (no page of it landed before the cancel): %r" % c["regions"])
+        self.assertTrue(any(g[0] == 0 for g in c["gaps"]), "…and the pre-jump's re-window rendered its element: %r" % c["gaps"])
+        self.assertIsNotNone(c["headTop"], "the thread has content at the cancel: %r" % c)
+        self.assertTrue(c["guess"] and abs(c["guess"][1] - c["headTop"]) <= 1, "the pre-jump wrote the head gap's start, where the thread's content starts (below #content's padding): %r, content at %r" % (c["guess"], c["headTop"]))
+        self.assertLessEqual(abs(c["top"] - c["headTop"]), 1, "the reader rests there after the cancel, not in the padding above it: scrollTop %r, content at %r: %r" % (c["top"], c["headTop"], c))
+        self.assertIsNotNone(c["point"], "the point under the viewport top is named at the cancel (road 10 went red on a null point here): %r" % c)
+        self.assertTrue(0 <= c["point"] < 1, "…as the transcript's first turn: %r" % c["point"])
+        late = r["late16"]
+        self.assertEqual(late["landWrites"], [], "the cancelled landing wrote no landing move: %r" % late["landWrites"])
+        self.assertTrue(late["regions"] and late["regions"][0][:2] == ["run", 0], "the late reply loaded the head: %r" % late["regions"])
+        self.assertGreater(late["rows"], 0, "rows are on screen after the late reply: %r" % late)
+        self.assertIsNotNone(late["point"], "the point is named after the fill: %r" % late)
+        self.assertLess(abs(late["point"] - c["point"]), 1.0, "the late reply moved the reader by less than a turn: %r -> %r (scrollTop %r -> %r)" % (c["point"], late["point"], c["top"], late["top"]))
+
+    def test_a_cancelled_jump_to_the_head_gap_whose_late_reply_stops_short_of_the_head_asks_for_the_head_and_rows_come_on_screen(self):
+        # road 17: a deep link to turn 170 while the head gap is hidden in the top spacer, every ask held, the notice clicked away after the
+        # head gap's element is rendered; the window's ask released alone, page asks held until the window's run is in, then released
+        r = self._result()
+        h = r["headHidden17"]
+        self.assertTrue(h["spacer"] and h["headGap"] and not h["headEl"], "the head gap was hidden in the top spacer at the deep link, with no element of its own (the road's premise): %r" % h)
+        c = r["cancel17"]
+        self.assertTrue(c["headEl"], "the head gap's element was rendered before the click (the road's premise): %r" % c)
+        self.assertFalse(c["notice"], "the click hid the notice: %r" % c)
+        self.assertEqual(c["held"], [["loadAround"]], "the window's ask was the only ask held at the cancel (the road's premise): %r" % c["held"])
+        self.assertEqual(r["rel17"], 1, "…and it was released alone: %r" % r["rel17"])
+        w = r["window17"]
+        self.assertGreater(w["runN"], r["runN17"], "the window's run came in: %r -> %r" % (r["runN17"], w["runN"]))
+        self.assertTrue(w["regions"] and w["regions"][0][:2] == ["gap", 0], "…and stopped short of the head (the road's premise): %r" % w["regions"])
+        self.assertTrue(any(a[0] == "loadTurns" and a[1] == 0 for a in w["held"]), "the page asked for a page from the head: held %r, regions %r, rows on screen %r" % (w["held"], w["regions"], w["rows"]))
+        late = r["late17"]
+        self.assertTrue(late["regions"] and late["regions"][0][:2] == ["run", 0], "the head's page came in: %r" % late["regions"])
+        self.assertTrue(late["rows"], "rows are on screen: %r" % late)
 
     def test_clicking_the_notice_is_the_only_cancel_the_late_reply_fills_in_place_and_the_view_stays(self):
         r = self._result()

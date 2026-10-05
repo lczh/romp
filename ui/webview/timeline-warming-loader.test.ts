@@ -33,6 +33,9 @@ test("a backstop timer guarantees the loader can never trap (CLAUDE.md loader ru
 });
 
 test("the kernel tags the live-first bars build as warming (partial), settled builds as not", () => {
-  assert.match(KERNEL, /tl_warming = True\s+# this is the PARTIAL cold build/);
+  // The live-first build is the timeline builder's phase one since 2026-10-03, typed as the partial, and the push reads the
+  // type for the bars' warming flag on the connect arm and the pusher's (tests/test_single_flight_builds.py drives it).
+  assert.match(KERNEL, /tl = _TimelinePartial\(build_timeline\(now, live_map, with_bars=True, live_only=True\)\)/);
+  assert.match(KERNEL, /tl_warming = isinstance\(timeline, _TimelinePartial\)\s+# the PARTIAL/);
   assert.match(KERNEL, /"now": timeline\["now"\], "warming": tl_warming\}/);
 });
