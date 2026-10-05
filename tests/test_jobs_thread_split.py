@@ -315,14 +315,17 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
     records the paths it wrote in _CKPT_JUST_WRITTEN; the converge pass (the pusher's, against the cycle's byte budget) skips
     them and empties the set. The two now run at once, so the add and the take share _CKPT_JUST_LOCK: the take copies and
     clears in one step, and a write landing in between waits for the clear and is kept for the pass's next look. Beside it,
-    what the move put on the jobs pass: the settle write's first sight at the pass's start (the settle key and the leaf's
-    stat, each taken once per session), and the fault lines of first sight and of each half.
+    what the move put on the jobs pass: the settle write's first sight at every pass's start (the settle key and the leaf's
+    stat with its time stamp, each taken once per session, whichever pass first lists it), and the fault lines of first
+    sight and of each half.
     Synthetic sids and paths; every collaborator of the two functions is stubbed, so nothing is read or written."""
 
     SID_A = "11111111-2222-3333-4444-555555555501"
     SID_B = "11111111-2222-3333-4444-555555555502"
+    SID_C = "11111111-2222-3333-4444-555555555503"
     LEAF_A = "/synthetic/web/leaf.jsonl"
     LEAF_B = "/synthetic/api/leaf.jsonl"
+    LEAF_C = "/synthetic/tests/leaf.jsonl"
 
     def setUp(self):
         self.km = km = kernel_module()
@@ -525,12 +528,14 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertEqual(self.persisted, [self.LEAF_A], "the settle during the boot's first pass was written, once, and only it")
         self.assertEqual(km._CKPT_SETTLE_SEEN[self.SID_A][0], 2, "and its key recorded as written")
 
-    def test_a_leaf_that_grows_during_the_boots_first_pass_is_written_at_that_passs_end(self):
+    def test_with_the_period_at_zero_a_leaf_that_grows_during_the_boots_first_pass_is_written_at_that_passs_end(self):
         """First sight's other half (the review's round two): the leaf's stat, the periodic trigger's evidence, is taken at the
         pass's START beside the settle key. No turn ends here and the states log stands (the settle key is fixed), the period
         is 0, and web's leaf grows during the first pass's reminder walk; api's stands. The settle write at the pass's end
         sees web's leaf moved since its first sight and writes that document, once, and api's not at all. With the leaf's
-        first sight left to the write, at the pass's end, the growth fell before it and the leaf waited for its next move."""
+        first sight left to the write, at the pass's end, the growth fell before it and the leaf waited for its next move.
+        The write lands at this pass's end only because the period is 0: with the shipped period it waits until the period
+        has passed since first sight (the clock test below)."""
         km = self.km
         patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
         leaf = {"size": 1}
@@ -564,12 +569,43 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertEqual(self.persisted, [self.LEAF_A], "the settle between the passes was written, once, and only it")
         self.assertEqual(km._CKPT_SETTLE_SEEN[self.SID_A][0], 2, "and its key recorded as written")
 
-    def test_a_leaf_that_grows_between_two_passes_is_written_at_the_next_passs_end(self):
+    def test_a_session_first_listed_at_a_later_pass_whose_turn_settles_during_it_is_written_at_its_end(self):
+        """First sight at every pass's start, not on the boot's first pass alone (the review's round three): a session first
+        seen after the boot is one of the reasons _checkpoint_first_sight's docstring gives. Web and api are listed from the
+        boot's first pass, their evidence standing; tests is first listed before the second pass (before the pusher's second
+        cycle), and its turn settles during that pass's reminder walk (its turn-end key moves from 1 to 2). The second pass's
+        start records tests' key as 1, so the settle write at its end sees the move and writes tests' document, once, and no
+        other session's. A first sight taken on the boot's first pass alone would leave tests to the write's own first sight,
+        at the second pass's end, after the move: nothing written, its documents waiting for its next settle or a leaf move
+        past the period."""
+        km = self.km
+        patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
+        turn = {"key": 1}
+        walks = []
+
+        def walk(now, live_map):
+            walks.append(now)
+            if len(walks) == 2:
+                turn["key"] = 2                                     # tests' turn settles during the second pass
+
+        def between(i):
+            if i == 1:                                              # tests is first listed after the boot's first pass
+                self.sessions.append({"sid": self.SID_C, "path": self.LEAF_C})
+        patches.update(_auto_nudge_tick=walk, _turn_end_key=lambda sid, reg=None: turn["key"] if sid == self.SID_C else 1)
+        self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}, {"sid": self.SID_B, "path": self.LEAF_B}]
+        self._cycles_and_passes(patches, between)
+        self.assertEqual(len(walks), 3, "the walk ran in every pass")
+        self.assertEqual(self.persisted, [self.LEAF_C], "the settle during the pass that first listed tests was written, once, "
+                                                        "and only it")
+        self.assertEqual(km._CKPT_SETTLE_SEEN[self.SID_C][0], 2, "and its key recorded as written")
+
+    def test_with_the_period_at_zero_a_leaf_that_grows_between_two_passes_is_written_at_the_next_passs_end(self):
         """The same for the leaf's stat: the settle key fixed and the period at 0, web's leaf grows BETWEEN the first pass and
         the second; api's stands. The second pass's start leaves web's recorded stat alone, so the settle write at its end
         sees the leaf moved and writes web's document, once. A leaf stat retaken at every pass's start would record the
         growth there with a fresh stamp and the write would find the leaf unmoved; and since the stamp would reset each
-        pass, the periodic trigger could never fire within a pass shorter than the period."""
+        pass, the periodic trigger could never fire within a pass shorter than the period. The write lands at the next
+        pass's end only because the period is 0 (the clock test below holds the shipped case)."""
         km = self.km
         patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
         leaf = {"size": 1}
@@ -582,6 +618,49 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self._cycles_and_passes(patches, between)
         self.assertEqual(self.persisted, [self.LEAF_A], "the growth between the passes was written, once, and only it")
         self.assertEqual(km._CKPT_PERIODIC_SEEN[self.SID_A][0], ("synthetic", 2), "and the leaf's stat recorded as written")
+
+    def test_a_leaf_that_grows_between_two_passes_is_written_once_the_period_has_passed_since_first_sight(self):
+        """First sight's time stamp (the review's round three). First sight records the leaf's stat with the monotonic time,
+        and that stamp is what makes a periodic write wait CKPT_PERIOD_S after first sight. The kernel's clock is patched as
+        PeriodicCheckpoints._run in tests/test_restart_phases.py patches it, but it starts at ten periods (from 0.0, a stamp
+        of 0.0 and a true one agree), and the period is 30 s, not 0. The boot's first pass takes first sight at its start and
+        runs 10 s (its reminder walk moves the clock); web's leaf grows before the second pass, 15 s after first sight: no
+        write there, and web's entry still holds first sight's stat and stamp. The clock then moves to 35 s after first
+        sight, 25 s after the first pass's end: the third pass writes web's document, once, and api's, whose leaf stands,
+        never. A stamp of 0.0 or of mono - 1e9 writes at the second pass; a leaf stat left to the write's own first sight,
+        at the first pass's end, starts the period 10 s late and writes nothing at the third."""
+        km = self.km
+        period = 30.0
+        t0 = 10 * period
+        clock = {"t": t0}
+        leaf = {"size": 1}
+        walks, after_second = [], {}
+
+        def walk(now, live_map):
+            walks.append(clock["t"])
+            if len(walks) == 1:
+                clock["t"] = t0 + 10.0                              # the boot's first pass runs 10 s past its first sight
+
+        def between(i):
+            if i == 1:
+                leaf["size"] = 2                                    # web's leaf grows before the second pass, inside the period
+                clock["t"] = t0 + 15.0
+            elif i == 2:
+                after_second.update(persisted=list(self.persisted), entry=km._CKPT_PERIODIC_SEEN.get(self.SID_A))
+                clock["t"] = t0 + period + 5.0                      # past the period since first sight, not since the pass's end
+        patches = self._quiet({"_checkpoint_first_sight", "_persist_checkpoints", "_converge_checkpoints"})
+        patches.update(_auto_nudge_tick=walk, CKPT_PERIOD_S=period,
+                       _stat_key=lambda path: ("synthetic", leaf["size"] if str(path) == self.LEAF_A else 1))
+        self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}, {"sid": self.SID_B, "path": self.LEAF_B}]
+        with mock.patch.object(km.time, "monotonic", lambda: clock["t"]):
+            self._cycles_and_passes(patches, between)
+        self.assertEqual(walks, [t0, t0 + 15.0, t0 + period + 5.0], "the walk ran in every pass, on the patched clock")
+        self.assertEqual(after_second["persisted"], [], "the growth inside the period since first sight was not written")
+        self.assertEqual(after_second["entry"], (("synthetic", 1), t0), "and web's entry kept first sight's stat and stamp")
+        self.assertEqual(self.persisted, [self.LEAF_A], "past the period since first sight the growth was written, once, "
+                                                        "and only it")
+        self.assertEqual(km._CKPT_PERIODIC_SEEN[self.SID_A], (("synthetic", 2), t0 + period + 5.0),
+                         "and the leaf's stat recorded with the write's time")
 
     def test_a_settle_write_that_raises_is_caught_and_named_and_the_pass_still_closes(self):
         """A raise from the settle write through the REAL jobs pass, every other job quiet: nothing escapes the pass (an escape
