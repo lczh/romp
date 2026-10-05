@@ -33,8 +33,10 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     memory, counts that tail's document corrupt once, with no raise, when a fold's count in it is no int (infinity, NaN, a
     string, null) or missing, and lets the tail go with it, so the file is read whole once and dropped, for a workflow agent
     and for a card's subagent whose chat is no longer built, whether the launch-ids count or the viewer's background-task
-    count was bad, re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written
-    record;
+    count was bad (a tail of the generation the gate looked at, a longer one an append put in its place included; a whole
+    entry or one of another generation another read put there stays, and a whole entry a viewer's parse read, its steps
+    count bad, stays through the fallback and leaves at a later quiet drop, its document written), re-scans its memo when a
+    tail entry becomes the whole file, and pays no whole read for a half-written record;
     a raise in the drop's witness check or the guard's folds (its launch-ids fold included) is counted and said with the
     file and the frame, at the 1st, 10th, 100th and 1000th raise, and a guard fold that raises at every pass does not keep
     the folds after it from dropping a returned agent;
@@ -1376,34 +1378,169 @@ class SpendGuard(Base):
             with self.subTest(count=label):
                 self.assertEqual(self.corrupt_tail(30 + i, ("bgAll", "agentLaunchIds"), "bgAll", count), self.CORRUPT_DROPPED)
 
-
-    def test_the_gates_eviction_spares_an_entry_another_read_put_in_its_place(self):
-        """The gate lets the restored tail go only while the cache still holds that very entry (review round eleven): an
-        entry another read put in its place between the gate's look and its fallback stays."""
-        wf = str(self.sub / "workflows" / "wf_1" / "agent-a9a00000000000140.jsonl")
-        pairs = [(rec(T0 - 1000 + 10 * i, i), T0 - 1000 + 10 * i) for i in range(100)]
+    def spared(self, n, put):
+        """The restored-tail test above for a workflow agent in a session of its own (`n` names it), its document's
+        launch-ids count edited to Infinity while the kernel was down. Inside the corrupt fallback, between the gate's look
+        and its eviction and before the fallback removes the document, `put(wf, pairs)` has another read store an entry of
+        its own for the file (a record it appends joins `pairs`). The guard passes the file once, at T0, its total checked.
+        Returns the session's leaf, the file, the records, the restored tail the gate looked at, the entry `put` stored, and
+        the corrupt fallbacks counted before the pass."""
+        self.fresh_process()
+        sid = "11111111-2222-4333-8444-0000000001%02d" % n
+        leaf = str(self.proj / (sid + ".jsonl"))
+        write(leaf, [rec(T0 - 5000, 0)], T0 - 5000)              # the leaf: nothing inside the window
+        wf = str(self.proj / sid / "subagents" / "workflows" / "wf_1" / ("agent-a9a000000000001%02d.jsonl" % n))
+        pairs = [(rec(T0 - 1000 + 10 * i, i), T0 - 1000 + 10 * i) for i in range(100)]   # T0-1000 .. T0-10
         write(wf, [r for r, _t in pairs[:5]], T0 - 960)
         self.clock.t = T0 - 955
-        km._agent_launch_ids_fold(wf)
+        km._agent_launch_ids_fold(wf)                             # the previous process's fold while the agent ran
         self.assertTrue(em.checkpoint_write(wf))
         append(wf, [r for r, _t in pairs[5:]], T0 - 10)
         cp = em._ckpt_file(wf)
         d = json.loads(cp.read_text())
-        d["folds"]["agentLaunchIds"]["count"] = float("inf")
+        d["folds"]["agentLaunchIds"]["count"] = float("inf")      # a hand edit while the kernel was down
         cp.write_text(json.dumps(d))
-        self.fresh_process()
-        real, put = em._ckpt_fallback, []
+        self.fresh_process()                                      # the restart
+        real, seen = em._ckpt_fallback, []
 
         def fallback(*a, **k):
-            real(*a, **k)
-            with em._JSONL_CACHE_LOCK:
-                em._JSONL_CACHE[wf] = e = tuple(list(em._JSONL_CACHE[wf]))   # another read's entry: equal, not the same object
-            put.append(e)
+            if not seen:                                          # once, should a read `put` makes reach the fallback again
+                seen.append(self.entry(wf))                       # the restored tail the gate looked at, still in place
+                seen.append(put(wf, pairs))
+            return real(*a, **k)
 
-        with mock.patch.object(em, "_ckpt_fallback", side_effect=fallback), mock.patch("sys.stderr", new=io.StringIO()):
-            self.window(T0)
-        self.assertEqual(len(put), 1, "the gate took the corrupt fallback once")
-        self.assertIs(self.entry(wf), put[0], "the entry another read put in place stays")
+        fb0 = em.checkpoint_stats()["fallbacks"].get("corrupt", 0)
+        want = sum(usd(r) for r, rt in pairs if rt >= T0 - 600)   # priced before the guard's folds run
+        self.clock.t = T0
+        with mock.patch.object(em, "_ckpt_fallback", side_effect=fallback) as fb, mock.patch("sys.stderr", new=io.StringIO()):
+            self.assertAlmostEqual(km._spend_window_usd(leaf, T0, 600, PRICES), want, places=9)
+        self.assertEqual(fb.call_count, 1, "the gate took the corrupt fallback once")
+        looked, mine = seen
+        self.assertEqual((looked[5], len(looked[4])), (5, 95), "the premise: the gate looked at the restored tail")
+        return leaf, wf, pairs, looked, mine, fb0
+
+    def test_the_gates_eviction_spares_a_whole_entry_or_another_generation_another_read_put_in_its_place(self):
+        """The gate lets go of a tail of the generation it looked at, never of a whole entry nor of one of another generation
+        (review round twelve; at review round eleven, of the very entry it looked at alone). Between the gate's look and its
+        eviction a whole reader upgrades the tail in place (the whole file, the same generation), or the count cap evicts
+        the tail and a reader that takes one restores it again from the document, at a generation of its own: the entry
+        that read stored stays."""
+        def whole(wf, pairs):
+            return em._read_jsonl_entry(wf)                       # a whole reader: the tail upgraded in place
+
+        def regen(wf, pairs):
+            with em._JSONL_CACHE_LOCK:
+                em._cache_pop_locked(wf)                          # the count cap evicts the tail
+            return em._read_jsonl_entry(wf, tail_ok=True)         # and a reader that takes a tail restores it again
+
+        for i, (label, put) in enumerate((("a whole entry", whole), ("another generation", regen))):
+            with self.subTest(put=label):
+                _leaf, wf, _pairs, looked, mine, _fb0 = self.spared(40 + i, put)
+                if put is whole:
+                    self.assertEqual((mine[5], len(mine[4]), mine[6]), (0, 100, looked[6]),
+                                     "the premise: the whole file at the generation the gate looked at")
+                else:
+                    self.assertEqual((mine[5], len(mine[4])), (5, 95), "the premise: the restored tail again")
+                    self.assertNotEqual(mine[6], looked[6], "at a generation of its own")
+                self.assertIs(self.entry(wf), mine, "the entry another read put in place stays")
+
+    def test_the_gates_eviction_lets_go_of_a_same_generation_tail_an_append_put_in_its_place(self):
+        """Between the gate's look and its eviction the agent writes one more record, and a reader that takes a tail (the
+        assembly refresh, say) appends it over the restored tail: a longer tail of the generation the gate looked at, with
+        no state left for a fold to step once the fallback removes the document. The gate lets it go as it lets that tail go
+        (review round twelve; at 66a48e3f9, which spared every entry but the one it looked at, it stayed with its 96
+        records, nothing dropped and no document). The guard's next read takes the file whole, and its launch-ids fold
+        drops it once the agent has been quiet for two minutes, writing a good document; the total holds at every pass."""
+        def appended(wf, pairs):
+            r = rec(T0 - 3, 100)
+            append(wf, [r], T0 - 3)
+            pairs.append((r, T0 - 3))
+            return em._read_jsonl_entry(wf, tail_ok=True)
+
+        leaf, wf, pairs, looked, mine, fb0 = self.spared(42, appended)
+        self.assertEqual((mine[5], len(mine[4]), mine[6]), (5, 96, looked[6]), "the premise: a longer tail, the same generation")
+        self.assertIsNot(mine, looked)
+        self.assertIsNone(self.entry(wf), "it goes with the corrupt document")
+        size, r1, err = os.path.getsize(wf), self.read_of(wf), io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            for t in range(T0 + 5, T0 + 901, 5):
+                self.clock.t = t
+                self.assertAlmostEqual(km._spend_window_usd(leaf, t, 600, PRICES), sum(usd(r) for r, rt in pairs if rt >= t - 600),
+                                       places=9, msg="the window at +%d s" % (t - T0))
+        ent = self.entry(wf)
+        self.assertTrue(ent is None or not ent[4], "the records left memory")
+        self.assertEqual(em.record_cache_stats()["dropped"], 1, "dropped once")
+        self.assertEqual(self.doc(wf)["folds"]["agentLaunchIds"]["count"], 101, "by the launch-ids fold, which wrote a good document")
+        self.assertLessEqual(self.read_of(wf) - r1, size + 4 * em._JSONL_TAIL_GUARD, "after one whole read")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"].get("corrupt", 0) - fb0, 1, "counted corrupt once")
+        self.assertNotIn("checkpoint fallback", err.getvalue(), "no later pass took a fallback")
+
+    def test_a_whole_entry_a_viewers_parse_read_outlasts_the_gates_fallback_and_leaves_at_a_later_quiet_drop(self):
+        """A card's subagent whose chat is no longer built, after a restart, its document's steps count edited to Infinity,
+        its viewer open: the viewer's parse read the file whole before the agent's last record (review round twelve). The
+        guard's launch-ids fold restores over that whole entry, and the steps gate, asked next, reads the bad count and
+        takes the corrupt fallback. At 66a48e3f9 the gate popped the whole entry there, past the assembly pin, freeing
+        nothing the parse held, and the viewer's rebuild read the file whole. The gate lets go of a tail only, so the entry
+        stays and the quiet drop decides it as before: the pin keeps it while the parse stands, its document written; the
+        viewer's rebuild reads nothing, as at 147100aa0; and once the viewer's close releases the parse, the next quiet pass
+        drops it."""
+        ap = str(self.sub / "agent-a9a00000000000150.jsonl")
+        pairs = [(rec(T0 - 1000 + 10 * i, i), T0 - 1000 + 10 * i) for i in range(100)]   # T0-1000 .. T0-10
+        write(ap, [r for r, _t in pairs[:5]], T0 - 960)
+        self.clock.t = T0 - 955
+        km._agent_launch_ids_fold(ap)                             # the previous process: the card's two folds while the agent ran
+        km._agent_gist_fold(ap)
+        self.assertTrue(em.checkpoint_write(ap))                  # its document
+        append(ap, [r for r, _t in pairs[5:]], T0 - 20)
+        cp = em._ckpt_file(ap)
+        d = json.loads(cp.read_text())
+        self.assertEqual({f: ("state" in d["folds"][f], d["folds"][f]["count"]) for f in ("agentLaunchIds", "agentGist")},
+                         {"agentLaunchIds": (True, 5), "agentGist": (True, 5)}, "the document carries both folds' states at 5")
+        d["folds"]["agentGist"]["count"] = float("inf")           # a hand edit while the kernel was down
+        cp.write_text(json.dumps(d))
+        self.fresh_process()                                      # the restart; no card fold runs: the chat is not built
+        self.clock.t = T0
+
+        def parse():                                              # the subagent viewer's parse of the agent's own file
+            em.parse_session(ap, rompuuid=SID, name="api", dir="/w/notes-api", candidate_files=[ap], states=None,
+                             postal_log=[], now=T0)
+        parse()
+        self.assertEqual((self.entry(ap)[5], len(self.entry(ap)[4])), (0, 100), "the premise: the parse read the file whole")
+        last = rec(T0 - 5, 100)
+        append(ap, [last], T0 - 5)                                # the agent's last record, after the parse
+        pairs.append((last, T0 - 5))
+
+        def want(t):
+            return sum(usd(r) for r, rt in pairs if rt >= t - 600)
+        st0, fb0, err = em.record_cache_stats(), em.checkpoint_stats()["fallbacks"].get("corrupt", 0), io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            self.assertAlmostEqual(self.window(T0), want(T0), places=9)
+            ent = self.entry(ap)
+            self.assertEqual(em.checkpoint_stats()["fallbacks"].get("corrupt", 0) - fb0, 1, "the steps gate counted the document corrupt")
+            self.assertIn("fold agentGist: ", err.getvalue(), "the fallback names the fold whose count it refused")
+            self.assertFalse(cp.exists(), "and removed the document")
+            self.assertIsNotNone(ent, "the whole entry the viewer's parse read outlasts the gate's fallback")
+            self.assertEqual((ent[5], len(ent[4])), (0, 101))
+            st1 = em.record_cache_stats()
+            self.assertEqual((st1.get("pinnedKept", 0) - st0.get("pinnedKept", 0), st1["dropped"] - st0["dropped"]), (0, 0),
+                             "nothing dropped or pinned yet: the agent wrote five seconds ago")
+            self.assertAlmostEqual(self.window(T0 + 200), want(T0 + 200), places=9)   # the agent quiet for 205 s
+            st2 = em.record_cache_stats()
+            self.assertIs(self.entry(ap), ent, "the parse built before the last append is a whole assembly entry: the pin keeps it")
+            self.assertEqual((st2.get("pinnedKept", 0) - st1.get("pinnedKept", 0), st2["dropped"] - st1["dropped"]), (1, 0),
+                             "counted as kept for the pin, not as a drop")
+            self.assertEqual(self.doc(ap)["folds"]["agentLaunchIds"]["count"], 101, "the quiet drop wrote a good document first")
+            r0 = self.read_of(ap)
+            parse()                                               # the viewer rebuilds
+            self.assertEqual(self.read_of(ap), r0, "and reads nothing, as at 147100aa0, which kept the entry too")
+            self.assertEqual(em.release_assembly(ap, rompuuid=SID), 1, "the viewer's close releases the parse")
+            self.assertAlmostEqual(self.window(T0 + 205), want(T0 + 205), places=9)
+        st3 = em.record_cache_stats()
+        self.assertIsNone(self.entry(ap), "the parse released, the next quiet pass drops the entry")
+        self.assertEqual((st3.get("pinnedKept", 0) - st2.get("pinnedKept", 0), st3["dropped"] - st2["dropped"]), (0, 1))
+        self.assertEqual(self.doc(ap)["folds"]["agentLaunchIds"]["count"], 101, "its document stands")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"].get("corrupt", 0) - fb0, 1, "counted corrupt once")
+        self.assertEqual(self.guard_whole_reads(), {}, "the guard never read the file whole")
 
     def test_the_row_memo_rescans_when_its_tail_entry_becomes_the_whole_file(self):
         f = str(self.proj / "11111111-2222-4333-8444-0000000000e1.jsonl")
