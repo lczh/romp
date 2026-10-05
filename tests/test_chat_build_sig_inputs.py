@@ -379,7 +379,7 @@ def _unkeyed_field_permits():
     """The kernel's text and, per dropped row field, the line ranges where naming it is legitimate: for both fields
     the projection block between _chat_sig_deps and _chat_build_sig (the constants, their comment and _chat_row_sig,
     which name the field in order to drop it) and _chat_build_sig itself (the key, whose row comment says so; a read
-    there would be a key input, not a payload read); for ctxTokens also the compaction-suggestion tick (its one
+    there would be a key input, not a payload read); for ctxTokens also the compaction-suggestion tick (a
     reader, a tick, not a build), Sessions.live (the merge that writes it) and the one line of the jobs pass's gate's
     row fields (_JOBS_GATE_ROW_FIELDS, 2026-10-05: the live row's fields the jobs read, the compaction tick's among
     them, which the gate fingerprints on the jobs thread; no build reads it). Ranges as _reads_outside takes them."""
@@ -457,8 +457,8 @@ class Census(unittest.TestCase):
         backstop a reader added in a helper they call would slip past, the whole kernel source: every read of lastTool
         lies in the projection block itself (the constants, their comment and _chat_row_sig, which name the field in
         order to drop it) or in _chat_build_sig (the key, whose row comment says so; a read there would be a key
-        input, not a payload read), and every read of ctxTokens in those two, in the compaction-suggestion tick (its
-        one reader, a tick, not a build), in Sessions.live (the merge that writes it) or on the line of the jobs pass's
+        input, not a payload read), and every read of ctxTokens in those two, in the compaction-suggestion tick (a
+        reader, a tick, not a build), in Sessions.live (the merge that writes it) or on the line of the jobs pass's
         gate's row fields (which observe that tick's input on the jobs thread). _interrupting reads snapT and
         interrupting by design and is folded under clock; it is deliberately not among the readers."""
         self.assertEqual(km._CHAT_ROW_UNKEYED, {"snapT", "interrupting", "ctxTokens"})

@@ -157,8 +157,8 @@ class Census(unittest.TestCase):
 
 class FaultCensus(unittest.TestCase):
     """Point three of the review: an except in a declared job's road that lets the job go on (it continues, returns or falls
-    through) owes a fault (_jobs_gate_owe("fault")), so the job's next pass is owed as after a raise and the fault leaves no
-    record, or is named in HEALED with what brings the job back without one: an owed predicate, an input whose stat moves when
+    through) owes the next pass (a _jobs_gate_owe call: "fault", which also leaves no record as after a raise, or the road's
+    own reason, as the relay's per-store except owes "relay"), or is named in HEALED with what brings the job back without one: an owed predicate, an input whose stat moves when
     the fault heals, or a base that never retries the work either. The road is the function the job's thunk calls and, for the
     walk and the API retry, the functions their bodies hand each pass to. A new except in a road is a hit until it does one or
     the other; an except that re-raises is the job's own raise, which the gate already hears."""

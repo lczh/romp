@@ -2763,8 +2763,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   miss. That cost moves out of those jobs' `cpuByJob` and their
   `jobs.<job>` stage walls into these two, `liftSpentAwaiting` dropping
   most; it changes what is measured, not what the jobs do), `gateFaults`
-  (a fault of the gate's own, which leaves that run unobserved and no
-  record, so the job's next pass is owed, or a fault in the pass's close;
+  (a fault of the gate's own, or a turn that found another observed run
+  still open, which leaves that run unobserved and no record, so the job's next pass is owed, or a fault in the pass's close;
   stderr names each job and exception type once), `marks`
   (`session`: dirty-set entries naming one session, which open that
   session's file readers even when a re-stat looks the same; `all`: passes
@@ -2774,8 +2774,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (an input's name, `due`, `first`, `fault`, `gateFault`, `unrecorded`,
   `undeclared`, or a job's own reason such as `canSpend` or `yield`),
   `closed`, `closedMs`, `closedCpuMs`, `runMs`, `runCpuMs`,
-  `projectedCpuMsPerHour`, `unobserved` (runs the gate's own fault left
-  unobserved), `wrongQuiet`
+  `projectedCpuMsPerHour`, `unobserved` (runs the gate left unobserved: its own
+  fault, or a turn that found another observed run still open on the jobs
+  thread), `wrongQuiet`
   (a job called closed that acted, raised, or found its own memo moved while
   none of its inputs did: a signal its declaration lacks, by evidence; the
   acts are `views`, `mark`, `push`, `send`, `problem`, `spendRow`, `write`, a

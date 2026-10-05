@@ -1479,9 +1479,10 @@ def _jobs_gate_run():
 
 
 def _jobs_gate_note(evidence):
-    """The running job ACTED (views, mark, push, send, problem, spendRow) or its own memo said an input moved (miss, neverSeen,
-    clockParse, load): the detector's evidence. A job the gate called closed that notes one is a wrongQuiet (a missing signal),
-    or `raced` when only a memo moved and one of the job's declared inputs moved while it ran."""
+    """The running job ACTED (views, mark, push, send, problem, spendRow, write) or its own memo said an input moved (miss,
+    neverSeen, clockParse, load): the detector's evidence. A job the gate called closed that notes one is a wrongQuiet (a missing
+    signal), or `raced` when only a memo moved and one of the job's declared inputs moved after the gate observed it, as the next
+    pass's gate will see it (_jobs_gate_raced)."""
     run = _jobs_gate_run()
     if run is not None:
         try:
@@ -66486,7 +66487,7 @@ _JOBS_GATE = {"asked": "", "modeKey": _JOBS_GATE_BOOT_KEY, "rec": {}, "lost": {}
 #   the passes whose dirty set named that session alone; floorSeen: (sid, path) -> the standing stat a floor re-stat was counted
 #   against; tree: sid -> the spend guard's simulated sixty-second floor; last: job -> the last observed pass's verdict, as /perf
 #   jobs.gate.lastPass shows it ("closed", "open:<reason>", "owed:<reason>", or "unobserved" after a gate fault); said: the
-#   (job, exception type) pairs whose gate fault stderr has named, once each per kernel life; warned: the knob's unrecognised
+#   (job, exception type) pairs whose gate fault stderr has named, once each per kernel life; warned: the knob's unrecognized
 #   words stderr has named. The jobs thread is the one writer.
 _JOBS_GATE_MISSING = object()
 
