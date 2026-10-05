@@ -2779,17 +2779,23 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   not stop the measurement. Per pass: `ticks`, `passMs` and `passCpuMs`,
   `wouldSkipPass` and `wouldSkipPassCpuMs` (passes on which every job was
   called closed and none went unobserved), `quietDeclared` (every declared
-  job closed; the two checkpoint jobs are undeclared, owed every pass,
-  wherever they run),
+  job closed; every job of the jobs pass is declared, the checkpoint settle
+  write and its first sight among them, and the one undeclared job, the
+  checkpoint converge pass, runs on the pusher's cycle, where nothing is
+  gated),
   `wouldRunMs` and `wouldRunCpuMs` (what an enforcing pass would still run),
   `closedMs` and `closedCpuMs` (the runs it called closed with nothing to
   show for them: the saving), `tickMs` and `tickCpuMs` (the gate's own
   observation, never inside a job's `cpuByJob`. The observation makes a few
-  reads before the job they serve: the pass's alive sessions at the first
-  job's turn, and the nudge ledger and the working notes when their caches
-  miss. That cost moves out of those jobs' `cpuByJob` and their
-  `jobs.<job>` stage walls into these two, `liftSpentAwaiting` dropping
-  most; it changes what is measured, not what the jobs do), `gateFaults`
+  reads before the job they serve: the pass's sessions at the first job's
+  turn (the listing at first sight's, the alive ones at the lift's), the
+  nudge ledger and the working notes when their caches miss, and at the
+  settle write's turn each listed session's settle evidence and, once its
+  period has passed or is a second from passing, its leaf's stat. That cost
+  moves out of those jobs'
+  `cpuByJob` and their `jobs.<job>` stage walls into these two,
+  `liftSpentAwaiting` dropping most; it changes what is measured, not what
+  the jobs do), `gateFaults`
   (a fault of the gate's own, or a turn that found another observed run
   still open, which leaves that run unobserved and no record, so the job's next pass is owed, or a fault in the pass's close;
   stderr names each job and exception type once), `marks`
@@ -2799,7 +2805,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   position, a floor re-stat that found a file moved with no mark: a writer
   that never said so). `byJob`, per job: `ticks`, `open` and `owed` by reason
   (an input's name, `due`, `first`, `fault`, `gateFault`, `unrecorded`,
-  `undeclared`, or a job's own reason such as `canSpend` or `yield`),
+  `undeclared`, or a job's own reason such as `canSpend` or `yield`; the
+  checkpoint settle write opens on `ckptSettle`, its sessions' turn-end
+  keys and states-log stats, and is owed under `unseen` (a listed session
+  one of its two tables lacks), `period` (a leaf that moved since its last
+  periodic write, its period passed or a second from passing) or `prune` (a
+  table over its bound, which the write clears); its first sight is owed
+  under `unseen` alone, and a dirty checkpoint by itself owes neither),
   `closed`, `closedMs`, `closedCpuMs`, `runMs`, `runCpuMs`,
   `projectedCpuMsPerHour`, `unobserved` (runs the gate left unobserved: its own
   fault, or a turn that found another observed run still open on the jobs
@@ -2807,9 +2819,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (a job called closed that acted, raised, or found its own memo moved with
   no signal for its inputs: a signal its declaration lacks, by evidence; the
   acts are `views`, `mark`, `push`, `send`, `problem`, `spendRow`, `write`, a
-  declared file written with no mark, and `raised`, and an act is never
-  raced) and `raced` (its memo moved and an input of the memo's session
-  moved after the gate looked, with a signal the next pass's gate will see:
+  declared file written with no mark or the checkpoint settle write's own
+  work (a first sight recorded, a session's documents written, a table
+  cleared), and `raised`, and an act is never raced) and `raced` (its memo
+  moved and an input of the memo's session moved after the gate looked,
+  with a signal the next pass's gate will see:
   a box-wide file, an in-memory input or a registry row observed again; a
   mark, a judge write or a moved live row naming the session; or a box-wide
   mark, the postal log or a shared judge write with a re-stat of a view
@@ -2817,7 +2831,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   when the floor, a later stat or an all-sessions mark brings the job back:
   a standing view is never re-statted, since it cannot tell a write during
   the run from one before the pass. A memo names its session, so another
-  session's input moving never makes it raced). `wrongQuietLast` keeps the newest
+  session's input moving never makes it raced, and a run whose memos name
+  several sessions is raced only when each of them is). `wrongQuietLast` keeps the newest
   sixteen, and `lastPass` each job's verdict on the newest observed pass
   (`closed`, `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate
   fault).

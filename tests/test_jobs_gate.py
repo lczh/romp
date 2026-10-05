@@ -126,8 +126,14 @@ class Census(unittest.TestCase):
         for job in list(km._JOBS_INPUTS) + list(km._JOBS_UNDECLARED):
             self.assertIn(job, km._PerfStats.JOBS, "%s: a real job (a _job_stage name of the census)" % job)
         self.assertFalse(set(km._JOBS_INPUTS) & set(km._JOBS_UNDECLARED))
-        self.assertEqual(set(km._JOBS_UNDECLARED), {"persistCheckpoints", "convergeCheckpoints"},
-                         "the checkpoint persist and converge are owed every pass wherever they run")
+        self.assertEqual(set(km._JOBS_UNDECLARED), {"convergeCheckpoints"},
+                         "the checkpoint converge pass alone is owed every pass, wherever it runs")
+        pusher = re.findall(JOB_NAME_RE, inspect.getsource(km._pusher_cycle_jobs))
+        self.assertIn("convergeCheckpoints", pusher, "the converge pass runs on the pusher's cycle, where nothing is gated")
+        self.assertEqual([j for j in jobs if j not in km._JOBS_INPUTS], [],
+                         "every job of the jobs pass is declared, so a quiet pass can count under wouldSkipPass")
+        self.assertEqual((jobs[0], jobs[-1]), ("checkpointFirstSight", "persistCheckpoints"),
+                         "the settle write's first sight opens the pass and the write closes it, both declared")
 
     def test_every_channel_a_spec_names_resolves(self):
         km = self.km
@@ -192,6 +198,7 @@ class FaultCensus(unittest.TestCase):
         "autoResumeRetry": ("_auto_resume_retry",), "autoResumeSession": ("_auto_resume_session_retry",),
         "autoRetry": ("_auto_retry_tick", "_fire_api_retry"), "idleQueueDrive": ("_idle_queue_drive_tick",),
         "clearDoneNotes": ("_clear_done_working_notes",), "heldWorking": ("_held_working_pass",),
+        "checkpointFirstSight": ("_checkpoint_first_sight",), "persistCheckpoints": ("_persist_checkpoints",),
     }
     UNRECORDED = "the evaluation its tick check opened is never recorded: the job is owed under unrecorded"
     DIRTY = "the memo stays dirty: the persist is owed under dirty"
@@ -218,6 +225,8 @@ class FaultCensus(unittest.TestCase):
         ("_held_working_pass", "OSError", 0): "the belt is owed every pass while a hold stands (held)",
         ("_held_working_pass", "Exception", 0): "the belt is owed every pass while a hold stands (held)",
         ("_held_working_pass", "Exception", 1): "the belt is owed every pass while a hold stands (held)",
+        ("_persist_checkpoints", "Exception", 0): "an assembly document that failed: the settle is recorded as written all the same, "
+                                                 "so the base never retries it before the next settle or period write either",
     }
     OWING = {   # the swallowing handlers that owe a fault: the review's seven first, then the census's own finds and the earlier fold's
         ("_auto_nudge_pass", "Exception", 0), ("_auto_nudge_pass", "Exception", 1), ("_auto_nudge_pass", "Exception", 2),
@@ -282,7 +291,7 @@ class _GateLab(unittest.TestCase):
                   "_usage_poll_last", "_retry_upgrade_last", "_BOOT_HEALTH_DONE", "_JOBS_GATE_MODE")
     CONTAINERS = ("_lift_seen", "_SPEND_CAN_PREV", "_SPEND_GUARD", "_SPEND_TREE_CACHE", "_held_working", "_auto_nudge_drops_pending",
                   "_FILES_STAT_STANDING", "_compact_clicked", "_auto_retried", "_auto_retry_state", "_RELAY_QUIET", "_RELAY_SAID",
-                  "_interrupt_clicked")
+                  "_interrupt_clicked", "_CKPT_SETTLE_SEEN", "_CKPT_PERIODIC_SEEN")
 
     def setUp(self):
         km = self.km = kernel_module()
@@ -481,16 +490,19 @@ class _GateLab(unittest.TestCase):
 class AQuietWorld(_GateLab):
     def test_on_a_quiet_pass_every_declared_job_is_called_closed_and_the_pass_would_have_been_skipped(self):
         """T2. Nothing moves between passes: from the third pass on, every declared job is closed, the pass counts under
-        wouldSkipPass (every job closed; undeclared jobs, if the pass runs any, are owed and keep it from counting, and
-        quietDeclared counts it then), and the closed runs' wall and CPU are the saving."""
+        wouldSkipPass (every job closed: every job of the jobs pass is declared, the checkpoint settle write and its first
+        sight among them, so none is owed as undeclared), quietDeclared counts it too, and the closed runs' wall and CPU are
+        the saving."""
         self.add_session()
         g = self.quiet()
         last = self.last()
         for job in self.declared():
             self.assertEqual(last.get(job), "closed", "%s on a quiet pass: %r" % (job, last))
         undeclared_ran = [j for j, v in last.items() if v == "owed:undeclared"]
+        self.assertEqual(undeclared_ran, [], "no job of the jobs pass is undeclared: %r" % last)
+        self.assertIn("persistCheckpoints", self.declared())
         self.assertEqual(g["quietDeclared"], 1, "the third pass alone: %r" % g)
-        self.assertEqual(g["wouldSkipPass"], 0 if undeclared_ran else 1, (undeclared_ran, g))
+        self.assertEqual(g["wouldSkipPass"], 1, "the third pass alone: %r" % g)
         self.assertEqual(g["ticks"], 3)
         self.assertEqual(g["mode"], "shadow", "the knob's default is shadow")
         first = g["byJob"]["liftSpentAwaiting"]
@@ -975,8 +987,8 @@ class Detector(_GateLab):
     session's own files and not the postal log, with a walk ahead of it taking the pass's shared snapshot as the real walk's key
     does (the re-stat's first road: the snapshot's own stat); then the lift's road (the gate's own stat at the pass's first job)
     and the walk's (the pass's fresh cache, the lift quiet); then the inputs observed again and the live row's since on a closed
-    walk; then a memo that names its session. Each write lands on another thread while the job runs, announced the one way its
-    test names; a write no signal covers stays a wrongQuiet."""
+    walk; then a memo that names its session, and memos of two sessions in one run. Each write lands on another thread while the
+    job runs, announced the one way its test names; a write no signal covers stays a wrongQuiet."""
 
     def _walk(self, fn):
         p = mock.patch.object(self.km, "_auto_nudge_tick", fn)
@@ -1289,6 +1301,34 @@ class Detector(_GateLab):
             self.assertEqual(self.last()["interruptBlock"], "closed", label)
             self.assertEqual((_delta(self.wrong("interruptBlock"), w0), _delta(self.raced("interruptBlock"), r0)), want, label)
 
+    def test_memos_of_two_sessions_each_need_their_own_race(self):
+        """Both sessions' tick-seen memos stale behind the gate's back, and only api's live-tail revision moves on another
+        thread: api's miss raced, web's had no signal, so the run is a wrongQuiet."""
+        km = self.km
+        self.add_session(SID, "api")
+        self.add_session(SID2, "web")
+        armed = [None]
+
+        def tick(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is None:
+                return
+            th = threading.Thread(target=fn)
+            th.start()
+            th.join()
+            for s in self.sessions:
+                km._TICK_SEEN[("interrupt-block", s["sid"])] = tuple([0.0] * 20)
+                km._tick_job_check("interrupt-block", dict(s))
+        self.stub("_interrupt_block_tick", tick)
+        self.quiet()
+        self.assertEqual(self.last()["interruptBlock"], "closed")
+        w0, r0 = self.wrong("interruptBlock"), self.raced("interruptBlock")
+        armed[0] = lambda: self.revs.__setitem__(SID, 1)
+        self.passes()
+        self.assertIsNone(armed[0])
+        self.assertEqual(self.last()["interruptBlock"], "closed")
+        self.assertEqual((_delta(self.wrong("interruptBlock"), w0), _delta(self.raced("interruptBlock"), r0)), ({"miss": 2}, {}))
+
 
 class TickSeen(_GateLab):
     """The tick jobs' memo hooks, reached through the real _tick_job_check from a job the gate called closed: a session never
@@ -1441,6 +1481,248 @@ class TheRaceRead(_GateLab):
             armed[0] = lambda: Detector._grow(store)
             self.passes()
         self.assertEqual(_delta(self.raced("autoNudge"), r0), {"miss": 1}, "the raise named every session; the re-stat found the store")
+
+
+class MemoScope(_GateLab):
+    """The re-observed channels scoped to a memo's session (_jg_scoped): with two sessions alive and a memo naming api, another
+    session's registry row, a judge write counted for another session and another session's compaction click, each moved on
+    another thread while the job runs, are no race of api's (a wrongQuiet), and api's own registry row is a race."""
+
+    def _two(self):
+        self.add_session(SID, "api")
+        self.add_session(SID2, "web")
+
+    def _tick_memos(self, which):
+        km = self.km
+        armed = [None]
+
+        def tick(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is None:
+                return
+            th = threading.Thread(target=fn)
+            th.start()
+            th.join()
+            for s in which():
+                km._TICK_SEEN[("interrupt-block", s["sid"])] = tuple([0.0] * 20)
+                km._tick_job_check("interrupt-block", dict(s))
+        self.stub("_interrupt_block_tick", tick)
+        return armed
+
+    def _walk_memo(self):
+        km = self.km
+        armed = [None]
+
+        def walk(now, live_map):
+            fn, armed[0] = armed[0], None
+            if fn is None:
+                return
+            th = threading.Thread(target=fn)
+            th.start()
+            th.join()
+            km._jobs_gate_note("miss", SID)
+        self.stub("_auto_nudge_tick", walk)
+        return armed
+
+    def _once(self, job, armed, move):
+        self.assertEqual(self.last()[job], "closed")
+        w0, r0 = self.wrong(job), self.raced(job)
+        armed[0] = move
+        self.passes()
+        self.assertIsNone(armed[0])
+        self.assertEqual(self.last()[job], "closed")
+        return _delta(self.wrong(job), w0), _delta(self.raced(job), r0)
+
+    def _reg(self, sid):
+        jd = self.km.jd
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (sid + ".json")).write_text(json.dumps({"sid": sid, "alive": True}))
+
+    def test_another_sessions_click_is_not_apis_race(self):
+        km = self.km
+        self._two()
+        armed = self._tick_memos(lambda: self.sessions[:1])
+        self.quiet()
+        self.assertEqual(self._once("interruptBlock", armed, lambda: km._compact_clicked.__setitem__(SID2, time.time())),
+                         ({"miss": 1}, {}))
+
+    def test_another_sessions_registry_row_is_not_apis_race(self):
+        self._two()
+        armed = self._walk_memo()
+        self.quiet()
+        self.assertEqual(self._once("autoNudge", armed, lambda: self._reg(SID2)), ({"miss": 1}, {}))
+
+    def test_a_judge_write_for_another_session_is_not_apis_race(self):
+        jd = self.km.jd
+        self._two()
+        armed = self._walk_memo()
+        self.quiet()
+        self.assertEqual(self._once("autoNudge", armed, lambda: jd._session_file_written(SID2)), ({"miss": 1}, {}))
+
+    def test_apis_own_registry_row_is_a_race(self):
+        self._two()
+        armed = self._walk_memo()
+        self.quiet()
+        self.assertEqual(self._once("autoNudge", armed, lambda: self._reg(SID)), ({}, {"miss": 1}))
+
+
+class TheCheckpointJobs(_GateLab):
+    """The checkpoint settle write (persistCheckpoints) and its first sight (checkpointFirstSight), both on the jobs pass since
+    main moved the write off the pusher, are declared, so a quiet pass still counts under wouldSkipPass and the detector audits
+    them. First sight's whole work is to record a listed session one of the write's two tables lacks: owed under `unseen` while
+    one does, and nothing else. The write opens on its sessions' settle evidence (mem:ckptSettle: the turn-end key and the
+    states log's stat, by the write's own reader) and is owed under `unseen`, `period` (a leaf moved since its last periodic
+    write and the period passed or a second from passing) and `prune` (a table over its bound). The REAL two jobs run over the
+    lab's one listed session (the listing stubbed to the lab's sessions, the turn-end key a test's own), with the write's
+    fold, document and assembly collaborators recorded, never run: each test reads the verdict and what the real job did."""
+
+    def setUp(self):
+        super().setUp()
+        km, jd = self.km, self.km.jd
+        self.leaf = self.add_session()
+        self.states = jd.STATE / "states" / (SID + ".jsonl")
+        self.states.parent.mkdir(parents=True, exist_ok=True)
+        self.states.write_text('{"state": "idle", "t": 1}\n')
+        self.turn, self.dirty, self.persisted = {}, [], []
+        self.stub("CKPT_PERIOD_S", 30.0)                                # the shipped period, whatever the environment says
+        self.stub("_sessions", lambda now, window=None, forks=True: [dict(s) for s in self.sessions])
+        self.stub("_turn_end_key", lambda sid, reg=None: self.turn.get(sid, 0))
+        self.stub("_heal_cold_folds", lambda leaf, dropped_out=None: [])
+        self.stub("_prime_leaf_folds", lambda leaf: True)
+        self.stub("_session_fold_files", lambda sid, leaf: {str(leaf)})
+        self.stub("_display_sdk_human", lambda sid: False)
+        self.stub("_stored_tree", lambda leaf, sid: None)
+        self.stub("_asm_refresh_maybe", lambda leaf, sid: False)
+        for name, fn in (("checkpoint_dirty", lambda: list(self.dirty)), ("drop_cold_cursors", lambda path: []),
+                         ("checkpoint_write_dirty_paths",
+                          lambda paths=None, budget_s=None: (self.persisted.extend(paths), list(paths))[1]),
+                         ("asm_checkpoint_write", lambda *a, **k: False)):
+            p = mock.patch.object(km.em, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(km, "_CKPT_JUST_WRITTEN", set())
+        p.start()
+        self.addCleanup(p.stop)
+        self.real("_checkpoint_first_sight", "_persist_checkpoints")
+        self.quiet()
+        self.assertEqual((self.last()["checkpointFirstSight"], self.last()["persistCheckpoints"]), ("closed", "closed"), self.last())
+        self.assertIn(SID, km._CKPT_SETTLE_SEEN, "the real first sight recorded the lab's session on the first pass")
+
+    def _pass(self):
+        """One pass: (first sight's verdict, the write's verdict, first sight's acts, the write's acts)."""
+        seen = self.spy()
+        self.passes()
+        last = self.last()
+        return (last["checkpointFirstSight"], last["persistCheckpoints"], self.acts(seen, "checkpointFirstSight"),
+                self.acts(seen, "persistCheckpoints"))
+
+    def _period_age(self, age):
+        """Date the session's last periodic write `age` seconds before now, as the period's clock would see it."""
+        st, _t = self.km._CKPT_PERIODIC_SEEN[SID]
+        self.km._CKPT_PERIODIC_SEEN[SID] = (st, time.monotonic() - age)
+
+    def test_on_a_quiet_pass_both_are_closed_and_the_pass_counts(self):
+        g0 = self.gate()
+        self.assertEqual(self._pass(), ("closed", "closed", {}, {}))
+        self.assertEqual(self.gate()["wouldSkipPass"] - g0["wouldSkipPass"], 1, "every job of the pass closed: the pass counts")
+        self.assertEqual(self.persisted, [])
+
+    def test_a_dirty_checkpoint_with_no_settle_and_no_period_is_no_work(self):
+        """The dirty set alone takes no session: the write writes only on new settle evidence or a due period."""
+        self.dirty = [str(self.leaf)]
+        self.assertEqual(self._pass(), ("closed", "closed", {}, {}))
+        self.assertEqual(self.persisted, [], "the real write wrote nothing")
+
+    def test_first_sight_is_owed_for_a_listed_session_a_table_lacks_and_records_it(self):
+        km = self.km
+        for table in (km._CKPT_PERIODIC_SEEN, km._CKPT_SETTLE_SEEN):
+            table.pop(SID)
+            self.assertEqual(self._pass(), ("owed:unseen", "closed", {"write": 1}, {}), "first sight records it before the write")
+            self.assertIn(SID, table)
+            self.assertEqual(self._pass(), ("closed", "closed", {}, {}))
+        self.assertEqual(self.persisted, [], "a first sight writes nothing")
+
+    def test_a_settle_opens_the_write_and_the_write_writes(self):
+        """A states-log row (a turn's settle) and then a turn-end key that moved: each opens the write on its input, the real
+        write writes the leaf's document, and the next pass is closed."""
+        self.dirty = [str(self.leaf)]
+        for n, move in enumerate((lambda: self.states.write_text(self.states.read_text() + '{"state": "working", "t": 2}\n'),
+                                  lambda: self.turn.__setitem__(SID, 1_800_000_100)), 1):
+            move()
+            self.assertEqual(self._pass(), ("closed", "open:ckptSettle", {}, {"write": 1}))
+            self.assertEqual(self.persisted, [str(self.leaf)] * n)
+            self.assertEqual(self._pass(), ("closed", "closed", {}, {}))
+
+    def test_a_leaf_that_moved_is_owed_once_its_period_is_due_and_not_before(self):
+        km = self.km
+        self.dirty = [str(self.leaf)]
+        with open(self.leaf, "a") as f:
+            f.write('{"type": "assistant"}\n')                          # the turn runs on: the leaf grows, no settle
+        self.assertEqual(self._pass(), ("closed", "closed", {}, {}), "inside the period: no write, and called closed")
+        self._period_age(km.CKPT_PERIOD_S - 0.9)                         # 0.9 s from due: owed (the margin is a second), and
+        self.assertEqual(self._pass(), ("closed", "owed:period", {}, {}))   # the write, its clock short of the period, writes nothing
+        self.assertEqual(self.persisted, [])
+        self._period_age(km.CKPT_PERIOD_S + 1.0)                         # past the period since the last periodic write
+        self.assertEqual(self._pass(), ("closed", "owed:period", {}, {"write": 1}))
+        self.assertEqual(self.persisted, [str(self.leaf)], "the real write took the period")
+        self.assertEqual(self._pass(), ("closed", "closed", {}, {}), "the write reset the period's clock")
+
+    def test_a_table_over_its_bound_is_owed_and_cleared(self):
+        km = self.km
+        for n in range(4097):
+            km._CKPT_SETTLE_SEEN["11111111-2222-3333-4444-%012d" % n] = (0, None)
+        self.assertEqual(self._pass(), ("closed", "owed:prune", {}, {"write": 1}))
+        self.assertEqual(len(km._CKPT_SETTLE_SEEN), 0, "the write cleared the table")
+        self.assertEqual(self._pass(), ("owed:unseen", "closed", {"write": 1}, {}), "first sight records the session again")
+
+    def test_the_writes_own_first_sight_is_owed_when_the_passs_first_sight_has_not_run(self):
+        km = self.km
+        self.stub("_checkpoint_first_sight", lambda now: None)
+        km._CKPT_SETTLE_SEEN.pop(SID)
+        km._CKPT_PERIODIC_SEEN.pop(SID)
+        self.assertEqual(self._pass()[1::2], ("owed:unseen", {"write": 1}))
+        self.assertEqual((SID in km._CKPT_SETTLE_SEEN, SID in km._CKPT_PERIODIC_SEEN, self.persisted), (True, True, []))
+
+    # ── the detector: each input moved behind the gate's back, after it looked and before the job read ──
+    def test_a_settle_behind_the_gates_back_is_a_wrong_quiet_write(self):
+        km = self.km
+        real = _ORIGINALS["_persist_checkpoints"]
+        armed = [False]
+
+        def persist(now):
+            if armed[0]:
+                armed[0] = False
+                self.states.write_text(self.states.read_text() + '{"state": "idle", "t": 3}\n')
+            return real(now)
+        self.stub("_persist_checkpoints", persist)
+        self.dirty = [str(self.leaf)]
+        w0, r0 = self.wrong("persistCheckpoints"), self.raced("persistCheckpoints")
+        armed[0] = True
+        self.passes()
+        self.assertEqual(self.last()["persistCheckpoints"], "closed", "called closed: the settle came after the gate looked")
+        self.assertEqual((_delta(self.wrong("persistCheckpoints"), w0), _delta(self.raced("persistCheckpoints"), r0)),
+                         ({"write": 1}, {}), "the write is an act, never raced")
+        self.assertEqual(self.persisted, [str(self.leaf)])
+        self.passes()
+        self.assertEqual(self.last()["persistCheckpoints"], "open:ckptSettle", "its input moved: the next pass opens it")
+
+    def test_a_first_sight_entry_dropped_behind_the_gates_back_is_a_wrong_quiet_write(self):
+        km = self.km
+        real = _ORIGINALS["_checkpoint_first_sight"]
+        armed = [False]
+
+        def sight(now):
+            if armed[0]:
+                armed[0] = False
+                km._CKPT_PERIODIC_SEEN.pop(SID)
+            return real(now)
+        self.stub("_checkpoint_first_sight", sight)
+        w0 = self.wrong("checkpointFirstSight")
+        armed[0] = True
+        self.passes()
+        self.assertEqual(self.last()["checkpointFirstSight"], "closed")
+        self.assertEqual(_delta(self.wrong("checkpointFirstSight"), w0), {"write": 1})
+        self.assertIn(SID, km._CKPT_PERIODIC_SEEN)
 
 
 class Acts(_GateLab):

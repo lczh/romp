@@ -14046,6 +14046,8 @@ def _checkpoint_first_sight(now):
         sid, leaf = s.get("sid"), s.get("path")
         if not sid or not leaf:
             continue
+        if sid not in _CKPT_SETTLE_SEEN or sid not in _CKPT_PERIODIC_SEEN:
+            _jobs_gate_note("write")          # (the jobs pass's gate, shadow: a first sight recorded is this job's whole work)
         if sid not in _CKPT_SETTLE_SEEN:
             _CKPT_SETTLE_SEEN[sid] = _ckpt_settle_key(sid)
         if sid not in _CKPT_PERIODIC_SEEN:
@@ -14082,6 +14084,8 @@ def _persist_checkpoints(now):
             continue
         key = _ckpt_settle_key(sid)
         seen = _CKPT_SETTLE_SEEN.get(sid)
+        if seen is None or sid not in _CKPT_PERIODIC_SEEN:
+            _jobs_gate_note("write")          # (the jobs pass's gate, shadow: the write's own first sight records the session)
         if seen is None:
             # first sight: the settle evidence predates this kernel life, so it is not NEW; record it and write nothing
             # (a first sight that wrote primed every session at once in the first pusher cycle after a boot)
@@ -14100,6 +14104,7 @@ def _persist_checkpoints(now):
             periodic_due = last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S
         if not settle_due and not periodic_due:
             continue
+        _jobs_gate_note("write")              # (the jobs pass's gate, shadow: a settle or periodic write, the job's work)
         _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
         _heal_cold_folds(leaf)                # the settle heals a tail-only fold (T359); the exit drain does not
         _prime_leaf_folds(leaf)
@@ -14126,6 +14131,8 @@ def _persist_checkpoints(now):
         except Exception:
             sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
+    if len(_CKPT_SETTLE_SEEN) > 4096 or len(_CKPT_PERIODIC_SEEN) > 4096:
+        _jobs_gate_note("write")              # (the jobs pass's gate, shadow: a table cleared at its bound)
     if len(_CKPT_SETTLE_SEEN) > 4096:
         _CKPT_SETTLE_SEEN.clear()
     if len(_CKPT_PERIODIC_SEEN) > 4096:
@@ -66933,13 +66940,19 @@ JOBS_GATE_ACCOUNT_FILE = "~/.claude.json"   # the credential store the account r
 _JOBS_GATE_POSITIONS = _TICK_KEY_FILES[:6]  # a session's own keyed files, in _session_files_stat's order; its other four are box-wide
 #                                             (the clears, postal and downtime logs and the ledger) and the gate stats them as such
 _JOBS_GATE_ACTS = ("views", "mark", "push", "send", "problem", "spendRow", "write", "raised")   # the evidence that is an act (write:
-#                                             a declared file the job wrote with no mark, a relay queue entry or a working note); the
-#                                             rest says a memo moved (miss, neverSeen, clockParse, load)
+#                                             a declared file the job wrote with no mark, a relay queue entry, a working note, or the
+#                                             checkpoint settle write's own work: a first sight recorded, a session's documents
+#                                             written, a table cleared at its bound); the rest says a memo moved (miss, neverSeen,
+#                                             clockParse, load)
 _JOBS_GATE_ROW_FIELDS = ("state", "since", "ctxTokens", "auth", "authLive", "connected", "spawning", "retryCount")   # the live
 #                                             row's fields the jobs read (never the whole row: its model-fallback retry countdown
 #                                             moves every second, which would make every row reader's input a clock)
-_JOBS_UNDECLARED = ("persistCheckpoints", "convergeCheckpoints")   # owed every pass wherever they run: a dirty set and a byte budget,
-#                                             no input the gate observes (on the pusher's cycle, where they ran at the base, nothing is gated)
+_JOBS_UNDECLARED = ("convergeCheckpoints",)   # owed every pass wherever it runs: a dirty set and a byte budget, no input the gate
+#                                             observes. It runs on the pusher's cycle, where nothing is gated. The checkpoint settle
+#                                             write (persistCheckpoints) and its first sight (checkpointFirstSight) run on the jobs
+#                                             pass, the first sight first and the write last (2026-10-05), and are declared in
+#                                             _JOBS_INPUTS: left undeclared there, the write would be owed on every pass and no pass
+#                                             could ever count under wouldSkipPass
 _JOBS_GATE_BOOT_KEY = ("unread",)    # the knob's stat key before the first pass reads it: equal to no stat and to no file (None), so
 #                                       the first pass always reads the knob, and the default is the read's, never a literal's
 _JOBS_GATE = {"asked": "", "modeKey": _JOBS_GATE_BOOT_KEY, "rec": {}, "lost": {}, "gen": {}, "floorSeen": {}, "tree": {}, "last": {},
@@ -67013,6 +67026,7 @@ _JOBS_GATE_MEM = {   # an input that is not a file, read at each declaring job's
     "compactClicked": lambda: tuple(sorted((str(k), v) for k, v in list(_compact_clicked.items()))),
     "held": lambda: tuple(sorted(str(k) for k in list(_held_working))),
     "prices": lambda: (_price_cache.get("t"), id(_price_cache.get("remote"))),
+    "ckptSettle": lambda: _jg_ckpt_settle(),         # each listed session's settle evidence, by the settle write's own reader
 }
 
 
@@ -67274,11 +67288,14 @@ def _jobs_gate_raced(run, tick):
     miss even when something else brings the job back next pass (the floor's re-stat, a later reader's stat refreshing the
     standing entry, an all-sessions mark over a standing view): a standing view is never re-statted, since it cannot tell a
     write during the run from one before the pass. A memo that names its session (the run's `memo`, _jobs_gate_note) is tested
-    on that session's inputs alone (_jg_scoped): another session's input moving is not why it moved. The live rows and the
-    membership are the pass's snapshot, which no job moves. A run's own writes never reach this test: each is an act (a mark,
-    a write, a send), and an act is never raced."""
+    on that session's inputs alone (_jg_scoped): another session's input moving is not why it moved. A run whose memos name
+    several sessions is raced only when each session's memo is. The live rows and the membership are the pass's snapshot,
+    which no job moves. A run's own writes never reach this test: each is an act (a mark, a write, a send), and an act is never
+    raced."""
     v = run.get("v") or {}
     memo = run.get("memo") or {None}
+    if None not in memo and len(memo) > 1:           # memos of several sessions: each needs a race of its own
+        return all(_jobs_gate_raced(dict(run, memo={sid}), tick) for sid in sorted(memo))
     scope = None if None in memo else memo           # None: a memo note named no session, so every session's inputs count
     nxt = None
     for ch, val in v.items():
@@ -67395,13 +67412,65 @@ def _jg_notes_active(tick):
         return True
 
 
+def _jg_ckpt_rows(tick=None):
+    """The sessions the checkpoint settle write and its first sight walk, as both take them: the pass's discover rows (_sessions
+    at the pass's clock, from the pass's memo), (sid, leaf) for each row with both, as both skip a row without one."""
+    if tick is None:
+        tick = getattr(_JOBS_GATE_TL, "tick", None)
+    now = tick["now"] if tick is not None else int(time.time())
+    return [(s.get("sid"), s.get("path")) for s in _sessions(now) if s.get("sid") and s.get("path")]
+
+
+def _jg_ckpt_settle():
+    """The settle write's declared input (mem:ckptSettle): each listed session's leaf and settle evidence, read with the write's
+    own reader (_ckpt_settle_key: the turn-end key and the states log's stat), so a turn that ends or a states-log row opens the
+    write. Compared with the write's last observed run, as every input is: the write records the same evidence as written."""
+    return {str(sid): (str(leaf), _ckpt_settle_key(sid)) for sid, leaf in _jg_ckpt_rows()}
+
+
+def _jg_owed_ckpt_sight(tick):
+    """First sight's whole work is to record a listed session one of the settle write's two tables lacks, so it is owed exactly
+    while one does: a session first listed, or the tables cleared at their bound by the write's last run."""
+    for sid, _leaf in _jg_ckpt_rows(tick):
+        if sid not in _CKPT_SETTLE_SEEN or sid not in _CKPT_PERIODIC_SEEN:
+            return "unseen"
+    return None
+
+
+JOBS_GATE_CKPT_EARLY_S = 1.0          # a periodic checkpoint write due within this is owed now: the write reads its own clock a
+#                                       moment after the gate's predicate reads it, and a period ending between the two would be a
+#                                       write the gate called quiet
+
+
+def _jg_owed_ckpt_persist(tick):
+    """The settle write's work that its input (mem:ckptSettle) does not announce, read from the write's own tables as the write
+    reads them: a listed session either table lacks (`unseen`: the write's own first sight records it, which happens when the
+    pass's first sight faulted), a leaf moved since its last periodic write once CKPT_PERIOD_S has passed since that write or
+    passes within JOBS_GATE_CKPT_EARLY_S (`period`; the leaf statted as the write stats it, _stat_key, and only once the period
+    is that close), and a table over its 4096 bound, which the write clears (`prune`). A dirty checkpoint alone is no work: the
+    write takes a session only on new settle evidence or a due period, and leaves the rest to the converge pass and the exit."""
+    rows = _jg_ckpt_rows(tick)
+    for sid, _leaf in rows:
+        if sid not in _CKPT_SETTLE_SEEN or sid not in _CKPT_PERIODIC_SEEN:
+            return "unseen"
+    mono = time.monotonic()
+    for sid, leaf in rows:
+        last = _CKPT_PERIODIC_SEEN.get(sid)
+        if last is not None and mono - last[1] >= CKPT_PERIOD_S - JOBS_GATE_CKPT_EARLY_S and last[0] != _stat_key(leaf):
+            return "period"
+    if len(_CKPT_SETTLE_SEEN) > 4096 or len(_CKPT_PERIODIC_SEEN) > 4096:
+        return "prune"
+    return None
+
+
 _JOBS_GATE_SIX = "files:" + ",".join(_JOBS_GATE_POSITIONS)
 # What each job of _jobs_pass reads, by its _job_stage name: `inputs` (channels, see _jobs_gate_observe), `active` / `idle` (a job
 # with nothing to do reads less), `due` (an instant from the job's own state, read after each run) and `owed` (a predicate read at
 # the job's turn). A job also notes dues and owed work while it runs (_jobs_gate_due, _jobs_gate_owe, _jobs_gate_key). A job with
-# no entry is owed every pass, and so are the two in _JOBS_UNDECLARED: undeclared means today's pace. Each entry is a claim that
+# no entry is owed every pass, and so is the one in _JOBS_UNDECLARED: undeclared means today's pace. Each entry is a claim that
 # the job's output is a function of what it names; the shadow's detector is how a claim is checked against real traffic.
 _JOBS_INPUTS = {
+    "checkpointFirstSight": {"inputs": (), "owed": _jg_owed_ckpt_sight},
     "liftSpentAwaiting": {"inputs": ("files:transcript,store,overrides", "rows", "members", "regs", "box:postal"),
                           "owed": _jg_owed_lift},
     "deathSweep": {"inputs": ("members",), "owed": _jg_owed_death},
@@ -67434,6 +67503,7 @@ _JOBS_INPUTS = {
                                   "rows", "members"),
                        "active": _jg_notes_active, "idle": ("box:workingNotes",)},
     "heldWorking": {"inputs": ("mem:held", "rows"), "owed": lambda tick: "held" if _held_working else None},
+    "persistCheckpoints": {"inputs": ("mem:ckptSettle",), "owed": _jg_owed_ckpt_persist},
 }
 
 
