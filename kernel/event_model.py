@@ -6839,11 +6839,11 @@ class LazyIndex:
             _LIVE_INDEXES.add(self)                       #  "set changed size during iteration" and /perf answered 500 (1597 low 1)
 
     def _row(self, k):
-        """The one row decode every accessor uses (build, text_flags, uuid_of, user_facts; uuids through uuid_of): a row that
-        does not decode to a JSON object refuses the DOCUMENT to the truth (1610 round three, mediums 1 and 2): noted `rows`
-        once (counted, said once per leaf, the document unlinked by the note), the leaf's assembly entry dropped so the next
-        parse is the whole parse, and this read alone raises LazyIndexError. A checkpoint is a cache: every road that decodes
-        a row can find it corrupt, and none of them may crash its reader twice or answer from one row fewer."""
+        """The one row decode every accessor uses (build, text_flags, uuid_of, user_facts, tool_ids; uuids through uuid_of): a
+        row that does not decode to a JSON object refuses the DOCUMENT to the truth (1610 round three, mediums 1 and 2):
+        noted `rows` once (counted, said once per leaf, the document unlinked by the note), the leaf's assembly entry dropped
+        so the next parse is the whole parse, and this read alone raises LazyIndexError. A checkpoint is a cache: every road
+        that decodes a row can find it corrupt, and none of them may crash its reader twice or answer from one row fewer."""
         with _MAT_LOCK:
             _ASM_INDEX_STATS["rowDecodes"] += 1
         try:
@@ -6856,7 +6856,11 @@ class LazyIndex:
             raise LazyIndexError("session %s row %d: %s" % (self.rompuuid[:8], k, e)) from e
 
     def build(self, k):
-        row = self._row(k)
+        return self._build_row(self._row(k))
+
+    def _build_row(self, row):
+        """The atom a decoded row restores to, a pure function of the row: build after its decode, and tool_ids for the
+        rows that carry no lazy marker."""
         if row.get("syn"):                                # a synthesized atom (idle, a salvaged reply): its message inline, if any
             a = dict(row.get("s") or {})
             if "m" in row:
@@ -6865,6 +6869,16 @@ class LazyIndex:
         a = _restore_prefix_atoms([row], self.rompuuid, self.records, self.fsids, self.source_files)[0]
         a.pop("_seq", None)                               # the read-order tiebreak: the section fixed the order (parse_session pops it too)
         return a
+
+    def tool_ids(self, k):
+        """Row k's tool_use ids and tool_result tool_use_ids (atom_tool_ids: falsy ones dropped) from one decode. A row with a
+        lazy marker answers from the marker's tu and tr scalars and builds nothing: the built atom carries that marker whole
+        (_restore_prefix_atoms), so it would answer the same. A row without one (an inline body, a synthesized atom, a
+        boundary) is built for this read and the atom dropped, never stored in a slot or registered in the LRU. A broken row
+        refuses the document and raises here, as a build does (_row)."""
+        row = self._row(k)
+        lz = row.get("lz")
+        return atom_tool_ids({"lazy": lz} if lz is not None else self._build_row(row))
 
     def _refuse_rows(self, detail):
         """A row that passed the load's shape check but does not decode to an object: the document is noted `rows` (counted once
@@ -7052,6 +7066,29 @@ class LazyAtoms(list):
 
     def rows(self):
         return list(self._rows)
+
+    def tool_ids(self):
+        """Every tool_use id and tool_result tool_use_id the atoms carry (falsy ones dropped), as a frozenset kept on the list
+        after the first call: the rows never change (release() resets slots, not rows), and the list is shared by every parse
+        its assembly entry serves (_asm_serve), so the set outlives the call. The reader is the settle gate's background hold
+        (the judge's _awaiting_bg_hold), which looks for the turn naming a running launch without walking the atoms. A built
+        slot is read where it sits (list.__getitem__: no lock, no LRU touch, as user_facts reads it; a hydrated atom carries
+        the ids its marker carried); an unbuilt one answers from one row decode (LazyIndex.tool_ids). Nothing is stored in a
+        slot or registered, so neither the LRU nor asmIndex.materialized sees this read. Two threads computing the set at once
+        store equal sets."""
+        got = self.__dict__.get("_tool_ids")
+        if got is None:
+            out = set()
+            for i, r in enumerate(self._rows):
+                a = list.__getitem__(self, i)
+                if a is _UNMAT:
+                    out |= self._index.tool_ids(r)        # a turn's list is minted over a LazyIndex (_pre_turns_of); the one
+                    #                                       stand-in index in tests (build and uuid_of, no tool_ids) serves
+                    #                                       lane tests, which never ask a list for its tool ids
+                else:
+                    out |= atom_tool_ids(a)
+            got = self._tool_ids = frozenset(out)
+        return got
 
     # ── the list surface ──
     def _unbuilt(self):
@@ -8621,6 +8658,15 @@ def atom_tool_results(atom):
     if lz is not None:
         return list(lz.get("tr") or [])
     return [b.get("tool_use_id") for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+
+def atom_tool_ids(atom):
+    """The set of an atom's tool_use ids and tool_result tool_use_ids (atom_tool_uses, atom_tool_results: a lazy atom answers
+    from its marker, no hydration), falsy ones dropped: an id the settle gate can look up is never falsy (_bg_step registers a
+    background task only under a truthy one)."""
+    out = {x for x, _n in atom_tool_uses(atom) if x}
+    out.update(x for x in atom_tool_results(atom) if x)
+    return out
 
 
 def postal_mids(content, ids=None):

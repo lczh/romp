@@ -1257,6 +1257,7 @@ class _PerfStats:
                           ("backref", jd.backref_memo_stats), ("captions", jd.captions_memo_stats),
                           ("goalArchive", jd.goal_archive_memo_stats), ("plannerSkip", jd.planner_skip_stats),
                           ("liftGate", _lift_gate_report), ("bgTops", _bg_tops_report),
+                          ("bgHold", jd.bg_hold_stats),   # the settle gate's background hold: its walks and the turns they read
                           ("intrMarks", _intr_marks_memo_report), ("deadWait", lambda: dict(_DEAD_WAIT_STATS)),
                           ("tickSeen", _tick_seen_report),
                           ("statesOverlay", _states_overlay_report),
@@ -6602,12 +6603,140 @@ def _write_view_order(order):
 # The same opaque-data contract. The object is the browser's (tab-groups.ts TabFolds: collapsed, expanded,
 # pinned, and the rename memory the pins rest on); this kernel checks that it IS an object and that it is
 # bounded, and reads nothing inside it. Tag names, session ids and host prefixes are all the viewer's to
-# interpret, exactly as the arrangement's are. Last write wins, as there.
+# interpret, exactly as the arrangement's are. Last write wins, as there. Beside the object the frame names
+# the publish it reflects (`foldsBy`, kept in memory, never in the file: the note below).
 _VIEW_FOLDS_CAP = 256 * 1024             # bytes of JSON: the browser's own state is a few hundred; this only stops a
 #                                          client bug growing the file without limit, and it REFUSES rather than trims
 #                                          (a cut object is not a smaller fold state, it is a different one)
 _view_folds_lkg = [None]                 # last known good, as _view_order_lkg
 _VIEW_FOLDS_UNKNOWN = object()           # _view_folds_served's "cannot say": the frame then carries no folds half
+
+# WHICH PUBLISH A FRAME REFLECTS (2026-09-29). A page that folded two groups inside one round trip heard this
+# kernel's answer to the first fold after it had published the second, took that older state for another
+# device's word, and reopened the second group; every pane of that browser shares one cached copy, so a
+# sibling pane hearing the answer first did the same to the browser's copy, and a change waiting in the
+# browser was merged over it and lost the second fold here for good. Recognizing the answer by its content
+# cannot work: a publish that changes nothing gets no answer, a refused one gets a warning, and a push is
+# built from the store when it is sent. So a page names each publish ({browser, n}: an id its browser keeps
+# and a counter every pane of that browser shares), this kernel keeps the name of the LAST publish it handled
+# beside the folds and serves it on the frame as `foldsBy`, and a page passes over a frame naming one of its
+# own publishes older than one it has sent since (tab-groups.ts hearSharedFolds). The last handled publish
+# counts whether it was written, unchanged or refused, since any of them is what the page last said here. A
+# browser's publish older than one already handled from that browser (two panes, two sockets, landing out of
+# order) is dropped: it would put back a state that browser has already replaced (a lower number whose count
+# proves it newer is not older: the note below). Memory only, never in
+# view-folds.json, whose object stays the browser's byte for byte; a restarted kernel names nothing until the
+# next publish, so until then no frame is passed over for its name (its count starts again too: the note below).
+#
+# HOW FAR THIS KERNEL HAS GOT (2026-09-30). The name says whose publish a frame reflects, which cannot say whether
+# THIS browser's latest publish had landed when a frame naming another device, or nothing, was built: an
+# arrangement push built just before a fold landed carries the folds without it. And a browser whose record came
+# back older numbers its publishes under the one kept here, which a page learns only from a frame naming it. So
+# this kernel also counts the fold publishes it TAKES in this life (_view_folds_taken: every one not dropped,
+# whether written, unchanged or refused, stamped or not) and serves the count on every frame as `foldsSeq`
+# ({boot, n}, read with the folds in one step), and a page sends with each publish the highest count its
+# browser had received (`by.received`). A frame whose count is at or below that of a publish still out was built
+# before that publish was taken, and the page passes it over; and a publish numbered under the kept one is
+# still taken when it says its browser had received a frame built after the kept one was taken (the count
+# the kept one was taken at), since only a newer state can say that.
+#
+# THE TAKES NUMBERED ABOVE A PUBLISH (2026-09-30, the second review round; a list since 2026-10-01, the third). A
+# publish taken on its count that way replaces the kept n with its own smaller one, so an older publish of the same
+# browser numbered between the two (a pane's fold on a slow socket, whose sibling's later fold landed first, while a
+# tab in another renderer process whose copy of the record lacked both published on the later fold's count) was taken
+# as newer and put the kernel back to that older state. Keeping the largest n taken beside the kept one closed that
+# only while the largest was taken after the browser's record last came back older. One taken before (the browser
+# killed before its storage was written) was taken at a count under every count the returned browser sends, so it held
+# nothing back, and this kernel judged that browser's publishes on the kept n alone. So for each browser this kernel
+# keeps the (n, count) pairs it took that no later take numbered at or above them has replaced: a take removes every
+# pair with n at or under its own and appends its own, so n runs descending down the list and the count ascending,
+# the largest n held is the first pair and the kept (latest taken) one the last. A publish numbered under a pair is
+# judged against the pair with the smallest n above its own: the last such in the list, which is the most recent take
+# numbered above it and, of those, the one taken at the highest count. It is taken only on a received count of this
+# kernel life at or above that pair's count, which says its browser had received a frame built after every take
+# numbered above it. Otherwise it is an overtaken state: dropped, logged under that pair ("kept", "largest", or
+# "between" for a pair at neither end), and answered with the kernel's frame (the setViewFolds branch). A record that
+# came back older still lands: its connect push was built after every pair then held was taken, so its publishes carry
+# a count at or above all of them, and its quick successive publishes, numbered upward, each replace the one before.
+# Within one renderer process, while storage writes succeed, a dropped publish is an older state, and it carries
+# nothing the later one lacks unless a frame was heard between the two that replaced the browser's copy without it
+# (another device's publish, taken before this one landed): a sibling pane's publish made over that frame and landing
+# first is then kept, and this one is dropped with its change. A tab in another renderer process that publishes inside
+# the storage delay can have its own change dropped too. The answer shows the poster's tab the kernel's folds, its
+# change undone, unless that tab passes the frame over: a drop under a pair above the kept one is answered by a frame
+# that can name the kept n, at or under the dropped one's, which a tab holding a standing entry above that n takes for
+# its own older state.
+#
+# THE CAP ON THE PAIRS (2026-10-01). The list grows only on a take numbered under the kept one, which only a page with
+# a lagging record makes (one that came back older, or a tab in another renderer process inside the storage delay), and
+# a take at or above a pair removes it, so a real browser holds one pair, or a few: each such take adds one, and the
+# list is that one pair shorter again only once a take is numbered at or above the pair that take was numbered under (a
+# take numbered between the two replaces the added pair with its own and leaves the length as it was). For a tab inside
+# the storage delay that is the next take from a tab whose copy of the record is current, or that tab's own once its
+# copy catches up. After a record that came back older it comes only once the browser's numbers pass the largest taken
+# before the return, and each further return of that kind before then (another device having published between, so no
+# frame named the browser's last number) adds one more. _VIEW_FOLDS_PAIRS_CAP (16) only bounds what a buggy or hostile
+# page can make this kernel hold: 256 browsers by 16 pairs. Past it the FIRST pair is forgotten, the largest n held,
+# taken longest ago. Forgetting a pair removes a reason to drop and adds none (a publish is dropped only under a pair
+# still held, at that pair's own count), so at the publish it judges the cap can only make this kernel TAKE one it
+# would have dropped, the base's last write wins. What is lost at it is the drop of a publish numbered between that
+# pair's n and the next pair's, made before its browser received any frame built after that oldest take. Once taken,
+# that publish is held as a pair like any other, so a later publish numbered under it, made before its browser received
+# a frame built after it, is dropped under it, even where the full list would have taken it.
+_view_folds_by = [None]                  # the {browser, n} of the last setViewFolds handled, None when it carried none
+_view_folds_seen = {}                    # browser -> its pairs, [[n, count], ...]: its takes that no later take at or
+#                                          above replaced, n descending and the count ascending, so the last pair is its
+#                                          kept (latest taken) publish and the first the largest n held; re-inserted on
+#                                          each update
+_VIEW_FOLDS_SEEN_CAP = 256               # browsers remembered; past it the one heard from longest ago is forgotten
+_VIEW_FOLDS_PAIRS_CAP = 16               # pairs held per browser; past it the first (the largest n, the oldest take) goes
+_view_folds_taken = [0]                  # fold publishes taken in this kernel life (_BOOT_ID): the frame's foldsSeq.n
+
+
+class _ViewFoldsDropped(Exception):
+    """A setViewFolds _write_view_folds dropped as an overtaken state of its browser: nothing was written, counted or
+    re-stamped. Carries what the log line names: the browser, the dropped publish's n and received count (None when
+    it carried none), the pair it was dropped under, the one with the smallest n above its own (`under`: "kept", the
+    latest taken from that browser, "largest", the largest n held from it, or "between", a pair at neither end of the
+    list), and that pair's n and the count it was taken at. Deliberately not a _StateUnreadable or _StateUnwritable: a
+    drop is no fault of the store, and the poster is answered with a frame, never a warning."""
+
+    def __init__(self, browser, n, received, under, pair_n, pair_at):
+        super().__init__("browser %r n=%d, %s n=%d taken at %d" % (browser[:8], n, under, pair_n, pair_at))
+        self.browser, self.n, self.received = browser, n, received
+        self.under, self.pair_n, self.pair_at = under, pair_n, pair_at
+
+
+def _view_folds_by_of(raw):
+    """The publish stamp a setViewFolds carries, {"browser": str, "n": int}, or None when there is none or it is
+    malformed (then the publish counts as unstamped): browser a string of 1 to 64 characters, n an int (never a
+    bool) from 1 to 2**53, the largest integer a page's number holds exactly."""
+    if not isinstance(raw, dict):
+        return None
+    b, n = raw.get("browser"), raw.get("n")
+    if not isinstance(b, str) or not 1 <= len(b) <= 64:
+        return None
+    if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= 2 ** 53:
+        return None
+    return {"browser": b, "n": n}
+
+
+def _view_folds_received_of(raw):
+    """The count a setViewFolds says its browser had received, `by.received` ({"boot": str, "n": int}, a frame's
+    foldsSeq as the page kept it), or None when there is none or it is malformed (then the publish carries no
+    count): boot a string of 1 to 64 characters, n an int (never a bool) from 0 to 2**53. Read only when `by` is a
+    dict; it counts for anything only beside a valid name (_write_view_folds reads it for the drop alone)."""
+    if not isinstance(raw, dict):
+        return None
+    r = raw.get("received")
+    if not isinstance(r, dict):
+        return None
+    b, n = r.get("boot"), r.get("n")
+    if not isinstance(b, str) or not 1 <= len(b) <= 64:
+        return None
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= 2 ** 53:
+        return None
+    return {"boot": b, "n": n}
 
 
 def _view_folds_path():
@@ -6635,17 +6764,54 @@ def _view_folds_served():
     return raw
 
 
-def _write_view_folds(folds):
+def _write_view_folds(folds, by=None, received=None):
     """Publish the viewer's fold state. Raises _StateUnwritable on a failed publish (and on an object over the
     cap, which is refused whole rather than cut), so the gesture is refused loudly. Returns whether anything
     CHANGED: every browser of this kernel republishes the state it was just served when a rename moves a pin
-    the same way on each, and an unchanged state is not worth a push."""
-    if not isinstance(folds, dict):
-        raise _StateUnwritable(_view_folds_path(), "not an object")
-    text = json.dumps(folds, sort_keys=True)
-    if len(text) > _VIEW_FOLDS_CAP:
-        raise _StateUnwritable(_view_folds_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FOLDS_CAP))
-    with _view_order_lock:                           # one lock for the viewer's store, both files
+    the same way on each, and an unchanged state is not worth a push.
+
+    `by` is the publish's stamp (_view_folds_by_of), None for a page that sends none, and `received` the count
+    its browser had received (_view_folds_received_of). Under the store's lock, before anything else: a stamped
+    publish numbered under a pair held for its browser (_view_folds_seen: its takes that no later take at or above
+    them replaced) is judged against the pair with the smallest n above its own, and DROPPED, raising
+    _ViewFoldsDropped with nothing touched (no write, no count, the stamp and the browsers remembered as they were),
+    unless `received` is of this kernel life and at or above the count that pair was taken at. A drop is an
+    overtaken state: a publish made before its browser received any frame built after a later-numbered publish of
+    its own was taken. Within one renderer process, while storage writes succeed, that is an older state, and it
+    carries nothing the later one lacks unless a frame was heard between the two that replaced the browser's copy
+    without it (another device's publish, taken before this one landed): a sibling pane's publish made over that
+    frame and landing first is then kept, and this one is dropped with its change. A tab in another renderer process
+    that publishes inside the storage delay can have its own change dropped too. The answer then shows the poster's
+    tab the kernel's folds, its change undone, unless that tab passes it over (a drop under a pair above the kept
+    one: the frame can name the kept n, under an entry standing there). Every other publish is TAKEN: the count
+    rises by one; a stamped one removes its browser's pairs numbered at or under its own and appends its own with
+    the count it took (the first pair forgotten past _VIEW_FOLDS_PAIRS_CAP), so its n is the kept one (lower than
+    before when the received count proved it newer) beside the largest n held; and its stamp becomes the one the
+    next frame serves, whatever the write then does (unchanged, refused or written); an unstamped publish clears the
+    stamp, since its frame reflects a publish nobody named. The notes above _view_folds_by have the why."""
+    with _view_order_lock:                           # one lock for the viewer's store, both files, the stamp and the count
+        pairs = _view_folds_seen.get(by["browser"], []) if by is not None else []   # read only: a take builds a new list
+        above = next((p for p in reversed(pairs) if p[0] > by["n"]), None)   # the smallest n above: n runs descending
+        if above is not None and not (
+                received is not None and received["boot"] == _BOOT_ID and received["n"] >= above[1]):
+            under = "kept" if above is pairs[-1] else "largest" if above is pairs[0] else "between"
+            raise _ViewFoldsDropped(by["browser"], by["n"], received, under, above[0], above[1])
+        _view_folds_taken[0] += 1
+        if by is not None:
+            at = _view_folds_taken[0]
+            pairs = [p for p in pairs if p[0] > by["n"]] + [[by["n"], at]]
+            while len(pairs) > _VIEW_FOLDS_PAIRS_CAP:
+                del pairs[0]
+            _view_folds_seen.pop(by["browser"], None)
+            _view_folds_seen[by["browser"]] = pairs
+            while len(_view_folds_seen) > _VIEW_FOLDS_SEEN_CAP:
+                del _view_folds_seen[next(iter(_view_folds_seen))]
+        _view_folds_by[0] = dict(by) if by else None
+        if not isinstance(folds, dict):
+            raise _StateUnwritable(_view_folds_path(), "not an object")
+        text = json.dumps(folds, sort_keys=True)
+        if len(text) > _VIEW_FOLDS_CAP:
+            raise _StateUnwritable(_view_folds_path(), "%d bytes, over the %d cap" % (len(text), _VIEW_FOLDS_CAP))
         try:
             raw = _read_state_json(_view_folds_path(), expect=dict)
         except _StateUnreadable:
@@ -56636,13 +56802,28 @@ def _view_order_frame():
     the thing the 2026-07-31 ruling ruled out); `stored` says whether this kernel has an arrangement at
     all, which the client's migration turns on (view-order.ts viewOrderToPublish). Sent to a client on
     its `ready` -- the connect push -- and to every client the moment a setViewOrder CHANGES the store,
-    which is the event the viewer's other devices converge on. Nothing periodic reads it.
+    which is the event the viewer's other devices converge on; and to one client, with nothing changed, when
+    the kernel drops that client's setViewFolds as an overtaken state (2026-09-30), the answer that shows its
+    page the kernel's folds at once unless the page passes it over (a drop under a pair held above the kept
+    publish of its browser: the frame can name the kept n). Nothing periodic reads it.
 
     `folds` rides beside them (2026-09-23): the viewer's fold state (_view_folds_served), an object, or null
     when this kernel has none, which is what a browser carrying folds of its own publishes against
     (tab-groups.ts foldsToPublish). A change to either half is a change to this one frame, pushed on the
     same slot, so the folds converge on the same event the arrangement does (a setViewFolds that CHANGES
     the store).
+
+    `foldsBy` rides beside `folds` (2026-09-29): the {browser, n} stamp of the last setViewFolds this kernel
+    handled when the state was read, present only when that publish carried one, so a page can tell its own
+    earlier publish coming back from another device's word. After a refusal it names the refused publish,
+    whose folds were never kept, so the folds served are older than the publish it names (the note above
+    _view_folds_by).
+
+    `foldsSeq` rides beside `folds` too (2026-09-30), whenever the folds half does, an object or null: {boot:
+    _BOOT_ID, n: the fold publishes this kernel life has taken}, so a page can tell a frame built before its
+    own publish was taken from one built after it, whoever the frame names (the second note above
+    _view_folds_by). The folds, the stamp and the count are read under the store's lock in one acquisition, so
+    the three describe the same moment.
 
     `files` rides beside them too (2026-09-30): the viewer's file tabs (_view_files_served), an object, or null when
     this kernel keeps none (file-tabs.ts hearSharedFileTabs publishes a browser's own against that), on the same
@@ -56652,7 +56833,10 @@ def _view_order_frame():
     what it is showing for that half rather than adopting a guess (federation.ts reads a half only when it
     is present); None, no frame at all, when no half can be said."""
     served = _view_order_served()
-    folds = _view_folds_served()
+    with _view_order_lock:                           # the folds, the stamp that names them and the count, as one read
+        folds = _view_folds_served()
+        by = _view_folds_by[0]
+        taken = _view_folds_taken[0]
     files = _view_files_served()
     if served is None and folds is _VIEW_FOLDS_UNKNOWN and files is _VIEW_FOLDS_UNKNOWN:
         return None
@@ -56661,6 +56845,9 @@ def _view_order_frame():
         fr["order"], fr["stored"] = served
     if folds is not _VIEW_FOLDS_UNKNOWN:
         fr["folds"] = folds
+        if by:
+            fr["foldsBy"] = dict(by)
+        fr["foldsSeq"] = {"boot": _BOOT_ID, "n": taken}
     if files is not _VIEW_FOLDS_UNKNOWN:
         fr["files"] = files
     return fr
@@ -56668,7 +56855,8 @@ def _view_order_frame():
 
 def _send_view_order(c, fr=None):
     """One client's copy, on its own dedup slot: a client already holding this arrangement byte for byte
-    is sent nothing, so the connect push and the change push cannot double up on it."""
+    is sent nothing, so the connect push, the change push and the answer to a dropped setViewFolds (the
+    setViewFolds branch, 2026-09-30) cannot double up on it."""
     try:
         if fr is None:
             fr = _view_order_frame()
@@ -56680,7 +56868,11 @@ def _send_view_order(c, fr=None):
 
 def _broadcast_view_order():
     """The change event: every connected client learns the new arrangement now. Built ONCE and handed to
-    each client's dedup slot -- the viewer that posted it holds it already and is skipped there."""
+    each client's dedup slot. The viewer that posted the change is sent it too: its slot holds the last
+    frame this kernel sent it, not the state its page published, so the new frame differs there as it does
+    everywhere else. That echo is how a page hears its own publish land, `foldsBy` is how it tells the
+    echo of an earlier publish from newer news (2026-09-29, the note above _view_folds_by), and `foldsSeq` how
+    it tells a frame built before its latest publish was taken, whoever that frame names (2026-09-30)."""
     try:
         fr = _view_order_frame()
     except Exception:
@@ -77822,12 +78014,34 @@ class Handler(BaseHTTPRequestHandler):
             # A group folded or opened, or a member set to show through a fold, on ANY viewer of this kernel
             # (the user 2026-09-23, who wanted the phone to fold too and the folds shared like the order).
             # Kept WHOLE and OPAQUE beside the arrangement, and pushed on the same frame, so the phone and
-            # the desktop fold together. Last write wins.
+            # the desktop fold together. Last write wins. The publish's stamp (`by`, 2026-09-29) is kept for
+            # the frames that follow, whatever the write does, and a browser's publish that is only an older
+            # state of one already taken from it is dropped (_write_view_folds; the notes above _view_folds_by).
+            by_raw = msg.get("by")
             try:
-                changed = _write_view_folds(msg["folds"])
+                changed = _write_view_folds(msg["folds"], _view_folds_by_of(by_raw), _view_folds_received_of(by_raw))
+            except _ViewFoldsDropped as d:
+                # An overtaken state: the kernel keeps the later one. Two panes' sockets landing out of order drop
+                # an older state, which carries nothing the kept one lacks unless a frame was heard between the two
+                # that replaced the browser's copy without it (another device's publish, taken before this one
+                # landed): the sibling pane's publish made over that frame landed first and is kept, and this one is
+                # dropped with its change. A tab in another renderer process that publishes inside the storage delay
+                # can have its own change dropped here too. Logged, and answered with the kernel's frame on the
+                # poster's own dedup slot, which is nothing when that slot already holds it (the later publish's
+                # push), so a page whose publish this was shows the kernel's folds at once, its change undone, unless
+                # it passes that frame over (a drop under a pair above the kept one: the frame can name the kept
+                # number). The line names that pair: "kept", "largest", or "between" for one at neither end. No warn:
+                # out-of-order panes drop publishes legitimately, and a warn would be false. The browser id and the
+                # received boot are the page's own strings, so both go in with %r and a newline in either cannot
+                # forge a second line.
+                sys.stderr.write("romp-kernel: setViewFolds dropped: browser %r n=%d received=%s, %s n=%d taken at %d\n"
+                                 % (d.browser[:8], d.n, "%r:%d" % (d.received["boot"], d.received["n"]) if d.received else "none",
+                                    d.under, d.pair_n, d.pair_at))
+                _send_view_order(client)
             except (_StateUnreadable, _StateUnwritable) as e:
                 # refused out loud: the group sits folded on this page and would silently spring back on
-                # the next reload, and no other device would ever hear of it
+                # the next reload, and no other device would ever hear of it. (A drop, above, is not this: it is
+                # a state the kernel has already replaced with a later one of the same browser's.)
                 sys.stderr.write("romp-kernel: setViewFolds refused: %s\n" % e)
                 _reply(client, {"type": "warn", "text": "Couldn't save the folded groups: %s" % e})
             else:
