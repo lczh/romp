@@ -94,9 +94,16 @@ calls, reported as ms min/median/max:
   load_goals:S           jd.load_goals for each of the K largest goal stores
   push_cold_cycle        ONE periodic _push over the fake clients with every cache empty and empty
                          dedup state: the pusher's first cycle after a restart (single call, no
-                         warm-up). Reports the full frames' bytes per slot.
+                         warm-up). Reports the full frames' bytes per slot. On a kernel with the
+                         timeline builder (2026-10-03) it no longer includes the timeline's cold
+                         build: the cycle sends the live lanes and owes the build to the builder,
+                         so the timeline client gets no bars here.
+  timeline_build_cold    the timeline builder's pass that the cold cycle owed, run synchronously
+                         (single call): the live-only partial, then the full build into the empty
+                         slot. Absent on a kernel without the builder, whose cold cycle builds it.
   push_connect:APP       _push([fresh client], connect=True) per app after a warming cycle: the path
-                         a page load pays (pusher-warmed feed served, no baseline move). A fresh
+                         a page load pays (pusher-warmed feed served, no baseline move; the filled
+                         timeline served, as in a live kernel once the builder has run). A fresh
                          client with empty dedup state for every sample.
   push_steady            the periodic _push over the same clients, repeated; no warm-up of its own
                          (it follows the rows above). Each sample records whether _cached_feed /
@@ -1322,6 +1329,13 @@ def _bench(args, state, repo, out, shadow, rec, maps):
             for name in ("_feed_wire", "_bars_wire"):
                 if hasattr(km, name):
                     setattr(km, name, None)
+            for name in ("_tl_partial", "_tl_cold_lanes"):   # the timeline builder's cold state (2026-10-03), where it exists
+                slot = getattr(km, name, None)
+                if slot is not None:
+                    slot[0] = None
+            owed = getattr(km, "_TL_OWED", None)
+            if owed is not None:
+                owed.clear()
             unscope()
             scope(live_map)
             asm0 = dict(em._ASM_STATS)
@@ -1330,6 +1344,18 @@ def _bench(args, state, repo, out, shadow, rec, maps):
             bench["push_cold_cycle"] = single((time.perf_counter() - t0) * 1000, bytes=client_bytes(clients), clients=apps,
                                               asm=asm_delta(em, asm0))   # every live transcript parsed inside the cycle
             reset_client_bytes(clients)
+            if owed is not None and owed.is_set() and hasattr(km, "_timeline_builder_pass"):
+                # the cold timeline build the cycle owed, which a live kernel runs on its builder thread: run here, on this
+                # thread, so the rows below serve a filled slot as a live kernel's pushes do once the builder has run. The
+                # pass opens and closes its own scope, which leaves this thread's unset, so the tool's is opened again.
+                owed.clear()
+                asm0 = dict(em._ASM_STATS)
+                t0 = time.perf_counter()
+                km._timeline_builder_pass()
+                bench["timeline_build_cold"] = single((time.perf_counter() - t0) * 1000, asm=asm_delta(em, asm0),
+                                                      lanes=len((km._built_timeline[1] or {}).get("sessions") or []))
+                unscope()
+                scope(live_map)
             new_cycle()
             km._push(clients, live_map=live_map)               # a warming cycle: baselines, wire caches, chat cache
             reset_client_bytes(clients)

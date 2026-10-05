@@ -286,16 +286,31 @@ class PassFrame(unittest.TestCase):
         self.assertNotIn(("parse", SID), b["keys"], "the new frame holds no key for the session ...")
         self.assertNotIn(SID, b["parses"], "... and no parse: neither, never a parse alone")
 
-    def test_a_fork_lane_keys_the_frame_and_the_frameless_cache_alike(self):
-        # a /clear fork lane's leaf is not the anchor file: _judge_candidates adds the anchor once; the frame's
-        # key is computed from the RAW leaf list exactly as the frameless cache key is, so the two agree
+    def _fork_lane(self, head_parent):
         fork = self.td / "99999999-8888-7777-6666-555555555555.jsonl"
         fork.write_text("\n".join(json.dumps(r) for r in [
-            uline(T0 + 500, "fresh start after the clear", "u9"),
+            uline(T0 + 500, "picking the work up again", "u9", head_parent),
             aline(T0 + 510, "Picking it up from here.", "a9", "u9", stop="end_turn")]) + "\n")
+        return fork
+
+    def test_a_fork_lane_keys_the_frame_and_the_frameless_cache_alike(self):
+        # a fork lane whose head links back into the anchor file: _judge_candidates adds the anchor once; the frame's
+        # key is computed from the RAW leaf list exactly as the frameless cache key is, so the two agree
+        fork = self._fork_lane("a1")
         warm = jd.parsed_session(SID, [str(fork)], T0 + 600)             # frameless: fills the cache
         frameless_key = jd._PARSE_CACHE[SID][0]
         self.assertEqual(len(frameless_key[0]), 2, "premise: the leaf plus the anchor, once")
+        self.assertTrue(jd.begin_pass_frame())
+        pair, _cut, _fr = jd._frame_parse_key(SID, [str(fork)])
+        self.assertEqual(pair, frameless_key, "the framed key equals the frameless one")
+        self.assertIs(jd.parsed_session(SID, [str(fork)], T0 + 600), warm, "so the pass's first touch is a cache hit")
+
+    def test_a_clear_fork_lane_keys_the_frame_and_the_frameless_cache_alike_over_its_one_file(self):
+        # the /clear twin (2026-10-03): a parentless head parses alone, so both keys name the one file and still agree
+        fork = self._fork_lane(None)
+        warm = jd.parsed_session(SID, [str(fork)], T0 + 600)
+        frameless_key = jd._PARSE_CACHE[SID][0]
+        self.assertEqual(len(frameless_key[0]), 1, "premise: the leaf alone")
         self.assertTrue(jd.begin_pass_frame())
         pair, _cut, _fr = jd._frame_parse_key(SID, [str(fork)])
         self.assertEqual(pair, frameless_key, "the framed key equals the frameless one")

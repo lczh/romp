@@ -276,7 +276,7 @@ class WarmTheCards(P.Harness):
 
     def test_the_wiring(self):
         src = open(os.path.join(P.BIN, "romp-kernel")).read()
-        send = src.index('_PERF_STATS.stage("push.send", time.monotonic() - _t_stage)')
+        send = src.rindex('_PERF_STATS.stage("push.send", time.monotonic() - _t_stage)')   # the send stage's close, after the bars; the feed's send closes the same stage earlier, before the timeline (2026-10-03)
         block = src[send:src.index("def _broadcast_restarting", send)]
         self.assertIn("_warm_history_pages(_fs, now, live_map)", block, "the pusher warms AFTER its send stage")
         self.assertIn('if any(c["app"] in ("feed", "fleet") for c in targets) and _fs and not connect and any(c.get("proto") == 2 for c in chat_clients):', block,

@@ -504,6 +504,10 @@ class LazyChatSerialization(unittest.TestCase):
             km._built_feed[:] = [None, None, 0.0, 0.0]
             km._built_timeline[:] = [None, None, 0.0, 0.0]
             km._pusher_cycle()
+            # a cold timeline slot is the timeline builder's to fill (2026-10-03): its pass, run here synchronously, then a
+            # cycle over the filled slot, which makes the bars' wire form once
+            km._timeline_builder_pass()
+            km._pusher_cycle()
             w_feed, w_bars = km._feed_wire, km._bars_wire
             self.assertIsNotNone(w_feed, "the first cycle made the feed's wire form once")
             # the body is a lazy cell: this feed client announces no delta, so its whole frame went and the cell
@@ -514,14 +518,16 @@ class LazyChatSerialization(unittest.TestCase):
             n = len(frames)
             km._pusher_cycle()
             self.assertIs(km._feed_wire, w_feed, "unchanged feed → the SAME wire tuple, no re-dump")
-            if w_bars is not None:   # bars need a warmed timeline build; when present, same contract
-                self.assertIs(km._bars_wire, w_bars, "unchanged bars → the SAME wire tuple, no re-dump")
+            self.assertIsNotNone(w_bars, "the warmed cycle made the bars' wire form")
+            self.assertIs(km._bars_wire, w_bars, "unchanged bars → the SAME wire tuple, no re-dump")
             self.assertEqual(len(frames), n, "…and the deduped client got nothing new")
         finally:
             base.tearDown()
             km._feed_wire = km._bars_wire = None
             km._built_feed[:] = [None, None, 0.0, 0.0]
             km._built_timeline[:] = [None, None, 0.0, 0.0]
+            km._tl_partial[0] = km._tl_cold_lanes[0] = None
+            km._TL_OWED.clear()
 
     def test_send_client_honors_a_precomputed_dedup_sig(self):
         # feed/bars carry volatile keys, so _dedup_sig re-dumps the FILTERED payload per call — the

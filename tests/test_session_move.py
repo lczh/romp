@@ -423,6 +423,82 @@ class BootHeal(MoveBase):
         self.assertTrue(any("NEITHER" in m and p for m, p in self.logs))
 
 
+PARENT = "44444444-5555-6666-7777-888888888888"          # the session SID was forked from (registered, live)
+PARENT_CLEAR = "55555555-6666-7777-8888-999999999999"    # the parent's own /clear transcript, current when SID forked
+
+
+class ForkMove(MoveBase):
+    """A session born as a FORK names its parent's transcript in its own records: the first row of its episode log (the
+    conversation root, _seed_fork_stores) is the parent's fsid. Moving the fork carried that file too, so a live parent's
+    transcript was renamed into the fork's folder while the parent's CLI kept writing a fresh file at its own path, and
+    the parent's chat lost every earlier turn (2026-10-05). The move carries what the fork owns and nothing else."""
+
+    def _fork_history(self, parent_fsid=PARENT, own_row=True):
+        self.be._update_reg(SID, forkedFrom={"sid": PARENT, "name": "api", "cut": "c1", "t": 1})
+        (Path(self.td) / "sdk" / (PARENT + ".json")).write_text(json.dumps(
+            {"sid": PARENT, "name": "api", "cwd": self.old, "lastSid": PARENT, "alive": True}))
+        (Path(self.td) / "episodes").mkdir(exist_ok=True)
+        rows = [{"head": "h0", "fsid": parent_fsid, "t": 1}]
+        if own_row:
+            rows += [{"head": "c1", "fsid": SID, "t": 2}, {"head": "h2", "fsid": EPISODE_FSID, "t": 3}]
+        (Path(self.td) / "episodes" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        self._place(self.old, parent_fsid, sidecar=True, text="the parent's own conversation")
+        self._place(self.old, EPISODE_FSID, text="the fork's own earlier episode")
+
+    def test_a_forks_move_leaves_its_parents_transcript_where_the_parent_writes_it(self):
+        self._fork_history()
+        self._wire([_ok(self.new)])
+        self.assertEqual(self.be.move(SID, self.new), "")
+        self.assertTrue(os.path.exists(sb.transcript_path(self.old, PARENT)), "the parent's transcript stays at its own path")
+        self.assertFalse(os.path.exists(sb.transcript_path(self.new, PARENT)), "and is never renamed into the fork's folder")
+        self.assertTrue((Path(sb.transcript_path(self.old, PARENT)).parent / PARENT / "subagents").exists(),
+                        "its sidecar folder stays with it")
+        self.assertTrue(os.path.exists(sb.transcript_path(self.new, EPISODE_FSID)), "the fork's own /clear episode follows it")
+        self.assertFalse(os.path.exists(sb.transcript_path(self.old, EPISODE_FSID)))
+        self.assertTrue(any("left where they are" in m for m, _p in self.logs), "the move says what it left: %r" % self.logs)
+
+    def test_a_parents_clear_transcript_the_fork_inherited_stays_too(self):
+        # the parent had /cleared before the fork, so the inherited row names a transcript no registry is keyed by: the
+        # lineage rule (rows before the fork's own) is what keeps it, not the registry check
+        self._fork_history(parent_fsid=PARENT_CLEAR)
+        self._wire([_ok(self.new)])
+        self.assertEqual(self.be.move(SID, self.new), "")
+        self.assertTrue(os.path.exists(sb.transcript_path(self.old, PARENT_CLEAR)))
+        self.assertFalse(os.path.exists(sb.transcript_path(self.new, PARENT_CLEAR)))
+
+    def test_movable_fsids_splits_ownership_from_lineage(self):
+        self._fork_history(parent_fsid=PARENT_CLEAR)
+        carry, held = sb.movable_fsids(Path(self.td), SID)
+        self.assertEqual(carry, {SID, EPISODE_FSID})
+        self.assertEqual(held, {PARENT_CLEAR})
+
+    def test_a_fork_with_no_row_of_its_own_moves_none_of_its_rows(self):
+        self._fork_history(own_row=False)
+        carry, held = sb.movable_fsids(Path(self.td), SID)
+        self.assertEqual(carry, {SID}, "what the fork owns cannot be shown: nothing it may not own is moved")
+        self.assertIn(PARENT, held)
+
+    def test_an_unspent_fork_launch_does_not_carry_the_parents_current_file(self):
+        self.be._update_reg(SID, forkOf=PARENT, lastSid=PARENT)
+        (Path(self.td) / "sdk" / (PARENT + ".json")).write_text(json.dumps({"sid": PARENT, "cwd": self.old}))
+        carry, held = sb.movable_fsids(Path(self.td), SID)
+        self.assertNotIn(PARENT, carry)
+
+    def test_another_registered_sessions_transcript_is_never_carried(self):
+        # no fork record at all, yet an episode row names a transcript another session's registry is keyed by
+        (Path(self.td) / "sdk" / (PARENT + ".json")).write_text(json.dumps({"sid": PARENT, "cwd": self.old}))
+        (Path(self.td) / "episodes").mkdir(exist_ok=True)
+        (Path(self.td) / "episodes" / (SID + ".jsonl")).write_text(
+            json.dumps({"head": "h0", "fsid": PARENT, "t": 1}) + "\n" + json.dumps({"head": "h1", "fsid": SID, "t": 2}) + "\n")
+        carry, held = sb.movable_fsids(Path(self.td), SID)
+        self.assertEqual((carry, held), ({SID}, {PARENT}))
+
+    def test_a_plain_sessions_history_is_all_its_own(self):
+        self._record_history()
+        carry, held = sb.movable_fsids(Path(self.td), SID)
+        self.assertEqual((carry, held), ({SID, EPISODE_FSID, FORK_FSID}, set()))
+
+
 class Helpers(MoveBase):
     def test_known_fsids_reads_every_lineage_record(self):
         self._record_history()

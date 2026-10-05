@@ -882,7 +882,9 @@ def _cache_insert_locked(path, ent, began=None):
 def record_cache_stats() -> dict:
     """The record cache for /perf: entries, held bytes (file bytes, as the kernel's samples read them), the same held
     bytes decoded (realBytes, the budget's unit) and the multiple, the budget, and the counters (inserts, evictions by
-    count and by budget, evicted bytes, budget re-reads, drop-after-fold drops)."""
+    count and by budget, evicted bytes, budget re-reads, drop-after-fold drops). What the entries weigh by class is
+    record_cache_resident's (the heap block). Called by the pusher's gc-freeze tick every cycle and by the judge child's
+    done line, so it stays O(1) beyond the wholeReads tables."""
     with _JSONL_CACHE_LOCK:
         out = {"entries": len(_JSONL_CACHE), "bytes": _JSONL_CACHE_BYTES[0], "realBytes": _real_bytes(_JSONL_CACHE_BYTES[0]),
                "decodedMultiple": _RECORD_CACHE_MULTIPLE, "budgetBytes": _JSONL_CACHE_BUDGET_BYTES,
@@ -892,6 +894,59 @@ def record_cache_stats() -> dict:
         bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")             # T401: the same reads per (stage, caller)
         out["wholeReadsByStage"] = {k: dict(v) for k, v in bys.items()} if isinstance(bys, dict) else {}
         return out
+
+
+# What a held record weighs in memory against its bytes on disk (the kernel memory diagnosis, 2026-10-01): the lab's records-only
+# measurement, 2.86 live-heap bytes per source byte on a real 37.7 MB transcript by tracemalloc (_scan_jsonl_stream's docstring),
+# and 3.01 on a synthetic plain-ASCII transcript of 6,000 records, 5.57 MB (tracemalloc, Python 3.12, 2026-10-01); the default,
+# RECORD_CACHE_DECODED_MULTIPLE (above), is 2.85, within 0.01 of the lab's, and a fit of the kernel's resident size against
+# recordCache.bytes gives about the same slope, but that slope is the whole process's: it also takes in every holder that
+# grows with the same transcripts (assembly entries, built atoms, the hydrated memo), which the heap block weighs beside this one,
+# so the block's estimates are not meant to be summed. Content moves it: about 1.1 for one long plain-ASCII string, such as a
+# large tool result, and about 4 to 5 for text with emoji or for small, metadata-heavy records (synthetic tests, 2026-10-01), so
+# subagent files likely weigh more than this says. The logs class is mixed: rows shaped like the per-session states log weigh
+# about 9 traced bytes per file byte, and body-heavy postal rows under 2 (a review's tracemalloc probe, 2026-10-02), so 2.85
+# under-reads the first and over-reads the second. The heap block publishes it beside every estimate built on it. It is the
+# record cache's multiple in force (_RECORD_CACHE_MULTIPLE above: RECORD_CACHE_DECODED_MULTIPLE, 2.85, unless
+# ROMP_RECORD_CACHE_DECODED_MULTIPLE sets it), so the budget and these gauges weigh a file byte alike. The gauges read it
+# when they run, as the budget does; RECORD_DECODED_MULTIPLE is the same figure under this name, taken at load, which only
+# a test that rebinds _RECORD_CACHE_MULTIPLE can leave behind (review, 2026-10-03).
+RECORD_DECODED_MULTIPLE = _RECORD_CACHE_MULTIPLE
+RECORD_CACHE_CLASSES = ("wholeLeaf", "tail", "subagent", "logs")
+_SUBAGENT_SEGMENT = os.sep + "subagents" + os.sep
+
+
+def record_cache_resident(logs_root=None, transcript_roots=()) -> dict:
+    """The record cache in memory units for /perf's heap block. The entries are copied under the cache's lock (tuples a read
+    replaces, never changes in place), then weighed and classed after it, so a reader's hit never waits on the weighing.
+    Each is classed by its path and base: `logs` (a file under `logs_root`, the state root the kernel passes: the states logs, the
+    captions, the postal and nudge logs; never a file under one of `transcript_roots`, the Codex backend's session
+    transcripts and the Claude projects root, which the kernel passes because either can sit under the state root, the
+    first always and the second when the Claude config directory is placed there; their files are never logs and fall into
+    the three classes below by the same rules as any other), `subagent` (a `subagents` path segment), `tail` (any other
+    entry with base above zero: a leaf's records past a checkpoint's or an assembly document's cut), `wholeLeaf` (the rest:
+    transcripts held from record 0). Per class `entries`, `fileBytes` (each entry's _entry_weight, the unit of
+    recordCache.bytes, so the classes sum to it at the read) and `bytes`, the file bytes times the multiple in force
+    (_RECORD_CACHE_MULTIPLE, read at the call), an estimate; the totals beside them. O(entries): a weight and a few prefix
+    tests per entry, never a walk over records."""
+    m = _RECORD_CACHE_MULTIPLE
+    prefix = (str(logs_root).rstrip(os.sep) + os.sep) if logs_root else None
+    leaves = tuple(str(r).rstrip(os.sep) + os.sep for r in transcript_roots or () if r)
+    with _JSONL_CACHE_LOCK:
+        held = list(_JSONL_CACHE.items())
+    rows = [(p, _entry_weight(e), e[5]) for p, e in held]
+    classes = {c: {"entries": 0, "fileBytes": 0, "bytes": 0} for c in RECORD_CACHE_CLASSES}
+    for p, w, base in rows:
+        p = str(p)
+        log = prefix is not None and p.startswith(prefix) and not p.startswith(leaves)
+        cls = ("logs" if log else "subagent" if _SUBAGENT_SEGMENT in p
+               else "tail" if int(base or 0) > 0 else "wholeLeaf")
+        classes[cls]["entries"] += 1
+        classes[cls]["fileBytes"] += w
+    for row in classes.values():
+        row["bytes"] = int(round(row["fileBytes"] * m))
+    return {"multiple": m, "entries": len(rows), "fileBytes": sum(r["fileBytes"] for r in classes.values()),
+            "bytes": sum(r["bytes"] for r in classes.values()), "classes": classes}
 
 
 _JSONL_TAIL_GUARD = 64            # bytes of pre-offset content re-verified before an incremental read
@@ -1128,6 +1183,7 @@ def set_checkpoint_dir(fn):
         _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear(); _DROP_OWED.clear()
         _RETIRED_FOLDS.clear()                            # a retirement never outlives a state rebind (round two, low 2)
         _DOC_MEMO.clear(); _DOC_MEMO_BYTES[0] = 0         # nor does a memoized document (the harnesses' fresh process is this setter)
+        _DOC_INDEX.clear()                                # nor what a write's carry knows of a document without reading it
         _CKPT_CYCLE["cap"] = _ckpt_cycle_default_cap(); _CKPT_CYCLE["spent"] = 0
 
 
@@ -1150,6 +1206,7 @@ def _ckpt_fallback(path, reason, detail=""):
         _CKPT_STATS["fallbacks"][reason] = _CKPT_STATS["fallbacks"].get(reason, 0) + 1
         _CKPT_PENDING.pop(str(path), None)
         _CKPT_DOC_FOLDS.pop(str(path), None)              # the document is gone: the converge pass must not believe it whole
+        _DOC_INDEX.pop(str(path), None); _doc_memo_drop(str(path))   # nor may a write's carry or a consult serve it from memory
     try:
         sys.stderr.write("checkpoint fallback (%s) for %s%s\n" % (reason, path, (": " + detail) if detail else ""))
     except Exception:
@@ -1214,12 +1271,13 @@ def _ckpt_load(path):
         _ckpt_fallback(path, "path", str(doc.get("path"))[:80]); return None
     try:
         offset, count, size = int(doc["offset"]), int(doc["count"]), int(doc["size"])
+        int(doc.get("seq") or 0); float(doc.get("mtime") or 0)   # as the restore reads them: a bad one is corrupt here, not a raise there
         guard = bytes.fromhex(doc.get("guard") or "")
         folds = doc.get("folds") or {}
         if offset < 0 or count < 0 or len(guard) > _JSONL_TAIL_GUARD or not isinstance(folds, dict):
             raise ValueError("shape")
-    except (KeyError, TypeError, ValueError) as e:
-        _ckpt_fallback(path, "corrupt", "shape: %s" % e); return None
+    except (KeyError, TypeError, ValueError, OverflowError) as e:   # OverflowError: a number json read as infinity, which raised out
+        _ckpt_fallback(path, "corrupt", "shape: %s" % e); return None   #  of every process's restore before, never counted or removed
     return doc
 
 
@@ -1352,7 +1410,7 @@ def _restored_cursor(key, name, ent):
         with _CKPT_LOCK:
             _CKPT_STATS["restoredFolds"][name] = _CKPT_STATS["restoredFolds"].get(name, 0) + 1
         return (count, ent[6], state)
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, OverflowError) as e:   # OverflowError: a count json read as infinity
         _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e)); return None
 
 
@@ -1725,10 +1783,23 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     converge pass an idle session's document was never rewritten, so they survived). Only entries with a state, or an
     over-the-cap cursor, at a count inside this entry's held records, and only when the document's own guard still
     stands on disk (a file rewritten since voids its states); a bare or tail-only cursor is not carried: the next boot reads
-    the file whole for that fold once and the write after carries its state."""
+    the file whole for that fold once and the write after carries its state.
+    The document is not read when this process already knows it gives nothing: when _DOC_INDEX describes the very file on
+    disk (its inode, mtime and size, as this process last wrote or loaded it) and none of its carryable entries passes the
+    filter below (each names a fold this write holds, stands at a count it cannot record, or has no int count), the
+    answer is {} without a read, the answer the read would give whatever its verdict and guard say, since those only ever
+    withhold entries."""
     cp = _ckpt_file(key)
-    if cp is None or not cp.exists():
+    if cp is None:
         return {}
+    sig = _doc_stat_sig(cp, key)
+    if sig is None:
+        return {}                                         # no document (a missing file is the common case: a first write)
+    with _CKPT_LOCK:
+        idx = _DOC_INDEX.get(key)
+    if idx is not None and idx[0] == sig and not any(
+            n not in folds and c is not None and _count_recordable(base, count, c) for n, c in idx[1].items()):
+        return {}                                         # nothing in it this write could carry: no read
     doc = _ckpt_doc_shared(key)                           # one read, shared with a retirement's consult of the same document (low C)
     if not isinstance(doc, dict) or doc.get("v") != _CKPT_V or doc.get("path") != os.path.realpath(key):
         return {}
@@ -1748,10 +1819,9 @@ def _carry_forward_states(key, folds, base, count, size, mtime):
     for name, f in (doc.get("folds") or {}).items():
         if name in folds or not isinstance(f, dict) or not ("state" in f or f.get("over")):
             continue
-        try:
-            c = int(f["count"])
-        except (KeyError, TypeError, ValueError):
-            continue
+        c = f.get("count")
+        if type(c) is not int:                                # an int count only: the entry is carried as it stands and the cut takes
+            continue                                          #  its count as is, so "3", 3.0, infinity or none is not carried
         if _count_recordable(base, count, c):                 # a carried count too far behind would drag the cut (the bound above)
             out[name] = f
     return out
@@ -1802,7 +1872,8 @@ def checkpoint_write(path, force=False):
                 _CKPT_STATS["skippedFolds"] += 1
     if not folds and not force:
         return False
-    folds.update(_carry_forward_states(key, folds, base, count, size, mtime))   # the disk document's states for folds this process never ran
+    carried = _carry_forward_states(key, folds, base, count, size, mtime)
+    folds.update(carried)                                 # the disk document's states for folds this process never ran
     with _CKPT_LOCK:
         retired = set(_RETIRED_FOLDS.get(key, ()))        # taken AFTER the cursor snapshot and the carry: a forget that raced the
     for n in retired:                                     #  snapshot still omits its fold here; every name taken is honoured by
@@ -1843,14 +1914,19 @@ def checkpoint_write(path, force=False):
         cp.parent.mkdir(parents=True, exist_ok=True)
         tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
         tmp.write_text(json.dumps(doc, separators=(",", ":")))
-        os.replace(tmp, cp)
+        sig = _doc_sig(tmp.stat())                        # the rename keeps the inode, mtime and size: the stat of the file this
+        os.replace(tmp, cp)                               #  write puts at `cp`, never another writer's (a later rename there: the next stat differs)
     except OSError:
         return False
     with _CKPT_LOCK:
         _CKPT_SEQ[key] = seq
         _CKPT_STATS["writes"] += 1
         _CKPT_DOC_FOLDS[key] = _doc_fold_shapes(folds)
-        _doc_memo_drop(key)                               # the document moved under the memo: the next consult reads the new one
+        _doc_index_put_locked(key, sig, folds)            # what the next write's carry could take from it, known without a read
+        if any(n in folds for n in carried):              # it holds an entry this process does not compute: the next carry needs it
+            _doc_memo_put_locked(key, sig, doc)           #  again and takes it from memory (`doc` is what _ckpt_load would return)
+        else:
+            _doc_memo_drop(key)                           # this process's own states only: the index serves the next carry
         if omitted:                                       # the retirements this document honoured are done; any that arrived
             rem = _RETIRED_FOLDS.get(key)                 #  after the check above stay, and keep the path dirty for the next write
             if rem is not None:
@@ -1921,17 +1997,20 @@ def converge_stat(name, n=1):
 def checkpoint_write_dirty(paths=None, budget_s=None):
     """Write the checkpoints of `paths` (default: every dirty path); returns how many were written. `budget_s`
     bounds the pass (the exit path, 2026-09-11: an unbounded write over a kernel life's dirty files outran the
-    manager's 5 s grace and the SIGKILL lost the cut row): the first file always writes, the pass stops once the
-    budget has passed, and what is left stays dirty for the next writer."""
+    manager's 5 s grace and the SIGKILL lost the cut row): the first path is always attempted, the pass stops once the
+    budget has passed, whether or not anything was written, and what is left stays dirty for the next writer."""
     return len(checkpoint_write_dirty_paths(paths, budget_s))
 
 
 def checkpoint_write_dirty_paths(paths=None, budget_s=None):
-    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle)."""
+    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle). The budget is
+    keyed on the paths ATTEMPTED, as the converge pass's is: under a lasting fault every write fails (a checkpoints directory
+    the kernel cannot search or write, a full disk), each after its encode, and a budget that tripped only after a written
+    path let the exit drain attempt every dirty one."""
     out = []
     t0 = time.monotonic()
-    for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
-        if budget_s is not None and out and time.monotonic() - t0 > budget_s:
+    for i, p in enumerate(checkpoint_dirty() if paths is None else [str(p) for p in paths]):
+        if budget_s is not None and i and time.monotonic() - t0 > budget_s:
             break
         if checkpoint_write(p):
             out.append(p)
@@ -2044,7 +2123,49 @@ def checkpoint_sweep():
     return gone
 
 
+READ_BY_PATH_TOP = 50             # rows of readByPath a plain /perf read carries: the paths with the most bytes (2026-10-01: the whole
+#                                   table, one row per path ever read, was most of the snapshot's bytes within minutes of
+#                                   a boot, on every poll); GET /perf?paths=all carries the whole table, and so does ?walk=1 (the
+#                                   kernel's _perf_paths)
+
+
+def _top_paths(items, top):
+    """{path: bytes} of the `top` (path, bytes) pairs with the most bytes, or all of them when `top` is None: one pass with a
+    bounded heap, never a sort of every path."""
+    if top is None or len(items) <= top:
+        return dict(items)
+    import heapq
+    return dict(heapq.nlargest(top, items, key=lambda kv: kv[1]))
+
+
+def read_by_path(top=None):
+    """({path: bytes the reader pulled off it since boot}, the running total): the `top` paths with the most bytes, or every
+    path when `top` is None (the whole table GET /perf?paths=all carries), and the total taken in the same lock acquisition,
+    so the rows never run ahead of the total beside them (review of 2026-10-02: a total from the snapshot's earlier copy
+    trailed the table by the reads between the two)."""
+    with _READ_BYTES_LOCK:
+        items = list(_READ_BYTES.items())
+        total = _READ_BYTES_TOTAL[0]
+    return _top_paths(items, top), total
+
+
+def checkpoint_document_bytes(items):
+    """documentBytes from a copy of the read table, its (path, bytes) pairs: the rows under the checkpoint directory, 0 with
+    no directory. checkpoint_stats and the kernel's whole-table read (_perf_paths) both take it from the copy their readBytes
+    comes from, so the table's checkpoint rows never run ahead of it (review of 2026-10-02)."""
+    d = _ckpt_dir()
+    if d is None:
+        return 0
+    prefix = str(d) + os.sep
+    return sum(n for p_, n in items if p_.startswith(prefix))
+
+
 def checkpoint_stats():
+    """The fold checkpoints for /perf. Most fields count events since boot (restored, writes, swept, fallbacks and the other
+    per-reason tables), and `documentBytes` (the checkpoint documents' own reads) and `readBytes` (every byte the JSONL reader
+    pulled off disk) are running counters of bytes READ since boot, never memory held. The gauges are `dirty`, `docMemo`
+    and `readPaths`. `readByPath` is the per-file split of readBytes, cut to the READ_BY_PATH_TOP paths with the most bytes
+    (`readPaths` says how many paths the whole table has; GET /perf?paths=all carries it whole, and so does ?walk=1)."""
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
         out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
@@ -2053,13 +2174,14 @@ def checkpoint_stats():
         out["rewoundMemo"] = dict(_REWOUND_STATS)
         out["docMemo"] = {"entries": len(_DOC_MEMO), "bytes": _DOC_MEMO_BYTES[0], "capBytes": _DOC_MEMO_CAP,
                           "parseMultiple": _DOC_MEMO_PARSE_MULTIPLE}
-    d = _ckpt_dir()
     with _READ_BYTES_LOCK:
-        out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
         out["dirty"] = len(_FOLD_DIRTY)
-    rb = read_bytes_report()
-    out["readBytes"] = rb.pop("total")
-    out["readByPath"] = rb                            # per file, so a boot can be read as tails versus whole files
+    with _READ_BYTES_LOCK:                            # the total and the table from one copy, as read_bytes_report takes them
+        items = list(_READ_BYTES.items())
+        out["readBytes"] = _READ_BYTES_TOTAL[0]
+    out["documentBytes"] = checkpoint_document_bytes(items)   # and the documents' share, from that same copy
+    out["readPaths"] = len(items)
+    out["readByPath"] = _top_paths(items, READ_BY_PATH_TOP)   # per file, so a boot can be read as tails versus whole files
     return out
 
 
@@ -2190,8 +2312,9 @@ def _read_jsonl_incremental(path, on_fail=None):
 _TAIL_OK = threading.local()      # .flag: the calling fold accepts a tail entry (set by fold_records around its read)
 _READER_TRACE = bool(os.environ.get("ROMP_READER_TRACE"))   # one stderr line per read that pulled bytes (a diagnosis aid)
 _WHOLE_READ_KINDS = ("zero", "rewrite", "guard", "shrunk", "upgrade")   # the reader's kinds that pull a file whole (T384's counter)
-_READ_STAGE_FN = [None]           # T401: the kernel's answer to "which stage is the calling thread in" (a job or push sub-stage name,
-#                                   None outside the pusher's cycle), so a whole read or a hydration is also counted per (stage, caller)
+_READ_STAGE_FN = [None]           # T401: the kernel's answer to "which stage is the calling thread in" (its stage mark: a job or push
+#                                   sub-stage, a handler's route, a judge tier and the rest; None on a thread with no mark), so a whole
+#                                   read or a hydration is also counted per (stage, caller)
 
 
 def set_read_stage_provider(fn):
@@ -2419,6 +2542,62 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     if gone:                                            #  any cold flood)
         _asm_drop_holding(gone)              # AFTER the cache lock: the assembly entries over what the budget evicted go too
     return ent
+
+
+def cached_whole_records(path):
+    """The records of the reader's WHOLE entry for `path` when one stands at the file's current stat, else None. The entry is
+    not touched (its place in the LRU order stays), so a caller that only looks through it leaves the cache as it found it."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(path)
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and hit[5] == 0:
+            return hit[4]
+    return None
+
+
+def read_records_detached(path, on_fail=None):
+    """`path`'s records read whole off the disk, line by line as the reader reads a file (_scan_jsonl_stream, to the size a stat
+    taken before the read saw), into a list only the caller holds: no reader entry is installed, upgraded or touched, so the
+    record cache keeps exactly what it held for the file (a tail a restore left stays a tail, a file it did not hold stays
+    out) and nothing stays resident once the caller lets the list go (review round two, 2026-10-03: the comment cut's look
+    into a session's first file after a /clear). Nor the file's read stripe: this read fills no cache. The bytes count like
+    every reader byte (read_bytes_report), and the read as a whole read on /perf, kind "detached" under its caller. None when
+    the file cannot be stat'd, opened or read, after on_fail(error) with the OSError that stopped it when given, so a caller
+    can say why (review round three); a read that failed counts no byte and no whole read."""
+    path = str(path)
+    try:
+        st = os.stat(path)
+        with open(path, "rb") as fh:
+            records, _end, nread = _scan_jsonl_stream(fh, 0, None, limit=st.st_size)
+    except OSError as e:
+        if on_fail is not None:
+            on_fail(e)
+        return None
+    _count_read(path, nread)
+    try:
+        fr = sys._getframe(1)
+        while fr is not None and (fr.f_code.co_filename == __file__ or _synthetic_scope(fr)):
+            fr = fr.f_back
+        who = fr.f_code.co_name if fr is not None else "?"
+    except Exception:
+        who = "?"
+    with _JSONL_CACHE_LOCK:
+        table = _RECORD_CACHE_STATS.get("wholeReads")
+        if not isinstance(table, dict):
+            table = _RECORD_CACHE_STATS["wholeReads"] = {}
+        wr = table.setdefault("detached<-%s" % who, {"count": 0, "bytes": 0})
+        wr["count"] += 1; wr["bytes"] += nread
+        stg = _read_stage() or "none"
+        bys = _RECORD_CACHE_STATS.get("wholeReadsByStage")
+        if not isinstance(bys, dict):
+            bys = _RECORD_CACHE_STATS["wholeReadsByStage"] = {}
+        ws = bys.setdefault("%s:detached<-%s" % (stg, who), {"count": 0, "bytes": 0})
+        ws["count"] += 1; ws["bytes"] += nread
+    return records
 
 
 _SERVED_RECORDS = threading.local()   # .by_path = {path: records} while a caller serves its own records (serve_records)
@@ -3108,6 +3287,9 @@ class FileAdapter:
         # would rebind repaired stitches, so it forces full).
         self.prompt_ids = set()
         self.boundary_pids = set()
+        self.summary_pids = {}   # compaction summary promptId -> the uuids of the summaries THIS adapter ingested wearing it (a
+        #                          restored adapter's tail alone; the seed's boundary_pids stands for the rest): what the fold's
+        #                          promptid gate reads to tell an attached pair's pid from an adoptable one (_asm_pid_adoptable)
         self.skill_use_ids = set()
         self.src_tool_links = set()
         self.dangling = set()
@@ -3120,6 +3302,11 @@ class FileAdapter:
         self._src_keys = {}      # path -> the reader's (gen, base, count) the records came from (the fold's identity gate)
         self._src_stat = {}      # path -> the (size, mtime) of the file AS READ for those records: the witness a document row
         #                          carries for a file wholly before the cut, never the write-time stat (T396 round one)
+        self._src_bytes = {}     # path -> (the reader entry's weight, its record count) when the list was taken or a fold
+        #                          re-seated it: what the heap block weighs a list by once the record cache no longer holds it
+        #                          (asm_pinned_records)
+        self._src_superseded = {}   # path -> [(first record, records, file bytes)] for each list a fold moved the leaf off without
+        #                             sharing its records (_asm_reseat_src): by_uuid still holds them, so the heap block counts them
         if seed is not None:
             self._seq = int(seed["seq_base"])
             self.prompt_ids |= seed["prompt_ids"]; self.boundary_pids |= seed["boundary_pids"]
@@ -3153,6 +3340,7 @@ class FileAdapter:
             self._src_keys[str(fp)] = (ent[6], ent[5], ent[5] + len(recs)) if ent is not None else (None, 0, 0)
             if ent is not None:
                 self._src_stat[str(fp)] = (ent[1], ent[0])    # the reader's (size, mtime) for this very read
+                self._src_bytes[str(fp)] = (_entry_weight(ent), len(recs))
             if cut is not None and ent is not None and ent[5] < cut[1]:
                 recs = recs[cut[1] - ent[5]:]            # the entry holds records before the cut (a whole reader came
             #                                              first): the seed stands for those, ingest from the cut on
@@ -3227,6 +3415,7 @@ class FileAdapter:
                             # a compaction summary's promptId is the designed link the boundary
                             # ADOPTION keys on — episode records wearing it can re-seat a card
                             self.boundary_pids.add(r["promptId"])
+                            self.summary_pids.setdefault(r["promptId"], []).append(u)
                     if r.get("sourceToolUseID"):
                         self.src_tool_links.add(r["sourceToolUseID"])
                 elif t == "assistant":
@@ -5118,8 +5307,9 @@ def rewound_uuids(path, drop=True):
     such and walked again next time. The leaf road with a rompuuid never comes here.
 
     `drop`: whether the walk's entry leaves the reader's cache after the memo is stored (the quiescence drop, when the file
-    has been idle past its window). True for a dead episode's file, which nothing else reads; False for a file of a LIVE
-    session's lineage (its /clear anchor, T391 round one, medium): the chain walk reads that file whole first at every pass,
+    has been idle past its window). True for a dead episode's file, which nothing else reads, and for a /clear's anchor, which
+    no parse reads since 2026-10-03; False for a file of a LIVE session's lineage (an anchor its parse reaches, T391 round
+    one, medium): the chain walk reads that file whole first at every pass,
     and a memo that popped the entry made the next pass's chain walk read it whole again, every pass, while the memo itself
     found its cursor at a moved generation and walked. Resident, the anchor is read once per process and the memo's cursor
     stays at the generation the chain walk's entry holds, so the scan reads nothing at all.
@@ -5253,6 +5443,25 @@ class TranscriptGraph:
     def fsid(self, u):
         return self._ad.fsid_of.get(u)
 
+    def dangling(self):
+        """The parent targets records of the graph name that are no record of it, as a frozenset: the adapter's dangling set,
+        collected at ingest over every record, kept or not (a restored entry's seed carries its pre-cut part's), less any the
+        graph holds (a tail record's parent before a restored entry's cut). A link from the active chain is among them even
+        where a restored entry's spine stops at it (review round two, 2026-10-03: after a /clear the comment cut builds the
+        graph over both files only when one of these is a record of the session's first file)."""
+        return frozenset(u for u in self._ad.dangling if not self.has(u))
+
+    def root_may_link(self, u):
+        """Whether `u`, a record this graph gives no parent, names one all the same that the graph lacks (root_parent).
+        Never over a whole adapter, whose parent map is its records' own links; a restored entry's spine root may
+        (_SeededGraph, review round five, 2026-10-03, narrowed to a recorded parent in round six, 2026-10-04)."""
+        return False
+
+    def root_parent(self, u):
+        """The parent `u`'s record names where this graph gives `u` none: None over a whole adapter, whose parent map holds
+        every link its records name; for a restored entry's spine root, the one its document recorded (_SeededGraph)."""
+        return None
+
     def _splice_atom(self, u):
         """The absorbed atom the parse emitted for attachment `u`, else None. Over a fresh read the atoms are _absorbed's over
         the adapter's splices and its kept chain, from an empty dedup memory as a whole parse starts, with no postal index
@@ -5344,6 +5553,7 @@ class _SeededGraph(TranscriptGraph):
             spine = seed["spine"]
             sp = seed["_spineParent"] = dict(zip(spine, [None] + list(spine[:-1])))
         self._spine_parent = sp
+        self._root_parent = seed.get("spine_root_parent")    # the spine root's raw parentUuid (_seed_from_doc)
         self._locs = _precut_locations(entry, rompuuid)
         self._recs = {}
 
@@ -5364,6 +5574,21 @@ class _SeededGraph(TranscriptGraph):
         if u in self._types:
             raise GraphMiss("record %s is before the document's cut and off its active spine" % u)
         return None
+
+    def root_may_link(self, u):
+        """True for the root of the pre-cut spine when its record names a parent, not itself, that this graph lacks: the
+        spine, root to cut, gives that root no parent, so it reads as parentless here even where its record links into a
+        file the parse left out, a session's first transcript after a /clear among them (the comment cut, review round
+        five, 2026-10-03). A root whose record names no parent answers False (review round six, 2026-10-04)."""
+        p = self.root_parent(u)
+        return p is not None and p != u and not self.has(p)
+
+    def root_parent(self, u):
+        """The raw parentUuid the document recorded for the pre-cut spine's root (the seed's "spine_root_parent", review
+        round six), for that root alone; None for any other record."""
+        if u in self._ad.by_uuid or u not in self._spine_parent or self._spine_parent[u] is not None:
+            return None
+        return self._root_parent
 
     def _loc(self, u):
         form, src, got = self._locs
@@ -5526,9 +5751,14 @@ def with_display_graph(leaf_path, rompuuid, sdk_human, candidate_files, states, 
 #   - the new leaf does not descend from the old leaf through the delta, unless the
 #     delta is a parallel tool batch landing (FileAdapter._batch_delta)               -> full
 #   - the delta contains: a compact boundary or summary; a uuid already in the graph
-#     or among its recorded dangling parent targets; a promptId already seen; a Skill
-#     tool_use an old payload record already references; an unparseable or
+#     or among its recorded dangling parent targets; a promptId already seen, on a
+#     command-wrapper record or wearing an adoptable compaction's summary pid
+#     (_asm_pid_adoptable); a Skill tool_use an old payload record already references; an unparseable or
 #     watermark-regressing conversational timestamp                                   -> full
+#   - a delta holding a record the narrowed promptid arm let through, refused by a compaction,
+#     the descent or a batch's kept check: the whole parse, never the restore road    -> full
+#     (a compaction summary does not mark its own delta; the re-seat steps aside for such a
+#     delta that passed on a batch's link, so its kept check rules)
 #   - after the fold's graph recompute, ANY old record's kept-membership changed      -> full
 #     (a batch landing's delta: the restore road first, as its descent demotion took)
 # Postal is the one input with no gate, on the log's own invariant: rows are append-only and
@@ -5594,6 +5824,98 @@ def _asm_demote(reason):
     _asm_stat(k)
     _ASM_DEMOTE_TL.reason = reason
     return None
+
+
+def _asm_demote_passed():
+    """The demotion of a delta the narrowed promptid arm let through (_asm_pid_adoptable: every summary wearing the record's
+    id hangs off an attached pair) that then fails for a reason the restore road takes: a compaction in the delta, the leaf
+    descent, or the kept check of a parallel tool batch the descent let by (review of 2026-10-03, round one). It is filed as
+    the promptid demotion it was before the arm narrowed, which the restore road does not take, so it parses whole as it did
+    then, counted g:promptid:passedDemote beside the arms. The restore proves only that the tail chains onto the document, and
+    a record wearing the summary's prompt id that rewinds onto the pre-compaction leaf hangs off the tip of a document cut at
+    the compaction's turn: restored, it served a turn the cold parse does not build, and the settle, which writes nothing for
+    a restored entry, left that document standing, and each boot served the same turn, until the tail reached the churn
+    share. The descent cannot tell that rewind from an api_error retry, so a retry whose result wears the id parses whole here
+    too, as it did before the narrowing. The re-seat (_assemble) steps aside for a passed delta that passed on a parallel
+    batch's link, so its kept check rules and a rejection lands here (round two: re-seated, a result parented at a parallel
+    call that an automatic compaction was anchored on was served as a turn of its own); a passed delta that extends the path
+    keeps its re-seat. A compaction summary does not mark its own delta (_asm_gates), so a turn's later compaction alone in its
+    append takes the restore road as any compaction does."""
+    _asm_stat("g:promptid:passedDemote")
+    return _asm_demote("promptid")
+
+
+def _asm_on_path(ad, u):
+    """Whether `u` sits on the adapter's active path as the last parse or fold left it: a walk back over ad.parent_of (the
+    graph after the repair passes, adoption's splices included) from ad.leaf_uuid, stopping at `u`. For a compaction in the
+    current turn the walk is the records since it, never the whole chain; the seen set is the cycle guard, as in
+    active_path."""
+    cur, seen = ad.leaf_uuid, set()
+    while cur is not None and cur not in seen:
+        if cur == u:
+            return True
+        seen.add(cur)
+        cur = ad.parent_of.get(cur)
+    return False
+
+
+def _asm_pid_adoptable(ad, pid):
+    """Whether a delta record wearing `pid`, a compaction summary's promptId, could re-seat a boundary adoption, the one thing
+    such a record can change that the fold's kept check cannot see (2026-10-03). False only when every summary on record wearing
+    it hangs off a compact_boundary on the entry's active path that adoption did not splice: an ATTACHED pair, which an
+    automatic compaction writes, and which _adopt_detached_compactions skips (`if b in active: continue`). A delta that the
+    descent gate passes extends that path, or lands a parallel tool batch (_batch_delta), whose results can move the leaf onto
+    another call's branch and leave the pair off the path. Adoption cannot re-seat the pair then either: it splices a pair only
+    behind a /compact episode on the path that the summary's promptId names, and an automatic summary wearing its turn's
+    prompt id names that turn's records, none of them a /compact; the fold's recompute and kept check rule on the rest, and a
+    record wearing the id after that finds the pair off the path and demotes (review of 2026-10-03, round one). The records
+    after the pair already fold on the carried state (the restore dedup, the summaries map) when they wear another prompt's
+    id. A delta in which this lets through a record other than a compaction summary, and which a compaction, the descent
+    or a batch's kept check then refuses, parses whole (_asm_demote_passed), and a fold of one counts under
+    fold:attachedPass. Before, every summary's pid
+    demoted: if the CLI stamps an automatic compaction's summary with the prompt id of the turn it compacted in (not yet
+    checked on live transcripts; the fixtures give it none), every later tool result of that turn wears it, and each append
+    was a whole parse of the transcript until the next prompt.
+
+    True, the demotion as before, for a pid the entry cannot vouch for: one the restore seed carries (the document's gates name
+    the pids of the summaries before its cut, whose attachment is not on record here: _asm_doc_boundary_pids; a document
+    written before that names every summary's pid, which only demotes more), one with no summary in the graph, a summary whose
+    record a later copy replaced or whose parent is not a compact_boundary, a boundary adoption spliced (a live manual
+    /compact, whose episode a later record can move), and a boundary off the path."""
+    if pid in ((ad.seed or {}).get("boundary_pids") or ()):
+        return True
+    sums = getattr(ad, "summary_pids", {}).get(pid)
+    if not sums:
+        return True
+    for s in sums:
+        sr = ad.by_uuid.get(s)
+        if not (sr and sr.get("isCompactSummary") is True and sr.get("promptId") == pid):
+            return True                                  # a later copy of the uuid replaced the summary (last write wins)
+        b = ad.parent_of.get(s)                          # the summary's own link: adoption rewrites the boundary's and its child's
+        br = ad.by_uuid.get(b) if b else None
+        if not (br and br.get("type") == "system" and br.get("subtype") == "compact_boundary"):
+            return True
+        if b in ad._adopted or not _asm_on_path(ad, b):
+            return True
+    return False
+
+
+def _asm_doc_boundary_pids(ad, all_recs, cut_seq):
+    """The prompt ids a document's gates name as boundary_pids (2026-10-03): those of the compaction summaries before the cut,
+    every copy the pre-cut bytes carry (`all_recs`, the writer's (seq, record) pairs; _ingest adds each copy's). The writer
+    reads a whole entry's adapter, so no seed is carried: it refuses a restored entry with pre-cut atoms or turns, and no
+    exercised road reaches this line from the one restored entry it does not refuse there, a degenerate document's whose
+    pre-cut part restored no atoms (tests/test_asm_write_over_grown_entry.py; review round one). Every restore re-ingests the
+    tail, its summaries included, so the adapter it seeds holds the same boundary_pids a whole parse does, while the seed
+    names only the summaries the restored entry cannot see, which is what _asm_pid_adoptable's seed check asks. The gates
+    named every summary's pid until then, so a restore from any document written after a compaction past its cut (a restart
+    in the turn, the re-seat after a later whole parse) demoted every record wearing that summary's pid for the rest of the
+    turn. A document written before then still restores, and its wider set only demotes more."""
+    out = set()
+    for sq, r in all_recs:
+        if sq < cut_seq and r.get("type") == "user" and r.get("promptId") and r.get("isCompactSummary") is True:
+            out.add(r["promptId"])
+    return out
 
 
 def _asm_compaction_under_share(entry, leaf_path):
@@ -5755,6 +6077,71 @@ def evict_document(leaf_path):
     return len(popped), dropped
 
 
+def _records_shared(held, recs):
+    """Whether the reader's held list `held` holds the records of `recs` (a list an adapter took from the reader): the same
+    list, or the same first and last record objects at the list's start. Only an append shares records, and it stores
+    records + new under the same base; every read that changes an entry's base (a tail upgraded to the whole file, a read
+    from zero, a tail restored from an earlier start) decodes new objects, so the start is the one place to look. Two
+    identity checks, never a walk."""
+    if held is recs:
+        return True
+    n = len(recs)
+    return 0 < n <= len(held) and held[0] is recs[0] and held[n - 1] is recs[-1]
+
+
+def _list_file_bytes(size, n):
+    """The file bytes of an n-record list an adapter holds, from the (weight, count) it recorded for its list (_src_bytes):
+    the weight itself for the list it was recorded for, else the same bytes per record."""
+    w, n0 = size if size else (0, 0)
+    return int(w) if n0 == n else (int(w * n / n0) if n0 else 0)
+
+
+def asm_pinned_records() -> dict:
+    """The records an assembly entry's adapter holds that the record cache no longer does, for /perf's heap block (the memory
+    diagnosis, 2026-10-01: the record cache let go of a leaf, its counted bytes fell, and the entry's adapter still held the very
+    same list, so the memory did not; the next whole read decoded a second copy). For every installed entry, each file list the
+    adapter took from the reader (its _src, a private or skipped file aside) whose records the reader's current entry for that
+    path does not hold (_records_shared) is pinned, and so is every list a fold superseded (_src_superseded: a tail the reader
+    upgraded to the whole file, whose records the adapter's maps keep after the fold re-seated the leaf on the whole list):
+    `lists`, `records`, `fileBytes` (the reader entry's weight when the adapter took or re-seated the list, scaled by record
+    count when the adapter could not weigh its current list: the leaf's own bytes per record) and `bytes` (times the multiple
+    in force, _RECORD_CACHE_MULTIPLE, read at the call). A list two entries share counts once. It weighs records alone: an
+    entry's own atoms and lookup maps (by_uuid, the graph), about 0.9 to 1.1 KB per record of the leaf a whole entry parsed
+    (tracemalloc on two synthetic leaves, 2026-10-01: 0.31 bytes per file byte where records carry long tool results, 4.0
+    where they are short), stay a count (assemblyEntries), so a 0 here never says the entries are free. O(entries x their files):
+    one record-cache lookup per file, taken under the cache's lock with nothing else, then two identities each after it, so a
+    reader's hit never waits on the checks; no list is iterated; the two locks are taken one after the other."""
+    with _ASM_LOCK:
+        entries = list(_ASM_CACHE.values())
+    cands, pinned = [], {}
+
+    def pin(key, n, fb):                                  # the same records, whichever list carries them: the longest counts
+        if key not in pinned or pinned[key][0] < n:
+            pinned[key] = (n, fb)
+    for entry in entries:
+        ad = entry.get("ad") if isinstance(entry, dict) else None
+        if ad is None:
+            continue
+        keys, sizes = getattr(ad, "_src_keys", None) or {}, getattr(ad, "_src_bytes", None) or {}
+        for p, recs in list((getattr(ad, "_src", None) or {}).items()):
+            k = keys.get(p)
+            if not recs or not (isinstance(k, tuple) and len(k) == 3):   # an empty list, a ("private",) or ("skip",) row
+                continue
+            cands.append((p, recs, sizes.get(p)))
+        for p, gone in list((getattr(ad, "_src_superseded", None) or {}).items()):
+            for first, n, fb in list(gone):
+                pin((p, id(first)), n, fb)
+    with _JSONL_CACHE_LOCK:                               # the reader's entries as they stand (a tuple whose list a read replaces,
+        held = [_JSONL_CACHE.get(p) for p, _, _ in cands]  #  never extends in place); the identities are checked after the lock
+    for (p, recs, size), ent in zip(cands, held):
+        if ent is not None and _records_shared(ent[4], recs):
+            continue
+        pin((p, id(recs[0])), len(recs), _list_file_bytes(size, len(recs)))
+    fb_total = sum(fb for _, fb in pinned.values())
+    return {"lists": len(pinned), "records": sum(n for n, _ in pinned.values()), "fileBytes": fb_total,
+            "bytes": int(round(fb_total * _RECORD_CACHE_MULTIPLE))}
+
+
 def _asm_lazy_uuids(e):
     """The uuids of the pre-cut records assembly entry `e` serves as lazy atoms, whose bodies the hydrated memo holds, one at a
     time: its lazy index's record rows, or the atoms-only form's prefix atoms (read without materializing any). Nothing for a
@@ -5912,6 +6299,9 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         return _asm_demote("empty-graph")
     parent_d, new_leaf = {}, old_leaf
     compaction = None      # the delta's compaction reason, filed only once every record has met the other gates (below)
+    adoptable = {}         # a summary pid -> _asm_pid_adoptable's answer, asked once per delta
+    attached_pass = False  # the narrowed boundary arm let a record through where it demoted before: a later demotion the restore
+    #                        road would take parses whole instead (_asm_demote_passed), and the fold counts it once it serves
     for r in delta:
         t, u = r.get("type"), r.get("uuid")
         if u:
@@ -5936,11 +6326,31 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             # retroactively) and any record wearing an adoptable boundary's episode pid (it can
             # re-seat the adopted card's splice without changing kept — invisible to the
             # invariance check). Everything else folds: the carried twins map serves the DELTA
-            # record's own classification record-locally.
+            # record's own classification record-locally. A summary pid counts as adoptable
+            # unless the entry vouches that every summary wearing it hangs off an attached
+            # boundary (_asm_pid_adoptable, 2026-10-03: an automatic compaction's summary, when it
+            # wears its turn's prompt id, demoted every later tool result of that turn). The two arms count apart
+            # (g:promptid:boundary, g:promptid:wrapper; boundarySeed, the boundary demotions whose
+            # pid the restore seed named), beside g:promptid. A delta the narrowed arm let through
+            # (a record other than a compaction summary, which does not mark its own delta)
+            # is marked (attached_pass): if a compaction, the descent or a batch's kept check then
+            # refuses it, it parses whole under promptid as before (g:promptid:passedDemote), and
+            # if it folds, the fold counts it (fold:attachedPass, the folds the narrowing saved).
             _wtxt = _text_of(_content(r.get("message"))) or ""
-            if r["promptId"] in ad.boundary_pids or \
-                    (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
-                return _asm_demote("promptid")                                        #   re-classifies nothing (T333)
+            _pid = r["promptId"]
+            _bnd = False
+            if _pid in ad.boundary_pids:
+                if _pid not in adoptable:
+                    adoptable[_pid] = _asm_pid_adoptable(ad, _pid)
+                _bnd = adoptable[_pid]
+            if _bnd or (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load
+                _asm_stat("g:promptid:" + ("boundary" if _bnd else "wrapper"))          #   re-classifies nothing (T333)
+                if _bnd and _pid in ((ad.seed or {}).get("boundary_pids") or ()):
+                    _asm_stat("g:promptid:boundarySeed")
+                return _asm_demote("promptid")
+            if _pid in ad.boundary_pids and r.get("isCompactSummary") is not True:
+                attached_pass = True     # not the delta's own summary (round two): a turn's later compaction, its summary wearing
+                #                          the id the first put on record, restores alone in its append as any compaction does
         if t == "assistant":
             for b in _content(r.get("message")) or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use" and \
@@ -5957,8 +6367,9 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
         # a record past the compaction that the fold refuses for its own reason (a stamp before the records folded, a Skill call
         # a pre-cut payload names, a uuid a pre-cut record named as its parent, a re-classifying prompt id) demoted above for that
         # reason and keeps its whole parse (review of 2026-09-24: returning at the compaction masked them, and the restore served
-        # a tree a cold parse does not build, at every later boot as well)
-        return _asm_demote(compaction)
+        # a tree a cold parse does not build, at every later boot as well). A delta holding a record the narrowed promptid arm
+        # let through parses whole as it did before the narrowing (_asm_demote_passed)
+        return _asm_demote_passed() if attached_pass else _asm_demote(compaction)
     # Leaf descent: the new file-leaf must chain back to the old one THROUGH the delta — an
     # api_error spur re-parent, a rewind, and a /clear fork all fail here. walk.pop doubles
     # as the cycle guard; a delta with no uuid-bearing record passes trivially (leaf unmoved).
@@ -5973,14 +6384,19 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
     # says the delta passed on the batch link, so a kept rejection of it takes the road the
     # descent gave it (_asm_fold). It is cleared before every walk, so it speaks for this delta
     # alone: a later delta that descends from the old leaf keeps a kept rejection's own road.
+    # The pass bit beside it, set the same way, says the narrowed promptid arm let a record of
+    # this delta through: a descent demotion of such a delta, and a batch's kept rejection,
+    # parse whole instead of restoring (_asm_demote_passed), and its fold is counted. Both bits
+    # set means the re-seat (_assemble) steps aside, so that kept check rules (round two).
     _ASM_DEMOTE_TL.batch = False
+    _ASM_DEMOTE_TL.passed = attached_pass
     cur, hops, walk = new_leaf, 0, dict(parent_d)
     while cur != old_leaf:
         if cur is None or cur not in walk or hops > len(delta) + 1:
             if ad._batch_delta(delta, parent_d, old_leaf):
                 _ASM_DEMOTE_TL.batch = True
                 break
-            return _asm_demote("descent")
+            return _asm_demote_passed() if attached_pass else _asm_demote("descent")
         cur = walk.pop(cur)
         hops += 1
     return delta, leaf_recs
@@ -6051,6 +6467,10 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     kept = ad.kept_uuids(ad.active_path())
     dset = {r.get("uuid") for r in delta if r.get("uuid")}
     if kept - dset != entry["kept"]:
+        if getattr(_ASM_DEMOTE_TL, "batch", False) and getattr(_ASM_DEMOTE_TL, "passed", False):
+            return _asm_demote_passed()   # a batch delta the narrowed promptid arm let through: the whole parse it had before the
+            #                               narrowing, never the restore road the batch's kept rejection takes below (round one;
+            #                               the re-seat steps aside for such a delta so it reaches this check, round two)
         _asm_demote("kept")          # ancestry moved under an old record — the fold cannot
         #                              re-emit history; a full parse can, and so can a restore
         if getattr(_ASM_DEMOTE_TL, "batch", False):
@@ -6078,10 +6498,36 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
     entry["n_qatts"] = len(ad.qatts)
     ogen, obase, ocount = entry["recs"][leaf_key]
     entry["recs"][leaf_key] = (ogen, obase, ocount + len(delta))   # commit LAST: a bail above re-slices the same
-    ad._src[leaf_key] = leaf_recs                 #  delta next visit and the uuid gate demotes it
+    _asm_reseat_src(ad, leaf_key, leaf_recs)      #  delta next visit and the uuid gate demotes it
     ad._src_keys[leaf_key] = entry["recs"][leaf_key]
     _asm_stat("fold")
+    if getattr(_ASM_DEMOTE_TL, "passed", False):
+        _asm_stat("fold:attachedPass")   # a fold the narrowed promptid arm saved, counted only once the fold serves (round one): a
+        #                                  delta it let through that a later gate, the kept check or the re-seat took is no fold
     return _asm_serve(entry)
+
+
+def _asm_reseat_src(ad, path, recs):
+    """The fold's re-seat of the adapter's leaf list on `recs`, the reader's list the delta came from. When that list does not
+    hold the old one's records (a tail the reader upgraded to the whole file under the same generation, then an append that
+    folds: the judges' road over a restored live leaf), the adapter's maps still hold the old records, so the old list joins
+    _src_superseded and the heap block keeps weighing it for as long as the adapter lives (asm_pinned_records; review of
+    2026-10-01: the gauge said the copy had gone while the memory stayed). The new list is weighed by the reader's entry when
+    the cache still holds this very list (the entry the gates read), so a later drop is weighed by real bytes. O(1): two
+    identities and one cache lookup, never a walk."""
+    old = ad._src.get(path)
+    sizes = getattr(ad, "_src_bytes", None)
+    if old and not _records_shared(recs, old):
+        gone = getattr(ad, "_src_superseded", None)
+        if gone is None:
+            gone = ad._src_superseded = {}
+        gone.setdefault(path, []).append((old[0], len(old), _list_file_bytes((sizes or {}).get(path), len(old))))
+    ad._src[path] = recs
+    if sizes is not None:
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(path)
+            if ent is not None and ent[4] is recs:
+                sizes[path] = (_entry_weight(ent), len(recs))
 
 
 # ═══════════════════════ THE ASSEMBLY CHECKPOINT (T323 stage 4, 2026-09-11) ═══════════════════════
@@ -6189,6 +6635,16 @@ def _mat_register(la, i):
     _MAT_LRU[key] = (weakref.ref(la), i)
 
 
+def _mat_count(la, d):
+    """Under _MAT_LOCK: the index behind `la` holds `d` more (or fewer) materialized atoms that the LRU registers, the live
+    count the heap block's builtAtoms sums over the live indexes: a build adds one (LazyAtoms._at), an eviction takes one off
+    (_mat_trim) and a release takes off what it popped (LazyIndex.release). A stand-in index without the counter is skipped."""
+    ix = getattr(la, "_index", None)
+    n = getattr(ix, "_built", None)
+    if n is not None:
+        ix._built = max(0, n + d)
+
+
 def _mat_trim():
     """Under _MAT_LOCK: the LRU back within _MAT_CAP from its old end. A live entry is evicted as ever (its slot back to the
     placeholder, counted `evictions`); an entry whose list has been collected is dropped and counted `expired`, and no slot is
@@ -6204,6 +6660,7 @@ def _mat_trim():
             _ASM_INDEX_STATS["expired"] += 1
         else:
             list.__setitem__(lz, j, _UNMAT)
+            _mat_count(lz, -1)
             _ASM_INDEX_STATS["evictions"] += 1
             # #1735: no gc-freeze note here. A materialized atom is decoded json (a dict), acyclic: it dies by
             # reference counting when the slot drops it, frozen or not, so an unfreeze reclaim would collect nothing.
@@ -6225,12 +6682,17 @@ class LazyIndex:
         #                                                   under _MAT_LOCK; release() walks and prunes them): plain refs, no WeakSet, since
         #                                                   a LazyAtoms is unhashable and a ref callback may fire under the lock
         self.rowb = [r.encode("utf-8") for r in doc["atoms"]]   # v6: the document's rows are JSON strings already (T401 (4))
+        self.row_bytes = sum(map(len, self.rowb))         # the rows' encoded bytes, summed once here (rowb never changes), so the
+        #                                                   heap block's estimate reads a number, never the rows (restored_index_estimate)
         self.records = doc["records"]
         self.fsids = list(doc.get("fsids") or [])
         files = doc.get("files")
         self.source_files = None if files is None else _source_files(files)   # the held view's own document, not the last
         #                                                                         restore's (_restore_prefix_atoms, 2026-09-17)
         self._user_facts = {}                             # the interrupt-marks tally's light facts by row (user_facts), bounded by _USER_FACTS_CAP
+        self._built = 0                                   # the atoms of this index's lists the LRU registers, kept under _MAT_LOCK (_mat_count):
+        #                                                   the heap block's live atoms, where the LRU's length also counts the dead slots of
+        #                                                   collected lists until they expire
         with _MAT_LOCK:                                   # the add under the lock the userFacts gauge sums under: an add beside the sum raised
             _LIVE_INDEXES.add(self)                       #  "set changed size during iteration" and /perf answered 500 (1597 low 1)
 
@@ -6316,6 +6778,7 @@ class LazyIndex:
                         n += 1                                        #  id was popped at the build), so the count is this list's
                     list.__setitem__(la, i, _UNMAT)
             self._minted[:] = live                        # in place: a constructor holding this list appends to the one list
+            self._built = max(0, self._built - n)
             _ASM_INDEX_STATS["released"] += n
             _ASM_INDEX_STATS["resident"] = len(_MAT_LRU)
         # #1735: no gc-freeze note here, as in _mat_trim. The slots reset to _UNMAT release materialized atoms, which
@@ -6412,7 +6875,8 @@ class LazyAtoms(list):
                     _MAT_LRU.move_to_end(key)
                 elif list.__getitem__(self, i) is not _UNMAT:   # built and not registered (a dead entry under a reused id, or none):
                     _mat_register(self, i)                      #  registered now; an eviction or release between the read above and
-                    _mat_trim()                                 #  this lock left the slot unbuilt, and then `a` is the caller's value
+                    _mat_count(self, 1)                         #  this lock left the slot unbuilt, and then `a` is the caller's value
+                    _mat_trim()
             return a
         a = self._index.build(self._rows[i])
         by = _materialize_caller()
@@ -6422,6 +6886,7 @@ class LazyAtoms(list):
                 return cur
             list.__setitem__(self, i, a)
             _mat_register(self, i)
+            _mat_count(self, 1)
             _ASM_INDEX_STATS["materialized"] += 1
             _ASM_INDEX_STATS["materializedBy"][by] = _ASM_INDEX_STATS["materializedBy"].get(by, 0) + 1
             bs = "%s:%s" % (_read_stage() or "none", by)      # the calling thread's stage mark beside the caller (T401 (5a))
@@ -6661,6 +7126,11 @@ def plain_tree(session):
 
 
 def asm_index_stats():
+    """The lazy index for /perf. `materialized` (atoms built from document rows), `restoredTurns` (pre-cut turns restored from
+    documents) and `rowDecodes` (document rows decoded, a build's or a light read's) are running counters since boot, never
+    what is held, and so are `evictions`, `released` and `expired`. The gauges are `resident` (the LRU's slots, an upper bound
+    on the live atoms), `cap` and `userFacts`; what the slots and the live indexes weigh is the heap block's builtAtoms and
+    restoredIndexes."""
     with _MAT_LOCK:
         return {"materialized": _ASM_INDEX_STATS["materialized"], "materializedBy": dict(_ASM_INDEX_STATS["materializedBy"]),
                 "materializedByStage": dict(_ASM_INDEX_STATS["materializedByStage"]),
@@ -6671,6 +7141,67 @@ def asm_index_stats():
 #                                                                                       live indexes (a dropped index takes its cache with it)
 #   resident is len(_MAT_LRU) with the entries of collected lists included until they expire at the cap (_mat_trim) or are released;
 #   released and expired are the counters those two roads bump (the LRU's weak ownership, measured 2026-09-15)
+MAT_ATOM_BYTES = 1700                 # what one materialized pre-cut atom weighs: the middle of the 1.3 to 2.1 KB tracemalloc measured
+#                                       per atom over real indexes (2026-09-15, see _MAT_LRU); a synthesized atom with a short message,
+#                                       its LRU entry included, read 1,531 (Python 3.12, 2026-10-01). An atom as built, with no body:
+#                                       hydrate() writes a body into the atom in place, and that body is not in this figure
+MAT_SLOT_BYTES = 220                  # what one LRU entry weighs once its list has been collected (a dead slot, until it expires at the
+#                                       old end): its key and value tuples, the id's int and its share of the ordered dict's tables
+#                                       (218.6 by tracemalloc over 20,000 entries of 50-atom lists collected without a release, 234.1
+#                                       with 500-atom lists, whose slot numbers past 256 are ints of their own; Python 3.12, 2026-10-01)
+INDEX_ROW_OVERHEAD_BYTES = 42         # beyond its encoded bytes, what one atom row costs a LazyIndex: the bytes object's header and its
+#                                       list slot (41.7 by tracemalloc over 20,000 rows of a synthetic document, Python 3.12, 2026-10-01)
+INDEX_RECORD_ROW_BYTES = 430          # one decoded record row of a document, a list of ten (two uuids, a seq, a stamp, small codes) and
+#                                       its slot in the records list (429.4 by tracemalloc over 20,000 rows, the same probe); structural,
+#                                       so a synthetic document measures it as a real one would
+USER_FACT_BYTES = 447                 # one cached light fact (about 447 bytes a row measured, _USER_FACTS_CAP)
+
+
+def built_atoms_estimate() -> dict:
+    """The materialized pre-cut atoms for /perf's heap block: `slots` (the LRU's length, the same read as asmIndex.resident),
+    `live` (the slots whose list is alive: the atoms the live indexes count as built, _mat_count), `overSlots` (how far `live`
+    runs past `slots`, 0 unless a count drifted) and `bytes`: the live atoms, at most one per slot, x `atomBytes`
+    (MAT_ATOM_BYTES) plus the other slots x `slotBytes` (MAT_SLOT_BYTES), since a collected list's slots stay in the LRU,
+    holding only their entries, until they expire. An estimate of the atoms as built: a hydrated atom also holds its body,
+    which this leaves out (heap.hydrated counts the bodies only while its memo holds them). A list collected while its index
+    lives keeps its slots in `live` until the index goes, so `live` is the indexes' own sum, never cut to `slots` (a cut
+    would hide the counter's every miscount whenever the LRU held little else), while `bytes` never prices more atoms than
+    the LRU has slots (review of 2026-10-01: an over-count priced atoms nothing held); such a drift shows as `overSlots`
+    rather than as bytes. The dead slots are what `slots` leaves over `live`, never fewer than none. O(live indexes): one
+    counter per index."""
+    with _MAT_LOCK:                                   # the WeakSet is read under the lock its adds take (the userFacts gauge's rule)
+        n = len(_MAT_LRU)
+        live = sum(int(getattr(ix, "_built", 0) or 0) for ix in list(_LIVE_INDEXES))
+    atoms = min(live, n)                              # the LRU registers every built atom, so it cannot hold more than its slots
+    return {"slots": n, "live": live, "overSlots": max(0, live - n), "atomBytes": MAT_ATOM_BYTES, "slotBytes": MAT_SLOT_BYTES,
+            "bytes": atoms * MAT_ATOM_BYTES + max(0, n - live) * MAT_SLOT_BYTES}
+
+
+def restored_index_estimate() -> dict:
+    """The live lazy indexes for /perf's heap block (a restored session's pre-cut rows, T323 stage 4c): `indexes`, `rows` and
+    `rowBytes` (the atom rows' encoded bytes, which each index summed once when it was built), `records` (the document's record
+    rows, counted once per list: indexes restored from one memoized document share its list) and `userFacts` (the light facts
+    cached), and `bytes`: rowBytes plus rows x INDEX_ROW_OVERHEAD_BYTES plus records x INDEX_RECORD_ROW_BYTES plus userFacts x
+    USER_FACT_BYTES, an estimate. The record rows are the decoded document's own, so while the assembly document memo holds
+    that document (asmCheckpoint.asmDocMemo) the two gauges both count them. O(live indexes): lengths and the stored sum,
+    never a walk over rows."""
+    with _MAT_LOCK:                                   # the WeakSet is read under the lock its adds take (the userFacts gauge's rule)
+        live = list(_LIVE_INDEXES)
+    out = {"indexes": len(live), "rows": 0, "rowBytes": 0, "records": 0, "userFacts": 0}
+    seen = set()                                      # the record lists already counted, by identity (every list is alive here: the
+    for ix in live:                                   #  indexes in `live` hold them, so no id is reused during the loop)
+        out["rows"] += len(ix.rowb)                   # each index encodes its own rows, so those count per index
+        out["rowBytes"] += int(getattr(ix, "row_bytes", 0) or 0)
+        recs = ix.records
+        if recs is not None and id(recs) not in seen:
+            seen.add(id(recs))
+            out["records"] += len(recs)
+        out["userFacts"] += len(ix._user_facts)
+    out["bytes"] = (out["rowBytes"] + out["rows"] * INDEX_ROW_OVERHEAD_BYTES + out["records"] * INDEX_RECORD_ROW_BYTES
+                    + out["userFacts"] * USER_FACT_BYTES)
+    return out
+
+
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
 _ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
                    "hydratedHits": 0, "hydratedEvicted": 0,   # the hydrated-body memo's fills served without a read, and the
@@ -6877,9 +7408,10 @@ def _asm_refusal_stands(leaf_path):
 def asm_document_seeds(leaf_path):
     """Whether the assembly document for `leaf_path` can SEED a one-file walk of the leaf: its inputs are the leaf alone. Read
     from the sidecar's `files` (a few bytes, never the document); a sidecar without the list (an older write) answers as
-    asm_document_stands does, and the next write adds it. A cleared or resume-forked session's document is written over the
-    leaf plus its lineage, so file_rewound's load refused it on the inputs comparison and the leaf was read whole at every
-    process (T391 follow-up, round one, low 1): such a leaf takes the memo road."""
+    asm_document_stands does, and the next write adds it. A back-linked or resume-forked session's document is written over
+    the leaf plus its lineage, so file_rewound's load refused it on the inputs comparison and the leaf was read whole at every
+    process (T391 follow-up, round one, low 1): such a leaf takes the memo road. A /clear's leaf documents alone since
+    2026-10-03 (judge _judge_candidates), and takes the seeded leaf road."""
     if not asm_document_stands(leaf_path):
         return False
     cp = _asm_ckpt_file(leaf_path)
@@ -6911,8 +7443,10 @@ def _retire_fold(path, name):
         _FOLD_DIRTY.add(key)
 
 
-_DOC_MEMO = {}                     # path -> (document file's (mtime_ns, size), the loaded document): one read shared between the
-#                                   retirement's consult and the write's carry (T391 follow-up, low C), dropped when the file moves
+_DOC_MEMO = {}                     # path -> (document file's _doc_sig, the loaded document): one read shared between the
+#                                   retirement's consult and the write's carry (T391 follow-up, low C), dropped when the file moves;
+#                                   a write keeps the document it wrote here only when it carried an entry (a state or an
+#                                   over-the-cap cursor) the disk alone had
 _DOC_MEMO_PARSE_MULTIPLE = 4.5     # what a parsed fold document weighs resident against its bytes on disk (measured on the devbox's
 #                                    documents, 2026-09-12): the memo's weights and its cap are RESIDENT bytes, so the ceiling means
 #                                    what it says
@@ -6921,11 +7455,60 @@ _DOC_MEMO_CAP = _env_or("ROMP_DOC_MEMO_CAP_MB", max(64 * 1024 ** 2, _machine_mem
 #                                    the memo's resident cap: MemTotal / 512, never under 64 MiB (236 MiB on a 118 GiB machine; a count
 #                                    cap said nothing about bytes and held whole documents for files no writer touched again), reported
 #                                    under checkpoints.docMemo
+_DOC_INDEX = {}                    # path -> (document file's _doc_sig, {fold name: count, or None when not an int}) for every entry
+#                                   with a state or an over-the-cap cursor, as this process last WROTE or LOADED the document: what a
+#                                   write's carry could take from it, so a write after a write that changed nothing carryable reads
+#                                   no document byte (_carry_forward_states)
+_DOC_INDEX_MAX = 4096              # paths; over it the one least recently written or loaded is let go (its next carry reads the
+#                                    document once)
+
+
+def _doc_sig(st_):
+    """What identifies a fold document's bytes from its stat: (inode, mtime_ns, size). Every writer replaces a document by a
+    rename (a new inode), so a document another writer replaced at the same size within one clock tick still differs."""
+    return (st_.st_ino, st_.st_mtime_ns, st_.st_size)
+
+
+def _doc_stat_sig(cp, key):
+    """The _doc_sig of `key`'s fold document `cp`, or None when there is none to read. A missing file (or directory) is the
+    quiet common case, a first write. Any other stat error (a checkpoints directory this account cannot search, a failing
+    disk) answers None too and never raises, but is said once, naming the document and the error: the file is then read
+    whole and its write carries nothing (a lasting one can fail the write as well, and every boot reads the file whole), and
+    that line is what says why."""
+    try:
+        return _doc_sig(cp.stat())
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as e:
+        _say_once("checkpoint: the fold document %s of %s could not be checked (%s); read as no document, so the file is "
+                  "read whole and its write carries nothing" % (cp, key, e.strerror or e))
+        return None
+
+
+def _doc_carryable(folds):
+    """{fold name: count} of the entries a write's carry could take from a document's `folds` (the carry's own shape test: a
+    dict with a state or an over-the-cap cursor; the count None when it is not an int, "3", 3.0 or infinity among them, an
+    entry the carry skips)."""
+    out = {}
+    for n, f in (folds or {}).items():
+        if isinstance(f, dict) and ("state" in f or f.get("over")):
+            c = f.get("count")
+            out[n] = c if type(c) is int else None
+    return out
+
+
+def _doc_index_put_locked(key, sig, folds):
+    """Record (under _CKPT_LOCK) what `key`'s document, the file with stat `sig`, can give a write's carry; the path becomes the
+    index's newest, so the bound lets go of the path least recently written or loaded."""
+    _DOC_INDEX.pop(key, None)
+    _DOC_INDEX[key] = (sig, _doc_carryable(folds))
+    while len(_DOC_INDEX) > _DOC_INDEX_MAX:
+        _DOC_INDEX.pop(next(iter(_DOC_INDEX)), None)
 
 
 def _doc_memo_weight(sig):
     """A memoized document's resident weight from its file stat: the size on disk times the parse multiple."""
-    return int(sig[1] * _DOC_MEMO_PARSE_MULTIPLE)
+    return int(sig[-1] * _DOC_MEMO_PARSE_MULTIPLE)
 
 
 def _doc_memo_drop(key):
@@ -6935,17 +7518,26 @@ def _doc_memo_drop(key):
         _DOC_MEMO_BYTES[0] -= _doc_memo_weight(old[0])
 
 
+def _doc_memo_put_locked(key, sig, doc):
+    """Memoize (under _CKPT_LOCK) `key`'s document, the file with stat `sig`: bounded in bytes (the caches rule), the oldest
+    documents go and the newest stays for the read it shares."""
+    _doc_memo_drop(key)
+    _DOC_MEMO[key] = (sig, doc); _DOC_MEMO_BYTES[0] += _doc_memo_weight(sig)
+    while _DOC_MEMO_BYTES[0] > _DOC_MEMO_CAP and len(_DOC_MEMO) > 1:
+        _doc_memo_drop(next(iter(_DOC_MEMO)))
+
+
 def _ckpt_doc_shared(key):
     """`key`'s fold document as _ckpt_load verifies it (version, path, shape; a corrupt one counted and removed), or None; the
     read shared with the write's carry through _DOC_MEMO, keyed by the document file's stat, so a consult and the write that
-    follows read the document once (low C). Counted under checkpoints.docConsults."""
+    follows read the document once (low C). Counted under checkpoints.docConsults. A validated load also records what the
+    document can give a write's carry (_DOC_INDEX)."""
     cp = _ckpt_file(key)
-    if cp is None or not cp.exists():
+    if cp is None:
         return None
-    try:
-        st_ = cp.stat(); sig = (st_.st_mtime_ns, st_.st_size)
-    except OSError:
-        return None
+    sig = _doc_stat_sig(cp, key)
+    if sig is None:
+        return None                                       # no document
     with _CKPT_LOCK:
         hit = _DOC_MEMO.get(key)
         if hit is not None and hit[0] == sig:
@@ -6953,11 +7545,11 @@ def _ckpt_doc_shared(key):
     doc = _ckpt_load(key)                                 # the validated read: version, path and shape (low A: a raw read raised
     with _CKPT_LOCK:                                      #  on a folds that is not a dict, retired from another path's or an old
         _CKPT_STATS["docConsults"] += 1                   #  version's document, re-read a corrupt one forever)
-        _doc_memo_drop(key)
         if doc is not None:
-            _DOC_MEMO[key] = (sig, doc); _DOC_MEMO_BYTES[0] += _doc_memo_weight(sig)
-            while _DOC_MEMO_BYTES[0] > _DOC_MEMO_CAP and len(_DOC_MEMO) > 1:   # bounded in bytes (the caches rule): the oldest
-                _doc_memo_drop(next(iter(_DOC_MEMO)))                          #  documents go; the newest stays for the write it shares
+            _doc_memo_put_locked(key, sig, doc)
+            _doc_index_put_locked(key, sig, doc.get("folds"))
+        else:
+            _doc_memo_drop(key); _DOC_INDEX.pop(key, None)
     return doc
 
 
@@ -7078,6 +7670,10 @@ def _restore_ms(part, t0):
 
 
 def asm_checkpoint_stats():
+    """The assembly documents for /perf. Almost everything here counts since boot (written, restored, the per-reason tables,
+    restoreMs), and `hydratedBytes` (the bytes of pre-cut bodies read on demand) and `hydratedAtoms` (those bodies) are
+    running counters too, so they keep rising while the memo that holds the bodies sits at its cap (what the memo holds is
+    the heap block's hydrated). The one gauge is asmDocMemo."""
     with _ASM_CKPT_LOCK:
         out = dict(_ASM_CKPT_STATS); out["fallbacks"] = dict(out["fallbacks"]); out["skipped"] = dict(out["skipped"])
         out["restoreMs"] = {k: round(v, 3) for k, v in (out.get("restoreMs") or {}).items()}   # microsecond resolution (a fast
@@ -7719,7 +8315,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                #                                             (absorbed attachments, shadowed copies): the restore's reuse check reads
                #                                             rows and these, so a tail record reusing any of them refuses (round two)
                "turns": turns_doc, "treeIdentity": _tree_identity_of_doc(turns_doc, identity) if turns_doc else None,
-               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
+               "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(_asm_doc_boundary_pids(ad, all_recs, cut_seq)),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
                "carry": _carry_encode(st), "identity": identity, "t": time.time(), "tipChildless": bool(tip_childless)}
@@ -8197,10 +8793,13 @@ def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links, quiet
 
 def _seed_from_doc(doc):
     """(seed, landed) from a verified document: the pre-cut graph facts a FileAdapter takes, and the pre-cut uuids
-    whose records carried assistant text."""
+    whose records carried assistant text. "spine_root_parent" is the raw parentUuid of the pre-cut spine's root, as that
+    record's row holds it, None with no spine: the spine gives its root no parent, and _SeededGraph.root_may_link reads
+    this to tell a root whose record links outside the graph from one with no parent (review round six, 2026-10-04)."""
     verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
     type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
     seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
+            "spine_root_parent": doc["records"][doc["spine"][0]][9] if doc["spine"] else None,
             "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
             "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
             "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
@@ -8749,13 +9348,22 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
             if entry is not None:
                 _ASM_DEMOTE_TL.reason = None
                 got = _asm_gates(entry, leaf_path, candidate_files, links)
-                if got is not None and entry.get("reseat"):
+                if got is not None and entry.get("reseat") and not (got[0] and getattr(_ASM_DEMOTE_TL, "batch", False)
+                                                                    and getattr(_ASM_DEMOTE_TL, "passed", False)):
                     # A WHOLE entry whose own document now stands (2026-09-24): the settle or the converge pass wrote it from this
                     # entry, which then kept every record and atom for the life of the process, so every fold re-ran the graph
                     # passes over the whole history and copied every atom (at 150 MB, an order of magnitude over a fold of the
                     # restored entry) and the chat's render floor stayed at turn 0. A delta the gates pass is re-seated instead: the
                     # restore road reads the document and the tail from its cut, and the folds after it walk the tail alone. A
-                    # delta the gates demote keeps its own road and its own reason
+                    # delta the gates demote keeps its own road and its own reason. Nor is a delta the narrowed promptid arm let
+                    # through that passed on a parallel batch's link re-seated (both thread bits, which the gate's walk sets for
+                    # every delta it rules on; an empty delta runs no walk, so it re-seats whatever an earlier delta left on the
+                    # thread): the fold's kept check rules on it, and a rejection there parses whole (_asm_demote_passed).
+                    # Re-seated, it took the restore road, which proves only that the tail chains onto the document: with an
+                    # automatic compaction anchored on the parallel call and a result of that call parented at the call, the
+                    # restore served the result as a turn of its own, and the settle, which writes nothing for a restored entry,
+                    # left that tree standing for the next record and every boot (review of 2026-10-03, round two). A passed
+                    # delta that extends the path keeps its re-seat
                     got = _asm_demote("reseat")
                 if got is not None:
                     delta, leaf_recs = got
@@ -8860,6 +9468,81 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
         return ad.atoms(rompuuid, postal_index), ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {}), []
 
 
+_FILE_HEAD_T = {}                 # realpath -> the stamp of the file's first uuid-bearing record, once one is on disk (a head never moves)
+_FILE_HEAD_T_MAX = 4096
+
+
+def _file_head_t(path):
+    """The stamp (epoch seconds) of `path`'s first uuid-bearing record, or None while it has none, when its stamp does not
+    parse, or when the file cannot be read. The record judge.transcript_head reads (a transcript is append-only, so its head
+    never changes once written): read from the start a line at a time, normally that one record, the bytes counted like every
+    reader byte, and memoized by realpath once found. Each line is decoded as transcript_head and the reader decode it, with
+    bad bytes replaced, so a head record holding an invalid byte is the head here too, as it is to the candidate rule (review
+    round two, 2026-10-03: raw bytes made json.loads refuse it and the floor fell to the next record's stamp)."""
+    key = os.path.realpath(str(path))
+    hit = _FILE_HEAD_T.get(key)
+    if hit is not None:
+        return hit
+    t, n = None, 0
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                n += len(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("uuid"):
+                    t = parse_z(r.get("timestamp")) or None
+                    break
+    except OSError:
+        t = None
+    if n:
+        _count_read(str(path), n)
+    if t is not None:
+        if len(_FILE_HEAD_T) >= _FILE_HEAD_T_MAX:
+            try:
+                _FILE_HEAD_T.pop(next(iter(_FILE_HEAD_T)), None)   # the oldest entry; a racing writer's resize is harmless
+            except (StopIteration, RuntimeError):
+                pass
+        _FILE_HEAD_T[key] = t
+    return t
+
+
+def _conversation_floor(candidate_files):
+    """When the conversation a parse reads began: the earliest head stamp over its candidate files, or None when any of them
+    has no readable head stamp yet (no floor, then: nothing is dropped on a guess)."""
+    ts = []
+    for f in candidate_files:
+        t = _file_head_t(f)
+        if t is None:
+            return None
+        ts.append(t)
+    return min(ts) if ts else None
+
+
+def _orphan_rows_from(srows, candidate_files):
+    """The states rows synthesize_orphans reads: every row, less the orphanReply markers stamped before the conversation the
+    parse reads began (_conversation_floor over `candidate_files`; None, the tail road's, is no floor). A marker from before
+    that is a reply of a conversation this parse does not hold: a /clear's new file starts after the pre-clear markers, and
+    once the pre-clear file that held what landed of them is no candidate (judge _judge_candidates leaves it out of a /clear's
+    parse, 2026-10-03) the landed-text dedup cannot see them, so they would come back as fresh replies at pre-clear times; a
+    marker that never landed leaked into every post-clear parse already. Same-second markers stay (`>=` the whole second:
+    losing a reply is the worse error). A no-op whenever the session's first file is a candidate: no marker predates the
+    conversation's first record. The heads are read only when a marker exists, and the rows themselves stay whole for idle
+    spans (synthesize_idle)."""
+    if candidate_files is None or not any(isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) for r in srows or []):
+        return srows
+    conv0 = _conversation_floor(candidate_files)
+    if conv0 is None:
+        return srows
+    floor = int(conv0)
+    return [r for r in srows if not (isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) and (r.get("t") or 0) < floor)]
+
+
 def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None,
                   candidate_files=None, states=None, postal_log=None, now=None, sdk_human=False,
                   leaf_override=None, asm_mode_out=None, private_entry_out=None, tail_records=None):
@@ -8926,7 +9609,11 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # tail alone is segmented and synthesized over below, and a span or a marker from before the tail's first atom is the
     # document's (or nothing: the whole parse put it in a pre-cut turn)
     t_tail0 = min((a["t"] for a in atoms if a.get("t")), default=None) if pre_turns else None
-    orphans = synthesize_orphans(_srows, atoms, landed_text_uuids=landed, rompuuid=rompuuid,
+    # salvaged replies never predate the conversation the parse reads (2026-10-03): the floor is the first record of its own
+    # candidate files, the same number whatever road served the atoms (whole, fold, restore, refresh), so it never races the
+    # kernel's episode tick. The tail road reads no candidate file and has no floor
+    orphans = synthesize_orphans(_orphan_rows_from(_srows, candidate_files if tail_records is None else None), atoms,
+                                 landed_text_uuids=landed, rompuuid=rompuuid,
                                  pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None)
     if pre_turns:
         orphans = [a for a in orphans if t_tail0 is not None and a["t"] >= t_tail0]

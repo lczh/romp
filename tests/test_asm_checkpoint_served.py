@@ -235,7 +235,7 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             timeline = []
             dt2, frame = self._open_tab(p2, timeline, k2.pid)
             time.sleep(1.0)
-            perf = self._get(p2, "/perf")
+            perf = self._get(p2, "/perf?paths=all")   # ?paths=all: the whole per-file read table (a plain GET carries the 50 largest)
             asm = perf["asmCheckpoint"]
             by = perf["checkpoints"]["readByPath"]
             self.assertEqual(asm["fallbacks"], {}, "the document verified: %s" % asm)
@@ -270,7 +270,7 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertEqual(asm["hydratedAtoms"], n_lazy, "each pre-cut atom with a body read once, at its offset, whoever asked first: %s"
                              % asm["hydratedBy"])
             time.sleep(2.0)                                            # whatever the judges did meanwhile (a pass under the full suite's
-            perf = self._get(p2, "/perf")                              #  load may not finish here; the deterministic proof that the
+            perf = self._get(p2, "/perf?paths=all")                    #  load may not finish here; the deterministic proof that the
             asm = perf["asmCheckpoint"]                                #  declared plan hydrates nothing is tests/test_asm_checkpoint.py)
             self.assertNotIn("declared_plan", asm["hydratedBy"], "a session with no task store and no plan hydrates nothing for the "
                                                                     "planner's declared-plan fold: %s" % asm["hydratedBy"])

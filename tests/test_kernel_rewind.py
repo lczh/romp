@@ -8,7 +8,9 @@ it wouldn't: a stale click on an already-abandoned branch): a missing record, a 
 record ("No message found" — verified live 2026-07-16), and the conversation's first message.
 Exercised HERE against synthetic transcripts, so the backend's failure path stays reserved for
 genuine races. Plus source pins on the drive-op arm (SDK-only gate, busy gate, warn toasts)."""
+import contextlib
 import inspect
+import io
 import json
 import os
 import tempfile
@@ -34,6 +36,33 @@ km = load_source("romp_kernel_rw", os.path.join(BIN, "romp-kernel"))
 km._limit_hold = lambda sid: None
 
 SID = "11111111-2222-3333-4444-555555555555"
+CLEARED = "66666666-7777-8888-9999-aaaaaaaaaaab"     # the transcript a /clear opened under SID's session
+
+
+def _first_file_untouched(path):
+    """Drop the reader's records of `path` and its byte count, and return a function answering the bytes read from it since."""
+    em, rp = km.em, os.path.realpath(str(path))
+    with em._JSONL_CACHE_LOCK:
+        for k in [k for k in em._JSONL_CACHE if os.path.realpath(str(k)) == rp]:
+            em._cache_pop_locked(k)
+    with em._READ_BYTES_LOCK:
+        for k in [k for k in em._READ_BYTES if os.path.realpath(str(k)) == rp]:
+            em._READ_BYTES.pop(k, None)
+
+    def read():
+        with em._READ_BYTES_LOCK:
+            return sum(n for k, n in em._READ_BYTES.items() if os.path.realpath(str(k)) == rp)
+    return read
+
+
+def _clear_leaf(directory):
+    """A /clear's leaf beside the session's first file in `directory`: a parentless head and three records after it."""
+    p = os.path.join(str(directory), CLEARED + ".jsonl")
+    with open(p, "w") as f:
+        for r in [_rec("user", "c1", None, "a fresh start after the clear"), _rec("assistant", "c2", "c1", "fresh reply"),
+                  _rec("user", "c3", "c2", "and the next step"), _rec("assistant", "c4", "c3", "next step done")]:
+            f.write(json.dumps(r) + "\n")
+    return p
 
 
 def _rec(typ, uuid, parent, text="x", **extra):
@@ -114,6 +143,76 @@ class RewindTarget(unittest.TestCase):
         target, err = km._rewind_target(p, SID, "77777777-8888-9999-aaaa-bbbbbbbbbbbb")
         self.assertIsNone(target)
         self.assertIn("isn't in the transcript", err)
+
+    def test_a_clear_leafs_edit_reads_no_pre_clear_file_and_a_pre_clear_target_answers_as_before(self):
+        # a /clear's leaf heads fresh: the edit resolves over the leaf's own graph and reads no byte of the session's
+        # pre-clear file (2026-10-03), while a target only that file holds still gets the seam refusal it always got
+        em = km.em
+        anchor = self._transcript(self._base())
+        leaf = os.path.join(os.path.dirname(anchor), "66666666-7777-8888-9999-aaaaaaaaaaaa.jsonl")
+        with open(leaf, "w") as f:
+            for r in [_rec("user", "c1", None, "a fresh start after the clear"), _rec("assistant", "c2", "c1", "fresh reply"),
+                      _rec("user", "c3", "c2", "and the next step"), _rec("assistant", "c4", "c3", "next step done")]:
+                f.write(json.dumps(r) + "\n")
+        with em._JSONL_CACHE_LOCK:
+            em._JSONL_CACHE.pop(anchor, None)
+        with em._READ_BYTES_LOCK:
+            em._READ_BYTES.pop(anchor, None)
+        self.assertEqual(km._rewind_target(leaf, SID, "c3"), ("c2", None))
+        with em._READ_BYTES_LOCK:
+            self.assertEqual(em._READ_BYTES.get(anchor, 0), 0, "the edit read no byte of the pre-clear file")
+        self.assertEqual(km._rewind_target(leaf, SID, "u2"),
+                         (None, "that message is from before a restart seam; the conversation can only rewind to newer messages"),
+                         "a pre-clear target: the same refusal as before")
+
+    def test_an_edit_of_a_pre_clear_message_is_refused_from_the_first_files_uuids_and_reads_it_once(self):
+        # review round three: an edit of a message only the session's first file holds built the graph over both files at
+        # every attempt, reading that file whole each time, for the seam refusal its membership alone gives. The first
+        # attempt reads it once, for the session's uuid set; the second reads none of it; neither leaves a record cache
+        # entry for it
+        em = km.em
+        first = self._transcript(self._base())
+        leaf = _clear_leaf(os.path.dirname(first))
+        km._CUT_FIRST_UUIDS.pop(SID, None)
+        read = _first_file_untouched(first)
+        seam = (None, "that message is from before a restart seam; the conversation can only rewind to newer messages")
+        answers = [km._rewind_target(leaf, SID, "u2")]
+        once = read()
+        answers.append(km._rewind_target(leaf, SID, "u2"))
+        rp = os.path.realpath(first)
+        with em._JSONL_CACHE_LOCK:
+            held = [k for k in em._JSONL_CACHE if os.path.realpath(str(k)) == rp]
+        self.assertEqual({"answers": answers, "the first attempt's bytes of the first file": once,
+                          "the second attempt's": read() - once, "record cache entries for it": held},
+                         {"answers": [seam, seam], "the first attempt's bytes of the first file": os.path.getsize(first),
+                          "the second attempt's": 0, "record cache entries for it": []})
+
+    def test_an_unreadable_first_file_leaves_an_edit_of_an_unwritten_message_to_try_again_and_says_why(self):
+        # review round four: an edit of a uuid the leaf lacks is decided from the first file's uuid set alone, so with that
+        # file unreadable (mode 0, restored in the finally) the lookup reports no membership, and an edit of a post-clear
+        # message not on disk yet is told to try again, never the seam refusal, which would refuse it for good once it lands;
+        # and the edit road says why on stderr, one line naming the error
+        if os.geteuid() == 0:
+            self.skipTest("root reads any file: the unreadable first file cannot be staged")
+        first = self._transcript(self._base())
+        leaf = _clear_leaf(os.path.dirname(first))
+        km._CUT_FIRST_UUIDS.pop(SID, None)
+        km._cut_read_said.discard((SID, "unreadable"))
+        _first_file_untouched(first)                     # no whole entry to serve the set without a read
+        err, mode = io.StringIO(), os.stat(first).st_mode & 0o777
+        os.chmod(first, 0)
+        try:
+            with self.assertRaises(PermissionError, msg="premise: the first file cannot be opened"):
+                open(first, "rb").close()
+            with contextlib.redirect_stderr(err):
+                got = km._rewind_target(leaf, SID, "c9")
+        finally:
+            os.chmod(first, mode)
+        lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+        self.assertEqual({"answer": got, "stderr lines": len(lines)},
+                         {"answer": (None, "that message isn't in the transcript yet; try again in a moment"), "stderr lines": 1},
+                         "stderr: %s" % lines)
+        self.assertIn("PermissionError", lines[0], "the line names the error")
 
 
 class DriveOpPins(unittest.TestCase):
@@ -675,6 +774,19 @@ class HoldLeafEclipsedFlip(unittest.TestCase):
         self.assertIs(km._hold_leaf_still_active(SID, "a2"), True,
                       "a machine-eclipsed leaf is live content, not a taken rewind")
 
+    def test_a_clear_leafs_check_reads_no_byte_of_the_first_file(self):
+        # the check walks the display parse's own candidates, a /clear's leaf alone (2026-10-03); before review round one
+        # only a source-text count pinned that, and a line putting the first file back passed it
+        first = self.td / (SID + ".jsonl")
+        with open(first, "w") as f:
+            for r in [_rec("user", "u1", None, "first ask"), _rec("assistant", "a1", "u1", "first reply")]:
+                f.write(json.dumps(r) + "\n")
+        leaf = _clear_leaf(self.td)
+        km._sessions = lambda now: [{"sid": SID, "path": leaf}]
+        read = _first_file_untouched(first)
+        self.assertIs(km._hold_leaf_still_active(SID, "c4"), True, "the leaf's tip is live")
+        self.assertEqual(read(), 0, "no byte of the session's first file")
+
 
 class RewindKeptLookupEconomy(unittest.TestCase):
     """_rewind_kept_uuids runs on EVERY feed/chat build of a held session, for the whole armed
@@ -746,6 +858,17 @@ class RewindKeptLookupEconomy(unittest.TestCase):
             return real(*a, **k)
         km.em.chain_membership = counting
         return calls
+
+    def test_a_clear_leafs_kept_walk_reads_no_byte_of_the_first_file(self):
+        # the kept walk takes the display parse's own candidates, a /clear's leaf alone (2026-10-03): pinned by behavior,
+        # not by the source-text count alone, since review round one
+        first = self._transcript(register=False)
+        leaf = _clear_leaf(self.td)
+        km._sessions = lambda now: [{"sid": SID, "path": leaf}]
+        read = _first_file_untouched(first)
+        kept = km._rewind_kept_uuids(SID)
+        self.assertTrue({"c1", "c2", "c3", "c4"} <= set(kept or ()), kept)
+        self.assertEqual(read(), 0, "no byte of the session's first file")
 
     def test_the_kept_walk_memoizes_on_the_fileset_and_busts_on_change(self):
         p = self._transcript()

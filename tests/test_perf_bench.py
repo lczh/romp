@@ -335,8 +335,8 @@ class PerfBench(unittest.TestCase):
         for name in ("liveness_snapshot", "names_snapshot", "discover_cold", "discover_warm", "build_feed",
                      "build_feed_noparse", "build_timeline_bars", "build_timeline_skel", "warm_all_parses",
                      "build_session_cold:11111111", "build_session_emwarm:11111111", "build_session_warm:11111111",
-                     "build_session_cold:22222222", "load_goals:11111111", "push_cold_cycle", "push_steady",
-                     "push_connect:chat", "push_connect:feed", "push_connect:timeline"):
+                     "build_session_cold:22222222", "load_goals:11111111", "push_cold_cycle", "timeline_build_cold",
+                     "push_steady", "push_connect:chat", "push_connect:feed", "push_connect:timeline"):
             self.assertIn(name, b, "missing benchmark %s in %s" % (name, sorted(b)))
             self.assertIsInstance(b[name]["median"], (int, float), name)
         self.assertNotIn("build_session_cold:33333333", b, "a closed reg (alive=false) is not a live session")
@@ -440,12 +440,22 @@ class PerfBench(unittest.TestCase):
         self.assertIn("chat:11111111", b["push_connect:chat"]["bytes"]["slots"], "a fresh chat client gets the full session")
         self.assertIn("feed", b["push_connect:feed"]["bytes"]["slots"])
         self.assertIn("timeline", b["push_connect:timeline"]["bytes"]["slots"])
+        # the cold cycle owes the timeline's cold build to the timeline builder (2026-10-03) and sends the lanes alone; the
+        # tool runs the builder's pass as its own row, so a page load serves the filled slot, bars included, as a live
+        # kernel's does once the builder has run
+        self.assertNotIn("timelinebars", b["push_cold_cycle"]["bytes"]["timeline"]["slots"], "the cold cycle sends no bars")
+        self.assertIn("timelinebars", b["push_connect:timeline"]["bytes"]["slots"], "a page load over the filled slot gets the bars")
+        self.assertIsInstance(b["timeline_build_cold"]["median"], (int, float))
+        self.assertGreaterEqual(b["timeline_build_cold"]["lanes"], 2, "the builder's full build has both live sessions' lanes")
         # a connect sample is a FRESH client with empty dedup state, so it receives what the cold cycle's fresh
-        # client did: the same frame count per app, and for the chat the same bytes (the session frame does not
-        # depend on the parse caches; the cold cycle's feed and timeline were built before any parse, so their
-        # sizes differ from the warm ones). A client reused across samples accumulates frames instead.
-        for app in ("chat", "feed", "timeline"):
+        # client did: the same frame count per app (the timeline's bars besides, which the cold cycle owed), and for
+        # the chat the same bytes (the session frame does not depend on the parse caches; the cold cycle's feed and
+        # timeline were built before any parse, so their sizes differ from the warm ones). A client reused across
+        # samples accumulates frames instead.
+        for app in ("chat", "feed"):
             self.assertEqual(b["push_connect:" + app]["bytes"]["frames"], b["push_cold_cycle"]["bytes"][app]["frames"], app)
+        self.assertEqual(b["push_connect:timeline"]["bytes"]["frames"], b["push_cold_cycle"]["bytes"]["timeline"]["frames"] + 1,
+                         "the lanes, and the bars the cold cycle owed")
         self.assertEqual(b["push_connect:chat"]["bytes"], b["push_cold_cycle"]["bytes"]["chat"])
         self.assertGreaterEqual(b["push_cold_cycle"]["asm"].get("full", 0), 2, "the cold cycle parsed both live transcripts inside itself")
         st = b["push_steady"]

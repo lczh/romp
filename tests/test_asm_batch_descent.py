@@ -21,6 +21,8 @@ batch result BESIDE such a record (a spur and the prompt after it, a rewound pro
 record. A batch result that passes the gate but moves an old record's kept membership (the leaf leaving an api_error spur
 off the opener) demotes under g:kept and takes the restore road, the one the descent's demotion gave it before; a later
 delta that chains back to the old leaf and is rejected there still parses whole, the batch bit cleared at its own gate.
+The promptid gate's pass bit beside it speaks for one delta too: after a delta the narrowed arm let through has folded, a
+routine delta counts no saved fold and a batch result the kept check rejects still restores (2026-10-03).
 Synthetic transcripts only: the notes-api demo world, invented commands, placeholder ids and a private placeholder session
 id."""
 import collections
@@ -91,6 +93,17 @@ def api_error(t, uid, parent):
     """The record the CLI flushes when a request fails and is retried: parented where the request started (T209)."""
     return {"type": "system", "subtype": "api_error", "uuid": uid, "parentUuid": parent, "level": "error",
             "timestamp": iso(t), "error": {"type": "overloaded_error"}}
+
+
+def compaction(t, tag, anchor, pid):
+    """An automatic compaction as the CLI writes it in the middle of a turn: the boundary `<tag>b` anchored on `anchor`
+    (logicalParentUuid, no parentUuid), its summary `<tag>s` its child, the conversation chaining on the summary. The summary
+    wears the turn's prompt id `pid` (the shape the promptid gate's narrowed arm lets through)."""
+    return [{"type": "system", "subtype": "compact_boundary", "uuid": tag + "b", "parentUuid": None, "logicalParentUuid": anchor,
+             "timestamp": iso(t), "isMeta": False, "compactMetadata": {"trigger": "auto", "preTokens": 160000, "postTokens": 9000}},
+            {"type": "user", "uuid": tag + "s", "parentUuid": tag + "b", "timestamp": iso(t + 1), "isCompactSummary": True,
+             "isVisibleInTranscriptOnly": True, "promptId": pid,
+             "message": {"role": "user", "content": "summary so far: the notes-api search index rebuild is under way"}}]
 
 
 def history(turns):
@@ -475,6 +488,46 @@ class TheBatchBitSpeaksForOneDelta(Harness):
         self.assertEqual((modes, moved.get("full:demoted", 0), asked), (["full"], 1, []),
                          "a kept rejection of a delta off no batch link parses whole and never asks the restore, though a "
                          "batch folded on this thread just before it: %s" % moved)
+
+
+class ThePassBitSpeaksForOneDelta(Harness):
+    """Beside the batch bit the gate leaves a pass bit on the calling thread: the promptid gate's narrowed arm let a record
+    of the delta through (one wearing the prompt id of an automatic compaction's summary whose pair is attached). With both
+    bits set, a batch's kept rejection parses whole instead of restoring, and a fold with the pass bit counts a saved fold
+    (fold:attachedPass). The gate sets the pass bit before every walk, so it speaks for one delta: after a passed delta folds,
+    a routine delta counts no saved fold, and a later batch result the kept check rejects takes the restore road from the
+    standing document, as KeptRejectionRestores's does (review of 2026-10-03, round two)."""
+
+    def test_a_batch_kept_rejection_after_a_passed_delta_restores(self):
+        base = self.restored(200)                               # more history than the default: the compaction's turn joins the tail
+        t = self.after(base, 60)
+        pid = "11111111-2222-3333-4444-000000000ac1"
+        turn = [prompt(t, "zp", base[-1]["uuid"], "rebuild the notes-api search index shard by shard", pid=pid),
+                call(t + 5, "zc0", "zp", "toolu_z0", "uv run python -m notes_api.reindex --shard 0", "msg_z0"),
+                result(t + 10, "zr0", "zc0", "toolu_z0", "shard 0 rebuilt", pid)]
+        compacted = compaction(t + 20, "zk", "zr0", pid) + [call(t + 25, "zc1", "zks", "toolu_z1",
+                                                                  "uv run python -m notes_api.reindex --shard 1", "msg_z1")]
+        modes, moved, _ = self.land([turn, compacted], "the turn and its automatic compaction")
+        self.assertEqual((modes, moved.get("g:boundary", 0)), (["fold", "restore"], 1),
+                         "the turn folds, and its compaction restores from the document: %s" % moved)
+        modes, moved, _ = self.land([[result(t + 30, "zr1", "zc1", "toolu_z1", "shard 1 rebuilt", pid)]],
+                                    "a result wearing the summary's prompt id")
+        self.assertEqual((modes, moved.get("fold:attachedPass", 0), moved.get("g:promptid", 0)), (["fold"], 1, 0),
+                         "the narrowed arm lets the result through, and its fold counts the saved fold: %s" % moved)
+        modes, moved, _ = self.land([[reply(t + 35, "zreply", "zr1", "Both shards are rebuilt.", "msg_z_reply")]], "the turn's reply")
+        self.assertEqual((modes, moved.get("fold:attachedPass", 0)), (["fold"], 0),
+                         "a routine delta after the passed one folds and counts no saved fold: %s" % moved)
+        t2 = t + 100
+        head, results, _tail = batch(t2, "zreply")
+        self.assertEqual(self.land([head, results[0]], "the batch's calls and its first result")[0], ["fold", "fold"])
+        modes, moved, _ = self.land([[api_error(t2 + 11, "e1", "bp"), api_error(t2 + 11, "e2", "e1")]], "a spur off the opener")
+        self.assertEqual((modes, moved.get("g:descent", 0)), (["restore"], 1),
+                         "the spur demotes at the descent and restores from the document: %s" % moved)
+        modes, moved, tree = self.land([results[1]], "the next result, off the spur's spine")
+        self.assertEqual((modes, moved.get("g:kept", 0), moved.get("restore:afterDemote", 0), moved.get("g:promptid:passedDemote", 0),
+                          moved.get("full", 0)), (["restore"], 1, 1, 0, 0),
+                         "the batch's kept rejection restores from the document: no pass bit outlived its delta: %s" % moved)
+        self.assertGreater(tree.get("cutTurn") or 0, 0, "the entry is a restored one again")
 
 
 if __name__ == "__main__":
