@@ -31,7 +31,7 @@ all, so a workflow agent (no card, no fold) stayed resident too. Pinned here:
     after the window, prices a file a fresh process restored as a tail (one whole read after the boot, none later, the
     drop after two quiet minutes), prices a restored tail that covers the window without a whole read and folds it out of
     memory, counts that tail's document corrupt once, with no raise, when a fold's count in it is no int (infinity, NaN, a
-    string, null or none), and lets the tail go with it, so the file is read whole once and dropped, for a workflow agent
+    string, null) or missing, and lets the tail go with it, so the file is read whole once and dropped, for a workflow agent
     and for a card's subagent whose chat is no longer built, whether the launch-ids count or the viewer's background-task
     count was bad, re-scans its memo when a tail entry becomes the whole file, and pays no whole read for a half-written
     record;
@@ -1375,6 +1375,35 @@ class SpendGuard(Base):
         for i, (label, count) in enumerate((("Infinity", float("inf")), ("no count", self.NO_COUNT))):
             with self.subTest(count=label):
                 self.assertEqual(self.corrupt_tail(30 + i, ("bgAll", "agentLaunchIds"), "bgAll", count), self.CORRUPT_DROPPED)
+
+
+    def test_the_gates_eviction_spares_an_entry_another_read_put_in_its_place(self):
+        """The gate lets the restored tail go only while the cache still holds that very entry (review round eleven): an
+        entry another read put in its place between the gate's look and its fallback stays."""
+        wf = str(self.sub / "workflows" / "wf_1" / "agent-a9a00000000000140.jsonl")
+        pairs = [(rec(T0 - 1000 + 10 * i, i), T0 - 1000 + 10 * i) for i in range(100)]
+        write(wf, [r for r, _t in pairs[:5]], T0 - 960)
+        self.clock.t = T0 - 955
+        km._agent_launch_ids_fold(wf)
+        self.assertTrue(em.checkpoint_write(wf))
+        append(wf, [r for r, _t in pairs[5:]], T0 - 10)
+        cp = em._ckpt_file(wf)
+        d = json.loads(cp.read_text())
+        d["folds"]["agentLaunchIds"]["count"] = float("inf")
+        cp.write_text(json.dumps(d))
+        self.fresh_process()
+        real, put = em._ckpt_fallback, []
+
+        def fallback(*a, **k):
+            real(*a, **k)
+            with em._JSONL_CACHE_LOCK:
+                em._JSONL_CACHE[wf] = e = tuple(list(em._JSONL_CACHE[wf]))   # another read's entry: equal, not the same object
+            put.append(e)
+
+        with mock.patch.object(em, "_ckpt_fallback", side_effect=fallback), mock.patch("sys.stderr", new=io.StringIO()):
+            self.window(T0)
+        self.assertEqual(len(put), 1, "the gate took the corrupt fallback once")
+        self.assertIs(self.entry(wf), put[0], "the entry another read put in place stays")
 
     def test_the_row_memo_rescans_when_its_tail_entry_becomes_the_whole_file(self):
         f = str(self.proj / "11111111-2222-4333-8444-0000000000e1.jsonl")
