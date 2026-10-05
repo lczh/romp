@@ -531,9 +531,9 @@ class ScalarWalkers(Restored):
 
 
 class CapsSizedToTheMachine(unittest.TestCase):
-    """2026-09-11: the index's 20,000-atom literal evicted 1.19 million atoms in 150 s on a busy devbox, the 64 MB body memo
-    hydrated 3.1 GB, and the 64 KB fold-state cap cold-refolded 31 leaves (1.74 GB) at every boot. The user's direction: caches are
-    one shared pool sized to the machine, never a small literal."""
+    """2026-09-11: on a busy devbox the index's 20,000-atom literal evicted nearly every atom it materialized, the 64 MB body
+    memo hydrated many times its size, and the 64 KB fold-state cap cold-refolded the leaves at every boot. The user's direction:
+    caches are one shared pool sized to the machine, never a small literal."""
 
     def test_the_index_cap_is_a_fraction_of_the_machine_with_a_floor(self):
         text = "MemTotal:       123634396 kB\n"

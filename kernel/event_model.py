@@ -6555,8 +6555,8 @@ _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for
 #                                          the first row is decoded at load and must be a JSON object
 # Materialized pre-cut atoms resident across every session (the lazy index's LRU): MemTotal / 32 KiB, never under 500,000
 # (3.9 million on a 118 GiB machine); ROMP_ASM_INDEX_CAP sets it outright. At 20,000 (2026-09-11, the day the index
-# shipped) the restored turns of many sessions materialized 1.2 million atoms and evicted 1.19 million of them in 150 s,
-# every chat build cold at 5.6 s: a ceiling under the working set is a thrash, not a saving.
+# shipped) the restored turns of many sessions evicted nearly every atom they materialized within minutes, and every
+# chat build ran cold: a ceiling under the working set is a thrash, not a saving.
 #                                       7: the cut is the boundary before the last SETTLED turn, not only a compaction's (stage one b, 2026-09-15):
 #                                          every v6 document is refused once (`version`) at the deploy boot and rewritten at the next settle
 #                                       8: a parallel tool batch's branch beside the spine is kept (FileAdapter._batch_head, 2026-09-23): its
@@ -7223,16 +7223,15 @@ _HYDRATED = {}                     # uuid -> (the body fields a fill of any kind
 _HYDRATED_BYTES = [0]              # the entries' weights summed: REAL bytes, each entry's decoded size (_decoded_size)
 _HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(256 * 1024 ** 2, _machine_memory_bytes() // 48), 1024 * 1024)
 #                                    the hydrated-body memo's cap in real bytes (2026-10-01): MemTotal / 48, never under 256 MiB
-#                                    (about 661 MiB on a 31 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
-#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 31 GiB machine. The live
-#                                    kernel's memo held about 66,700 records from 2.7 to 9.5 hours, then grew: 77,144 records and
-#                                    302 MiB of lines (4,107 bytes a line) at 11.7 hours, nothing evicted. As decoded body fields
-#                                    that is an estimated 550 to 615 MiB, a wide band, since an entry weighs 0.55 of its line
-#                                    for a Read result and up to 4.6 for a question's answers. This cap holds that set by the
-#                                    estimate and binds as it grows; a 64th would bind within the first day to save at most 165
-#                                    MiB more. An LRU thrashes once the records read again and again outgrow it, and the size of
-#                                    that set is unmeasured. 64 MB of line bytes (an estimated 110 to 180 MiB here) thrashed on
-#                                    2026-09-11, before the per-cycle walkers moved onto the lazy scalars (T358).
+#                                    (about 683 MiB on a 32 GiB machine, 2.5 GiB on a 118 GiB one). It was max(1 GiB, MemTotal /
+#                                    32) of LINE bytes over whole records, about 2.9 GiB decoded on a 32 GiB machine. A running
+#                                    kernel's memo held a steady set for hours, then grew, with nothing evicted. As decoded body
+#                                    fields its size is an estimate in a wide band, since an entry weighs 0.55 of its line for a
+#                                    Read result and up to 4.6 for a question's answers. This cap holds that set by the estimate
+#                                    and binds as it grows; a 64th would bind sooner and save little more. An LRU thrashes once
+#                                    the records read again and again outgrow it, and the size of that set is unmeasured. 64 MB
+#                                    of line bytes thrashed on 2026-09-11, before the per-cycle walkers moved onto the lazy
+#                                    scalars (T358).
 #                                    The weights count a body an atom also holds, so while that atom lives its entry's eviction
 #                                    frees only the entry's own share. asmCheckpoint's hydratedHits and hydratedEvicted count the
 #                                    memo's serves and evictions
