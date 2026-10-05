@@ -13362,13 +13362,17 @@ def _LEAF_FOLDS():
             (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
 
 
-def _heal_cold_folds(leaf):
+def _heal_cold_folds(leaf, dropped_out=None):
     """At a SETTLE write (never the exit drain and its budget): a leaf fold that began cold in this process for want of a state
     in its document (em.drop_cold_cursors drops those cursors: reason "cold", never "over") is refolded whole once, so the write
     that follows carries its complete state and the next boot restores it warm (T359: the kernel's background-task view stayed
     a tail-only state boot after boot, each write recording the cursor alone and every boot blaming the cap). An over-the-cap
-    fold is left cold: a heal would only be written cursor-only again. Returns the names healed."""
+    fold is left cold: a heal would only be written cursor-only again. Returns the names healed; `dropped_out`, when given,
+    receives the names this call's drop took, healed or not (the converge pass counts its unhealed folds from them: the
+    settle write's heal on the jobs thread can run over the same leaf at once, and each drop takes a fold once)."""
     dropped = set(em.drop_cold_cursors(leaf))   # no cursor: the fold reads the leaf whole once and is complete again
+    if dropped_out is not None:
+        dropped_out.extend(sorted(dropped))
     if not dropped:
         return []
     names = {id(c): n for n, c in em._FOLD_REG.items()}
@@ -13420,14 +13424,6 @@ def _ckpt_just_take():
         taken = set(_CKPT_JUST_WRITTEN)
         _CKPT_JUST_WRITTEN.clear()
     return taken
-
-
-def _fold_has_cursor(name, p):
-    """True when the fold checkpointed as `name` holds a cursor for `p` (its cursor dict in em._FOLD_REG): a fold another
-    thread's heal reran holds one again; a fold whose cursor a heal dropped and could not rerun holds none. The converge
-    pass's unhealed count asks, after its own heal."""
-    cache = em._FOLD_REG.get(name)
-    return cache is not None and str(p) in cache
 
 
 def _begin_checkpoint_cycle():
@@ -13486,19 +13482,17 @@ def _converge_checkpoints(now):
         #                                                    it resident): the idle leaf converges once and leaves the candidate set;
         #                                                    with the drop write off there is nothing to gain, so it is refused and
         #                                                    the boot's read kept
-        cold = [k for k, r in em.cold_fold_reasons(p).items() if r == "cold"]
         with em.hold_quiescent_drops():                    # a heal whose last fold is the launch fold would otherwise pop the entry
             if p in leaves:                                #  mid-heal, before the prime ran (review, low 2)
                 before = _read_bytes_of(p)
-                healed = _heal_cold_folds(p)               # drops every tail-only cursor, reruns the five leaf folds
+                mine = []                                  # the cold folds THIS heal's drop takes, each under the event model's lock
+                healed = _heal_cold_folds(p, mine)         # drops every tail-only cursor, reruns the five leaf folds
                 if healed:
                     got = _read_bytes_of(p) - before
                     em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); em.checkpoint_cycle_charge(got)
-                still = em.cold_fold_reasons(p)            # read again AFTER the heal: the settle write's heal on the jobs thread can
-                unhealed = [k for k in cold if k not in healed       #  land between the list above and the heal here, and its
-                            and (still.get(k) == "cold" or not _fold_has_cursor(k, p))]   # fold, complete again, is not unhealed
-                #                                            (review, 2026-10-05); a fold the heal here dropped and could not rerun
-                #                                            lost its cold mark with its cursor, so "no cursor" counts it, as before
+                unhealed = [k for k in mine if k not in healed]   # what THIS heal dropped and could not rerun (review, 2026-10-05):
+                #                                            a fold the settle write's heal on the jobs thread took first is that
+                #                                            heal's to rerun, finished or still reading the leaf, never this pass's
                 if em.entry_whole_resident(p) and _prime_leaf_folds(p):
                     em.converge_stat("primed")
             else:
@@ -13715,8 +13709,8 @@ def _checkpoint_first_sight(now):
     documents waited for the next settle, a leaf move past CKPT_PERIOD_S, or the exit drain (a crash before either left the
     next boot the older document and the longer tail). Taken here, a move during the pass is new evidence at its end. At
     the pass's start rather than at boot: the pass's discover memo (_sessions) is open here and its jobs read it anyway, so
-    this adds no sweep (main has no such scope), and a session first seen after the boot is covered by the same rule. A
-    session either table already holds costs a dict lookup."""
+    this adds no sweep (main(), where the boot runs, has no such scope), and a session first seen after the boot is covered
+    by the same rule. A session either table already holds costs a dict lookup."""
     mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")

@@ -60,6 +60,7 @@ class Partition(unittest.TestCase):
         self.assertEqual(tuple(jobs), HOUSEKEEPING, "the housekeeping, in the order it always ran, the checkpoint settle write last")
         self.assertFalse(set(pusher) & set(jobs), "no job on both threads")
         self.assertEqual(set(pusher) | set(jobs), set(km._PerfStats.JOBS), "together they are the JOBS census")
+        self.assertEqual([nm for nm in QUIET if not hasattr(km, nm)], [], "every name the lab cycles quiet is in this kernel")
 
     def test_the_jobs_pass_keeps_its_ordering_reasons(self):
         src = inspect.getsource(self.km._jobs_pass)
@@ -337,7 +338,7 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         stub(km, "_sessions", lambda now, *a, **k: list(self.sessions))
         stub(km, "_turn_end_key", lambda sid, reg=None: 2)
         stub(km, "_stat_key", lambda path: ("synthetic", 1))
-        stub(km, "_heal_cold_folds", lambda leaf: [])
+        stub(km, "_heal_cold_folds", lambda leaf, dropped_out=None: [])
         stub(km, "_prime_leaf_folds", lambda leaf: True)
         stub(km, "_session_fold_files", lambda sid, leaf: {str(leaf)})
         stub(km.em, "checkpoint_dirty", lambda: [s["path"] for s in self.sessions])

@@ -931,11 +931,11 @@ class KernelFolds(Base):
         self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
         real, landed = km._heal_cold_folds, []
 
-        def after_the_settles_heal(leaf):
+        def after_the_settles_heal(leaf, dropped_out=None):
             th = threading.Thread(target=lambda: landed.append(real(leaf)), name="jobs-probe")
             th.start(); th.join(30)
             self.assertFalse(th.is_alive(), "the jobs thread's heal finished")
-            return real(leaf)                                         # the pass's own: nothing is cold any more
+            return real(leaf) if dropped_out is None else real(leaf, dropped_out)   # the pass's own: nothing is cold
         with mock.patch.object(km, "_heal_cold_folds", after_the_settles_heal):
             self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
         self.assertEqual(landed, [["bgAll"]], "the jobs thread's heal reran the fold")
@@ -943,6 +943,41 @@ class KernelFolds(Base):
         self.assertEqual((cv["unhealed"], cv["heals"]), (0, 0), "none unhealed, no heal of the pass's own: %s" % cv)
         self.assertEqual(em.cold_fold_reasons(self.leaf), {})
         self.assertIn("state", self.doc(self.leaf)["folds"]["bgAll"], "the fold complete, and written")
+
+    def test_a_heal_still_rerunning_on_the_jobs_thread_is_not_counted_unhealed(self):
+        """The same race caught mid-rerun: the settle write's heal on the jobs thread has dropped the fold's cursor and cold
+        mark and is still reading the leaf whole when the converge pass counts, so neither a cold mark nor a cursor is there
+        to see. The pass counts only what its own drop took. A stub holds the jobs thread's rerun at its start (an event, no
+        clock) until the pass has counted and written."""
+        self._converge_world({"bgAll": "bare"})
+        km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
+        real_fold, real_heal = km._bg_scan_all_cached, km._heal_cold_folds
+        started, release, box = threading.Event(), threading.Event(), {}
+
+        def held_fold(leaf, *a, **k):
+            if threading.current_thread().name == "jobs-probe" and not started.is_set():
+                started.set(); release.wait(30)                  # the jobs thread's rerun, held at its start
+            return real_fold(leaf, *a, **k)
+
+        def jobs_heal_in_flight(leaf, dropped_out=None):
+            th = box["th"] = threading.Thread(target=lambda: box.setdefault("landed", real_heal(leaf)), name="jobs-probe")
+            th.start()
+            self.assertTrue(started.wait(30), "the jobs thread's heal dropped the cursor and began its rerun")
+            return real_heal(leaf) if dropped_out is None else real_heal(leaf, dropped_out)   # the pass's own: nothing cold
+        try:
+            with mock.patch.object(km, "_heal_cold_folds", jobs_heal_in_flight), mock.patch.object(km, "_bg_scan_all_cached", held_fold):
+                km._converge_checkpoints(TS0 + 600)
+        finally:
+            release.set()
+            if "th" in box:
+                box["th"].join(30)
+        self.assertIn("th", box, "the pass healed the leaf")
+        self.assertFalse(box["th"].is_alive(), "the jobs thread's heal finished")
+        self.assertEqual(box.get("landed"), ["bgAll"], "and reran the fold")
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual((cv["unhealed"], cv["heals"]), (0, 0), "none unhealed, no heal of the pass's own: %s" % cv)
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {})
 
     def test_converge_is_bounded_per_cycle_in_bytes_and_defers_the_rest(self):
         """The budget: a second leaf (a copy) with the same gap; with a one-byte budget the pass writes the first candidate and
