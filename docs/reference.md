@@ -1787,7 +1787,11 @@ own count; further behind, the fold is left out (it refolds whole once when it
 next runs), so a fold that ran early and stopped cannot drag the document's
 cut, and every later boot's tail read, back to its count. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
-them at exit; checkpoints of files that no longer exist are swept at boot. A
+them at exit. The settle write runs on the jobs thread, as the last job of its
+pass (`jobs.persistCheckpoints`), so no dashboard frame waits on it; the
+converge pass stays on the pusher's cycle, whose byte budget it spends, and
+skips the paths the settle write took since it last looked. Checkpoints of
+files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
 
 The assembly checkpoint (2026-09-11) does the same for the parse itself. A
@@ -2698,7 +2702,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `jobs`: the jobs thread, which runs the housekeeping (the sweeps, the
   reminder walk, the interrupt tick, the persists, the pause and retry
   family) off the pusher since 2026-09-13, so no browser frame waits on a
-  cold read: `passes`, `pass_ms_sum`, `pass_ms_max`, `pass_ms_last`,
+  cold read, and since 2026-10-05 the checkpoint settle write as its pass's
+  last job: `passes`, `pass_ms_sum`, `pass_ms_max`, `pass_ms_last`,
   `pass_cpu_ms_sum`, `pass_ms_p50`, `pass_ms_p90`, `pass_ms_ring_max`,
   `ring_n`, `passFailed` (a pass that raised out of the loop and was
   skipped), `splitFailed`, `firstPass` (the boot's first pass's stage split,
@@ -2731,8 +2736,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   its opening `jobs.prelude`; each job is still its
   `jobs.<job>` stage, so a stage name says which thread ran it by the list
   in `_pusher_cycle_jobs` (the pusher's: the checkpoint cycle, pending ops,
-  turn notify, the checkpoint persist and converge, the boot row backstop,
-  the kernel sample, the API health frame) against `_jobs_pass`.
+  turn notify, the checkpoint converge pass, the boot row backstop,
+  the kernel sample, the API health frame) against `_jobs_pass` (which
+  ends with `jobs.persistCheckpoints`, the checkpoint settle write).
 - `pusher`: `cycles`, `wakes` (every wake call; a burst of wakes runs one
   cycle), `wakes_event` and `wakes_backstop` (how the loop's wait ended),
   `connectPush` (a fresh client's full push on its handler thread, the
