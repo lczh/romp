@@ -150,7 +150,7 @@ class DeadWritersTempFiles(T.Harness):
         self.assertEqual(left, {"mine", "parent"}, "only the dead writer's temps are removed")
 
 
-# ── the settle starts the refresh, off the pusher (the kernel side) ──
+# ── the settle write (the jobs pass's) starts the refresh on a thread of its own (the kernel side) ──
 _STATE_ROOT = tempfile.mkdtemp(prefix="romp-asm-refresh-")
 os.environ["XDG_STATE_HOME"] = _STATE_ROOT                # hermetic state BEFORE the load (the kernel resolves its root at import)
 os.environ.pop("ROMP_STATE_DIR", None)
@@ -221,8 +221,8 @@ class TheSettleStartsTheRefresh(unittest.TestCase):
         self.assertTrue(entry is not None and entry.get("preTurns"), "the restored entry the readers fold was left in place")
 
     def test_the_settle_returns_while_the_refresh_runs(self):
-        """The pusher is not held by the refresh: the settle claims it and returns while the whole parse and the write are still
-        running on their own thread (stood in for here by a refresh that waits to be released)."""
+        """The jobs pass's settle write is not held by the refresh: the settle claims it and returns while the whole parse and the
+        write are still running on their own thread (stood in for here by a refresh that waits to be released)."""
         base = _base()
         Path(self.leaf).write_text("".join(json.dumps(r) + "\n" for r in base))
         tree = self._parse()
