@@ -904,6 +904,51 @@ def known_fsids(state_dir: Path, sid: str, reg: dict | None = None, faults: list
     return out
 
 
+def movable_fsids(state_dir: Path, sid: str, reg: dict | None = None) -> tuple[set[str], set[str]]:
+    """(the transcripts a move of `sid` carries, the ones it leaves where they are): known_fsids minus every
+    transcript that is only LINEAGE, never this session's to move (2026-10-05). A session born as a fork carries its
+    parent's transcript in its records: _seed_fork_stores writes the parent's fsid as the first row of the fork's
+    episode log (the conversation root), and a fork whose init has not flipped lastSid still names the parent's file
+    there. known_fsids reads that as one of the fork's own episodes, so moving a fork renamed the PARENT's transcript,
+    the file a live parent's CLI was appending to, into the fork's new folder: the parent's CLI went on writing a
+    fresh file at its own path whose first record linked into history no reader looked for, so its chat lost every
+    earlier turn and a later resume of it would have too (several sessions on one machine, each moved in turn). The
+    by-fsid route already reads that row as lineage, not ownership (_session_by_fsid); this is the same reading for
+    the move. Left: for a fork (forkedFrom, forkOf or threadOf), the episode rows before the first that names the
+    fork's own sid (every row, when none does: what the fork owns cannot be proved, so nothing it may not own is
+    moved), the parent's sid, and a lastSid an unspent forkOf still points at the parent; for any session, a
+    transcript that is another registered session's own sid. A file left behind stays where its owner reads it."""
+    reg = reg if reg is not None else (read_reg(state_dir, sid) or {})
+    sid = str(sid)
+    known = known_fsids(state_dir, sid, reg)
+    held = set()
+    ff = reg.get("forkedFrom") if isinstance(reg.get("forkedFrom"), dict) else {}
+    parents = {str(p) for p in (ff.get("sid"), reg.get("forkOf"), reg.get("threadOf")) if p}
+    if parents:
+        held |= parents
+        try:
+            lines = (Path(state_dir) / "episodes" / (sid + ".jsonl")).read_text().splitlines()
+        except OSError:
+            lines = []
+        rows = []
+        for line in lines:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("head") and r.get("fsid"):
+                rows.append(str(r["fsid"]))
+        own = rows.index(sid) if sid in rows else len(rows)
+        held.update(rows[:own])
+        if reg.get("forkOf") and reg.get("lastSid") and str(reg["lastSid"]) != sid:
+            held.add(str(reg["lastSid"]))
+    for f in known - held - {sid}:
+        if _reg_path(state_dir, f).exists():
+            held.add(f)                                   # another session's own transcript, whatever the records say
+    held.discard(sid)
+    return known - held, held & known
+
+
 def relocate_transcripts(old_cwd: str, new_cwd: str, fsids, log=None) -> list[str]:
     """Move the transcripts of `fsids` (each `.jsonl` and its `<fsid>/` sidecar folder) from
     `old_cwd`'s project slug to `new_cwd`'s, by RENAME within the projects tree. A source that is not
@@ -16334,7 +16379,8 @@ class SdkBackend:
           * on `ok`: the live cwd, the reg (cwd + a durable movedFrom), the names/ discovery file (name
             and colours preserved) and the PRIOR-EPISODE transcripts (the CLI moves only the current
             <lastSid>.jsonl + folder; the older fsids of this sid — /clear episodes, resume forks — have
-            no writer, so romp renames them) all follow. Comment threads (threadOf regs) keep their own
+            no writer, so romp renames them; a fork's parent's transcript, which its records name too, is
+            the parent's and stays: movable_fsids) all follow. Comment threads (threadOf regs) keep their own
             reg.cwd and stay where they are in v1 — their transcripts stay consistent with their own reg.
 
         Nothing is injected into the session: the CLI's own isMeta notice already tells the model where
@@ -16600,9 +16646,11 @@ class SdkBackend:
             parts = [str(reg.get("name") or sid), old]
         parts += ["", "", ""]
         write_name(self.state_dir, sid, parts[0] or str(reg.get("name") or sid), new, parts[2], parts[3])
-        moved = relocate_transcripts(old, new, known_fsids(self.state_dir, sid, reg), log=self._log)
-        self._log("sdk %s: moved %r -> %r (%d prior transcript file(s) followed)"
-                  % (sid[:8], old, new, len(moved)))
+        carry, held = movable_fsids(self.state_dir, sid, reg)   # never another session's transcript (2026-10-05)
+        moved = relocate_transcripts(old, new, carry, log=self._log)
+        self._log("sdk %s: moved %r -> %r (%d prior transcript file(s) followed%s)"
+                  % (sid[:8], old, new, len(moved),
+                     "; %d left where they are, another session's lineage" % len(held) if held else ""))
         self._poke()
 
     def _update_reg_dropping(self, sid: str, drop=(), **fields) -> None:
