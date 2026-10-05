@@ -2743,12 +2743,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   at the job's turn, before the job reads anything, says what an enforcing
   gate would have done, runs the job as before, and checks the outcome.
   `mode` is `shadow` or `off`, from the bare-value file `jobs-gate` under the
-  state directory, read again whenever its stat moves (no file means
-  `shadow`; `on` reads as `shadow` until the gate enforces), and `asked` is
-  the file's word. Per pass: `ticks`, `passMs` and `passCpuMs`,
+  state directory, read again whenever its stat moves and always on the
+  first pass, and `asked` is the file's word. It takes session-hosts' words:
+  `off`, `0`, `false` or `no` turn the observation off; no file, an empty
+  one, `shadow`, `on`, `1`, `true` or `yes` read as `shadow` (`on` too, until
+  the gate enforces). Any other word reads as the default, `shadow`, and is
+  said once on stderr, where session-hosts would read it as off: a typo must
+  not stop the measurement. Per pass: `ticks`, `passMs` and `passCpuMs`,
   `wouldSkipPass` and `wouldSkipPassCpuMs` (passes on which every job was
-  called closed), `quietDeclared` (every declared job closed; the two
-  checkpoint jobs are undeclared, owed every pass, wherever they run),
+  called closed and none went unobserved), `quietDeclared` (every declared
+  job closed; the two checkpoint jobs are undeclared, owed every pass,
+  wherever they run),
   `wouldRunMs` and `wouldRunCpuMs` (what an enforcing pass would still run),
   `closedMs` and `closedCpuMs` (the runs it called closed with nothing to
   show for them: the saving), `tickMs` and `tickCpuMs` (the gate's own
@@ -2759,7 +2764,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `jobs.<job>` stage walls into these two, `liftSpentAwaiting` dropping
   most; it changes what is measured, not what the jobs do), `gateFaults`
   (a fault of the gate's own, which leaves that run unobserved and no
-  record, so the job's next pass is owed), `marks`
+  record, so the job's next pass is owed, or a fault in the pass's close;
+  stderr names each job and exception type once), `marks`
   (`session`: dirty-set entries naming one session, which open that
   session's file readers even when a re-stat looks the same; `all`: passes
   with a box-wide mark, which only re-stat), and `floorCaught` (by file
@@ -2768,13 +2774,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   (an input's name, `due`, `first`, `fault`, `gateFault`, `unrecorded`,
   `undeclared`, or a job's own reason such as `canSpend` or `yield`),
   `closed`, `closedMs`, `closedCpuMs`, `runMs`, `runCpuMs`,
-  `projectedCpuMsPerHour`, `wrongQuiet`
+  `projectedCpuMsPerHour`, `unobserved` (runs the gate's own fault left
+  unobserved), `wrongQuiet`
   (a job called closed that acted, raised, or found its own memo moved while
-  none of its inputs did: a signal its declaration lacks, by evidence) and
-  `raced` (its memo moved and so did a declared input while it ran: the next
-  pass would have opened it). `wrongQuietLast` keeps the newest sixteen, and
-  `lastPass` each job's verdict on the newest observed pass (`closed`,
-  `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate fault).
+  none of its inputs did: a signal its declaration lacks, by evidence; the
+  acts are `views`, `mark`, `push`, `send`, `problem`, `spendRow`, `write`, a
+  declared file written with no mark, and `raised`, and an act is never
+  raced) and `raced` (its memo moved and so did a declared input after the
+  gate looked, as the next pass's gate will see it: a box or an in-memory
+  input observed again, a mark, a judge write or a moved live row naming the
+  session, or a box-wide mark, the postal log or a shared judge write with a
+  re-stat of a session whose view was a stat of that pass, never a standing
+  one, which cannot tell a write during the run from one before the pass;
+  the next pass would have opened it). `wrongQuietLast` keeps the newest
+  sixteen, and `lastPass` each job's verdict on the newest observed pass
+  (`closed`, `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate
+  fault).
   `today` and `projected` give `periodMs`, `passesPerHour` and `cpuMsPerHour`:
   `today` over the observed passes less the gate's cost, `projected` with
   the closed runs taken out, so the period shortens, passes per hour rise

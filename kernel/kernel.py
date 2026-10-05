@@ -5508,6 +5508,7 @@ def _relay_recall_sweep(sid, nd, now):
             keep.append(r)                                 # the bus could not be asked a moment ago: held, not hammered
             next_at = min(next_at or 10**12, int(r["unknownAt"]) + hold)
             continue
+        _jobs_gate_note("send")                            # (the jobs pass's gate, shadow: a recall asked of the bus is an act)
         got = _bus_recall_relay(sid, r.get("pendingMid"))
         if got == "unknown":
             r["unknownAt"] = int(now)
@@ -5562,6 +5563,7 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
         if nd is None or _relay_record_names(nd, marker):
             return 0, changed, True, False                 # spent: the node is gone, or a record names the marker
         if isinstance(rw, dict):                           # the node carries another marker: the entry is REWRITTEN for
+            _jobs_gate_note("write")                       #   (the jobs pass's gate, shadow: a queue entry written, no save)
             jd._relay_write_entry(sid, nid, rw.get("id") or "", rev)   #   the live one, never unlinked (the path may
             return 0, changed, False, False                #   already be that newer flush); the next tick sends it
         if rev >= int(e.get("rev") or 0):
@@ -5606,6 +5608,7 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
             hold = RELAY_UNKNOWN_HOLD * (RELAY_RECALL_BACKOFF if int(rw.get("recallAttempts") or 0) >= RELAY_RECALL_TRIES else 1)
             if rw.get("recallUnknownAt") and int(now) - int(rw["recallUnknownAt"]) < hold:
                 return 0, changed, False, int(rw["recallUnknownAt"]) + hold   # held: quiet until the hold ends
+            _jobs_gate_note("send")                        #   (the jobs pass's gate, shadow: a recall asked of the bus is an act)
             got = _bus_recall_relay(sid, rw["pendingMid"])  #   so the far host never delivers a stale one
             if got == "unknown":
                 rw["recallUnknownAt"] = int(now)
@@ -5632,6 +5635,7 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
                                                            #   sweep's block to stand the marker down or the session to live
     who = _name_of(sid) or sid[:8]
     body = _relay_body(who, rw.get("why"), rw.get("context"))
+    _jobs_gate_note("send")                                # (the jobs pass's gate, shadow: the question handed to the bus is an act)
     ok, err, definitive, resp = _bus_send_relay({"to": peer, "from": who, "from_id": sid, "body": body,
                                                  "kind": "question", "relayed": True, "relayMarker": str(rw.get("id") or "")})
     rw.pop("unknownAt", None)
@@ -5679,6 +5683,7 @@ def _relay_spend(f, e):
         cur = None
     if isinstance(cur, dict) and any(str(cur.get(k) or "") != str(e.get(k) or "") for k in ("marker", "nid", "token")):
         return
+    _jobs_gate_note("write")                               # (the jobs pass's gate, shadow: a queue entry consumed is a write)
     f.unlink(missing_ok=True)
 
 
@@ -5713,10 +5718,12 @@ def _relay_store(sid, ents, now, alive_ids=None):
             until = min(until or 10**12, int(q))
         if changed:
             jd.rollup_status(store, False)
+            _jobs_gate_note("mark")                        # (the jobs pass's gate, shadow: the store, a keyed file, written by this job)
             jd.save_goals(sid, store)                      # the record lands first; a raise here keeps the entry
         if spent:
             nd = store["nodes"].get(str(e["nid"]))
             if jd._relay_owes_recall(nd) and not jd._relay_recall_entry_path(sid, str(e["nid"])).exists():   # the rows, like the other readers
+                _jobs_gate_note("write")                   # (the jobs pass's gate, shadow: a queue entry written, no save)
                 jd._relay_write_entry(sid, str(e["nid"]), "recall", int(store.get("rev") or 0))   # a recall still owed:
                 quiet = False                              #   its OWN entry beside the marker's (never a rewrite of the
             _relay_spend(f, e)                             #   marker's file, which the judge may have renamed a newer
@@ -5757,10 +5764,14 @@ def _relay_tick(now, alive_ids=None):
         return 0
     for f in d.glob(".tmp-*"):                             # a writer's temp file left by a crash: swept after a minute
         try:
-            if int(now) - int(f.stat().st_mtime) > 60:
+            mt = int(f.stat().st_mtime)
+            if int(now) - mt > 60:
+                _jobs_gate_note("write")                   # (the jobs pass's gate, shadow: the sweep's unlink is a write)
                 f.unlink(missing_ok=True)
+            else:
+                _jobs_gate_due(mt + 61)                    # (the jobs pass's gate, shadow: the first second this file is swept)
         except OSError:
-            pass
+            _jobs_gate_owe("fault")                        # (the jobs pass's gate, shadow: a stat or unlink that failed is retried)
     by_sid = {}
     for f in sorted(d.glob("*.json")):
         try:
@@ -5770,6 +5781,7 @@ def _relay_tick(now, alive_ids=None):
         except Exception as ex:
             _RELAY_BAD["n"] += 1
             sys.stderr.write("relay queue: entry %s malformed (%r); dropped, the others stand\n" % (f.name, ex))
+            _jobs_gate_note("write")                       # (the jobs pass's gate, shadow: the drop's unlink is a write)
             f.unlink(missing_ok=True)
             continue
         by_sid.setdefault(str(e["sid"]), []).append((f, e))
@@ -5785,6 +5797,8 @@ def _relay_tick(now, alive_ids=None):
                     _jobs_gate_flip(int(held[1]))          # (the jobs pass's gate, shadow: a hold that ends on the clock is the walk's due)
                 continue                                   # nothing it reads has moved since a pass that changed nothing,
                                                            #   and no hold of its has ended
+            if held and held[0] != key:
+                _jobs_gate_note("miss")                    # (the jobs pass's gate, shadow: the relay's own quiet key moved)
             sent, quiet = _relay_store(sid, ents, now, alive_ids)
             n += sent
             if quiet and key is not None:
@@ -12099,6 +12113,7 @@ def _auto_pause_on_limit():
     try:
         account = _account_limited()                     # 5h / 7d only: fable is model-scoped
     except Exception:
+        _jobs_gate_owe("fault")                          # (the jobs pass's gate, shadow: the reading is tried again next pass)
         return
     if account and not _retry_paused_on():
         # latched at the event: the API cell's 'paused, usage limit' (not re-derived from _retry_resume_at's clock
@@ -12246,6 +12261,7 @@ def _auto_resume_retry(now, live_map):
             if _account_limited():
                 return                                   # the window holds: nothing a session writes outranks the report
         except Exception:
+            _jobs_gate_owe("fault")                      # (the jobs pass's gate, shadow: the reading is tried again next pass)
             return                                       # no reading: no change (the engage side reads nothing either)
         _lift_retry_pause(now, "the usage window reset")
         return
@@ -14731,6 +14747,7 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
             if on:
                 fired = _compact_suggest_tick(s["sid"], live_map.get(s["sid"]), now) or fired
         except Exception:
+            _jobs_gate_owe("fault")                       # (the jobs pass's gate, shadow: a look that raised is looked at again next pass)
             sys.stderr.write("auto-nudge (session %s): %s\n"
                              % (s.get("sid") or "?", traceback.format_exc()))
     _set_stage("jobs.autoNudge")                          # the looks close with the loop, however it ended: its wall less the parses' (1736 round two)
@@ -14741,6 +14758,7 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
         #                                                question, once per block (mail, not an injected message: the toggle
         #                                                below governs injected follow-ups, not the postal service)
     except Exception:
+        _jobs_gate_owe("fault")                        # (the jobs pass's gate, shadow: the tail's faults are retried next pass)
         sys.stderr.write("relay tick: %s\n" % traceback.format_exc())   # its own failure never skips the sweeps below
     try:
         if on:
@@ -14756,10 +14774,12 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
             # so skipping loses nothing.
             _dead_wait_sweep(alive_ids, nudged, now)   # dormant owners' stamped cards → procedural block
     except Exception:
+        _jobs_gate_owe("fault")
         sys.stderr.write("debt-backstop: %s\n" % traceback.format_exc())
     try:
         fired = _awaiting_wake_outcomes(now, alive_ids) or fired   # wake outcomes for records the walk can't reach
     except Exception:
+        _jobs_gate_owe("fault")
         sys.stderr.write("awaiting-wake outcomes: %s\n" % traceback.format_exc())
     if fired:
         # ack-fast, not inline: this tick usually runs on the pusher thread, but the WS setAutoNudge
@@ -16051,6 +16071,7 @@ def _awaiting_wake_outcomes(now, walked=None):
             if _mark_nudge_failed(gid, ev_t=_ev, wake=True) == "failed":
                 fired = True
         except Exception:
+            _jobs_gate_owe("fault")                  # (the jobs pass's gate, shadow: the record is swept again next pass)
             sys.stderr.write("awaiting-wake outcome (%s): %s\n" % (gid, traceback.format_exc()))
     return fired
 
@@ -17495,6 +17516,7 @@ def _clear_done_working_notes(now, live_map):
             continue
         if _open_top_goal(sid):                           # working OR blocked top remains → still its work
             continue
+        _jobs_gate_note("write")                          # (the jobs pass's gate, shadow: the lift writes the notes directory)
         _set_working_note(sid, "")                        # idle + nothing open → lift the stale claim
 
 
@@ -22165,7 +22187,8 @@ def _fire_api_retry(sid, be, manual=False):
         _rerr = _api_error(_path_of(sid) or "")
         _rk = (_rerr.get("uuid") or _rerr.get("text") or "") if _rerr else None
     except Exception:
-        pass                                              # unreadable state → manual still fires below
+        _jobs_gate_owe("fault")                           # (the jobs pass's gate, shadow: the auto path reads it again next pass)
+        #                                                   unreadable state → manual still fires below
     if _rk is None:
         _clear_retry_backoff(sid)                         # recovered (or never blocked): reset the ladder
     if not manual:
@@ -37762,8 +37785,9 @@ def _chat_sig_deps(sid, deps):
 # The liveness-row fields the chat build never reads (2026-09-18). snapT and interrupting as before (the row comment in
 # _chat_build_sig; the merged row Sessions.live emits carries neither, it copies an explicit key list and interrupting
 # is a feed-entry field, so those two matter only to hand-built test rows and are kept for them); ctxTokens, the raw
-# token count every usage report moves while the payload renders the clamped percent (context, ctxOver; its one reader
-# is the compaction-suggestion tick, _compact_suggest_tick, not a build); and, on each background-task row, lastTool,
+# token count every usage report moves while the payload renders the clamped percent (context, ctxOver; its two readers
+# are the compaction-suggestion tick, _compact_suggest_tick, and the jobs pass's gate, whose live-row fingerprint names
+# it among _JOBS_GATE_ROW_FIELDS for that tick's job; neither is a build); and, on each background-task row, lastTool,
 # which every task_progress of a background task that names a tool rewrites (sdk_backend _on_task_event) and no kernel
 # reader reads (_bg_live_norm, _bg_tasks, _agent_alive and the feed's _row_ids_sig read toolUseId, taskId, type, desc,
 # since). A field the build READS is never listed here: an unread field left in costs one byte-identical rebuild per
@@ -50480,6 +50504,7 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
         try:
             rate = _spend_rate_usd_per_hour(path, now, prices=prices, stat=stat)
         except Exception:
+            _jobs_gate_owe("fault")                      # (the jobs pass's gate, shadow: the rate is read again next pass)
             sys.stderr.write("spend-guard rate (%s): %s\n" % (sid[:8], traceback.format_exc()))
             continue
         st = _SPEND_GUARD.get(sid)
@@ -66431,29 +66456,38 @@ def _sub_stage(name):
 # checks whether a job it called closed acted anyway or found its own memo moved (a wrongQuiet: a signal its declaration lacks).
 # GET /perf jobs.gate carries the verdicts per job, the CPU of the runs it called closed, and the pace an enforcing loop would
 # keep (_jobs_gate_report). No job reads anything the gate records; the knob (STATE/jobs-gate) turns the observation off.
-JOBS_GATE_FILE = "jobs-gate"          # a bare value under the state directory, statted each pass: "off", or the default "shadow"
-#                                       (no file, an empty one, any other word); "on" reads as shadow until the gate enforces
+JOBS_GATE_FILE = "jobs-gate"          # a bare value under the state directory, statted each pass: an off word, or the default "shadow"
+#                                       (no file, an empty one, an on word); "on" reads as shadow until the gate enforces
+_JOBS_GATE_OFF_WORDS = ("off", "0", "false", "no")             # session-hosts' off words (host_transport.session_hosts_read)
+_JOBS_GATE_SHADOW_WORDS = ("", "shadow", "on", "1", "true", "yes")   # its on words, the empty file and this stage's own word; any other
+#                                       word reads as the default, shadow, said once on stderr (session-hosts reads one as off: a typo
+#                                       in this knob must not silently stop the measurement it exists for)
 JOBS_GATE_TREE_FLOOR_S = 60           # the floor for agent files no event announces once the gate enforces (the user 2026-10-03,
 #                                       who set the spend guard's check for those writes at once a minute): reported, not applied
 JOBS_GATE_WRONG_LAST = 16             # the newest wrongQuiet records kept for /perf, each naming its job, its evidence and its pass
 JOBS_GATE_ACCOUNT_FILE = "~/.claude.json"   # the credential store the account reader stats (_acct_read): a logout lifts a limit pause
 _JOBS_GATE_POSITIONS = _TICK_KEY_FILES[:6]  # a session's own keyed files, in _session_files_stat's order; its other four are box-wide
 #                                             (the clears, postal and downtime logs and the ledger) and the gate stats them as such
-_JOBS_GATE_ACTS = ("views", "mark", "push", "send", "problem", "spendRow", "raised")   # the evidence that is an act; the rest says a
-#                                             memo moved (miss, neverSeen, clockParse, load)
+_JOBS_GATE_ACTS = ("views", "mark", "push", "send", "problem", "spendRow", "write", "raised")   # the evidence that is an act (write:
+#                                             a declared file the job wrote with no mark, a relay queue entry or a working note); the
+#                                             rest says a memo moved (miss, neverSeen, clockParse, load)
 _JOBS_GATE_ROW_FIELDS = ("state", "since", "ctxTokens", "auth", "authLive", "connected", "spawning", "retryCount")   # the live
 #                                             row's fields the jobs read (never the whole row: its model-fallback retry countdown
 #                                             moves every second, which would make every row reader's input a clock)
 _JOBS_UNDECLARED = ("persistCheckpoints", "convergeCheckpoints")   # owed every pass wherever they run: a dirty set and a byte budget,
 #                                             no input the gate observes (on the pusher's cycle, where they ran at the base, nothing is gated)
-_JOBS_GATE = {"asked": "", "modeKey": None, "rec": {}, "lost": {}, "gen": {}, "floorSeen": {}, "tree": {}, "last": {}}
+_JOBS_GATE_BOOT_KEY = ("unread",)    # the knob's stat key before the first pass reads it: equal to no stat and to no file (None), so
+#                                       the first pass always reads the knob, and the default is the read's, never a literal's
+_JOBS_GATE = {"asked": "", "modeKey": _JOBS_GATE_BOOT_KEY, "rec": {}, "lost": {}, "gen": {}, "floorSeen": {}, "tree": {}, "last": {},
+              "said": set(), "warned": set()}
 #   rec: job -> its last completed run {v: the inputs observed before it ran, owed: what it left owing, dues: the earliest instant
 #   after that run at which its answer can change, t: that pass's clock}; lost: job -> why it holds no record ("fault", or
 #   "gateFault": the gate's own fault left that run unobserved); gen: sid ->
 #   the passes whose dirty set named that session alone; floorSeen: (sid, path) -> the standing stat a floor re-stat was counted
 #   against; tree: sid -> the spend guard's simulated sixty-second floor; last: job -> the last observed pass's verdict, as /perf
-#   jobs.gate.lastPass shows it ("closed", "open:<reason>", "owed:<reason>", or "unobserved" after a gate fault). The jobs
-#   thread is the one writer.
+#   jobs.gate.lastPass shows it ("closed", "open:<reason>", "owed:<reason>", or "unobserved" after a gate fault); said: the
+#   (job, exception type) pairs whose gate fault stderr has named, once each per kernel life; warned: the knob's unrecognised
+#   words stderr has named. The jobs thread is the one writer.
 _JOBS_GATE_MISSING = object()
 
 
@@ -66591,18 +66625,27 @@ def _jobs_gate_six(s):
     return tuple(out)
 
 
-def _jobs_gate_files(tick, s):
+def _jobs_gate_files(tick, s, fresh=None):
     """`s`'s six files as the pass's next reader of the shared snapshot would see them, WITHOUT filling the snapshot (filling it
     before its first reader would move what the walk and the interrupt tick read): the snapshot's entry once a reader took it; the
     standing stat while no mark names the session and the floor holds; else a stat of the gate's own, kept for the pass. A floor
-    re-stat that finds a file moved with no mark is counted under jobs.gate.floorCaught by position: a writer that never said so."""
+    re-stat that finds a file moved with no mark is counted under jobs.gate.floorCaught by position: a writer that never said so.
+    `fresh`, when given, collects the sid when the view is a stat taken in THIS pass (the snapshot's, or the gate's own), never a
+    standing one: the raced test re-stats those sessions alone, since a standing view cannot tell a write during the run from one
+    before the pass (_jobs_gate_raced)."""
     sid = str(s.get("sid") or "")
     key = (sid, s.get("path") or "")
     memo = getattr(_live_scope, "files_stat", None)
     if memo is not None and key in memo:
+        if fresh is not None:
+            taken = _FILES_STAT_STANDING.get(key)
+            if taken is not None and taken[1] >= tick["mono"]:
+                fresh.add(sid)                       # the snapshot's reader statted it in this pass (a served entry keeps its old time)
         return tuple(memo[key][:12])
     hit = tick["fresh"].get(key)
     if hit is not None:
+        if fresh is not None:
+            fresh.add(sid)
         return hit
     dirty = getattr(_live_scope, "files_dirty", None)
     stand = _FILES_STAT_STANDING.get(key)
@@ -66613,6 +66656,8 @@ def _jobs_gate_files(tick, s):
         floor = True
     out = _jobs_gate_six(s)
     tick["fresh"][key] = out
+    if fresh is not None:
+        fresh.add(sid)
     if floor and _JOBS_GATE["floorSeen"].get(key) != stand[1]:
         _JOBS_GATE["floorSeen"][key] = stand[1]
         moved = [n for i, n in enumerate(_JOBS_GATE_POSITIONS) if tuple(out[2 * i:2 * i + 2]) != tuple(stand[0][2 * i:2 * i + 2])]
@@ -66642,11 +66687,12 @@ def _jobs_gate_row(sid, row):
             + (ids(row.get("subagents"), "agentId", "id"), ids(row.get("bgTasks"), "taskId", "toolUseId"), rev))
 
 
-def _jobs_gate_observe(spec, tick):
+def _jobs_gate_observe(spec, tick, fresh=None):
     """The job's declared inputs now: {channel: version}. A spec's `active` false (nothing for the job to do) narrows them to its
     `idle` list. Per session: `files:<positions>` (the pass's view of those files plus the session's mark generation), `rows`
     (the live row's fingerprint), `regs` (the session's registry row); `members` is the live map's sids and the alive sessions';
-    `box:<name>` one stat; `mem:<name>` an in-memory value."""
+    `box:<name>` one stat; `mem:<name>` an in-memory value. `fresh` collects the sessions whose file view is a stat of this pass
+    (_jobs_gate_files)."""
     inputs = spec.get("inputs", ())
     active = spec.get("active")
     if active is not None and not active(tick):
@@ -66663,7 +66709,7 @@ def _jobs_gate_observe(spec, tick):
             gen = _JOBS_GATE["gen"]
             d = {}
             for s in _jobs_gate_alive(tick):
-                six = _jobs_gate_files(tick, s)
+                six = _jobs_gate_files(tick, s, fresh)
                 sid = str(s["sid"])
                 d[sid] = tuple(six[2 * i + j] for i in idx for j in (0, 1)) + (gen.get(sid, 0),)
             v[ch] = d
@@ -66676,6 +66722,80 @@ def _jobs_gate_observe(spec, tick):
         elif kind == "regs":
             v[ch] = {str(s["sid"]): _jobs_gate_stat(jd.SDKDIR / (str(s["sid"]) + ".json")) for s in _jobs_gate_alive(tick)}
     return v
+
+
+def _jobs_gate_next():
+    """What the NEXT pass's prelude will observe of the sessions' files, read now and taken from nothing (_files_stat_pass_open
+    takes them, this only reads): (the sids it will name alone, whether it will name every session). Its own reads, each against
+    the baseline this pass's prelude left: the dirty set and its all flag (the in-process writers' marks since then), the judge
+    module's write counts by session and in total, each live row's state, since and live-tail revision (from the backends now,
+    not the pass's snapshot), and the postal log's stat."""
+    with _FILES_STAT_LOCK:
+        sids, every = set(_FILES_STAT_DIRTY["sids"]), bool(_FILES_STAT_DIRTY["all"])
+    try:
+        _pst = os.stat(str(jd.STATE / "timeline" / "messages.jsonl")); postal = (_pst.st_mtime, _pst.st_size)
+    except OSError:
+        postal = (0.0, 0)
+    if postal != _FILES_STAT_OBSERVED["postal"]:
+        every = True
+    writes = getattr(jd, "SESSION_FILE_WRITES", None)
+    if isinstance(writes, dict):
+        try:
+            by = dict(writes.get("by") or {})
+        except RuntimeError:                         # a writer mid-insert: the prelude would name every session, this once
+            by, every = dict(_FILES_STAT_OBSERVED["jdBy"]), True
+        if writes.get("all") != _FILES_STAT_OBSERVED["jdAll"]:
+            every = True
+        prev = _FILES_STAT_OBSERVED["jdBy"]
+        sids.update(str(sid) for sid, n in by.items() if prev.get(sid) != n)
+        sids.update(str(sid) for sid in prev if sid not in by)
+    try:
+        live = Sessions.live()
+    except Exception:
+        live, every = {}, True                       # unreadable: when unsure, every session
+    rows = _FILES_STAT_OBSERVED["rows"]
+    for sid, row in (live or {}).items():
+        try:
+            cur = ((row or {}).get("state"), (row or {}).get("since"), Sessions.live_rev(sid))
+        except Exception:
+            cur = None
+        if cur is None or cur != rows.get(sid):
+            sids.add(str(sid))
+    return sids, every
+
+
+def _jobs_gate_raced(run, tick):
+    """Whether a declared input of a run called closed moved after the gate observed it, as the next pass's gate will see it:
+    then a memo that moved during the run was a race (the next pass opens the job: later, not lost), else a wrongQuiet. A box,
+    an in-memory value or a registry row is observed again. A files channel moved when the next prelude will name one of its
+    sessions alone (a mark, a judge write, a moved row: its generation opens the job), or will name every session (a box-wide
+    mark, the postal log, the judge's shared writes) and a re-stat of a session whose view was a stat of this pass finds its
+    positions moved. A standing view is never re-statted: it cannot tell a write during the run from one before the pass, which
+    no signal announced and the next pass would miss too. The live rows and the membership are the pass's snapshot, which no
+    job moves. A run's own writes never reach this test: each is an act (a mark, a write, a send), and an act is never raced."""
+    v = run.get("v") or {}
+    nxt = None
+    for ch, val in v.items():
+        kind, _, arg = ch.partition(":")
+        if kind in ("box", "mem", "regs"):
+            if _jobs_gate_observe({"inputs": (ch,)}, tick).get(ch) != val:
+                return True
+        elif kind == "files":
+            if nxt is None:
+                nxt = _jobs_gate_next()
+            sids, every = nxt
+            idx = [_JOBS_GATE_POSITIONS.index(p) for p in arg.split(",")]
+            for s in _jobs_gate_alive(tick):
+                sid = str(s["sid"])
+                if sid not in val:
+                    continue
+                if sid in sids:
+                    return True
+                if every and sid in run.get("fresh", ()):
+                    six = _jobs_gate_six(s)
+                    if tuple(six[2 * i + j] for i in idx for j in (0, 1)) != tuple(val[sid][:-1]):
+                        return True
+    return False
 
 
 def _jg_owed_lift(tick):
@@ -66819,8 +66939,11 @@ def _jobs_gate_reset():
 
 def _jobs_gate_mode():
     """The knob, STATE/jobs-gate (JOBS_GATE_FILE): statted every pass and read again only when its stat moves, a bare-value file
-    beside session-hosts so a flip needs no restart. "off" stops the observation; anything else, the file's absence included, is
-    shadow ("on" too: this stage never skips a job). A flip forgets every record, since nothing was watched in between."""
+    beside session-hosts so a flip needs no restart, read with its words: off, 0, false or no stops the observation; no file, an
+    empty one, shadow, and its on words (on, 1, true, yes) are shadow (this stage never skips a job). Any other word reads as
+    shadow too, the default, and is said once on stderr; session-hosts reads such a word as off, a difference kept on purpose (a
+    typo here must not silently stop the measurement). The first pass always reads the file (_JOBS_GATE_BOOT_KEY), so the
+    default is the read's. A flip forgets every record, since nothing was watched in between."""
     p = jd.STATE / JOBS_GATE_FILE
     try:
         st = os.stat(p)
@@ -66835,7 +66958,11 @@ def _jobs_gate_mode():
                 raw = p.read_text(encoding="utf-8").strip().lower()
             except (OSError, ValueError):
                 raw = ""
-        mode = "off" if raw == "off" else "shadow"
+        mode = "off" if raw in _JOBS_GATE_OFF_WORDS else "shadow"
+        if raw not in _JOBS_GATE_OFF_WORDS and raw not in _JOBS_GATE_SHADOW_WORDS and raw not in _JOBS_GATE["warned"]:
+            _JOBS_GATE["warned"].add(raw)
+            sys.stderr.write("jobs gate: %s says %r, not an off word (off, 0, false, no) or an on word (shadow, on, 1, true, yes): "
+                             "read as the default, shadow (said once per word)\n" % (JOBS_GATE_FILE, raw[:40]))
         _JOBS_GATE["asked"] = raw
         if mode != _JOBS_GATE_MODE[0]:
             _jobs_gate_reset()
@@ -66852,7 +66979,7 @@ def _jobs_gate_tick_open(now, live_map):
             return None
         tick = {"now": now, "live_map": live_map if isinstance(live_map, dict) else {}, "alive": None, "aliveFault": False,
                 "rows": None, "fresh": {}, "gens": False, "jobs": {}, "verdicts": {}, "gateMs": 0.0, "gateCpu": 0.0, "runMs": 0.0,
-                "runCpu": 0.0, "closedMs": 0.0, "closedCpu": 0.0, "faults": 0}
+                "runCpu": 0.0, "closedMs": 0.0, "closedCpu": 0.0, "faults": 0, "unobserved": 0, "mono": time.monotonic()}
     except Exception:
         return None
     _JOBS_GATE_TL.tick = tick
@@ -66864,12 +66991,12 @@ def _jobs_gate_predict(name, tick):
     a due it noted has come, consumed by a run at or after it), owed (it has no record, it left work owing, its own predicate says
     so, or it is undeclared) or closed. The inputs are observed here, BEFORE the job reads them, and are what its record keeps."""
     run = {"job": name, "acts": {}, "owed": set(), "dues": [], "flips": [], "pending": set(), "tree": set(), "spec": None,
-           "v": None, "verdict": "owed", "reason": "undeclared"}
+           "v": None, "verdict": "owed", "reason": "undeclared", "fresh": set()}
     spec = _JOBS_INPUTS.get(name)
     if spec is None:
         return run
     run["spec"] = spec
-    v = run["v"] = _jobs_gate_observe(spec, tick)
+    v = run["v"] = _jobs_gate_observe(spec, tick, run["fresh"])
     if tick["aliveFault"] and any(ch.partition(":")[0] in ("files", "rows", "members", "regs") for ch in spec.get("inputs", ())):
         run["reason"] = "gateFault"                  # the sessions could not be listed: no closed verdict on that
         return run
@@ -66900,26 +67027,54 @@ def _jobs_gate_predict(name, tick):
     return run
 
 
+def _jobs_gate_unobserved(tick, name, declared, why):
+    """A run the gate could not observe: its own fault at the job's turn or after its run (`why` the exception), or a turn that
+    found another observed run still open on this thread (`why` None). The pass reads `unobserved` for the job and counts it
+    under gateFaults and under the job's byJob row (`unobserved`), so the pass is never a wouldSkipPass, and no record stands:
+    what the run's hooks said never reached one, so the next pass is owed (gateFault), as after the job's own fault. stderr names
+    the job and the exception type once each per kernel life. Never raises."""
+    try:
+        tick["faults"] += 1
+        tick["unobserved"] += 1
+        tick["jobs"][name] = (False, declared)
+        tick["verdicts"][name] = "unobserved"
+        _JOBS_GATE["rec"].pop(name, None)            # an unobserved run leaves no record: what it noted went unheard, so the
+        _JOBS_GATE["lost"][name] = "gateFault"       #  next pass is owed, as after the job's own fault
+        kind = type(why).__name__ if why is not None else "runOpen"
+        if (name, kind) not in _JOBS_GATE["said"]:
+            _JOBS_GATE["said"].add((name, kind))
+            sys.stderr.write("jobs gate (%s): %s; this run unobserved, its next pass owed (counted under /perf jobs.gate.gateFaults "
+                             "and byJob.%s.unobserved; said once per job and kind)\n"
+                             % (name, ("the gate's own %s: %s" % (kind, str(why)[:200])) if why is not None
+                                else "another observed run was still open on this thread", name))
+
+        def put(b):
+            _jobs_gate_byjob(b, name)["unobserved"] += 1
+        _PERF_STATS.gate_update(put)
+    except Exception:
+        pass
+
+
 def _jobs_gate_open(name):
     """At a job's turn: None unless this thread's pass is under the gate's observation (the jobs thread under _jobs_cycle, the knob
-    not off) and no observed job is already running here (a nested stage); else the job's run record, its verdict predicted. The
-    gate's own work is timed apart from the job's (jobs.gate.tickMs and tickCpuMs), and a fault in it leaves the job unobserved
-    for this pass (gateFaults) and never reaches the job. An unobserved run leaves no record, here or in _jobs_gate_close: what
-    its hooks said never reached one, so the next pass is owed (gateFault)."""
+    not off); else the job's run record, its verdict predicted. A turn that finds an observed run still open on this thread (its
+    close never ran) is unobserved, never a nested observation. The gate's own work is timed apart from the job's
+    (jobs.gate.tickMs and tickCpuMs), and a fault in it leaves the job unobserved for this pass (_jobs_gate_unobserved) and never
+    reaches the job. An unobserved run leaves no record, here or in _jobs_gate_close: what its hooks said never reached one, so
+    the next pass is owed (gateFault)."""
     tick = getattr(_JOBS_GATE_TL, "tick", None)
-    if tick is None or _jobs_gate_run() is not None:
+    if tick is None:
+        return None
+    if _jobs_gate_run() is not None:
+        _jobs_gate_unobserved(tick, name, name in _JOBS_INPUTS, None)
         return None
     t0, c0 = time.monotonic(), time.thread_time()
     try:
         _jobs_gate_gens(tick)
         run = _jobs_gate_predict(name, tick)
-    except Exception:
+    except Exception as e:
         run = None
-        tick["faults"] += 1
-        tick["jobs"][name] = (False, name in _JOBS_INPUTS)
-        tick["verdicts"][name] = "unobserved"
-        _JOBS_GATE["rec"].pop(name, None)            # an unobserved run leaves no record: what it noted went unheard, so the
-        _JOBS_GATE["lost"][name] = "gateFault"       #  next pass is owed, as after the job's own fault
+        _jobs_gate_unobserved(tick, name, name in _JOBS_INPUTS, e)
     _JOBS_GATE_TL.run = run
     tick["gateMs"] += (time.monotonic() - t0) * 1000.0
     tick["gateCpu"] += (time.thread_time() - c0) * 1000.0
@@ -66935,12 +67090,8 @@ def _jobs_gate_close(run, wall, cpu, raised):
     t0, c0 = time.monotonic(), time.thread_time()
     try:
         _jobs_gate_settle(run, tick, wall, cpu, raised)
-    except Exception:
-        tick["faults"] += 1
-        tick["jobs"][run["job"]] = (False, run["spec"] is not None)
-        tick["verdicts"][run["job"]] = "unobserved"
-        _JOBS_GATE["rec"].pop(run["job"], None)      # a settle that faulted, whatever it wrote: no record stands, the next
-        _JOBS_GATE["lost"][run["job"]] = "gateFault"   #  pass is owed
+    except Exception as e:
+        _jobs_gate_unobserved(tick, run["job"], run["spec"] is not None, e)   # whatever the settle wrote: no record stands
     tick["gateMs"] += (time.monotonic() - t0) * 1000.0
     tick["gateCpu"] += (time.thread_time() - c0) * 1000.0
 
@@ -66948,18 +67099,19 @@ def _jobs_gate_close(run, wall, cpu, raised):
 def _jobs_gate_settle(run, tick, wall, cpu, raised):
     """The run's outcome against its verdict. A job called closed that ACTED (a write, a mark, a send, a row, a raise) is a
     wrongQuiet with its evidence; one whose own memo moved while none of its declared inputs did is one too; one whose memo moved
-    while a declared input moved during its run is `raced` (the next pass's gate would have opened it: later, not lost). Then the
-    record: a run that raised, or noted a fault, leaves NONE (the fault-boundary rule: the next pass evaluates it as if it never
-    completed); any other keeps the inputs observed before it ran, what it left owing (an evaluation left unrecorded among it) and
-    its earliest due after this pass. A job called closed with no evidence adds its wall and CPU to closedMs / closedCpuMs, what
-    enforcement would save; every other run's go to runMs / runCpuMs, what an enforcing pass would still spend."""
+    while a declared input moved after the gate observed it, as the next pass's gate will see it, is `raced` (that gate opens it:
+    later, not lost; _jobs_gate_raced). Then the record: a run that raised, or noted a fault, leaves NONE (the fault-boundary
+    rule: the next pass evaluates it as if it never completed); any other keeps the inputs observed before it ran, what it left
+    owing (an evaluation left unrecorded among it) and its earliest due after this pass. A job called closed with no evidence
+    adds its wall and CPU to closedMs / closedCpuMs, what enforcement would save; every other run's go to runMs / runCpuMs,
+    what an enforcing pass would still spend."""
     name, spec, now, verdict = run["job"], run["spec"], tick["now"], run["verdict"]
     acts = dict(run["acts"])
     if raised:
         acts["raised"] = acts.get("raised", 0) + 1
     wrong = raced = None
     if verdict == "closed" and acts:
-        if any(k in _JOBS_GATE_ACTS for k in acts) or _jobs_gate_observe(spec, tick) == run["v"]:
+        if any(k in _JOBS_GATE_ACTS for k in acts) or not _jobs_gate_raced(run, tick):
             wrong = acts
         else:
             raced = acts
@@ -66995,10 +67147,7 @@ def _jobs_gate_settle(run, tick, wall, cpu, raised):
     reason = run["reason"]
 
     def put(b):
-        r = b["byJob"].get(name)
-        if r is None:
-            r = b["byJob"][name] = {"ticks": 0, "open": {}, "owed": {}, "closed": 0, "closedMs": 0.0, "closedCpuMs": 0.0,
-                                    "runMs": 0.0, "runCpuMs": 0.0, "wrongQuiet": {}, "raced": {}}
+        r = _jobs_gate_byjob(b, name)
         r["ticks"] += 1
         if verdict == "closed":
             r["closed"] += 1
@@ -67016,6 +67165,15 @@ def _jobs_gate_settle(run, tick, wall, cpu, raised):
             b["wrongQuietLast"].append({"job": name, "evidence": sorted(wrong), "t": now})
             del b["wrongQuietLast"][:-JOBS_GATE_WRONG_LAST]
     _PERF_STATS.gate_update(put)
+
+
+def _jobs_gate_byjob(b, name):
+    """The gate block's row for job `name`, made at zero on its first write (_jobs_gate_settle, _jobs_gate_unobserved)."""
+    r = b["byJob"].get(name)
+    if r is None:
+        r = b["byJob"][name] = {"ticks": 0, "open": {}, "owed": {}, "closed": 0, "closedMs": 0.0, "closedCpuMs": 0.0,
+                                "runMs": 0.0, "runCpuMs": 0.0, "wrongQuiet": {}, "raced": {}, "unobserved": 0}
+    return r
 
 
 def _jobs_gate_tree_floor(run, prev, tick):
@@ -67072,8 +67230,9 @@ def _jobs_gate_tree_floor(run, prev, tick):
 
 def _jobs_gate_tick_close(tick, pass_s, pass_cpu_s):
     """The pass's close for the gate (_jobs_cycle's finally): the pass's verdict (wouldSkipPass: every job called closed, so an
-    enforcing loop would have run nothing; quietDeclared: every DECLARED job closed, the undeclared ones ran), its wall and CPU,
-    the would-run and closed sums, the gate's own cost, and the per-session state pruned to the alive sessions. Never raises."""
+    enforcing loop would have run nothing, and none went unobserved; quietDeclared: every DECLARED job closed, the undeclared ones
+    ran), its wall and CPU, the would-run and closed sums, the gate's own cost, and the per-session state pruned to the alive
+    sessions. Never raises: its own fault counts one gateFault and is said once per exception type."""
     if tick is None:
         return
     _JOBS_GATE_TL.tick = None
@@ -67081,7 +67240,7 @@ def _jobs_gate_tick_close(tick, pass_s, pass_cpu_s):
     try:
         _JOBS_GATE["last"] = dict(tick["verdicts"])
         jobs = tick["jobs"]
-        skip = bool(jobs) and all(c for c, _d in jobs.values())
+        skip = bool(jobs) and all(c for c, _d in jobs.values()) and not tick["unobserved"]
         decl = [c for c, d in jobs.values() if d]
         quiet = bool(decl) and all(decl)
         if tick["alive"] is not None and not tick["aliveFault"]:
@@ -67105,8 +67264,17 @@ def _jobs_gate_tick_close(tick, pass_s, pass_cpu_s):
             if quiet:
                 b["quietDeclared"] += 1
         _PERF_STATS.gate_update(put)
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            def fault(b):
+                b["gateFaults"] += 1
+            _PERF_STATS.gate_update(fault)
+            if ("pass close", type(e).__name__) not in _JOBS_GATE["said"]:
+                _JOBS_GATE["said"].add(("pass close", type(e).__name__))
+                sys.stderr.write("jobs gate: the pass's close raised %s: %s (counted under /perf jobs.gate.gateFaults; said once "
+                                 "per kind)\n" % (type(e).__name__, str(e)[:200]))
+        except Exception:
+            pass
 
 
 def _jobs_gate_report(g):
@@ -67150,7 +67318,9 @@ def _job_stage(name, thunk):
     CPU, a collection inside it included, reaches cpuByJob when it ends) and a moved one does not put it in the job.
     With the jobs pass's gate observing (stage one, shadow: _jobs_gate_open, only on the jobs thread under _jobs_cycle), the job's
     declared inputs are read and its verdict predicted before the clocks above start, and the verdict is settled against what
-    the job did after they stop (_jobs_gate_close), so neither is the job's wall or CPU. The job runs whatever the verdict."""
+    the job did after they stop (_jobs_gate_close), so neither is the job's wall or CPU. The job runs whatever the verdict. The
+    close runs in a finally of its own, so a stage or CPU write that raised never leaves the run open on this thread (every later
+    job of the pass would then read unobserved)."""
     _gate = _jobs_gate_open(name)
     _t = time.monotonic()
     _c = time.thread_time()
@@ -67163,12 +67333,15 @@ def _job_stage(name, thunk):
         return _out
     finally:
         _cpu = time.thread_time() - _c
-        _set_stage(prev)
-        _wall = time.monotonic() - _t
-        _PERF_STATS.stage("jobs." + name, _wall)
-        _PERF_STATS.job_cpu(name, _cpu)
-        if _gate is not None:
-            _jobs_gate_close(_gate, _wall, _cpu, _raised)
+        _wall = None
+        try:
+            _set_stage(prev)
+            _wall = time.monotonic() - _t
+            _PERF_STATS.stage("jobs." + name, _wall)
+            _PERF_STATS.job_cpu(name, _cpu)
+        finally:
+            if _gate is not None:
+                _jobs_gate_close(_gate, (time.monotonic() - _t) if _wall is None else _wall, _cpu, _raised)
 
 
 def _pusher_cycle_jobs(now, live_map, any_client):
