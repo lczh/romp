@@ -8493,9 +8493,12 @@ class SdkSession:
         The picks still in flight before the latest one (_held_chain) end the same way: a report drops every one it
         reflects, and a versioned one it reflects on another version joins the memory. The revert puts a pick back with
         its dots only while it is still listed (_revert_model): given them back after its report, a pick hid a real
-        fallback at the next reply, neither carded nor armed until its next report (round three of that review). For a
-        Latest, default or upward pick, the report that drops it includes the old model's reply of a turn the CLI opened
-        itself: the first of the cases docs/reference.md lists, reached through a refused pick.
+        fallback at the next reply, neither carded nor armed until its next report (round three of that review).
+        For the default, or a Latest or upward pick in the family of the model the session was on, the report that
+        drops it includes the old model's reply of a turn the CLI opened itself. The default and a Latest pick then
+        reach the first of the cases docs/reference.md lists, through a refused pick; an upward pick joins the memory
+        of picks not landed instead, and reaches that page's switch-on sentence: turning Retry upgrades on arms it,
+        and its first reply shows a false "Model back on" card (round five).
 
         The list's check and rewrite and the marker's read and clear sit in one hold of the session lock, under which
         set_model writes both on the kernel's thread. Held for the rewrite alone, a pick landing during the check, or
@@ -16875,9 +16878,12 @@ class SdkBackend:
         that reflects it drops it from the list (_resolve_model_pending), so a pick that reported after a
         later pick replaced its marker goes back without them, and a real fallback at the next reply is
         carded and armed. Given its dots back, it hid that fallback until its next report, and a fallback
-        over by then was never carded (round three of that review). For a Latest, default or upward pick,
-        that report includes the old model's reply of a turn the CLI opened itself: the first of the cases
-        docs/reference.md lists, reached through a refused pick."""
+        over by then was never carded (round three of that review). For the default, or a Latest or upward
+        pick in the family of the model the session was on, the report that drops it includes the old
+        model's reply of a turn the CLI opened itself. The default and a Latest pick then reach the first
+        of the cases docs/reference.md lists, through a refused pick; an upward pick joins the memory of
+        picks not landed instead (_pick_unlanded), and reaches that page's switch-on sentence: turning
+        Retry upgrades on arms it, and its first reply shows a false "Model back on" card (round five)."""
         picked = prev.get("picked")
         chain = prev.get("chain") or ()
         with sess._lock:
