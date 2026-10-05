@@ -550,7 +550,7 @@ class _PerfStats:
     JOBS = ("beginCheckpointCycle", "sessionsListing", "applyPendingOps", "artifactsSignal", "turnNotify", "liftSpentAwaiting", "deathSweep", "endOnIdle", "deferralSweep",
             "autoNudge", "interruptBlock", "persistTickSeen", "persistIntrMarks", "persistSpendTrees", "persistCheckpoints", "convergeCheckpoints", "bootRowBackstop",
             "kernelSample", "autoPauseOnLimit", "usagePoll", "retryUpgrade", "autoPauseOnSpend", "spendGuard", "autoResumeRetry", "apiHealth",
-            "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes", "heldWorking")   # the tick jobs, each a `jobs.<job>` stage (T398)
+            "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes", "heldWorking", "checkpointFirstSight")   # the tick jobs, each a `jobs.<job>` stage (T398)
     STAGES = ("prelude", "jobs", "push", "push.chat", "push.feed", "push.timeline", "push.send", "push.warm", "push.feedFirst",
               "jobsPass", "jobs.prelude", "timelineBuild") \
         + tuple("jobs." + j for j in JOBS)   # every stage a fresh snapshot lists at zero: the cycle's prelude, the containers, the sub-stages
@@ -13422,6 +13422,14 @@ def _ckpt_just_take():
     return taken
 
 
+def _fold_has_cursor(name, p):
+    """True when the fold checkpointed as `name` holds a cursor for `p` (its cursor dict in em._FOLD_REG): a fold another
+    thread's heal reran holds one again; a fold whose cursor a heal dropped and could not rerun holds none. The converge
+    pass's unhealed count asks, after its own heal."""
+    cache = em._FOLD_REG.get(name)
+    return cache is not None and str(p) in cache
+
+
 def _begin_checkpoint_cycle():
     """The pusher cycle's START (T362 round one, lows 2 and 3): the cycle's checkpoint byte budget is whole again, shared by the
     builds' quiescence-drop writes and the converge pass near the cycle's end (the boot's first builds are capped where the
@@ -13486,7 +13494,11 @@ def _converge_checkpoints(now):
                 if healed:
                     got = _read_bytes_of(p) - before
                     em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); em.checkpoint_cycle_charge(got)
-                unhealed = [k for k in cold if k not in healed]
+                still = em.cold_fold_reasons(p)            # read again AFTER the heal: the settle write's heal on the jobs thread can
+                unhealed = [k for k in cold if k not in healed       #  land between the list above and the heal here, and its
+                            and (still.get(k) == "cold" or not _fold_has_cursor(k, p))]   # fold, complete again, is not unhealed
+                #                                            (review, 2026-10-05); a fold the heal here dropped and could not rerun
+                #                                            lost its cold mark with its cursor, so "no cursor" counts it, as before
                 if em.entry_whole_resident(p) and _prime_leaf_folds(p):
                     em.converge_stat("primed")
             else:
@@ -13689,6 +13701,33 @@ def _read_bytes_of(p):
     return rb.get(p, 0) or rb.get(os.path.realpath(p), 0)
 
 
+def _ckpt_settle_key(sid):
+    """A session's settle evidence as the settle write compares it: its turn-end key and its states log's stat. One reader
+    for the write and its first sight, so the two can never differ in shape and make every session due at once."""
+    return (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
+
+
+def _checkpoint_first_sight(now):
+    """The settle write's FIRST SIGHT, taken at the jobs pass's START (the review of 2026-10-05): for a session neither table
+    holds, its settle evidence (_ckpt_settle_key) goes into _CKPT_SETTLE_SEEN and its leaf's stat into _CKPT_PERIODIC_SEEN,
+    and nothing is written. The settle write (_persist_checkpoints) runs LAST in the pass and took first sight there itself,
+    tens of seconds into a boot's first pass, so a turn that settled during that pass was recorded as first sight and its
+    documents waited for the next settle, a leaf move past CKPT_PERIOD_S, or the exit drain (a crash before either left the
+    next boot the older document and the longer tail). Taken here, a move during the pass is new evidence at its end. At
+    the pass's start rather than at boot: the pass's discover memo (_sessions) is open here and its jobs read it anyway, so
+    this adds no sweep (main has no such scope), and a session first seen after the boot is covered by the same rule. A
+    session either table already holds costs a dict lookup."""
+    mono = time.monotonic()
+    for s in _sessions(now):
+        sid, leaf = s.get("sid"), s.get("path")
+        if not sid or not leaf:
+            continue
+        if sid not in _CKPT_SETTLE_SEEN:
+            _CKPT_SETTLE_SEEN[sid] = _ckpt_settle_key(sid)
+        if sid not in _CKPT_PERIODIC_SEEN:
+            _CKPT_PERIODIC_SEEN[sid] = (_stat_key(leaf), mono)
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
@@ -13702,17 +13741,22 @@ def _persist_checkpoints(now):
     dirty (_drain_and_exit). Returns how many files were written.
     WHO runs this (2026-10-05): the jobs thread, as the LAST job of its pass (_jobs_pass). It was a job of the pusher's
     cycle, where each write (a fold document's carry, which can re-read the document it replaces, and an assembly
-    document's build) held up the next dashboard frame, though nothing in a frame reads it and it never charges the
-    cycle's checkpoint byte budget itself (a quiescence drop one of its folds meets takes from it in one locked step, as a
-    drop on any thread does). The converge pass stays on the pusher, since it spends that budget; the paths written
-    here reach it under _CKPT_JUST_LOCK (_ckpt_just_take). _CKPT_SETTLE_SEEN and _CKPT_PERIODIC_SEEN have this one writer."""
+    document's build) ran inside the cycle and held up the next dashboard frame, though nothing in a frame reads it and it
+    never charges the cycle's checkpoint byte budget itself (a quiescence drop one of its folds meets takes from it in one
+    locked step, as a drop on any thread does). The pusher no longer runs it, but a frame can still wait on it: a CPU-bound
+    write shares the interpreter lock with every frame built meanwhile, and a build that parses the same leaf waits on the
+    leaf's writer lock while its assembly document is written (at most the whole write the pusher used to pay). The
+    converge pass stays on the pusher, since it spends that budget; the paths written here reach it under _CKPT_JUST_LOCK
+    (_ckpt_just_take). FIRST SIGHT is taken at the pass's START (_checkpoint_first_sight, the review of 2026-10-05), so a
+    turn that settles while the pass runs is new evidence here; the first-sight branches below serve a caller that runs
+    this alone. _CKPT_SETTLE_SEEN and _CKPT_PERIODIC_SEEN are written on the jobs thread alone."""
     written = 0
     mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
         if not sid or not leaf:
             continue
-        key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
+        key = _ckpt_settle_key(sid)
         seen = _CKPT_SETTLE_SEEN.get(sid)
         if seen is None:
             # first sight: the settle evidence predates this kernel life, so it is not NEW; record it and write nothing
@@ -66304,8 +66348,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
     cycle (the user asked why the reminder walk had to finish before the UI showed at all), and their writers already end in
     _mark_views_dirty, which wakes this loop, so nothing they decide waits for anything here. The checkpoint settle write
     (_persist_checkpoints) followed on 2026-10-05: it feeds no frame and never charges the budget itself (a quiescence drop
-    its folds meet takes from it in one locked step, from any thread), and every write it made here delayed the next
-    frame; the converge pass, which spends the budget, stays."""
+    its folds meet takes from it in one locked step, from any thread), and here every write it made ran inside the cycle
+    and delayed the next frame. Off this thread a write can still slow frames, by less: a CPU-bound write shares the
+    interpreter lock with every frame built meanwhile, and a build that parses the same leaf waits on the leaf's writer
+    lock while its assembly document is written. The converge pass, which spends the budget, stays."""
     _t_jobs = time.monotonic()            # /perf: this function minus the _push_all below is the `jobs` stage
     if not _PERF_STATS._mine():
         _PERF_STATS.cycle_begin()         # a caller that did not open the cycle (a test driving the jobs alone) opens it here
@@ -66373,13 +66419,19 @@ def _jobs_pass(now, live_map):
     boot that decided it, 30 to 60 s first cycles all day), and the push sat behind them on one thread. Their writers end in
     _mark_views_dirty (a dirty mark plus the pusher's wake), so a card move a job decides rides the pusher's next cycle exactly
     as it did when the job ran on that thread. The stage container is `jobsPass`; each job is still its `jobs.<name>` stage.
-    The checkpoint settle write (_persist_checkpoints) closes the pass since 2026-10-05: on the pusher every write it made held
-    up the next frame, and here, last, it holds up none of this pass's decisions, only the next pass's start."""
+    The checkpoint settle write (_persist_checkpoints) closes the pass since 2026-10-05: on the pusher every write it made ran
+    inside the cycle and held up the next frame, and here, last, it holds up none of this pass's decisions, only the next
+    pass's start. Its first sight of each session opens the pass (_checkpoint_first_sight), so a turn that settles while the
+    pass runs is new evidence at its end."""
     _t_pass = time.monotonic()
     if not _PERF_STATS._mine():
         _PERF_STATS.cycle_begin("jobs")   # a caller that did not open the pass (a test driving the jobs alone) opens it here
     _own_stat = _files_stat_pass_open(live_map)   # the dirty set taken, the prelude's observers read, the pass's shared ten-file
     #                                               snapshot opened when the caller did not (closed below; the cycle's finally too)
+    try:                                  # the settle write's first sight of each session, at the START (review, 2026-10-05): the write
+        _job_stage('checkpointFirstSight', lambda: _checkpoint_first_sight(now))   # closes the pass, and a turn settling between the two
+    except Exception:                     #  is then new evidence there, not a first sight
+        sys.stderr.write("checkpoint first sight: %s\n" % traceback.format_exc())
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
         _job_stage('liftSpentAwaiting', lambda: _lift_spent_awaiting(now, live_map))   # so the nudge tick below never wakes a wait that already ended
     except Exception:

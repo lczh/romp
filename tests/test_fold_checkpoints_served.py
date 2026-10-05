@@ -267,7 +267,7 @@ class ExitThenBoot(unittest.TestCase):
                 self._get(port, "/busy")
             except Exception:
                 pass
-            time.sleep(2.0)                                     # a few pusher cycles: the settle-keyed writer runs
+            time.sleep(2.0)                                     # a few jobs passes: the settle-keyed writer runs
         finally:
             client.close()
 

@@ -2003,10 +2003,10 @@ def checkpoint_write_dirty(paths=None, budget_s=None):
 
 
 def checkpoint_write_dirty_paths(paths=None, budget_s=None):
-    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle). The budget is
-    keyed on the paths ATTEMPTED, as the converge pass's is: under a lasting fault every write fails (a checkpoints directory
-    the kernel cannot search or write, a full disk), each after its encode, and a budget that tripped only after a written
-    path let the exit drain attempt every dirty one."""
+    """checkpoint_write_dirty, returning the paths written (the converge pass skips them at its next look: the kernel's
+    `_ckpt_just_take`). The budget is keyed on the paths ATTEMPTED, as the converge pass's is: under a lasting fault every
+    write fails (a checkpoints directory the kernel cannot search or write, a full disk), each after its encode, and a
+    budget that tripped only after a written path let the exit drain attempt every dirty one."""
     out = []
     t0 = time.monotonic()
     for i, p in enumerate(checkpoint_dirty() if paths is None else [str(p) for p in paths]):

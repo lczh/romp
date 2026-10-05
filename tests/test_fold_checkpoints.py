@@ -919,6 +919,31 @@ class KernelFolds(Base):
         self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("bgAll", 0), before + 1)
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2)
 
+    def test_a_heal_the_settle_write_lands_between_the_list_and_the_heal_is_not_counted_unhealed(self):
+        """The review of 2026-10-05: the converge pass (the pusher's) lists the leaf's cold folds, heals, and counted as
+        unhealed every listed fold its own heal did not rerun. The settle write's heal runs on the jobs thread since that
+        change and can land between the two: the pass's heal then finds nothing cold, and the fold, complete again, read as
+        one unhealed. A stub lands the jobs thread's heal there, deterministically (the real heal on a thread of its own,
+        joined, then the pass's own). Counted after the heal now, from what is still cold or has no cursor: none unhealed,
+        no heal of the pass's own, and the fold complete and written."""
+        self._converge_world({"bgAll": "bare"})
+        km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
+        real, landed = km._heal_cold_folds, []
+
+        def after_the_settles_heal(leaf):
+            th = threading.Thread(target=lambda: landed.append(real(leaf)), name="jobs-probe")
+            th.start(); th.join(30)
+            self.assertFalse(th.is_alive(), "the jobs thread's heal finished")
+            return real(leaf)                                         # the pass's own: nothing is cold any more
+        with mock.patch.object(km, "_heal_cold_folds", after_the_settles_heal):
+            self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
+        self.assertEqual(landed, [["bgAll"]], "the jobs thread's heal reran the fold")
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual((cv["unhealed"], cv["heals"]), (0, 0), "none unhealed, no heal of the pass's own: %s" % cv)
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {})
+        self.assertIn("state", self.doc(self.leaf)["folds"]["bgAll"], "the fold complete, and written")
+
     def test_converge_is_bounded_per_cycle_in_bytes_and_defers_the_rest(self):
         """The budget: a second leaf (a copy) with the same gap; with a one-byte budget the pass writes the first candidate and
         defers the second (counted), the next pass takes it. The knobs: CKPT_CONVERGE_MS and CKPT_CONVERGE_BYTES."""
