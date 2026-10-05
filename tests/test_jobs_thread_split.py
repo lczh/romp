@@ -387,15 +387,24 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
 
     def _cycles_and_passes(self, patches, between=None, n=3):
         """The pusher's cycle, then the jobs thread's pass, `n` times, one thread each as in the kernel, under `patches` (the
-        quiet jobs and the world a test sets); `between(i)` runs before the i-th cycle, where the world moves between passes."""
+        quiet jobs and the world a test sets); `between(i)` runs before the i-th cycle, where the world moves between passes.
+        Each pass is recorded as the kernel's jobs loop records it (_PERF_STATS.jobs_pass, in the same submitted call on the
+        jobs thread), so a job that tells the boot's first pass by the pass count sees the later passes as later (review of
+        2026-10-05, round four)."""
         km = self.km
+        before = km._PERF_STATS.jobs.get("passes", 0)
+
+        def one_pass(now):
+            km._jobs_pass(now, {})
+            km._PERF_STATS.jobs_pass(0.0)
         with mock.patch.multiple(km, **patches), \
                 concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="jobs-probe") as jobs:
             for i in range(n):
                 if between is not None:
                     between(i)
                 km._pusher_cycle_jobs(NOW + i, {}, False)
-                jobs.submit(km._jobs_pass, NOW + i, {}).result(timeout=30)
+                jobs.submit(one_pass, NOW + i).result(timeout=30)
+        self.assertEqual(km._PERF_STATS.jobs.get("passes", 0) - before, n, "each pass recorded as the jobs loop records it")
 
     def test_a_path_the_jobs_pass_wrote_is_skipped_by_the_pushers_converge_pass(self):
         """The jobs pass on a thread of its own (the jobs thread's place), then the pusher's jobs on this one, every job of both
