@@ -1030,6 +1030,7 @@ const refusalUndo = new Map<string, () => void>();
 // tracks — its blob meets the gate like any other arrival, and nothing is re-pinned (onViewsAck).
 function onKernelCaps(m: { caps?: unknown; viewsSeq?: unknown }) {
   kernelCaps = new Set(Array.isArray(m.caps) ? m.caps.filter((c): c is string => typeof c === "string") : []);
+  typedTurnsCapsArrived();
   const adopted = capsAdopts(rejectedViews, m.viewsSeq);
   if (adopted && rejectedViews) adoptBase(rejectedViews);
   announcedViewsSeq = adopted ? null : announcedSeq(m.viewsSeq);
@@ -13621,19 +13622,42 @@ function measureRows(v: View): void {
     if (m.px != null) { v.pxPerTurn = m.px; if (m.road === "typed") noteTypedTurns(v, m.turns, rows.length); }
   }
 }
-/** The sessions this page counted by typed rows (turnCountTyped), one client-diag row each per page load. */
+/** The sessions this page counted by typed rows (turnCountTyped), at most one client-diag row each per page load: filed at the measure,
+ *  or, for a local session measured before the page's first caps frame, held in typedTurnsHeld until that frame arrives, so a page that
+ *  never receives a caps frame files no turnCountTyped row for its local sessions. A held row marks its session here too, so a
+ *  rebuilt view of that session files no second row, before the frame or after it. */
 const typedTurnsSaid = new Set<string>();
+/** Whether a caps frame has reached this page. A local session's cause is read off kernelCaps, which is empty until the first one, and the
+ *  kernel sends that frame after its connect push (kernel.py _send_caps), so a local session's row measured before it is held in
+ *  typedTurnsHeld until it arrives (typedTurnsCapsArrived), and is never filed if none arrives. The first caps frame raises
+ *  the flag and nothing lowers it, so once a caps frame has reached the page, a local session first measured after a redial files its row
+ *  at once, its cause read off the caps the page last heard, which may be the previous kernel's: after a caps frame has answered the
+ *  bundle's ready, the page sends its local kernel no other ready (the bundle posts it once, and the pane shim posts it again only while
+ *  no caps frame has answered it), so no redial earns another caps frame. */
+let typedTurnsCapsHeard = false;
+const typedTurnsHeld: { sid: string; typed: number; rows: number }[] = [];
 /** The px per turn was measured off TYPED rows (2026-10-01): none of the rows carried the kernel's turn (`turn`, caps chatTurn), so the
- *  gaps are drawn from the page's own count, which misses every turn a peer's message opened. Said once per session, in client-diag, with
- *  why: a remote host the page holds no caps for, an older local kernel (no chatTurn), or a local kernel that announced chatTurn and sent
- *  rows without it (a bug, or a view holding only rows the page injected). */
+ *  gaps are drawn from the page's own count, which misses every turn a peer's message opened. Said at most once per session, in
+ *  client-diag, with why: a remote host the page holds no caps for, an older local kernel (its caps frame has no chatTurn), or a local
+ *  kernel that announced chatTurn and sent rows without it (a bug, or a view holding only rows the page injected). A local session's row
+ *  measured before the page's first caps frame waits for it (typedTurnsCapsHeard), so a page that never receives one files none for its
+ *  local sessions. */
 function noteTypedTurns(v: View, typed: number, rows: number): void {
   let sid = "";
   for (const [id, w] of views) if (w === v) { sid = id; break; }
   if (!sid || typedTurnsSaid.has(sid)) return;
   typedTurnsSaid.add(sid);
+  if (hostOf(sid) === "" && !typedTurnsCapsHeard) { typedTurnsHeld.push({ sid, typed, rows }); return; }
+  fileTypedTurns(sid, typed, rows);
+}
+function fileTypedTurns(sid: string, typed: number, rows: number): void {
   const cause = hostOf(sid) !== "" ? "remote" : kernelCaps.has("chatTurn") ? "unstamped" : "olderKernel";
   chatDiagRow("turnCountTyped", { sid, cause, typed, rows });
+}
+/** The kernel's caps frame arrived (onKernelCaps, once it has set kernelCaps): the rows held for it are filed with the cause it gives. */
+function typedTurnsCapsArrived(): void {
+  typedTurnsCapsHeard = true;
+  for (const r of typedTurnsHeld.splice(0)) fileTypedTurns(r.sid, r.typed, r.rows);
 }
 
 /** The estimated top, in scroll space, of a unit hidden in a spacer (the same walk unitAtScroll maps a position by: each hidden unit its

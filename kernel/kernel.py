@@ -43906,6 +43906,19 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _chat_dep_scope.deps["postal_key"], _chat_dep_scope.deps["pidx"], _chat_dep_scope.deps["msum"] = _pk, _pidx, _msum
     events = _hydrate_postal(events, _pidx, sid, captions=_msum)   # swap postal traffic for clean in/out cards (no boilerplate)
     _stamp_interrupt_causes(events)                     # a restart/crash resume notice names the seam's cause
+    # The parse's turn index of each turn in this build's list, for the `turn` stamp below. The list is the live-merged one, which
+    # can hold synthetic turns of stale echoes (_place_stale_echoes, `echoTurn`: at most one per idle gap, holding every echo placed
+    # in it) that the parse's list does not hold, so every index past such turns is higher than the parse's by the number of them
+    # before it. An echo turn maps to the parse turn before it, the turn _turn_index_of_events gives
+    # its rows; one before every parse turn maps to -1. The live turn _merge_live_atoms makes for a session with no transcript turn
+    # yet (no `echoTurn`) counts as turn 0. None: the two lists are the same length, so no echo turn is in this one (an echo turn
+    # always makes the merged list the longer) and the indexes are the parse's own.
+    _parse_ix = None
+    if len(_turns) != len(parsed.get("turns") or ()):
+        _parse_ix, _n = [], -1
+        for _t in _turns:
+            _n += 0 if _t.get("echoTurn") else 1
+            _parse_ix.append(_n)
     for ev in events:
         # tlId = the timeline atom a chat hover lights: a message/prompt → the DOT (segment promptId),
         # work (assistant/tool/sent message) → the BAR (segment workId). Falls back to the segment id.
@@ -43913,13 +43926,17 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         anchors = seg_anchors.get(seg)
         is_prompt = ev.get("kind") in ("user", "teammate") or (ev.get("kind") == "postal-service" and ev.get("direction") == "in")
         ev["tlId"] = ((anchors[0] if is_prompt else anchors[1]) or seg) if anchors else seg
-        # `turn` = the turn of this build's turn list the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01): the
-        # numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a peer's message or a
-        # nudge opened counts as one, as here; counting the typed rows alone read about half the turns on a session that
-        # takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the raw
-        # event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries none.
+        # `turn` = the parse's index of the turn the event was emitted in (KERNEL_WS_CAPS chatTurn, 2026-10-01; an echo
+        # turn's rows take the parse turn before it, and the live turn of a session with no transcript turn yet counts as 0,
+        # both above): the numbering a page's span, tailLo and a gap count in. The page counts turns off it, so a turn a
+        # peer's message opened counts as one, as here; counting the typed rows alone read about half the turns on a session
+        # that takes much mail, and the gaps were drawn about twice their height. A card hydrated from a raw event takes the
+        # raw event's turn by its uuid; an event this map does not place (a head card, an overlay appended below) carries
+        # none, and nor do the rows of an echo turn that comes before every parse turn.
         _tn = _raw_turn.get(id(ev), _raw_turn.get(ev.get("uuid")))
-        if _tn is not None:
+        if _tn is not None and _parse_ix is not None and _tn < len(_parse_ix):
+            _tn = _parse_ix[_tn]
+        if _tn is not None and _tn >= 0:
             ev["turn"] = _tn
         if ev.get("askAnswer") and not ev.get("askAnswerFilled"):
             # AskUserQuestion whose record carried NO structured answers map (an old transcript) →
@@ -56753,10 +56770,12 @@ KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSes
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
-#   chatTurn — every chat event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
-#             2026-10-01), the numbering the history spans, tailLo and the gaps count in. The page counts turns off it (the
-#             px per turn a gap is drawn at, the turn a row names); an older page ignores the field, and a page on an older
-#             kernel counts its typed rows as before and files a turnCountTyped client-diag row saying so.
+#   chatTurn: every transcript event this kernel builds carries `turn`, the index of the kernel turn it belongs to (build_session,
+#             2026-10-01), the numbering the history spans, tailLo and the gaps count in: the parse's turns. The page counts
+#             turns off it (the px per turn a gap is drawn at, the turn a row names); an older page
+#             ignores the field, and a page on an older kernel counts its typed rows as before and files at most one
+#             turnCountTyped client-diag row per session saying so; a local session's row measured before the page's first caps
+#             frame waits for it, so a page that never receives one files no turnCountTyped row for its local sessions.
 #   restartSession: the menus' Restart session (2026-09-23) — a page that has the row and a kernel that does not answers
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 #   applyNow: Apply now (2026-10-01), a pick waiting for a quiet session pushed through from its control — a page that

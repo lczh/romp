@@ -7,12 +7,18 @@ the measure read half the turns and the gap stood about twice the height its tur
 event with its turn (`turn`, caps `chatTurn`) and the page counts those.
 
 Served, on a hermetic kernel over a synthetic transcript of four hundred turns, the even ones typed, the odd ones a peer's message
-(hydrated into its card from a synthetic postal log), each answered by a one-line reply. Two page loads against the one kernel:
+(hydrated into its card from a synthetic postal log), each answered by a one-line reply. Three page loads against the one kernel:
 
 - the kernel as it is: the gap's drawn px per turn, read with the head page's reply held at the wire, matches the height per turn the
   head page's rows take once released, within a tolerance;
 - the same kernel dressed as an older one at the wire (the stamps stripped from every frame, chatTurn dropped from the caps): the page
-  falls back to its typed count, so the gap stands about twice the rows' height, and says so in one turnCountTyped client-diag row.
+  falls back to its typed count, so the gap stands about twice the rows' height, and says so in one turnCountTyped client-diag row;
+- the stamps stripped and the caps left as sent (a kernel that announced chatTurn and sent no stamps): the row names that cause,
+  `unstamped`.
+
+In the last two loads the caps frame is held at the wire until the page has painted the rows it landed on (the paint measures them),
+so on every run the page measures before the frame arrives. The kernel sends the frame after the viewed session's first frame, but
+nothing on the page orders the measure against the frame's arrival, so without the hold the order could change from run to run.
 
 Synthetic fixtures only (placeholder uuids, invented notes-api prose).
 """
@@ -59,9 +65,10 @@ try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const painted = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
 
-// One page load. olderKernel: every frame the kernel sends is rewritten at the wire as an older kernel would have sent it, the events
-// without `turn` and the caps without chatTurn.
-async function leg(olderKernel) {
+// One page load. mode "kernel": every frame as the kernel sent it; mode "older": every frame the kernel sends is rewritten at the wire as
+// an older kernel would have sent it, the events without `turn` and the caps without chatTurn; mode "stampsOnly": the events without
+// `turn`, the caps as sent. In the two rewritten modes the caps frame is held at the wire until the rows the page landed on have painted.
+async function leg(mode) {
   const page = await browser.newPage({ viewport: cfg.viewport });
   await page.addInitScript(() => {
     const send = WebSocket.prototype.send;
@@ -72,18 +79,28 @@ async function leg(olderKernel) {
     };
   });
   const asOlder = (m) => {
-    if (!olderKernel || typeof m !== "string") return m;
+    if (mode === "kernel" || typeof m !== "string") return m;
     let f; try { f = JSON.parse(m); } catch (e) { return m; }
     if (!f || typeof f !== "object" || Array.isArray(f)) return m;
-    if (f.type === "caps" && Array.isArray(f.caps)) f.caps = f.caps.filter((c) => c !== "chatTurn");
+    if (mode === "older" && f.type === "caps" && Array.isArray(f.caps)) f.caps = f.caps.filter((c) => c !== "chatTurn");
     for (const k of ["events", "headCards"]) if (Array.isArray(f[k])) for (const e of f[k]) if (e && typeof e === "object") delete e.turn;
     return JSON.stringify(f);
   };
   let hold = false; const held = [];
+  let capsHold = mode !== "kernel"; const capsHeld = [];
+  const order = [];       // the viewed session's full (`session`) frames and the caps frame, in the order the kernel sent them
+  const delivered = [];   // the page's side: "painted" once the rows it landed on have painted, "caps" when the caps frame reaches it
   await page.routeWebSocket((u) => /[?&]app=chat(?:&|$)/.test(u.href), (ws) => {
     const server = ws.connectToServer();
     ws.onMessage((m) => server.send(m));
-    server.onMessage((m) => { const out = asOlder(m); if (hold && typeof out === "string" && /^\{"type": ?"chatTurns"/.test(out)) held.push([ws, out]); else ws.send(out); });
+    server.onMessage((m) => {
+      const t = typeof m === "string" ? /^\{"type": ?"(session|caps)"/.exec(m) : null;
+      if (t && (t[1] === "caps" || m.includes(cfg.sid))) order.push(t[1]);
+      const out = asOlder(m);
+      if (t && t[1] === "caps" && capsHold) { capsHeld.push([ws, out]); return; }
+      if (t && t[1] === "caps") delivered.push("caps");
+      if (hold && typeof out === "string" && /^\{"type": ?"chatTurns"/.test(out)) held.push([ws, out]); else ws.send(out);
+    });
     server.onClose(() => ws.close()); ws.onClose(() => server.close());
   });
   const pageErrors = [];
@@ -98,6 +115,11 @@ async function leg(olderKernel) {
     return { typed: rows.filter((r) => r.classList.contains("turn-user")).length, peer: rows.filter((r) => r.classList.contains("turn-postal-service")).length,
              stamped: rows.filter((r) => r.dataset.kturn != null).length, regions: typeof window.__rompRegions === "function" ? window.__rompRegions() : null };
   });
+  // the caps frame, held while the page painted (and so measured) the rows it landed on, goes on now
+  delivered.push("painted");
+  capsHold = false;
+  for (const [w, m] of capsHeld.splice(0)) { delivered.push("caps"); try { w.send(m); } catch (e) { /* closed */ } }
+  await painted(page);
   // the head gap as drawn: a jump to the head renders its element and asks its page, held at the wire so the gap stays
   hold = true;
   const asks0 = await page.evaluate(() => window.__sent.filter((m) => m.type === "loadTurns").length);
@@ -122,9 +144,9 @@ async function leg(olderKernel) {
   }, [cfg.realFrom, cfg.realTo]);
   const diag = await page.evaluate(() => window.__sent.filter((m) => m.type === "clientDiag" && m.what === "turnCountTyped").map((m) => m.data));
   await page.close();
-  return { landed, gap, real, diag, pageErrors };
+  return { landed, gap, real, diag, order, delivered, pageErrors };
 }
-const out = { stamped: await leg(false), older: await leg(true) };
+const out = { stamped: await leg("kernel"), older: await leg("older"), stampsOnly: await leg("stampsOnly") };
 process.stdout.write("RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 """
@@ -216,7 +238,7 @@ class TurnStampedHeight(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "viewport": self.VIEWPORT,
-                       "realFrom": _uuid(REAL_FROM), "realTo": _uuid(REAL_TO)}, f)
+                       "realFrom": _uuid(REAL_FROM), "realTo": _uuid(REAL_TO), "sid": SID}, f)
         driver = os.path.join(self.lab, "drive.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -261,17 +283,33 @@ class TurnStampedHeight(unittest.TestCase):
         self.assertGreater(leg["landed"]["stamped"], 0, "the rows carry the kernel's turn: %r" % leg["landed"])
         self.assertEqual(leg["diag"], [], "the kernel road files nothing")
 
+    def _assert_measured_before_caps(self, leg):
+        d = leg["delivered"]
+        self.assertTrue("painted" in d and "caps" in d and d.index("painted") < d.index("caps"),
+                        "the premise: the caps frame reached the page only after the rows it landed on had painted: %r" % d)
+
     def test_on_an_older_kernel_the_page_counts_typed_rows_and_says_so(self):
         leg = self._result()["older"]
         self.assertEqual(leg["landed"]["stamped"], 0, "the wire carried no stamp (the lab's premise): %r" % leg["landed"])
+        self._assert_measured_before_caps(leg)
         ratio, est, truth = self._ratio(leg)
         self.assertGreater(ratio, 1.6, "the typed count reads half the turns: the gap stands about twice the rows (x%.2f)" % ratio)
         self.assertEqual([d.get("cause") for d in leg["diag"]], ["olderKernel"], "…and the page says so once, in client-diag: %r" % leg["diag"])
         self.assertEqual(leg["diag"][0].get("sid"), SID)
 
+    def test_on_a_kernel_that_announced_chat_turn_and_sent_no_stamps_the_row_says_unstamped(self):
+        leg = self._result()["stampsOnly"]
+        self.assertEqual(leg["landed"]["stamped"], 0, "the wire carried no stamp (the lab's premise): %r" % leg["landed"])
+        o = leg["order"]
+        self.assertTrue("session" in o and "caps" in o and o.index("session") < o.index("caps"),
+                        "the premise: the kernel sent the viewed session's first frame before its caps frame: %r" % o)
+        self._assert_measured_before_caps(leg)
+        self.assertEqual([d.get("cause") for d in leg["diag"]], ["unstamped"], "the cause is read off the caps frame: %r" % leg["diag"])
+        self.assertEqual(leg["diag"][0].get("sid"), SID)
+
     def test_the_pages_raised_no_error(self):
         r = self._result()
-        self.assertEqual(r["stamped"]["pageErrors"] + r["older"]["pageErrors"], [])
+        self.assertEqual(r["stamped"]["pageErrors"] + r["older"]["pageErrors"] + r["stampsOnly"]["pageErrors"], [])
 
 
 if __name__ == "__main__":

@@ -15,9 +15,8 @@ export type Region = Run | Gap;
 
 export const DEFAULT_TURN_PX = 120;   // the per-TURN estimate the spacers use until a run is measured (a turn is ~two rows; render.ts sizeSpacers measures px-per-turn)
 
-/** The kernel's turn an event carries (`turn`, the kernel's caps `chatTurn`, 2026-10-01): the index of the turn the kernel built it in,
- *  the numbering every span, tailLo and gap counts in. Null when it carries none: an older kernel, a row the page injected (an optimistic
- *  echo, the queued group), a head card above turn 0. */
+/** The kernel's turn an event carries (`turn`, the kernel's caps `chatTurn`, 2026-10-01), in the numbering every span, tailLo and gap
+ *  counts in. Null when it carries none. */
 export function kernelTurnOf(e: unknown): number | null {
   const t = e && typeof e === "object" ? (e as { turn?: unknown }).turn : undefined;
   return typeof t === "number" && Number.isInteger(t) && t >= 0 ? t : null;

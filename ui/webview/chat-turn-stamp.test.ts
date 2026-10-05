@@ -3,7 +3,8 @@
 // typed rows as turns, while the kernel opens a turn on a peer session's message too, so on a session that takes much mail the measure
 // read about half the turns and every gap stood about twice its height. The kernel now stamps each event with its turn (`turn`, caps
 // `chatTurn`); here, executed: the pure measure over a synthetic window of typed and peer turns, the old-kernel fallback with its one
-// client-diag row, and render.ts's turnOfEvents and measureRows lifted and driven over stubs. Synthetic rows only.
+// client-diag row (its cause read once the kernel's caps frame has arrived), and render.ts's turnOfEvents and measureRows lifted and
+// driven over stubs. Synthetic rows only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -100,13 +101,19 @@ test("turnOfEvents names each event's turn by the kernel's stamp, so a peer's tu
 
 // ── render.ts's measureRows and its client-diag row, executed ────────────────────────────────────────────────────────
 type Row = { what: string; data: any };
-function liftMeasureRows(caps: string[]): { measure: (v: any) => void; views: Map<string, any>; rows: Row[] } {
+type Lifted = { measure: (v: any) => void; views: Map<string, any>; rows: Row[]; kernelCaps: Set<string>; arrive: (() => void) | null };
+/** measureRows lifted over a caps set holding `caps`. `capsArrived` (the default) delivers the kernel's caps frame before any measure,
+ *  through the function onKernelCaps calls once it has set the caps (typedTurnsCapsArrived); `arrive` delivers it later, and is null when
+ *  render.ts defines no such function. */
+function liftMeasureRows(caps: string[], capsArrived = true): Lifted {
   const js = liftBetween("function measureRows(v: View): void {", "\n/** The estimated top, in scroll space");
-  const views = new Map<string, any>(), rows: Row[] = [];
+  const views = new Map<string, any>(), rows: Row[] = [], kernelCaps = new Set(caps);
   const chatDiagRow = (what: string, data: any) => { rows.push({ what, data }); };
-  const measure = new Function("measureTurnPx", "views", "hostOf", "kernelCaps", "chatDiagRow", js + "\nreturn measureRows;")(
-    measureTurnPx, views, hostOf, new Set(caps), chatDiagRow);
-  return { measure, views, rows };
+  const [measure, arrive] = new Function("measureTurnPx", "views", "hostOf", "kernelCaps", "chatDiagRow",
+    js + "\nreturn [measureRows, typeof typedTurnsCapsArrived === \"function\" ? typedTurnsCapsArrived : null];")(
+    measureTurnPx, views, hostOf, kernelCaps, chatDiagRow);
+  if (capsArrived && arrive) arrive();
+  return { measure, views, rows, kernelCaps, arrive };
 }
 /** A view whose children are the rows of `measured`, as the DOM would hold them (a gap's element, turn rows with data-kturn). */
 function fakeView(measured: MeasuredRow[]): any {
@@ -153,6 +160,82 @@ test("the typed road names its cause: a remote host the page holds no caps for, 
   local.views.set("cccccccc-1111-2222-3333-444444444444", lv);
   local.measure(lv);
   assert.equal(local.rows[0]?.data.cause, "unstamped", "a local kernel that promised the field and sent none: the row says so");
+});
+
+test("a local view measured before the kernel's caps frame names its cause when the frame arrives; a remote view's row does not wait", () => {
+  const lab = liftMeasureRows([], false);   // the page's caps set before the kernel's caps frame: empty
+  const sid = "eeeeeeee-1111-2222-3333-444444444444";
+  const v = fakeView(windowRows(0, 10, false));
+  lab.views.set(sid, v);
+  lab.measure(v);
+  assert.equal(v.pxPerTurn, 320, "the typed count, measured at once");
+  assert.deepEqual([...lab.rows], [], "no cause is read off a caps set no caps frame has filled");
+  const remote = "TESTHOST:bbbbbbbb-1111-2222-3333-444444444444", rv = fakeView(windowRows(0, 10, false));
+  lab.views.set(remote, rv);
+  lab.measure(rv);
+  assert.deepEqual(lab.rows.map((r) => r.data.cause), ["remote"], "a remote view's cause does not depend on the local kernel's caps");
+  assert.ok(lab.arrive, "render.ts defines typedTurnsCapsArrived");
+  for (const c of ["chatProto2", "chatTurn"]) lab.kernelCaps.add(c);   // onKernelCaps sets the caps, then calls it
+  lab.arrive!();
+  assert.deepEqual(lab.rows.slice(1), [{ what: "turnCountTyped", data: { sid, cause: "unstamped", typed: 5, rows: 20 } }],
+    "the held row is filed with the cause the frame gives: this kernel announced chatTurn");
+  lab.arrive!();   // a later caps frame
+  assert.equal(lab.rows.length, 2, "a held row is filed once");
+  const later = "ffffffff-1111-2222-3333-444444444444", lv = fakeView(windowRows(0, 10, false));
+  lab.views.set(later, lv);
+  lab.measure(lv);
+  assert.deepEqual(lab.rows.slice(2).map((r) => [r.data.sid, r.data.cause]), [[later, "unstamped"]], "a view measured after the frame is filed at once");
+  const old = liftMeasureRows([], false), ov = fakeView(windowRows(0, 10, false));
+  old.views.set(sid, ov);
+  old.measure(ov);
+  old.kernelCaps.add("chatProto2");   // a caps frame without chatTurn
+  old.arrive!();
+  assert.deepEqual(old.rows.map((r) => r.data.cause), ["olderKernel"]);
+});
+
+// Its first assertion is the hold itself: the first measure's row waits for the caps frame. The rest check that the held row marks its
+// session said.
+test("a held row marks its session said: a view of that session built again files no second row, before the caps frame or after it", () => {
+  const lab = liftMeasureRows([], false);
+  const sid = "eeeeeeee-1111-2222-3333-444444444444";
+  const v1 = fakeView(windowRows(0, 10, false));
+  lab.views.set(sid, v1);
+  lab.measure(v1);
+  assert.deepEqual([...lab.rows], [], "the premise: the first measure was held for the caps frame");
+  const v2 = fakeView(windowRows(0, 10, false));
+  lab.views.set(sid, v2);   // the session's view built again before the frame (a fork's teardown, say)
+  lab.measure(v2);
+  assert.equal(v2.pxPerTurn, 320, "the premise: the rebuilt view measured on the typed road");
+  for (const c of ["chatProto2", "chatTurn"]) lab.kernelCaps.add(c);
+  lab.arrive!();
+  assert.deepEqual(lab.rows.map((r) => [r.data.sid, r.data.cause]), [[sid, "unstamped"]], "one row for the session, not one per view");
+  const v3 = fakeView(windowRows(0, 10, false));
+  lab.views.set(sid, v3);   // built again after the frame
+  lab.measure(v3);
+  assert.equal(v3.pxPerTurn, 320, "the premise: the view built after the frame measured on the typed road");
+  assert.equal(lab.rows.length, 1, "still one row after the frame: " + JSON.stringify(lab.rows));
+});
+
+test("two local views measured before the caps frame are both filed when it arrives, in the order they were measured", () => {
+  const lab = liftMeasureRows([], false);
+  const a = "aaaaaaaa-1111-2222-3333-444444444444", b = "cccccccc-1111-2222-3333-444444444444";
+  const va = fakeView(windowRows(0, 10, false)), vb = fakeView(windowRows(0, 10, false));
+  lab.views.set(a, va);
+  lab.views.set(b, vb);
+  lab.measure(vb);   // measured in the other order from the views map's
+  lab.measure(va);
+  assert.deepEqual([va.pxPerTurn, vb.pxPerTurn], [320, 320], "the premise: both views measured on the typed road");
+  assert.deepEqual([...lab.rows], [], "the premise: both local rows held before the frame");
+  assert.ok(lab.arrive, "render.ts defines typedTurnsCapsArrived");
+  for (const c of ["chatProto2", "chatTurn"]) lab.kernelCaps.add(c);
+  lab.arrive!();
+  assert.deepEqual(lab.rows.map((r) => [r.data.sid, r.data.cause]), [[b, "unstamped"], [a, "unstamped"]], "both held rows filed at the frame");
+});
+
+test("onKernelCaps files the held typed-road rows right after it sets the caps (executed: the stampsOnly leg of tests/test_turn_stamped_height_browser.py)", () => {
+  const caps = RENDER.slice(RENDER.indexOf("function onKernelCaps("), RENDER.indexOf("\n}\n", RENDER.indexOf("function onKernelCaps(")));
+  assert.match(caps, /kernelCaps = new Set\([^\n]*\);\n\s*typedTurnsCapsArrived\(\);/,
+    "a row held for the caps frame is filed from the caps handler, after the set it reads is filled");
 });
 
 test("a hidden view measures nothing and files nothing; a later visible measure decides", () => {
