@@ -776,8 +776,8 @@ class PromptIdAdoptable(unittest.TestCase):
     def _refusal(self, ad, pid):
         """_asm_pid_refusal's (why, how), checked against the reasons the gate counts (_ASM_PID_REFUSALS, review of 2026-10-05,
         round one): a refusal's reason is listed, and so is the shape the episode rule vouched for, which the gate counts as the
-        reason when the record itself names /compact. Every shape below asks through here, so a reason renamed or added
-        without the list fails."""
+        reason when the record itself names /compact. Every shape below asks through here, so a reason one of them returns
+        that the list lacks, renamed or new, fails."""
         why, how = emi._asm_pid_refusal(ad, pid)
         self.assertIn(why if why is not None else how, emi._ASM_PID_REFUSALS + (("attached",) if why is None else ()),
                       "the reason or shape is one the gate counts")
@@ -923,9 +923,10 @@ class PromptIdAdoptable(unittest.TestCase):
         adoption itself. Per listed text, an adapter holds a live manual /compact's detached pair, its summary wearing pc, and
         an on-path record wearing pc with that text: adoption splices the pair behind the record only when it reads the text as
         a /compact episode, and then the gate's reading of the record must say yes. A widening of adoption's reading alone
-        (another tag, another source, another name) adopts on a text where the gate reads no /compact, and this fails; the
-        command-message-only text is the widening the review planted. Adoption reads the first tag only, so the text whose
-        first tag is another command's adopts nothing."""
+        (another tag, another source, another name) that reaches one of the listed texts adopts on a text where the gate reads
+        no /compact, and this fails; the command-message-only text is the widening the review planted, and a widening no
+        listed text reaches passes until a text for it is added. Adoption reads the first tag only, so the text whose first
+        tag is another command's adopts nothing."""
         base = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")]
         side, _so = G.manual_compact_lines(T0 + 60, T0 + 120, "c", parent="a1")    # side[:2]: the detached pair, its summary wearing pc
         adopted = []
