@@ -9,6 +9,7 @@ is outside romp's view (a trigger in the task's context that ages out of the win
 the boundary is the event. Hermetic state, synthetic sids, no CLI."""
 import asyncio
 import inspect
+import itertools
 import os
 import sys
 import tempfile
@@ -1675,20 +1676,27 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # reflects still stands, set_model lists it in flight before the new pick, and a refusal of the new pick gives it
         # its dots back, so a real fallback at the next reply is neither carded nor armed (round five of that review). A
         # stand-in for the session lock forwards the lock's methods and, armed only while the prune runs, lands a pick of
-        # Fable 5 once, just after the prune first releases the lock: in the first gap a split leaves, or after the hold
+        # Fable 5 just after the prune's k-th release of the lock. Each road runs for k = 1, 2 and on, its outcome
+        # checked each time the landing fires, until the first k where it does not; at the head that is one landing,
+        # after the one hold. Landed at the first release only, the pick fell into the gap of an earlier, harmless hold
+        # (the memory of picks not landed read in a hold of its own) ahead of a split that does harm, which then stayed
+        # green (round six). The test wants a landing at the first release and leaves the number of releases free,
+        # since a harmless hold adds one
         refused5 = Exception("Unknown model: claude-fable-5")
         down = RuntimeError(self.DOWN)
 
-        def landing(be, s):
-            """Swap in the stand-in. Returns the list that names the function the landing fired in, and the real lock,
-            to put back after the report."""
-            real_lock, landed = s._lock, []
+        def landing(be, s, k):
+            """Swap in the stand-in, landing Fable 5 at the prune's k-th release of the session lock. Returns the list
+            that names the function the landing fired in, and the real lock, to put back after the report."""
+            real_lock, landed, releases = s._lock, [], []
             pruning = self._in_prune(s)
 
             def released():
-                if pruning and not landed:
-                    landed.append(sys._getframe(2).f_code.co_name)  # the frame that released the lock
-                    be.set_model(SID, "claude-fable-5")             # the kernel thread's pick; it takes this lock too
+                if pruning and not landed:              # set_model's own releases, after the landing, do not count
+                    releases.append(True)
+                    if len(releases) == k:
+                        landed.append(sys._getframe(2).f_code.co_name)  # the frame that released the lock
+                        be.set_model(SID, "claude-fable-5")             # the kernel thread's pick; it takes the lock
 
             class Landing:
                 """The session lock, forwarding its methods."""
@@ -1712,53 +1720,51 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             s._lock = Landing()
             return landed, real_lock
 
-        def report(be, s, picks, road):
-            """Each of `picks` taken with its refresh failing, then a reply on Opus 5.5 with Fable 5 landing in the
-            window, and Fable 5 refused, its refresh failing."""
-            for pick in picks:
-                self._pick(be, s, pick)
-                self._settle(s, [down])                              # taken; its dots stand
-            landed, real_lock = landing(be, s)
-            self._served(s, "claude-opus-5-5")                       # the report, Fable 5 landing as the prune lets go
-            del s._resolve_model_pending
-            s._lock = real_lock
-            self.assertEqual(landed, ["_resolve_model_pending"], "%s: the pick did not land as the prune released the "
-                                                                 "session lock" % road)
-            self._settle(s, [down], lost=refused5)                   # the CLI's refusal of Fable 5
-            return sb.read_reg(be.state_dir, SID).get("modelPending")
+        def each_release(road, picks, outcome):
+            """For k = 1, 2 and on: each of `picks` taken with its refresh failing, then a reply on Opus 5.5 with
+            Fable 5 landing at the prune's k-th release of the session lock and, when it lands, Fable 5 refused, its
+            refresh failing, and `outcome` checked. Stops at the first k where the landing does not fire, which must
+            not be k = 1."""
+            for k in itertools.count(1):
+                where, landed = "%s (the landing at the prune's release %d of the lock)" % (road, k), []
+                with self.subTest(release=k, road=road), _Hooks() as h:
+                    be, s = self._world(**self.ON48)
+                    for pick in picks:
+                        self._pick(be, s, pick)
+                        self._settle(s, [down])                      # taken; its dots stand
+                    landed, real_lock = landing(be, s, k)
+                    self._served(s, "claude-opus-5-5")               # the report, Fable 5 landing as the prune lets go
+                    del s._resolve_model_pending
+                    s._lock = real_lock
+                    self.assertTrue(landed or k > 1, "%s: the pick never landed, so the window was never reached"
+                                                     % where)
+                    if landed:
+                        self.assertEqual(landed, ["_resolve_model_pending"], "%s: the pick did not land as the prune "
+                                                                             "released the session lock" % where)
+                        self._settle(s, [down], lost=refused5)       # the CLI's refusal of Fable 5
+                        outcome(be, s, h, picks[-1], sb.read_reg(be.state_dir, SID).get("modelPending"), where)
+                if not landed:
+                    return
 
-        # the pick the report reflected is the marker (one pick), or a listed pick and the marker (two picks): either way
-        # the pick put back reported, so it goes back without dots, and a real fallback after it is carded and armed
-        for road, picks in (
-                ("Opus 5.5 picked on Opus 4.8 and taken, its refresh failing, a reply on Opus 5.5 with Fable 5 landing as "
-                 "the prune releases the lock, Fable 5 refused, its refresh failing, and a real fallback to Sonnet 5",
-                 ("claude-opus-5-5",)),
-                ("Opus 5.5 then Latest Opus picked on Opus 4.8, both taken with their refreshes failing, a reply on Opus "
-                 "5.5 with Fable 5 landing as the prune releases the lock, Fable 5 refused, its refresh failing, and a "
-                 "real fallback to Sonnet 5", ("claude-opus-5-5", "opus"))):
-            with self.subTest(road=road), _Hooks() as h:
-                be, s = self._world(**self.ON48)
-                on_disk = report(be, s, picks, road)
-                self.assertEqual((s.chosen_model, s._model_pending, on_disk), (picks[-1], "", False),
-                                 "%s: the pick put back, reported since, got its switching dots back" % road)
-                self.assertEqual(s._held_chain, (), "%s: the pick the report reflected is still listed in flight" % road)
-                self.assertIsNone(s._upgrade_retry, "%s: nothing to retry at the refusal" % road)
-                self._served(s, "claude-sonnet-5")                   # a real fallback at the next reply
-                self.assertEqual(h.fallbacks, [("Opus 5.5", "Sonnet 5")], "%s: the real fallback is carded" % road)
-                arm = s._upgrade_retry
-                self.assertIsNotNone(arm, "%s: and armed" % road)
-                self.assertEqual((arm["from"], arm["to"]), ("Opus 5.5", "Sonnet 5"), road)
-                self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1,
-                                 "%s: due, one attempt" % road)
-        # the marker a Latest click, which the report does not reflect, over a listed pick it does: the click is still in
-        # flight when Fable 5 lands, so it goes back with its dots, and its first reply, on Sonnet 5, is its landing
-        road = ("Opus 5.5 then Latest Sonnet picked on Opus 4.8, both taken with their refreshes failing, a reply on Opus "
-                "5.5 with Fable 5 landing as the prune releases the lock, Fable 5 refused, its refresh failing, then the "
-                "first reply on Sonnet 5")
-        with self.subTest(road=road), _Hooks() as h:
-            be, s = self._world(**self.ON48)
-            on_disk = report(be, s, ("claude-opus-5-5", "sonnet"), road)
-            self.assertEqual((s.chosen_model, s._model_pending, on_disk), ("sonnet", "sonnet", True),
+        def reported(be, s, h, pick, on_disk, road):
+            """The pick put back reported: it goes back without dots, and a real fallback after it is carded and
+            armed."""
+            self.assertEqual((s.chosen_model, s._model_pending, on_disk), (pick, "", False),
+                             "%s: the pick put back, reported since, got its switching dots back" % road)
+            self.assertEqual(s._held_chain, (), "%s: the pick the report reflected is still listed in flight" % road)
+            self.assertIsNone(s._upgrade_retry, "%s: nothing to retry at the refusal" % road)
+            self._served(s, "claude-sonnet-5")                       # a real fallback at the next reply
+            self.assertEqual(h.fallbacks, [("Opus 5.5", "Sonnet 5")], "%s: the real fallback is carded" % road)
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "%s: and armed" % road)
+            self.assertEqual((arm["from"], arm["to"]), ("Opus 5.5", "Sonnet 5"), road)
+            self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 1,
+                             "%s: due, one attempt" % road)
+
+        def in_flight(be, s, h, pick, on_disk, road):
+            """The Latest click put back while still in flight: back with its dots, and its first reply, on Sonnet 5,
+            is its landing."""
+            self.assertEqual((s.chosen_model, s._model_pending, on_disk), (pick, pick, True),
                              "%s: the Latest click put back while still in flight lost its switching dots" % road)
             self.assertIsNone(s._upgrade_retry, "%s: a retry was armed from a pick still in flight" % road)
             self._served(s, "claude-sonnet-5")                       # the Latest click's first reply
@@ -1767,6 +1773,20 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
             self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 0,
                              "%s: the tick reconnected the session" % road)
             self.assertEqual(s._model_pending, "", "%s: its first report ends its dots" % road)
+
+        # the pick the report reflected is the marker (one pick), or a listed pick and the marker (two picks): either way
+        # the pick put back reported, so it goes back without dots, and a real fallback after it is carded and armed
+        each_release("Opus 5.5 picked on Opus 4.8 and taken, its refresh failing, a reply on Opus 5.5 with Fable 5 "
+                     "landing as the prune releases the lock, Fable 5 refused, its refresh failing, and a real "
+                     "fallback to Sonnet 5", ("claude-opus-5-5",), reported)
+        each_release("Opus 5.5 then Latest Opus picked on Opus 4.8, both taken with their refreshes failing, a reply "
+                     "on Opus 5.5 with Fable 5 landing as the prune releases the lock, Fable 5 refused, its refresh "
+                     "failing, and a real fallback to Sonnet 5", ("claude-opus-5-5", "opus"), reported)
+        # the marker a Latest click, which the report does not reflect, over a listed pick it does: the click is still in
+        # flight when Fable 5 lands, so it goes back with its dots, and its first reply, on Sonnet 5, is its landing
+        each_release("Opus 5.5 then Latest Sonnet picked on Opus 4.8, both taken with their refreshes failing, a reply "
+                     "on Opus 5.5 with Fable 5 landing as the prune releases the lock, Fable 5 refused, its refresh "
+                     "failing, then the first reply on Sonnet 5", ("claude-opus-5-5", "sonnet"), in_flight)
 
     PICKS = (("versioned", "claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
              ("alias", "opus", "claude-opus-5", "Opus"),
