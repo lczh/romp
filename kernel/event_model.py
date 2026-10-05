@@ -3737,8 +3737,8 @@ class FileAdapter:
         # episode's last landed record — adopted, so unarmed — and re-seats once the stdout lands.
         episodes = {}
         for eu, er in self.by_uuid.items():          # insertion order = file read order
-            pid = er.get("promptId")
-            if not pid or er.get("type") != "user" or er.get("isCompactSummary"):
+            pid = _compact_episode_pid(er)           # a user record's promptId, a compaction summary's aside: the one filter,
+            if not pid:                              # which the promptid gate's every reading of an episode asks too
                 continue
             blocks = _content(er.get("message"))
             btext = (_text_of(blocks) if blocks else "") or ""
@@ -6005,12 +6005,26 @@ _ASM_PID_REFUSALS = ("seed", "nosummary", "replaced", "parent", "adopted", "offp
 _ASM_PID_EPISODE_VOUCHES = ("replaced", "parent", "offpath")   # the shapes the episode rule can vouch for (2026-10-05)
 
 
+def _compact_episode_pid(r):
+    """The prompt id of the /compact invocation episode record `r` joins, or None when it joins none: a user record's promptId,
+    a compaction summary's aside. The one filter of which records make up an episode, so it cannot drift apart between the
+    readers that ask (review of 2026-10-05, round two): adoption groups its episodes by it (_adopt_detached_compactions), and
+    the promptid gate asks it of the records on hand (_asm_pid_compact_episode), of a delta record (_asm_gates) and of the
+    records before a document's cut (_asm_doc_compact_pids). tests/test_event_model_assembly.py holds a summary and a record
+    of another type wearing the id, each with a text that opens on the /compact tag: a filter widened for adoption alone
+    adopts a pair there that the gate vouched for, and the fold serves a tree without the turn the cold parse builds."""
+    if r.get("type") != "user" or r.get("isCompactSummary"):
+        return None
+    return r.get("promptId") or None
+
+
 def _names_compact(text, first=False):
     """Whether a user record's text (its text blocks, joined) names /compact: a <command-name> tag whose name, read with a
     leading slash when it has none, is /compact. The one reader of it, so its matcher and its name normalization cannot drift
     apart between the two that ask (review of 2026-10-05, round one): adoption reads an episode record's FIRST tag (`first`,
-    _adopt_detached_compactions), and the promptid gate reads every tag (_asm_names_compact), so the gate says yes whenever
-    adoption does. tests/test_event_model_assembly.py runs adoption itself against the gate's reading."""
+    _adopt_detached_compactions), and the promptid gate reads every tag (_asm_names_compact) of the records the shared filter
+    puts in an episode (_compact_episode_pid), so the gate says yes whenever adoption does. tests/test_event_model_assembly.py
+    runs adoption itself against the gate's reading."""
     if "<command-name>" not in text:
         return False
     for m in COMMAND_NAME_ANY_RE.finditer(text):
@@ -6032,15 +6046,16 @@ def _asm_names_compact(r):
 
 def _asm_pid_compact_episode(ad, pid):
     """Whether the episode adoption keys on `pid` can be a /compact one as far as this entry can read it, and which check said
-    so: "episode" when a user record on hand wearing the id (a compaction summary aside, as adoption leaves summaries out of its
-    episodes) names /compact (_asm_names_compact); "seed" when none does but a restored entry's seed lists the id, since the
-    records before the document's cut are not in this adapter; None when neither. The seed's list is the document's
-    compact_pids, the prompt ids that a user record before its cut naming /compact wears (_asm_doc_compact_pids); a document
-    written before that field (2026-10-05) has none, and its prompt_ids stands in for it: every prompt id its writer had read,
-    the open turn's included, a superset that only refuses more. One walk over the adapter's records, asked once per delta and
-    id (the gate's `adoptable` map), and only for an id whose pair is not attached."""
+    so: "episode" when a record on hand that adoption's own filter puts in that episode (_compact_episode_pid: a user record
+    wearing the id, a compaction summary aside) names /compact (_asm_names_compact); "seed" when none does but a restored
+    entry's seed lists the id, since the records before the document's cut are not in this adapter; None when neither. The
+    seed's list is the document's compact_pids, the prompt ids that a record before its cut, read the same way, wears
+    (_asm_doc_compact_pids); a document written before that field (2026-10-05) has none, and its prompt_ids stands in for
+    it: every prompt id its writer had read, the open turn's included, a superset that only refuses more. One walk over the
+    adapter's records, asked once per delta and id (the gate's `adoptable` map), and only for an id whose pair is not
+    attached."""
     for r in ad.by_uuid.values():
-        if r.get("promptId") == pid and r.get("type") == "user" and not r.get("isCompactSummary") and _asm_names_compact(r):
+        if _compact_episode_pid(r) == pid and _asm_names_compact(r):
             return "episode"
     seed = ad.seed or {}
     listed = seed.get("compact_pids")
@@ -6136,9 +6151,10 @@ def _asm_doc_boundary_pids(ad, all_recs, cut_seq):
 
 
 def _asm_doc_compact_pids(ad, all_recs, cut_seq):
-    """The prompt ids a document's gates name as compact_pids (2026-10-05): those that a user record before the cut naming
-    /compact wears (a compaction summary aside), every copy the pre-cut bytes carry, read as the episode rule reads a record on
-    hand (_asm_names_compact). What _asm_pid_compact_episode's seed check asks: a restored entry holds the tail's records, and
+    """The prompt ids a document's gates name as compact_pids (2026-10-05): those that a record before the cut naming /compact
+    wears, every copy the pre-cut bytes carry, read as the episode rule reads a record on hand: adoption's filter of the records
+    in an episode (_compact_episode_pid: a user record, a compaction summary aside) and the gate's reading of /compact
+    (_asm_names_compact). What _asm_pid_compact_episode's seed check asks: a restored entry holds the tail's records, and
     this names the pre-cut episodes that could be /compact ones. The gates' prompt_ids, every prompt id the writer had read,
     would not do: an entry restored from any document written after a turn opened (a restart, a dropped entry restored again,
     the re-seat after a whole parse) would refuse that turn's every later record wearing an off-path pair's id for the rest of
@@ -6150,8 +6166,7 @@ def _asm_doc_compact_pids(ad, all_recs, cut_seq):
     reached only through seeds a test set by hand)."""
     out = set()
     for sq, r in all_recs:
-        if sq < cut_seq and r.get("type") == "user" and r.get("promptId") and not r.get("isCompactSummary") \
-                and _asm_names_compact(r):
+        if sq < cut_seq and _compact_episode_pid(r) and _asm_names_compact(r):
             out.add(r["promptId"])
     return out
 
@@ -6586,8 +6601,7 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
                 if _pid not in adoptable:
                     adoptable[_pid] = _asm_pid_refusal(ad, _pid)
                 _why, _how = adoptable[_pid]
-                if _why is None and _how in _ASM_PID_EPISODE_VOUCHES and r.get("isCompactSummary") is not True \
-                        and _asm_names_compact(r):
+                if _why is None and _how in _ASM_PID_EPISODE_VOUCHES and _compact_episode_pid(r) and _asm_names_compact(r):
                     _why = _how          # this record would make the id's episode a /compact one: the episode rule no longer holds
             _bnd = _why is not None
             if _bnd or (CMD_WRAP_RE.match(_wtxt) and not is_skill_load_wrapper(_wtxt)):   # the harness's skill load

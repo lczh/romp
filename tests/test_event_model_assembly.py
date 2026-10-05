@@ -649,6 +649,30 @@ class GateDemotions(unittest.TestCase):
         self.assertEqual((self._promptid_arms(moved)[":boundary"], self._boundary_reasons(moved), moved.get("g:kept", 0)),
                          (1, {"offpath": 1}, 0), "the record on hand that names /compact keeps the arm refusing: %s" % moved)
 
+    def test_a_record_outside_every_episode_that_names_compact_leaves_the_episode_rule_vouching(self):
+        """Which records make up a /compact episode is one filter, adoption's and the gate's (_compact_episode_pid, review of
+        2026-10-05, round two): a user record wearing the id, a compaction summary aside. Each case puts p9 on a record the
+        filter leaves out, its text opening on the /compact tag: the summary cs1, or the turn's assistant call a2, which is
+        no user record. The golden eclipse keeps the pair off the path; the append lands l9, a meta record wearing p9 that
+        names nothing, and a reply under it. No record in p9's episode names /compact, so adoption splices nothing, the
+        episode rule vouches (`offpath`), and the append folds, the tree equal to the whole parse's at every step. A filter
+        widened for adoption alone, to summaries or to records of any type, makes the episode a /compact one ending on l9: the
+        cold parse splices the pair behind l9 while the gate still vouches, and the fold serves a tree without that turn."""
+        turn = self._compacted_turn()[:-2]
+        self.assertEqual([r["uuid"] for r in turn], ["u1", "a1", "u2", "a2", "r2", "cb1", "cs1"], "the premise: the turn's records")
+        cs1 = dict(G.compact_summary_line(T0 + 91, "cs1", parent="cb1",
+                                          text="<command-name>/compact</command-name>\nsummary of the conversation so far"),
+                   promptId="p9")
+        a2 = dict(G.aline(T0 + 70, "<command-name>/compact</command-name>\nrunning the migration", "a2", "u2", tools=("Bash",),
+                          stop="tool_use"), promptId="p9")
+        l9 = dict(G.uline(T0 + 140, "a note the harness kept for the turn", "l9", "a5", ps=None), promptId="p9", isMeta=True)
+        for case, recs in (("summary", turn[:6] + [cs1]), ("assistant", turn[:3] + [a2] + turn[4:])):
+            with self.subTest(case=case):
+                moved = self._stream_then(recs + self._golden_eclipse(), [l9, G.aline(T0 + 150, "noted", "a6", "l9")],
+                                          expect_full=False)
+                self.assertEqual((self._promptid_arms(moved)[":boundary"], self._pass_shapes(moved)), (0, {"offpath": 1}),
+                                 "the episode rule vouched for the append: %s" % moved)
+
     def test_a_fold_the_attached_rule_saves_after_one_the_episode_rule_saved_names_no_shape(self):
         """The shape tags speak for their own delta (review of 2026-10-05, round one): the gate sets them for every delta that
         reaches the descent, so a fold the attached rule saves after one the episode rule saved counts no shape. The turn's
