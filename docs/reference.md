@@ -3917,6 +3917,34 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   entries), `bytes` (their containers, estimated) and `bound`, the band's
   wire cap (20,000 entries): only entries that reach the frame are held, so
   a judge storm's rows never widen the memo.
+  `captionRows` is the captions mapping the builds share (2026-10-05): a
+  session's captions file as {unit id: caption row}, held on the reader's
+  version of the file (its path, the reader entry's generation and base, and
+  the record count) and handed to every caller that asks while that version
+  stands, where each call used to fold every row into a fresh dict (the
+  timeline asks once per live lane per build). `hit`: the held mapping served;
+  `extend`: an append, served as the held mapping copied and extended by the
+  appended rows; `build`: every row folded (the file's first read, or a new
+  generation: a rewrite, a truncation, another file renamed over it, an
+  evicted entry read back); `uncached`: a read the reader's entry no longer
+  holds (no file, or another thread's newer read), answered and not held;
+  `swept`: mappings dropped because the record cache let their entry go,
+  checked whenever the memo holds a new version of any file, so a mapping
+  the cache released stays at most until that next version. A caption lookup
+  whose
+  segment id has drifted from the judge's (the two parses place a triggered
+  segment's start differently, and a segment's message caption is missing
+  until the captioner writes it) used to scan every row; it now reads the
+  mapping's drift index, the ids grouped by their time-free key in the rows'
+  order, built at the first drifted lookup and extended on append, which
+  gives the scan's answers exactly: the nearest time among the work rows,
+  the earlier row on a tie, and the first message row. `indexBuild` counts
+  the indexes built, `indexLookup` the drifted lookups the index answered and
+  `scanLookup` those that scanned (a mapping that is not the builds' own, or
+  an id that is not a string, where the scan's answer is kept as it was).
+  The gauges: `entries` (mappings held), `rows` (their rows) and `bytes`
+  (their dicts and indexes, estimated; the rows themselves are the record
+  cache's).
   Four memos cover the chat build's per-build fixed costs, each keyed on the
   inputs it reads and evicted by the pusher with the tab set (a comment thread
   built this cycle is kept, like its fold prefix). `chatMergeSets` is the
