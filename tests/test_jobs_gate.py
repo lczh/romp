@@ -75,6 +75,7 @@ class Census(unittest.TestCase):
         """The gate stats a session's six own files by the same paths as _session_files_stat (outside a pass both stat fresh)."""
         km = self.km
         root = Path(tempfile.mkdtemp())
+        (root / "session-hosts").write_text("off\n")                 # a test that mints its own state root pins session hosts off
         self.addCleanup(shutil.rmtree, root, True)
         saved = km.jd.STATE
         km.jd._rebind_state(root)
@@ -451,6 +452,8 @@ class Owed(_GateLab):
             self.assertEqual(self.last()["deathSweep"], "closed", "the clean run recorded")
 
     def test_a_noted_fault_leaves_no_record_either(self):
+        """A job that notes a fault and returns (the deferral sweep's, which heals without a file write) leaves no record, as a
+        raise does: the next pass is owed under `fault`, and the clean run after it records."""
         km = self.km
         self.add_session()
         once = [True]
@@ -460,9 +463,54 @@ class Owed(_GateLab):
                 once[0] = False
                 km._jobs_gate_owe("fault")
         with mock.patch.object(km, "_deferral_sweep_tick", sweep):
-            self.quiet()
-            self.assertEqual(self.last()["deferralSweep"], "closed")
+            self.passes()
+            self.assertNotIn("deferralSweep", km._JOBS_GATE["rec"], "the noted fault left no record")
+            self.assertEqual(km._JOBS_GATE["lost"].get("deferralSweep"), "fault")
+            self.passes()
+            self.assertEqual(self.last()["deferralSweep"], "owed:fault")
+            self.passes()
+            self.assertEqual(self.last()["deferralSweep"], "closed", "two passes after the fault, the clean run's record stands")
             self.assertEqual(self.gate()["byJob"]["deferralSweep"]["owed"], {"first": 1, "fault": 1})
+
+    def _gate_fault_once(self, target, job):
+        """Patch the gate's `target` (_jobs_gate_predict or _jobs_gate_settle) to raise once, for `job` alone. The settle's fault
+        lands after the real settle wrote its record, so the test also shows that no record a faulted settle wrote stands."""
+        km = self.km
+        real = getattr(km, target)
+        once = [True]
+
+        def faulty(run_or_name, *rest):
+            hit = (run_or_name if isinstance(run_or_name, str) else run_or_name["job"]) == job and once[0]
+            if hit and target == "_jobs_gate_settle":
+                real(run_or_name, *rest)
+            if hit:
+                once[0] = False
+                raise RuntimeError("a synthetic gate fault")
+            return real(run_or_name, *rest)
+        p = mock.patch.object(km, target, faulty)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_gate_fault_leaves_the_run_unobserved_and_no_record(self):
+        """The gate's own fault, at the job's turn (the observation) or after its run (the settle): the job still runs, the pass
+        reads `unobserved` and counts a gateFault, and no record stands, since what the run's hooks said never reached one; so
+        the next pass is owed under gateFault (a record left standing would call it closed), and the clean run after it records."""
+        km = self.km
+        self.add_session()
+        calls = []
+        with mock.patch.object(km, "_death_sweep_tick", lambda now, live_map: calls.append(now)):
+            self.quiet()
+            for n, target in enumerate(("_jobs_gate_predict", "_jobs_gate_settle"), 1):
+                self.assertEqual(self.last()["deathSweep"], "closed", target)
+                self._gate_fault_once(target, "deathSweep")
+                g = self.passes()
+                self.assertEqual((self.last()["deathSweep"], g["gateFaults"]), ("unobserved", n), target)
+                self.assertNotIn("deathSweep", km._JOBS_GATE["rec"], "%s: the unobserved run left no record" % target)
+                self.passes()
+                self.assertEqual(self.last()["deathSweep"], "owed:gateFault", target)
+                self.passes()
+        self.assertEqual(self.last()["deathSweep"], "closed")
+        self.assertEqual(len(calls), 9, "the job ran on every pass, the unobserved ones included")
 
     def test_an_evaluation_left_unrecorded_is_owed_and_a_recorded_one_is_not(self):
         """Derived from the job's own memo, mechanically: an evaluation its memo did not skip and its done did not record (a

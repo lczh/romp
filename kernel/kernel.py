@@ -5884,7 +5884,7 @@ def _debt_backstop_tick(now):
         if isinstance(fire_t, (int, float)) and now - fire_t > NUDGE_DEFER_BACKSTOP_SECS:
             _debt_escalate(asker, debtor, ts, now)
             drop.append(key)
-        elif isinstance(fire_t, (int, float)):
+        elif isinstance(fire_t, (int, float)) and math.isfinite(fire_t):   # (an Infinity or NaN fire time has no instant to floor)
             _jobs_gate_due(math.floor(fire_t + NUDGE_DEFER_BACKSTOP_SECS) + 1)   # (the jobs pass's gate, shadow: the backstop's instant)
     if drop:
         with _NUDGE_LOCK:                              # _debt_reminder_outcomes' write shape exactly:
@@ -66448,7 +66448,8 @@ _JOBS_UNDECLARED = ("persistCheckpoints", "convergeCheckpoints")   # owed every 
 #                                             no input the gate observes (on the pusher's cycle, where they ran at the base, nothing is gated)
 _JOBS_GATE = {"asked": "", "modeKey": None, "rec": {}, "lost": {}, "gen": {}, "floorSeen": {}, "tree": {}, "last": {}}
 #   rec: job -> its last completed run {v: the inputs observed before it ran, owed: what it left owing, dues: the earliest instant
-#   after that run at which its answer can change, t: that pass's clock}; lost: job -> why it holds no record ("fault"); gen: sid ->
+#   after that run at which its answer can change, t: that pass's clock}; lost: job -> why it holds no record ("fault", or
+#   "gateFault": the gate's own fault left that run unobserved); gen: sid ->
 #   the passes whose dirty set named that session alone; floorSeen: (sid, path) -> the standing stat a floor re-stat was counted
 #   against; tree: sid -> the spend guard's simulated sixty-second floor; last: job -> the last observed pass's verdict, as /perf
 #   jobs.gate.lastPass shows it ("closed", "open:<reason>", "owed:<reason>"). The jobs thread is the one writer.
@@ -66902,7 +66903,8 @@ def _jobs_gate_open(name):
     """At a job's turn: None unless this thread's pass is under the gate's observation (the jobs thread under _jobs_cycle, the knob
     not off) and no observed job is already running here (a nested stage); else the job's run record, its verdict predicted. The
     gate's own work is timed apart from the job's (jobs.gate.tickMs and tickCpuMs), and a fault in it leaves the job unobserved
-    for this pass (gateFaults) and never reaches the job."""
+    for this pass (gateFaults) and never reaches the job. An unobserved run leaves no record, here or in _jobs_gate_close: what
+    its hooks said never reached one, so the next pass is owed (gateFault)."""
     tick = getattr(_JOBS_GATE_TL, "tick", None)
     if tick is None or _jobs_gate_run() is not None:
         return None
@@ -66915,6 +66917,8 @@ def _jobs_gate_open(name):
         tick["faults"] += 1
         tick["jobs"][name] = (False, name in _JOBS_INPUTS)
         tick["verdicts"][name] = "unobserved"
+        _JOBS_GATE["rec"].pop(name, None)            # an unobserved run leaves no record: what it noted went unheard, so the
+        _JOBS_GATE["lost"][name] = "gateFault"       #  next pass is owed, as after the job's own fault
     _JOBS_GATE_TL.run = run
     tick["gateMs"] += (time.monotonic() - t0) * 1000.0
     tick["gateCpu"] += (time.thread_time() - c0) * 1000.0
@@ -66934,6 +66938,8 @@ def _jobs_gate_close(run, wall, cpu, raised):
         tick["faults"] += 1
         tick["jobs"][run["job"]] = (False, run["spec"] is not None)
         tick["verdicts"][run["job"]] = "unobserved"
+        _JOBS_GATE["rec"].pop(run["job"], None)      # a settle that faulted, whatever it wrote: no record stands, the next
+        _JOBS_GATE["lost"][run["job"]] = "gateFault"   #  pass is owed
     tick["gateMs"] += (time.monotonic() - t0) * 1000.0
     tick["gateCpu"] += (time.thread_time() - c0) * 1000.0
 
@@ -67107,8 +67113,10 @@ def _jobs_gate_report(g):
     report, and the pace. `projected` is what an enforcing loop would keep if every run cost what it cost here: its period is
     the observed pass less the jobs called closed, plus the JOBS_PASS_S rest, so passes per hour RISE as passes shorten and a job
     owed on every pass is counted at that faster pace (byJob's projectedCpuMsPerHour), never at today's (the design critique's
-    first finding: skipping work shortens the period, and whatever still runs every pass runs more often). `today` is the same
-    arithmetic over the observed passes less the gate's own cost. Judge by the hour, never by the pass."""
+    first finding: skipping work shortens the period, and whatever still runs every pass runs more often). It is a ceiling: every
+    run not called closed counts at that pace, the runs an input or a due opened among them, which an enforcing loop runs at that
+    event's own rate. `today` is the same arithmetic over the observed passes less the gate's own cost. Judge by the hour, never
+    by the pass."""
     t = g.get("ticks") or 0
     rest = JOBS_PASS_S * 1000.0
 
