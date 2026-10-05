@@ -15,6 +15,7 @@ SYNTHETIC fixtures only: placeholder UUIDs, invented names.
 import json
 import os
 import tempfile
+import time
 import unittest
 from romp_load import load_source
 from pathlib import Path
@@ -116,6 +117,50 @@ class CyclePublishesNamesScope(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             km._pusher_cycle()
         self.assertIsNone(getattr(km._live_scope, "names", None), "the finally clears it on the raise too")
+
+
+class CycleStampsItsSnapshot(unittest.TestCase):
+    """_pusher_cycle stamps its liveness snapshot (_live_scope.snapshot_t) before it reads it, its jobs see that one stamp,
+    and the finally clears it (the cold timeline build, 2026-10-04): a push in flight when the timeline builder's full build
+    lands serves that build as it stands when its cycle's stamp predates the build's start (_cached_timeline), and the cold
+    lanes order two builds by it (_timeline_cold_lanes). A stamp taken after the read would date the snapshot later than the
+    world it read; a stamp left set would date every later push on the thread by an old cycle (review find, 2026-10-04:
+    the tests that drive the in-flight push set the stamp by hand, so none of them showed that the cycle sets one)."""
+
+    def setUp(self):
+        self.saved = (km._live_map, km._pusher_cycle_jobs)
+        self.addCleanup(lambda: (setattr(km, "_live_map", self.saved[0]),
+                                 setattr(km, "_pusher_cycle_jobs", self.saved[1])))
+        km._live_scope.snapshot_t = None
+        self.addCleanup(lambda: setattr(km._live_scope, "snapshot_t", None))
+
+    def test_the_stamp_is_set_before_the_read_shared_by_the_jobs_and_cleared(self):
+        reads, jobs = [], []
+
+        def live():
+            reads.append((getattr(km._live_scope, "snapshot_t", None), time.time()))
+            return {}
+
+        def cycle_jobs(now, live_map, any_client):
+            jobs.append(getattr(km._live_scope, "snapshot_t", None))
+            time.sleep(0.02)                              # a job that runs a while: the stamp holds through it
+            jobs.append(getattr(km._live_scope, "snapshot_t", None))
+        km._live_map = live
+        km._pusher_cycle_jobs = cycle_jobs
+        km._pusher_cycle()
+        self.assertTrue(reads, "the cycle read its liveness snapshot")
+        stamp, read_at = reads[0]
+        self.assertIsNotNone(stamp, "the stamp is set when the cycle reads its snapshot")
+        self.assertLessEqual(stamp, read_at, "...and taken no later than the read")
+        self.assertEqual(jobs, [stamp, stamp], "the jobs see the one stamp of the cycle's snapshot throughout")
+        self.assertIsNone(getattr(km._live_scope, "snapshot_t", None), "cleared at the cycle's end")
+
+    def test_a_jobs_raise_still_clears_the_stamp(self):
+        km._live_map = lambda: {}
+        km._pusher_cycle_jobs = lambda now, live, any_client: (_ for _ in ()).throw(RuntimeError("job died"))
+        with self.assertRaises(RuntimeError):
+            km._pusher_cycle()
+        self.assertIsNone(getattr(km._live_scope, "snapshot_t", None), "the finally clears it on the raise too")
 
 
 class PostalIndexMemo(unittest.TestCase):
