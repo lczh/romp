@@ -51816,7 +51816,7 @@ def _msg_scan_held_bound():
 MSG_SCAN_HELD_BYTES = _msg_scan_held_bound()
 _MSG_SCAN_LOCK = threading.Lock()    # the held table and its counters: the pusher and a handler thread can scan at once
 _MSG_SCAN_STATS = {"scans": 0, "heldTurns": 0, "walkedTurns": 0, "partial": 0, "reset": 0, "raised": 0, "evict": 0}
-#   scans: scans that reached the walk; heldTurns / walkedTurns: closed turns served from the hold / turns walked (the
+#   scans: scans whose walk finished (a walk that raised counts under raised instead); heldTurns / walkedTurns: closed turns served from the hold / turns walked (the
 #   open one always); partial: a held entry whose turns diverged before its end (a rewind, a compaction re-seat, a late
 #   record); reset: a held entry discarded whole (another leaf, or the seams moved); raised: a walk that raised (stored
 #   nothing); evict: entries the byte bound shed
@@ -51913,12 +51913,15 @@ def _msg_mid_records(sid, turns, store, head):
         if keys:
             table = _msg_scan_held()
             table.pop(sid, None)
-            table[sid] = (head, fp, tuple(keys), tuple(recs[:n_closed]), size)
-            total = sum(e[4] for e in table.values())
-            while table and total > MSG_SCAN_HELD_BYTES:
-                _k, old = table.popitem(last=False)  # the least recently scanned first; an entry over the bound alone goes too
-                total -= old[4]
-                st["evict"] += 1
+            if size > MSG_SCAN_HELD_BYTES:
+                st["evict"] += 1                     # an entry over the bound alone is not held, and sheds no other session
+            else:
+                table[sid] = (head, fp, tuple(keys), tuple(recs[:n_closed]), size)
+                total = sum(e[4] for e in table.values())
+                while total > MSG_SCAN_HELD_BYTES:
+                    _k, old = table.popitem(last=False)  # the least recently scanned first; the newest fits alone
+                    total -= old[4]
+                    st["evict"] += 1
     return recs
 
 
@@ -52028,7 +52031,11 @@ def _msg_summaries():
         try:
             sub = _msg_sum_scan_session(sid, s["path"], now)
         except Exception:
-            sub = ent[1] if ent else {}              # keep last-known on a transient error
+            # keep last-known on a transient error, under no key: the next build retries the scan (the held turns make a
+            # retry cheap) instead of serving the pre-raise map until an input moves
+            per[sid] = (None, ent[1] if ent else {})
+            dirty = True
+            continue
         per[sid] = (key, sub)
         dirty = True
     for sid in [k for k in per if k not in live]:    # forget dead sessions so `per` can't grow unbounded

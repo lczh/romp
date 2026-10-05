@@ -373,6 +373,34 @@ class MsgScanHold(unittest.TestCase):
         self.assertEqual(snap["bound"], km.MSG_SCAN_HELD_BYTES)
         json.dumps(snap)
 
+    def test_a_raise_leaves_no_key_behind_so_the_next_scan_retries(self):
+        self.session(SID_WEB, 8)
+        self.build()
+        t = self.open_t[SID_WEB]
+        self.append(SID_WEB, [reply(t + 20, "web-a08", "web-c08", "Shipped."),
+                              peer(t + 300, "web-u09", "web-a08", "api asks: and the cursor?", "m-web09")])
+        seg = next(s for _i, s in self.segs(SID_WEB) if "m-web09" in km._seg_mids(s))
+        self.caption(SID_WEB, [{"id": seg["id"], "grain": "segment", "t": seg["t"], "caption": "web: weighing the cursor"}])
+
+        def raising(turn, store):
+            raise em.LazyBodyRead("a synthetic body read fault")
+        with mock.patch.object(km, "_segs_seam", raising):
+            self.assertNotIn("m-web09", self.build(), "the faulted scan serves the last-known map")
+        self.assertEqual(self.build().get("m-web09"), "web: weighing the cursor",
+                         "with nothing written since, the next scan retries instead of serving the faulted one's map")
+
+    def test_an_entry_over_the_bound_alone_sheds_no_other_session(self):
+        self.session(SID_WEB, 2)
+        self.session(SID_API, 12)
+        self.build()
+        small, big = self.held(SID_WEB)[4], self.held(SID_API)[4]
+        self.assertLess(small, big)
+        with mock.patch.object(km, "MSG_SCAN_HELD_BYTES", big - 1):
+            self.append(SID_API, [tool_out(self.open_t[SID_API] + 10, "api-r12", "api-c12", "toolu_1", "ok")])
+            self.build()
+        self.assertIsNone(self.held(SID_API), "api's entry alone is over the bound: not held")
+        self.assertIsNotNone(self.held(SID_WEB), "and web's, which fits, is not shed for it")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3910,7 +3910,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   keep their (segment id, message ids) pairs between scans, under the turns'
   identities, the leaf's path and inode and the seams by value, so a scan
   walks only the turns from the first that moved, the open one always, and
-  joins the captions fresh. `scans` (scans that reached the walk),
+  joins the captions fresh. `scans` (scans whose walk finished),
   `heldTurns` and `walkedTurns` (closed turns served from the hold, and turns
   walked), `partial` (a held entry whose turns diverged before its end: a
   rewind, a compaction, a late record), `reset` (an entry discarded whole
