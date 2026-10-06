@@ -19639,7 +19639,18 @@ def _thread_reg(tsid):
 
 
 def _thread_transcript_path(reg, tsid):
+    """A comment thread's transcript (a thread has no names/ entry, so discovery never resolves it): where the CLI said
+    it writes (the reg's transcriptPath, recorded by the thread's own Stop and worktree hooks), the current lastSid in
+    that directory when it is there, discovery's rule for every session (judge discover); else derived from the reg's
+    cwd. Derived alone, a cwd that stopped naming the transcript's directory lost the whole thread: the registry took
+    each turn's reported cwd, which follows the agent's shell, so after a thread's agent cd'd into a subdirectory every
+    message vanished from its popover and the reply showed as a fresh, unsent comment (2026-10-06; the adoption is
+    fixed in sdk_backend.registry_cwd_for, and this reads a thread whose reg it already moved)."""
     fsid = reg.get("lastSid") or tsid
+    rec = reg.get("transcriptPath")
+    if isinstance(rec, str) and rec and os.path.isfile(rec):
+        cand = os.path.join(os.path.dirname(rec), fsid + ".jsonl")
+        return cand if os.path.isfile(cand) else rec
     return str(jd._proj_dir(reg.get("cwd") or os.path.expanduser("~")) / (fsid + ".jsonl"))
 
 
@@ -42797,14 +42808,14 @@ def _sdk_sess(sid, now):
     on disk). Lets its tab open + chat build immediately; once it runs, discover() takes over.
 
     A comment THREAD never gets a names/ entry, so _sdk_transcript_path (names-fed cwd, sid-named
-    file) points nowhere for it — its reg is the authority: cwd + lastSid name the real transcript
-    (the user 2026-08-17: the popover renders the thread with the chat's own builder)."""
+    file) points nowhere for it — its reg is the authority (_thread_transcript_path names the real
+    transcript; the user 2026-08-17: the popover renders the thread with the chat's own builder)."""
     p = _sdk_transcript_path(sid)
     name = _name_of(sid)
     if not name and not os.path.exists(str(p)):
         reg = _thread_reg(sid)
         if reg:
-            p = jd._proj_dir(reg.get("cwd") or os.path.expanduser("~")) / ((reg.get("lastSid") or sid) + ".jsonl")
+            p = Path(_thread_transcript_path(reg, sid))   # the thread's one resolution (the popover's events and msgs alike)
             name = reg.get("name") or ""
     try:
         mtime = p.stat().st_mtime

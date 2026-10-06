@@ -813,6 +813,37 @@ def transcript_path(cwd: str, fsid: str) -> str:
                     "projects", proj, fsid + ".jsonl")   # per-kernel Claude root (plans/multi-kernel.md phase 2)
 
 
+def registry_cwd_for(reg_cwd: str, cli_cwd: str, fsids) -> str:
+    """The cwd a session's registry holds once the CLI's init reports `cli_cwd`: the directory whose projects dir holds
+    the transcript the CLI writes (a file named for one of `fsids`). Everything that finds the transcript keys it on
+    the registry's cwd (transcript_path, the kernel's comment-thread reads, the --resume of a relaunch).
+
+    Every turn's init reports the CLI's CURRENT directory, and that follows the agent's shell: after a `cd` in a Bash
+    call it names the directory the shell moved to, while the transcript stays under the launch directory's projects
+    dir. Adopting that string pointed every read at a file that does not exist (2026-10-06: a comment thread's popover
+    lost every message after a reply, because the thread's agent had cd'd into a results directory). So the CLI's string
+    is taken only where it holds the transcript: a variant spelling of the launch directory (case, a symlink: the
+    2026-07-17 wrong-case launch this adoption was written for), or a worktree the CLI moved its transcript into. Else
+    the nearest directory above it that holds the transcript (the launch directory, which also mends a registry an
+    earlier adoption pointed at a subdirectory), else the registry's own when it holds it. When no candidate holds a
+    transcript yet (a fresh session's first init, before anything is written) the CLI's string is taken, as before."""
+    names = [f for f in fsids if f]
+
+    def holds(d):
+        return any(os.path.isfile(transcript_path(d, f)) for f in names)
+    d = cli_cwd
+    while True:
+        if holds(d):
+            return d
+        up = os.path.dirname(d)
+        if not up or up == d:
+            break
+        d = up
+    if reg_cwd and holds(reg_cwd):
+        return reg_cwd
+    return cli_cwd
+
+
 # ── moving a live session's working directory (the user 2026-09-01, who wanted a session to follow a
 # subproject promoted to its own repo) ────────────────────────────────────────────────────────────
 # Claude Code 2.1.257 has a `set_cwd` control request — the headless twin of the interactive /cd. On
@@ -9272,15 +9303,18 @@ class SdkSession:
                           % (self.sid[:8], (reg_now.get("forkSrcBytes") or 0) / 1048576.0,
                              max(0, int(time.time()) - int(_ff.get("t") or time.time()))))
             cli_cwd = d.get("cwd")
-            if isinstance(cli_cwd, str) and cli_cwd and cli_cwd != self.cwd:
-                # The CLI's own cwd is the AUTHORITATIVE string: its projects-dir/transcript encoding
-                # is keyed on it (getcwd returns true on-disk casing), while romp's transcript_path is
-                # keyed on the registry string. A create-time variant (case, symlink) launches a real
-                # session whose transcript discovery then never finds (the silent wrong-case launch, the
-                # user 2026-07-17) — adopt the CLI's string the moment init reports it.
-                self.backend._log("sdk %s: adopting CLI cwd %r (registry had %r)" % (self.sid[:8], cli_cwd, self.cwd))
-                self.cwd = cli_cwd
-                self.backend._update_reg(self.sid, cwd=cli_cwd)
+            # The CLI's own cwd string is authoritative where its transcript is keyed on it (getcwd returns true
+            # on-disk casing, while romp's transcript_path is keyed on the registry string): a create-time variant
+            # (case, symlink) launched a real session whose transcript discovery then never found (the silent
+            # wrong-case launch, the user 2026-07-17). But each turn's init reports where the agent's shell has
+            # cd'd to, which holds no transcript: registry_cwd_for takes the directory that holds it.
+            adopt = registry_cwd_for(self.cwd, cli_cwd, (fsid, loaded_sid)) \
+                if isinstance(cli_cwd, str) and cli_cwd and cli_cwd != self.cwd else self.cwd
+            if adopt != self.cwd:
+                self.backend._log("sdk %s: adopting CLI cwd %r (registry had %r; the CLI reports %r)"
+                                  % (self.sid[:8], adopt, self.cwd, cli_cwd))
+                self.cwd = adopt
+                self.backend._update_reg(self.sid, cwd=adopt)
                 if loaded_sid and getattr(self, "_spend_first_result", False) \
                         and getattr(self, "_spend_baseline", "fresh") == "fresh":   # getattr: __new__-built test doubles
                     # (a seed from the registry, or the dead-CLI seed a replayed tail carries, is not clobbered by an

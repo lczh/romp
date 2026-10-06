@@ -281,9 +281,10 @@ ON_FEED = {
     "jd._cli_epoch": ("spawnedAt",),     # the CLI epoch, the bg ghost gate of _bg_live_norm's transcript rung (_sdk_spawned_at
     #                                      delegates here)
 }
-# _sdk_sess's reads, field -> the component that folds the row field it lands in: cwd and lastSid name the row's
+# _sdk_sess's reads, its own and those of the thread transcript resolve it hands the record to (_thread_transcript_path),
+# field -> the component that folds the row field it lands in: cwd, lastSid and transcriptPath name the row's
 # transcript path (folded by string and by file identity), name is the row's name (by value)
-FOLDED_BY = {"cwd": "transcript", "lastSid": "transcript", "name": "names"}
+FOLDED_BY = {"cwd": "transcript", "lastSid": "transcript", "transcriptPath": "transcript", "name": "names"}
 # read inside the body, output consumed by no card: held disjoint from the allow-list, with the reason in the test
 NOT_CONSUMED = {
     "jd._sdk_last_sid": ("lastSid",),    # _session_stamp_read (under _bg_split -> _session_stamped_tops, run by _awaiting_task_descs
@@ -311,7 +312,8 @@ OFF_FEED = (
     "_thread_mail_off",            # the mail-off gate: threadOf
     "_thread_names",               # name claims and the sid resolve: name
     "_thread_owes_first_reply",    # comment threads: forkOf
-    "_thread_transcript_path",     # comment threads' transcript resolve (a `reg` parameter): cwd, lastSid
+    "_thread_transcript_path",     # comment threads' transcript resolve (a `reg` parameter; _sdk_sess's path too, FOLDED_BY):
+    #                                cwd, lastSid, transcriptPath
     "_thread_turn_read",           # comment threads: forkOf
     "_turn_end_key",               # the post-loop notify pass, the checkpoints, the bell pass after the feed's loop: lastStopAt
     "_turn_opener",                # the post-loop notify pass: lastTurnOpener
@@ -1053,7 +1055,7 @@ class RegAllowList(unittest.TestCase):
         self.assertFalse(set(OFF_FEED) & self.reached, sorted(set(OFF_FEED) & self.reached))
 
     def test_the_session_rows_registry_reads_land_in_components_the_key_folds(self):
-        self.assertEqual(set(self.census["_sdk_sess"]), set(FOLDED_BY))
+        self.assertEqual(set(self.census["_sdk_sess"]) | set(self.census["_thread_transcript_path"]), set(FOLDED_BY))
         for field, label in FOLDED_BY.items():
             self.assertIn(label, km._FEED_MEMO_LABELS, field)
         self.assertFalse(set(FOLDED_BY) & set(km._FEED_REG_FIELDS), "a folded field needs no allow-list entry")
