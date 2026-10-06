@@ -1716,8 +1716,10 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # checked each time the landing fires, until the first k where it does not; at the head that is one landing,
         # after the one hold. Landed at the first release only, the pick fell into the gap of an earlier, harmless hold
         # (the memory of picks not landed read in a hold of its own) ahead of a split that does harm, which then stayed
-        # green (round six). The test wants a landing at the first release and leaves the number of releases free,
-        # since a harmless hold adds one
+        # green (round six). The test wants a landing at the first release and leaves the number of releases free for
+        # holds in the prune's own body, since a harmless hold adds one. A hold moved into a helper the prune calls
+        # releases the lock in the helper's frame, and the frame check fails at the first release: loudly, so a
+        # harmless hold there reads as a failure, never as a pass (the review of #42 after it merged)
         refused5 = Exception("Unknown model: claude-fable-5")
         down = RuntimeError(self.DOWN)
 
