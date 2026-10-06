@@ -1715,13 +1715,22 @@ class PerfWiring(LaneMemoBase):
         self.build(); self.build()
         blk = km._PERF_STATS.snapshot()["memos"]["lanes"]
         self.assertEqual(set(blk), {"hit", "miss", "live_tail", "complain_skip", "unshared_skip", "evict", "entries",
-                                    "segs_hit", "segs_miss", "prefix_hit", "prefix_segs", "dead_serve", "dead_miss", "dead_failed_serve"})
+                                    "segs_hit", "segs_miss", "prefix_hit", "prefix_segs",
+                                    "prefix_partial", "prefix_reset", "prefix_recap", "prefix_recap_new",   # the prefix's inputs by value (2026-10-06)
+                                    "dead_serve", "dead_miss", "dead_failed_serve"})
         self.assertEqual((blk["hit"], blk["miss"], blk["entries"], blk["segs_hit"], blk["segs_miss"]), (1, 1, 1, 1, 1))
         self.assertEqual((blk["dead_serve"], blk["dead_miss"], blk["dead_failed_serve"]), (0, 0, 0), "live lanes only so far")
         self.build(live_map={}); self.build(live_map={})
         blk = km._PERF_STATS.snapshot()["memos"]["lanes"]
         self.assertEqual((blk["dead_serve"], blk["dead_miss"], blk["dead_failed_serve"]), (1, 1, 0), "the dead lanes ride the same block")
         self.assertEqual((blk["hit"], blk["miss"]), (1, 1), "and leave the live counters alone")
+
+    def test_the_reference_names_every_key_of_the_block(self):
+        doc = (Path(HERE).parent / "docs" / "reference.md").read_text(encoding="utf-8")
+        at = doc.index("`lanes` is the timeline's")
+        passage = doc[at:doc.index("`msgScan` is", at)]
+        for k in km._lanes_memo_report():
+            self.assertIn("`%s`" % k, passage, k)
 
 
 def _boundary(t, uuid, parent):
@@ -1757,15 +1766,75 @@ class _CountingAtoms(km.em.LazyAtoms):
         return super()._at(i)
 
 
+def _tool_use(t, uuid, parent, tid):
+    """An assistant record that calls a tool (real work: what a seam's tail must hold for apply_seams to split)."""
+    return {"type": "assistant", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "assistant", "stop_reason": "tool_use",
+                        "content": [{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "make test"}}]}}
+
+
+def _tool_result(t, uuid, parent, tid):
+    return {"type": "user", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}}
+
+
 class PrefixMemo(LaneMemoBase):
     """The lane PREFIX memo (2026-09-12): a live lane whose transcript moved re-derived every turn of its history each
     build (1.19 million segments re-walked in 25 minutes on the devbox, a third of the pusher's time). The closed
     turns before the last one are held per lane and reused; only the tail is derived, and the bars equal a whole
-    derivation's."""
+    derivation's.
+
+    Since 2026-10-06 the prefix's inputs are what the bars read, by value: the store's seams (_seams_fp), not the
+    store object; the captions not at all, the held bars re-captioned instead (only those an appended row can reach,
+    through the entry's bar index, or every one after a rewrite), a changed bar a new object in the builder's key
+    order and every other bar the same object; the leaf's path and inode (the head) and each turn's uuids
+    (_turn_hold_key) in the key. Red first: the caption-row, open-segment, rewrite, republish and re-recorded-uuid
+    tests fail on the kernel before that change (the prefix was not served, or was served with another record's
+    ids); the seam test and the unshared-store test pin rules that held before and hold still."""
 
     def _prefix_counts(self):
         st = self.stats()
         return (st["prefix_hit"], st["prefix_segs"])
+
+    def recap(self):
+        st = self.stats()
+        return (st["prefix_recap"], st["prefix_recap_new"])
+
+    def head(self):
+        """The live lane's leaf as build_timeline stats it before the parse: the prefix's head."""
+        return km._msg_scan_head(str(self.tpath()))
+
+    def derive(self, session, goals, caps, head):
+        """_lane_segments over the live lane as _lane_memo calls it; `head` is the prefix's leaf (None holds nothing)."""
+        return km._lane_segments(LIVE_SID, session, goals, caps, True, None, head=head)
+
+    def whole(self):
+        """A whole derivation of the lane as it stands: no prefix read or held, over the current parse, store and captions."""
+        session = km._parse(str(self.tpath()), LIVE_SID, self.now)
+        return km._lane_segments(LIVE_SID, session, km.jd.load_goals_shared(LIVE_SID), km._captions(LIVE_SID), True, None)
+
+    def seg_ids(self):
+        """Every segment id of the lane's current parse, in turn order (one segment per turn in these fixtures)."""
+        session = km._parse(str(self.tpath()), LIVE_SID, self.now)
+        return [s["id"] for t in session["turns"] for s in km.em.segments(t)]
+
+    def three_turns(self, parent="a1"):
+        """Two more exchanges after the first, built after each append: by the third build the first two turns are held
+        (the third build was served the first). Returns the third build's frame."""
+        self.build()
+        self.append_records([_rec("user", self.t0 + 100, "u2", parent, "and cap the delay"),
+                             _rec("assistant", self.t0 + 120, "a2", "u2", "Capped at two minutes.")])
+        self.build()
+        self.append_records([_rec("user", self.t0 + 200, "u3", "a2", "and log each retry"),
+                             _rec("assistant", self.t0 + 220, "a3", "u3", "Logged with the delay.")])
+        return self.build()
+
+    def write_store(self, seams, rev):
+        """The lane's goal store written whole, as a publish leaves it: no nodes, these seams, a new version."""
+        p = km.jd.GOALDIR / (LIVE_SID + ".json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"nodes": {}, "status": {}, "seams": list(seams), "rev": rev}))
+        os.utime(p, (self.now - 300 + rev, self.now - 300 + rev))
 
     def test_a_third_turn_reuses_the_held_prefix_and_equals_a_whole_derivation(self):
         km.jd.append_caption(LIVE_SID, self.seg_id(), "segment", self.t0, "Added backoff")
@@ -1790,26 +1859,228 @@ class PrefixMemo(LaneMemoBase):
         self.assertEqual(nsegs, 3)
         self.assertEqual(self.stats()["segs_miss"], 1 + 2 + 2, "the derivations walked 1, then 2, then only the 2 turns after the prefix")
 
-    def test_a_captions_change_is_a_new_input_and_the_prefix_is_not_served_under_the_old_one(self):
-        self.append_records([_rec("user", self.t0 + 100, "u2", "a1", "and cap the delay"),
-                             _rec("assistant", self.t0 + 120, "a2", "u2", "Capped at two minutes.")])
-        self.build()
-        self.append_records([_rec("user", self.t0 + 200, "u3", "a2", "and log each retry"),
-                             _rec("assistant", self.t0 + 220, "a3", "u3", "Logged with the delay.")])
-        self.build()
+    def test_a_caption_row_re_captions_the_held_bar_it_names_and_the_prefix_still_serves(self):
+        """RED FIRST (2026-10-06): a caption row for the working session was a new input to the prefix (the captions
+        file's stat), so the build that drew it re-walked every turn of the lane, and the judges write one every few
+        seconds while a session works. The prefix now serves, and only the held bar the appended row names is looked up
+        again (the bar index): the bars and their encoded bytes equal a whole derivation's, the re-captioned bar is a
+        new object, and the other held bar is the same object, never edited, so the wire cache's string for it stands.
+        A later row for the second held bar, whose turn closed after the index was first built, reaches it too."""
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        tl3 = self.three_turns()
         self.assertEqual(self._prefix_counts()[0], 1)
-        km.jd.append_caption(LIVE_SID, self.seg_id(), "segment", self.t0, "Added backoff")   # the first turn's caption changes
-        tl = self.build()
-        self.assertEqual(self._prefix_counts()[0], 1, "a changed captions file is a changed input: the old prefix is not served")
-        self.assertEqual(tl["turns"][LIVE_SID][0].get("c"), "Added backoff", "and the first bar carries the new caption")
+        held = list(tl3["turns"][LIVE_SID])
+        self.assertEqual(held[0].get("c"), "first summary")
+        snap = [json.dumps(b) for b in held]
+        km._delta_split("dictlist:id", tl3["turns"], memo_key=("bars", "turns"))   # the wire cache, warm from this frame
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "Added backoff")   # the first turn's caption changes
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("c"), "Added backoff", "the first bar carries the new caption")
+        self.assertEqual(self._prefix_counts()[0], 2, "the prefix served the build that drew the caption row")
+        self.assertEqual(self.recap(), (1, 1), "one held bar looked up again, and rebuilt")
+        self.assertIsNot(bars[0], held[0], "the re-captioned bar is a new object")
+        self.assertIs(bars[1], held[1], "the other held bar is the same object")
+        self.assertEqual([json.dumps(b) for b in held], snap, "no held bar was edited in place")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]), "the bars equal a whole derivation's")
+        warm, worder = km._delta_split("dictlist:id", tl4["turns"], memo_key=("bars", "turns"))
+        cold, corder = km._delta_split("dictlist:id", tl4["turns"])
+        self.assertEqual(worder, corder)
+        self.assertEqual({k: v[1] for k, v in warm.items()}, {k: v[1] for k, v in cold.items()},
+                         "the frame's bytes through the warm wire cache equal a cold encoding")
+        self.assertEqual([m["x"] for m in self.marks(tl4, judge="captioner")], ["Added backoff"],
+                         "the judging marks are derived on every build, a prefix hit's too")
+        seg1 = self.seg_ids()[1]
+        km.jd.append_caption(LIVE_SID, seg1, "segment", self.t0 + 100, "Capped the delay")
+        tl5 = self.build()
+        self.assertEqual(tl5["turns"][LIVE_SID][1].get("c"), "Capped the delay", "the second held bar, indexed when its turn closed")
+        self.assertEqual((self._prefix_counts()[0], self.recap()), (3, (2, 2)))
+        self.assertIs(tl5["turns"][LIVE_SID][0], bars[0], "and the first bar, unchanged this time, is the same object")
+        self.assertEqual(json.dumps(tl5["turns"][LIVE_SID]), json.dumps(self.whole()[0]))
+
+    def test_a_caption_row_for_the_open_segment_looks_up_no_held_bar(self):
+        """RED FIRST: the captioner rewrites the OPEN segment's caption as it grows (the build-cost lab's churn writes
+        exactly that row). It shares no held bar's segment key, so the bar index finds none: the build looks up the
+        open segment's captions alone, where the whole walk looked up every segment's (three here), and the held bars
+        are the same objects."""
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        tl3 = self.three_turns()
+        tail = self.seg_ids()[-1]
+        calls, real = [], km._seg_work_caption
+        self.addCleanup(setattr, km, "_seg_work_caption", real)
+        km._seg_work_caption = lambda caps, seg_id: (calls.append(seg_id), real(caps, seg_id))[1]
+        km.jd.append_caption(LIVE_SID, tail, "segment", self.t0 + 200, "Logging each retry")
+        tl4 = self.build()
+        km._seg_work_caption = real
+        self.assertEqual(calls, [tail], "only the open segment's caption was looked up")
+        self.assertEqual(self.recap(), (0, 0), "no held bar was looked up again")
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[-1].get("c"), "Logging each retry")
+        self.assertTrue(all(a is b for a, b in zip(bars[:2], tl3["turns"][LIVE_SID][:2])), "the held bars are the same objects")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_a_rewritten_captions_file_re_captions_every_held_bar(self):
+        """RED FIRST: a rewrite of the captions file (a new generation of the reader's entry: rows dropped or replaced)
+        is not an append, so no appended rows say which bars it reaches: every held bar is looked up again, the prefix
+        still serves, a bar whose row went loses its caption, and the bars equal a whole derivation's."""
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        tl3 = self.three_turns()
+        self.assertEqual(tl3["turns"][LIVE_SID][0].get("c"), "first summary")
+        seg1 = self.seg_ids()[1]
+        path = km.jd.CAPDIR / (LIVE_SID + ".jsonl")
+        before = path.stat().st_size
+        path.write_text(json.dumps({"id": seg1, "grain": "segment", "t": self.t0 + 100, "caption": "Capped"}) + "\n")
+        os.utime(path, (self.now - 5, self.now - 5))
+        self.assertLess(path.stat().st_size, before, "the premise: the file shrank, which the reader reads from zero")
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertNotIn("c", bars[0], "the first bar's row went")
+        self.assertEqual(bars[1].get("c"), "Capped")
+        self.assertEqual(self._prefix_counts()[0], 2, "the prefix served the rewrite's build")
+        self.assertEqual(self.recap(), (2, 2), "both held bars looked up again, both changed")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_a_republished_store_with_the_same_seams_serves_the_prefix(self):
+        """RED FIRST: a store republish (a planner's write: a node minted, no seam) made a new shared store object, and
+        the prefix was keyed on the object, so that build re-walked every turn. The bars read the store only through
+        its seams, which stand, so the prefix serves and the held bars are the same objects; the planner's new node is a
+        mark on the same build (the marks are derived on every build, outside the prefix)."""
+        self.mint_store(text="First goal")
+        tl3 = self.three_turns()
+        self.assertEqual(self._prefix_counts()[0], 1)
+        s = km.jd.load_goals(LIVE_SID)
+        km.jd.apply_plan(s, "s2", self.t0 + 100, [{"do": "mint", "why": "x", "text": "Second goal"}], [])
+        km.jd.rollup_status(s, session_closed=False)
+        km.jd.save_goals(LIVE_SID, s)
+        tl4 = self.build()
+        self.assertEqual(sorted(m["x"] for m in self.marks(tl4, judge="planner")), ["First goal", "Second goal"],
+                         "the premise: a republished store, read by this build")
+        self.assertEqual(self._prefix_counts()[0], 2, "the same seams: the prefix served")
+        self.assertEqual(self.stats()["prefix_reset"], 0)
+        self.assertTrue(all(a is b for a, b in zip(tl4["turns"][LIVE_SID][:2], tl3["turns"][LIVE_SID][:2])))
+        self.assertEqual(json.dumps(tl4["turns"][LIVE_SID]), json.dumps(self.whole()[0]))
+
+    def test_a_seam_that_splits_a_held_segment_re_derives_the_lane_and_equals_a_whole_derivation(self):
+        """A seam (a goal settled while its segment kept working) splits a held segment into two bars. The seams are the
+        prefix's input by value, so the held bars are dropped (prefix_reset), the lane re-derives, and the bars equal a
+        whole derivation's with the split; the seam removed, the same again with one bar."""
+        self.add_lane(LIVE_SID, "web", [
+            _rec("user", self.t0, "u1", None, "make the retry loop back off"),
+            _tool_use(self.t0 + 10, "c1", "u1", "toolu_1"), _tool_result(self.t0 + 20, "r1", "c1", "toolu_1"),
+            _tool_use(self.t0 + 40, "c2", "r1", "toolu_2"), _tool_result(self.t0 + 50, "r2", "c2", "toolu_2"),
+            _rec("assistant", self.t0 + 60, "a1", "r2", "Added exponential backoff.")])
+        self.write_store([], 1)
+        tl3 = self.three_turns()
+        n = len(tl3["turns"][LIVE_SID])
+        seg0 = self.seg_ids()[0]
+        self.write_store([{"segs": [km.jd._seg_key(seg0)], "t": self.t0 + 30, "top": "g1", "text": "Back off the retries"}], 2)
+        tl4 = self.build()
+        self.assertEqual(len(tl4["turns"][LIVE_SID]), n + 1, "the premise: the seam split the first segment")
+        self.assertEqual(self.stats()["prefix_reset"], 1, "the seams moved: the held bars were dropped")
+        self.assertEqual(json.dumps(tl4["turns"][LIVE_SID]), json.dumps(self.whole()[0]))
+        self.write_store([], 3)
+        tl5 = self.build()
+        self.assertEqual(len(tl5["turns"][LIVE_SID]), n)
+        self.assertEqual(self.stats()["prefix_reset"], 2)
+        self.assertEqual(json.dumps(tl5["turns"][LIVE_SID]), json.dumps(self.whole()[0]))
+
+    def test_records_re_recorded_under_new_uuids_are_not_served_the_held_bars(self):
+        """RED FIRST: a turn's identity in the prefix key named its session, start second and prompt text, so a leaf
+        rewritten with the same times and text under new uuids (a file rewritten in place, a fixture reusing its times)
+        was served the held bars, whose prompt and work ids named records the transcript no longer holds. The hold key
+        carries the trigger's and the newest atom's uuids: the first held turn diverges (prefix_partial), the lane
+        re-derives, and the bars name the new records, equal to a whole derivation's."""
+        tl3 = self.three_turns()
+        self.assertEqual(tl3["turns"][LIVE_SID][0].get("p"), "u1")
+        ino = os.stat(self.tpath()).st_ino
+        self.tpath().write_text("".join(json.dumps(r) + "\n" for r in [
+            _rec("user", self.t0, "x1", None, "make the retry loop back off"),
+            _rec("assistant", self.t0 + 20, "y1", "x1", "Added exponential backoff."),
+            _rec("user", self.t0 + 100, "u2", "y1", "and cap the delay"),
+            _rec("assistant", self.t0 + 120, "a2", "u2", "Capped at two minutes."),
+            _rec("user", self.t0 + 200, "u3", "a2", "and log each retry"),
+            _rec("assistant", self.t0 + 220, "a3", "u3", "Logged with the delay.")]))
+        os.utime(self.tpath(), (self.now - 5, self.now - 5))
+        self.assertEqual(os.stat(self.tpath()).st_ino, ino, "the premise: rewritten in place, the same leaf")
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual((bars[0].get("p"), bars[0].get("w")), ("x1", "y1"), "the bar names the new records")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+        self.assertEqual((self.stats()["prefix_partial"], self._prefix_counts()[0]), (1, 1), "diverged: not served")
+
+    def test_another_leaf_under_the_same_session_is_a_new_prefix(self):
+        """A resume into another file, or a file replaced at the same path, is another leaf: the prefix is headed by the
+        leaf's path and inode, so the held bars are dropped (prefix_reset) even where every turn key stands; a caller
+        with no head (a dead lane, a direct derivation) neither reads nor holds a prefix."""
+        self.three_turns()
+        session = km._parse(str(self.tpath()), LIVE_SID, self.now)
+        goals = km.jd.load_goals_shared(LIVE_SID)
+        km._lane_prefix_memo.clear(); _zero(km._lanes_stats)
+        here = self.head()
+        self.assertIsNotNone(here)
+        self.derive(session, goals, {}, here)
+        self.derive(session, goals, {}, here)
+        self.assertEqual((self._prefix_counts()[0], self.stats()["prefix_reset"]), (1, 0), "the same leaf: served")
+        other = (here[0] + ".resumed", here[1] + 1)
+        v = self.derive(session, goals, {}, other)
+        self.assertEqual((self._prefix_counts()[0], self.stats()["prefix_reset"]), (1, 1), "another leaf: dropped, not served")
+        self.assertEqual(json.dumps(v[0]), json.dumps(self.derive(session, goals, {}, None)[0]))
+        self.assertEqual(self.stats()["prefix_reset"], 1, "no head: nothing read")
+        self.assertEqual(km._lane_prefix_memo[LIVE_SID][0][0], other, "and nothing held over the last leaf's entry")
+
+    def test_an_unshared_mutable_store_gets_no_prefix(self):
+        """A private store with content (the shared view off) could change under a held entry: no prefix is read or
+        held for it, whatever its seams (the rule before the seams were keyed by value, kept)."""
+        self.mint_store()
+        km.jd._SHARED_OFF[0] = True
+        try:
+            tl3 = self.three_turns()
+            self.assertEqual(self._prefix_counts()[0], 0)
+            self.assertNotIn(LIVE_SID, km._lane_prefix_memo)
+            self.assertEqual(len(tl3["turns"][LIVE_SID]), 3)
+        finally:
+            km.jd._SHARED_OFF[0] = False
+
+    def test_the_re_captioned_bar_keeps_the_builders_key_order(self):
+        """A held bar whose caption changed is rebuilt as a new dict, and its bytes equal the builder's only if its keys
+        come in the builder's order. _BAR_ORDER is read here off the loop itself (its `bar = {...}` literal, then every
+        `bar[...] =` in source order), and a rebuilt bar keeps it with every key set, an empty caption omitted."""
+        tree = ast.parse(inspect.getsource(km._lane_segments))
+        order = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+                continue
+            tgt = node.targets[0]
+            if isinstance(tgt, ast.Name) and tgt.id == "bar" and isinstance(node.value, ast.Dict):
+                order += [(node.lineno, i, k.value) for i, k in enumerate(node.value.keys)]
+            elif (isinstance(tgt, ast.Subscript) and isinstance(tgt.value, ast.Name) and tgt.value.id == "bar"
+                  and isinstance(tgt.slice, ast.Constant)):
+                order.append((node.lineno, 0, tgt.slice.value))
+        self.assertEqual(tuple(k for _l, _i, k in sorted(order)), km._BAR_ORDER, "the loop's key order")
+        full = {k: (1 if k in ("start", "end") else "v-" + k) for k in reversed(km._BAR_ORDER)}
+        out = km._bar_recaptioned(full, "new work", "new gist")
+        self.assertIsNot(out, full)
+        self.assertEqual(list(out), list(km._BAR_ORDER))
+        self.assertEqual((out["c"], out["m"], out["q"]), ("new work", "new gist", "v-q"))
+        bare = km._bar_recaptioned(full, "", "")
+        self.assertEqual(list(bare), [k for k in km._BAR_ORDER if k not in ("c", "m")],
+                         "an empty caption is omitted, as the builder omits it")
+        self.assertEqual(full["c"], "v-c", "the bar it was rebuilt from is untouched")
 
     # ── the closed turns' compaction markers ride the prefix (2026-09-16) ──
     def _lazy_closed_turns(self, session):
-        """Every closed turn's atoms as fresh, UNBUILT counting LazyAtoms over the same rows (the turn keys stand: id,
-        ended, atom count, end); the wrapped lists come back so a test can pin their slots, and the read count starts at 0."""
+        """Every closed turn's atoms as fresh, UNBUILT counting LazyAtoms over the same rows, with the uuids beside them
+        as a restored turn carries them (em._pre_turns_of: `pre` and `uuids`, no stored segments), so the hold key reads
+        none of the atoms and stands (id, ended, atom count, end, the trigger's and the newest atom's uuids). The wrapped
+        lists come back so a test can pin their slots, and the read count starts at 0."""
         out = []
         for turn in session["turns"][:-1]:
-            turn["atoms"] = _CountingAtoms(_RowIndex(), list(turn["atoms"]))
+            rows = list(turn["atoms"])
+            turn["atoms"] = _CountingAtoms(_RowIndex(), rows)
+            turn["pre"], turn["uuids"] = True, [a.get("uuid") for a in rows]
             out.append(turn["atoms"])
         _CountingAtoms.reads = 0
         return out
@@ -1838,14 +2109,14 @@ class PrefixMemo(LaneMemoBase):
         """The markers were a comprehension over every atom of every turn, run AFTER the prefix reuse, so a hit still read
         the whole history for them. With the closed turns as unbuilt LazyAtoms (the kernel's shape for a restored lane),
         a prefix-hit derivation reads none of their slots, leaves every one unbuilt, and serves the whole derivation's
-        markers. cap_key names a captions key on both calls: a prefix is held under a key only."""
+        markers. Both calls name the leaf's head: a prefix is held under a head only."""
         session, goals, want = self._boundary_lane()
         self._lazy_closed_turns(session)
-        whole = km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key="empty")
+        whole = self.derive(session, goals, {}, self.head())
         self.assertGreater(_CountingAtoms.reads, 0, "the whole derivation reads the closed turns")
         self.assertEqual(whole[3], want)
         lazies = self._lazy_closed_turns(session)                  # fresh unbuilt slots over the same rows
-        hit = km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key="empty")
+        hit = self.derive(session, goals, {}, self.head())
         self.assertEqual(self._prefix_counts()[0], 1, "the second derivation was served the prefix")
         self.assertEqual(_CountingAtoms.reads, 0, "a prefix hit reads no atom of the closed turns")
         self.assertTrue(all(self._slots(lazies)), "and leaves every closed slot unbuilt: on a restored lane the read IS the cost")
@@ -1878,6 +2149,8 @@ class PrefixMemo(LaneMemoBase):
                 seen.append(([la.n for la in lazies], [all(self._slots([la])) for la in lazies]))
                 for t, atoms in zip(session["turns"], plain):
                     t["atoms"] = atoms
+                    t.pop("pre", None)
+                    t.pop("uuids", None)
         km._lane_segments = wrapped
         try:
             self.append_records([_boundary(self.t0 + 300, "cb1", "a3")])
@@ -1910,26 +2183,28 @@ class PrefixMemo(LaneMemoBase):
         self.assertEqual(json.dumps(tl6["turns"][LIVE_SID]), json.dumps(whole[0]))
 
     def test_a_prefix_miss_still_walks_every_closed_turn_and_the_compactions_equal(self):
-        """The two ways a prefix is not served fall back as before: a changed input (another captions key) and a partial
-        prefix (a closed turn gone from the middle) each re-derive the whole lane, every closed slot built and the
-        markers gathered from scratch. The partial case's fixture drops the marker's own turn, so a prefix that served
-        its held markers blindly would put a marker on a lane that has none."""
+        """The two ways a prefix is not served fall back as before: a changed input (another leaf) and a partial prefix (a
+        closed turn gone from the middle) each re-derive the whole lane, every closed slot built and the markers gathered
+        from scratch, and each is counted (prefix_reset, prefix_partial). The partial case's fixture drops the marker's
+        own turn, so a prefix that served its held markers blindly would put a marker on a lane that has none."""
         session, goals, want = self._boundary_lane()
+        here = self.head()
+        other = (here[0] + ".other", here[1] + 1)
         self._lazy_closed_turns(session)
-        km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key="empty")
+        self.derive(session, goals, {}, here)
         lazies = self._lazy_closed_turns(session)
-        miss = km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key=(1, 2, 3))   # a captions stat key: a new input
-        self.assertEqual(self._prefix_counts()[0], 0, "a changed input is not served the held prefix")
+        miss = self.derive(session, goals, {}, other)              # another leaf: a new input
+        self.assertEqual((self._prefix_counts()[0], self.stats()["prefix_reset"]), (0, 1), "a changed input is not served the held prefix")
         self.assertFalse(any(self._slots(lazies)), "the whole lane re-derived: every closed slot built")
         self.assertEqual(miss[3], want)
         short = dict(session, turns=[session["turns"][0], session["turns"][2], session["turns"][3]])   # the marker's turn gone
         lazies = self._lazy_closed_turns(short)
-        part = km._lane_segments(LIVE_SID, short, goals, {}, True, None, cap_key=(1, 2, 3))
-        self.assertEqual(self._prefix_counts()[0], 0, "a partial prefix is not served either")
+        part = self.derive(short, goals, {}, other)
+        self.assertEqual((self._prefix_counts()[0], self.stats()["prefix_partial"]), (0, 1), "a partial prefix is not served either")
         self.assertFalse(any(self._slots(lazies)))
         self.assertEqual(part[3], [], "no marker on a lane whose marker turn is gone")
         km._lane_prefix_memo.clear()
-        whole = km._lane_segments(LIVE_SID, short, goals, {}, True, None, cap_key=(1, 2, 3))
+        whole = self.derive(short, goals, {}, other)
         self.assertEqual(json.dumps(part[0]), json.dumps(whole[0]))
         self.assertEqual(part[3], whole[3])
 
@@ -1940,16 +2215,17 @@ class PrefixMemo(LaneMemoBase):
         exactly as often as a from-scratch derivation reads them, and no more (2026-09-16)."""
         session, goals, want = self._boundary_lane()
         short = dict(session, turns=[session["turns"][0], session["turns"][2], session["turns"][3]])   # the marker's turn gone
+        here = self.head()
         km._lane_prefix_memo.clear()
         fresh = self._lazy_closed_turns(short)                          # a from-scratch derivation's read count per standing turn
-        km._lane_segments(LIVE_SID, short, goals, {}, True, None, cap_key=(1, 2, 3))
+        self.derive(short, goals, {}, here)
         scratch = [la.n for la in fresh]
         self.assertTrue(all(n > 0 for n in scratch), "the derivation reads every closed turn")
         km._lane_prefix_memo.clear()
         self._lazy_closed_turns(session)
-        km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key=(1, 2, 3))   # the four-turn prefix is held
+        self.derive(session, goals, {}, here)                           # the four-turn prefix is held
         lazies = self._lazy_closed_turns(short)                         # turn 0 stands, turn 1 differs: the partial branch
-        part = km._lane_segments(LIVE_SID, short, goals, {}, True, None, cap_key=(1, 2, 3))
+        part = self.derive(short, goals, {}, here)
         self.assertEqual(self._prefix_counts()[0], 0, "a partial prefix is not served")
         self.assertEqual([la.n for la in lazies], scratch, "the standing turn is read as a from-scratch derivation reads it, not once more by a dead loop")
         self.assertEqual(part[3], [], "no marker on a lane whose marker turn is gone")
@@ -1968,8 +2244,8 @@ class PrefixMemo(LaneMemoBase):
         self.assertEqual(len(session["turns"]), 5)
         session["turns"][1]["echoTurn"] = True                     # the first marker's turn, flagged as a stale echo's
         goals = km.jd.load_goals_shared(LIVE_SID)
-        whole = km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key="empty")
-        hit = km._lane_segments(LIVE_SID, session, goals, {}, True, None, cap_key="empty")
+        whole = self.derive(session, goals, {}, self.head())
+        hit = self.derive(session, goals, {}, self.head())
         self.assertEqual(self._prefix_counts()[0], 1)
         self.assertEqual(whole[3], [{"t": self.t0 + 50}, {"t": self.t0 + 250}], "both markers, in turn order")
         self.assertEqual(hit[3], whole[3])
