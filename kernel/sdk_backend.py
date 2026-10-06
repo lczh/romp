@@ -8564,8 +8564,9 @@ class SdkSession:
                 # prune writes the flag down after its hold of the session lock, so a pick landing between the two
                 # (set_model on the kernel's thread: its marker, its seed write and its own flag) had its flag
                 # overwritten, and this road wrote nothing more. A hard kernel death before the pick's next report then
-                # healed nothing, and the session revived on the model from before the pick, whose first report read as
-                # a fallback: carded and, with Retry upgrades on, armed (the review of #42 after it merged).
+                # healed nothing, and the session revived on the model from before the pick: a Latest or default pick
+                # resolving below that model had its first report read as a fallback, carded and, with Retry upgrades
+                # on, armed (the review of #42 after it merged).
                 # The marker is read inside the registry lock: set_model sets it in its hold of the session lock before
                 # its own flag write takes the registry lock, so a pick landing as this write runs is read here or
                 # writes its flag after this one. Read just before the lock, as the context refresh's write and the

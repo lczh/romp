@@ -1718,7 +1718,7 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # (the memory of picks not landed read in a hold of its own) ahead of a split that does harm, which then stayed
         # green (round six). The test wants a landing at the first release and leaves the number of releases free for
         # holds in the prune's own body, since a harmless hold adds one. A hold moved into a helper the prune calls
-        # releases the lock in the helper's frame, and the frame check fails at the first release: loudly, so a
+        # releases the lock in the helper's frame, and the frame check fails at that hold's release: loudly, so a
         # harmless hold there reads as a failure, never as a pass (the review of #42 after it merged)
         refused5 = Exception("Unknown model: claude-fable-5")
         down = RuntimeError(self.DOWN)
@@ -1933,17 +1933,18 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # pick landing between the two (set_model on the kernel's thread: its marker, its seed write and its own flag)
         # had its flag overwritten, and on a report naming the live model the learn returned without writing it again.
         # A hard kernel death before the pick's next report then healed nothing: the session revived on the model from
-        # before the pick, and the pick's first report was carded as a fallback and, with Retry upgrades on, armed (the
-        # review of #42 after it merged). The release test's stand-in lands the click at the prune's first release,
-        # after its hold and before its write, during a reply on Opus 5.5 that ends a first pick's dots; the click is
-        # taken with its refresh failing, and the kernel dies. A new kernel over the same state heals the row in the
-        # session's construction, or in the boot sweep and then the construction, and the session revives on the
-        # click's own name. On the roads whose click's refresh fails, a stand-in for the kernel's wake reads the
-        # registry at each poke the report makes: the flag is the marker's by then. Two controls stay as they were: the
-        # click made after the report, and the click's refresh answering before the death, with the model the click
-        # runs (which lands it) or with no model named (which writes the flag from the marker). A fifth case lands the
-        # click, its refresh failing, after the prune, as the report's own flag write takes the registry lock: a write
-        # that read the marker before that lock wrote the flag down over the click's, the same road to the card
+        # before the pick, and a Latest or default pick resolving below it had its first report carded as a fallback
+        # and, with Retry upgrades on, armed (the review of #42 after it merged). The release test's stand-in lands the
+        # click at the prune's first release, after its hold and before its write, during a reply on Opus 5.5 that ends
+        # a first pick's dots; the click is taken with its refresh failing, and the kernel dies. A new kernel over the
+        # same state heals the row in the session's construction, or in the boot sweep and then the construction, and
+        # the session revives on the click's own name. On the roads whose click's refresh fails, a stand-in for the
+        # kernel's wake reads the registry at each poke the report makes: the flag is the marker's by then. Two controls
+        # stay as they were: the click made after the report, and the click's refresh answering before the death, with
+        # the model the click runs (which lands it) or with no model named (which writes the flag from the marker). A
+        # fifth case lands the click, its refresh failing, after the prune, as the report's own flag write takes the
+        # registry lock: a write that read the marker before that lock wrote the flag down over the click's, the same
+        # road to the card
         down = RuntimeError(self.DOWN)
         firsts = (("a re-pick of Opus 5.5", "claude-opus-5-5"), ("Opus 4.8", "claude-opus-4-8"))
         # (the click, its value, the model the CLI runs for it, the click's own name)
