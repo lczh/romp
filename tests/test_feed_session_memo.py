@@ -1950,9 +1950,10 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         """A seam that splits turn 13's segment between its two checks (t + 30): its reply moves into the tail."""
         return {"segs": [jd._seg_key(self.seg[(13, 0)])], "t": T0 + 1330, "top": WEB + ":g4", "text": "Paged the results"}
 
-    def _publish_web(self, check_t=None, mt_bump=0):
+    def _publish_web(self, check_t=None, mt_bump=0, seams=None):
         """Web's goal store, in the judge's file shape, its goals' trails and log rows naming segments across the
-        history (the ids of the first parse, which a seam's head keeps)."""
+        history (the ids of the first parse, which a seam's head keeps); `seams`, when given, is the field as written,
+        whatever its type."""
         g = lambda n: WEB + ":g%d" % n
         s = lambda ti, si=0: self.seg.get((ti, si)) or self.seg[(ti, 0)]
         trail1 = [s(0), s(3), s(7), s(9, 1), s(13), s(15, 1), s(19), s(21)]
@@ -1978,7 +1979,7 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         }
         store = {"rompUuid": WEB, "seq": self.rev, "rev": self.rev, "placementsV": jd.PLACEMENTS_V, "placements": {},
                  "nodes": nodes, "status": {g(1): "working", g(2): "blocked", g(4): "completed"}, "lastNode": g(1),
-                 "seams": list(self.seams)}
+                 "seams": list(self.seams) if seams is None else seams}
         p = jd.GOALDIR / (WEB + ".json")
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(store))
@@ -2146,6 +2147,33 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self.assertNotIn(WEB + ":g1", self._cards(f))
         self.assertNotIn(WEB, held, "the departed session's aggregate left with it")
         self.assertEqual(km._feed_memo_report()["segEntries"], len(held))
+
+    def test_a_goal_store_whose_seams_is_a_truthy_scalar_keeps_its_cards_on_a_cold_build(self):
+        """Web's store with its seams field a truthy scalar where a list belongs (1, True, 1.5), each on a cold kernel
+        (no earlier entry to serve in a failure's place). The held walk read the seams' fingerprint before the fold's
+        try, so the raise left web's derivation: build_feed's guard said so, and with nothing memoized web's cards left
+        the board. The one-pass loop it replaced met such seams inside its try and cost only the anchors. Now no
+        derivation raises, web keeps its cards, and nothing is held for it. tests/test_feed_seg_held.py pins the walk."""
+        bells = []                                       # the rows the build's failure guard rings, nothing on the ring
+        p = mock.patch.object(km, "_sync_notice", lambda text, ok=True, kind="sync":
+                              bells.append(str(text)) if str(text).startswith("feed: the cards for") else None)
+        p.start()
+        self.addCleanup(p.stop)
+        want = {WEB + ":g1", WEB + ":g2", WEB + ":g4"}
+        self.assertLessEqual(want, set(self._cards(self._build())), "the premise: web's cards with its seams a list")
+        for bad in (1, True, 1.5):
+            self.rev += 1
+            self._publish_web(seams=bad)
+            self._settle()
+            _reset_memo()                                # a cold kernel: no earlier entry, no held aggregate
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                f = self._build()
+            self.assertEqual(km._feed_memo_report()["failed"], 0,
+                             "%r: no derivation raised: %s" % (bad, err.getvalue()[-800:]))
+            self.assertLessEqual(want, set(self._cards(f)), "%r: web keeps its cards" % (bad,))
+            self.assertNotIn(WEB, km._FEED_SEG_HELD, "%r: nothing is held under seams the walk cannot read" % (bad,))
+            self.assertEqual(bells, [], "%r: no failure was rung" % (bad,))
 
     def test_a_seeded_random_walk_matches_a_cold_derivation_after_every_step(self):
         rng = random.Random(20261006)

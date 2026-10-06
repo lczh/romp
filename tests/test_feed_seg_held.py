@@ -594,6 +594,30 @@ class Failures(HoldWorld):
                          "the diverged entry is dropped once, by the walk that found it")
         self.check("the cut world walked, nothing raising", whole=True)
 
+    def test_seams_that_are_a_truthy_scalar_hold_nothing_and_raise_nothing_out_of_the_walk(self):
+        """A goal store whose seams field is a truthy scalar where a list belongs (1, True, 1.5). The one-pass loop met
+        it inside its try, so it cost only the anchors; the held walk read the seams' fingerprint before the fold's try,
+        so the raise left the derivation and, on a cold kernel, the session's cards left the board. Now the walk holds
+        nothing for such a store, drops the entry held under good seams, and its maps are the oracle's (empty: the
+        oracle meets the seams at its first segment)."""
+        self.history()
+        self.check("cold, the seams a list", whole=True)
+        self.assertIn(SID_WEB, km._FEED_SEG_HELD, "the premise: web's closed turns are held")
+        turns = self.tree()["turns"]
+        for bad in (1, True, 1.5):
+            store = {"nodes": {}, "status": {}, "seams": bad}
+            s0 = self.stats()
+            w = km._feed_seg_walk(SID_WEB, self.head(), turns, store)
+            plain_t = km._feed_seg_plain_t(w)
+            self.assertFalse(w.ok, "%r: the fold met the seams inside its guard" % (bad,))
+            self.assertNotIn(SID_WEB, km._FEED_SEG_HELD, "%r: nothing is held under seams the walk cannot read" % (bad,))
+            self.assert_maps("seams %r" % (bad,), w, plain_t, turns, store)
+            s1 = self.stats()
+            self.assertEqual(s1["segRaised"] - s0["segRaised"], 1, "%r: counted as a walk that stored nothing" % (bad,))
+            self.assertEqual(s1["segWalks"] - s0["segWalks"], 0, "%r: a walk that did not finish" % (bad,))
+        self.check("the seams a list again: every turn", whole=True)
+        self.assertIn(SID_WEB, km._FEED_SEG_HELD, "held again under seams it can read")
+
     def test_a_lazy_lookup_whose_segmentation_raises_answers_none_and_counts_the_landing_fault(self):
         self.history()
         self.check("cold", whole=True)

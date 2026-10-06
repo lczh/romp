@@ -48480,13 +48480,19 @@ def _feed_seg_walk(fsid, head, turns, store):
     untouched. The held entry is judged inside the lock: one that cannot serve this parse (no leaf to vouch for it, no
     closed turn left, another leaf, other seams, held keys that diverged) is deleted there, so a walk that then fails
     leaves no unusable entry behind to stay newest or to be counted again; one that serves is marked used in this build
-    and moved to the newest end."""
+    and moved to the newest end. Seams the fingerprint cannot read (a truthy scalar where a list belongs) hold nothing,
+    and the fold meets them inside its guard, as the one-pass loop's try did."""
     w = _FeedSegWalk()
     turns = turns if turns is not None else []
     n = len(turns)
     n_closed = n - 1 if n else 0
     w.fsid, w.head, w.turns, w.n_closed, w.closed, w.ok = fsid, head, turns, n_closed, None, True
-    w.fp = _seams_fp(store) if n else ()
+    try:
+        w.fp = _seams_fp(store) if n else ()
+    except Exception:
+        w.fp, head = None, None                      # seams the fingerprint cannot read (a truthy scalar where a list
+        #                                              belongs): hold nothing; the fold's guard below keeps the maps as
+        #                                              far as it gets, as the one-pass loop's try did
     w.keys = tuple(_turn_hold_key(t) for t in turns[:n_closed]) if (head is not None and n_closed) else ()
     ent, start = None, 0
     if n:
