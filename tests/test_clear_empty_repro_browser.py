@@ -73,11 +73,13 @@ await page.waitForFunction(() => (window.__sent || []).some((x) => x.text === "/
 // IN FLIGHT (the fake holds the clear on the gate file): ONE evaluation, keyed on the kernel's "Clearing
 // conversation..." row, returns the snapshot it read (2026-09-29, after this lab failed intermittently in CI). The
 // old form waited on "bubble OR echo", swallowed that wait's timeout and read the page again in a second round trip.
-// The kernel's first frame after a send into an EMPTY session shares no id with the page's own pending group, so the
-// page reads it as a new transcript (render.ts upsert, `forked`): the view is torn down in that frame's task and
-// rebuilt at the next animation frame, and a read landing between the two found only the loader, neither the bubble
-// nor the row. The row is never on the page in that gap, so this predicate cannot fire there; and every paint that
-// shows the row paints from a list already holding the pending /clear, so the snapshot it returns sees the bubble.
+// Before the fix of 2026-09-30 (#28), the kernel's first frame after a send into an EMPTY session shared no id with the
+// page's own pending group, so the page read it as a new transcript (render.ts upsert, `forked`): the view was torn
+// down in that frame's task and rebuilt at the next animation frame, and a read landing between the two found only the
+// loader, neither the bubble nor the row. The row was never on the page in that gap, so this predicate could not fire
+// there. Since that fix the view is kept: the page's own groups stay out of the kernel list a fork is read against.
+// Every paint that shows the row paints from a list already holding the pending /clear, so the snapshot it returns
+// sees the bubble.
 // It also checks what the old read often skipped: in about half of the passing runs that read came before the
 // clearing frame, so it never saw the page's in-flight state. 10 s from seeing the send stays well under the fake
 // SDK's gate cap (about 15 s from when the fake takes the /clear, which can only follow that send), so the fixture
