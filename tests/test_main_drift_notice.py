@@ -469,11 +469,15 @@ class DriftWiring(unittest.TestCase):
         os.environ["ROMP_MANAGER_PID"] = "424242"
         try:
             km._TERMINATING[0] = True
-            with mock.patch.object(km.os, "_exit", lambda code: exits.append(code)):
+            # the exit's quiesce turns the collector off and stops the loops interpreter-wide (2026-10-05); in-process it
+            # would outlive the patched exit call, so it is stubbed out here (create=True: a kernel without it runs unchanged)
+            with mock.patch.object(km.os, "_exit", lambda code: exits.append(code)), \
+                 mock.patch.object(km, "_exit_quiesce", lambda: None, create=True):
                 km._parent_watch()
             self.assertEqual(exits, [], "the graceful term owns the exit")
             km._TERMINATING[0] = False
-            with mock.patch.object(km.os, "_exit", lambda code: exits.append(code)):
+            with mock.patch.object(km.os, "_exit", lambda code: exits.append(code)), \
+                 mock.patch.object(km, "_exit_quiesce", lambda: None, create=True):
                 km._parent_watch()
             self.assertEqual(exits, [0], "a dead manager with no drain running still exits the kernel")
         finally:
@@ -487,6 +491,9 @@ class DriftWiring(unittest.TestCase):
         gt = inspect.getsource(km._graceful_term)
         self.assertLess(gt.index("_TERMINATING[0] = True"), gt.index("_broadcast_restarting()"),
                         "the flag is the FIRST thing the graceful term does")
+        self.assertLess(gt.index("_TERMINATING[0] = True"), gt.index("_exit_quiesce()"),
+                        "the quiesce follows the flag (the exit path, 2026-10-05)...")
+        self.assertLess(gt.index("_exit_quiesce()"), gt.index("_broadcast_restarting()"), "...and precedes the frame")
 
     def test_only_deploy_restarts_count_toward_the_cool_down(self):
         # a rail-button restart, a self-close, an in-place skip: none of them is a converge, so none

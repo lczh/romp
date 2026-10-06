@@ -1645,8 +1645,9 @@ class KernelFolds(Base):
         self.assertEqual(sorted(snap["checkpoints"]), ["coldFolds", "coldWrites", "converge", "dirty", "docConsults", "docMemo", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds",
                                                         "readByPath", "readBytes", "readPaths", "refolds", "restored", "restoredFolds", "rewoundMemo", "skippedFolds", "swept", "writes"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn("em.checkpoint_write_dirty(budget_s=EXIT_CKPT_WRITE_BUDGET_S)", src,
-                      "exit writes the dirty checkpoints in _drain_and_exit, bounded (2026-09-11: unbounded, it met the manager's SIGKILL)")
+        self.assertIn("em.checkpoint_write_dirty(paths=_ckpt_order, budget_s=max(0.0, _write_end - time.monotonic()))", src,
+                      "exit writes the dirty checkpoints in _drain_and_exit, bounded (2026-09-11: unbounded, it met the manager's SIGKILL; "
+                      "2026-10-05: by its cap and the exit's pre-drain line, the leaves it primed first)")
         self.assertIn("_persist_checkpoints(now)", src)
         self.assertIn("em.checkpoint_sweep()", src)
 

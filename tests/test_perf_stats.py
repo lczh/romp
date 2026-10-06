@@ -131,11 +131,20 @@ class Collector(unittest.TestCase):
                                               "bgTops", "bgHold", "liftGate", "intrMarks", "deadWait", "tickSeen", "statesOverlay", "lanes", "spendTree", "summaryAnchor",
                                               "parkedHandoffs",   # the feed's parked-handoff fold over the postal log (2026-09-18)
                                               "judgingBand",   # the judging band's per-row memo and horizon cursor (2026-09-16)
+                                              "captionRows",   # the captions mapping the builds share and its drift index (2026-10-05)
                                               "subagentTree",   # the subagents directory walk memo (2026-09-16): served vs walked, roots held
                                               "chatMergeSets", "chatPostal", "chatLedger", "chatFoldTasks",   # the chat build's fixed-cost memos (2026-09-09)
                                               "outlineProvisional",   # the Outline's provisional-row ledger memo, parse-free (plans/outline-pane-provisional-row.md, 2026-09-15)
-                                              "notices"})   # the notice files' parsed rows (T370, plans/notice-cards.md): bytes against their bound
+                                              "notices",   # the notice files' parsed rows (T370, plans/notice-cards.md): bytes against their bound
+                                              "msgScan"})   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
+        self.assertEqual(set(snap["memos"]["msgScan"]), {"scans", "heldTurns", "walkedTurns", "partial", "reset", "raised", "evict",
+                                                       "entries", "bytes", "bound"},
+                         "the message-caption scan's hold: its counters, occupancy and bytes against its bound")
+        self.assertEqual(snap["memos"]["msgScan"]["bound"], km.MSG_SCAN_HELD_BYTES)
         self.assertEqual(set(snap["memos"]["notices"]), {"entries", "bytes", "bound", "hit", "miss", "evicted"}, "the notice memo: occupancy against its bound, and its counters")
+        self.assertEqual(set(snap["memos"]["captionRows"]), {"entries", "rows", "bytes", "hit", "extend", "build", "uncached", "swept",
+                                                           "indexBuild", "indexLookup", "scanLookup"},
+                         "the captions mapping held per file version: its occupancy, its paths and the drifted lookups (2026-10-05)")
         self.assertEqual(set(snap["memos"]["outlineProvisional"]), {"hit", "miss", "bypass_hold", "bypass_empty", "entries"},
                          "the provisional ledger memo: hits and misses on the store object's identity, the two bypasses (a rewind hold, an empty store), and the occupancy")
         self.assertEqual(set(snap["memos"]["spendTree"]), {"entries", "bytes", "bound", "served", "dirStats", "fileStats", "entryStats", "listings", "loaded", "loadFailed", "written", "swept", "dropped", "dumpSkipped", "evicted", "writeFailed"}, "the spend guard's tree memos against their bound")

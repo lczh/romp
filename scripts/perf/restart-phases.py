@@ -3,7 +3,7 @@
 
     scripts/perf/restart-phases.py [--state DIR] [--last N] [--json]
 
-Reads restart-cuts.jsonl (one cut row per exit, one boot row per start) and kernel-samples.jsonl (the kernel's size at
+Reads restart-cuts.jsonl (one cut row per exit and its done row, one boot row per start) and kernel-samples.jsonl (the kernel's size at
 5, 30 and 60 minutes of uptime and every hour after) under the state directory, pairs each cut with the boot that
 followed it, and prints per restart: the exit's checkpoint writes (ckptS) and the sessions' close (drainS), the gap
 from the cut to the next kernel serving (outageS), the new kernel's census (censusS) and last attach (attachS)
@@ -33,14 +33,23 @@ def _rows(path):
 
 
 def cycles(cut_rows, last=None):
-    """Pair each cut row with the boot row that followed it (by time); the newest `last` pairs."""
+    """Pair each cut row with the boot row that followed it (by time); the newest `last` pairs. Since 2026-10-05 the kernel
+    writes the cut row at the exit's start and a done row after the drain (exitDone, cutT = the cut row's t, its phases):
+    the exit's ckptS, drainS and stopped come from the done row when there is one, and exitDone says whether the exit
+    completed (False: killed after its cut row; None: a row from an older kernel, whose own ckptS and drainS are read; a
+    cut row carrying exitDone itself is the exit's late full row, complete with no done row)."""
     cuts = [r for r in cut_rows if "cutTurns" in r]
     boots = [r for r in cut_rows if r.get("bootSettled")]
+    dones = {(r.get("pid"), r.get("cutT")): r for r in cut_rows if r.get("exitDone") is True and "cutTurns" not in r}
     out = []
     for c in cuts:
         b = next((x for x in boots if x.get("prevCutT") == c.get("t")), None) or next((x for x in boots if x.get("t", 0) >= c.get("t", 0)), None)
-        out.append({"cutT": c.get("t"), "pid": c.get("pid"), "ckptS": c.get("ckptS"), "drainS": c.get("drainS"),
-                    "cutTurns": len(c.get("cutTurns") or []), "stopped": c.get("stopped"), "exitRssMb": round((c.get("rssKb") or 0) / 1024),
+        d = dones.get((c.get("pid"), c.get("t")))
+        ph = (d.get("phases") if d and isinstance(d.get("phases"), dict) else None) or {}
+        out.append({"cutT": c.get("t"), "pid": c.get("pid"), "ckptS": ph.get("ckptS", c.get("ckptS")), "drainS": ph.get("drainS", c.get("drainS")),
+                    "exitDone": True if d or c.get("exitDone") is True else (False if c.get("expectsDone") else None),
+                    "cutTurns": len((d.get("drainCutTurns") if d and isinstance(d.get("drainCutTurns"), list) else c.get("cutTurns")) or []),
+                    "stopped": d.get("stopped") if d else c.get("stopped"), "exitRssMb": round((c.get("rssKb") or 0) / 1024),
                     "outageS": b.get("outageS") if b else None, "censusS": b.get("censusS") if b else None,
                     "attachS": b.get("attachS") if b else None, "attachTimedOut": bool(b.get("attachTimedOut")) if b else None,
                     "bootPid": b.get("pid") if b else None})
