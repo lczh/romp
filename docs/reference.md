@@ -3112,8 +3112,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `replaced` (a later record reused the summary's uuid), `parent` (the
   summary hangs off a record that is no compaction boundary) or `offpath`
   (the boundary is off the conversation's path), these three only when a
-  record wearing the id names /compact, one the entry holds or the new
-  record itself, and `seedEpisode` for a pair of those three shapes when
+  user record wearing the id, not a compaction summary, names /compact,
+  one the entry holds or the new record itself, and `seedEpisode` for a pair of those three shapes when
   no such record is on hand but the entry was restored from a document
   that lists the id: a document's gates carry `compact_pids`, the prompt
   ids that a user record before its cut, not a compaction summary, naming

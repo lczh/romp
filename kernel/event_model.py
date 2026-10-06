@@ -6098,8 +6098,8 @@ def _asm_pid_refusal(ad, pid):
     `adopted`, a pair adoption spliced (a live manual /compact, whose episode a later record moves, and whose episode is a
     /compact one), whichever summary wearing the id it is; `replaced`, `parent` or `offpath` when a record on hand wearing the id
     that the episode filter admits names /compact; and `seedEpisode`, a pair of one of those three shapes when no record on
-    hand does but a restored entry's seed lists the id: its document's compact_pids (a record before the cut wearing it names
-    /compact) or, for a document
+    hand does but a restored entry's seed lists the id: its document's compact_pids (a record before the cut that the episode
+    filter admits, wearing it, names /compact) or, for a document
     written before that field, its prompt_ids (some record its writer had read wore it). Counted apart from the shapes, so
     the restored entry's guard is told from a /compact episode the entry reads. A delta in which either rule lets through a
     record other than a compaction summary, and which a compaction, the descent or a batch's kept check then refuses, parses
