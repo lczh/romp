@@ -1995,7 +1995,7 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
             out = fn()
         return seen, out
 
-    def _row(self, feed, nid):
+    def _tree_row(self, feed, nid):
         card = self._cards(feed)[nid]
         return next(r for r in card["tree"] if r["id"] == nid)
 
@@ -2032,8 +2032,8 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self.assertEqual(sorted(self._cards(f)),
                          sorted([WEB + ":g1", WEB + ":g2", WEB + ":g4", API + ":g1", TESTS + ":g1"]))
         self.assertIn((9, 1), self.seg, "the premise: a second typed prompt mid-turn opens a second segment")
-        self.assertEqual(self._row(f, WEB + ":g4")["anchorUuid"], "w-a13", "the premise: g4 lands on turn 13's reply")
-        log1 = [r["anchorUuid"] for r in self._row(f, WEB + ":g1")["log"]]
+        self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-a13", "the premise: g4 lands on turn 13's reply")
+        log1 = [r["anchorUuid"] for r in self._tree_row(f, WEB + ":g1")["log"]]
         self.assertEqual(len(log1), 8)
         self.assertTrue(all(log1), "the premise: every log row of g1 resolves to an anchor: %r" % log1)
         self.assertEqual(self._cards(f)[WEB + ":g2"]["summaryAnchorUuid"], "w-a06",
@@ -2051,13 +2051,13 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self.rev += 1
         self._publish_web()
         f = self._warm_cold("a seam splits turn 13's segment")
-        self.assertEqual(self._row(f, WEB + ":g4")["anchorUuid"], "w-c13",
+        self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-c13",
                          "the premise: the seam moved turn 13's reply into its tail")
         self.seams = []
         self.rev += 1
         self._publish_web()
         f = self._warm_cold("the seam removed")
-        self.assertEqual(self._row(f, WEB + ":g4")["anchorUuid"], "w-a13")
+        self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-a13")
         self._compact()
         self._warm_cold("an auto compaction")
         self._restore(3)
