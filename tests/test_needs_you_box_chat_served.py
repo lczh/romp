@@ -67,7 +67,7 @@ await page.addInitScript((sid) => { window.__frameN = 0; window.__injN = 0; wind
   if (m.id === sid && rows && rows.length && (m.type === "status" || m.type === "session" || m.type === "chatTail")) window.__lastStatus = { type: "status", id: sid, status: m.status }; }, true); }, cfg.sid);   // the kernel's frames counted and the session's latest status (the box's rows ride the chatTail frames' status here) kept, so a scene can post a status frame of its own that differs in one field and wait for the page to handle it, never on a delay
 const errors = []; page.on("pageerror", (e) => errors.push(String(e).slice(0, 300)));
 const out = { errors };
-const mark = () => process.stdout.write("PARTIAL:" + JSON.stringify(out) + "\n");   // the record so far, after every scene: what a run that hits the driver's budget still reports
+const mark = () => process.stdout.write("PARTIAL:" + JSON.stringify(out) + "\n");   // the record so far, after most scenes (the shell's scenes share one): what a run that hits the driver's budget still reports
 const rowSel = (id) => '#notices .ntc-row[data-item="' + id + '"]';
 // a row's LINE (read as `.ntc-secs > .fask-distill` or `.ntc-body` below): on a goal row the card's distill line (the brief or the takeaway), drawn by the card's
 // own builder since the box content round (plans/needs-you.md); on a notice row and on the credential row the kernel's markdown body, as before. A page
@@ -672,8 +672,8 @@ await browser.close();
 # test's setUpClass too: the esbuild run and the healthz boot loop, bounded at about 60 to 120 s here), so a kernel that boots late and then
 # stalls still hits this cap before the runner's, with the record below and the kernel's tail in hand rather than a bare per-test timeout
 # that also skips every later served test in the process (the second contributor's read of PR 2038). A driver that runs past it has hit
-# several deadlines in a row; the driver prints a PARTIAL line after every scene, and _result reports the last one, its two premise records
-# named first (_overrun_record), with the kernel's tail.
+# several deadlines in a row; the driver prints a PARTIAL line after most scenes, among them one right after the shell pane's pick and one
+# after the shell's scenes, and _result reports the last one, its two premise records named first (_overrun_record), with the kernel's tail.
 DRIVER_TIMEOUT_S = 480
 
 
