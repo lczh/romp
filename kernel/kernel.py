@@ -31146,13 +31146,14 @@ def _consumed_audit_t():
 
 
 def _consumed_audit():
-    """(t, pid) of the audit row the NEWEST cut row already joined and of the kernel that wrote that cut row ((0, None)
-    for none): _consumed_audit_t's walk, with the consumer's pid, so the reader can tell a request this kernel's
-    predecessor spent from one a sibling kernel under the same root spent on the same restart (_recent_restart_audit)."""
+    """(t, pid, cutT) of the audit row the NEWEST cut row already joined, of the kernel that wrote that cut row and of
+    that cut row's own t ((0, None, None) for none): _consumed_audit_t's walk, with the consumer's pid, so the reader can
+    tell a request this kernel's predecessor spent from one a sibling kernel under the same root spent on the same restart
+    (_recent_restart_audit)."""
     try:
         lines = RESTART_CUTS_FILE.read_text().strip().splitlines()
     except Exception:
-        return 0, None
+        return 0, None, None
     for line in reversed(lines[-50:]):
         try:
             r = json.loads(line)
@@ -31162,16 +31163,16 @@ def _consumed_audit():
             # the newest cut that CONSUMED a row — walked back past anonymous cuts (a service stop, a
             # Ctrl+C, a bare kill), which used to reset consumption to 0 and let the next anonymous cut
             # re-inherit the still-in-window row (review find: rows alternated consumed/anonymous/consumed)
-            return int(r["auditT"]), r.get("pid")
-    return 0, None
+            return int(r["auditT"]), r.get("pid"), r.get("t")
+    return 0, None, None
 
 
 def _consumer_alive(pid):
-    """Whether the kernel that consumed a request (a cut row's pid, as _consumed_audit reads it) is still running: what tells
-    a SIBLING under the same root (alive, its exit running beside this one) from this kernel's PREDECESSOR (it exited before
-    its successor started), which the pid alone cannot when the predecessor's request and this kernel's start share a
-    wall-clock second (the review of 2026-10-06). Only a positive int is a pid (os.kill(0) and os.kill(-1) address groups);
-    anything else, and a pid os.kill refuses, reads as not running. Never raises."""
+    """Whether the kernel that consumed a request (a cut row's pid, as _consumed_audit reads it) is still running: the
+    tie-break between a SIBLING under the same root and this kernel's PREDECESSOR when the consumer's cut row falls in the
+    wall-clock second this kernel started (a cut row from a later second is a sibling's, alive or not: an idle sibling's
+    exit can finish before this kernel reads the tail) (the review of 2026-10-06). Only a positive int is a pid (os.kill(0)
+    and os.kill(-1) address groups); anything else, and a pid os.kill refuses, reads as not running. Never raises."""
     try:
         return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and _pid_alive(pid)
     except Exception:
@@ -31227,15 +31228,16 @@ def _recent_restart_audit(window=90, now=None, started=None):
         predecessors' parks only;
       - a row with an action is a request and wins, unless a cut row already consumed it: spent on the
         cut it asked for, this cut is anonymous. The exception is a request ANOTHER kernel's cut row
-        consumed while the manager's note for THIS pid lies above it and that kernel is still running: one
-        restart signaled both kernels under the root, and since the exit path (2026-10-05) a sibling's cut
-        row lands milliseconds after its signal, before this kernel reads the tail, where it used to land
-        after the sibling's drain. The request still answers then, and this cut row consumes it too, as
-        both did before. A consumer that is gone is this kernel's predecessor (it exited before this one
-        started), and the request it spent stays spent even when it was filed in the second this kernel
-        started, which the start bound reads as this kernel's lifetime (_consumer_alive). A later,
-        separate signal the manager noted for this kernel alone, inside the window and above a request a
-        sibling spent, is read the same way: the rows cannot tell the two apart;
+        consumed while the manager's note for THIS pid lies above it, by a cut row written after this kernel
+        started (or, in the second it started, by a kernel still running): one restart signaled both kernels
+        under the root, and since the exit path (2026-10-05) a sibling's cut row lands milliseconds after its
+        signal, before this kernel reads the tail, where it used to land after the sibling's drain. The
+        request still answers then, and this cut row consumes it too, as both did before, even when the
+        sibling's exit has already finished. A predecessor's cut row was written before this kernel started
+        and its kernel has exited, so the request it spent stays spent even when it was filed in the second
+        this kernel started, which the start bound reads as this kernel's lifetime (_consumer_alive decides
+        only that second). A later, separate signal the manager noted for this kernel alone, inside the
+        window and above a request a sibling spent, is read the same way: the rows cannot tell the two apart;
       - a `when: quiet` request is pending until the restart it asked for lands, up to the far manager's
         15-minute backstop, so its window is RESTART_EXPECT_MAX_S and it names a cut well past the
         immediate window (T238); any other row older than the window ends the walk;
@@ -31270,7 +31272,7 @@ def _recent_restart_audit(window=90, now=None, started=None):
         tail = (jd.STATE / "restart-audit.jsonl").read_text().strip().splitlines()
         if not tail:
             return None
-        consumed, consumed_pid = _consumed_audit()
+        consumed, consumed_pid, consumed_cut_t = _consumed_audit()
         t0 = int(now if now is not None else time.time())
         born = int(_STARTED if started is None else started)
         via_manager = None                                  # the newest manager-sigterm note about us, if any
@@ -31315,9 +31317,11 @@ def _recent_restart_audit(window=90, now=None, started=None):
                 break                                       # older rows are older still
             spent = bool(consumed) and rec["t"] == consumed  # a cut row already joined it (auditT)
             if spent and consumed_pid not in (None, os.getpid()) and isinstance(via_manager, dict) \
-                    and via_manager.get("pid") == os.getpid() and _consumer_alive(consumed_pid):
+                    and via_manager.get("pid") == os.getpid() \
+                    and ((isinstance(consumed_cut_t, int) and consumed_cut_t > (_STARTED if started is None else started))
+                         or _consumer_alive(consumed_pid)):
                 spent = False                               # a sibling's cut spent it on the restart whose note for us lies above
-                #                                             (a sibling is alive; a predecessor exited before this kernel started)
+                #  (a sibling's cut row follows this kernel's start, or its kernel still runs; a predecessor's does neither)
             if rec["t"] < born:
                 # a predecessor's row; only a parked quiet request survives the kernel that filed it
                 if quiet and not park_settled and not spent:

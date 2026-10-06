@@ -1267,9 +1267,10 @@ class RequestOnRecord(unittest.TestCase):
         # cut row, written at its exit's START (2026-10-05), consumes the request milliseconds later, before this kernel reads
         # the tail. With the manager's note for THIS pid above the request, the request still names this cut (the base read it
         # before the sibling's row landed, after its drain); with no such note, or spent by this pid's own cut, it stays spent.
-        # The sibling is a LIVE stand-in process: a sibling's exit runs beside this one's, where a predecessor has exited (the
-        # review of 2026-10-06; the next test). And only a note naming THIS pid un-spends: a note naming no pid counts as this
-        # kernel's for its label, so it answers with that label and the spent request stays spent
+        # The sibling is a live stand-in process, as one still draining is; its cut row, written after this kernel started, is
+        # what marks it a sibling (the review of 2026-10-06; the next two tests take a sibling whose exit has finished and one
+        # whose cut row falls in this kernel's first second). And only a note naming THIS pid un-spends: a note naming no pid
+        # counts as this kernel's for its label, so it answers with that label and the spent request stays spent
         stand_in = subprocess.Popen(["sleep", "60"])
         self.addCleanup(stand_in.wait)
         self.addCleanup(stand_in.kill)
@@ -1299,12 +1300,51 @@ class RequestOnRecord(unittest.TestCase):
         self._write(request, sib_note, our_note)
         self.assertEqual(self._reason(), "manager-sigterm: restart-all", "spent by this pid's own cut: the note answers")
 
+    def test_a_request_a_sibling_spent_still_names_this_cut_when_the_siblings_exit_has_finished(self):
+        # the review of 2026-10-06, its second round: the manager notes and signals every kernel under the root in one loop, and an idle
+        # sibling's whole exit takes about a tenth of a second, so it can be gone before this kernel reads the tail. Its cut
+        # row was written after this kernel started (t 1001, this kernel started at 900), which a predecessor's never is, so
+        # the request it spent still names this cut. Liveness alone read the finished sibling as a predecessor
+        gone = subprocess.Popen(["true"])
+        gone.wait()                                  # the sibling's pid: its exit finished before this kernel read the tail
+        km.RESTART_CUTS_FILE.write_text(json.dumps({"t": 1001, "pid": gone.pid, "cutTurns": [], "auditT": 1000,
+                                                    "expectsDone": True}) + "\n")
+        self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update", "pid": 7},
+                    {"t": 1001, "action": "manager-sigterm", "kernel": "aux", "pid": gone.pid, "reason": "restart",
+                     "trigger": "restart-all"},
+                    {"t": 1001, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(), "reason": "restart",
+                     "trigger": "restart-all"})
+        self.assertEqual(self._reason(), "kernel-asks-manager-restart-all: self-update",
+                         "a cut row written after this kernel started is a sibling's, alive or not")
+        km.RESTART_CUTS_FILE.write_text(json.dumps({"pid": gone.pid, "cutTurns": [], "auditT": 1000,
+                                                    "expectsDone": True}) + "\n")
+        self.assertEqual(self._reason(), "manager-sigterm: restart-all",
+                         "a cut row with no whole-second t says nothing about when it was written: liveness decides,"
+                         " and an exited consumer's spend stands")
+
+    def test_a_request_a_live_sibling_spent_in_the_second_this_kernel_started_still_names_this_cut(self):
+        # the tie-break: the sibling's cut row falls in the wall-clock second this kernel started (t 1000, started 1000.5),
+        # so its t cannot tell it from a predecessor's, and the sibling still running is what says it is one
+        stand_in = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(stand_in.wait)
+        self.addCleanup(stand_in.kill)
+        km.RESTART_CUTS_FILE.write_text(json.dumps({"t": 1000, "pid": stand_in.pid, "cutTurns": [], "auditT": 1000,
+                                                    "expectsDone": True}) + "\n")
+        self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update", "pid": 7},
+                    {"t": 1000, "action": "manager-sigterm", "kernel": "aux", "pid": stand_in.pid, "reason": "restart",
+                     "trigger": "restart-all"},
+                    {"t": 1000, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(), "reason": "restart",
+                     "trigger": "restart-all"})
+        self.assertEqual(self._reason(now=1001, started=1000.5), "kernel-asks-manager-restart-all: self-update",
+                         "a sibling still running spent it in this kernel's first second")
+
     def test_a_request_a_predecessor_spent_in_the_second_this_kernel_started_stays_spent(self):
         # the review of 2026-10-06: the start bound compares whole seconds, so a successor started 0.7 s after the self-update
         # that restarted its predecessor reads the request as filed inside its own lifetime. Stopped through the manager within
         # 90 s (the manager's stop note for this pid above the request) with no request row of its own, it filed its cut as that
         # self-update and consumed it a second time: the predecessor's spend read as a sibling's, since the sibling rule told
-        # the two apart by the consumer's pid alone. A consumer that has exited is a predecessor, and its spend stands
+        # the two apart by the consumer's pid alone. A predecessor's cut row precedes this kernel's start and its kernel has
+        # exited, so its spend stands
         gone = subprocess.Popen(["true"])
         gone.wait()                                  # the predecessor's pid: it exited before this kernel started
         km.RESTART_CUTS_FILE.write_text(json.dumps({"t": 1000, "pid": gone.pid, "cutTurns": [], "auditT": 1000,

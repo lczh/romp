@@ -5426,9 +5426,10 @@ writes the row. When one restart signals two kernels under the same state
 root, the first kernel's cut row consumes the request within milliseconds; the
 second still names that request, not its own `manager-sigterm` note, as long
 as the manager's note for the second kernel's pid sits above the request in
-the audit file and the first kernel is still running. A kernel that consumed
-the request and has exited is the second one's predecessor, so the request
-stays spent, even when it was filed in the second the new kernel started.
+the audit file and the first kernel's cut row was written after the second
+kernel started, or, when both fall in one second, the first kernel is still
+running. A request the second kernel's predecessor consumed stays spent, even
+when it was filed in the second the new kernel started.
 The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
