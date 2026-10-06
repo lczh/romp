@@ -6083,9 +6083,11 @@ def _asm_pid_refusal(ad, pid):
     The episode rule, for a pair that is not attached (its summary replaced by a later copy of its uuid, its summary hung off a
     record that is no compact_boundary, or its boundary off the path): adoption splices a detached pair only behind the episode
     its summary's promptId names, and only when that episode is a /compact one (`if ep is not None and not ep["compact"]`; a
-    summary with no promptId falls to the adjacency fallback, which reads /compact episodes alone too). So when no user record
-    wearing the id names /compact, on hand or, on a restored entry, before its document's cut (_asm_pid_compact_episode), no
-    record wearing it can make adoption splice anything, and the gate refuses, per record, one that itself names /compact.
+    summary with no promptId falls to the adjacency fallback, which reads /compact episodes alone too). So when no record the
+    episode filter admits (_compact_episode_pid: a user record, a compaction summary aside) wearing the id names /compact, on
+    hand or, on a restored entry, before its document's cut (_asm_pid_compact_episode), no record wearing it can make adoption
+    splice anything, and the gate refuses, per record, one that adoption would put in the episode and that itself names
+    /compact.
     An automatic compaction's summary wearing its turn's prompt id names that turn's records, none of them a /compact. On a
     live kernel the attached rule alone vouched for none of the summaries the transcripts held: the boundary arm refused
     every one, and each record wearing such an id parsed whole.
@@ -6095,8 +6097,9 @@ def _asm_pid_refusal(ad, pid):
     written before that names every summary's pid, which only demotes more); `nosummary`, one with no summary in the graph;
     `adopted`, a pair adoption spliced (a live manual /compact, whose episode a later record moves, and whose episode is a
     /compact one), whichever summary wearing the id it is; `replaced`, `parent` or `offpath` when a record on hand wearing the id
-    names /compact; and `seedEpisode`, a pair of one of those three shapes when no record on hand does but a restored entry's
-    seed lists the id: its document's compact_pids (a record before the cut wearing it names /compact) or, for a document
+    that the episode filter admits names /compact; and `seedEpisode`, a pair of one of those three shapes when no record on
+    hand does but a restored entry's seed lists the id: its document's compact_pids (a record before the cut wearing it names
+    /compact) or, for a document
     written before that field, its prompt_ids (some record its writer had read wore it). Counted apart from the shapes, so
     the restored entry's guard is told from a /compact episode the entry reads. A delta in which either rule lets through a
     record other than a compaction summary, and which a compaction, the descent or a batch's kept check then refuses, parses
@@ -6585,8 +6588,9 @@ def _asm_gates(entry, leaf_path, candidate_files, links):
             # off an attached boundary (2026-10-03: an automatic compaction's summary, when it
             # wears its turn's prompt id, demoted every later tool result of that turn), or no
             # /compact episode wears it, so adoption has no episode to splice its pair behind
-            # (the episode rule, 2026-10-05), and then a record that names /compact itself is
-            # refused here. The two arms count apart (g:promptid:boundary, g:promptid:wrapper),
+            # (the episode rule, 2026-10-05), and then a record that adoption would put in the
+            # episode and that itself names /compact is refused here. The two arms count apart
+            # (g:promptid:boundary, g:promptid:wrapper),
             # the boundary arm's demotions again by reason (g:promptid:boundary:<reason>, and
             # boundarySeed, the seed's part), beside g:promptid. A delta the narrowed arm let through
             # (a record other than a compaction summary, which does not mark its own delta)
