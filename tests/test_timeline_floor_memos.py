@@ -32,8 +32,9 @@ change's mutants turn them red. The classes below pin the new rules and are red 
                  cannot order walks as before;
   Bounds         both tables are byte-bounded LRU tables, an entry over the bound alone is not held, sheds nothing and
                  counts under overBound (since the follow-up to the review: before it, under evict, and in the states
-                 table under sort too), and a full build drops the lanes it no longer draws while a live-only build
-                 drops none;
+                 table under sort too), a full build drops the lanes it no longer draws while a live-only build drops
+                 none, and a lane the dead-lane memo takes over leaves the marks table and keeps its states entry
+                 (since the same follow-up);
   PerfWiring     memos.judgingMarks and memos.stateIntervals carry their keys, and docs/reference.md names every one.
 The follow-up to the review posted after the change merged adds cases for code the classes above left untested, each
 green at the code it covers and red under its own mutant: in MarksMemo a NaN-timed append and a held row rewritten to
@@ -980,6 +981,34 @@ class Bounds(_Lanes):
         tl = self.build()
         self.assertIn(API, km._JUDGING_MARKS_MEMO, "a lane that returns is derived and held again")
         self.assertEqual([m["x"] for m in tl["judging"].get(API, [])], ["a caption"])
+
+    def test_a_lane_the_dead_lane_memo_takes_over_leaves_the_marks_table_and_keeps_its_states(self):
+        for sid in (WEB, API):
+            self.append(self.cap_path(sid), [crow((self.now - 600, "%08x" % 7), "segment", self.now - 600, "a caption", sid=sid)])
+        self.build()
+        self.assertEqual(set(km._JUDGING_MARKS_MEMO), {WEB, API}, "(the premise) both live lanes' marks are held")
+        live = {WEB: _live_row(self.now - 100)}             # the api session ends: its lane is dead and still drawn
+        forget = self.stats("_JUDGING_MARKS_STATS")["forget"]
+        tl = km.build_timeline(self.now, live, with_bars=True)
+        self.assertIn(API, km._dead_lane_memo, "(the premise) this build cached the dead lane")
+        self.assertNotIn(API, km._JUDGING_MARKS_MEMO, "its marks entry went with its parse: the dead-lane memo serves them")
+        self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["forget"] - forget, 1, "counted under forget")
+        self.assertIn(WEB, km._JUDGING_MARKS_MEMO, "a live lane's entry stays")
+        self.assertEqual(set(km._STATE_IV_MEMO), {WEB, API}, "the dead lane's states entry stays: every build reads it")
+        self.assertEqual([m["x"] for m in tl["judging"].get(API, [])], ["a caption"])
+        before = self.stats("_JUDGING_MARKS_STATS")
+        tl = km.build_timeline(self.now, live, with_bars=True)   # a dead-lane hit: served whole from that memo
+        after = self.stats("_JUDGING_MARKS_STATS")
+        self.assertEqual([after[k] - before[k] for k in ("build", "extend", "uncached", "forget")], [0, 0, 0, 0],
+                         "nothing derived for the dead lane")
+        self.assertNotIn(API, km._JUDGING_MARKS_MEMO)
+        self.assertEqual([m["x"] for m in tl["judging"].get(API, [])], ["a caption"])
+        self.append(self.cap_path(API), [crow((self.now - 300, "%08x" % 8), "segment", self.now - 300, "a later caption", sid=API)])
+        build = self.stats("_JUDGING_MARKS_STATS")["build"]
+        tl = km.build_timeline(self.now, live, with_bars=True)   # a dead miss: its marks built whole once, then taken over again
+        self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["build"] - build, 1)
+        self.assertNotIn(API, km._JUDGING_MARKS_MEMO)
+        self.assertEqual([m["x"] for m in tl["judging"].get(API, [])], ["a caption", "a later caption"])
 
 
 class BoundEnvironment(unittest.TestCase):

@@ -4167,8 +4167,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   them. Each derivation over captions counts once, under one of those five
   (a session with no caption rows has no marks to count). `evict`:
   entries the byte bound shed to make room for a newer one; `forget`:
-  entries of lanes a full build no longer draws. The gauges:
-  `entries`, `marks`, `bytes` (estimated) and `bound`
+  entries of lanes a full build no longer draws, and of a lane the dead-lane
+  memo takes over (that memo serves a dead lane's marks; the lane's
+  `stateIntervals` entry stays, since every build reads its states log).
+  The gauges: `entries`, `marks`, `bytes` (estimated) and `bound`
   (`ROMP_JUDGING_MARKS_MEMO_BYTES`, else a 256th of the machine's memory).
   `stateIntervals` is the states logs' transitions, sorted, held per session
   on the log's fold cursor (its record count and the reader's generation)
@@ -4181,10 +4183,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   row still without its newline, a failed read), sorted and not held;
   `overBound`: a version whose entry is over the byte bound by itself,
   sorted and served but not held, and no other lane shed for it. Each read
-  counts once, under one of those four. `evict` and `forget` as above; the
-  gauges `entries`, `transitions`,
-  `bytes` (estimated) and `bound` (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a
-  512th of the machine's memory).
+  counts once, under one of those four. `evict` as above; `forget`: entries
+  of lanes a full build no longer draws. The gauges: `entries`,
+  `transitions`, `bytes` (estimated) and `bound`
+  (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a 512th of the machine's memory).
   Four memos cover the chat build's per-build fixed costs, each keyed on the
   inputs it reads and evicted by the pusher with the tab set (a comment thread
   built this cycle is kept, like its fold prefix). `chatMergeSets` is the

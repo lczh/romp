@@ -54085,7 +54085,9 @@ def _derive_judging(sid, caps, goals, t0, out, seg_ends=None, stamp=False):
 # record count, valid while the fold's answer IS the cursor's own state object, which a fold never mutates), with each
 # state set's intervals, so a build bisects the horizon. Both are byte-bounded LRU tables (the user's caches rule: a
 # fraction of memory with an override) dropped for the lanes a full build no longer draws, and /perf reports them as
-# memos.judgingMarks and memos.stateIntervals. No clock is read in either: the horizon is the caller's.
+# memos.judgingMarks and memos.stateIntervals. A lane the dead-lane memo takes over drops its marks entry (that memo
+# serves its marks from then on) and keeps its states entry, which every build reads. No clock is read in either: the
+# horizon is the caller's.
 _CAP_T_TYPES = (int, float, bool)   # a time the bisection can order: JSON's numbers (NaN is refused separately)
 
 
@@ -54146,7 +54148,8 @@ _JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "overB
 #   bisection cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read
 #   not held, a version another thread has replaced since), derived and not held; overBound: marks over the byte bound
 #   by themselves, derived (built whole or extended), served and not held, and no other lane shed for them. evict:
-#   entries the byte bound shed to make room for a newer one; forget: entries of lanes a full build no longer draws
+#   entries the byte bound shed to make room for a newer one; forget: entries of lanes a full build no longer draws, and
+#   of a lane the dead-lane memo takes over
 _STATE_IV_LOCK = threading.Lock()
 _STATE_IV_MEMO = collections.OrderedDict()   # sid -> (version, the fold's state, sorted transitions, plain, {state set:
 #                                              (starts, ends, open start)}, bytes), least recently used first
@@ -56065,10 +56068,16 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
                 # the parse has done its work for this dead lane: drop it (the RSS lever); a lane that moves
                 # re-parses once, and a session that revives is parsed by its chat build as before. The live-lane
                 # memo's entry from the lane's live days goes with it: its key is that parse object, so it cannot
-                # hit again and would hold the parse the pop just released
+                # hit again and would hold the parse the pop just released. So does the lane's entry in the
+                # captioner's marks table: the dead-lane memo now serves its marks, and a dead miss (a keyed input
+                # moved) builds them whole once, as before that table. Its states entry stays: every build reads
+                # every lane's states log
                 _parse_cache.pop(s["path"], None)
                 with _LANES_LOCK:
                     _lanes_memo.pop(sid, None)
+                with _JUDGING_MARKS_LOCK:
+                    if _JUDGING_MARKS_MEMO.pop(sid, None) is not None:
+                        _JUDGING_MARKS_STATS["forget"] += 1
                 _release_dead_lane(sid, s["path"], lane_key[0], alive, live_map)   # and its assembly entry and records (2026-10-01)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
         # chip), keyed on the DERIVED chip `state` computed above, not the raw row state. The old form read
