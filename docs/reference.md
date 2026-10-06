@@ -2824,7 +2824,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   observation, never inside a job's `cpuByJob`. The observation makes a few
   reads before the job they serve: the pass's sessions at the first two
   jobs' turns (the listing at first sight's, the alive ones at the lift's),
-  the nudge ledger and the working notes when their caches miss, and at the
+  the nudge ledger and the working notes when their caches miss, each input
+  whose records belong to sessions once per version of it (the ledger, the
+  session flags, and the relay queue's and the working notes' listings), and at the
   settle write's turn each listed session's settle evidence and, once its
   period has passed or is a second from passing, its leaf's stat. That cost
   moves out of those jobs' `cpuByJob` and their `jobs.<job>` stage walls
@@ -2866,9 +2868,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   that pass took. A write no such signal covers stays a `wrongQuiet` even
   when the floor, a later stat or an all-sessions mark brings the job back:
   a standing view is never re-statted, since it cannot tell a write during
-  the run from one before the pass. A memo names its session, so another
-  session's input moving never makes it raced, and a run whose memos name
-  several sessions is raced only when each of them is). `wrongQuietLast` keeps the newest
+  the run from one before the pass. A memo names the sessions its key
+  carries, and the walk's look names the askers whose registry rows its key
+  holds beside the session it looks at. It is tested on those sessions'
+  inputs alone: their registry rows, judge writes, judge calls in flight,
+  compaction clicks and settle evidence, and their records in the nudge
+  ledger, the session flags, the relay queue and the working notes, beside
+  the records that name no session. So another session's input moving never
+  makes it raced, unless the memo's own key carried that input whole: the
+  ten-file key carries the ledger's stat, and a key that moved there counts
+  any ledger write. The inputs every session reads whole, such as the
+  clears, postal and downtime logs, count whole. A run whose memos name
+  several sessions is raced only when each memo is. The settle write's
+  work is an act only when the gate saw what it acted on: a settle key or
+  a leaf that moved after the gate read it makes the session's memo
+  instead, a `miss`, raced by that input read again). `wrongQuietLast` keeps the newest
   sixteen, and `lastPass` each job's verdict on the newest observed pass
   (`closed`, `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate
   fault).
