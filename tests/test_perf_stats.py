@@ -263,7 +263,8 @@ class Collector(unittest.TestCase):
                                      # the card anchor walk's held aggregates (2026-10-06): walks, held and folded turns, partial and
                                      # reset entries, walks that raised, evictions, and the occupancy against the bound
                                      "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised", "segEvict",
-                                     "segEntries", "segBytes", "segBound"})
+                                     "segEntries", "segBytes", "segBound",
+                                     "overBound"})   # an aggregate over the bound by itself, never held (the review after the merge)
         self.assertEqual(set(memo["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
         self.assertEqual(set(memo["row_by"]), set(km._FEED_ROW_FIELDS) | {"presence"})
         self.assertEqual(memo["bound"], km.FEED_MEMO_BYTES)

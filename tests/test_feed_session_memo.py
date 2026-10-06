@@ -1812,9 +1812,11 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
     g3 a done child (two "continue" segments: the text-atom landing), g4 completed (its anchor is turn 13's reply, the
     segment a seam splits). Pinned: a streaming append and a republish with the same seams fold the open turn alone
     (every turn before the hold); after every step of a road and of a seeded random walk the board equals a derivation
-    from cleared memos over the same inputs, byte for byte (_dump); a rewind that takes the latest plain prompt drops the
-    re-check, and a plain prompt in the open turn after a re-examined block raises it; a departed session's held
-    aggregate leaves with it. tests/test_feed_seg_held.py pins the walk itself against the one-pass loop."""
+    from cleared memos over the same inputs, byte for byte (_dump), the road's steps including web's leaf replaced by
+    rename under standing turn keys (the inode in the head, the review after the merge); a rewind that takes the latest
+    plain prompt drops the re-check, and a plain prompt in the open turn after a re-examined block raises it; each board
+    build is one build number, which marks the entry a derivation used; a departed session's held aggregate leaves with
+    it. tests/test_feed_seg_held.py pins the walk itself against the one-pass loop."""
 
     BLOCK_T = T0 + 2850                    # g2's block: after turn 28's plain prompt, before turn 29's
 
@@ -1919,6 +1921,29 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         km.em.asm_checkpoint_write(leaf, WEB, sdk_human=bool(km._display_sdk_human(WEB)), tree=km._parse(leaf, WEB, NOW))
         _fresh_parse_state()
         self._stream(k)
+
+    def _replace_leaf(self, old, new):
+        """Web's transcript replaced by rename (a new inode at the same path), the record `old` re-recorded under `new`:
+        an in-turn uuid (turn 3's first segment's work anchor), so every closed turn's key stands and only the leaf's
+        inode, which the key stats before the parse (ctx leaf_head), tells the held aggregate it no longer stands."""
+        held = getattr(km, "_FEED_SEG_HELD", {})
+        keys = held[WEB][2] if WEB in held else None
+        recs = [json.loads(x) for x in self.tpath[WEB].read_text().splitlines() if x.strip()]
+        for r in recs:
+            if r.get("uuid") == old:
+                r["uuid"] = new
+            if r.get("parentUuid") == old:
+                r["parentUuid"] = new
+        ino = self.tpath[WEB].stat().st_ino
+        tmp = self.tpath[WEB].with_name(self.tpath[WEB].name + ".new")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        os.replace(tmp, self.tpath[WEB])
+        self.web_last = recs[-1]["uuid"]
+        self.assertNotEqual(self.tpath[WEB].stat().st_ino, ino, "the premise: a new file under the path")
+        if keys is not None:
+            turns = km._parse(str(self.tpath[WEB]), WEB, NOW)["turns"]
+            self.assertEqual(tuple(km._turn_hold_key(x) for x in turns[:len(keys)]), keys,
+                             "the premise: every held turn key stands")
 
     def _seam13(self):
         """A seam that splits turn 13's segment between its two checks (t + 30): its reply moves into the tail."""
@@ -2058,6 +2083,10 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self._publish_web()
         f = self._warm_cold("the seam removed")
         self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-a13")
+        self._replace_leaf("w-c03", "w-x03")
+        f = self._warm_cold("the leaf replaced by rename, every turn key standing")
+        log1 = [r["anchorUuid"] for r in self._tree_row(f, WEB + ":g1")["log"]]
+        self.assertIn("w-x03", log1, "the premise: the replaced file moved a log row's work anchor: %r" % log1)
         self._compact()
         self._warm_cold("an auto compaction")
         self._restore(3)
@@ -2087,6 +2116,23 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         f = self._warm_cold("the block re-examined past turn 29's prompt")
         self.assertTrue(self._cards(f)[WEB + ":g2"]["rejudging"],
                         "the open turn's plain prompt (T0+3000) came after the re-examination")
+
+    def test_each_board_build_is_one_build_number_and_a_derivation_marks_the_entry_it_used(self):
+        """Past the byte bound a store sheds only entries no derivation of the current build used (the review after the
+        merge; tests/test_feed_seg_held.py pins the shed): build_feed raises the build number once per build, never by a
+        clock, and the derivation that uses or stores web's aggregate marks it with that number. A kernel without the
+        number (the base commit this change's red-first run pins against) reads 0 here and runs red on the assertions."""
+        num = lambda: getattr(km, "_FEED_SEG_BUILD", [0])[0]
+        b0 = num()
+        self._build()
+        self._build()
+        self.assertEqual(num() - b0, 2, "one build number per build_feed")
+        self._stream(1)
+        self._settle()
+        self._build()                                    # web derives: its held entry is reused and marked
+        held = getattr(km, "_FEED_SEG_HELD", {})
+        self.assertIn(WEB, held, "the premise: web's closed turns are held")
+        self.assertEqual(held[WEB][6:], (num(),), "the entry carries the number of the build that used it")
 
     def test_a_departed_sessions_held_aggregate_leaves_with_it(self):
         held = getattr(km, "_FEED_SEG_HELD", None)
