@@ -988,13 +988,14 @@ class Bounds(_Lanes):
         self.build()
         self.assertEqual(set(km._JUDGING_MARKS_MEMO), {WEB, API}, "(the premise) both live lanes' marks are held")
         live = {WEB: _live_row(self.now - 100)}             # the api session ends: its lane is dead and still drawn
-        forget = self.stats("_JUDGING_MARKS_STATS")["forget"]
+        forget, sorts = self.stats("_JUDGING_MARKS_STATS")["forget"], self.stats("_STATE_IV_STATS")["sort"]
         tl = km.build_timeline(self.now, live, with_bars=True)
         self.assertIn(API, km._dead_lane_memo, "(the premise) this build cached the dead lane")
         self.assertNotIn(API, km._JUDGING_MARKS_MEMO, "its marks entry went with its parse: the dead-lane memo serves them")
         self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["forget"] - forget, 1, "counted under forget")
         self.assertIn(WEB, km._JUDGING_MARKS_MEMO, "a live lane's entry stays")
         self.assertEqual(set(km._STATE_IV_MEMO), {WEB, API}, "the dead lane's states entry stays: every build reads it")
+        self.assertEqual(self.stats("_STATE_IV_STATS")["sort"], sorts, "read again from the held entry, not sorted again")
         self.assertEqual([m["x"] for m in tl["judging"].get(API, [])], ["a caption"])
         before = self.stats("_JUDGING_MARKS_STATS")
         tl = km.build_timeline(self.now, live, with_bars=True)   # a dead-lane hit: served whole from that memo
