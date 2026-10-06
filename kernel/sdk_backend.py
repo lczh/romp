@@ -8560,6 +8560,16 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("model learn (%s): registry write failed: %s" % (self.name, e))
             if cleared:
+                # the flag from the marker, before the poke, as the context refresh and the write below put it: the
+                # prune writes the flag down after its hold of the session lock, so a pick landing between the two
+                # (set_model on the kernel's thread: its marker, its seed write and its own flag) had its flag
+                # overwritten, and this road wrote nothing more. A hard kernel death before the pick's next report then
+                # healed nothing, and the session revived on the model from before the pick, whose first report read as
+                # a fallback: carded and, with Retry upgrades on, armed (the review of #42 after it merged)
+                try:
+                    self.backend._update_reg(self.sid, modelPending=bool(self._model_pending))
+                except Exception as e:
+                    self.backend._log("model learn (%s): registry write failed: %s" % (self.name, e))
                 self.backend._poke()
             return
         if self.model and not self._model_pending and not cleared \
@@ -8714,7 +8724,12 @@ class SdkSession:
         The list's check and rewrite and the marker's read and clear sit in one hold of the session lock, under which
         set_model writes both on the kernel's thread. Held for the rewrite alone, a pick landing during the check, or
         between the rewrite and the marker's clear, left the pick this report reflects listed, and a refusal of the new
-        pick gave it its dots back (round four). __new__-built test doubles have no lock, and take a fresh one."""
+        pick gave it its dots back (round four). __new__-built test doubles have no lock, and take a fresh one.
+
+        The registry's flag is written after the hold, so a pick landing between the two has its own flag overwritten.
+        Each caller given True writes the flag again from the marker before it pokes: the context refresh, and both of
+        _learn_model's roads, the early return for a report that names the live model included (the review of #42
+        after it merged)."""
         with (getattr(self, "_lock", None) or threading.Lock()):
             unlanded = getattr(self, "_pick_unlanded", ())   # getattr: __new__-built test doubles skip __init__
             kept = tuple(p for p in unlanded if not _lands_on_pick(pm, p))

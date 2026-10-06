@@ -1669,6 +1669,42 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                                                        % (road, seen))
             self.assertEqual(s._model_pending, "", "%s: the report left the pick's switching dots standing" % road)
 
+    def _landing(self, be, s, k, pick):
+        """Swap in the stand-in for the session lock, landing `pick` at the prune's k-th release of it. The stand-in
+        forwards the lock's methods and is armed only while the prune runs. Returns the list that names the function the
+        landing fired in, and the real lock, to put back after the report."""
+        real_lock, landed, releases = s._lock, [], []
+        pruning = self._in_prune(s)
+
+        def released():
+            if pruning and not landed:              # set_model's own releases, after the landing, do not count
+                releases.append(True)
+                if len(releases) == k:
+                    landed.append(sys._getframe(2).f_code.co_name)  # the frame that released the lock
+                    be.set_model(SID, pick)                         # the kernel thread's pick; it takes the lock
+
+        class Landing:
+            """The session lock, forwarding its methods."""
+            def __enter__(self):
+                return real_lock.__enter__()
+
+            def __exit__(self, *a):
+                out = real_lock.__exit__(*a)
+                released()
+                return out
+
+            def acquire(self, *a, **k):
+                return real_lock.acquire(*a, **k)
+
+            def release(self):
+                real_lock.release()
+                released()
+
+            def locked(self):
+                return real_lock.locked()
+        s._lock = Landing()
+        return landed, real_lock
+
     def test_a_pick_landing_as_the_prune_releases_the_session_lock_finds_the_report_whole(self):
         # the test above checks that every read and write of the list and the marker inside the prune runs under the
         # session lock, and it stays green with the one hold split in two, each half under a hold of its own. A split
@@ -1685,41 +1721,6 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         refused5 = Exception("Unknown model: claude-fable-5")
         down = RuntimeError(self.DOWN)
 
-        def landing(be, s, k):
-            """Swap in the stand-in, landing Fable 5 at the prune's k-th release of the session lock. Returns the list
-            that names the function the landing fired in, and the real lock, to put back after the report."""
-            real_lock, landed, releases = s._lock, [], []
-            pruning = self._in_prune(s)
-
-            def released():
-                if pruning and not landed:              # set_model's own releases, after the landing, do not count
-                    releases.append(True)
-                    if len(releases) == k:
-                        landed.append(sys._getframe(2).f_code.co_name)  # the frame that released the lock
-                        be.set_model(SID, "claude-fable-5")             # the kernel thread's pick; it takes the lock
-
-            class Landing:
-                """The session lock, forwarding its methods."""
-                def __enter__(self):
-                    return real_lock.__enter__()
-
-                def __exit__(self, *a):
-                    out = real_lock.__exit__(*a)
-                    released()
-                    return out
-
-                def acquire(self, *a, **k):
-                    return real_lock.acquire(*a, **k)
-
-                def release(self):
-                    real_lock.release()
-                    released()
-
-                def locked(self):
-                    return real_lock.locked()
-            s._lock = Landing()
-            return landed, real_lock
-
         def each_release(road, picks, outcome):
             """For k = 1, 2 and on: each of `picks` taken with its refresh failing, then a reply on Opus 5.5 with
             Fable 5 landing at the prune's k-th release of the session lock and, when it lands, Fable 5 refused, its
@@ -1732,7 +1733,7 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                     for pick in picks:
                         self._pick(be, s, pick)
                         self._settle(s, [down])                      # taken; its dots stand
-                    landed, real_lock = landing(be, s, k)
+                    landed, real_lock = self._landing(be, s, k, "claude-fable-5")
                     self._served(s, "claude-opus-5-5")               # the report, Fable 5 landing as the prune lets go
                     del s._resolve_model_pending
                     s._lock = real_lock
@@ -1862,6 +1863,94 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 s = sb.SdkSession(be, sb.read_reg(be.state_dir, SID))
                 self.assertEqual((s.model, sb.read_reg(be.state_dir, SID).get("liveModel")), ("Opus 5.5", "Opus 5.5"),
                                  "%s: only a stranded MODEL pick moves the name; the one the session reported stays" % road)
+
+    @staticmethod
+    def _new_kernel(be):
+        """A kernel started over the state a hard death left behind: the same directory, none of the dead one's
+        memory."""
+        nb = sb.SdkBackend(be.state_dir, "/bin/true", lambda *a, **k: None)
+        nb._logs = []
+        nb._log = lambda msg, *a, **k: nb._logs.append(msg)
+        return nb
+
+    @staticmethod
+    def _flags_at_pokes(be, s):
+        """A stand-in for the kernel's wake that reads, at each poke, the registry's in-flight flag beside the session's
+        marker, as a reader the poke wakes finds them. Returns the list of (flag, marker set) pairs;
+        `be._poke_cb = None` unwires it."""
+        seen = []
+        be._poke_cb = lambda: seen.append((sb.read_reg(be.state_dir, SID).get("modelPending"), bool(s._model_pending)))
+        return seen
+
+    def test_a_pick_landing_before_the_prunes_registry_write_is_healed_after_a_hard_death(self):
+        # the prune clears the marker in its hold of the session lock and writes the registry's flag down after it. A
+        # pick landing between the two (set_model on the kernel's thread: its marker, its seed write and its own flag)
+        # had its flag overwritten, and on a report naming the live model the learn returned without writing it again.
+        # A hard kernel death before the pick's next report then healed nothing: the session revived on the model from
+        # before the pick, and the pick's first report was carded as a fallback and, with Retry upgrades on, armed (the
+        # review of #42 after it merged). The release test's stand-in lands the click at the prune's first release,
+        # after its hold and before its write, during a reply on Opus 5.5 that ends a first pick's dots; the click is
+        # taken with its refresh failing, and the kernel dies. A new kernel over the same state heals the row in the
+        # session's construction, or in the boot sweep and then the construction, and the session revives on the
+        # click's own name. On the roads whose click's refresh fails, a stand-in for the kernel's wake reads the
+        # registry at each poke the report makes: the flag is the marker's by then. Two controls stay as they were: the
+        # click made after the report, and the click's refresh answering before the death, with the model the click
+        # runs (which lands it) or with no model named (which writes the flag from the marker)
+        down = RuntimeError(self.DOWN)
+        firsts = (("a re-pick of Opus 5.5", "claude-opus-5-5"), ("Opus 4.8", "claude-opus-4-8"))
+        # (the click, its value, the model the CLI runs for it, the click's own name)
+        clicks = (("a Latest Opus click", "opus", "claude-opus-5", "Opus"),
+                  ("the default", "default", "claude-sonnet-5", ""),
+                  ("a Latest Sonnet click", "sonnet", "claude-sonnet-5", "Sonnet"))
+        # (the case, the click lands in the gap, the click's refresh, the report's pokes read, the click lands before
+        # the death)
+        cases = (("the click in the gap, its refresh failing", True, down, True, False),
+                 ("the click after the report, its refresh failing", False, down, True, False),
+                 ("the click in the gap, its refresh answering with the model it runs", True, "RUNS", False, True),
+                 ("the click in the gap, its refresh answering with no model named", True, "NOMODEL", False, False))
+        heals = ("the session's construction", "the boot sweep, then the session's construction")
+        for (first, fpick), (click, value, runs, label), (case, gap, answer, read, lands), heal in itertools.product(
+                firsts, clicks, cases, heals):
+            road = ("live on Opus 5.5, %s taken with its refresh failing, a reply on Opus 5.5, then %s (%s), and a "
+                    "hard kernel death healed by %s" % (first, click, case, heal))
+            with self.subTest(first=first, click=click, case=case, heal=heal), _Hooks() as h:
+                be, s = self._world()
+                self._pick(be, s, fpick)
+                self._settle(s, [down])                              # taken; its dots stand
+                pokes = self._flags_at_pokes(be, s)
+                if gap:
+                    landed, real_lock = self._landing(be, s, 1, value)
+                self._served(s, "claude-opus-5-5")                   # the report, ending the first pick's dots
+                be._poke_cb = None
+                if gap:
+                    del s._resolve_model_pending
+                    s._lock = real_lock
+                    self.assertEqual(landed, ["_resolve_model_pending"], "%s: the click did not land as the prune "
+                                                                         "released the session lock" % road)
+                else:
+                    self._pick(be, s, value)                         # the click, after the report
+                self._settle(s, [runs if answer == "RUNS" else answer])
+                at_death = (s._model_pending, sb.read_reg(be.state_dir, SID).get("modelPending"))
+                nb = self._new_kernel(be)                            # the hard death: a new kernel over the same state
+                if heal != "the session's construction":
+                    self._sweep(nb)
+                t = self._revived(sb.SdkSession(nb, sb.read_reg(nb.state_dir, SID)))
+                nb.sessions[SID] = t
+                revived, healed = t.model, sb.read_reg(nb.state_dir, SID)
+                self._init(t, runs); self._served(t, runs)               # the click's first report after the restart
+                apart = [p for p in pokes if p[0] != p[1]]       # a poke that found the flag and the marker apart
+                got = {"the marker and the flag at the death": at_death,
+                       "the report's pokes, the flag apart from the marker": apart if read else "not read",
+                       "the report poked": bool(pokes) if read else "not read",
+                       "revived on": revived, "the flag after the heal": bool(healed.get("modelPending")),
+                       "cards": h.fallbacks, "armed": t._upgrade_retry is not None}
+                want = {"the marker and the flag at the death": ("", False) if lands else (value, True),
+                        "the report's pokes, the flag apart from the marker": [] if read else "not read",
+                        "the report poked": True if read else "not read",
+                        "revived on": sb.pretty_model(runs) if lands else label, "the flag after the heal": False,
+                        "cards": [], "armed": False}
+                self.assertEqual(got, want, road)
+                self._assert_nothing(nb, t, h, road)
 
     # (road, the registry before the pick, the pick, the model the CLI ran before it, the model the pick runs)
     UPWARD = (("an upward pick in the family", ON48, "claude-opus-5-5", "claude-opus-4-8", "claude-opus-5-5"),
