@@ -54139,19 +54139,23 @@ STATE_IV_MEMO_BYTES = _floor_memo_bound("ROMP_STATE_INTERVALS_MEMO_BYTES", 512) 
 _JUDGING_MARKS_LOCK = threading.Lock()   # the table and its counters: the pusher and a connect push can build at once
 _JUDGING_MARKS_MEMO = collections.OrderedDict()   # sid -> (version, id count, marks, ids, bytes), least recently used first;
 #                                                   ids are the caption ids of the marks, in the marks' order
-_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "evict": 0, "forget": 0}
-#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows; build:
-#   every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the bisection
-#   cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read not held,
-#   a version another thread has replaced since), derived and not held; evict: entries the byte bound shed (an entry
-#   over the bound alone is not held); forget: entries of lanes a full build no longer draws
+_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
+#   Each derivation over caption rows counts once, under one of the first five (an empty mapping has no marks to count).
+#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows;
+#   build: every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the
+#   bisection cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read
+#   not held, a version another thread has replaced since), derived and not held; overBound: marks over the byte bound
+#   by themselves, derived (built whole or extended), served and not held, and no other lane shed for them. evict:
+#   entries the byte bound shed to make room for a newer one; forget: entries of lanes a full build no longer draws
 _STATE_IV_LOCK = threading.Lock()
 _STATE_IV_MEMO = collections.OrderedDict()   # sid -> (version, the fold's state, sorted transitions, plain, {state set:
 #                                              (starts, ends, open start)}, bytes), least recently used first
-_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "evict": 0, "forget": 0}
-#   hit: the held transitions served; sort: a version sorted and held; uncached: a fold answer that is not the cursor's
-#   own state (a newline-less last row folded provisionally, served records, a failed read, another thread's newer fold),
-#   sorted and not held; evict and forget as above
+_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
+#   Each read counts once, under one of the first four. hit: the held transitions served; sort: a version sorted and
+#   held; uncached: a fold answer that is not the cursor's own state (a newline-less last row folded provisionally,
+#   served records, a failed read, another thread's newer fold), sorted and not held; overBound: a version whose entry
+#   is over the byte bound by itself, sorted, served and not held, and no other lane shed for it. evict as above;
+#   forget: entries of lanes a full build no longer draws
 
 
 def _cap_mark(sid, c):
@@ -54272,11 +54276,11 @@ def _judging_cap_marks(sid, caps):
     size = _judging_marks_bytes(marks, ids)
     with _JUDGING_MARKS_LOCK:
         st = _JUDGING_MARKS_STATS
-        st[kind] += 1
         _JUDGING_MARKS_MEMO.pop(sid, None)
         if size > JUDGING_MARKS_MEMO_BYTES:
-            st["evict"] += 1                             # over the bound alone: served, not held, and sheds no other lane
+            st["overBound"] += 1                         # over the bound alone: served, not held, and sheds no other lane
         else:
+            st[kind] += 1
             _JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
             total = sum(e[4] for e in _JUDGING_MARKS_MEMO.values())
             while total > JUDGING_MARKS_MEMO_BYTES:
@@ -54328,11 +54332,11 @@ def _state_ev_sorted(sid, path):
     ent = (ver, res, ev, _state_ev_plain(ev), {}, 200 + 40 * len(ev))   # the transitions and two state sets' intervals
     with _STATE_IV_LOCK:
         st = _STATE_IV_STATS
-        st["sort"] += 1
         _STATE_IV_MEMO.pop(sid, None)
         if ent[5] > STATE_IV_MEMO_BYTES:
-            st["evict"] += 1
+            st["overBound"] += 1                         # over the bound alone: served, not held, and sheds no other lane
         else:
+            st["sort"] += 1
             _STATE_IV_MEMO[sid] = ent
             total = sum(e[5] for e in _STATE_IV_MEMO.values())
             while total > STATE_IV_MEMO_BYTES:

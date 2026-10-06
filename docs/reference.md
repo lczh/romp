@@ -4162,8 +4162,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   its time stands); `build`: every row sorted (a first derivation, a
   rewrite, a rewritten row whose time moved or appeared, or times the
   bisection cannot order); `uncached`: a mapping that is not the one held
-  for its file, derived and not held; `evict`: entries the byte bound shed;
-  `forget`: entries of lanes a full build no longer draws. The gauges:
+  for its file, derived and not held; `overBound`: marks over the byte bound
+  by themselves, derived and served but not held, and no other lane shed for
+  them. Each derivation over captions counts once, under one of those five
+  (a session with no caption rows has no marks to count). `evict`:
+  entries the byte bound shed to make room for a newer one; `forget`:
+  entries of lanes a full build no longer draws. The gauges:
   `entries`, `marks`, `bytes` (estimated) and `bound`
   (`ROMP_JUDGING_MARKS_MEMO_BYTES`, else a 256th of the machine's memory).
   `stateIntervals` is the states logs' transitions, sorted, held per session
@@ -4175,7 +4179,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   bisection. `hit`: the held transitions served; `sort`: a version sorted
   and held; `uncached`: a fold answer that is not the cursor's state (a last
   row still without its newline, a failed read), sorted and not held;
-  `evict` and `forget` as above; the gauges `entries`, `transitions`,
+  `overBound`: a version whose entry is over the byte bound by itself,
+  sorted and served but not held, and no other lane shed for it. Each read
+  counts once, under one of those four. `evict` and `forget` as above; the
+  gauges `entries`, `transitions`,
   `bytes` (estimated) and `bound` (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a
   512th of the machine's memory).
   Four memos cover the chat build's per-build fixed costs, each keyed on the

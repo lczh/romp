@@ -30,8 +30,10 @@ change's mutants turn them red. The classes below pin the new rules and are red 
   StatesMemo     two state sets over two builds sort once; an append, a rewrite and a cleared cursor sort again; a last
                  row without its newline is not held; the horizon cut equals the walk at every edge; a log the bisection
                  cannot order walks as before;
-  Bounds         both tables are byte-bounded LRU tables, an entry over the bound alone is not held and sheds nothing,
-                 and a full build drops the lanes it no longer draws while a live-only build drops none;
+  Bounds         both tables are byte-bounded LRU tables, an entry over the bound alone is not held, sheds nothing and
+                 counts under overBound (since the follow-up to the review: before it, under evict, and in the states
+                 table under sort too), and a full build drops the lanes it no longer draws while a live-only build
+                 drops none;
   PerfWiring     memos.judgingMarks and memos.stateIntervals carry their keys, and docs/reference.md names every one.
 The follow-up to the review posted after the change merged adds cases for code the classes above left untested, each
 green at the code it covers and red under its own mutant: in MarksMemo a NaN-timed append and a held row rewritten to
@@ -906,9 +908,12 @@ class Bounds(_Lanes):
         self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["evict"], 1)
         self.derive(SID3)
         self.assertEqual(list(km._JUDGING_MARKS_MEMO), [SID2], "an entry over the bound alone is not held and sheds nothing")
-        self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["evict"], 2)
+        st = self.stats("_JUDGING_MARKS_STATS")
+        self.assertEqual((st["evict"], st["overBound"], st["build"]), (1, 1, 2),
+                         "counted over the bound: not an eviction (no lane was shed) and not a held build")
         caps, m = self.derive(SID3)
         self.marks_equal("served, not held", SID3, caps, m)
+        self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["overBound"], 2, "and again on every derivation of it")
         rep = km._judging_marks_report()
         self.assertEqual((rep["entries"], rep["marks"], rep["bytes"], rep["bound"]), (1, 20, km._JUDGING_MARKS_MEMO[SID2][4],
                                                                                    km.JUDGING_MARKS_MEMO_BYTES))
@@ -923,8 +928,11 @@ class Bounds(_Lanes):
         self.assertEqual(list(km._STATE_IV_MEMO), [SID2])
         km._state_intervals(SID3, COMPACT, T + 5000)
         self.assertEqual(list(km._STATE_IV_MEMO), [SID2])
-        self.assertEqual(self.stats("_STATE_IV_STATS")["evict"], 2)
+        st = self.stats("_STATE_IV_STATS")
+        self.assertEqual((st["evict"], st["overBound"], st["sort"]), (1, 1, 2),
+                         "counted over the bound: not an eviction (no lane was shed) and not a version sorted and held")
         self.assertEqual(km._state_intervals(SID3, "working", T + 5000), ref_state_intervals(SID3, "working", T + 5000))
+        self.assertEqual(self.stats("_STATE_IV_STATS")["overBound"], 2, "and again on every read of it")
 
     # recency: under a bound that fits two entries, lanes A and B are derived, A again as a hit, then C; the bound sheds B,
     # the least recently USED, and keeps A, the least recently derived (a table that never moved a hit sheds A)
@@ -1000,8 +1008,10 @@ class PerfWiring(_Lanes):
         self.build(); self.build()
         memos = km._PERF_STATS.snapshot()["memos"]
         marks, states = memos["judgingMarks"], memos["stateIntervals"]
-        self.assertEqual(set(marks), {"hit", "extend", "build", "uncached", "evict", "forget", "entries", "marks", "bytes", "bound"})
-        self.assertEqual(set(states), {"hit", "sort", "uncached", "evict", "forget", "entries", "transitions", "bytes", "bound"})
+        self.assertEqual(set(marks), {"hit", "extend", "build", "uncached", "overBound", "evict", "forget", "entries", "marks",
+                                      "bytes", "bound"})
+        self.assertEqual(set(states), {"hit", "sort", "uncached", "overBound", "evict", "forget", "entries", "transitions",
+                                       "bytes", "bound"})
         self.assertTrue(all(type(v) is int for v in list(marks.values()) + list(states.values())))
         self.assertEqual((marks["build"], marks["entries"], marks["marks"], marks["bound"]), (1, 1, 1, km.JUDGING_MARKS_MEMO_BYTES))
         self.assertEqual((states["sort"], states["entries"], states["transitions"], states["bound"]), (2, 2, 4, km.STATE_IV_MEMO_BYTES))

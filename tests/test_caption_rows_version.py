@@ -125,7 +125,8 @@ def ref_marks_tail(old, new):
 
 
 def ref_judging_cap_marks(sid, caps):
-    """_judging_cap_marks as it asked its own pair."""
+    """_judging_cap_marks as it asked its own pair (its count for marks over the bound by themselves follows the kernel's
+    overBound key, which came after the fold, so the two differ only in the pair they ask)."""
     ver = ref_marks_version(sid, caps)
     if ver is None:
         if caps:
@@ -152,11 +153,11 @@ def ref_judging_cap_marks(sid, caps):
     size = km._judging_marks_bytes(marks, ids)
     with km._JUDGING_MARKS_LOCK:
         st = km._JUDGING_MARKS_STATS
-        st[kind] += 1
         km._JUDGING_MARKS_MEMO.pop(sid, None)
         if size > km.JUDGING_MARKS_MEMO_BYTES:
-            st["evict"] += 1
+            st["overBound"] += 1
         else:
+            st[kind] += 1
             km._JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
             total = sum(e[4] for e in km._JUDGING_MARKS_MEMO.values())
             while total > km.JUDGING_MARKS_MEMO_BYTES:

@@ -146,11 +146,11 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["memos"]["captionRows"]), {"entries", "rows", "bytes", "hit", "extend", "build", "uncached", "swept",
                                                            "indexBuild", "indexLookup", "scanLookup"},
                          "the captions mapping held per file version: its occupancy, its paths and the drifted lookups (2026-10-05)")
-        self.assertEqual(set(snap["memos"]["judgingMarks"]), {"hit", "extend", "build", "uncached", "evict", "forget",
+        self.assertEqual(set(snap["memos"]["judgingMarks"]), {"hit", "extend", "build", "uncached", "overBound", "evict", "forget",
                                                             "entries", "marks", "bytes", "bound"},
                          "the captioner's marks held per captions version: its counters, occupancy and bytes against its bound")
         self.assertEqual(snap["memos"]["judgingMarks"]["bound"], km.JUDGING_MARKS_MEMO_BYTES)
-        self.assertEqual(set(snap["memos"]["stateIntervals"]), {"hit", "sort", "uncached", "evict", "forget",
+        self.assertEqual(set(snap["memos"]["stateIntervals"]), {"hit", "sort", "uncached", "overBound", "evict", "forget",
                                                               "entries", "transitions", "bytes", "bound"},
                          "the states logs' sorted transitions held per fold cursor: counters, occupancy, bytes, bound")
         self.assertEqual(snap["memos"]["stateIntervals"]["bound"], km.STATE_IV_MEMO_BYTES)
