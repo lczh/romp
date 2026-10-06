@@ -1884,6 +1884,50 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         be._poke_cb = lambda: seen.append((sb.read_reg(be.state_dir, SID).get("modelPending"), bool(s._model_pending)))
         return seen
 
+    @staticmethod
+    def _landing_at_the_write(be, s, pick):
+        """Swap in a stand-in for the backend's registry lock, armed once the prune has returned, that runs set_model
+        for `pick` whole (its marker, its seed write and its own flag) just before the first acquire of the lock made
+        from _learn_model, in its own body or in the helper it calls. Returns the list that names the function the
+        landing fired for, and the real lock, to put back after the report; `del s._resolve_model_pending` unwraps the
+        prune."""
+        real_lock, landed, armed, real_prune = be._reg_lock, [], [], s._resolve_model_pending
+
+        def prune(*a, **k):
+            try:
+                return real_prune(*a, **k)
+            finally:
+                armed.append(True)
+        s._resolve_model_pending = prune
+
+        def acquiring():
+            if armed and not landed:                     # set_model's own acquires, after the landing, do not count
+                callers = (sys._getframe(2).f_code.co_name, sys._getframe(3).f_code.co_name)
+                if "_learn_model" in callers:            # the frame taking the lock, or the one that called it
+                    landed.append("_learn_model")
+                    be.set_model(SID, pick)              # the kernel thread's pick; it takes the lock itself
+
+        class Landing:
+            """The registry lock, forwarding its methods."""
+            def __enter__(self):
+                acquiring()
+                return real_lock.__enter__()
+
+            def __exit__(self, *a):
+                return real_lock.__exit__(*a)
+
+            def acquire(self, *a, **k):
+                acquiring()
+                return real_lock.acquire(*a, **k)
+
+            def release(self):
+                real_lock.release()
+
+            def locked(self):
+                return real_lock.locked()
+        be._reg_lock = Landing()
+        return landed, real_lock
+
     def test_a_pick_landing_before_the_prunes_registry_write_is_healed_after_a_hard_death(self):
         # the prune clears the marker in its hold of the session lock and writes the registry's flag down after it. A
         # pick landing between the two (set_model on the kernel's thread: its marker, its seed write and its own flag)
@@ -1897,21 +1941,25 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
         # click's own name. On the roads whose click's refresh fails, a stand-in for the kernel's wake reads the
         # registry at each poke the report makes: the flag is the marker's by then. Two controls stay as they were: the
         # click made after the report, and the click's refresh answering before the death, with the model the click
-        # runs (which lands it) or with no model named (which writes the flag from the marker)
+        # runs (which lands it) or with no model named (which writes the flag from the marker). A fifth case lands the
+        # click, its refresh failing, after the prune, as the report's own flag write takes the registry lock: a write
+        # that read the marker before that lock wrote the flag down over the click's, the same road to the card
         down = RuntimeError(self.DOWN)
         firsts = (("a re-pick of Opus 5.5", "claude-opus-5-5"), ("Opus 4.8", "claude-opus-4-8"))
         # (the click, its value, the model the CLI runs for it, the click's own name)
         clicks = (("a Latest Opus click", "opus", "claude-opus-5", "Opus"),
                   ("the default", "default", "claude-sonnet-5", ""),
                   ("a Latest Sonnet click", "sonnet", "claude-sonnet-5", "Sonnet"))
-        # (the case, the click lands in the gap, the click's refresh, the report's pokes read, the click lands before
-        # the death)
-        cases = (("the click in the gap, its refresh failing", True, down, True, False),
-                 ("the click after the report, its refresh failing", False, down, True, False),
-                 ("the click in the gap, its refresh answering with the model it runs", True, "RUNS", False, True),
-                 ("the click in the gap, its refresh answering with no model named", True, "NOMODEL", False, False))
+        # (the case, where the click lands: in the gap, after the report or at the report's flag write; the click's
+        # refresh, the report's pokes read, the click lands before the death)
+        cases = (("the click in the gap, its refresh failing", "gap", down, True, False),
+                 ("the click after the report, its refresh failing", "after", down, True, False),
+                 ("the click in the gap, its refresh answering with the model it runs", "gap", "RUNS", False, True),
+                 ("the click in the gap, its refresh answering with no model named", "gap", "NOMODEL", False, False),
+                 ("the click as the report's flag write takes the registry lock, its refresh failing", "write", down,
+                  True, False))
         heals = ("the session's construction", "the boot sweep, then the session's construction")
-        for (first, fpick), (click, value, runs, label), (case, gap, answer, read, lands), heal in itertools.product(
+        for (first, fpick), (click, value, runs, label), (case, at, answer, read, lands), heal in itertools.product(
                 firsts, clicks, cases, heals):
             road = ("live on Opus 5.5, %s taken with its refresh failing, a reply on Opus 5.5, then %s (%s), and a "
                     "hard kernel death healed by %s" % (first, click, case, heal))
@@ -1920,15 +1968,22 @@ class APickOfTheUsersOwnIsNeverAFallback(unittest.TestCase):
                 self._pick(be, s, fpick)
                 self._settle(s, [down])                              # taken; its dots stand
                 pokes = self._flags_at_pokes(be, s)
-                if gap:
+                if at == "gap":
                     landed, real_lock = self._landing(be, s, 1, value)
+                elif at == "write":
+                    landed, real_reg_lock = self._landing_at_the_write(be, s, value)
                 self._served(s, "claude-opus-5-5")                   # the report, ending the first pick's dots
                 be._poke_cb = None
-                if gap:
+                if at == "gap":
                     del s._resolve_model_pending
                     s._lock = real_lock
                     self.assertEqual(landed, ["_resolve_model_pending"], "%s: the click did not land as the prune "
                                                                          "released the session lock" % road)
+                elif at == "write":
+                    del s._resolve_model_pending
+                    be._reg_lock = real_reg_lock
+                    self.assertEqual(landed, ["_learn_model"], "%s: the click did not land as the report's flag write "
+                                                               "took the registry lock" % road)
                 else:
                     self._pick(be, s, value)                         # the click, after the report
                 self._settle(s, [runs if answer == "RUNS" else answer])
