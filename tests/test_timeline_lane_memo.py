@@ -881,9 +881,9 @@ class DerivationSplit(unittest.TestCase):
         finally:
             km.time = real
         self.assertTrue(cap_marks and other)
-        # the run above takes a plain dict, so it reaches neither table's held roads; the names check covers every helper
-        # the derivation reaches on the build, hit and extend roads of the captioner's marks (2026-10-06) and the states
-        # table's two, which the floors' comment holds to the same rule
+        # the run above takes a plain dict, so it reaches neither table's held roads; the names check covers the helpers
+        # of the captioner's marks on the build, hit and extend roads (2026-10-06) and the states table's three, which
+        # the floors' comment holds to the same rule
         for fn in (km._derive_judging_marks, km._judging_cap_marks, km._cap_marks_build, km._cap_marks_extend, km._cap_mark,
                    km._caption_rows_version, km._caption_rows_since, km._state_ev_sorted, km._state_iv_cands,
                    km._state_ev_plain):
