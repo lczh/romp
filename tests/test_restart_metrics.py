@@ -201,6 +201,121 @@ class BootJoin(unittest.TestCase):
         self.assertEqual([(r["t"], (r.get("boot") or {}).get("t")) for r in rs], [(1000, None), (2000, 2003), (3000, 3002)])
         self.assertEqual(rs[1]["boot"]["outageS"], 3.5, "computed from firstServe when the boot row has no outageS")
 
+    def test_an_exits_done_row_folds_into_its_cut_row_and_a_killed_exit_reads_as_not_done(self):
+        """The kernel's exit path (2026-10-05) writes the cut row at the exit's START (its prediction, `expectsDone`) and a done
+        row after the drain (exitDone, cutT, the drain's result, phases). The reader folds the pair into one record; a cut
+        row with expectsDone and no done row is an exit killed after its row (exitDone False, its outage still from the cut
+        row), a row from an older kernel is exitDone None, and a done row is never a restart of its own."""
+        fold = getattr(rm, "fold_exit_done", None)
+        self.assertIsNotNone(fold, "the reader folds an exit's done row into its cut row (the base has no fold)")
+        rows = [{"t": 1000, "pid": 7, "cutTurns": [], "stopped": 2, "unjoined": 0, "reaped": 0, "watchesArmed": 1,
+                 "reason": "manager-sigterm: restart", "auditT": 999, "expectsDone": True},
+                {"t": 1003, "pid": 7, "exitDone": True, "cutT": 1000, "stopped": 3, "unjoined": 1, "reaped": 1,
+                 "drainCutTurns": [{"sid": SID, "name": "web"}], "phases": {"rowS": 0.0, "ckptS": 0.9, "drainS": 0.4},
+                 "ckptWritten": 4, "ckptLeft": 2, "deadlineS": 3.2, "elapsedS": 2.9},
+                {"t": 1006, "pid": 8, "bootSettled": True, "firstServe": 1006.0, "reconcileDone": 1006.2, "settleS": 0.2,
+                 "prevCutT": 1000, "outageS": 6.0},
+                {"t": 2000, "pid": 8, "cutTurns": [{"sid": SID2, "name": "api"}], "stopped": 1, "reason": "p2p-update",
+                 "expectsDone": True},                                                     # killed after its row: no done row
+                {"t": 2011, "pid": 9, "bootSettled": True, "firstServe": 2011.0, "reconcileDone": 2011.2, "settleS": 0.2,
+                 "prevCutT": 2000, "outageS": 11.0},
+                {"t": 3000, "pid": 9, "cutTurns": [], "stopped": 1, "reason": "p2p-update"},   # a row from an older kernel
+                {"t": 3002, "pid": 10, "exitDone": True, "cutT": 2999, "stopped": 5}]          # a done row whose cut row is gone
+        before = json.dumps(rows, sort_keys=True)
+        rs = rm.parse_restarts(rows)
+        self.assertEqual(json.dumps(rows, sort_keys=True), before, "the input is not modified")
+        self.assertEqual([r["t"] for r in rs], [1000, 2000, 3000], "the done rows are no restarts of their own")
+        a, b, c = rs
+        self.assertEqual((a["exitDone"], a["cutTurns"], a["cutSessions"], a["stopped"], a["unjoined"], a["reaped"]),
+                         (True, 1, ["web"], 3, 1, 1), "the drain's result overrides the prediction")
+        self.assertEqual((a["auditT"], a["reason"], a["boot"]["outageS"]), (999, "manager-sigterm: restart", 6.0))
+        self.assertEqual((b["exitDone"], b["cutTurns"], b["cutSessions"], b["boot"]["outageS"]), (False, 1, ["api"], 11.0),
+                         "a killed exit keeps its row and its outage, and says it never finished")
+        self.assertIsNone(c["exitDone"], "an older kernel's row predates the done row")
+        folded = fold(rows)
+        self.assertEqual(len(folded), 5, "the two done rows are gone, every other row stays")
+        self.assertEqual((folded[0]["ckptS"], folded[0]["drainS"], folded[0]["ckptLeft"], folded[0]["doneT"]), (0.9, 0.4, 2, 1003))
+        self.assertEqual(folded[1], rows[2], "a boot row passes unchanged")
+        other = fold([dict(rows[0]), dict(rows[1], pid=70)])
+        self.assertEqual([r.get("exitDone") for r in other], [False], "a done row joins only its own pid's cut row")
+
+    def test_a_completed_exit_reads_as_the_one_row_it_used_to_write(self):
+        """When the exit completes, the folded pair is the record the single row written after the drain gave, but for
+        exitDone: the summary text, built from these records, is unchanged by the second row."""
+        legacy = [{"t": 1000, "pid": 7, "cutTurns": [{"sid": SID, "name": "web"}], "stopped": 3, "unjoined": 1, "reaped": 1,
+                   "watchesArmed": 1, "reason": "signal; the manager was stopped too (a service stop or restart)",
+                   "rssKb": 2048, "cpuS": 9.5}]
+        pair = [{"t": 1000, "pid": 7, "cutTurns": [], "stopped": 2, "unjoined": 0, "reaped": 0, "watchesArmed": 1,
+                 "reason": "signal, not requested through the manager", "rssKb": 2048, "cpuS": 9.5, "expectsDone": True},
+                {"t": 1002, "pid": 7, "exitDone": True, "cutT": 1000, "stopped": 3, "unjoined": 1, "reaped": 1,
+                 "drainCutTurns": [{"sid": SID, "name": "web"}],
+                 "finalReason": "signal; the manager was stopped too (a service stop or restart)"}]
+        old, new = rm.parse_restarts(legacy)[0], rm.parse_restarts(pair)[0]
+        self.assertIsNone(old.pop("exitDone", "absent"), "an older kernel's row: exitDone None (the base has no field)")
+        self.assertIs(new.pop("exitDone", None), True)
+        self.assertEqual(new, old, "the late verdict and the drain's count are the record's")
+
+    def test_the_record_carries_the_exits_timings_and_the_predictions_fault(self):
+        """The done row's phases and counts reach the record (the reader folded them and kept none: the review's round two),
+        a cut row's cutTurnsError rides along, and the exit's late full row (a cut row carrying exitDone itself) is complete."""
+        rows = [{"t": 1000, "pid": 7, "cutTurns": [], "stopped": 2, "expectsDone": True, "cutTurnsError": "RuntimeError: synthetic"},
+                {"t": 1003, "pid": 7, "exitDone": True, "cutT": 1000, "stopped": 2,
+                 "phases": {"rowS": 0.0, "primeS": 0.3, "ckptS": 0.9, "drainS": 0.4},
+                 "ckptWritten": 4, "ckptLeft": 2, "primed": 1, "primeSkipped": 1, "asmSkipped": 0, "asmBusy": 1,
+                 "deadlineS": 3.2, "elapsedS": 2.9},
+                {"t": 2000, "pid": 8, "cutTurns": [{"sid": SID, "name": "web"}], "stopped": 1, "exitDone": True,
+                 "phases": {"drainS": 0.2}, "ckptS": 0.5, "drainS": 0.2, "deadlineS": 3.2}]   # a late full row
+        a, b = rm.parse_restarts(rows)
+        self.assertEqual(a["phases"], {"rowS": 0.0, "primeS": 0.3, "ckptS": 0.9, "drainS": 0.4})
+        self.assertEqual((a["ckptWritten"], a["ckptLeft"], a["primed"], a["primeSkipped"], a["asmSkipped"], a["asmBusy"],
+                          a["deadlineS"], a["elapsedS"]), (4, 2, 1, 1, 0, 1, 3.2, 2.9))
+        self.assertEqual((a["exitDone"], a["cutTurnsError"]), (True, "RuntimeError: synthetic"))
+        self.assertEqual((b["exitDone"], b["cutTurns"], b["phases"], b["deadlineS"]), (True, 1, {"drainS": 0.2}, 3.2),
+                         "the late full row is an exit that finished, not an older kernel's row")
+        self.assertIsNone(b["cutTurnsError"])
+
+    def test_a_killed_exit_is_measured_never_clean_and_counted_apart(self):
+        """An exit killed after its cut row (no done row) counts the turns its cut row predicted and is never clean: with an
+        empty prediction the head read it as a clean restart. When its prediction failed too (cutTurnsError) its turns are
+        unknown, as a crash boot's are, so it leaves both sides of the rate. The rate, over a completed exit and cut rows
+        with no done row, with and without the fault."""
+        web, api = {"sid": SID, "name": "web"}, {"sid": SID2, "name": "api"}
+        completed = [{"t": D0 + 100, "pid": 7, "cutTurns": [], "stopped": 1, "expectsDone": True},
+                     {"t": D0 + 102, "pid": 7, "exitDone": True, "cutT": D0 + 100, "stopped": 1, "drainCutTurns": [web]}]
+        killed = {"t": D0 + 200, "pid": 8, "cutTurns": [api], "stopped": 1, "expectsDone": True}            # predicted one cut
+        killed_empty = {"t": D0 + 300, "pid": 9, "cutTurns": [], "stopped": 1, "expectsDone": True}         # predicted none
+        killed_fault = {"t": D0 + 400, "pid": 10, "cutTurns": [], "stopped": 1, "expectsDone": True,
+                        "cutTurnsError": "RuntimeError: synthetic predicate fault"}                         # no prediction
+
+        def bucket(rows):
+            (b,) = rm.build_buckets(rm.parse_restarts(rows), [], [], [], [], [], {}, "week", "2026-09-10", TZ)
+            return b
+        b = bucket(completed + [killed, killed_empty])
+        self.assertEqual((b["restarts"], b["cutTurns"], b["cleanRestarts"], b["killedExits"], b["measuredRestarts"],
+                          b["unmeasuredRestarts"]), (3, 2, 0, 2, 3, 0),
+                         "the killed exits are measured by their predictions, and neither is clean (the head counted one)")
+        self.assertEqual(b["cutTurnsPerRestart"], 0.67, "2 turns over 3 measured restarts")
+        b = bucket(completed + [killed_fault])
+        self.assertEqual((b["restarts"], b["cutTurns"], b["cleanRestarts"], b["killedExits"], b["measuredRestarts"],
+                          b["unmeasuredRestarts"]), (2, 1, 0, 1, 1, 1),
+                         "with no prediction the killed exit's turns are unknown: out of the measured restarts")
+        self.assertEqual(b["cutTurnsPerRestart"], 1.0, "1 turn over the 1 measured restart (the head: 0.5, and 1 clean)")
+        b = bucket(completed + [dict(killed_fault, cutTurns=[api])])     # a Codex turn read, the SDK prediction failed
+        self.assertEqual((b["cutTurns"], b["measuredRestarts"], b["cutTurnsPerRestart"]), (2, 1, 1.0),
+                         "an unmeasured exit's known turns count as cut, and leave the rate's top with its bottom")
+        b = bucket([dict(completed[0], cutTurnsError="RuntimeError: synthetic"), completed[1]])
+        self.assertEqual((b["measuredRestarts"], b["cutTurnsPerRestart"]), (1, 1.0),
+                         "a completed exit's drain result stands in for a failed prediction: measured")
+        present = {k: {"present": True} for k in ("restartCuts", "restartAudit", "sessionEvents", "turns")}
+        text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
+                           "buckets": [bucket(completed + [killed, killed_empty])], "live": {"skipped": True}})
+        self.assertIn("clean restarts 0 · boots with no cut row 0 · killed after the cut row 2", text)
+        self.assertNotIn("unknown cut count", text, "every exit here has a known count")
+        text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
+                           "buckets": [bucket(completed + [killed_fault])], "live": {"skipped": True}})
+        self.assertIn("· killed after the cut row 1 · exits with an unknown cut count 1", text,
+                      "the text names the exit the per-measured-restart rate leaves out, so the rate reconciles")
+
     def test_rotated_predecessor_is_read_first(self):
         state = Path(tempfile.mkdtemp())
         _write(state, "turns.jsonl.1", [{"t": 1, "sid": SID}])
@@ -311,7 +426,8 @@ class Document(unittest.TestCase):
         self.assertIn("continuation notices 3 · redo turns 1 · redo cost $0.50 of $15.50 in the window · redo tokens 3,700", text)
         self.assertIn("feed to result n=2 p50 10.0 s p90 37.0 s", text)
         self.assertIn("machine cuts crash 1, restart 1", text)
-        self.assertIn("kernel process at its exits: resident n=2 p50 2048 MB p90 4096 MB max 4096 MB · cpu n=2 p50 300 s", text)
+        self.assertIn("kernel process as its exits began: resident n=2 p50 2048 MB p90 4096 MB max 4096 MB · cpu n=2 p50 300 s", text)
+        self.assertNotIn("killed after the cut row", text, "no exit was killed after its row: the count is left off the line")
         self.assertIn("live: skipped", text)
         self.assertIn("note: Redo cost", text)
         self.assertNotIn("MISSING", text)

@@ -345,8 +345,11 @@ class FailureRoads(_Child):
         src = inspect.getsource(km._drain_and_exit)
         self.assertIn("_JUDGE_CHILD.end(background=True)", src, "the exit road signals the child at once and reaps it on its own thread")
         self.assertLess(src.index("_JUDGE_CHILD.end(background=True)"), src.index("EXIT_PRIME_BUDGET_S"), "before the first stage")
-        self.assertLess(src.index("_append_restart_cut(row)"), src.index(".finish(EXIT_GRACE_S - JUDGE_END_MARGIN_S"), "joined after the cut row")
-        self.assertLess(src.index(".finish(EXIT_GRACE_S - JUDGE_END_MARGIN_S"), src.index("os._exit(0)"), "and before the exit")
+        self.assertLess(src.index("_JUDGE_CHILD.end(background=True)"), src.index("_append_restart_cut(cut_row)"),
+                        "and before the cut row the exit writes at its start (the exit path, 2026-10-05)")
+        self.assertLess(src.index("_append_restart_cut(done)"), src.index("_judge_end.finish("), "joined after the done row")
+        self.assertIn("_judge_end.finish(max(0.0, _end - _t))", src, "with what the exit's deadline has left")
+        self.assertLess(src.index("_judge_end.finish("), src.rindex("os._exit(0)"), "and before the exit")
 
     def test_an_orphan_left_by_a_dead_kernel_is_swept_at_the_first_request(self):
         import subprocess

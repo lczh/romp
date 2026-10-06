@@ -813,6 +813,37 @@ def transcript_path(cwd: str, fsid: str) -> str:
                     "projects", proj, fsid + ".jsonl")   # per-kernel Claude root (plans/multi-kernel.md phase 2)
 
 
+def registry_cwd_for(reg_cwd: str, cli_cwd: str, fsids) -> str:
+    """The cwd a session's registry holds once the CLI's init reports `cli_cwd`: the directory whose projects dir holds
+    the transcript the CLI writes (a file named for one of `fsids`). Everything that finds the transcript keys it on
+    the registry's cwd (transcript_path, the kernel's comment-thread reads, the --resume of a relaunch).
+
+    Every turn's init reports the CLI's CURRENT directory, and that follows the agent's shell: after a `cd` in a Bash
+    call it names the directory the shell moved to, while the transcript stays under the launch directory's projects
+    dir. Adopting that string pointed every read at a file that does not exist (2026-10-06: a comment thread's popover
+    lost every message after a reply, because the thread's agent had cd'd into a results directory). So the CLI's string
+    is taken only where it holds the transcript: a variant spelling of the launch directory (case, a symlink: the
+    2026-07-17 wrong-case launch this adoption was written for), or a worktree the CLI moved its transcript into. Else
+    the nearest directory above it that holds the transcript (the launch directory, which also mends a registry an
+    earlier adoption pointed at a subdirectory), else the registry's own when it holds it. When no candidate holds a
+    transcript yet (a fresh session's first init, before anything is written) the CLI's string is taken, as before."""
+    names = [f for f in fsids if f]
+
+    def holds(d):
+        return any(os.path.isfile(transcript_path(d, f)) for f in names)
+    d = cli_cwd
+    while True:
+        if holds(d):
+            return d
+        up = os.path.dirname(d)
+        if not up or up == d:
+            break
+        d = up
+    if reg_cwd and holds(reg_cwd):
+        return reg_cwd
+    return cli_cwd
+
+
 # ── moving a live session's working directory (the user 2026-09-01, who wanted a session to follow a
 # subproject promoted to its own repo) ────────────────────────────────────────────────────────────
 # Claude Code 2.1.257 has a `set_cwd` control request — the headless twin of the interactive /cd. On
@@ -5585,6 +5616,29 @@ def _model_same_tier(x, y):
     return va is None or vb is None or va == vb
 
 
+def _lands_on_pick(pm, pick):
+    """Is `pm` the very model a VERSIONED pick names, its family and its version ('Opus 4.8' for claude-opus-4-8 or
+    claude-opus-4-8[1m])? A move onto it is the pick landing, never an automatic fallback: a fallback moves a session
+    away from what was picked. This holds where a report from before the pick moved the live name above it (a reply of a
+    turn the CLI opened itself, still streaming when the pick went live; 2026-09-30, the #33 follow-up). An alias or
+    `default` names no version, so nothing lands on it by name. Only ever suppresses a card; never mints one."""
+    lab = _alias_label(str(pick or ""))
+    v = _model_version(lab)
+    return v is not None and _model_rank(pm) == _model_rank(lab) and _model_version(pm) == v
+
+
+def _heal_pick_label(pick, old):
+    """The name a session rebuilt with a model pick still in flight starts from (a thread's death, a hard kernel death):
+    the pick's own label, so the pick's first report is not read as a fallback from the model it replaced, unless the
+    pick sits ABOVE the old name. Then the old name stays: the rebuilt session can attach to a CLI that never got the
+    pick, or replay a reply from before it (an attach tells the CLI nothing), and relabeled, that report of the old model
+    read as the pick falling back (2026-09-30, the #33 follow-up's review). Kept, the pick's report is an upgrade and the
+    old model's changes nothing."""
+    lab = _alias_label(str(pick or ""))
+    old = str(old or "")
+    return old if _model_downgrade(lab, old) else lab
+
+
 def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False, category=""):
     """The model picker's REQUESTED-model mark (the user 2026-09-17): while a session's live model sits a tier below
     its pick, the picker draws a yellow tick beside the requested model with a tooltip saying why and whether romp is
@@ -5760,9 +5814,18 @@ class SdkSession:
         _waiting = [p for p in (_wait.get("picks") or {}) if p in PICK_LAUNCH_KEYS] \
             if isinstance(_wait.get("picks"), dict) and backend._lease_survives(self.sid) else []
         if reg.get("effortPending") or reg.get("modelPending") or reg.get("authPending"):
-            backend._update_reg(self.sid, modelPending=False,
-                                **({} if "effort" in _waiting else {"effortPending": False}),
-                                **({} if "billing" in _waiting else {"authPending": False}))
+            _heal = dict({"modelPending": False},
+                         **({} if "effort" in _waiting else {"effortPending": False}),
+                         **({} if "billing" in _waiting else {"authPending": False}))
+            if reg.get("modelPending") and "model" in reg:
+                # …and a model pick that never landed starts from the PICK's label, as _on_session_gone leaves it
+                # (2026-09-30, the #33 follow-up): a thread that dies mid-turn is rebuilt here (its heal's _ensure)
+                # BEFORE that reset runs, a hard kernel death skips it, and the old label read the pick's first report
+                # as a fallback nobody asked for; a pick above the old label keeps the old one (_heal_pick_label). A
+                # flagged row with no pick on record keeps its label.
+                _heal["liveModel"] = _heal_pick_label(reg.get("model"), reg.get("liveModel"))
+                reg = dict(reg, liveModel=_heal["liveModel"])   # self.model and _served_model seed from it below
+            backend._update_reg(self.sid, **_heal)
         # protocol/runtime state
         self.loop: asyncio.AbstractEventLoop | None = None
         self.client = None
@@ -5887,10 +5950,20 @@ class SdkSession:
         # write it too — and is ruled per WRITE, by token, in SdkBackend._seed_write_*: no per-session
         # view of that layer exists here on purpose (see _seed_write_refused). Under self._lock.
         self._model_accepted = reg.get("model")
+        self._pick_seq = 0                           # bumped by every live pick (SdkBackend.set_model), at the pick
+        self._pick_taken = 0                         # the latest pick the CLI has had: its set_model answered (taken or
+        #   refused), or a spawn's --model carried it (never an attach, which tells the CLI nothing). A context refresh
+        #   answers for the model only when, at its ask, the CLI had had every pick made by its answer (_do_refresh_context)
         self._model_pending = ""                     # target ALIAS while a /model switch is resolving: the badge shows
         #   animated dots until the LIVE model actually reflects the pick (the user 2026-07-03: a switch stamped the
         #   chosen alias but left liveModel stale, and model_label PREFERS liveModel → the badge kept the OLD name).
         #   Cleared the instant _learn_model / _do_refresh_context reports a model matching the alias (event-based).
+        self._held_chain = ()                        # the markers still standing before the latest live pick, the nearest
+        #   first (SdkBackend.set_model): that pick's refusal puts back the pick among them with its dots (_revert_model);
+        #   a report drops every one it reflects (_resolve_model_pending). Written under self._lock
+        self._pick_unlanded = ()                     # the versioned picks whose dots a report of their family on ANOTHER
+        #   version ended, one entry per pick, each kept until a report lands on its version (_resolve_model_pending): a
+        #   refusal that puts one back skips the re-arm, the live name being the world before it (_do_set_model)
         self.effort = reg.get("effort") or DEFAULT_EFFORT   # connect-time --effort; tracked since the init msg doesn't echo it
         self.env_vars = dict(reg.get("env") or {})   # per-session env vars (the reg's `env`, the user 2026-08-17):
         #   _options folds them into the per-sid flag-settings file at EVERY connect, so two sessions in the
@@ -5934,8 +6007,10 @@ class SdkSession:
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
         #   kernel's tick asks for the pick again every RETRY_UPGRADE_S (retry_model_upgrades → request_reconnect); cleared
-        #   when a parent turn is SERVED on a model at least `from`'s tier again (_note_model_served), by a new pick
-        #   (set_model), or with the session. In memory only: a kernel restart reconnects every session on its pick anyway.
+        #   when a parent turn is SERVED on a model at least `from`'s tier again, or at least a versioned pick's own model
+        #   (_note_model_served), by a new pick (set_model), by a refusal that puts back a versioned pick at or below `to`
+        #   (the refusal's stand-down, _do_set_model), or with the session. `pick` is informational (_arm_upgrade_retry).
+        #   In memory only: a kernel restart reconnects every session on its pick anyway.
         self._fast_unlocked = False   # whether THIS connection was made with the opt-in flag — the
         #   per-CONNECTION snapshot of fast_opt, taken where _connect_once builds options and never
         #   persisted. Only an unlocked connection accepts literal '/fast on|off' sends; without the
@@ -6983,6 +7058,16 @@ class SdkSession:
             self._interrupted = False
             self.backend._poke()
 
+    def _pick_answered(self, prev):
+        """The CLI answered the set_model request of the pick `prev` names (it took it or refused it). Control requests
+        are answered in the order they are written, so a context refresh asked from here on reports the world after that
+        pick (the #33 follow-up's review, 2026-09-30: the pick's request reaches the CLI a loop hop after the pick, and a
+        refresh written in that gap reported the model before it, which ended a Latest or default pick's switching dots
+        and let the pick's own report read as a fallback). A lost answer says nothing and marks nothing."""
+        seq = (prev or {}).get("seq")
+        if isinstance(seq, int) and seq > getattr(self, "_pick_taken", 0):
+            self._pick_taken = seq
+
     async def _do_set_model(self, model, prev=None):
         try:
             await self.client.set_model(model)
@@ -7018,6 +7103,8 @@ class SdkSession:
             picked = prev.get("picked") if prev else None
             tok = prev.get("tok") if prev else None
             refusal = _cli_refusal(e)
+            if refusal:
+                self._pick_answered(prev)   # a refusal is the CLI's answer too: it runs what it ran before the pick
             with self._lock:
                 superseded = prev is not None and self.chosen_model != picked
             if superseded:
@@ -7049,6 +7136,48 @@ class SdkSession:
                 back = "the account default"
                 if prev is not None:
                     back = self.backend._revert_model(self, prev) or back
+                    # Retry upgrades, judged again against the pick put back (the #33 follow-up's review, 2026-10-01). The
+                    # learn judged a carded fallback's arm against the pick standing when the fallback landed, and a live
+                    # pick is what otherwise clears or re-judges an arm; a refusal makes none. A retry standing at or
+                    # above a versioned pick put back stands down (its end at the pick would mint a "back on" card for
+                    # the very model the session fell to at the next reply), and a session left below the pick put back
+                    # with nothing armed is taken up, as the switch flip and the attach take it up. A retry that stood
+                    # down falls through to that re-arm, which reads the model served now: a second hop while it stood
+                    # can leave the session below the pick put back though the model the retry fell to is not. A pick
+                    # still in flight is left alone, as the switch flip leaves it: set_model runs on the kernel thread,
+                    # so a newer pick can land during the revert, whose compare-and-swap leaves it standing; the live
+                    # name is the world before it, and an arm from it would end at its first reply with a false "back on".
+                    # So is a pick put back that is itself still in flight, with no report of it yet: the revert
+                    # gives it its dots back (_revert_model), the live name being the world before it too (round two of
+                    # that review). So is a versioned pick put back whose dots a report of another version in its family
+                    # ended before it had reported (_pick_unlanded: Opus 4.8, a reply of a turn the CLI opened itself,
+                    # after Opus 5.5 was picked), the live name being the world before it as well; its dots stay ended
+                    # (a later check on that round). The session keeps one entry per such pick, so a newer pick whose own
+                    # dots ended the same way and that is then refused still finds the older one it puts back (a later
+                    # check on that fix). A pick that lands between this check and the arm (the arm reads the
+                    # Retry upgrades file twice first) is caught after it, under the session lock set_model holds for its
+                    # own writes: the arm just written is the world before that pick, and it stands down. Every line the
+                    # retry logs here says problem=False (as _arm_upgrade_retry's and _retry_armed's do): inside this
+                    # except block a line that says nothing is classed as the refusal's report (SdkBackend._log), and one
+                    # refused pick put up to three of the retry's lines in the error center beside its own, labeled as
+                    # failures.
+                    arm = self._retry_armed()
+                    _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
+                    if arm and _model_version(_plab) is not None and not _model_downgrade(_plab, arm.get("to")):
+                        self._upgrade_retry = None
+                        self.backend._log("retry upgrade (%s): the pick went back to %s, not above %s; that retry "
+                                          "stands down" % (self.name, _plab, arm.get("to")), problem=False)
+                        arm = None
+                    if not arm and not getattr(self, "_model_pending", "") \
+                            and getattr(self, "chosen_model", "") not in getattr(self, "_pick_unlanded", ()) \
+                            and self._arm_if_below_pick():
+                        with self._lock:
+                            newer = getattr(self, "_model_pending", "")
+                            if newer:
+                                self._upgrade_retry = None
+                        if newer:
+                            self.backend._log("retry upgrade (%s): a newer pick (%s) went in while the refusal was put "
+                                              "back; the retry just armed stands down" % (self.name, newer), problem=False)
                 self.backend._log("set_model (%s -> %s) refused by the SDK: %s: %s — the switch did NOT apply; "
                                   "the model reverted to %s" % (self.name, model, type(e).__name__, e, back),
                                   problem=True)
@@ -7069,6 +7198,7 @@ class SdkSession:
                     except Exception as e2:
                         self.backend._log("model-pick forget (%s): %s" % (self.name, e2), problem=True)
         else:
+            self._pick_answered(prev)
             if prev is not None:
                 self._model_accept(prev.get("picked"))   # the verdict that moves the accepted state
                 self.backend._seed_write_settled(prev.get("tok"))
@@ -7112,6 +7242,7 @@ class SdkSession:
             self._ctx_refresh_again = True
             return
         self._ctx_refreshing = True
+        asked = getattr(self, "_pick_taken", 0)   # the latest pick the CLI had had when this ask went out (getattr: __new__-built test doubles)
         try:
             cu = await self.client.get_context_usage()
         except Exception as e:
@@ -7148,6 +7279,12 @@ class SdkSession:
         if isinstance(tt, (int, float)) and int(tt) != self._ctx_tokens:
             self._ctx_tokens, changed = int(tt), True
         raw = str(cu.get("model") or "").strip()
+        if getattr(self, "_pick_seq", 0) != asked:
+            # a pick was made that the CLI had not had when this ask went out (2026-09-30, the #33 follow-up): its
+            # set_model was unanswered then, or the pick came later, so the model this reports can be the world before
+            # the pick, and it neither answers the pick nor moves the label. The pick's own refresh follows the CLI's
+            # answer (_do_set_model; a rerun behind this one, _ctx_refresh_again); the percentage still lands
+            raw = ""
         pm = pretty_model(raw)
         if pm and self._resolve_model_pending(pm):
             changed = True
@@ -7555,11 +7692,13 @@ class SdkSession:
 
     def _arm_if_below_pick(self) -> bool:
         """Retry upgrades after downgrades, for a session ALREADY sitting below its pick: arm from the pick's label when the
-        switch is on, no arm stands, and the model last served ranks below the pick. Two callers: the switch flip
-        (apply_model_switches) and a host ATTACH after a kernel restart (review 2026-09-17: the arm is in memory only,
+        switch is on, no arm stands, and the model last served ranks below the pick. Three callers: the switch flip
+        (apply_model_switches), a host ATTACH after a kernel restart (review 2026-09-17: the arm is in memory only,
         and an attach to a CLI that survived the restart replays no init and serves no new fallback, so a standing
-        fallback lost its retry — and the picker's tooltip promised a cadence nothing was running). Off: the switch
-        going off ends any arm (_retry_armed). Returns True when it armed."""
+        fallback lost its retry — and the picker's tooltip promised a cadence nothing was running), and a pick the CLI
+        refuses (_do_set_model: the pick it puts back is judged afresh, 2026-10-01). The flip and the refusal skip a
+        pick still in flight, and the refusal a versioned pick put back that has not landed (_pick_unlanded).
+        Off: the switch going off ends any arm (_retry_armed). Returns True when it armed."""
         pick = getattr(self, "chosen_model", "") or ""
         if not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             self._retry_armed()
@@ -7579,10 +7718,13 @@ class SdkSession:
         if getattr(self, "_upgrade_retry", None) or not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             return
         now = time.time()
+        # `pick` (the pick on record at the arm) is informational: no product code has read it since the retry's end at
+        # the pick moved to chosen_model, the pick the reconnect asserts (_note_model_served)
         self._upgrade_retry = {"from": frm, "to": to, "pick": getattr(self, "chosen_model", "") or "",
                                "since": now, "next": now + RETRY_UPGRADE_S, "attempts": 0}
         self.backend._log("retry upgrade (%s): %s fell back to %s — the picked model is asked for again every %d min, "
-                          "when the session is quiet, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)))
+                          "when the session is quiet, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)),
+                          problem=False)   # never a failure, whoever calls: a refused pick arms from inside its except block
 
     def _retry_armed(self):
         """The standing retry, or None — and None as well once the switch is off (review 2026-09-17: an arm that outlived
@@ -7591,7 +7733,8 @@ class SdkSession:
         arm = getattr(self, "_upgrade_retry", None)
         if arm and not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
             self._upgrade_retry = None
-            self.backend._log("retry upgrade (%s): the switch is off — standing down" % self.name)
+            self.backend._log("retry upgrade (%s): the switch is off — standing down" % self.name,
+                              problem=False)   # never a failure: a refused pick reads the arm from inside its except block
             return None
         return arm
 
@@ -7599,13 +7742,36 @@ class SdkSession:
         """A PARENT turn was served on `pm` while a retry stands (the AssistantMessage learn, never the init's report of
         the configured model or a context refresh: the CLI running on the pick is not the API serving it). At or above
         the tier the session fell from, the retry is done: the arm clears and the kernel-wired hook mints the completed
-        card saying the session is back (on_model_restored, the on_model_fallback idiom)."""
+        card saying the session is back (on_model_restored, the on_model_fallback idiom). At or above a VERSIONED pick's
+        own model too (2026-09-30, the #33 follow-up's review): the learn arms from the live name, which after a pick below
+        it can still sit above the pick when a real fallback below the pick lands (a reply from before the pick moved it
+        back; a fallback at or above a versioned pick arms nothing, _learn_model), and the
+        retry's reconnect runs the pick, so the model it was armed from never comes back. A pick that names no version
+        (a Latest click, the account default) keeps the end at the tier it fell from. The pick read is the one the
+        reconnect asserts (chosen_model), not the one the arm recorded: a live pick clears the arm, so they differ only
+        after a refusal put the accepted model back under a standing arm, and a turn served on the refused version is
+        then a fallback from the model the reconnect runs, never the way back.
+
+        The arm and the pick are read as one world, under the session lock (the #33 follow-up's review, round two): a
+        pick lands on the kernel thread (set_model, which clears the arm and writes the pick in one hold of this
+        lock), and read apart, a pick between the two reads had the end judged against it, so a pick of the user's own
+        at or below the model served minted a "Model back on" card. Under the lock, an arm that is no longer the one
+        read was cleared by such a pick, and nothing ends. The log and the card come after the lock is released."""
         arm = self._retry_armed()
         if not arm:
             return
-        if _model_rank(pm) is None or _model_rank(arm.get("from")) is None or _model_downgrade(arm.get("from"), pm):
+        if _model_rank(pm) is None:
             return
-        self._upgrade_retry = None
+        with self._lock:
+            if getattr(self, "_upgrade_retry", None) is not arm:
+                return
+            frm = arm.get("from")
+            lab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
+            back = _model_rank(frm) is not None and not _model_downgrade(frm, pm)
+            on_pick = _model_version(lab) is not None and not _model_downgrade(lab, pm)
+            if not (back or on_pick):
+                return
+            self._upgrade_retry = None
         self.backend._log("retry upgrade (%s): back on %s after %d attempt(s)" % (self.name, pm, arm.get("attempts", 0)))
         fb = getattr(type(self.backend), "on_model_restored", None)
         if fb:
@@ -8090,6 +8256,7 @@ class SdkSession:
             # a stamp at the connect's outcome missed a host whose CLI came up and whose handshake then failed, since the
             # retry ATTACHED to that fresh CLI and nothing stamped for its life (the spawnedAt fix's rounds, 2026-09-14).
             # _options builds the options only.
+            carried = getattr(self, "_pick_seq", 0)   # read BEFORE _options reads the pick: one made in between counts as not carried
             try:
                 opts = self.backend._options(self, ClaudeAgentOptions)
             except Exception as e:
@@ -8181,6 +8348,8 @@ class SdkSession:
                     # first message. get_context_usage() is the DESIGNED control request behind the CLI's /context
                     # and returns BOTH the live model id and the % pre-turn, so this one refresh fills both. Runs on
                     # every (re)connect; guarded + idempotent + pokes only on change.
+                    if not getattr(self, "_host_is_attach", False) and carried > getattr(self, "_pick_taken", 0):
+                        self._pick_taken = carried   # a launch runs the pick its --model carried; an attach tells the CLI nothing
                     asyncio.ensure_future(self._do_refresh_context())
                     # …and the fast-mode fields the same way: they ride the initialize response the
                     # SDK already holds (get_server_info), so the badge exists pre-turn too — without
@@ -8236,6 +8405,9 @@ class SdkSession:
                     # out): the host and its CLI live on; detach (the transport's close already did) and try
                     # again, bounded — never the crash heal, whose resume would put a second CLI beside the host's
                     self._host_attach_retries += 1
+                    if not getattr(self, "_host_is_attach", False) and carried > getattr(self, "_pick_taken", 0):
+                        self._pick_taken = carried   # this LAUNCH's CLI is up with the pick's --model, and the attach that
+                        #   retries it tells that CLI nothing (2026-09-30, the #33 follow-up's review)
                     self.backend._log("host (%s): attach did not complete (%s); retry %d" % (self.name, type(e).__name__, self._host_attach_retries))
                     if self._host_attach_retries <= 3:
                         self.inflight = 0
@@ -8391,15 +8563,18 @@ class SdkSession:
                 self.backend._poke()
             return
         if self.model and not self._model_pending and not cleared \
+                and not _lands_on_pick(pm, getattr(self, "chosen_model", "")) \
                 and _model_downgrade(self.model, pm):
             # A DOWN-TIER transition nobody asked for (no /model pick pending): the API fell back
             # mid-turn. Surface it as a completed card via the kernel-wired hook (the user
             # 2026-08-23) — never silently (the swap was invisible before this). DOWNGRADES ONLY
-            # (the user 2026-08-23, from a card reading "fallback" on their own upgrade): romp only
-            # sees ITS OWN picks pending — a /model typed inside the CLI, or any user-side switch,
-            # arrives here as an unrequested transition too, and a capacity fallback never moves a
-            # session UP-tier. An up-tier, lateral, or unknown-name change is treated as the user's
-            # doing and just updates the badge, exactly as before the card existed.
+            # (the user 2026-08-23, from a card reading "fallback" on their own upgrade): every live
+            # pick romp makes is pending from the pick until its first report (set_model), and a move
+            # onto a versioned pick's own model is that pick landing (_lands_on_pick; 2026-09-30, the
+            # #33 follow-up) — but a /model typed inside the CLI, or any user-side switch, arrives here
+            # as an unrequested transition too, and a capacity fallback never moves a session UP-tier.
+            # An up-tier, lateral, or unknown-name change is treated as the user's doing and just
+            # updates the badge, exactly as before the card existed.
             arm = self._retry_armed()
             if arm and arm.get("to") == pm and arm.get("attempts", 0) > arm.get("logged", 0):
                 # the retry's own re-fallback (the user 2026-09-17), said once per attempt with the real wait; the card
@@ -8426,7 +8601,15 @@ class SdkSession:
                         cards.append((self.model, pm, gid))
                 except Exception as e:
                     self.backend._log("model-fallback card (%s): %s" % (self.name, e), problem=True)
-            self._arm_upgrade_retry(self.model, pm)   # Retry upgrades after downgrades: remember the way back (off → nothing)
+            # Retry upgrades after downgrades: remember the way back (off → nothing). Not for a fallback to a model at or
+            # above a VERSIONED pick (the #33 follow-up's review, 2026-10-01): the live name can sit above the pick (a reply
+            # from before it moved the name back), but the session is served at or above what was picked, so the
+            # requested-model mark and _arm_if_below_pick see nothing to retry, and an arm here ended at the very next reply
+            # on the model it fell to (_note_model_served's end at the pick) with a "back on" card and no attempt made. A
+            # pick the CLI then refuses judges the arm again against the pick it puts back (_do_set_model).
+            _plab = _alias_label(str(getattr(self, "chosen_model", "") or ""))
+            if _model_version(_plab) is None or _model_downgrade(_plab, pm):
+                self._arm_upgrade_retry(self.model, pm)
             # A NEW episode resets the cause (the CLI's refusal frame names it seconds later); an observation of the fallback
             # ALREADY standing — the API served this tier last time too: a host attach replaying the fallen reply the old
             # kernel never acked, a reconnect's init reporting the pick and the next reply falling back the same way — keeps
@@ -8503,10 +8686,53 @@ class SdkSession:
 
     def _resolve_model_pending(self, pm) -> bool:
         """If a /model switch is pending and the observed live name `pm` now reflects the chosen alias,
-        clear the pending marker (badge stops showing dots) and persist it. Returns True if it cleared."""
-        if not self._model_pending or not _model_reflects_alias(pm, self._model_pending):
-            return False
-        self._model_pending = ""
+        clear the pending marker (badge stops showing dots) and persist it. Returns True if it cleared.
+
+        A versioned pick's dots end at a report of its family, so a report of ANOTHER version can end them before the
+        pick has reported: Opus 4.8 for claude-opus-5-5, a reply of a turn the CLI opened itself, still on the model
+        before the pick. Such a pick is remembered (_pick_unlanded) until a report lands on its version (_lands_on_pick),
+        and a refusal that puts it back skips the re-arm (_do_set_model): the live name is then the world before it, and
+        an arm from it was a fallback nobody had, with a "fell back" log line, a reconnect ten minutes later and a false
+        "Model back on" card at its first reply (a later check on the #33 follow-up's review, round two).
+
+        The memory keeps one entry per pick (the last eight), and a marker that clears adds its pick without removing
+        another: a newer pick whose own dots the same turn's next reply ends (Opus 5 after Opus 5.5, or a Latest click)
+        can be the one refused, and the pick it puts back is the older one, still not reported. Kept in one slot that
+        every clear overwrote, that older pick went back unremembered and was armed from the world before it (a later
+        check on that fix). Only a report that lands on a pick's version ends its entry.
+
+        The picks still in flight before the latest one (_held_chain) end the same way: a report drops every one it
+        reflects, and a versioned one it reflects on another version joins the memory. The revert puts a pick back with
+        its dots only while it is still listed (_revert_model): given them back after its report, a pick hid a real
+        fallback at the next reply, neither carded nor armed until its next report (round three of that review).
+        For the default, or a Latest or upward pick in the family of the model the session was on, the report that
+        drops it includes the old model's reply of a turn the CLI opened itself. The default and a Latest pick then
+        reach the first of the cases docs/reference.md lists, through a refused pick; an upward pick joins the memory
+        of picks not landed instead, and reaches that page's switch-on sentence: turning Retry upgrades on arms it,
+        and its first reply shows a false "Model back on" card (round five).
+
+        The list's check and rewrite and the marker's read and clear sit in one hold of the session lock, under which
+        set_model writes both on the kernel's thread. Held for the rewrite alone, a pick landing during the check, or
+        between the rewrite and the marker's clear, left the pick this report reflects listed, and a refusal of the new
+        pick gave it its dots back (round four). __new__-built test doubles have no lock, and take a fresh one."""
+        with (getattr(self, "_lock", None) or threading.Lock()):
+            unlanded = getattr(self, "_pick_unlanded", ())   # getattr: __new__-built test doubles skip __init__
+            kept = tuple(p for p in unlanded if not _lands_on_pick(pm, p))
+            chain = getattr(self, "_held_chain", ())
+            if any(_model_reflects_alias(pm, p) for p in chain):
+                self._held_chain = tuple(p for p in chain if not _model_reflects_alias(pm, p))
+                for p in chain:
+                    if _model_reflects_alias(pm, p) and _model_version(_alias_label(p)) is not None \
+                            and not _lands_on_pick(pm, p) and p not in kept:
+                        kept = (kept + (p,))[-8:]
+            if kept != unlanded:
+                self._pick_unlanded = kept
+            marker = self._model_pending
+            if not marker or not _model_reflects_alias(pm, marker):
+                return False
+            if _model_version(_alias_label(marker)) is not None and not _lands_on_pick(pm, marker) and marker not in kept:
+                self._pick_unlanded = (kept + (marker,))[-8:]
+            self._model_pending = ""
         try:
             self.backend._update_reg(self.sid, modelPending=False)
         except Exception as e:
@@ -9272,15 +9498,18 @@ class SdkSession:
                           % (self.sid[:8], (reg_now.get("forkSrcBytes") or 0) / 1048576.0,
                              max(0, int(time.time()) - int(_ff.get("t") or time.time()))))
             cli_cwd = d.get("cwd")
-            if isinstance(cli_cwd, str) and cli_cwd and cli_cwd != self.cwd:
-                # The CLI's own cwd is the AUTHORITATIVE string: its projects-dir/transcript encoding
-                # is keyed on it (getcwd returns true on-disk casing), while romp's transcript_path is
-                # keyed on the registry string. A create-time variant (case, symlink) launches a real
-                # session whose transcript discovery then never finds (the silent wrong-case launch, the
-                # user 2026-07-17) — adopt the CLI's string the moment init reports it.
-                self.backend._log("sdk %s: adopting CLI cwd %r (registry had %r)" % (self.sid[:8], cli_cwd, self.cwd))
-                self.cwd = cli_cwd
-                self.backend._update_reg(self.sid, cwd=cli_cwd)
+            # The CLI's own cwd string is authoritative where its transcript is keyed on it (getcwd returns true
+            # on-disk casing, while romp's transcript_path is keyed on the registry string): a create-time variant
+            # (case, symlink) launched a real session whose transcript discovery then never found (the silent
+            # wrong-case launch, the user 2026-07-17). But each turn's init reports where the agent's shell has
+            # cd'd to, which holds no transcript: registry_cwd_for takes the directory that holds it.
+            adopt = registry_cwd_for(self.cwd, cli_cwd, (fsid, loaded_sid)) \
+                if isinstance(cli_cwd, str) and cli_cwd and cli_cwd != self.cwd else self.cwd
+            if adopt != self.cwd:
+                self.backend._log("sdk %s: adopting CLI cwd %r (registry had %r; the CLI reports %r)"
+                                  % (self.sid[:8], adopt, self.cwd, cli_cwd))
+                self.cwd = adopt
+                self.backend._update_reg(self.sid, cwd=adopt)
                 if loaded_sid and getattr(self, "_spend_first_result", False) \
                         and getattr(self, "_spend_baseline", "fresh") == "fresh":   # getattr: __new__-built test doubles
                     # (a seed from the registry, or the dead-CLI seed a replayed tail carries, is not clobbered by an
@@ -12954,7 +13183,15 @@ class SdkBackend:
                     _w = r.get("relaunchWait") if isinstance(r.get("relaunchWait"), dict) else {}
                     _keep = isinstance(_w.get("picks"), dict) and "effort" in _w["picks"] and self._lease_survives(sid)
                     if r.get("modelPending") or (r.get("effortPending") and not _keep):
-                        self._update_reg(sid, modelPending=False, **({} if _keep else {"effortPending": False}))
+                        _heal = dict({"modelPending": False}, **({} if _keep else {"effortPending": False}))
+                        if r.get("modelPending") and "model" in r:
+                            # a pick in flight at a hard kernel death starts from its own label, as SdkSession.__init__
+                            # heals it, or keeps the old one when the pick is above it: a session that ATTACHES to a CLI
+                            # that survived tells it nothing, so its first report can be the old model (_heal_pick_label;
+                            # 2026-09-30, the #33 follow-up); this sweep runs first for every alive row, so the
+                            # construction never sees the flag
+                            _heal["liveModel"] = _heal_pick_label(r.get("model"), r.get("liveModel"))
+                        self._update_reg(sid, **_heal)
                     if str(r.get("lastSid") or "") in spared_fsids or sid in spared_fsids or sid in spared_lease:
                         # A claude process this kernel did not start (another kernel's state tag, or none) may still
                         # be writing this session's conversation: the reap above spared it and named it on its
@@ -16917,16 +17154,32 @@ class SdkBackend:
                 # a turn in the new model kept showing the OLD name. Now the pick marks pending; _do_set_model
                 # pulls the real name, which clears it (and the dormant/never-driven trap can't happen — the
                 # refresh resolves an idle session, and _on_session_gone resolves a thread that exits mid-switch).
-                already = _model_reflects_alias(s.model, value)
-                s._model_pending = "" if already else value
-                pending = bool(s._model_pending)
+                # EVERY live pick is in flight from the click (2026-09-30, the #33 follow-up) until the first report
+                # naming the pick's family (any report, for the default; a context refresh only once the CLI has had
+                # the pick): a family word says nothing about the version (claude-opus-4-8 picked on Opus 5.5), an
+                # alias or the default names none, and a pick left unmarked read its own first report, a turn's init
+                # before the refresh, as a fallback nobody asked for. The counter, bumped here at the pick and not at
+                # the loop hop that sends it, lets a context refresh the CLI answered before it had the pick stand
+                # aside for it (_do_refresh_context).
+                s._pick_seq = getattr(s, "_pick_seq", 0) + 1
+                seq = s._pick_seq
+                # every pick still in flight before this one, the nearest first: a refusal of this one puts back the pick
+                # it names with its dots (_revert_model). The marker alone names only the nearest, and two picks refused
+                # together put back a pick made before both of them, which may not have reported either
+                held = getattr(s, "_model_pending", "")
+                chain = ((held,) + tuple(getattr(s, "_held_chain", ()))) if held else ()
+                s._held_chain = chain
+                s._model_pending = value or "default"   # "" goes out as set_model(None), as "default" does
+                pending = True
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
                 s._fallback_cause = ""        # …and the standing fallback's cause; the served model is learned afresh on the pick
                 s._fallback_category = ""
                 s._served_model = ""
             # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
             tok = self._seed_write_pending(sid, value)
-            prev = {"picked": value, "tok": tok}   # what the layers hold until the CLI rules — the revert's CAS keys
+            prev = {"picked": value, "tok": tok, "seq": seq, "chain": chain}   # what the layers hold until the CLI rules
+            #                                                    (the revert's CAS keys), which pick the CLI's answer is
+            #                                                    to (_pick_answered) and the picks in flight before it
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
             self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
@@ -16959,13 +17212,37 @@ class SdkBackend:
         (this session's next pick; another session's pick in the SHARED defaults store) must not roll
         that pick back: a writer whose evidence predates the diary stands down. The compare and the
         assign of chosen_model sit in one hold of the session lock — set_model assigns it from the kernel
-        thread under the same lock, so the swap cannot tear."""
+        thread under the same lock, so the swap cannot tear.
+
+        The pending marker goes back too: to the model put back when it is among the picks still in flight
+        when the refused pick was made (`prev["chain"]`, set_model's markers, the nearest first), so a pick
+        put back while it was itself still in flight keeps its dots until its own first report, and to none
+        otherwise (the #33 follow-up's review, round two). Cleared outright, the model from before that pick
+        read as the model served now: the refusal's re-arm (_do_set_model) armed the pick put back as a
+        fallback nobody had (a "fell back" log line, a reconnect ten minutes later and a false "Model back
+        on" card at its first reply) after a second pick refused before the first had reported. The whole
+        chain, not only the marker the refused pick replaced: two picks refused together (the second
+        written before the first's answer) put back a pick made before both, and the first one's refusal,
+        superseded, puts back nothing. A pick gets its dots back only while it is still listed: a report
+        that reflects it drops it from the list (_resolve_model_pending), so a pick that reported after a
+        later pick replaced its marker goes back without them, and a real fallback at the next reply is
+        carded and armed. Given its dots back, it hid that fallback until its next report, and a fallback
+        over by then was never carded (round three of that review). For the default, or a Latest or upward
+        pick in the family of the model the session was on, the report that drops it includes the old
+        model's reply of a turn the CLI opened itself. The default and a Latest pick then reach the first
+        of the cases docs/reference.md lists, through a refused pick; an upward pick joins the memory of
+        picks not landed instead (_pick_unlanded), and reaches that page's switch-on sentence: turning
+        Retry upgrades on arms it, and its first reply shows a false "Model back on" card (round five)."""
         picked = prev.get("picked")
+        chain = prev.get("chain") or ()
         with sess._lock:
             back_model = sess._model_accepted
+            want = back_model or "default"
+            # set_model's marker for the pick put back, while it is in flight and no report has reflected it since
+            keep = want if want in chain and want in getattr(sess, "_held_chain", ()) else ""
             if sess.chosen_model == picked:
                 sess.chosen_model = back_model or ""
-                sess._model_pending = ""
+                sess._model_pending = keep
         with self._reg_lock:
             reg = read_reg(self.state_dir, sess.sid) or {"sid": sess.sid}
             if reg.get("model") == picked:
@@ -16973,7 +17250,7 @@ class SdkBackend:
                     reg.pop("model", None)
                 else:
                     reg["model"] = back_model
-                reg["modelPending"] = False
+                reg["modelPending"] = bool(keep)
                 write_reg(self.state_dir, sess.sid, reg)
         self._seed_write_refused(prev.get("tok"))
         return back_model or ""
@@ -17089,7 +17366,9 @@ class SdkBackend:
         when there is no pick) on a fresh CLI, the moment the session is quiet (want_switch_reconnect: no turn in flight or
         queued, no live subagent or background task): nothing is cut. Every RETRY_UPGRADE_S until a parent turn is served on the pick's tier again
         (_note_model_served clears the arm and mints the "back on" card), the user picks a model (set_model clears it),
-        the session ends, or the switch is turned off — read here at every tick, so off leaves an armed session inert.
+        the CLI refuses a pick and puts back a versioned one at or below the model the session fell to (the refusal's
+        stand-down, _do_set_model), the session ends, or the switch is turned off — read here at every tick, so off
+        leaves an armed session inert.
         Returns how many sessions were asked this tick. The fallback's cause is outside romp's view (the trigger lives in
         the task's context and ages out of the window), so the cadence is the designed read; the boundary is the event."""
         for s in list(self.sessions.values()):
@@ -17142,7 +17421,8 @@ class SdkBackend:
                                  "" if s.quiet() else " once the session is quiet"))
                     s.want_switch_reconnect("always fast")
                     asked += 1
-                s._arm_if_below_pick()
+                if not getattr(s, "_model_pending", ""):   # a pick still resolving: the live name is the world before it
+                    s._arm_if_below_pick()                  # (2026-09-30, the #33 follow-up: armed from it, then a false "back on")
             except Exception as e:
                 self._log("model switches (%s): %s" % (s.name, e), problem=True)
         return asked
@@ -18673,9 +18953,9 @@ class SdkBackend:
         self._heal_stale_awaiting(sess.sid)
         self.retire_live_work(sess.sid)   # no stream left → unlanded work atoms must not hold the turn open
         if sess._model_pending:           # a switch that never resolved before the thread died → don't trap the dots
-            sess._model_pending = ""
+            sess._model_pending = ""      # (the pick's label, or the old one for a pick above it: _heal_pick_label)
             try:
-                self._update_reg(sess.sid, liveModel=_alias_label(sess.chosen_model), modelPending=False)
+                self._update_reg(sess.sid, liveModel=_heal_pick_label(sess.chosen_model, sess.model), modelPending=False)
             except Exception as e:
                 self._log("session gone (%s): model-pending clear failed: %s" % (sess.name, e))
         self._seed_writes_dropped(sess.sid)   # no verdict can reach its pending shared-model writes now

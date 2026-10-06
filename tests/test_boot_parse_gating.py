@@ -266,10 +266,14 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         """1610 round two, medium 3: the exit drain wrapped the three persists in one bare except, so one memo's raise silently
         cost the other two. A source pin: each persist in its own try, the failure logged by name."""
         import inspect
+        import re
         src = inspect.getsource(km._drain_and_exit)
         for name in ("tick-seen", "interrupt-marks", "spend-tree", "planner-seen"):
             self.assertIn('_exit_log("romp-kernel: the %s memo was not persisted at exit' % name, src, name)
-        self.assertEqual(src.count('    except Exception as _e:\n        _exit_log("romp-kernel: the '), 4, "each persist in its own try")
+        # each persist's except names it, at whatever depth the body sits (the exit path, 2026-10-05: the whole body moved
+        # inside the one try whose finally reaches the process exit)
+        self.assertEqual(len(re.findall(r'\n( +)except Exception as _e:\n\1    _exit_log\("romp-kernel: the ', src)), 4,
+                         "each persist in its own try")
         self.assertNotIn("        _persist_tick_seen(force=True)\n        _persist_intr_marks(force=True)", src, "no shared try")
 
     def test_the_memo_persists_and_the_next_kernel_starts_from_it(self):

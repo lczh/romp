@@ -85,8 +85,8 @@ def restart_instants(cuts: list, audit: list = None) -> list:
     deploy, no restart followed): taken for instants they made a session's next ordinary turn a first result, reset
     the chain's baseline to that small figure and the next real re-bill was corrected to almost the whole lifetime
     (the round-three review's HIGH); a request a boot answers adds nothing the boot does not; a restart with no boot
-    row wrote no first serve and re-billed nothing. The cut row is written by the DYING kernel after its drain while
-    sessions are still unjoined, so results land for seconds after it and are the old kernel's. The boot row's own
+    row wrote no first serve and re-billed nothing. The cut row is written by the DYING kernel at the start of its exit, before its drain, so
+    results land for seconds after it and are the old kernel's. The boot row's own
     `t` is the SETTLE, which lagged the first serve by three minutes on 2026-09-11 at 20:19Z while the re-billed
     first results landed from 20:19:44Z. Every row at or before the first-serve second is the old kernel's."""
     out = set()

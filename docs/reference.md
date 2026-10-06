@@ -409,15 +409,50 @@ following to every connected machine's kernel):
   (`Model changed automatically: … → …`). A lower tier is a smaller model family
   or an older version of the same one (Opus 4.8 answering for Opus 5.5); a bare
   alias pick such as `opus` names no version, so the requested-model mark below
-  compares its family alone. Every ten minutes the kernel asks for
+  compares its family alone. A model you pick yourself is not read as an
+  automatic fallback, even an older version or a family alias that resolves
+  below the version the session was on: from the pick until the session reports
+  a model of the picked family (any model, for the account default), no change
+  counts as a fallback, and the session landing on the exact version you picked
+  is that pick. Four cases can still read a pick as a fallback: a reply from a
+  turn the session started on its own (a background task's notice, a scheduled
+  prompt) arriving after a Latest or default pick, or after any pick above the
+  model the session was on; a Latest or default pick made while the session is
+  reconnecting, or any pick above the model the session was on made after a
+  kernel restart before the session reconnects, either of which can miss its CLI;
+  a reply from before the pick that the session replays after a kernel
+  restart; and, for a pick made while an earlier one is still taking effect, a
+  report of the earlier pick arriving after the later one has taken effect, or
+  after a reply on the model the session was on when that model is of the later
+  pick's family.
+  When any of them follows a Latest or default pick that
+  resolves below the model the session was on, and the switch is on, the session
+  is then reconnected every ten minutes on the pick, and turns served on it never
+  end that. One more case shows a pick as not answering: a pick above the model the
+  session was on, still taking effect when the session's CLI ends while idle or
+  the kernel restarts, gracefully or not, keeps the old model's name, so the
+  requested-model mark below shows the pick as not answering until the first
+  reply served on it, even where the CLI runs it. With the switch on, a session
+  that then reattaches to a CLI that outlived it arms the retry, and when that CLI
+  already runs the pick, a `Model back on …` card follows its first reply. Every ten
+  minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
-  below its pick when you turn the switch on is taken up at once. A fallback that
+  below its pick when you turn the switch on is taken up at once, unless a pick
+  of its own is still taking effect. It is also taken up, and the pick's first
+  reply then shows a `Model back on …` card, when a reply on the model the
+  session was on arrived after a pick above that model and no reply has been
+  served on the pick yet; when the two are of one family, this holds even
+  before the pick has taken effect. A fallback that
   happens again is logged once per attempt; its card follows the board's usual
-  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
+  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the model
+  the session fell from or above it, or on the version you picked or above it, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
-  A pick of your own ends it too, as does turning the switch off. While a
+  A pick of your own ends it too, as does turning the switch off. A fallback to
+  a model at or above the version you picked is carded but arms no retry. A pick
+  the CLI refuses puts back the model you had, and the retry is judged again
+  against it. While a
   fallback stands, the session's model picker, in the chat statusline and in the
   timeline's lane picker alike, marks the requested model with a yellow tick
   beside the blue tick on the model that answers; its tooltip says why
@@ -2977,11 +3012,30 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   adoption could still move, with `g:promptid:boundarySeed` the part of
   those whose id a restored entry's document names (a document names the
   prompt ids of the summaries before its cut), where the entry cannot tell
-  whether that boundary is attached, and `g:promptid:passedDemote` for a
+  whether that boundary is attached, and `g:promptid:boundary:<reason>`
+  the same demotions again by the reason the entry could not vouch for the
+  id: `seed` (the same count as `boundarySeed`, its older name),
+  `nosummary` (no summary wearing the id on record), `adopted` (an
+  adoption spliced a pair wearing it, as a live manual /compact's), and
+  `replaced` (a later record reused the summary's uuid), `parent` (the
+  summary hangs off a record that is no compaction boundary) or `offpath`
+  (the boundary is off the conversation's path), these three only when a
+  record wearing the id names /compact, one the entry holds or the new
+  record itself, and `seedEpisode` for a pair of those three shapes when
+  no such record is on hand but the entry was restored from a document
+  that lists the id: a document's gates carry `compact_pids`, the prompt
+  ids that a user record before its cut naming /compact wears, and a
+  document written before that field (an optional one, so the document's
+  version is unchanged) is read by its prompt ids, every id its writer had
+  read, the open turn's included, which only refuses more. Otherwise
+  adoption has no episode to splice the pair behind, and the gate lets the
+  record through (2026-10-05).
+  `g:promptid:passedDemote` counts a
   delta in which the gate let a record wearing a summary's prompt id
   through, because every summary wearing its id hangs off a boundary on the
   conversation's path that
-  adoption did not splice, as an automatic compaction's does, and which a
+  adoption did not splice, as an automatic compaction's does, or because no
+  /compact episode wears it, and which a
   compaction in it, the descent (a rewind and an api_error retry alike) or
   a parallel batch's kept check then refused: it parses whole, as it did
   before the gate let such records through, and never takes the restore
@@ -2998,7 +3052,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   document, under the whole parse's `full:demoted`), never under
   `fold:attachedPass`. The deltas
   the gate let through that folded count under `fold:attachedPass`, the
-  folds it saved),
+  folds it saved, and under `fold:attachedPass:<shape>` (`replaced`,
+  `parent`, `offpath`) when the gate let a record through because no
+  /compact episode wears the id, for a pair of that shape),
   `skill-link`, `ts`, `kept`, and
   `reseat`, a whole entry whose own document the settle or the converge
   pass has written, re-seated on it by the restore road, where it lands
@@ -5237,17 +5293,77 @@ restart)`; otherwise `signal, not requested through the manager`, which means
 no request was on record when the kernel read the file, not that the sender
 is known. The sender's pid is never recorded; a Python signal handler does not
 receive it. A kernel whose manager disappears writes a row with action
-`parent-gone` before it exits. `restart-cuts.jsonl` gets one row per exit
-naming the turns the drain cut and the reason: the audit row's `action:
+`parent-gone` before it exits. `restart-cuts.jsonl` gets one cut row per exit (and a done row when the exit completes, described below)
+naming the turns the drain cuts and the reason: the audit row's `action:
 reason`, the `signal` row's reason, or `parent-gone: the manager exited; the
 kernel followed it`. When the helper that files the `signal` row fails (a
 `ROMP_MANAGER_PID` the kernel cannot use as a pid), no `signal` row is written,
-and the cut row carries the plain `signal, not requested through the manager`
-verdict plus a `reasonError` naming the fault, so the missing row is explained
+and the exit's done row carries a `reasonError` naming the fault, with the plain
+`signal, not requested through the manager` verdict as its `finalReason` when the cut row's provisional verdict differs, so the missing row is explained
 on disk. A second SIGTERM during the drain is ignored; the first
-writes the row. The manager's log says `exited without a restart request
+writes the row. When one restart signals two kernels under the same state
+root, the first kernel's cut row consumes the request within milliseconds; the
+second still names that request, not its own `manager-sigterm` note, as long
+as the manager's note for the second kernel's pid sits above the request in
+the audit file. The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
+
+The exit runs against one deadline measured from the moment the SIGTERM
+handler starts: `EXIT_DEADLINE_S`, 40 percent of the manager's grace
+(`ROMP_SHUTDOWN_GRACE_MS`) and at most 4 s, so 3.2 s at the manager's 8 s
+(`ROMP_EXIT_DEADLINE_S` sets it outright). The
+rest of the grace is for what the exit cannot bound: the handler's own start,
+one item's overrun per phase, and the process teardown. The handler first turns
+automatic garbage collection off, freezes the heap, switches the freeze
+controller off and stands the loops and tick jobs down (a settle write the jobs
+pass is running leaves before its next session). It then sends the restarting frame, reads who asked, signals the judges' child
+and writes the cut row, before any other exit work: `t` is the handler's start, `cutTurns` the turns the
+drain is about to cut (the backend's `would_cut`, the drain's own predicate,
+plus the Codex turns), `stopped` the backend's session count, and
+`expectsDone: true`. For a signal with no request on record the row's reason is
+a provisional verdict read without waiting (the manager's pid already gone or
+its stop note already written). The memos and the session listing follow and run whole, counted against the
+deadline; then the fold priming, the checkpoint writes (the leaves just primed
+first) and the assembly documents, each capped by its `ROMP_EXIT_*_BUDGET_S`
+share and ending by the deadline less the drain's reserve
+(`EXIT_DRAIN_BUDGET_S`, 35 percent of the deadline and never under 0.9 s, the
+top of the drain times recorded with session hosts on, nor over the deadline),
+plus the one item in flight, so an overrun shrinks the later phases. No
+checkpoint write starts past that line or once its cap is spent, and an
+assembly document waits for its leaf's lock only until the line: a leaf whose
+lock another thread holds longer is skipped and counted as `asmBusy`, and
+keeps its standing document until its next settle. The drain is handed what
+the deadline has left, at least 0.25 s. The reserve is smaller than the
+drain's share of the grace before this change (1.12 s at the manager's 8 s,
+where the share was 2.625 s; 0.9 s at the default 5 s, where it was 1.575 s),
+so a drain slower than its reserve meets the deadline sooner than it met the
+old share. The deadline, the reserve and the caps are read from the
+environment once, when the kernel starts. After the drain the unrequested verdict is
+decided as before (its wait and its `signal` row), and a done row is appended:
+`exitDone: true`, `cutT` (the cut row's `t`), the drain's `stopped`,
+`unjoined` and `reaped`, `drainCutTurns` when the turns cut differ from the
+prediction (a drain that raised returned nothing, so its done row has neither
+the counts nor the list, and the cut row's prediction stands), `drainError`
+and `reasonError` when those faults happened,
+`finalReason` when the late verdict differs from the cut row's, `phases`
+(`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
+priming-to-assembly window as older cut rows carried it, `drainS`), the
+checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`,
+`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row that could
+not be built at the start, or whose append failed, is written after the drain
+instead, from the drain's own result, as the exit's one row: `t` is still the
+handler's start, and it carries `exitDone: true`, the phases and the counts,
+with no done row. The done row carries no
+`cutTurns`, `reason` or `auditT`, so every reader that keys on those reads the
+cut row alone; `romp restart-metrics` joins the pair on the pid and `cutT`, and
+a cut row with `expectsDone` and no done row reads as `exitDone: false`, an
+exit killed after its row. Because the cut row's `t` is now the handler's start
+rather than the end of the drain, a restart's `outageS` reads longer by the
+exit's own length than it did before this change. Each phase logs one line,
+`romp-kernel: exit <phase> <s> s (window <s> s; <s> s left of the <s> s
+deadline)`, and the last says `romp-kernel: exit done in <s> s of the <s> s
+grace`.
 
 Two more ledgers there record what restarts do to the sessions, appended by
 the SDK backend and read by `romp restart-metrics` (below). `session-events.jsonl`
@@ -5292,7 +5408,7 @@ background task's notification, a scheduled prompt) has no feed, so its row
 carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
 kept, so each pair stays under 64 MB; the reader reads both. The restart rows
 of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
-sampled at its exit (the cut row) and at its settled boot (the boot row), so
+sampled as its exit starts (the cut row) and at its settled boot (the boot row), so
 the kernel's growth between restarts is a series without a sampler of its own.
 And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
 parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's
@@ -5413,9 +5529,13 @@ state directory's ledgers (`restart-cuts.jsonl`, `restart-audit.jsonl`,
 `spend.json` for the day's total dollars) and from the running kernel's
 `GET /version` and `GET /perf`; it loads no kernel module and writes nothing.
 The text form prints one screen per window: restarts and the turns they cut
-(with the clean restarts and the boots that had no cut row, a crash respawn,
-whose cut count is unknown; the per-restart rate divides by the measured
-restarts alone),
+(with the clean restarts, the boots that had no cut row, a crash respawn,
+whose cut count is unknown, and the exits killed after their cut row, which
+count the turns their cut row predicted and are never clean; an exit whose
+prediction failed (`cutTurnsError`) with no drain result to stand in for it,
+killed or with a drain that raised, cut an unknown number too, and the text
+names how many such exits there were; the per-restart rate divides the
+measured restarts' turns by the measured restarts alone),
 the reasons, the outage from exit to first serve and the reconcile settle (from
 the `bootSettled` rows), the quiet windows' waits and backstop firings (from
 the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes
@@ -5428,7 +5548,7 @@ so), turn latency from the feed pop to the result and to the first output (from
 state log's `working` and `waiting` rows (one-second resolution, the only
 latency available for turns before `turns.jsonl` existed), the machine cuts by
 cause (a state-log pair broken by a machine cut is not a turn), and the kernel
-process's resident memory and CPU at its exits. The live
+process's resident memory and CPU as its exits began. The live
 block reads each `romp-session-*` scope's `memory.current` and `cpu.stat` on
 Linux (a `ps` tree walk where there is no cgroup), the kernel's pid, uptime,
 CPU, resident size and the pusher's idle-cycle share, and lists any
@@ -5449,7 +5569,9 @@ unless `--tz` names a zone; weeks are counted in local dates, so a clock change
 inside a week moves no boundary off local midnight. The header names the machine `this machine`
 unless `--label` says otherwise, so no hostname reaches the text by default. A
 missing ledger is named at the top, never a silent zero. `--json` prints the whole document (`schema` 1): `restarts`
-(each cut row joined to the boot that followed it), `quietWindows` (each
+(each cut row joined to the boot that followed it, with `exitDone`,
+`cutTurnsError`, and the exit's `phases` and checkpoint counts from its done
+row), `quietWindows` (each
 joined to the restart it released), `kernelSeries`, `events`, `buckets` (every
 metric above per window, with capped latency samples for the distribution
 figure), `sources`, and `live` (with `duplicateClis`, `threads`,
@@ -5679,8 +5801,8 @@ Bounds and counters, all on `/perf` under `judge`:
   parent-death signal, asked for between fork and exec through a pointer the kernel bound at import, so the forked child
   does no work of its own); the kernel's exit road ends it first in every case: the quit and the SIGTERM go out at once,
   even with a pass in flight (that pass is lost and counted), and the bounded waits (a tenth of the manager's SIGTERM
-  grace before the kill, a twentieth after) run on their own thread beside the exit's stages, which already spend the
-  grace less a margin; after its cut row the exit joins that thread with what the grace has left and kills outright
+  grace before the kill, a twentieth after) run on their own thread beside the exit's stages, which end by the exit's
+  deadline; after its done row the exit joins that thread with what the deadline has left and kills outright
   whatever still stands,
   so the exit stays inside the grace whatever the child does. A boot sweep that cannot list the state root leaves the
   sweep unmarked and the first request retries it.
