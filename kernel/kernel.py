@@ -52036,13 +52036,28 @@ def _turn_hold_key(turn):
     that reuses its times, are told apart by their records' uuids. A restored pre-cut turn (em.PreTurn) answers both
     from its stored uuids, so no atom is built. There is no restored-turn bit: a restored turn and the whole parse's
     agree on every field here by construction (em._pre_turns_of; the document's turns are written from the tree it
-    restores), so a restore reuses what the whole road held instead of walking every turn once more."""
-    trig = (turn.get("trigger") or {}).get("uuid")
-    if turn.get("pre") and turn.get("uuids") is not None:
-        last = next((u for u in reversed(turn["uuids"]) if u), None)
+    restores), so a restore reuses what the whole road held instead of walking every turn once more.
+    Spelled out in one frame (2026-10-06): the lane prefix keys every closed turn of a working lane with it on every
+    derivation too (12,030 turns at the build-cost lab's 3x history, beside the message-caption scan's 12,030), and in
+    that lab a quiet timeline build came out about 15 ms slower than with the prefix key it replaced; the nested
+    _turn_prefix_key call, the two generators and the tuple concatenation were extra frames and tuples per turn.
+    The first four fields are _turn_prefix_key's, in its order (a test pins the two together)."""
+    get = turn.get
+    atoms = get("atoms") or ()
+    trig = (get("trigger") or {}).get("uuid")
+    last = None
+    if get("pre") and get("uuids") is not None:
+        for u in reversed(turn["uuids"]):
+            if u:
+                last = u
+                break
     else:
-        last = next((u for u in (a.get("uuid") for a in reversed(turn.get("atoms") or [])) if u), None)
-    return _turn_prefix_key(turn) + (trig, last)
+        for a in reversed(atoms):
+            u = a.get("uuid")
+            if u:
+                last = u
+                break
+    return (get("id"), bool(get("ended")), len(atoms), get("end"), trig, last)
 
 
 def _hold_fp_val(v):
