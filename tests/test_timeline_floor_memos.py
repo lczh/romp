@@ -33,6 +33,10 @@ change's mutants turn them red. The classes below pin the new rules and are red 
   Bounds         both tables are byte-bounded LRU tables, an entry over the bound alone is not held and sheds nothing,
                  and a full build drops the lanes it no longer draws while a live-only build drops none;
   PerfWiring     memos.judgingMarks and memos.stateIntervals carry their keys, and docs/reference.md names every one.
+The follow-up to the review posted after the change merged adds cases for code the classes above left untested, each
+green at the code it covers and red under its own mutant: in MarksMemo a NaN-timed append and a held row rewritten to
+NaN build whole, and a cutoff that is not a plain number keeps the filter; in Bounds a hit makes an entry the newest in
+either table; BoundEnvironment pins both bounds' environment read; and FrameWalk's clock never moves backward.
 Synthetic data only: placeholder uuids, the notes-api demo names, invented captions."""
 import contextlib
 import copy
@@ -494,6 +498,42 @@ class MarksMemo(_Root):
         self.assertEqual(outcome(assembled, km._judging_assemble, m, 0), outcome(assembled, ref_judging_assemble,
                                                                                 ref_cap_marks(SID, dict(caps)), 0))
 
+    # the extend road's two NaN refusals: a NaN neither places after its ties nor stands in place, since the bisection
+    # cannot order it; each case reaches one refusal only, and a comparison of the marks alone would pass without either
+    # (NaN sorts last in both forms), so the counts, the held times and the assembly are what each case holds
+    HORIZONS = (0, T - 1, T, T + 1, T + 50, T + 99, T + 100, T + 101, T + 200, T + 201, T + 10_000)
+
+    def built_whole_with_no_times(self, label):
+        caps, m = self.derive()
+        st = self.stats("_JUDGING_MARKS_STATS")
+        self.assertEqual((st["build"], st["extend"]), (2, 0), "%s: built whole, not carried" % label)
+        self.assertIs(km._JUDGING_MARKS_MEMO[SID][2], m, "(the premise) the list served is the one held")
+        self.assertIsNone(m._ts, "%s: the held list carries no times to bisect" % label)
+        self.marks_equal(label, SID, caps, m)
+        ref = ref_cap_marks(SID, dict(caps))
+        for t0 in self.HORIZONS:
+            self.assertEqual(outcome(assembled, km._judging_assemble, m, t0), outcome(assembled, ref_judging_assemble, ref, t0),
+                             "%s: the assembly at horizon %r" % (label, t0))
+
+    def test_an_appended_row_timed_nan_builds_whole(self):
+        self.derive()
+        self.append(self.cap_path(), [crow((T + 400, "eeee5555"), "segment", float("nan"), "a new row timed NaN")])
+        self.built_whole_with_no_times("a NaN-timed append")
+
+    def test_a_held_row_whose_time_is_rewritten_to_nan_builds_whole(self):
+        self.derive()
+        self.append(self.cap_path(), [crow(B, "segment", float("nan"), "second, its time rewritten to NaN")])
+        self.built_whole_with_no_times("a held row rewritten to NaN")
+
+    def test_a_cutoff_that_is_not_a_plain_number_keeps_the_filter(self):
+        caps, m = self.derive()
+        self.assertIsNotNone(m._ts, "(the premise) the held times order")
+        ref = ref_cap_marks(SID, dict(caps))
+        for t0 in (float("nan"), "a string"):
+            self.assertEqual(outcome(assembled, km._judging_assemble, m, t0), outcome(assembled, ref_judging_assemble, ref, t0),
+                             "horizon %r" % (t0,))
+        self.assertEqual(assembled(km._judging_assemble, m, float("nan")), [], "a NaN cutoff keeps no mark, as the filter kept none")
+
     def test_the_lane_numeric_check_reads_the_held_bit(self):
         _caps, m = self.derive()
         self.assertIs(km._cap_marks_numeric(m), True)
@@ -761,9 +801,24 @@ class FrameWalk(_Lanes):
         return rows
 
     def test_every_lanes_frame_equals_the_reference_build_after_every_step(self):
-        rng = random.Random(20261006)
-        self.live = set(self.present)
         ln0 = dict(km._lanes_stats)
+        self.walk(20261006, 70)
+        if hasattr(km, "_JUDGING_MARKS_STATS"):           # the walk took every road of both tables
+            st, sv = self.stats("_JUDGING_MARKS_STATS"), self.stats("_STATE_IV_STATS")
+            for k in ("hit", "extend", "build", "forget"):
+                self.assertGreater(st[k], 0, "judgingMarks.%s" % k)
+            for k in ("hit", "sort", "forget"):
+                self.assertGreater(sv[k], 0, "stateIntervals.%s" % k)
+        for k in ("dead_miss", "dead_serve"):                # and the dead-lane road, derived and served
+            self.assertGreater(km._lanes_stats[k] - ln0.get(k, 0), 0, "lanes.%s" % k)
+
+    def walk(self, seed, steps):
+        """`steps` seeded steps, every lane's frame compared after each. The clock only moves forward: a horizon-edge
+        step picks a time whose horizon is at or after the clock. A step back made a dead lane's served frame differ from
+        a cold build at some seeds, at the base before either table too, so it tested the dead-lane memo under a clock
+        that steps back, which is not what this walk is for."""
+        rng = random.Random(seed)
+        self.live = set(self.present)
         km.TL_HORIZON, km.JUDGE_CAP_LIMIT = 1800, 5
         for sid in (WEB, API):
             rows = [{"id": "%s:%d:%08x" % (sid, self.now - 900 - 60 * j, j), "grain": "segment", "t": self.now - 900 - 60 * j,
@@ -774,13 +829,14 @@ class FrameWalk(_Lanes):
         ops = ("cap", "caprw", "st", "strw", "turn", "clock", "edge", "ivedge", "die", "wake", "depart", "noop")
         weights = (30, 4, 16, 3, 6, 10, 10, 10, 5, 4, 4, 6)
         wanted = set(km._NEEDS_INPUT_STATES) | {"compacting"}
-        for i in range(70):
+        for i in range(steps):
             op = rng.choices(ops, weights)[0]
             if i == 20:
                 op = "depart" if API in self.present else op   # the api lane leaves at least once, and comes back
             elif i == 40:
                 op = "depart" if API not in self.present else op
             sid = rng.choice(sorted(self.present))
+            clock = self.now
             if op == "cap":
                 rows = self.cap_rows(rng, sid, tl["turns"].get(sid) or [])
                 self.caps[sid].extend(rows)
@@ -805,7 +861,7 @@ class FrameWalk(_Lanes):
                 self.now += rng.choice((5, 60, 300))
             elif op == "edge":                    # the horizon exactly on a caption's or a transition's time
                 ts = [r["t"] for s in self.present for r in self.caps[s] + self.states[s]
-                      if isinstance(r.get("t"), int) and r["t"] + km.TL_HORIZON >= self.now - 600]
+                      if isinstance(r.get("t"), int) and r["t"] + km.TL_HORIZON >= self.now]
                 if ts:
                     self.now = rng.choice(ts) + km.TL_HORIZON
             elif op == "ivedge":                  # the horizon exactly on the end of a wanted state's interval
@@ -813,7 +869,7 @@ class FrameWalk(_Lanes):
                 for s in self.present:
                     ev = sorted((r["t"], r["state"]) for r in self.states[s] if r.get("t") and r.get("state"))
                     ends.extend(ev[j + 1][0] for j in range(len(ev) - 1) if ev[j][1] in wanted)
-                ends = [e for e in ends if e + km.TL_HORIZON >= self.now - 300]
+                ends = [e for e in ends if e + km.TL_HORIZON >= self.now]
                 if ends:
                     self.now = rng.choice(ends) + km.TL_HORIZON
             elif op == "die":                     # a lane goes dead: its frame comes off the dead-lane road
@@ -830,15 +886,8 @@ class FrameWalk(_Lanes):
                 else:
                     self.arrive("api", API)
                     self.live.add(API)
+            self.assertGreaterEqual(self.now, clock, "step %d (%s): the clock moved backward" % (i, op))
             tl = self.check(i, op)
-        if hasattr(km, "_JUDGING_MARKS_STATS"):           # the walk took every road of both tables
-            st, sv = self.stats("_JUDGING_MARKS_STATS"), self.stats("_STATE_IV_STATS")
-            for k in ("hit", "extend", "build", "forget"):
-                self.assertGreater(st[k], 0, "judgingMarks.%s" % k)
-            for k in ("hit", "sort", "forget"):
-                self.assertGreater(sv[k], 0, "stateIntervals.%s" % k)
-        for k in ("dead_miss", "dead_serve"):                # and the dead-lane road, derived and served
-            self.assertGreater(km._lanes_stats[k] - ln0.get(k, 0), 0, "lanes.%s" % k)
 
 
 # ── Bounds ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -877,6 +926,35 @@ class Bounds(_Lanes):
         self.assertEqual(self.stats("_STATE_IV_STATS")["evict"], 2)
         self.assertEqual(km._state_intervals(SID3, "working", T + 5000), ref_state_intervals(SID3, "working", T + 5000))
 
+    # recency: under a bound that fits two entries, lanes A and B are derived, A again as a hit, then C; the bound sheds B,
+    # the least recently USED, and keeps A, the least recently derived (a table that never moved a hit sheds A)
+    def test_a_hit_makes_the_marks_entry_the_newest(self):
+        for sid in (SID, SID2, SID3):
+            self.write(self.cap_path(sid), self.caps_rows(sid, 20))
+        self.derive(SID)
+        size = km._JUDGING_MARKS_MEMO[SID][4]
+        km.JUDGING_MARKS_MEMO_BYTES = 2 * size + size // 2   # two 20-row entries fit, three do not
+        self.derive(SID2)
+        _caps, held = self.derive(SID)
+        self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["hit"], 1, "(the premise) A's second derivation was a hit")
+        self.derive(SID3)
+        self.assertEqual(list(km._JUDGING_MARKS_MEMO), [SID, SID3], "B went; A, used since, stayed")
+        self.assertIs(km._JUDGING_MARKS_MEMO[SID][2], held)
+        self.assertEqual(self.stats("_JUDGING_MARKS_STATS")["evict"], 1)
+
+    def test_a_hit_makes_the_states_entry_the_newest(self):
+        for sid in (SID, SID2, SID3):
+            self.write(self.states_path(sid), [srow(T + 10 * i, ("working", "idle")[i % 2]) for i in range(10)])
+        km._state_intervals(SID, COMPACT, T + 5000)
+        size = km._STATE_IV_MEMO[SID][5]
+        km.STATE_IV_MEMO_BYTES = 2 * size + size // 2
+        km._state_intervals(SID2, COMPACT, T + 5000)
+        km._state_intervals(SID, "working", T + 5000)
+        self.assertEqual(self.stats("_STATE_IV_STATS")["hit"], 1, "(the premise) A's second read was a hit")
+        km._state_intervals(SID3, COMPACT, T + 5000)
+        self.assertEqual(list(km._STATE_IV_MEMO), [SID, SID3], "B went; A, used since, stayed")
+        self.assertEqual(self.stats("_STATE_IV_STATS")["evict"], 1)
+
     def test_a_full_build_drops_the_lanes_it_no_longer_draws_and_a_live_only_build_drops_none(self):
         for sid in (WEB, API):
             self.append(self.cap_path(sid), [crow((self.now - 600, "%08x" % 7), "segment", self.now - 600, "a caption", sid=sid)])
@@ -894,6 +972,25 @@ class Bounds(_Lanes):
         tl = self.build()
         self.assertIn(API, km._JUDGING_MARKS_MEMO, "a lane that returns is derived and held again")
         self.assertEqual([m["x"] for m in tl["judging"].get(API, [])], ["a caption"])
+
+
+class BoundEnvironment(unittest.TestCase):
+    """The two bounds' environment read (_floor_memo_bound): a positive integer override is the bound, anything else is
+    the machine's memory over the table's share, and each module constant is that share, read at import."""
+
+    def test_an_override_is_honored_and_anything_else_is_memory_over_the_share(self):
+        from unittest import mock
+        mem = km._mem_total_bytes()
+        for env, share, const in (("ROMP_JUDGING_MARKS_MEMO_BYTES", 256, "JUDGING_MARKS_MEMO_BYTES"),
+                                  ("ROMP_STATE_INTERVALS_MEMO_BYTES", 512, "STATE_IV_MEMO_BYTES")):
+            with mock.patch.dict(os.environ, {env: "8192"}):
+                self.assertEqual(km._floor_memo_bound(env, share), 8192, "%s: the override" % env)
+            for raw in ("lots", "0", "-4096", ""):
+                with mock.patch.dict(os.environ, {env: raw}):
+                    self.assertEqual(km._floor_memo_bound(env, share), mem // share,
+                                     "%s=%r: memory over %d" % (env, raw, share))
+            self.assertNotIn(env, os.environ, "(the premise) the run sets no override")
+            self.assertEqual(getattr(km, const), mem // share, "%s: memory over %d" % (const, share))
 
 
 # ── PerfWiring ───────────────────────────────────────────────────────────────────────────────────────────────────
