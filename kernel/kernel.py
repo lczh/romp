@@ -47746,6 +47746,7 @@ def _feed_memo_forget(alive_sids):
         _FEED_MEMO_STATS["entries"] = len(_feed_memo)
         for k in [k for k in _FEED_DERIVE_FAILED if k not in alive_sids]:
             _FEED_DERIVE_FAILED.pop(k, None)         # a departed session is not failing any more (nothing derives it)
+    _feed_seg_forget(alive_sids)                     # ...and its held anchor aggregate (2026-10-06), under the table's own lock
     return len(gone)
 
 
@@ -47787,7 +47788,8 @@ def _feed_derive_recovered(sid):
 
 
 def _feed_memo_report():
-    """The memo's counters with its occupancy refreshed (entries, bytes) and its bound: GET /perf builds.feed.memo."""
+    """The memo's counters with its occupancy refreshed (entries, bytes) and its bound, and beside them the card anchor
+    walk's held aggregates (_feed_seg_report, the seg* keys): GET /perf builds.feed.memo."""
     with _feed_memo_lock:
         out = dict(_FEED_MEMO_STATS)
         out["miss_by"] = dict(_FEED_MEMO_STATS["miss_by"])
@@ -47795,6 +47797,7 @@ def _feed_memo_report():
         out["entries"] = len(_feed_memo)
         out["bound"] = FEED_MEMO_BYTES
         out["failing"] = len(_FEED_DERIVE_FAILED)   # sessions whose LAST derivation raised (a standing fault, not history)
+    out.update(_feed_seg_report())                # the card anchor walk's held aggregates (2026-10-06): the seg* keys
     return out
 
 
@@ -47985,9 +47988,9 @@ def _feed_session_key(s, tm, ctx, prev_entry):
     an old key with new content, which the next build's stat sees and re-derives; the other order could pair a new
     key with old content and never heal). The clock is not a component; the two booleans it decides are. The
     per-session facts the body needs and this function already computed are handed over in `ctx` (`ps`,
-    `who_working`, `interrupting`, `store`, `closer`, `hide`, `leaf_ok`), so a build reads each once, hit or miss, and
-    their side effects (the live merge's prune/settle, the interrupt stamp's pop, the snapshot punch) run every build as
-    they did before the memo. `prev_entry` is the session's previous decoded entry (None when cold): its `peers` and
+    `who_working`, `interrupting`, `store`, `closer`, `hide`, `leaf_ok`, `leaf_head`), so a build reads each once, hit
+    or miss, and their side effects (the live merge's prune/settle, the interrupt stamp's pop, the snapshot punch) run
+    every build as they did before the memo. `prev_entry` is the session's previous decoded entry (None when cold): its `peers` and
     `reads` records drive the dependency components (_FEED_MEMO_DEPS), which _feed_key_with_deps re-evaluates over the NEW entry
     after a derivation (the chat build's deps idiom), so a cold entry hits on the next unchanged build. `ctx["prev_key"]`
     is the key that entry was memoized under (None when cold), set per session by build_feed's loop beside `prev_entry`:
@@ -47999,11 +48002,14 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         `reg` no longer folds those fields; a move between two transcripts that exist moves the identity, a move
         between two that do not has the identity None at both, and the string alone tells them apart). The
         cache-only parse (_parse_cached → jd.parse_cached's fileset key), the
-        anchors (_segs_seam, _seg_anchors, _seg_jump, _seg_key, _seg_last_text, _atom_prose_chars, em.turn_scalar),
+        anchors (_feed_seg_walk: _segs_seam, _seg_anchors, _seg_jump, _seg_key, _seg_last_text, _atom_prose_chars,
+        em.turn_scalar, the closed turns' part held under their hold keys, the seams by value and the leaf's path and
+        inode, `leaf_head`, taken from this component's stat),
         the api-error tail (_api_error), the background scans (_heal_session_tops → _bg_scan_all_cached,
         _bg_live_norm's transcript rung, _bg_owner_tops/_bg_service_descs/_awaiting_task_descs → _bg_placed_tops →
         _parse), the placeholders' _parse (_provisional_card, _blocked_placeholder, _awaiting_card),
-        _pure_delegation_top's dictated-prompt read, _open_turn_progress's hydrate, _last_plain_user_turn_t.
+        _pure_delegation_top's dictated-prompt read, _open_turn_progress's hydrate, the plain-prompt time
+        (_feed_seg_plain_t: _last_plain_user_turn_t over the turns the walk did not hold).
       parse: (`_parse_cached(path) is not None`, the last turn's end). The warm bit: a cold kernel derives without
         the parse (no dots, no anchors, the cold-parse summary fallback) and _warm_fleet_bg then fills the cache
         with NO file change, and the bit flipping is what re-derives the session warm. The end: the one value in a
@@ -48231,8 +48237,11 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         closer = bool(live and ps and not who_working and not jactive
                       and _closer_pending(fsid, path, now, st if st is not None else {"nodes": {}, "status": {}}))
     ctx.update(ps=ps, who_working=who_working, interrupting=interrupting, store=st, closer=closer, hide=hide,
-               leaf_ok=(transcript is not None and transcript[0] is not None))   # the leaf stat'ed (2026-09-21): the body's
-    #                                                                              warm ask is gated on it, see there
+               leaf_ok=(transcript is not None and transcript[0] is not None),   # the leaf stat'ed (2026-09-21): the body's
+               #                                                                   warm ask is gated on it, see there
+               leaf_head=((str(path), transcript[0][0]) if transcript is not None and transcript[0] is not None
+                          else None))   # the leaf's (path, inode) from the same stat, BEFORE the parse: the head the card
+    #                                     anchor walk's held aggregate is valid under (_feed_seg_walk, 2026-10-06)
     # the store component closes on the READ's outcome (st is None: the read faulted, jd.load_goals_shared_or_fault filed it):
     # an EIO or a permissions fault moves no stat, so without the bit a faulted derivation (no cards) would serve
     # on after the fault cleared, and a pre-fault entry would serve through it (tests/test_goal_store_fault_boundary)
@@ -48299,6 +48308,260 @@ def _feed_key_with_deps(key, ctx, entry):
     return tuple(k)
 
 
+# THE CARD ANCHOR WALK HOLDS ITS CLOSED TURNS (2026-10-06, the card part of the build-cost changes). A card's click-to-jump
+# anchors come from maps over every segment of the session's parse: segment key to work anchor, prompt anchor, latest prose
+# and its time, the position of the turn and segment behind it (the text-atom landing's input), plus the set of citable
+# uuids; the re-check then needs the session's latest plain human prompt. _feed_session_entry derived both over every turn
+# on every derivation, so a working session paid for its whole history at each append, whatever moved its key. Now the
+# closed turns' part is held as ONE aggregate per session, the lane prefix's whole-prefix form rather than per-turn
+# records: the five maps folded over every closed turn and the plain-prompt time over them, under the closed turns'
+# _turn_hold_key tuple, the leaf's (path, inode) and the seams by value (_seams_fp, the one store input a segment id
+# reads). While the held keys are a prefix of the current closed turns' keys, a derivation copies the aggregate and folds
+# the rest in order (the turns that closed since it was stored, then the open turn), so a later segment with a key
+# overwrites an earlier one exactly as the one-pass loop did, and the plain-prompt time is the larger of the held one and
+# _last_plain_user_turn_t over the turns not held. Any held key moving (a rewind, an edit, a compaction re-seat, a late
+# record), another leaf or other seams walks every turn. The aggregate holds strings, numbers and tuples, never a turn, a
+# segment or an atom: the landing's (turn, atoms) is segmented again on demand from the parse in hand (_FeedSegTurns). The
+# two failures stay apart, as they were (the critique's F7): a fold that raises leaves the maps as far as it got, the
+# one-pass loop's try, and a plain-prompt read that raises fails the derivation; a walk that met either stores nothing.
+# Bounded by its bytes (FEED_SEG_HELD_BYTES, least recently used first) and by the living sessions (_feed_memo_forget);
+# GET /perf reports it inside builds.feed.memo (the seg* keys).
+_FEED_SEG_HELD = collections.OrderedDict()   # fsid -> (head, seams, keys, maps, plain_t, bytes), least recently used first;
+#                                              maps = (seg_uuid, seg_trig, seg_best, cite_uuids, positions), never mutated
+#                                              once held (a derivation folds into copies)
+_FEED_SEG_LOCK = threading.Lock()            # the table and its counters: the pusher and a handler thread can build at once
+_FEED_SEG_STATS = {"segWalks": 0, "segHeld": 0, "segWalkTurns": 0, "segPartial": 0, "segReset": 0, "segRaised": 0,
+                   "segEvict": 0}
+#   segWalks: walks over a parse that finished (the anchor fold and the plain-prompt time); segHeld / segWalkTurns: closed
+#   turns served from the hold / turns folded (the open one always); segPartial: a held entry whose keys diverged inside
+#   it (a rewind, an edit, a compaction re-seat, a late record: every turn walked); segReset: a held entry discarded whole
+#   (another leaf or other seams, or a history with no closed turn left); segRaised: walks that met a failure and stored
+#   nothing; segEvict: entries shed by the byte bound, an entry over the bound alone (not held), and departed sessions'
+_FEED_SEG_KEY_BYTES = 480        # one held turn key's estimated bytes: the _HOLD_KEY_BYTES tuple and its turn id string
+_FEED_SEG_SEG_BYTES = 700        # one held segment key's estimated bytes across the five maps (the key, two anchor uuids,
+#                                  the latest-prose tuple, the position tuple, five table slots)
+_FEED_SEG_CITE_BYTES = 120       # one held citable uuid
+
+
+def _feed_seg_held_bound():
+    """The held anchor aggregates' byte bound: ROMP_FEED_SEG_HELD_BYTES when it names a positive integer, else a
+    hundred-twenty-eighth of the machine's memory (the _summary_anchor_memo_bound idiom; 64 MB on an 8 GB box, where a
+    session's held segments cost about 0.7 KB each, about 10 MB for the build-cost lab's 3x appender). Read once at import
+    (FEED_SEG_HELD_BYTES); GET /perf reports it beside the held bytes (builds.feed.memo segBound, segBytes). The user's
+    caches rule (2026-09-11): a byte bound as a fraction of memory with an override, never a count literal."""
+    raw = os.environ.get("ROMP_FEED_SEG_HELD_BYTES", "")
+    try:
+        if raw and int(raw) > 0:
+            return int(raw)
+    except ValueError:
+        pass
+    return _mem_total_bytes() // 128
+
+
+def _feed_seg_entry_bytes(keys, maps):
+    """An estimate of one held aggregate's bytes, from its sizes alone (no walk over its strings)."""
+    return 64 + _FEED_SEG_KEY_BYTES * len(keys) + _FEED_SEG_SEG_BYTES * len(maps[0]) + _FEED_SEG_CITE_BYTES * len(maps[3])
+
+
+def _feed_seg_copy(maps):
+    """A derivation's own copy of held maps: the held ones are never folded into."""
+    return (dict(maps[0]), dict(maps[1]), dict(maps[2]), set(maps[3]), dict(maps[4]))
+
+
+def _feed_seg_fold(maps, turns, start, stop, store):
+    """Fold turns[start:stop] into the anchor maps (seg_uuid, seg_trig, seg_best, cite_uuids, positions) exactly as the
+    one-pass loop of _feed_session_entry folded every turn (moved here 2026-10-06): segment by segment in turn order, the
+    key's position (turn index, segment ordinal) first, as the loop stored its (turn, atoms) first, then the work anchor
+    (the reply, else the first landable atom), the prompt anchor and the latest prose with the segment's start, then the
+    citable uuids (a restored pre-cut turn's stored prose chars, else its atoms'). A later segment with the same key
+    overwrites an earlier one. A raise leaves the maps as far as the fold got."""
+    seg_uuid, seg_trig, seg_best, cite_uuids, pos = maps
+    for ti in range(start, stop):
+        turn = turns[ti]
+        for si, seg in enumerate(_segs_seam(turn, store)):
+            atoms = seg["atoms"]
+            k = _seg_key(seg["id"])
+            pos[k] = (ti, si)
+            _w, r = _seg_anchors(atoms)
+            seg_uuid[k] = r or _seg_jump(atoms)          # timestamp-invariant key; landable anchors only, never a
+            #                                              thinking-only uuid (SDK echo/real drift)
+            seg_trig[k] = jd._prompt_anchor_uuid(seg)    # attachment-safe: a title click must land on the USER message,
+            #                                              never an attachment record no chat event carries (2026-08-25)
+            _lu, _lsub = _seg_last_text(atoms)
+            seg_best[k] = (_lu, _lsub, seg.get("t", 0))   # latest prose: the summary deep-link fallback
+            pcs_ = em.turn_scalar(turn, "pcs")
+            if pcs_ is not None:                         # a restored pre-cut turn: its stored prose chars, no atom built (T358)
+                cite_uuids.update(u_ for u_, n_ in pcs_.items() if n_ >= jd.CITE_MIN_CHARS)
+                continue
+            for _a in atoms:                             # citable-uuid set: gates the distiller's CITED anchor. Resolvable
+                # in THIS parse AND substantive (the user 2026-07-14): a stored citation pointing at a connective stub
+                # (a lead-in that merely names the goal) is a wrong link by construction, so it falls through to the
+                # deterministic fallback, healing bad anchors already in stores at read time.
+                if _a.get("uuid") and _atom_prose_chars(_a) >= jd.CITE_MIN_CHARS:
+                    cite_uuids.add(_a["uuid"])
+
+
+class _FeedSegTurns:
+    """The anchor walk's seg key -> (turn, segment atoms) map, read-only and lazy (2026-10-06): exactly the two reads the
+    text-atom landing makes of it (`k in seg_turn`, `seg_turn.get(k)`), answered from the (turn index, segment ordinal)
+    positions the fold recorded, held or walked, so no turn or atom outlives the parse in hand. `get` segments that turn of
+    the current parse (once per derivation) and returns its segment at the ordinal, as the one-pass loop's dict held it;
+    should that segment carry another key (a held position whose turn segments differently now), the turn's last segment
+    with the key, else the default. A segmentation that raises (a body that cannot be read) answers the default and counts
+    the landing tier's fault, so the derivation is served and not memoized, as a landing that met an unreadable body is."""
+    __slots__ = ("_pos", "_turns", "_store", "_segs")
+
+    def __init__(self, pos, turns, store):
+        self._pos, self._turns, self._store, self._segs = pos, turns, store, {}
+
+    def __contains__(self, k):
+        return k in self._pos
+
+    def get(self, k, default=None):
+        p = self._pos.get(k)
+        if p is None:
+            return default
+        ti, si = p
+        segs = self._segs.get(ti)
+        if segs is None:
+            try:
+                segs = _segs_seam(self._turns[ti], self._store)
+            except Exception:
+                _SUMMARY_ANCHOR_STATS["fault"] += 1
+                return default
+            self._segs[ti] = segs
+        seg = segs[si] if si < len(segs) else None
+        if seg is None or _seg_key(seg["id"]) != k:
+            seg = next((x for x in reversed(segs) if _seg_key(x["id"]) == k), None)
+            if seg is None:
+                return default
+        return (self._turns[ti], seg["atoms"])
+
+
+class _FeedSegWalk:
+    """One derivation's anchor walk (_feed_seg_walk): the maps the body reads, and what _feed_seg_plain_t needs to finish
+    the plain-prompt time and store the closed turns' aggregate."""
+    __slots__ = ("seg_uuid", "seg_trig", "seg_best", "cite_uuids", "seg_turn", "fsid", "head", "fp", "turns", "keys",
+                 "start", "n_closed", "base_plain", "closed", "ok")
+
+
+def _feed_seg_walk(fsid, head, turns, store):
+    """The card anchor maps over `turns` (the live-merged parse's) and `store` (the seams' source), the closed turns' part
+    served from the session's held aggregate where it stands (the comment above _FEED_SEG_HELD). `head` is the leaf's
+    (path, inode), stat'd by the key before the parse was read (ctx["leaf_head"]); None holds nothing. Returns a
+    _FeedSegWalk whose seg_uuid, seg_trig, seg_best, cite_uuids and seg_turn are the one-pass loop's five maps; the body
+    then calls _feed_seg_plain_t on it, which finishes the walk and stores the aggregate. No turns: empty maps, the table
+    untouched."""
+    w = _FeedSegWalk()
+    turns = turns if turns is not None else []
+    n = len(turns)
+    n_closed = n - 1 if n else 0
+    w.fsid, w.head, w.turns, w.n_closed, w.closed, w.ok = fsid, head, turns, n_closed, None, True
+    w.fp = _seams_fp(store) if n else ()
+    w.keys = tuple(_turn_hold_key(t) for t in turns[:n_closed]) if (head is not None and n_closed) else ()
+    ent, start, partial, reset = None, 0, False, False
+    if n:
+        with _FEED_SEG_LOCK:
+            ent = _FEED_SEG_HELD.get(fsid)
+            if ent is not None:
+                if not w.keys:                       # no leaf to vouch for it, or no closed turn left: nothing to reuse
+                    del _FEED_SEG_HELD[fsid]
+                    ent, reset = None, True
+                else:
+                    _FEED_SEG_HELD.move_to_end(fsid)   # a used entry is the newest: the bound sheds colder sessions first
+    if ent is not None:
+        hk = ent[2]
+        if ent[0] != head or ent[1] != w.fp:
+            ent, reset = None, True
+        elif len(hk) <= n_closed and w.keys[:len(hk)] == hk:
+            start = len(hk)
+        else:
+            ent, partial = None, True
+    if ent is not None:
+        maps, w.base_plain = _feed_seg_copy(ent[3]), ent[4]
+    else:
+        maps, w.base_plain = ({}, {}, {}, set(), {}), 0
+    w.start = start
+    try:
+        _feed_seg_fold(maps, turns, start, n_closed, store)
+        if w.keys and start < n_closed:              # closed turns were folded: they are the next aggregate
+            w.closed = maps
+            maps = _feed_seg_copy(maps)
+        _feed_seg_fold(maps, turns, n_closed, n, store)
+    except Exception:
+        w.closed, w.ok = None, False                 # the maps as far as the fold got (the one-pass loop's try); nothing stored
+    if n:
+        with _FEED_SEG_LOCK:
+            st = _FEED_SEG_STATS
+            st["segHeld"] += start
+            st["segWalkTurns"] += n - start
+            st["segPartial"] += 1 if partial else 0
+            st["segReset"] += 1 if reset else 0
+            st["segRaised"] += 0 if w.ok else 1
+    w.seg_uuid, w.seg_trig, w.seg_best, w.cite_uuids = maps[0], maps[1], maps[2], maps[3]
+    w.seg_turn = _FeedSegTurns(maps[4], turns, store)
+    return w
+
+
+def _feed_seg_plain_t(w):
+    """The re-check's plain-prompt time for the walk `w` (_feed_seg_walk): the larger of the held aggregate's and
+    _last_plain_user_turn_t over the turns it did not hold, the closed ones and the open one apart, so the closed part is
+    what the aggregate stores. A read that raises fails the derivation, as the one walk over every turn did, and stores
+    nothing (counted under segRaised). Then, when the anchor fold finished and closed turns were folded, the aggregate is
+    stored under the walk's keys, leaf and seams, and the byte bound sheds the least recently used sessions first; an
+    aggregate over the bound alone is not held and sheds no other session."""
+    try:
+        closed_t = w.base_plain
+        if w.start < w.n_closed:
+            closed_t = max(closed_t, _last_plain_user_turn_t(w.turns[w.start:w.n_closed]))
+        best = max(closed_t, _last_plain_user_turn_t(w.turns[w.n_closed:]))
+    except Exception:
+        if w.ok:
+            with _FEED_SEG_LOCK:
+                _FEED_SEG_STATS["segRaised"] += 1
+        raise
+    if not w.turns:
+        return best
+    with _FEED_SEG_LOCK:
+        st = _FEED_SEG_STATS
+        st["segWalks"] += 1 if w.ok else 0
+        if w.ok and w.closed is not None:
+            size = _feed_seg_entry_bytes(w.keys, w.closed)
+            _FEED_SEG_HELD.pop(w.fsid, None)
+            if size > FEED_SEG_HELD_BYTES:
+                st["segEvict"] += 1                  # an aggregate over the bound alone is not held, and sheds no other session
+            else:
+                _FEED_SEG_HELD[w.fsid] = (w.head, w.fp, w.keys, w.closed, closed_t, size)
+                total = sum(e[5] for e in _FEED_SEG_HELD.values())
+                while total > FEED_SEG_HELD_BYTES:
+                    _k, old = _FEED_SEG_HELD.popitem(last=False)   # the least recently used first; the newest fits alone
+                    total -= old[5]
+                    st["segEvict"] += 1
+    return best
+
+
+def _feed_seg_forget(alive_sids):
+    """Drop the held aggregates of the sessions outside `alive_sids` (build_feed's alive set, through _feed_memo_forget):
+    a departed session's walk is not coming back under its sid, and a revived one walks once. Counted under segEvict, as
+    the card memo counts its departures under evict."""
+    with _FEED_SEG_LOCK:
+        gone = [k for k in _FEED_SEG_HELD if k not in alive_sids]
+        for k in gone:
+            del _FEED_SEG_HELD[k]
+        _FEED_SEG_STATS["segEvict"] += len(gone)
+
+
+def _feed_seg_report():
+    """The held aggregates' counters (_FEED_SEG_STATS) with their occupancy (segEntries), estimated bytes (segBytes) and
+    bound (segBound): merged into GET /perf builds.feed.memo by _feed_memo_report."""
+    with _FEED_SEG_LOCK:
+        out = dict(_FEED_SEG_STATS)
+        out["segEntries"] = len(_FEED_SEG_HELD)
+        out["segBytes"] = sum(e[5] for e in _FEED_SEG_HELD.values())
+    out["segBound"] = FEED_SEG_HELD_BYTES
+    return out
+
+
 def _feed_session_entry(s, ctx):
     """ONE session's contribution to the feed, derived from its inputs alone: the body of build_feed's per-session
     loop (T368), memoized per session by build_feed under _feed_session_key. Returns a JSON-able dict, or None for a
@@ -48317,7 +48580,8 @@ def _feed_session_entry(s, ctx):
       reads         usage=True for a cap offer, nudges=[node ids] for the nudge facts read by this entry
     `ctx` carries the build's cross-session reads (now, live_map, cleared, dbg_rows, wmap, stalls, jauth_map,
     jactive) and the per-session facts the key already computed (ps, who_working, interrupting, store, closer,
-    leaf_ok: whether the transcript's stat succeeded, 2026-09-21):
+    leaf_ok: whether the transcript's stat succeeded, 2026-09-21; leaf_head: the leaf's path and inode from that stat,
+    the head the anchor walk's held aggregate stands under, 2026-10-06):
     the body reads those from ctx and nothing twice. Every helper this body calls is covered by a component of
     _feed_session_key (its docstring maps them); tests/test_feed_memo_inputs.py pins that mapping against this
     function's source."""
@@ -48436,33 +48700,14 @@ def _feed_session_entry(s, ctx):
     # title is prompt-intent and must land on the USER turn — passing the trigger uuid (which the chat
     # tags + the kind guard accepts as turn-user) lets it resolve BY ID instead of a kind-restricted
     # nearest-time landing (the user 2026-06-17). (Both are emitted .turn[data-uuid]s in the chat.)
-    seg_uuid, seg_trig, seg_best, cite_uuids = {}, {}, {}, set()
-    seg_turn = {}                                    # seg key -> (turn, segment atoms): the text-atom resolve's input (T388)
-    try:
-        for turn in (ps["turns"] if ps else []):     # cached parse only; anchors fill in after _warm_fleet_bg
-            for seg in _segs_seam(turn, store):
-                seg_turn[_seg_key(seg["id"])] = (turn, seg["atoms"])
-                w, r = _seg_anchors(seg["atoms"])
-                seg_uuid[_seg_key(seg["id"])] = r or _seg_jump(seg["atoms"])   # timestamp-invariant key; landable
-                #                                  anchors only — never a thinking-only uuid (SDK echo/real drift)
-                seg_trig[_seg_key(seg["id"])] = jd._prompt_anchor_uuid(seg)   # attachment-safe: a
-                #                                  title click must land on the USER message, never an
-                #                                  attachment record no chat event carries (2026-08-25)
-                _lu, _lsub = _seg_last_text(seg["atoms"])
-                seg_best[_seg_key(seg["id"])] = (_lu, _lsub, seg.get("t", 0))   # latest prose → summary deep-link fallback
-                pcs_ = em.turn_scalar(turn, "pcs")
-                if pcs_ is not None:                 # a restored pre-cut turn: its stored prose chars, no atom built (T358)
-                    cite_uuids.update(u_ for u_, n_ in pcs_.items() if n_ >= jd.CITE_MIN_CHARS)
-                    continue
-                for _a in seg["atoms"]:              # citable-uuid set: gates the distiller's CITED anchor.
-                    # Resolvable in THIS parse AND substantive (the user 2026-07-14): a stored citation
-                    # pointing at a connective stub (a lead-in that merely names the goal) is a wrong
-                    # link by construction — the outcome never lives there — so it falls through to the
-                    # deterministic fallback below, healing bad anchors already in stores at read time.
-                    if _a.get("uuid") and _atom_prose_chars(_a) >= jd.CITE_MIN_CHARS:
-                        cite_uuids.add(_a["uuid"])
-    except Exception:
-        pass
+    # seg_best → the latest prose per segment (the summary deep-link fallback), cite_uuids → the substantive atoms a
+    # stored citation may name, seg_turn → seg key to (turn, segment atoms), the text-atom resolve's input (T388).
+    # The walk folds every segment of the cached parse (anchors fill in after _warm_fleet_bg), the closed turns' part
+    # held between derivations (2026-10-06, _feed_seg_walk: the comment above _FEED_SEG_HELD), seg_turn answered lazily
+    # from the parse in hand. A walk that raises keeps the maps as far as it got, as the one-pass loop's try did.
+    _seg_walk = _feed_seg_walk(fsid, ctx["leaf_head"], ps["turns"] if ps else None, store)
+    seg_uuid, seg_trig, seg_best = _seg_walk.seg_uuid, _seg_walk.seg_trig, _seg_walk.seg_best
+    cite_uuids, seg_turn = _seg_walk.cite_uuids, _seg_walk.seg_turn
     healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: machine-rooted tops nest (read-side)
     heal_total += sum(1 for v in healed.values() if v[0])
     _hidden = {k for k, v in healed.items() if v[1].get("hidden")}   # T333: rooted in a skill the harness loaded, no
@@ -48835,7 +49080,9 @@ def _feed_session_entry(s, ctx):
     if _unnested:                                # the derivations below read the tree the card SHOWS (item 8 of the
         agent_open = _agent_open_set(nodes, children)   #   fourth review): recomputed over the un-nested layout
         parked_rows = _parked_rows(nodes, children)
-    plain_user_t = _last_plain_user_turn_t(ps["turns"]) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
+    plain_user_t = _feed_seg_plain_t(_seg_walk) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
+    #                                          (the closed turns' part held with the walk's; a read that raises fails the
+    #                                          derivation as before, and the walk then stores nothing)
     had_working = False                          # does this session show ANY working card? → drives the provisional placeholder
     had_awaiting = False                         # …and does any of them read AWAITING? → the session's await-green dot (below)
     # The live background-task set, once per session: OWNERSHIP for the blocked-yield below (any live
@@ -50743,6 +50990,9 @@ SPEND_GUARD_TREE_MEMO_BYTES = _spend_tree_memo_bound()   # the tree memos togeth
 #                                                          it the largest goes first, and only the deficit is shed
 FEED_MEMO_BYTES = _feed_memo_bound()             # the feed's per-session card memo (T368, defined beside build_feed): its
 _FEED_MEMO_STATS["bound"] = FEED_MEMO_BYTES      #  entries' JSON bytes together; over it the least recently served goes first
+FEED_SEG_HELD_BYTES = _feed_seg_held_bound()     # the card anchor walk's held aggregates (2026-10-06, defined beside
+#                                                  _feed_session_entry): their estimated bytes together; over it the least
+#                                                  recently used goes first
 
 
 def _spend_ceiling():

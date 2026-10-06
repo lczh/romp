@@ -249,11 +249,14 @@ class SegJump(unittest.TestCase):
         self.assertIsNone(km._seg_jump(atoms))
 
     def test_the_deep_link_maps_use_the_landable_anchor(self):
-        # both zone maps (ledger seg_work + feed seg_uuid) resolve through _seg_jump, not bare `r or w`
+        # both zone maps (ledger seg_work + feed seg_uuid) resolve through _seg_jump, not bare `r or w`; the feed's map is
+        # folded by _feed_seg_fold since the card anchor walk holds its closed turns (2026-10-06), the body only reads it
         import inspect
-        src = inspect.getsource(km.build_session) + inspect.getsource(km._feed_session_entry)   # T368: the feed's loop body
-        self.assertEqual(src.count('_seg_jump(seg["atoms"])'), 2)
-        self.assertNotIn("= r or w", src)
+        ledger = inspect.getsource(km.build_session)
+        feed = inspect.getsource(km._feed_seg_fold)
+        self.assertEqual(ledger.count('_seg_jump(seg["atoms"])'), 1)
+        self.assertEqual(feed.count("seg_uuid[k] = r or _seg_jump(atoms)"), 1)
+        self.assertNotIn("= r or w", ledger + feed + inspect.getsource(km._feed_session_entry))
 
 
 if __name__ == "__main__":

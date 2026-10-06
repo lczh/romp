@@ -42,10 +42,12 @@ jd.save_goals). The parses stay cold, as the feed reads them (cache-only), so a 
 Synthetic fixtures only: private synthetic sids (the goal-store fixture rule: load_goals replays the per-sid
 override journal, so a shared placeholder sid would be re-flagged by other modules' rows), invented text.
 """
+import collections
 import contextlib
 import io
 import json
 import os
+import random
 import re
 import tempfile
 import time
@@ -114,7 +116,14 @@ def _without_tints(feed):
 def _reset_memo():
     """The memo empty and its counters at zero: every test starts cold. A kernel without the memo (the base commit
     this change's red-first run pins against) has nothing to reset: the walked-sessions pin below then runs red on
-    its own assertion rather than erroring here."""
+    its own assertion rather than erroring here. The card anchor walk's held aggregates (2026-10-06) go too, where the
+    kernel has them, so a from-scratch build walks every turn."""
+    held = getattr(km, "_FEED_SEG_HELD", None)
+    if held is not None:
+        with km._FEED_SEG_LOCK:
+            held.clear()
+            for k in km._FEED_SEG_STATS:
+                km._FEED_SEG_STATS[k] = 0
     if not hasattr(km, "_feed_memo"):
         return
     with km._feed_memo_lock:
@@ -132,18 +141,30 @@ def _reset_memo():
 
 
 def _memo_snapshot():
-    """(the entries, the counters) as they stand, so a test can hand the process back what it found."""
+    """(the entries, the counters) as they stand, so a test can hand the process back what it found; with them the card
+    anchor walk's held aggregates and their counters, where the kernel has them (2026-10-06)."""
     if not hasattr(km, "_feed_memo"):
         return None
     with km._feed_memo_lock:
-        return (dict(km._feed_memo), json.loads(json.dumps(km._FEED_MEMO_STATS)),
+        snap = (dict(km._feed_memo), json.loads(json.dumps(km._FEED_MEMO_STATS)),
                 dict(getattr(km, "_FEED_DERIVE_FAILED", {})))
+    held = getattr(km, "_FEED_SEG_HELD", None)
+    if held is not None:
+        with km._FEED_SEG_LOCK:
+            snap += (collections.OrderedDict(held), dict(km._FEED_SEG_STATS))
+    return snap
 
 
 def _memo_restore(snap):
     if snap is None:
         return
-    entries, stats, failed = snap
+    entries, stats, failed = snap[:3]
+    if len(snap) > 3:
+        with km._FEED_SEG_LOCK:
+            km._FEED_SEG_HELD.clear()
+            km._FEED_SEG_HELD.update(snap[3])
+            km._FEED_SEG_STATS.clear()
+            km._FEED_SEG_STATS.update(snap[4])
     with km._feed_memo_lock:
         km._feed_memo.clear()
         km._feed_memo.update(entries)
@@ -895,7 +916,11 @@ class TheBoundAndTheDepartures(_Board):
         self.assertEqual(set(feed["memo"]), {"hit", "miss", "evict", "entries", "bytes", "bound", "derived", "miss_by",
                                              "failed", "failing",     # the contained derivation faults (2026-09-17)
                                              "row_by",                # the row miss by the row position that moved (2026-09-18)
-                                             "coldLive", "coldFlip"})   # the cache-only parse misses and the in-place re-reads (2026-09-18)
+                                             "coldLive", "coldFlip",  # the cache-only parse misses and the in-place re-reads (2026-09-18)
+                                             # the card anchor walk's held aggregates (2026-10-06): its counters and gauges
+                                             "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised",
+                                             "segEvict", "segEntries", "segBytes", "segBound"})
+        self.assertEqual(feed["memo"]["segBound"], km.FEED_SEG_HELD_BYTES)
         self.assertEqual((feed["memo"]["failed"], feed["memo"]["failing"]), (0, 0))
         self.assertEqual(set(feed["memo"]["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
         self.assertEqual(set(feed["memo"]["row_by"]), set(km._FEED_ROW_FIELDS) | {"presence"})
@@ -1686,6 +1711,426 @@ class AWarmEntryIsNeverDerivedCold(_Board):
         c1 = km._feed_memo_report()
         self.assertEqual((c1["coldLive"] - c0["coldLive"], c1["coldFlip"] - c0["coldFlip"]), (3, 0),
                          "three living sessions read cold, none flipped")
+
+
+# ── the card anchor walk's world (2026-10-06) ──
+ANCHOR_PROSE = "the notes-api search now pages twenty results at a time and hands back a cursor for the next page"
+
+
+def tline(t, uuid, parent, tid):
+    """An assistant tool call: the turn stays open (stop_reason tool_use)."""
+    return {"type": "assistant", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"id": "msg_" + uuid, "role": "assistant", "stop_reason": "tool_use",
+                        "content": [{"type": "tool_use", "id": tid, "name": "Bash", "input": {"command": "make test"}}]}}
+
+
+def rline(t, uuid, parent, tid, content):
+    """A tool's result: a user record that opens nothing."""
+    return {"type": "user", "timestamp": iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": content}]}}
+
+
+def anchor_turn(i, t, parent):
+    """Turn i of web's long history and its last uuid, the kind by i % 6 (tests/test_feed_seg_held.py's six): 0 a typed
+    ask answered at length (a citable reply); 1 a typed ask whose work runs on past a check (the segment a seam splits at
+    t + 30); 2 a typed reply to one card (the romp-goal-id marker: no plain prompt); 3 a second typed prompt mid-turn (two
+    segments); 4 a bare "continue" (one segment key across turns: the later turn wins); 5 a "continue" with a second one
+    mid-turn (two segments of one turn sharing a key)."""
+    u, a, c, r, c2, r2, m = ("w-%s%02d" % (k, i) for k in ("u", "a", "c", "r", "d", "e", "m"))
+    tid, tid2 = "toolu_w%02d" % i, "toolu_wx%02d" % i
+    kind = i % 6
+    if kind == 0:
+        return [uline(t, "step %d: page the notes-api search" % i, u, parent),
+                aline(t + 20, "Step %d: %s." % (i, ANCHOR_PROSE), a, u)], a
+    if kind == 1:
+        return [uline(t, "step %d: check the retry budget" % i, u, parent), tline(t + 10, c, u, tid),
+                rline(t + 20, r, c, tid, "budget: 4096"), tline(t + 40, c2, r, tid2),
+                rline(t + 50, r2, c2, tid2, "budget kept"), aline(t + 60, "Step %d: %s." % (i, ANCHOR_PROSE), a, r2)], a
+    if kind == 2:
+        return [uline(t, "answer for step %d <!-- romp-goal-id: %s:g2 -->" % (i, WEB), u, parent),
+                aline(t + 20, "Noted.", a, u)], a
+    if kind == 3:
+        return [uline(t, "step %d: index the notes" % i, u, parent), tline(t + 10, c, u, tid),
+                rline(t + 20, r, c, tid, "indexed"), uline(t + 30, "also check the cursor for step %d" % i, m, r),
+                aline(t + 40, "Step %d: %s." % (i, ANCHOR_PROSE), a, m)], a
+    if kind == 4:
+        return [uline(t, "continue", u, parent), aline(t + 20, "Continued.", a, u)], a
+    return [uline(t, "continue", u, parent), tline(t + 10, c, u, tid), rline(t + 20, r, c, tid, "next page"),
+            uline(t + 30, "continue", m, r), aline(t + 40, "Continued again.", a, m)], a
+
+
+def _fresh_parse_state():
+    """A kernel restart's in-memory side of the parse (tests/test_build_road_equivalence.py's fresh): no reader entry,
+    assembly entry, stored parse or read memo, so the next parse of a leaf with a document restores from it."""
+    em = km.em
+    with em._JSONL_CACHE_LOCK:
+        em._JSONL_CACHE.clear()
+    with em._ASM_LOCK:
+        em._ASM_CACHE.clear()
+    em._TRAILING_CACHE.clear()
+    with em._ASM_CKPT_LOCK:
+        em._HYDRATED.clear()
+        em._HYDRATED_BYTES[0] = 0
+    em._LAZY_FILES.clear()
+    with em._MAT_LOCK:
+        em._MAT_LRU.clear()
+    memo = getattr(em, "_ASM_DOC_MEMO", None)
+    if memo is not None:
+        with em._ASM_CKPT_LOCK:
+            memo.clear()
+            getattr(em, "_ASM_DOC_MEMO_BYTES", [0])[0] = 0
+    jd.parse_cache_clear()
+    km._parse_mode.clear()
+
+
+def _side_snapshot():
+    """The tables a derivation reads and writes beside the memo: the warm-anchor table and its revisions, the brief
+    landing's memo and its counters. A cold build starts from what the warm build started from."""
+    return (dict(km._node_anchor_last), dict(km._node_anchor_rev),
+            collections.OrderedDict(km._SUMMARY_ANCHOR_MEMO), dict(km._SUMMARY_ANCHOR_STATS))
+
+
+def _side_restore(snap):
+    last, rev, memo, stats = snap
+    km._node_anchor_last.clear()
+    km._node_anchor_last.update(last)
+    km._node_anchor_rev.clear()
+    km._node_anchor_rev.update(rev)
+    km._SUMMARY_ANCHOR_MEMO.clear()
+    km._SUMMARY_ANCHOR_MEMO.update(memo)
+    km._SUMMARY_ANCHOR_STATS.clear()
+    km._SUMMARY_ANCHOR_STATS.update(stats)
+
+
+class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
+    """The card anchor walk holds its closed turns (2026-10-06, _feed_seg_walk). A card's click-to-jump anchors (the work,
+    the prompt, the latest prose and its time, the citable uuids, the text-atom landing's turn) came from a walk over
+    every segment of the session's parse on every derivation, and the re-check's plain-prompt time from a second walk
+    over every turn; now the closed turns' part is held between derivations. Web carries a thirty-turn history of six
+    kinds (anchor_turn) and an open turn, warm, and a goal store whose four goals name segments across it: g1 working
+    (eight trail segments, eight log rows), g2 blocked after turn 28's plain prompt and before turn 29's (a cited brief),
+    g3 a done child (two "continue" segments: the text-atom landing), g4 completed (its anchor is turn 13's reply, the
+    segment a seam splits). Pinned: a streaming append and a republish with the same seams fold the open turn alone
+    (every turn before the hold); after every step of a road and of a seeded random walk the board equals a derivation
+    from cleared memos over the same inputs, byte for byte (_dump); a rewind that takes the latest plain prompt drops the
+    re-check, and a plain prompt in the open turn after a re-examined block raises it; a departed session's held
+    aggregate leaves with it. tests/test_feed_seg_held.py pins the walk itself against the one-pass loop."""
+
+    BLOCK_T = T0 + 2850                    # g2's block: after turn 28's plain prompt, before turn 29's
+
+    @staticmethod
+    def _transcript_body(sid):
+        if sid != WEB:
+            return _Board._transcript_body(sid)
+        recs, parent = [], None
+        for i in range(30):
+            rs, parent = anchor_turn(i, T0 + 100 * i, parent)
+            recs += rs
+        t = T0 + 3000
+        recs += [uline(t, "ship step 30", "w-u30", parent), tline(t + 10, "w-c30", "w-u30", "toolu_w30")]
+        return "".join(json.dumps(r) + "\n" for r in recs)
+
+    def setUp(self):
+        super().setUp()
+        em = km.em
+        td = Path(self.td.name)
+        (td / "session-hosts").write_text("off\n")       # this state root is the test's own: no host spawns
+        (td / "checkpoints").mkdir(exist_ok=True)
+        ckpt = (em._CKPT_DIR_FN, dict(em._CKPT_CYCLE))
+        em.set_checkpoint_dir(lambda: jd.STATE / "checkpoints")
+        em.checkpoint_cycle_begin(1 << 40)               # a document write is never deferred by an earlier test's spend
+
+        def restore_ckpt():
+            em.set_checkpoint_dir(ckpt[0])
+            em._CKPT_CYCLE.clear()
+            em._CKPT_CYCLE.update(ckpt[1])
+        self.addCleanup(restore_ckpt)
+        self.cut = {}                                    # the armed rollback's cut uuid per session: the key's and the parse's
+        cut_fn = lambda sid: self.cut.get(sid, "")
+        self.addCleanup(jd.set_pending_cut_provider, jd._PENDING_CUT_FN)
+        jd.set_pending_cut_provider(cut_fn)
+        be = km._sdk()
+        if be is not None:
+            p = mock.patch.object(be, "pending_cut", cut_fn)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(km, "_warm_fleet_bg", lambda now: None)   # every tab is parsed by the test (_settle)
+        p.start()
+        self.addCleanup(p.stop)
+        self.web_last, self.web_t, self.web_tid, self.n = "w-c30", T0 + 3010, "toolu_w30", 0
+        tree = km._parse(str(self.tpath[WEB]), WEB, NOW)
+        self.seg = {(ti, si): seg["id"] for ti, turn in enumerate(tree["turns"])
+                    for si, seg in enumerate(km._segs_seam(turn, {}))}
+        self.seams, self.rev = [], 1
+        self._publish_web()
+        self._settle()
+        self._build()                                    # web derives warm and its closed turns are held
+
+    # ── the world's writers ──
+    def _t(self, dt=2):
+        self.web_t += dt
+        return self.web_t
+
+    def _append(self, recs):
+        with self.tpath[WEB].open("a") as fh:
+            fh.write("".join(json.dumps(r) + "\n" for r in recs))
+        self.web_last = recs[-1]["uuid"]
+
+    def _stream(self, k):
+        """One record of the open turn: the pending tool call's result, else another tool call."""
+        if self.web_tid:
+            self._append([rline(self._t(), "w-z%04d" % k, self.web_last, self.web_tid, "step %d ran" % k)])
+            self.web_tid = None
+        else:
+            self.web_tid = "toolu_z%04d" % k
+            self._append([tline(self._t(), "w-z%04d" % k, self.web_last, self.web_tid)])
+
+    def _close_and_open(self, text):
+        """The open turn's reply lands (end_turn) and a new typed ask opens the next turn with a running tool call."""
+        self.n += 1
+        a, u, c = "w-ya%02d" % self.n, "w-yu%02d" % self.n, "w-yc%02d" % self.n
+        self._append([aline(self._t(), "Shipped: %s." % ANCHOR_PROSE, a, self.web_last)])
+        t = self._t(4)
+        self.web_tid = "toolu_y%02d" % self.n
+        self._append([uline(t, text, u, a), tline(self._t(), c, u, self.web_tid)])
+
+    def _compact(self):
+        """The open turn's reply lands, then an auto compaction (its boundary and summary) and a new ask after it."""
+        self.n += 1
+        a, b, sm = "w-ya%02d" % self.n, "w-b%02d" % self.n, "w-s%02d" % self.n
+        u, c = "w-yu%02d" % self.n, "w-yc%02d" % self.n
+        self._append([aline(self._t(), "Closed out: %s." % ANCHOR_PROSE, a, self.web_last)])
+        t = self._t(4)
+        self.web_tid = "toolu_y%02d" % self.n
+        self._append([{"type": "system", "subtype": "compact_boundary", "timestamp": iso(t), "uuid": b, "parentUuid": None,
+                       "logicalParentUuid": a, "isMeta": False,
+                       "compactMetadata": {"trigger": "auto", "preTokens": 160000, "postTokens": 9000}},
+                      {"type": "user", "timestamp": iso(t + 1), "uuid": sm, "parentUuid": b, "isCompactSummary": True,
+                       "isVisibleInTranscriptOnly": True,
+                       "message": {"role": "user", "content": "summary so far: the notes-api search is paged"}},
+                      uline(t + 2, "after the compaction: what remains of the search?", u, sm),
+                      tline(t + 3, c, u, self.web_tid)])
+        self.web_t = t + 3
+
+    def _restore(self, k):
+        """A document written from web's whole parse, a restart's in-memory state, and a record landing: the next parse
+        restores the closed turns from the document."""
+        leaf = str(self.tpath[WEB])
+        km.em.asm_checkpoint_write(leaf, WEB, sdk_human=bool(km._display_sdk_human(WEB)), tree=km._parse(leaf, WEB, NOW))
+        _fresh_parse_state()
+        self._stream(k)
+
+    def _seam13(self):
+        """A seam that splits turn 13's segment between its two checks (t + 30): its reply moves into the tail."""
+        return {"segs": [jd._seg_key(self.seg[(13, 0)])], "t": T0 + 1330, "top": WEB + ":g4", "text": "Paged the results"}
+
+    def _publish_web(self, check_t=None, mt_bump=0):
+        """Web's goal store, in the judge's file shape, its goals' trails and log rows naming segments across the
+        history (the ids of the first parse, which a seam's head keeps)."""
+        g = lambda n: WEB + ":g%d" % n
+        s = lambda ti, si=0: self.seg.get((ti, si)) or self.seg[(ti, 0)]
+        trail1 = [s(0), s(3), s(7), s(9, 1), s(13), s(15, 1), s(19), s(21)]
+        nodes = {
+            g(1): {"id": g(1), "parentId": None, "t": T0, "mt": T0 + 2100 + mt_bump, "text": GOAL_OF[WEB],
+                   "nodeComplete": False, "blocked": False, "cleared": False, "trail": trail1,
+                   "log": [{"kind": "verdict", "src": "planner", "why": "progress at step %d" % k, "at": T0 + 100 * k + 50,
+                            "ev_t": T0 + 100 * k + 50, "seg": x} for k, x in enumerate(trail1)]},
+            g(2): {"id": g(2), "parentId": None, "t": T0 + 600, "mt": self.BLOCK_T, "text": "pick the notes-api cursor format",
+                   "nodeComplete": False, "blocked": True, "blockWhy": "offset or cursor", "cleared": False,
+                   "blockSummary": "Pick offset or cursor paging. The cursor keeps pages stable while notes are added.",
+                   "summaryAnchor": "w-a06", "briefedMt": NOW, "blockCheckT": check_t or self.BLOCK_T,
+                   "trail": [s(6), s(27, 1)],
+                   "log": [{"kind": "block", "src": "planner", "why": "needs the user's call", "at": self.BLOCK_T,
+                            "ev_t": self.BLOCK_T, "seg": s(27, 1)}]},
+            g(3): {"id": g(3), "parentId": g(1), "t": T0 + 400, "mt": T0 + 1000, "text": "keep the cap work going",
+                   "nodeComplete": True, "blocked": False, "cleared": False, "summary": "Continued the cap work.",
+                   "trail": [s(4), s(10)], "log": []},
+            g(4): {"id": g(4), "parentId": None, "t": T0 + 1200, "mt": T0 + 1300, "text": "page the notes-api search results",
+                   "nodeComplete": True, "blocked": False, "cleared": False,
+                   "summary": "Paged the search results and checked the cursor.", "settledAt": T0 + 1900,
+                   "trail": [s(12), s(13)], "log": []},
+        }
+        store = {"rompUuid": WEB, "seq": self.rev, "rev": self.rev, "placementsV": jd.PLACEMENTS_V, "placements": {},
+                 "nodes": nodes, "status": {g(1): "working", g(2): "blocked", g(4): "completed"}, "lastNode": g(1),
+                 "seams": list(self.seams)}
+        p = jd.GOALDIR / (WEB + ".json")
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(store))
+        os.replace(tmp, p)
+
+    # ── the reads ──
+    def _settle(self):
+        """The chat's parse of every tab (the feed reads the parse cache-only)."""
+        for sid in SIDS:
+            km._parse(str(self.tpath[sid]), sid, NOW)
+
+    def _warm_cold(self, label):
+        """The board as the warm memos give it, asserted equal (_dump) to a build from cleared memos over the same inputs
+        and the same side tables; the warm memos are put back, so the next step builds on the warm chain."""
+        self._settle()
+        side = _side_snapshot()
+        warm = self._build()
+        side_after, memo = _side_snapshot(), _memo_snapshot()
+        _side_restore(side)
+        _reset_memo()
+        cold = self._build()
+        _memo_restore(memo)
+        _side_restore(side_after)
+        self.assertEqual(_dump(warm), _dump(cold), "%s: the warm board is the cold one" % label)
+        return warm
+
+    def _folded(self, fn):
+        """(the indexes of web's turns whose segments the card anchor walk folded during fn(), fn's result): the walk's
+        latest-prose read (_seg_last_text, which no other reader on the feed's path calls) mapped to its turn."""
+        tree = km._parse(str(self.tpath[WEB]), WEB, NOW)
+        idx = {id(a): ti for ti, turn in enumerate(tree["turns"]) for a in turn["atoms"]}
+        seen, real = set(), km._seg_last_text
+
+        def spy(atoms):
+            ti = next((idx[id(a)] for a in atoms if id(a) in idx), None)
+            if ti is not None:
+                seen.add(ti)
+            return real(atoms)
+        with mock.patch.object(km, "_seg_last_text", spy):
+            out = fn()
+        return seen, out
+
+    def _tree_row(self, feed, nid):
+        card = self._cards(feed)[nid]
+        return next(r for r in card["tree"] if r["id"] == nid)
+
+    # ── the tests ──
+    def test_a_streaming_append_folds_the_open_turn_alone(self):
+        self._stream(1)
+        self._settle()
+        folded, f = self._folded(self._build)
+        self.assertEqual(folded, {30}, "only the open turn's segments were folded (before the hold: every one of the 31 "
+                                       "turns, on every derivation)")
+        self.assertIn(WEB + ":g1", self._cards(f))
+        self._close_and_open("next: page the archive")
+        self._settle()
+        folded, f = self._folded(self._build)
+        self.assertEqual(folded, {30, 31}, "a turn boundary folds the turn that closed and the one that opened")
+        self._warm_cold("after the boundary")
+
+    def test_a_republish_with_the_same_seams_folds_the_open_turn_alone(self):
+        self.rev += 1
+        self._publish_web(mt_bump=7)                     # a planner's write: a node moved, the seams as they were
+        self._settle()
+        folded, f = self._folded(self._build)
+        self.assertEqual(folded, {30}, "the store moved but not its seams: the held turns stand")
+        self.assertEqual(self._cards(f)[WEB + ":g1"]["t"], T0 + 2107, "the premise: the republish reached the card")
+        self.seams = [self._seam13()]
+        self.rev += 1
+        self._publish_web()
+        self._settle()
+        folded, f = self._folded(self._build)
+        self.assertEqual(folded, set(range(31)), "a seam stamped: every turn folded again")
+
+    def test_the_board_equals_a_cold_derivation_after_every_road_step(self):
+        f = self._warm_cold("the history at rest")
+        self.assertEqual(sorted(self._cards(f)),
+                         sorted([WEB + ":g1", WEB + ":g2", WEB + ":g4", API + ":g1", TESTS + ":g1"]))
+        self.assertIn((9, 1), self.seg, "the premise: a second typed prompt mid-turn opens a second segment")
+        self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-a13", "the premise: g4 lands on turn 13's reply")
+        log1 = [r["anchorUuid"] for r in self._tree_row(f, WEB + ":g1")["log"]]
+        self.assertEqual(len(log1), 8)
+        self.assertTrue(all(log1), "the premise: every log row of g1 resolves to an anchor: %r" % log1)
+        self.assertEqual(self._cards(f)[WEB + ":g2"]["summaryAnchorUuid"], "w-a06",
+                         "the premise: the cited tier holds (the citation is in the citable set)")
+        self._stream(1)
+        self._warm_cold("an append to the open turn")
+        self._stream(2)
+        self._warm_cold("its tool call")
+        self._close_and_open("next: page the archive")
+        self._warm_cold("the open turn closes and another opens")
+        self.rev += 1
+        self._publish_web(mt_bump=5)
+        self._warm_cold("a republish with the same seams")
+        self.seams = [self._seam13()]
+        self.rev += 1
+        self._publish_web()
+        f = self._warm_cold("a seam splits turn 13's segment")
+        self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-c13",
+                         "the premise: the seam moved turn 13's reply into its tail")
+        self.seams = []
+        self.rev += 1
+        self._publish_web()
+        f = self._warm_cold("the seam removed")
+        self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-a13")
+        self._compact()
+        self._warm_cold("an auto compaction")
+        self._restore(3)
+        self._settle()
+        self.assertEqual(km._parse_mode.get(str(self.tpath[WEB])), "restore", "the premise: the parse restored")
+        self._warm_cold("a restart that restores from the document")
+        self._stream(4)
+        self._warm_cold("an append over the restored turns")
+        self._close_and_open("after the restart: the archive's cursor")
+        self._warm_cold("a turn boundary over the restored turns")
+
+    def test_the_plain_prompt_time_drops_when_a_rewind_removes_the_latest_plain_reply(self):
+        f = self._warm_cold("at rest")
+        self.assertTrue(self._cards(f)[WEB + ":g2"]["rejudging"], "the premise: the latest plain prompts came after the block")
+        self.cut[WEB] = "w-a28"                          # the rolled-back world ends at turn 28's reply
+        f = self._warm_cold("a rewind cut at turn 28's reply")
+        card = self._cards(f)[WEB + ":g2"]
+        self.assertFalse(card["rejudging"], "the rewind took the plain prompt the latch read")
+        self.assertEqual(card["column"], "needs_input")
+        self.cut[WEB] = ""
+        f = self._warm_cold("the cut released")
+        self.assertTrue(self._cards(f)[WEB + ":g2"]["rejudging"])
+
+    def test_a_plain_prompt_in_the_open_turn_after_a_re_examined_block_raises_the_re_check(self):
+        self.rev += 1
+        self._publish_web(check_t=T0 + 2950)             # the unblocker examined evidence up to T0+2950 (the seams as they were)
+        f = self._warm_cold("the block re-examined past turn 29's prompt")
+        self.assertTrue(self._cards(f)[WEB + ":g2"]["rejudging"],
+                        "the open turn's plain prompt (T0+3000) came after the re-examination")
+
+    def test_a_departed_sessions_held_aggregate_leaves_with_it(self):
+        held = getattr(km, "_FEED_SEG_HELD", None)
+        self.assertIsNotNone(held, "the kernel holds the card anchor walk's closed turns")
+        self.assertIn(WEB, held, "the premise: web's closed turns are held")
+        self.live.pop(WEB)                               # the session is gone from the backend's live map ...
+        (jd.NAMES / WEB).unlink()                        # ... and from the names registry
+        jd._discover_cache.clear()
+        f = self._build()
+        self.assertNotIn(WEB + ":g1", self._cards(f))
+        self.assertNotIn(WEB, held, "the departed session's aggregate left with it")
+        self.assertEqual(km._feed_memo_report()["segEntries"], len(held))
+
+    def test_a_seeded_random_walk_matches_a_cold_derivation_after_every_step(self):
+        rng = random.Random(20261006)
+        ops = ("stream", "stream", "stream", "close", "republish", "seam", "rewind", "rewind", "restore", "compact")
+        plan = ["stream", "close", "republish", "seam", "rewind", "rewind", "restore", "compact"]   # every kind once,
+        plan += [rng.choice(ops) for _ in range(26)]                                             # then the seeded draw
+        seen = collections.Counter()
+        for step, op in enumerate(plan):
+            seen[op] += 1
+            if op != "rewind" and self.cut.get(WEB):
+                self.cut[WEB] = ""                       # a record landing spends an armed rollback: release it before a write
+            if op == "stream":
+                self._stream(100 + step)
+            elif op == "close":
+                self._close_and_open(rng.choice(("next: page step %d" % step, "continue",
+                                                 "answer %d <!-- romp-goal-id: %s:g2 -->" % (step, WEB))))
+            elif op == "republish":
+                self.rev += 1
+                self._publish_web(check_t=rng.choice((None, T0 + 2950)), mt_bump=step)
+            elif op == "seam":
+                self.seams = [] if self.seams else [self._seam13()]
+                self.rev += 1
+                self._publish_web()
+            elif op == "rewind":
+                self.cut[WEB] = "" if self.cut.get(WEB) else "w-a%02d" % rng.randrange(5, 30)
+            elif op == "restore":
+                self._restore(100 + step)
+            else:
+                self._compact()
+            self._warm_cold("step %d (%s)" % (step, op))
+        self.assertTrue(all(seen[o] for o in ("stream", "close", "republish", "rewind", "restore")),
+                        "the premise: the walk took every kind of step: %r" % dict(seen))
 
 
 if __name__ == "__main__":

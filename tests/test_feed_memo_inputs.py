@@ -134,20 +134,17 @@ km = load_source("romp_kernel_feed_memo_inputs", os.path.join(BIN, "romp-kernel"
 HELPERS = {
     # the transcript (the cache-only parse, the anchors, the api-error tail, the background scans)
     "_api_error": ("sig", ("transcript",)),
-    "_atom_prose_chars": ("sig", ("transcript",)),
-    "_last_plain_user_turn_t": ("sig", ("transcript",)),
     "_open_turn_progress": ("sig", ("transcript",)),
     "_pure_delegation_top": ("sig", ("transcript",)),
-    "_seg_anchors": ("sig", ("transcript",)),
-    "_seg_jump": ("sig", ("transcript",)),
     "_seg_key": ("sig", ("transcript",)),
-    "_seg_last_text": ("sig", ("transcript",)),
     "_summary_text_anchor": ("sig", ("transcript",)),   # T388: the brief line's text-atom landing, read from the parse's atoms
+    # the card anchor walk (2026-10-06): the one-pass loop's maps, its closed turns' part held between derivations under
+    # the turns' hold keys, the leaf's (path, inode) and the seams by value, so it reads the parse's turns (transcript,
+    # by way of ctx["ps"]) and the store's seams (store); the plain-prompt time over the turns the walk did not hold
+    "_feed_seg_walk": ("sig", ("transcript", "store")),
+    "_feed_seg_plain_t": ("sig", ("transcript",)),
     "_summary_outrun": ("sig", ("store", "transcript")),   # T388: the T153 outrun rule on a node's stamps and its trail's segment times
     "_landing_inputs": ("sig", ("store",)),               # T388: the shown line and completed bit from a node's state and its brief fields
-    "_segs_seam": ("sig", ("transcript",)),
-    "em.turn_scalar": ("sig", ("transcript",)),
-    "jd._prompt_anchor_uuid": ("sig", ("transcript",)),
     "_heal_session_tops": ("sig", ("transcript", "store")),            # the background scan over the store's tops
     "_warm_wanted": ("sig", ("transcript", "parse", "row")),           # moved since boot, or working (the row's state): worth a warm
     # the placeholders: their own _parse, the caption gist, the clear set, the current ask
@@ -200,7 +197,6 @@ MODULE_READS = {
     #                                                        met an unreadable body; such an entry is served but never memoized, so a
     #                                                        memoized entry always carries faults 0 and the key needs no component
     "_NEEDS_INPUT_STATES": ("const", "the live-prompt perm states (permission, picker), a tuple of strings bound once"),
-    "jd.CITE_MIN_CHARS": ("const", "the judge module's citation floor, an int bound once"),
     "jd.WHY_IN_FLIGHT": ("const", "the in-flight-class stall reasons, a tuple of the judge module's constant strings"),
     "jd.STATE": ("const", "the state root, a Path bound once at import (handed to the registry write above; the tests rebind it whole)"),
 }
@@ -219,6 +215,7 @@ CTX = {
     "jactive": ("sig", ("jactive",)),
     "ps": ("sig", ("parse", "transcript", "live", "cut", "states")),   # the cache-only, live-merged parse, re-read in place for a warm entry gone stale
     "leaf_ok": ("sig", ("transcript",)),               # the transcript's stat succeeded (2026-09-21): a gone leaf asks the warmer for nothing
+    "leaf_head": ("sig", ("transcript",)),             # the leaf's (path, inode) from the same stat (2026-10-06): the head the anchor walk's held aggregate stands under
     "who_working": ("sig", ("downtime", "parse")),     # _session_working over the open turn, suspension-aware
     "interrupting": ("sig", ("interrupting",)),
     "store": ("sig", ("store",)),                      # _feed_goals_keyed(fsid), read once in the key
