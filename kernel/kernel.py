@@ -35727,8 +35727,9 @@ def _caption_rows_version(fsid, caps):
     """The captions version `caps` was built from, for a memo that holds what it derived from those rows (the lane
     prefix, 2026-10-06): "empty" for an empty mapping (no file, or no rows: every lookup answers ''); (path,
     generation, base, record count) when `caps` is the mapping _captions holds for that version of
-    captions/<fsid>.jsonl; else None, a version nothing equals (a plain dict, a read the memo did not hold, or a
-    version another thread has replaced since this build's read)."""
+    captions/<fsid>.jsonl; else None, an unknown version (a plain dict, a read the memo did not hold, or a version
+    another thread has replaced since this build's read): the caller re-captions every held bar under it, even when the
+    held version is None too."""
     if not caps:
         return "empty"
     path = str(jd.CAPDIR / (fsid + ".jsonl"))
@@ -53622,7 +53623,7 @@ def _lanes_forget(keep):
 # live tail was merged (a turn in flight: `session is not parsed`, 35 % of the per-lane memo's lookups on the devbox),
 # re-derived EVERY turn of its history each build: 1.19 million segments re-walked in 25 minutes for 149 builds of
 # 3.4 s each, a third of the pusher's wall time. Every closed turn's bars depend only on that turn and the lane's
-# inputs (the store's seams, the captions, live, the branch clip, the host's downtime), never on its neighbours, so
+# inputs (the store's seams, the captions, live, the branch clip, the host's downtime), never on its neighbors, so
 # the bars of the turns BEFORE the last one are held per lane and reused while those turns' identities and the
 # inputs stand; only the tail (and any turn after the first that changed) is derived. An unshared mutable store
 # disables the prefix for that build (the derivation stays whole). Bounded by the lanes the builds draw

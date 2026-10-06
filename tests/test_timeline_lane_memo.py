@@ -1921,6 +1921,103 @@ class PrefixMemo(LaneMemoBase):
         self.assertTrue(all(a is b for a, b in zip(bars[:2], tl3["turns"][LIVE_SID][:2])), "the held bars are the same objects")
         self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
 
+    def test_a_message_caption_row_for_a_held_bar_re_captions_its_dot(self):
+        """RED FIRST: a '#p' row is a held bar's MESSAGE caption (its dot, `m`). It reaches the bar through the bar index
+        under the row's key less its '#p', exact and drifted: the prefix serves, that bar alone is rebuilt, the other held
+        bar is the same object, and the bars equal a whole derivation's."""
+        km.jd.append_caption(LIVE_SID, self.seg_id(), "segment", self.t0, "first summary")
+        tl3 = self.three_turns()
+        held = list(tl3["turns"][LIVE_SID])
+        self.assertNotIn("m", held[0], "the premise: no message caption yet")
+        seg0, seg1 = self.seg_ids()[:2]
+        km.jd.append_caption(LIVE_SID, seg0 + "#p", "prompt", self.t0, "Back off the retries")
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("m"), "Back off the retries", "the first held bar carries its new message caption")
+        self.assertEqual(self._prefix_counts()[0], 2, "the prefix served the build that drew the row")
+        self.assertEqual(self.recap(), (1, 1), "that held bar alone was looked up again, and rebuilt")
+        self.assertIsNot(bars[0], held[0])
+        self.assertIs(bars[1], held[1], "the other held bar is the same object")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+        parts = seg1.split(":")
+        parts[-2] = str(int(parts[-2]) + 3)                  # the judge's parse placed the segment's start 3 s later
+        km.jd.append_caption(LIVE_SID, ":".join(parts) + "#p", "prompt", self.t0 + 103, "Cap the delay")
+        tl5 = self.build()
+        bars5 = tl5["turns"][LIVE_SID]
+        self.assertEqual(bars5[1].get("m"), "Cap the delay", "a drifted '#p' row reaches its held bar too")
+        self.assertEqual((self._prefix_counts()[0], self.recap()), (3, (2, 2)))
+        self.assertIs(bars5[0], bars[0])
+        self.assertEqual(json.dumps(bars5), json.dumps(self.whole()[0]))
+
+    def test_seeded_caption_rows_rewrites_republishes_and_turns_keep_the_bars_whole(self):
+        """Seeded random caption rows (exact, drifted, '#p', the open segment's, another grain, rows the fold ignores),
+        captions rewrites, store republishes and new turns: after each, the lane's bars and their bytes through the warm
+        wire cache equal a whole derivation's and a cold encoding, and the prefix served and re-captioned along the way."""
+        import random
+        rnd = random.Random(1)
+        km.jd.append_caption(LIVE_SID, self.seg_id(), "segment", self.t0, "first summary")
+        self.build()
+        state = {"n": 1, "last": "a1", "rev": 0}
+        texts = ["continue", "go on", "and cap the delay"]
+
+        def add_turn():
+            i = state["n"]
+            t = self.t0 + 100 + 25 * i
+            u, a = "u%d" % (i + 1), "a%d" % (i + 1)
+            self.append_records([_rec("user", t, u, state["last"], rnd.choice(texts)),
+                                 _rec("assistant", t + 10, a, u, "Done %d." % i)])
+            state["n"] += 1
+            state["last"] = a
+        for _ in range(4):
+            add_turn()
+            self.build()
+        tl = self.build()
+        km._delta_split("dictlist:id", tl["turns"], memo_key=("fuzz", "turns"))
+        cap_path = km.jd.CAPDIR / (LIVE_SID + ".jsonl")
+        st0 = dict(self.stats())
+        for step in range(36):
+            ids = self.seg_ids()
+            pick = rnd.choice(ids[:-1])
+            parts = pick.split(":")
+            parts[-2] = str(int(parts[-2]) + rnd.choice([-4, 3, 7]))
+            drift = ":".join(parts)
+            k = rnd.randrange(10)
+            if k == 0:
+                km.jd.append_caption(LIVE_SID, pick, "segment", self.t0, "w%d" % step)
+            elif k == 1:
+                km.jd.append_caption(LIVE_SID, pick + "#p", "prompt", self.t0, "p%d" % step)
+            elif k == 2:
+                km.jd.append_caption(LIVE_SID, drift, "segment", int(parts[-2]), "dw%d" % step)
+            elif k == 3:
+                km.jd.append_caption(LIVE_SID, drift + "#p", "prompt", int(parts[-2]), "dp%d" % step)
+            elif k == 4:
+                km.jd.append_caption(LIVE_SID, ids[-1], "segment", self.t0, "o%d" % step)
+            elif k == 5:
+                km.jd.append_caption(LIVE_SID, pick, "turn", self.t0, "t%d" % step)
+            elif k == 6:
+                with cap_path.open("a") as f:
+                    f.write(json.dumps({"grain": "segment", "caption": "no id"}) + "\n")
+            elif k == 7:
+                rows = [json.loads(x) for x in cap_path.read_text().splitlines() if x.strip()]
+                keep = [r for r in rows if rnd.random() < 0.6]
+                cap_path.write_text("".join(json.dumps(r) + "\n" for r in keep))
+            elif k == 8:
+                state["rev"] += 1
+                self.write_store([], state["rev"])
+            else:
+                add_turn()
+            tl = self.build()
+            bars = tl["turns"][LIVE_SID]
+            label = "step %d kind %d" % (step, k)
+            self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]), label)
+            warm, wo = km._delta_split("dictlist:id", tl["turns"], memo_key=("fuzz", "turns"))
+            cold, co = km._delta_split("dictlist:id", tl["turns"])
+            self.assertEqual(wo, co, label)
+            self.assertEqual({x: v[1] for x, v in warm.items()}, {x: v[1] for x, v in cold.items()}, label)
+        st = self.stats()
+        self.assertGreater(st["prefix_hit"] - st0.get("prefix_hit", 0), 0, "the walk served the held prefix")
+        self.assertGreater(st.get("prefix_recap_new", 0) - st0.get("prefix_recap_new", 0), 0, "and rebuilt re-captioned bars")
+
     def test_a_rewritten_captions_file_re_captions_every_held_bar(self):
         """RED FIRST: a rewrite of the captions file (a new generation of the reader's entry: rows dropped or replaced)
         is not an append, so no appended rows say which bars it reaches: every held bar is looked up again, the prefix
