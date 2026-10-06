@@ -770,6 +770,9 @@ class Bound(_CaptionsBase):
                          "an evicted entry's mapping: its rows the memo's alone")
         self.write(recaptioned(road_rows()[:6], "rewritten"), path=other)
         em._read_jsonl_incremental(str(other))        # another reader's read of the rewrite replaces the entry
+        with em._JSONL_CACHE_LOCK:
+            regen = em._JSONL_CACHE[str(other)][6]
+        self.assertNotEqual(regen, km._CAPTION_ROWS_MEMO[str(other)][0], "(the premise) the rewrite read anew")
         self.assertEqual(gauges(), dict(both, orphanRows=len(caps) + len(caps2),
                                         orphanBytes=one_level(caps) + one_level(caps2)),
                          "a replaced entry's mapping: an orphan too")
