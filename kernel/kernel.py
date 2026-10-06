@@ -36022,10 +36022,11 @@ _CAPTION_ROWS_MEMO = {}           # captions path -> (generation, base, record c
 #                                   and the mapping built from exactly those records (_captions)
 _CAPTION_ROWS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "swept": 0,
                        "indexBuild": 0, "indexLookup": 0, "scanLookup": 0}
-#                                   hit: the held mapping served; extend: copied and extended by the appended rows; build: built
+#                                   hit: the held mapping served (a read that finds its own version stored by another thread
+#                                   meanwhile serves that one); extend: copied and extended by the appended rows; build: built
 #                                   from every row (a new generation, or the file's first read); uncached: a read whose records
-#                                   the reader's entry no longer holds (no file, or another thread's newer read), answered and
-#                                   not held; swept: entries dropped because the reader
+#                                   the reader's entry no longer holds (no file, or another thread's newer read), or that finds a
+#                                   newer version stored meanwhile, answered and not held; swept: entries dropped because the reader
 #                                   let their entry go; indexBuild: drift indexes built; indexLookup and scanLookup: drifted
 #                                   lookups served by the index, and by the scan (a mapping that is not a _CaptionRows, or an
 #                                   id that is not a string)
@@ -36093,12 +36094,20 @@ def _caption_index(caps):
     return None if idx is _CAPTION_IDX_SCAN else idx
 
 
+def _caption_rows_orphaned(ent, e):
+    """True when the reader's entry `ent` (None when it has none) no longer holds the version the memo's entry `e` was
+    built from: gone (an eviction, the file removed) or of another generation or base (a rewrite read back). Such a
+    mapping can only rebuild at its next read, and its rows are no longer the record cache's: the memo alone keeps them.
+    The one rule of the sweep and of /perf's orphan gauges."""
+    return ent is None or ent[6] != e[0] or ent[5] != e[1]
+
+
 def _caption_rows_sweep(keep):
-    """Drop the held mappings whose reader entry is gone or is of another generation or base (an eviction, a rewrite
-    read back, the file removed): such an entry can only rebuild at its next read, and holding it would keep rows the
-    reader's byte budget let go. Run whenever a new version is held, so at that moment the memo holds nothing the record
-    cache does not, beyond the version just installed; a mapping whose entry the cache lets go between two installs
-    stays until the next one. `keep` is that path."""
+    """Drop the held mappings whose reader entry is gone or is of another generation or base (_caption_rows_orphaned):
+    holding one would keep rows the reader's byte budget let go. Run whenever a new version is held, so at that moment
+    the memo holds nothing the record cache does not, beyond the version just installed; a mapping whose entry the
+    cache lets go between two installs stays until the next one, counted meanwhile by /perf's orphanRows and
+    orphanBytes. `keep` is that path."""
     with _CAPTION_ROWS_LOCK:
         held = [(p, e) for p, e in _CAPTION_ROWS_MEMO.items() if p != keep]
     if not held:
@@ -36106,8 +36115,7 @@ def _caption_rows_sweep(keep):
     with em._JSONL_CACHE_LOCK:
         stale = []
         for p, e in held:
-            ent = em._JSONL_CACHE.get(p)
-            if ent is None or ent[6] != e[0] or ent[5] != e[1]:
+            if _caption_rows_orphaned(em._JSONL_CACHE.get(p), e):
                 stale.append((p, e))
     if stale:
         with _CAPTION_ROWS_LOCK:
@@ -36119,18 +36127,30 @@ def _caption_rows_sweep(keep):
 
 def _caption_rows_report():
     """GET /perf memos.captionRows: the counters (_CAPTION_ROWS_STATS), the mappings held (`entries`), their rows
-    (`rows`) and their containers' bytes, estimated (`bytes`: each mapping's dict and its drift index; the rows
-    themselves are the record cache's)."""
+    (`rows`) and their containers' bytes, estimated (`bytes`: each mapping's dict and its drift index, the index's dict
+    and each group's key and list, O(groups)). A mapping's rows are the record cache's while the reader's entry holds
+    its version; `orphanRows` and `orphanBytes` count the rows of the mappings whose reader entry is gone or replaced
+    (_caption_rows_orphaned), which the memo alone keeps until the next sweep, their bytes estimated one level deep:
+    each row's dict, its keys and its values."""
     with _CAPTION_ROWS_LOCK:
         out = dict(_CAPTION_ROWS_STATS)
-        held = [e[3] for e in _CAPTION_ROWS_MEMO.values()]
+        held = list(_CAPTION_ROWS_MEMO.items())
     nbytes = 0
-    for m in held:
+    for _p, e in held:
+        m = e[3]
         nbytes += sys.getsizeof(m)
         idx = m._idx
         if isinstance(idx, dict):
-            nbytes += sys.getsizeof(idx) + 64 * len(idx)   # a one-id group's list, about 64 bytes
-    out.update(entries=len(held), rows=sum(len(m) for m in held), bytes=nbytes)
+            nbytes += sys.getsizeof(idx) + sum(sys.getsizeof(k) + sys.getsizeof(g) for k, g in idx.items())
+    with em._JSONL_CACHE_LOCK:
+        ents = [em._JSONL_CACHE.get(p) for p, _e in held]
+    orphans = [e[3] for (_p, e), ent in zip(held, ents) if _caption_rows_orphaned(ent, e)]
+    obytes = 0
+    for m in orphans:
+        for r in m.values():
+            obytes += sys.getsizeof(r) + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in r.items())
+    out.update(entries=len(held), rows=sum(len(e[3]) for _p, e in held), bytes=nbytes,
+               orphanRows=sum(len(m) for m in orphans), orphanBytes=obytes)
     return out
 
 
@@ -36150,8 +36170,16 @@ def _captions(fsid):
     history. The mapping is a _CaptionRows, a dict that refuses writes, since the builds now share it. A read whose
     records the reader's entry no longer holds (no file, or another thread's newer read) is answered and not held; each
     newly held version sweeps the entries whose reader entry is gone (_caption_rows_sweep), so the memo holds at most
-    what the record cache held at the last install."""
+    what the record cache held at the last install.
+
+    Another thread can store between this call's checks and its store, so the store re-reads the memo's entry under the
+    lock (2026-10-06): this call's own version there is served as it stands (one mapping per version, the one
+    _caption_rows_version answers for); a newer one (a later generation, or this generation and base with more records)
+    stands, and this call's rows are answered and not held; anything else is replaced. The drop of a read that found no
+    file makes the same check: an entry of a generation the reader minted after this call began is a later read's, and
+    stands (the next call or sweep decides it)."""
     path = str(jd.CAPDIR / (fsid + ".jsonl"))
+    floor = em._GEN[0]                                # the reader's last generation minted before this read
     records = em._read_jsonl_incremental(path)
     with em._JSONL_CACHE_LOCK:
         ent = em._JSONL_CACHE.get(path)
@@ -36159,7 +36187,9 @@ def _captions(fsid):
         with _CAPTION_ROWS_LOCK:
             _CAPTION_ROWS_STATS["uncached"] += 1
             if ent is None:
-                _CAPTION_ROWS_MEMO.pop(path, None)
+                held = _CAPTION_ROWS_MEMO.get(path)
+                if held is not None and held[0] <= floor:   # a version read before this call's: the file is gone since
+                    del _CAPTION_ROWS_MEMO[path]
         if not records:
             return _CAPTION_ROWS_EMPTY
         out = {}
@@ -36178,6 +36208,13 @@ def _captions(fsid):
         _caption_rows_fold(out, records)
         rows, kind = _CaptionRows(out), "build"
     with _CAPTION_ROWS_LOCK:
+        now = _CAPTION_ROWS_MEMO.get(path)            # re-read: another thread may have stored since the check above
+        if now is not None and now[0] == gen and now[1] == base and now[2] == count:
+            _CAPTION_ROWS_STATS["hit"] += 1
+            return now[3]                             # this version, stored meanwhile: the one mapping for it
+        if now is not None and (now[0] > gen or (now[0] == gen and now[1] == base and now[2] > count)):
+            _CAPTION_ROWS_STATS["uncached"] += 1
+            return rows                               # a newer version stored meanwhile: answered, not held
         _CAPTION_ROWS_MEMO[path] = (gen, base, count, rows)
         _CAPTION_ROWS_STATS[kind] += 1
     _caption_rows_sweep(path)
@@ -53679,11 +53716,12 @@ def _seg_caption(caps, seg_id):
     On a miss the answer is the FIRST row, in the rows' order, whose id ends in '#p' and shares the key, of any grain.
     A _captions mapping finds it through its drift index (_caption_index: the ids sharing the key, in the rows' order),
     where the scan visited every row on every miss: the open segment's message caption, not yet written, missed on
-    every build (2026-10-05). Any other mapping scans as before."""
+    every build (2026-10-05). Any other mapping scans as before. An empty mapping (the shared one every session with no
+    captions file is served) has nothing to find: it builds no index and moves no lookup counter (2026-10-06)."""
     hit = caps.get(seg_id + "#p")
     if hit is None:
         want = _seg_key(seg_id + "#p")
-        idx = _caption_index(caps)
+        idx = _caption_index(caps) if caps else None   # an empty mapping scans nothing, counted by neither road
         if idx is None:
             if caps:
                 _CAPTION_ROWS_STATS["scanLookup"] += 1
@@ -53708,7 +53746,8 @@ def _seg_work_caption(caps, seg_id):
     distinct segments sit minutes apart. '' when absent.
     On a miss a _captions mapping visits only the rows sharing the key, through its drift index (_caption_index), in
     the rows' order, so the grain filter, the nearest-t pick and its strict < (a tie goes to the earlier row) see the
-    rows the scan saw, in the order it saw them (2026-10-05). Any other mapping scans as before."""
+    rows the scan saw, in the order it saw them (2026-10-05). Any other mapping scans as before. An empty mapping builds
+    no index and moves no lookup counter, as in _seg_caption."""
     hit = caps.get(seg_id)
     if hit is not None:
         return hit.get("caption", "")
@@ -53721,7 +53760,7 @@ def _seg_work_caption(caps, seg_id):
         return ""
     want = _seg_key(seg_id)
     best = None
-    idx = _caption_index(caps)
+    idx = _caption_index(caps) if caps else None       # an empty mapping scans nothing, counted by neither road
     if idx is None:
         if caps:
             _CAPTION_ROWS_STATS["scanLookup"] += 1
