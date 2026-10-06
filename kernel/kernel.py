@@ -1263,6 +1263,7 @@ class _PerfStats:
                           ("statesOverlay", _states_overlay_report),
                           ("parkedHandoffs", _parked_fold_report),   # the feed's parked-handoff fold over the postal log (2026-09-18): its path counts and candidates held
                           ("lanes", _lanes_memo_report),   # the timeline's per-lane segment memo, live lanes; the dead lanes beside
+                          ("msgScan", _msg_scan_report),   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
                           ("judgingBand", _judging_band_report),   # the judging band's per-row memo and horizon cursor (2026-09-16)
                           ("spendTree", _spend_tree_memo_report),   # the spend guard's subagent-tree memos: bytes against their bound
                           ("subagentTree", _subagent_tree_memo_report),   # the subagents directory walk memo (2026-09-16): served vs walked, scoped
@@ -51933,25 +51934,225 @@ def _usage_for_client():
     return u
 
 
-_msg_sum_cache = {}                               # {"per": {sid: (mtime, submap)}, "map": union {mid: caption}}
+_msg_sum_cache = {}                               # {"per": {sid: (key, submap)}, "map": union {mid: caption},
+#                                                    "held": the scan's held turn records (_msg_scan_held)}
+
+
+# HELD PER-TURN RESULTS (2026-10-05, the first of the build-cost changes). Every turn of a session but its last is closed,
+# and what a walker derives from a closed turn is a function of that turn's atoms and a few session-wide inputs: the
+# premise the lane prefix already rests on (the comment above _lane_prefix_memo). A walker that re-derived every turn of
+# a working session on every build can hold each closed turn's result under _turn_hold_key and walk only the turns from
+# the first whose key moved, the open one always. The two helpers below are what every such walker shares: the turn's
+# key, and the seams' fingerprint by value (the one store input a segment id depends on).
+
+
+def _turn_hold_key(turn):
+    """A closed turn's identity for a held per-turn result: _turn_prefix_key (the turn id, which is the session, the
+    start second and the trigger text's hash; whether it ended; its atom count; its end) plus the trigger's uuid and the
+    uuid of its newest atom that carries one (an idle span carries none, and a closed turn usually ends on one). The turn
+    id names no record, so two turns with the same start second and prompt text, a file rewritten in place or a fixture
+    that reuses its times, are told apart by their records' uuids. A restored pre-cut turn (em.PreTurn) answers both
+    from its stored uuids, so no atom is built. There is no restored-turn bit: a restored turn and the whole parse's
+    agree on every field here by construction (em._pre_turns_of; the document's turns are written from the tree it
+    restores), so a restore reuses what the whole road held instead of walking every turn once more."""
+    trig = (turn.get("trigger") or {}).get("uuid")
+    if turn.get("pre") and turn.get("uuids") is not None:
+        last = next((u for u in reversed(turn["uuids"]) if u), None)
+    else:
+        last = next((u for u in (a.get("uuid") for a in reversed(turn.get("atoms") or [])) if u), None)
+    return _turn_prefix_key(turn) + (trig, last)
+
+
+def _hold_fp_val(v):
+    """One seam field as a value a fingerprint can keep after the store moves on: a scalar as itself; a dict by its keys
+    and a list by its members (what apply_seams' `in` reads), each tagged with its kind; anything else by its type and
+    repr. Two equal results read the same under apply_seams (two that read the same may still differ: one more walk)."""
+    if v is None or isinstance(v, (str, int, float)):
+        return v
+    if isinstance(v, dict):
+        return ("dict", tuple(_hold_fp_val(k) for k in v))
+    if isinstance(v, (list, tuple)):
+        return ("list", tuple(_hold_fp_val(x) for x in v))
+    return ("other", type(v).__name__, repr(v))
+
+
+def _seams_fp(store):
+    """The seams jd.apply_seams would apply, BY VALUE: (segs, t, top, text) of each, in store order (the order its `min`
+    breaks a tie in), through the same filter it takes them through. A held segmentation stands while this does: a
+    republish that moves nodes or status and no seam keeps it; a seam stamped, moved or removed does not. Compared by
+    value, never by the store's identity, so a store published again with the same seams is the same input."""
+    return tuple((_hold_fp_val(s["segs"]), _hold_fp_val(s.get("t", 0)), _hold_fp_val(s.get("top")),
+                  _hold_fp_val(s.get("text", "")))
+                 for s in ((store or {}).get("seams") or []) if isinstance(s, dict) and s.get("segs"))
+
+
+def _msg_scan_held_bound():
+    """The held message-id records' byte bound: ROMP_MSG_SCAN_HELD_BYTES when it names a positive integer, else a
+    two-hundred-fifty-sixth of the machine's memory (the _summary_anchor_memo_bound idiom: 32 MB on an 8 GB box, where a
+    session's held turns cost about 0.4 KB each). Read once at import (MSG_SCAN_HELD_BYTES); GET /perf reports it beside
+    the hold's bytes (memos.msgScan). The user's caches rule (2026-09-11): a byte bound as a fraction of memory with an
+    override, never a count literal."""
+    raw = os.environ.get("ROMP_MSG_SCAN_HELD_BYTES", "")
+    try:
+        if raw and int(raw) > 0:
+            return int(raw)
+    except ValueError:
+        pass
+    return _mem_total_bytes() // 256
+
+
+MSG_SCAN_HELD_BYTES = _msg_scan_held_bound()
+_MSG_SCAN_LOCK = threading.Lock()    # the held table and its counters: the pusher and a handler thread can scan at once
+_MSG_SCAN_STATS = {"scans": 0, "heldTurns": 0, "walkedTurns": 0, "partial": 0, "reset": 0, "raised": 0, "evict": 0}
+#   scans: scans whose walk finished (a walk that raised counts under raised instead); heldTurns / walkedTurns: closed turns served from the hold / turns walked (the
+#   open one always); partial: a held entry whose turns diverged before its end (a rewind, a compaction re-seat, a late
+#   record); reset: a held entry discarded whole (another leaf, or the seams moved); raised: a walk that raised (stored
+#   nothing); evict: entries the byte bound shed
+_HOLD_KEY_BYTES = 360                # one held key's estimated bytes beside its turn id: the tuple, the end, two uuids
+
+
+def _msg_scan_held():
+    """The held table, kept INSIDE _msg_sum_cache so whatever resets that cache (a test's clear) drops the held records
+    with the submaps they were joined into: an OrderedDict sid -> (head, seams, keys, records, bytes), least recently
+    scanned first. Called under _MSG_SCAN_LOCK."""
+    table = _msg_sum_cache.get("held")
+    if table is None:
+        table = _msg_sum_cache["held"] = collections.OrderedDict()
+    return table
+
+
+def _msg_scan_head(path):
+    """The leaf a held entry describes: (path, inode), stat'd BEFORE the parse reads the file, or None when it cannot be
+    stat'd (nothing is held then). The turn keys name no file, so a resume into a new file, a /clear's leaf, or a file
+    replaced at the same path is a new entry, one whole walk. Stat-then-read: a file replaced after this stat pairs the
+    old head with the new records, which the next scan's head discards."""
+    try:
+        return (str(path), os.stat(path).st_ino)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _msg_scan_entry_bytes(keys, recs):
+    """An estimate of one held entry's bytes: per key its tuple, end and uuids plus its turn id's length; per (segment
+    id, message ids) pair its tuples and strings. A turn without ids holds the shared empty tuple."""
+    n = 64 + 16 * len(keys) + sum(_HOLD_KEY_BYTES + len(k[0] or "") for k in keys)
+    for r in recs:
+        for seg_id, mids in r:
+            n += 160 + len(seg_id) + sum(56 + len(m) for m in mids)
+    return n
+
+
+def _msg_mid_turn(turn, store):
+    """One turn's (segment id, message ids) pairs, for its segments that carry ids, in segment order: everything the
+    message-caption join reads of the turn, and nothing of the captions (joined fresh at every scan)."""
+    out = []
+    for seg in _segs_seam(turn, store):
+        mids = _seg_mids(seg)                        # a peer-message segment carries its msgId marker
+        if mids:
+            out.append((seg["id"], tuple(mids)))
+    return tuple(out)
+
+
+def _msg_mid_records(sid, turns, store, head):
+    """Every turn's _msg_mid_turn pairs, the closed turns' served from the hold where they stand (2026-10-05, the
+    message-caption part of the build-cost changes). The held entry stands under the same leaf (`head`,
+    _msg_scan_head) and the same seams (_seams_fp, by value); then its closed turns are reused up to the first whose
+    _turn_hold_key moved, and the walk runs from there, the open turn always. The closed turns' records are stored for
+    the next scan, only when the walk finished: a walk that raises stores nothing and the caller keeps its last-known
+    submap."""
+    fp = _seams_fp(store)
+    n_closed = len(turns) - 1
+    keys = [_turn_hold_key(t) for t in turns[:n_closed]] if head is not None and n_closed > 0 else []
+    held, start, partial, reset = (), 0, False, False
+    if keys:
+        with _MSG_SCAN_LOCK:
+            table = _msg_scan_held()
+            ent = table.get(sid)
+            if ent is not None:
+                table.move_to_end(sid)               # a used entry is the newest: the bound sheds colder sessions first
+        if ent is not None:
+            if ent[0] == head and ent[1] == fp:
+                k = 0
+                for a, b in zip(ent[2], keys):
+                    if a != b:
+                        break
+                    k += 1
+                held, start = ent[3][:k], k
+                partial = k < len(ent[2]) and k < len(keys)
+            else:
+                reset = True
+    walked = []
+    try:
+        for t in turns[start:]:
+            walked.append(_msg_mid_turn(t, store))
+    except Exception:
+        with _MSG_SCAN_LOCK:
+            _MSG_SCAN_STATS["raised"] += 1
+        raise
+    recs = list(held) + walked
+    size = _msg_scan_entry_bytes(keys, recs[:n_closed]) if keys else 0
+    with _MSG_SCAN_LOCK:
+        st = _MSG_SCAN_STATS
+        st["scans"] += 1
+        st["heldTurns"] += start
+        st["walkedTurns"] += len(walked)
+        st["partial"] += 1 if partial else 0
+        st["reset"] += 1 if reset else 0
+        if keys:
+            table = _msg_scan_held()
+            table.pop(sid, None)
+            if size > MSG_SCAN_HELD_BYTES:
+                st["evict"] += 1                     # an entry over the bound alone is not held, and sheds no other session
+            else:
+                table[sid] = (head, fp, tuple(keys), tuple(recs[:n_closed]), size)
+                total = sum(e[4] for e in table.values())
+                while total > MSG_SCAN_HELD_BYTES:
+                    _k, old = table.popitem(last=False)  # the least recently scanned first; the newest fits alone
+                    total -= old[4]
+                    st["evict"] += 1
+    return recs
+
+
+def _msg_scan_forget(live):
+    """Drop the held records of the sessions outside `live`, the scan's discovered set, as _msg_summaries drops their
+    submaps: the hold is bounded by the sessions discovery returns and by its bytes."""
+    with _MSG_SCAN_LOCK:
+        table = _msg_scan_held()
+        for sid in [k for k in table if k not in live]:
+            del table[sid]
+
+
+def _msg_scan_report():
+    """GET /perf memos.msgScan: the message-caption scan's counters (_MSG_SCAN_STATS) with the hold's occupancy, its
+    estimated bytes and its bound."""
+    with _MSG_SCAN_LOCK:
+        table = _msg_sum_cache.get("held") or {}
+        return dict(_MSG_SCAN_STATS, entries=len(table), bytes=sum(e[4] for e in table.values()),
+                    bound=MSG_SCAN_HELD_BYTES)
 
 
 def _msg_sum_scan_session(sid, path, now):
     """Scan ONE session's transcript for its msgId→caption entries (the caption of each peer-message
-    segment it bore). Returns {mid: caption}; {} when it has no captions yet or on error."""
+    segment it bore). Returns {mid: caption}; {} when it has no captions yet or on error.
+
+    The walk is _msg_mid_records: each closed turn's (segment id, message ids) pairs are held between scans, so an
+    append, a caption row or a store republish walks the open turn alone where it re-segmented every turn and read
+    every atom's ids (2026-10-05). The captions are joined here, fresh at every scan, so a caption row costs the join
+    alone; the join assigns exactly what the one-pass loop did, in the same order (a captioned segment's ids, turn
+    by turn and segment by segment)."""
     caps = _captions(sid)
     if not caps:                                     # no captions yet → nothing to join, skip the parse
         return {}
-    sub = {}
+    head = _msg_scan_head(path)                      # BEFORE the parse (stat-then-read)
     session = _parse(path, sid, now)
     mstore = jd.load_goals_shared(sid)               # read-only: the seams for the seg ids
-    for turn in session["turns"]:
-        for seg in _segs_seam(turn, mstore):
-            cap = _seg_work_caption(caps, seg["id"])     # drift-safe: the store id came from the judge's parse
-            if not cap:
-                continue
-            for mid in _seg_mids(seg):               # a peer-message segment carries its msgId marker
-                sub[mid] = cap
+    sub = {}
+    for recs in _msg_mid_records(sid, session["turns"], mstore, head):
+        for seg_id, mids in recs:
+            cap = _seg_work_caption(caps, seg_id)    # drift-safe: the store id came from the judge's parse
+            if cap:
+                for mid in mids:
+                    sub[mid] = cap
     return sub
 
 
@@ -52018,12 +52219,17 @@ def _msg_summaries():
         try:
             sub = _msg_sum_scan_session(sid, s["path"], now)
         except Exception:
-            sub = ent[1] if ent else {}              # keep last-known on a transient error
+            # keep last-known on a transient error, under no key: the next build retries the scan (the held turns make a
+            # retry cheap) instead of serving the pre-raise map until an input moves
+            per[sid] = (None, ent[1] if ent else {})
+            dirty = True
+            continue
         per[sid] = (key, sub)
         dirty = True
     for sid in [k for k in per if k not in live]:    # forget dead sessions so `per` can't grow unbounded
         del per[sid]
         dirty = True
+    _msg_scan_forget(live)                           # and their held turn records with them
     if dirty or "map" not in _msg_sum_cache:         # rebuild the union only when a submap changed
         m = {}
         for _mt, sub in per.values():
