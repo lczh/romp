@@ -1289,6 +1289,8 @@ class _PerfStats:
                           ("msgScan", _msg_scan_report),   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
                           ("judgingBand", _judging_band_report),   # the judging band's per-row memo and horizon cursor (2026-09-16)
                           ("captionRows", _caption_rows_report),   # the captions mapping the builds share and its drift index (2026-10-05)
+                          ("judgingMarks", _judging_marks_report),   # the captioner's marks held per captions version (2026-10-06)
+                          ("stateIntervals", _state_intervals_report),   # the states logs' sorted transitions per fold cursor (2026-10-06)
                           ("spendTree", _spend_tree_memo_report),   # the spend guard's subagent-tree memos: bytes against their bound
                           ("subagentTree", _subagent_tree_memo_report),   # the subagents directory walk memo (2026-09-16): served vs walked, scoped
                           ("summaryAnchor", _summary_anchor_memo_report),   # the brief line's text-atom landings (T388): bytes against their bound
@@ -49943,11 +49945,21 @@ def _state_intervals(sid, want, now):
     predating the log don't appear. File-based port of the obsidian timeline's stateIntervals (the kernel
     reads states/, never a backend).
     Folds the states log append-incrementally since 2026-09-03 (_fold_records): every timeline
-    rebuild used to re-read and re-parse the whole file, twice per session (once per `want`); the
-    intervals themselves are cheap."""
+    rebuild used to re-read and re-parse the whole file, twice per session (once per `want`).
+    The sorted transitions are held on the fold's cursor since 2026-10-06 (_state_ev_sorted), where each call sorted
+    the whole log and walked every transition: a log of plain rows (numeric times, string states) keeps each state set's
+    intervals with them (_state_iv_cands), whose ends never decrease, so the horizon is a bisection and only the
+    intervals it keeps are built; any other log walks every transition as before, its raise included."""
     want = {want} if isinstance(want, str) else set(want)
-    ev = sorted(_fold_records(_state_ev_cache, jd.STATE / "states" / (sid + ".jsonl"), list, _state_ev_step, ckpt="stateIntervals"))
+    ent = _state_ev_sorted(sid, jd.STATE / "states" / (sid + ".jsonl"))
+    ev = ent[2]
     cutoff, out = now - TL_HORIZON, []
+    if ent[3] and type(cutoff) in _CAP_T_TYPES and cutoff == cutoff:
+        starts, ends, open_t = _state_iv_cands(ent, want)
+        out = [[max(starts[j], cutoff), ends[j]] for j in range(bisect.bisect_left(ends, cutoff), len(ends))]
+        if open_t is not None and not now < cutoff:
+            out.append([max(open_t, cutoff), now, True])
+        return out
     for i, (t, st) in enumerate(ev):
         if st not in want:
             continue
@@ -54053,6 +54065,350 @@ def _derive_judging(sid, caps, goals, t0, out, seg_ends=None, stamp=False):
     _judging_assemble(cap_marks, other_marks, t0, out, stamp=stamp)
 
 
+# ── the timeline's FLOORS that grew with history (2026-10-06, the build-cost design's D3): paid on every lane derivation
+# or every build even when every other memo hit. (1) The captioner's marks: _derive_judging_marks sorted every caption
+# row and made a mark dict per row on every derivation of a lane (36,000 rows at the build-cost lab's 3x history, and
+# the working lane derives on every build), and _judging_assemble then filtered every mark against the horizon on every
+# build of every lane, a memo hit included. The marks are a function of the sid and the caption rows alone, so they are
+# held per sid on the captions mapping's version (#118's reader version: the path, the reader entry's generation and
+# base, the record count, valid while the mapping _captions holds for that version IS the one handed in), carried
+# across an append by placing only the appended rows, and the assembly finds the horizon by bisection over the marks'
+# times. (2) The states log: _state_intervals sorted the whole log twice per lane per build (once per state set) and
+# walked every transition; the sorted transitions are held per sid on the log's fold cursor (the reader's generation and
+# record count, valid while the fold's answer IS the cursor's own state object, which a fold never mutates), with each
+# state set's intervals, so a build bisects the horizon. Both are byte-bounded LRU tables (the user's caches rule: a
+# fraction of memory with an override) dropped for the lanes a full build no longer draws, and /perf reports them as
+# memos.judgingMarks and memos.stateIntervals. No clock is read in either: the horizon is the caller's.
+_CAP_T_TYPES = (int, float, bool)   # a time the bisection can order: JSON's numbers (NaN is refused separately)
+
+
+class _CapMarks(list):
+    """The captioner's marks of one captions mapping in caption-time order (_derive_judging_marks): a list that refuses
+    every write, because one list now serves every derivation of the lane while its captions version stands, and is
+    shared by identity into the lane memo's entry and every build's assembly; a write would reach the next build's band.
+    list(marks) is a plain copy to edit (copy.copy and copy.deepcopy hand back plain lists, and a slice is one). `_ts` is
+    the marks' times as a tuple, in order, when every time is an int, a float or a bool and none is NaN (the assembly then
+    bisects the horizon), else None; `_num` says every time is an int or a float (the lane's numeric check,
+    _cap_marks_numeric). The mark dicts stay read-only by contract, as they were when the lane memo alone shared them."""
+    __slots__ = ("_ts", "_num")
+
+    def __init__(self, marks=(), ts=None, num=False):
+        list.__init__(self, marks)
+        self._ts = ts
+        self._num = num
+
+    def _read_only(self, *a, **k):
+        raise TypeError("the caption marks are shared by every build while the captions file stands; edit a copy (list(marks))")
+
+    append = extend = insert = pop = remove = clear = sort = reverse = _read_only
+    __setitem__ = __delitem__ = __iadd__ = __imul__ = _read_only
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        return copy.deepcopy(list(self), memo)
+
+    def __reduce_ex__(self, protocol):
+        return (list, (list(self),))
+
+
+def _floor_memo_bound(env, share):
+    """A floor memo's byte bound: the environment variable `env` when it names a positive integer, else the machine's
+    memory divided by `share` (the _summary_anchor_memo_bound idiom). Read once at import; GET /perf reports it beside
+    the memo's bytes. The user's caches rule (2026-09-11): a byte bound as a fraction of memory with an override, never
+    a count literal."""
+    raw = os.environ.get(env, "")
+    try:
+        if raw and int(raw) > 0:
+            return int(raw)
+    except ValueError:
+        pass
+    return _mem_total_bytes() // share
+
+
+JUDGING_MARKS_MEMO_BYTES = _floor_memo_bound("ROMP_JUDGING_MARKS_MEMO_BYTES", 256)   # 32 MB on an 8 GB box
+STATE_IV_MEMO_BYTES = _floor_memo_bound("ROMP_STATE_INTERVALS_MEMO_BYTES", 512)      # 16 MB on an 8 GB box
+_JUDGING_MARKS_LOCK = threading.Lock()   # the table and its counters: the pusher and a connect push can build at once
+_JUDGING_MARKS_MEMO = collections.OrderedDict()   # sid -> (version, id count, marks, ids, bytes), least recently used first;
+#                                                   ids are the caption ids of the marks, in the marks' order
+_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "evict": 0, "forget": 0}
+#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows; build:
+#   every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the bisection
+#   cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read not held,
+#   a version another thread has replaced since), derived and not held; evict: entries the byte bound shed (an entry
+#   over the bound alone is not held); forget: entries of lanes a full build no longer draws
+_STATE_IV_LOCK = threading.Lock()
+_STATE_IV_MEMO = collections.OrderedDict()   # sid -> (version, the fold's state, sorted transitions, plain, {state set:
+#                                              (starts, ends, open start)}, bytes), least recently used first
+_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "evict": 0, "forget": 0}
+#   hit: the held transitions served; sort: a version sorted and held; uncached: a fold answer that is not the cursor's
+#   own state (a newline-less last row folded provisionally, served records, a failed read, another thread's newer fold),
+#   sorted and not held; evict and forget as above
+
+
+def _cap_mark(sid, c):
+    """One caption row's mark, the shape _cap_marks_build's comprehension makes (key order included)."""
+    return {"judge": "captioner", "sid": sid, "t": c["t"], "kind": c.get("grain", "segment"), "text": c.get("caption", "")}
+
+
+def _cap_marks_build(sid, caps):
+    """Every timed caption row's mark in caption-time order, as the one-pass form made them: the rows sorted by t, a tie
+    in the mapping's order (a stable sort over the rows in that order). Returns (a _CapMarks, the caption ids in the
+    marks' order). A sort that raises (times that do not compare) raises here, as it did."""
+    rows = sorted((kv for kv in caps.items() if kv[1].get("t")), key=lambda kv: kv[1]["t"])
+    marks = [{"judge": "captioner", "sid": sid, "t": c["t"], "kind": c.get("grain", "segment"), "text": c.get("caption", "")}
+             for _k, c in rows]
+    ts = tuple(c["t"] for _k, c in rows)
+    num = order = True
+    for t in ts:
+        if not isinstance(t, (int, float)):
+            num = order = False
+            break
+        if order and (type(t) not in _CAP_T_TYPES or t != t):
+            order = False
+    return _CapMarks(marks, ts if order else None, num), tuple(k for k, _c in rows)
+
+
+def _cap_marks_extend(sid, marks0, ids0, nids0, caps, tail):
+    """The held marks `marks0` (of a mapping of `nids0` ids) carried to `caps`, the same file lengthened by the records
+    `tail`: (a new _CapMarks, its ids), or None when the marks must be built whole. Exact, never approximate:
+    - an id the tail added (the mapping's ids past the first nids0, in their order) is placed after every mark of an
+      equal time, since it follows every held id in the mapping's order, which is the sort's tie order;
+    - an id the tail rewrote keeps its place in the mapping's order, so its mark is replaced where it stands when its
+      time is unchanged, and dropped when the rewrite has no time; a time that moved, or a mark that appears, would need
+      the id's rank among its ties, and builds whole;
+    - a held list or a new time the bisection cannot order (not an int, a float or a bool, or NaN) builds whole.
+    The held lists are copied, never edited: they are another build's."""
+    ts0 = marks0._ts
+    if ts0 is None:
+        return None
+    keys = list(caps)
+    if len(keys) < nids0:
+        return None
+    added = keys[nids0:]
+    fresh = set(added)
+    rewritten = {}
+    for o in tail:
+        if isinstance(o, dict) and o.get("id") and o["id"] not in fresh:
+            rewritten[o["id"]] = None
+    marks, ts, ids = list(marks0), list(ts0), list(ids0)
+    for k in rewritten:
+        row = caps[k]
+        t = row.get("t")
+        if not t:
+            try:
+                i = ids.index(k)
+            except ValueError:
+                continue                                 # untimed before and after: no mark either way
+            del marks[i], ts[i], ids[i]
+            continue
+        if type(t) not in _CAP_T_TYPES or t != t:
+            return None
+        lo = bisect.bisect_left(ts, t)
+        i = next((j for j in range(lo, bisect.bisect_right(ts, t, lo)) if ids[j] == k), None)
+        if i is None:
+            return None                                  # its time moved, or it had none: its place is its rank among ties
+        marks[i] = _cap_mark(sid, row)
+        ts[i] = t
+    for k in added:
+        row = caps[k]
+        t = row.get("t")
+        if not t:
+            continue
+        if type(t) not in _CAP_T_TYPES or t != t:
+            return None
+        i = bisect.bisect_right(ts, t)
+        marks.insert(i, _cap_mark(sid, row))
+        ts.insert(i, t)
+        ids.insert(i, k)
+    return _CapMarks(marks, tuple(ts), True), tuple(ids)
+
+
+def _judging_caps_version(sid, caps):
+    """The captions version `caps` was built from: (path, generation, base, record count) when `caps` is the mapping
+    _captions holds for that version of captions/<sid>.jsonl, else None (a plain dict, an empty mapping, a read the
+    memo did not hold, a version another thread has replaced since this build's read)."""
+    if type(caps) is not _CaptionRows or not caps:
+        return None
+    path = str(jd.CAPDIR / (sid + ".jsonl"))
+    with _CAPTION_ROWS_LOCK:
+        held = _CAPTION_ROWS_MEMO.get(path)
+    if held is None or held[3] is not caps:
+        return None
+    return (path, held[0], held[1], held[2])
+
+
+def _judging_caps_tail(old, new):
+    """The caption records appended between two versions of one file, or None when `new` is not `old` lengthened (another
+    path, generation or base, a count that shrank) or the reader's entry no longer holds them. The reader keeps a
+    generation and base only across appends, each a new records list with the old records first (_captions), so the
+    records past `old`'s count are exactly the rows the appends added."""
+    if old[:3] != new[:3] or old[3] > new[3]:
+        return None
+    with em._JSONL_CACHE_LOCK:
+        ent = em._JSONL_CACHE.get(new[0])
+    if ent is None or ent[6] != new[1] or ent[5] != new[2] or len(ent[4]) < new[3]:
+        return None
+    return ent[4][old[3]:new[3]]
+
+
+def _judging_marks_bytes(marks, ids):
+    """An estimate of one held entry's bytes: the lists, and per mark its dict and its slots in the three sequences (the
+    strings are the rows' own)."""
+    per = sys.getsizeof(marks[0]) if marks else 0
+    return 200 + sys.getsizeof(marks) + sys.getsizeof(ids) * 2 + len(marks) * per
+
+
+def _judging_cap_marks(sid, caps):
+    """The captioner's marks of `caps` for lane `sid`, a _CapMarks in caption-time order (_derive_judging_marks): held
+    per sid on the captions version (_judging_caps_version) and served while it stands, carried across an append by
+    _cap_marks_extend, built whole otherwise. A mapping with no version is derived and not held. A build that raises
+    stores nothing and raises, as the derivation did."""
+    ver = _judging_caps_version(sid, caps)
+    if ver is None:
+        if caps:
+            with _JUDGING_MARKS_LOCK:
+                _JUDGING_MARKS_STATS["uncached"] += 1
+        return _cap_marks_build(sid, caps)[0]
+    with _JUDGING_MARKS_LOCK:
+        held = _JUDGING_MARKS_MEMO.get(sid)
+        if held is not None:
+            _JUDGING_MARKS_MEMO.move_to_end(sid)        # a used entry is the newest: the bound sheds colder lanes first
+            if held[0] == ver:
+                _JUDGING_MARKS_STATS["hit"] += 1
+                return held[2]
+    got, kind = None, "build"
+    if held is not None:
+        tail = _judging_caps_tail(held[0], ver)
+        if tail is not None:
+            got = _cap_marks_extend(sid, held[2], held[3], held[1], caps, tail)
+            if got is not None:
+                kind = "extend"
+    if got is None:
+        got = _cap_marks_build(sid, caps)
+    marks, ids = got
+    size = _judging_marks_bytes(marks, ids)
+    with _JUDGING_MARKS_LOCK:
+        st = _JUDGING_MARKS_STATS
+        st[kind] += 1
+        _JUDGING_MARKS_MEMO.pop(sid, None)
+        if size > JUDGING_MARKS_MEMO_BYTES:
+            st["evict"] += 1                             # over the bound alone: served, not held, and sheds no other lane
+        else:
+            _JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
+            total = sum(e[4] for e in _JUDGING_MARKS_MEMO.values())
+            while total > JUDGING_MARKS_MEMO_BYTES:
+                _k, old = _JUDGING_MARKS_MEMO.popitem(last=False)   # the least recently used first; the newest fits alone
+                total -= old[4]
+                st["evict"] += 1
+    return marks
+
+
+def _cap_marks_numeric(cap_marks):
+    """True when every caption mark's time is an int or a float: the lane's numeric check (_lane_segments), read off a
+    _CapMarks without visiting its marks."""
+    if type(cap_marks) is _CapMarks:
+        return cap_marks._num
+    return all(isinstance(m["t"], (int, float)) for m in cap_marks)
+
+
+def _state_ev_plain(ev):
+    """True when the bisection can order the sorted transitions: every time an int, a float or a bool and not NaN, every
+    state a string. Anything else walks every transition as before (the walk's own raise is then the answer)."""
+    for t, st in ev:
+        if type(t) not in _CAP_T_TYPES or t != t or type(st) is not str:
+            return False
+    return True
+
+
+def _state_ev_sorted(sid, path):
+    """The states log's transitions sorted, as a memo entry (version, state, ev, plain, intervals by state set, bytes):
+    held per sid on the fold's cursor (_state_ev_cache: the record count and the reader entry's generation) while the
+    fold's answer is the cursor's own state object, which a fold never mutates (it deep-copies before it steps), so the
+    object names its records exactly; any other answer is sorted and not held. A sort that raises stores nothing."""
+    key = str(path)
+    res = _fold_records(_state_ev_cache, path, list, _state_ev_step, ckpt="stateIntervals")
+    cur = _state_ev_cache.get(key)
+    if cur is None or cur[2] is not res:
+        ev = tuple(sorted(res))
+        with _STATE_IV_LOCK:
+            _STATE_IV_STATS["uncached"] += 1
+        return (None, None, ev, _state_ev_plain(ev), {}, 0)
+    ver = (key, cur[1], cur[0])
+    with _STATE_IV_LOCK:
+        ent = _STATE_IV_MEMO.get(sid)
+        if ent is not None:
+            _STATE_IV_MEMO.move_to_end(sid)
+            if ent[0] == ver and ent[1] is res:
+                _STATE_IV_STATS["hit"] += 1
+                return ent
+    ev = tuple(sorted(res))
+    ent = (ver, res, ev, _state_ev_plain(ev), {}, 200 + 40 * len(ev))   # the transitions and two state sets' intervals
+    with _STATE_IV_LOCK:
+        st = _STATE_IV_STATS
+        st["sort"] += 1
+        _STATE_IV_MEMO.pop(sid, None)
+        if ent[5] > STATE_IV_MEMO_BYTES:
+            st["evict"] += 1
+        else:
+            _STATE_IV_MEMO[sid] = ent
+            total = sum(e[5] for e in _STATE_IV_MEMO.values())
+            while total > STATE_IV_MEMO_BYTES:
+                _k, old = _STATE_IV_MEMO.popitem(last=False)
+                total -= old[5]
+                st["evict"] += 1
+    return ent
+
+
+def _state_iv_cands(ent, want):
+    """The intervals of state set `want` over a plain entry's sorted transitions: (the starts and the ends of the closed
+    ones, in order, and the open one's start or None), made once per entry and state set. A closed interval runs from a
+    transition into `want` to the next transition, so the ends never decrease and the horizon cuts a prefix of them."""
+    key = frozenset(want)
+    got = ent[4].get(key)
+    if got is None:
+        ev = ent[2]
+        starts, ends = [], []
+        for i in range(len(ev) - 1):
+            if ev[i][1] in key:
+                starts.append(ev[i][0])
+                ends.append(ev[i + 1][0])
+        got = (tuple(starts), tuple(ends), ev[-1][0] if ev and ev[-1][1] in key else None)
+        ent[4][key] = got                                # two threads may both make it: equal tuples, either stands
+    return got
+
+
+def _judging_floors_forget(keep):
+    """Drop both floor memos' entries for the lanes outside `keep`, a full build's lane set (build_timeline, beside
+    _lanes_forget)."""
+    for lock, table, stats in ((_JUDGING_MARKS_LOCK, _JUDGING_MARKS_MEMO, _JUDGING_MARKS_STATS),
+                               (_STATE_IV_LOCK, _STATE_IV_MEMO, _STATE_IV_STATS)):
+        with lock:
+            gone = [k for k in table if k not in keep]
+            for k in gone:
+                del table[k]
+            stats["forget"] += len(gone)
+
+
+def _judging_marks_report():
+    """GET /perf memos.judgingMarks: the counters (_JUDGING_MARKS_STATS), the entries held, their marks, their estimated
+    bytes and the bound."""
+    with _JUDGING_MARKS_LOCK:
+        return dict(_JUDGING_MARKS_STATS, entries=len(_JUDGING_MARKS_MEMO),
+                    marks=sum(len(e[2]) for e in _JUDGING_MARKS_MEMO.values()),
+                    bytes=sum(e[4] for e in _JUDGING_MARKS_MEMO.values()), bound=JUDGING_MARKS_MEMO_BYTES)
+
+
+def _state_intervals_report():
+    """GET /perf memos.stateIntervals: the counters (_STATE_IV_STATS), the entries held, their transitions, their
+    estimated bytes and the bound."""
+    with _STATE_IV_LOCK:
+        return dict(_STATE_IV_STATS, entries=len(_STATE_IV_MEMO),
+                    transitions=sum(len(e[2]) for e in _STATE_IV_MEMO.values()),
+                    bytes=sum(e[5] for e in _STATE_IV_MEMO.values()), bound=STATE_IV_MEMO_BYTES)
+
+
 def _derive_judging_marks(sid, caps, goals, seg_ends=None):
     """This session's judging marks UNFILTERED by the timeline horizon: (cap_marks, other_marks). cap_marks
     are the captioner's marks in caption-time order, one per caption row carrying a t (a row without one is
@@ -54063,11 +54419,12 @@ def _derive_judging_marks(sid, caps, goals, seg_ends=None):
     marks. That time differs from the mark's plotted t whenever seg_ends moved a completion to its
     segment's work end, which is why the pair is kept rather than re-derived from the mark. A synth diary
     row is dropped here (its skip never depended on the horizon). Reads caps, goals["nodes"] and
-    STATE/archive/<sid>.json, and no clock: the horizon and JUDGE_CAP_LIMIT belong to _judging_assemble."""
+    STATE/archive/<sid>.json, and no clock: the horizon and JUDGE_CAP_LIMIT belong to _judging_assemble.
+    cap_marks is a _CapMarks, read-only: since 2026-10-06 it is held on the captions file's version and shared by
+    every derivation of the lane while that version stands (_judging_cap_marks), where each derivation sorted every
+    caption row and made a dict per row."""
     endt = (lambda tt: seg_ends.get(tt, tt)) if seg_ends else (lambda tt: tt)   # completion → its segment's work-END
-    caps_in = sorted((c for c in caps.values() if c.get("t")), key=lambda c: c["t"])
-    cap_marks = [{"judge": "captioner", "sid": sid, "t": c["t"],
-                  "kind": c.get("grain", "segment"), "text": c.get("caption", "")} for c in caps_in]
+    cap_marks = _judging_cap_marks(sid, caps)
     out = []
     for n in goals.get("nodes", {}).values():
         t = n.get("t")
@@ -54137,8 +54494,14 @@ def _judging_assemble(cap_marks, other_marks, t0, out, stamp=False):
     not at derivation), on a memo hit as on a miss. With `stamp` (the dead-lane memo, _derive_judging's
     docstring) every appended mark is a COPY carrying its filter time under "_h": a copy, because the pairs
     are the per-lane memo's, shared by identity into every unstamped build's `semantic`, and the stamp must
-    never reach the wire (_dead_lane_marks strips it)."""
-    kept = [m for m in cap_marks if m["t"] >= t0]
+    never reach the wire (_dead_lane_marks strips it). The captioner's marks at or after t0 are a suffix of their
+    time-ordered list, so a _CapMarks whose times order (its `_ts`) is cut by bisection where every mark was compared
+    on every build (2026-10-06); any other list, or a t0 that is not a plain number, is filtered as before."""
+    ts = cap_marks._ts if type(cap_marks) is _CapMarks else None
+    if ts is not None and type(t0) in _CAP_T_TYPES and t0 == t0:
+        kept = cap_marks[bisect.bisect_left(ts, t0):]
+    else:
+        kept = [m for m in cap_marks if m["t"] >= t0]
     if stamp:
         out.extend(dict(m, _h=m["t"]) for m in kept[-JUDGE_CAP_LIMIT:])
         out.extend(dict(m, _h=ft) for ft, m in other_marks if ft >= t0)
@@ -54668,7 +55031,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, head
         # ev_t, distilledMt, briefedMt or archive t) cost this lane its marks. The same here, before the lane can
         # be memoized: a time the assembly could not compare is a failed marks stage, not a frame lost on every
         # build until the data changes.
-        if (any(not isinstance(m["t"], (int, float)) for m in cap_marks)
+        if (not _cap_marks_numeric(cap_marks)
                 or any(not isinstance(ft, (int, float)) for ft, _m in other_marks)):
             raise TypeError("a judging mark carries a non-numeric time")
     except Exception as e:
@@ -55789,6 +56152,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
         # plus the dead lanes inside the 12 h window, dismissed dead lanes dropped) is the set this build read. A
         # skeleton or live-only build reads a subset of the lanes and so must not evict on it.
         _lanes_forget(set(id2name))
+        _judging_floors_forget(set(id2name))   # the captioner's marks and the sorted states logs, on the same rule
     if with_bars:
         # Each with_bars-only stage is guarded ALONE (2026-08-18): the pusher sends the cheap lane
         # SKELETON before this heavy build, and its shared try used to abort the WHOLE bars frame on

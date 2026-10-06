@@ -4150,6 +4150,34 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   The gauges: `entries` (mappings held), `rows` (their rows) and `bytes`
   (their dicts and indexes, estimated; the rows themselves are the record
   cache's).
+  `judgingMarks` is the captioner's marks on the timeline's judging lane
+  (2026-10-06): one mark per timed caption row, in caption-time order, held
+  per session on that captions mapping's version, where every derivation of
+  a lane sorted every row and made a mark per row, and every build compared
+  every mark against the horizon. The held list is read-only and shared by
+  every build while the version stands, and the horizon is found by
+  bisection over its times. `hit`: the held marks served; `extend`: an
+  append, the held marks copied with only the appended rows placed (a new
+  row after every mark of an equal time, a rewritten row in its place when
+  its time stands); `build`: every row sorted (a first derivation, a
+  rewrite, a rewritten row whose time moved or appeared, or times the
+  bisection cannot order); `uncached`: a mapping that is not the one held
+  for its file, derived and not held; `evict`: entries the byte bound shed;
+  `forget`: entries of lanes a full build no longer draws. The gauges:
+  `entries`, `marks`, `bytes` (estimated) and `bound`
+  (`ROMP_JUDGING_MARKS_MEMO_BYTES`, else a 256th of the machine's memory).
+  `stateIntervals` is the states logs' transitions, sorted, held per session
+  on the log's fold cursor (its record count and the reader's generation)
+  while the fold's answer is that cursor's own state, where every build
+  sorted each log twice (once for the awaiting stripes, once for the
+  compacting ones) and walked every transition. A log of plain rows keeps
+  each state set's intervals beside them, so a build cuts the horizon by
+  bisection. `hit`: the held transitions served; `sort`: a version sorted
+  and held; `uncached`: a fold answer that is not the cursor's state (a last
+  row still without its newline, a failed read), sorted and not held;
+  `evict` and `forget` as above; the gauges `entries`, `transitions`,
+  `bytes` (estimated) and `bound` (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a
+  512th of the machine's memory).
   Four memos cover the chat build's per-build fixed costs, each keyed on the
   inputs it reads and evicted by the pusher with the tab set (a comment thread
   built this cycle is kept, like its fold prefix). `chatMergeSets` is the
