@@ -4164,8 +4164,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   bisection cannot order); `uncached`: a mapping that is not the one held
   for its file, derived and not held; `overBound`: marks over the byte bound
   by themselves, derived and served but not held, and no other lane shed for
-  them. Each derivation over captions counts once, under one of those five
-  (a session with no caption rows has no marks to count). `evict`:
+  them. Each derivation over captions that returns counts once, under one of
+  those five (a session with no caption rows has no marks to count, and a
+  sort that raises on a held version counts nowhere). `evict`:
   entries the byte bound shed to make room for a newer one; `forget`:
   entries of lanes a full build no longer draws, and of a lane the dead-lane
   memo takes over (that memo serves a dead lane's marks; the lane's
@@ -4183,7 +4184,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   row still without its newline, a failed read), sorted and not held;
   `overBound`: a version whose entry is over the byte bound by itself,
   sorted and served but not held, and no other lane shed for it. Each read
-  counts once, under one of those four. `evict` as above; `forget`: entries
+  that returns counts once, under one of those four (a sort that raises
+  counts nowhere). `evict` as above; `forget`: entries
   of lanes a full build no longer draws. The gauges: `entries`,
   `transitions`, `bytes` (estimated) and `bound`
   (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a 512th of the machine's memory).

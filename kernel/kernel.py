@@ -54142,7 +54142,8 @@ _JUDGING_MARKS_LOCK = threading.Lock()   # the table and its counters: the pushe
 _JUDGING_MARKS_MEMO = collections.OrderedDict()   # sid -> (version, id count, marks, ids, bytes), least recently used first;
 #                                                   ids are the caption ids of the marks, in the marks' order
 _JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
-#   Each derivation over caption rows counts once, under one of the first five (an empty mapping has no marks to count).
+#   Each derivation over caption rows that returns counts once, under one of the first five (an empty mapping has no
+#   marks to count; a sort that raises on a held version counts nowhere).
 #   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows;
 #   build: every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the
 #   bisection cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read
@@ -54154,7 +54155,8 @@ _STATE_IV_LOCK = threading.Lock()
 _STATE_IV_MEMO = collections.OrderedDict()   # sid -> (version, the fold's state, sorted transitions, plain, {state set:
 #                                              (starts, ends, open start)}, bytes), least recently used first
 _STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
-#   Each read counts once, under one of the first four. hit: the held transitions served; sort: a version sorted and
+#   Each read that returns counts once, under one of the first four (a sort that raises counts nowhere).
+#   hit: the held transitions served; sort: a version sorted and
 #   held; uncached: a fold answer that is not the cursor's own state (a newline-less last row folded provisionally,
 #   served records, a failed read, another thread's newer fold), sorted and not held; overBound: a version whose entry
 #   is over the byte bound by itself, sorted, served and not held, and no other lane shed for it. evict as above;

@@ -38,8 +38,9 @@ change's mutants turn them red. The classes below pin the new rules and are red 
   PerfWiring     memos.judgingMarks and memos.stateIntervals carry their keys, and docs/reference.md names every one.
 The follow-up to the review posted after the change merged adds cases for code the classes above left untested, each
 green at the code it covers and red under its own mutant: in MarksMemo a NaN-timed append and a held row rewritten to
-NaN build whole, and a cutoff that is not a plain number keeps the filter; in Bounds a hit makes an entry the newest in
-either table; BoundEnvironment pins both bounds' environment read; and FrameWalk's clock never moves backward.
+NaN build whole, and a cutoff that is not a plain number keeps the filter; in MarksMemo and StatesMemo a sort that
+raises counts nowhere, as the reference says; in Bounds a hit makes an entry the newest in either table;
+BoundEnvironment pins both bounds' environment read; and FrameWalk's clock never moves backward.
 Synthetic data only: placeholder uuids, the notes-api demo names, invented captions."""
 import contextlib
 import copy
@@ -537,6 +538,22 @@ class MarksMemo(_Root):
                              "horizon %r" % (t0,))
         self.assertEqual(assembled(km._judging_assemble, m, float("nan")), [], "a NaN cutoff keeps no mark, as the filter kept none")
 
+    # the counters' rule as the reference states it: a derivation that returns counts once, and a sort that raises on a
+    # held version counts nowhere, on a first build and on the build after an append the extend road refuses
+    def test_a_sort_that_raises_on_a_held_version_counts_nowhere(self):
+        self.derive()
+        before = self.stats("_JUDGING_MARKS_STATS")
+        self.append(self.cap_path(), [crow((T + 400, "eeee5555"), "segment", "a string", "a string time")])
+        self.write(self.cap_path(SID2), [crow((T, "ffff6666"), "segment", T, "a number", sid=SID2),
+                                         crow((T + 100, "abab7777"), "segment", "a string", "a string time", sid=SID2)])
+        for label, sid in (("an append the extend road refuses", SID), ("a first build", SID2)):
+            caps = km._captions(sid)
+            self.assertIs(type(km._caption_rows_version(sid, caps)), tuple, "(the premise) %s: a held version" % label)
+            with self.assertRaises(TypeError, msg=label):
+                km._derive_judging_marks(sid, caps, {}, None)
+            self.assertEqual(self.stats("_JUDGING_MARKS_STATS"), before, "%s: counted nowhere" % label)
+        self.assertNotIn(SID2, km._JUDGING_MARKS_MEMO, "a sort that raises stores nothing")
+
     def test_the_lane_numeric_check_reads_the_held_bit(self):
         _caps, m = self.derive()
         self.assertIs(km._cap_marks_numeric(m), True)
@@ -623,6 +640,18 @@ class StatesMemo(_Root):
             self.write(self.states_path(), rows)
             for d in (0, 150, 350, 450, 550, 650, 2000):           # cutoffs before, inside and after the transitions
                 self.intervals_equal("rows %r" % (rows,), now=T + d + 600)
+
+    # the counters' rule as the reference states it: a read that returns counts once, and a sort that raises counts
+    # nowhere, on the cursor's own state and on a fold answer that is not it
+    def test_a_sort_that_raises_counts_nowhere(self):
+        self.intervals_equal("first")
+        before = self.stats("_STATE_IV_STATS")
+        for label, rows, tail in (("the cursor's own state", [srow("a string", "working")], ""),
+                                  ("a last row without its newline", [], json.dumps(srow(T + 900, "compacting")))):
+            self.append(self.states_path(), rows, tail=tail)
+            with self.assertRaises(TypeError, msg=label):
+                km._state_intervals(SID, "working", self.NOW)
+            self.assertEqual(self.stats("_STATE_IV_STATS"), before, "%s: counted nowhere" % label)
 
 
 # ── the lanes: a world for build_timeline ────────────────────────────────────────────────────────────────────────
