@@ -5426,7 +5426,10 @@ writes the row. When one restart signals two kernels under the same state
 root, the first kernel's cut row consumes the request within milliseconds; the
 second still names that request, not its own `manager-sigterm` note, as long
 as the manager's note for the second kernel's pid sits above the request in
-the audit file. The manager's log says `exited without a restart request
+the audit file and the first kernel is still running. A kernel that consumed
+the request and has exited is the second one's predecessor, so the request
+stays spent, even when it was filed in the second the new kernel started.
+The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
 
@@ -5471,11 +5474,17 @@ and `reasonError` when those faults happened,
 (`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
 priming-to-assembly window as older cut rows carried it, `drainS`), the
 checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`,
-`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row that could
-not be built at the start, or whose append failed, is written after the drain
-instead, from the drain's own result, as the exit's one row: `t` is still the
-handler's start, and it carries `exitDone: true`, the phases and the counts,
-with no done row. The done row carries no
+`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row whose append
+failed is written after the drain instead, as the exit's one row: the row the
+exit built, with the done row's fields applied the way `romp restart-metrics`
+joins the pair, so a drain that raised leaves the prediction and the session
+count standing there too. A cut row that could not be built at the start is
+written after the drain from the drain's own result, with `cutTurnsError`
+naming the fault, since no prediction stands behind its turns. Either way `t`
+is still the handler's start, the process sample is the one taken as the exit
+began, and the row carries `exitDone: true`, the phases and the counts, with no
+done row. An append to the ledger that fails is said on the kernel's log, one
+line naming the row and the fault. The done row carries no
 `cutTurns`, `reason` or `auditT`, so every reader that keys on those reads the
 cut row alone; `romp restart-metrics` joins the pair on the pid and `cutT`, and
 a cut row with `expectsDone` and no done row reads as `exitDone: false`, an
@@ -5529,7 +5538,8 @@ background task's notification, a scheduled prompt) has no feed, so its row
 carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
 kept, so each pair stays under 64 MB; the reader reads both. The restart rows
 of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
-sampled as its exit starts (the cut row) and at its settled boot (the boot row), so
+sampled as its exit starts (the cut row, or a late full row, which carries the
+sample taken then) and at its settled boot (the boot row), so
 the kernel's growth between restarts is a series without a sampler of its own.
 And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
 parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's

@@ -255,10 +255,13 @@ class CutRow(unittest.TestCase):
         self.assertIn("row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),",
                       block, "the row counts BOTH persisted watch stores (T143) — and is built in the")
         self.assertIn("finally:", block)
-        self.assertIn("_append_restart_cut(row)", block,
+        self.assertIn("_append_restart_cut(_exit_late_row(cut_row, done))", block,
                       "…FINALLY block, so a raising drain still writes what it knew (T143: 2 of 18 "
                       "restarts died recordless)")
-        self.assertIn('row["drainError"]', block, "an errored drain's row names the error")
+        done_src = src[src.index("def _exit_done_row("):src.index("\ndef ", src.index("def _exit_done_row("))]
+        self.assertIn('row["drainError"]', done_src, "an errored drain's row names the error (the done row, and the late "
+                                                    "row it is joined into: _exit_late_row)")
+        self.assertIn("err=err, reason_err=reason_err", block, "and the exit hands the drain's error to it")
         self.assertIn("rec = _recent_restart_audit()", block, "the cut row joins — and CONSUMES — the audit row (auditT)")
         self.assertIn("_drain_and_exit(_audit_reason_text(rec), signum=signum", block,
                       "the request on record is read AT SIGNAL TIME, before the drain: a row that lands "
@@ -274,8 +277,9 @@ class CutRow(unittest.TestCase):
         drain = block[block.index("def _drain_and_exit("):]
         self.assertLess(drain.index("_append_restart_cut(cut_row)"), drain.index("be.drain("), "the cut row precedes the drain")
         self.assertLess(drain.index("be.drain("), drain.index("_append_restart_cut(done)"), "the done row follows it")
-        self.assertLess(drain.index("if cut_row is not None:"), drain.index("_append_restart_cut(row)"),
-                        "the late row is the fallback for an early row that could not be built")
+        self.assertLess(drain.index("if cut_row is not None and _cut_landed:"),
+                        drain.index("_append_restart_cut(_exit_late_row(cut_row, done))"),
+                        "the late row is the fallback for an early row that could not be built or never landed")
 
     def test_the_backends_log_wire_is_best_effort(self):
         # SdkBackend.drain logs its summary after every session is shut down, joined and reaped, right
@@ -1262,8 +1266,14 @@ class RequestOnRecord(unittest.TestCase):
         # one restart-all signals two kernels under one root: the manager notes each pid before its SIGTERM, and the sibling's
         # cut row, written at its exit's START (2026-10-05), consumes the request milliseconds later, before this kernel reads
         # the tail. With the manager's note for THIS pid above the request, the request still names this cut (the base read it
-        # before the sibling's row landed, after its drain); with no such note, or spent by this pid's own cut, it stays spent
-        sib = os.getpid() + 100000
+        # before the sibling's row landed, after its drain); with no such note, or spent by this pid's own cut, it stays spent.
+        # The sibling is a LIVE stand-in process: a sibling's exit runs beside this one's, where a predecessor has exited (the
+        # review of 2026-10-06; the next test). And only a note naming THIS pid un-spends: a note naming no pid counts as this
+        # kernel's for its label, so it answers with that label and the spent request stays spent
+        stand_in = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(stand_in.wait)
+        self.addCleanup(stand_in.kill)
+        sib = stand_in.pid
         request = {"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update", "pid": 7}
         sib_note = {"t": 1001, "action": "manager-sigterm", "kernel": "aux", "pid": sib, "reason": "restart", "trigger": "restart-all"}
         our_note = {"t": 1001, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(), "reason": "restart",
@@ -1280,9 +1290,34 @@ class RequestOnRecord(unittest.TestCase):
                          "and the row comes back, so this cut row consumes it too")
         self._write(request, sib_note)
         self.assertEqual(self._reason(), "", "no note for this pid above it: the spent request names nothing")
+        self._write(request, sib_note, {k: v for k, v in our_note.items() if k != "pid"})
+        self.assertEqual(self._reason(), "manager-sigterm: restart-all",
+                         "a note naming no pid: its label answers, and the request the sibling spent stays spent")
+        self.assertEqual((km._recent_restart_audit(window=90, now=1002, started=900) or {}).get("t"), 1001,
+                         "the note is the row this cut consumes, not the request")
         spent_by(os.getpid())
         self._write(request, sib_note, our_note)
         self.assertEqual(self._reason(), "manager-sigterm: restart-all", "spent by this pid's own cut: the note answers")
+
+    def test_a_request_a_predecessor_spent_in_the_second_this_kernel_started_stays_spent(self):
+        # the review of 2026-10-06: the start bound compares whole seconds, so a successor started 0.7 s after the self-update
+        # that restarted its predecessor reads the request as filed inside its own lifetime. Stopped through the manager within
+        # 90 s (the manager's stop note for this pid above the request) with no request row of its own, it filed its cut as that
+        # self-update and consumed it a second time: the predecessor's spend read as a sibling's, since the sibling rule told
+        # the two apart by the consumer's pid alone. A consumer that has exited is a predecessor, and its spend stands
+        gone = subprocess.Popen(["true"])
+        gone.wait()                                  # the predecessor's pid: it exited before this kernel started
+        km.RESTART_CUTS_FILE.write_text(json.dumps({"t": 1000, "pid": gone.pid, "cutTurns": [], "auditT": 1000,
+                                                    "expectsDone": True}) + "\n")
+        self._write({"t": 1000, "action": "kernel-asks-manager-restart-all", "reason": "self-update", "pid": gone.pid},
+                    {"t": 1000, "action": "manager-sigterm", "kernel": "main", "pid": gone.pid, "reason": "restart",
+                     "trigger": "restart-all"},
+                    {"t": 1040, "action": "manager-sigterm", "kernel": "main", "pid": os.getpid(), "reason": "stop",
+                     "trigger": "stop"})
+        self.assertEqual(self._reason(now=1041, started=1000.7), "manager-sigterm: stop",
+                         "the stop note names the cut; the self-update the predecessor spent does not come back")
+        self.assertEqual((km._recent_restart_audit(window=90, now=1041, started=1000.7) or {}).get("t"), 1040,
+                         "and the note is what this cut consumes")
 
 
 class ParentGone(unittest.TestCase):
@@ -1729,6 +1764,12 @@ class ExitPath(unittest.TestCase):
         self.assertIs(raw[0].get("exitDone"), True, "the exit's one row is complete: no done row follows it")
         self.assertIn("drainS", raw[0].get("phases") or {}, "and carries the phases a done row would have")
         self.assertIn("deadlineS", raw[0])
+        self.assertEqual({k: type(raw[0].get(k)) for k in km.EXIT_DONE_COUNTS}, {k: int for k in km.EXIT_DONE_COUNTS},
+                         "the checkpoint counts a done row would carry (the review of 2026-10-06: none was asserted)")
+        took = time.time() - before
+        self.assertGreaterEqual(raw[0].get("elapsedS", 0), 1.1, "the seconds the exit took from the handler's entry: the "
+                                                                "broadcast alone took 1.1 s (%r)" % raw[0].get("elapsedS"))
+        self.assertLessEqual(raw[0]["elapsedS"], took + 0.05, "and no more than the test saw (%.2f s)" % took)
         self.assertLessEqual(raw[0]["t"], int(before + 0.1), "its t is the handler's entry, as the early row's would be")
         self.assertIs(FOLD(raw)[0]["exitDone"], True, "the reader reads it as an exit that finished, not an older kernel's")
 
@@ -1924,20 +1965,27 @@ class ExitPath(unittest.TestCase):
         # another thread holds the leaf's key lock across the exit (a settle or converge document write, the display parse, a
         # fold): the exit's own document for that leaf waits for the lock only until the line, then skips it as busy, and the
         # drain starts by the line; a holder that lets go inside the window is still waited for and nothing is busy. The head
-        # waited out the whole hold (the real writer here: the lock is the only thing patched around it)
+        # waited out the whole hold (the real writer here: the lock is the only thing patched around it). A busy skip releases
+        # NOTHING (the review of 2026-10-06): read right after the exit, before the holder is let go, the lock is still the
+        # holder's, and the holder's own release raises nothing; the busy case holds for 30 s, far past the exit, so the read
+        # cannot meet a hold that lapsed under load. A release of the holder's lock (the scope's busy guard deleted) fails both
+        # checks, where it surfaced only as an unhandled-thread warning pytest does not fail on
         sess = self._sessions("web")
         leaf, sid = sess[0]["path"], sess[0]["sid"]
         lock = km.em._asm_key_lock((os.path.realpath(leaf), sid, False))
         ckdir = tempfile.mkdtemp()
-        for label, hold_s, busy in (("held past the line", 3.0, 1), ("let go inside the window", 0.15, 0)):
+        for label, hold_s, busy in (("held past the line", 30.0, 1), ("let go inside the window", 0.15, 0)):
             with self.subTest(label):
                 self._reset()
-                taken, release, calls = threading.Event(), threading.Event(), []
+                taken, release, calls, raised = threading.Event(), threading.Event(), [], []
 
                 def holder():
-                    with lock:
-                        taken.set()
-                        release.wait(hold_s)
+                    try:
+                        with lock:
+                            taken.set()
+                            release.wait(hold_s)
+                    except BaseException as e:     # the holder's release of a lock someone else let go lands here
+                        raised.append(e)
                 th = threading.Thread(target=holder, name="lock-holder", daemon=True)
                 th.start()
                 self.assertTrue(taken.wait(5))
@@ -1952,9 +2000,14 @@ class ExitPath(unittest.TestCase):
                          mock.patch.object(km.em, "_CKPT_DIR_FN", lambda: Path(ckdir)):
                         entry = time.monotonic()
                         _fire(self, Timed())
+                    held_after = lock.locked()         # read before the holder is let go
                 finally:
                     release.set()
                     th.join(10)
+                self.assertFalse(th.is_alive())
+                self.assertEqual(raised, [], "the holder's own release raised: the exit let go of a lock it never took")
+                self.assertEqual(held_after, bool(busy), "busy: the lock still the holder's after the exit; let go inside the "
+                                                         "window: the exit released the lock it took")
                 self.assertEqual(self._done().get("asmBusy"), busy)
                 self.assertLessEqual(calls[0] - entry, 0.6 + 0.25, "the drain starts by the line (0.6 s) and slack: %.2f s"
                                      % (calls[0] - entry))
@@ -2023,6 +2076,131 @@ class ExitPath(unittest.TestCase):
                          "the late full row, from the drain's own result, where the head wrote a done row no reader joins")
         self.assertNotIn("expectsDone", raw[0])
         self.assertEqual([r.get("expectsDone") for r in calls[:1]], [True], "the early row was built and its append failed")
+
+    # ── the review of 2026-10-06, posted after the merge ───────────────────────────────────────────────────────────────
+    def _staged_sample(self, stages):
+        """A stand-in for the kernel's process sample that says WHEN it was taken: rssKb 1 before the broadcast, 2 after
+        it, 3 after the drain (each stage appends to `stages`), so a row's sample names the moment it came from."""
+        return mock.patch.object(km, "_kernel_process_sample", lambda: {"rssKb": len(stages) + 1, "cpuS": 0.5})
+
+    def _bucket(self, raw):
+        (b,) = rm.build_buckets(rm.parse_restarts(raw), [], [], [], [], [], {}, "day", None, "UTC")
+        return b
+
+    def test_a_late_full_row_after_a_failed_append_keeps_the_prediction_a_raising_drain_left_standing(self):
+        # the cut row was built (its prediction names web, one session) but its append failed, and the drain raised: before this
+        # fix the late row was built from the drain's result alone, 0 stopped and no turn, which the reader counts as a clean restart.
+        # It is the built row with the done row's fields applied as the reader joins the pair, and its process sample is the
+        # one the handler took at its entry, before the broadcast
+        web, stages, calls = {"sid": SID, "name": "web"}, [], []
+        real = km._append_restart_cut
+
+        def first_fails(row):
+            calls.append(dict(row))
+            return False if len(calls) == 1 else real(row)
+
+        class Raising:
+            sessions = {SID: object()}
+
+            def would_cut(inner):
+                return [dict(web)]
+
+            def drain(inner, timeout):
+                stages.append("drain")
+                raise RuntimeError("synthetic drain fault")
+        t = self._request()
+        with mock.patch.object(km, "_append_restart_cut", side_effect=first_fails), self._staged_sample(stages):
+            _fire(self, Raising(), broadcast=lambda *a, **k: stages.append("broadcast"))
+        raw = _raw_rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(raw), 1, raw)
+        late = raw[0]
+        self.assertEqual((late.get("cutTurns"), late.get("stopped"), late.get("auditT"), late.get("exitDone")), ([web], 1, t, True),
+                         "the prediction and the session count stand (before this fix: [] and 0 stopped, from a drain that returned nothing)")
+        self.assertIn("RuntimeError: synthetic drain fault", late.get("drainError", ""))
+        self.assertNotIn("expectsDone", late)
+        self.assertEqual(late.get("rssKb"), 1, "the process as the exit began: sampled at the handler's entry, not after the drain")
+        built = calls[0]
+        self.assertEqual({k: v for k, v in late.items() if k in built}, {k: v for k, v in built.items() if k != "expectsDone"},
+                         "every field the built row had, the late row keeps (its drain returned nothing to override them)")
+        b = self._bucket(raw)
+        self.assertEqual((b["measuredRestarts"], b["cleanRestarts"], b["cutTurns"]), (1, 0, 1),
+                         "measured by its prediction, and not clean (before this fix it read as a clean restart)")
+
+    def test_a_late_full_row_with_no_prediction_behind_it_says_so(self):
+        # the cut row could not be built at the start, and the drain raised: the late row is the drain's own result (nothing)
+        # and no prediction stands behind its turns, so it carries cutTurnsError (the build's fault) and the reader counts it
+        # unmeasured, where before this fix the row (0 stopped, no turn, no cutTurnsError) read as a clean restart
+        real, built, stages = km._restart_cut_row, [], []
+
+        def flaky(*a, **k):
+            built.append(1)
+            if len(built) == 1:
+                raise RuntimeError("synthetic early-row fault")
+            return real(*a, **k)
+
+        class Raising:
+            def drain(inner, timeout):
+                stages.append("drain")
+                raise RuntimeError("synthetic drain fault")
+        with mock.patch.object(km, "_restart_cut_row", side_effect=flaky), self._staged_sample(stages):
+            _fire(self, Raising(), broadcast=lambda *a, **k: stages.append("broadcast"))
+        raw = _raw_rows(km.RESTART_CUTS_FILE)
+        self.assertEqual(len(raw), 1, raw)
+        late = raw[0]
+        self.assertIn("RuntimeError: synthetic early-row fault", late.get("cutTurnsError", ""),
+                      "no prediction stands behind its turns, and the row says why")
+        self.assertIn("RuntimeError: synthetic drain fault", late.get("drainError", ""))
+        self.assertEqual((late.get("cutTurns"), late.get("exitDone")), ([], True))
+        self.assertEqual(late.get("rssKb"), 1, "the sample taken at the handler's entry, passed in (before this fix: sampled after the drain)")
+        b = self._bucket(raw)
+        self.assertEqual((b["measuredRestarts"], b["unmeasuredRestarts"], b["cleanRestarts"]), (0, 1, 0),
+                         "its turns are unknown: out of the rate, and not a clean restart")
+
+    def test_the_late_full_row_reads_as_the_pair_would_have(self):
+        # _exit_late_row applies the done row's fields exactly as the reader's fold joins a cut row and its done row: for a
+        # drain that returned (its own counts and turn list, a late verdict) and one that raised (nothing but the error)
+        late_row = getattr(km, "_exit_late_row", None)
+        self.assertIsNotNone(late_row, "the late full row is the built row joined as the reader joins the pair (no such helper before this fix)")
+        web, api = {"sid": SID, "name": "web"}, {"sid": self.SIDS["api"], "name": "api"}
+        cut = {"t": 1000, "pid": os.getpid(), "cutTurns": [web], "stopped": 2, "unjoined": 0, "reaped": 0, "watchesArmed": 1,
+               "reason": km.SIGNAL_REASON_UNREQUESTED, "auditT": 999, "rssKb": 2048, "cpuS": 9.5,
+               "cutTurnsError": "RuntimeError: synthetic predicate fault", "expectsDone": True}
+        phases = {"rowS": 0.0, "memosS": 0.1, "listS": 0.0, "primeS": 0.2, "writeS": 0.3, "asmS": 0.1, "ckptS": 0.6, "drainS": 0.4}
+        counts = {"ckptWritten": 4, "ckptLeft": 1, "primed": 2, "primeSkipped": 0, "asmSkipped": 1, "asmBusy": 1}
+        for label, res, turns, reason, err in (
+                ("a drain that returned", {"cutTurns": [web, api], "stopped": 3, "unjoined": 1, "reaped": 1}, [web, api],
+                 km.SIGNAL_REASON_MANAGER_STOPPED, ""),
+                ("a drain that raised", {}, [], cut["reason"], "Traceback (most recent call last):\nRuntimeError: synthetic drain fault")):
+            with self.subTest(label):
+                done = km._exit_done_row(cut, res, turns, reason, err=err, reason_err="ValueError: synthetic", phases=phases,
+                                         counts=counts, deadline_s=3.2, elapsed_s=2.9, now=1003)
+                want = FOLD([dict(cut), dict(done)])[0]
+                for k in ("doneT", "expectsDone"):
+                    want.pop(k, None)
+                self.assertEqual(late_row(dict(cut), done), want)
+
+    def test_a_failed_append_is_said_once_on_the_log(self):
+        # the review of 2026-10-06: _append_restart_cut returned False without a word, and the done row's result was dropped, so
+        # a completed exit whose done row was lost read as killed with nothing on the log. Here the SECOND append (the done row)
+        # fails for real: the drain puts a directory where the ledger file was. One line names the row and the fault; the first
+        # append, which landed, says nothing
+        ledger = km.RESTART_CUTS_FILE
+
+        class Swapping:
+            def drain(inner, timeout):
+                ledger.unlink()
+                ledger.mkdir()                 # an unwritable ledger from here: open(..., "a") raises IsADirectoryError
+                return {"cutTurns": [], "stopped": 0}
+        try:
+            with mock.patch.object(km.sys, "stderr", new_callable=io.StringIO) as err:
+                _fire(self, Swapping())
+        finally:
+            if ledger.is_dir():
+                ledger.rmdir()
+        said = [l for l in err.getvalue().splitlines() if "restart ledger did not take" in l]
+        self.assertEqual(len(said), 1, "one line for the one append that failed: %r" % err.getvalue().splitlines())
+        self.assertIn("the exit's done row", said[0])
+        self.assertIn("IsADirectoryError", said[0])
 
     def test_the_session_in_flight_starts_no_document_refresh_once_the_stand_down_is_set(self):
         # the stand-down is read at the settle write's loop top; the session in flight could still start a document refresh (a
