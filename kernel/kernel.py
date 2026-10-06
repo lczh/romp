@@ -36185,14 +36185,19 @@ def _captions(fsid):
 
 
 def _caption_rows_version(fsid, caps):
-    """The captions version `caps` was built from, for a memo that holds what it derived from those rows (the lane
-    prefix, 2026-10-06): "empty" for an empty mapping (no file, or no rows: every lookup answers ''); (path,
-    generation, base, record count) when `caps` is the mapping _captions holds for that version of
-    captions/<fsid>.jsonl; else None, an unknown version (a plain dict, a read the memo did not hold, or a version
-    another thread has replaced since this build's read): the caller re-captions every held bar under it, even when the
-    held version is None too."""
+    """The captions version `caps` was built from, for a memo that holds what it derived from those rows: "empty" for
+    an empty mapping (no file, or no rows: every lookup answers ''); (path, generation, base, record count) when `caps`
+    is the mapping _captions holds for that version of captions/<fsid>.jsonl; else None, an unknown version (a plain
+    dict, a read the memo did not hold, or a version another thread has replaced since this build's read). The one
+    answer both such memos key on (2026-10-06): the lane prefix (_lane_segments) and the captioner's marks
+    (_judging_cap_marks) each had a copy of this pair, and a later change to what a version is could have reached one
+    and left the other keyed on the old rule. What a caller does with the answers that are not a tuple is its own: the
+    lane prefix holds "empty" like any version and re-captions every held bar under None, even when the held version is
+    None too; the marks hold neither, since an empty mapping has no marks to hold."""
     if not caps:
         return "empty"
+    if type(caps) is not _CaptionRows:
+        return None                                 # a plain dict: _captions holds only a _CaptionRows, so never the held one
     path = str(jd.CAPDIR / (fsid + ".jsonl"))
     with _CAPTION_ROWS_LOCK:
         held = _CAPTION_ROWS_MEMO.get(path)
@@ -36204,9 +36209,11 @@ def _caption_rows_version(fsid, caps):
 def _caption_rows_since(old, new):
     """The caption records appended between two versions of one captions file (_caption_rows_version), or None when
     `new` is not `old` lengthened: another path, generation or base, a count that shrank, a version that is not a
-    tuple, or a reader entry that no longer holds them. The reader keeps a generation and base only across appends,
-    each a new records list with the old records first (_captions' docstring), so the records past `old`'s count are
-    exactly the rows the appends added."""
+    tuple ("empty" or None), or a reader entry that no longer holds them; [] for one version twice, without reading the
+    reader's entry (neither caller asks: each serves its held entry first). The reader keeps a generation and base
+    only across appends, each a new records list with the old records first (_captions' docstring), so the records
+    past `old`'s count are exactly the rows the appends added: the lane prefix re-captions the held bars they reach,
+    the captioner's marks place them (_cap_marks_extend)."""
     if not (isinstance(old, tuple) and isinstance(new, tuple)) or old[:3] != new[:3] or old[3] > new[3]:
         return None
     if old[3] == new[3]:
@@ -54225,34 +54232,6 @@ def _cap_marks_extend(sid, marks0, ids0, nids0, caps, tail):
     return _CapMarks(marks, tuple(ts), True), tuple(ids)
 
 
-def _judging_caps_version(sid, caps):
-    """The captions version `caps` was built from: (path, generation, base, record count) when `caps` is the mapping
-    _captions holds for that version of captions/<sid>.jsonl, else None (a plain dict, an empty mapping, a read the
-    memo did not hold, a version another thread has replaced since this build's read)."""
-    if type(caps) is not _CaptionRows or not caps:
-        return None
-    path = str(jd.CAPDIR / (sid + ".jsonl"))
-    with _CAPTION_ROWS_LOCK:
-        held = _CAPTION_ROWS_MEMO.get(path)
-    if held is None or held[3] is not caps:
-        return None
-    return (path, held[0], held[1], held[2])
-
-
-def _judging_caps_tail(old, new):
-    """The caption records appended between two versions of one file, or None when `new` is not `old` lengthened (another
-    path, generation or base, a count that shrank) or the reader's entry no longer holds them. The reader keeps a
-    generation and base only across appends, each a new records list with the old records first (_captions), so the
-    records past `old`'s count are exactly the rows the appends added."""
-    if old[:3] != new[:3] or old[3] > new[3]:
-        return None
-    with em._JSONL_CACHE_LOCK:
-        ent = em._JSONL_CACHE.get(new[0])
-    if ent is None or ent[6] != new[1] or ent[5] != new[2] or len(ent[4]) < new[3]:
-        return None
-    return ent[4][old[3]:new[3]]
-
-
 def _judging_marks_bytes(marks, ids):
     """An estimate of one held entry's bytes: the lists, and per mark its dict and its slots in the three sequences (the
     strings are the rows' own)."""
@@ -54262,11 +54241,13 @@ def _judging_marks_bytes(marks, ids):
 
 def _judging_cap_marks(sid, caps):
     """The captioner's marks of `caps` for lane `sid`, a _CapMarks in caption-time order (_derive_judging_marks): held
-    per sid on the captions version (_judging_caps_version) and served while it stands, carried across an append by
-    _cap_marks_extend, built whole otherwise. A mapping with no version is derived and not held. A build that raises
-    stores nothing and raises, as the derivation did."""
-    ver = _judging_caps_version(sid, caps)
-    if ver is None:
+    per sid on the captions version (_caption_rows_version, the lane prefix's key too) and served while it stands,
+    carried across an append by _cap_marks_extend over the appended records (_caption_rows_since), built whole
+    otherwise. A mapping with no version is derived and not held, and so is an empty one: its version is "empty", which
+    the lane prefix holds and this memo does not (no marks to hold, none to count). A build that raises stores nothing
+    and raises, as the derivation did."""
+    ver = _caption_rows_version(sid, caps)
+    if type(ver) is not tuple:                           # None (no version) or "empty" (no rows): derived, not held
         if caps:
             with _JUDGING_MARKS_LOCK:
                 _JUDGING_MARKS_STATS["uncached"] += 1
@@ -54280,7 +54261,7 @@ def _judging_cap_marks(sid, caps):
                 return held[2]
     got, kind = None, "build"
     if held is not None:
-        tail = _judging_caps_tail(held[0], ver)
+        tail = _caption_rows_since(held[0], ver)        # held[0] != ver here: the hit above served one version twice
         if tail is not None:
             got = _cap_marks_extend(sid, held[2], held[3], held[1], caps, tail)
             if got is not None:
