@@ -54711,7 +54711,10 @@ _lanes_stats = {"hit": 0, "miss": 0, "live_tail": 0, "complain_skip": 0, "unshar
                 # those prefixes carried (work a whole-lane derivation would have redone); segs_miss counts only the derived
                 "prefix_hit": 0, "prefix_segs": 0,
                 # (2026-10-06) prefix_partial: a held prefix whose turns diverged before its end under the same inputs (a
-                # rewind, a compaction re-seat, a late record, a re-recorded uuid), which re-walks the whole lane;
+                # rewind, a compaction re-seat, a late record, a re-recorded uuid, or the turn that just closed before the
+                # next turn's state row landed: its idle span runs to the parse clock until that row ends it, so its end
+                # moves, at every turn boundary whose state row follows the new turn's first record), which re-walks the
+                # whole lane;
                 # prefix_reset: a held prefix discarded because an input moved (another leaf, the seams, liveness, the
                 # branch clip, the host's suspensions); prefix_recap and prefix_recap_new: held bars whose captions were
                 # looked up again because the captions moved, and those of them rebuilt because a caption changed
@@ -54727,8 +54730,10 @@ _LANES_LOCK = threading.Lock()
 
 def _lanes_memo_report():
     """The memo's counters plus its occupancy, for /perf (memos.lanes). hit, miss, live_tail, complain_skip,
-    unshared_skip, evict, entries, segs_hit and segs_miss are the LIVE lanes'; dead_serve, dead_miss and
-    dead_failed_serve are the dead lanes' (build_timeline counts them here, so one block carries every lane)."""
+    unshared_skip, evict, entries, segs_hit and segs_miss are the LIVE lanes'; prefix_hit, prefix_segs,
+    prefix_partial, prefix_reset, prefix_recap and prefix_recap_new are the lane prefix's, which those lanes'
+    derivations read (_lane_segments); dead_serve, dead_miss and dead_failed_serve are the dead lanes'
+    (build_timeline counts them here, so one block carries every lane)."""
     with _LANES_LOCK:
         out = dict(_lanes_stats)
         out["entries"] = len(_lanes_memo)
@@ -54801,20 +54806,29 @@ _BAR_ORDER = ("id", "start", "end", "p", "w", "r", "q", "c", "m", "s", "d", "u",
 
 
 def _turn_prefix_key(turn):
-    """A closed turn's identity for the prefix: its id, whether it ended, its atom count and its end."""
+    """The first four fields of a closed turn's _turn_hold_key, in its order: its id, whether it ended, its atom count
+    and its end. The lane prefix keyed its closed turns on this until 2026-10-06 and keys them on _turn_hold_key now;
+    no kernel code calls it, and it stays as the reference a test pins the hold key's leading fields against."""
     return (turn.get("id"), bool(turn.get("ended")), len(turn.get("atoms") or ()), turn.get("end"))
 
 
 def _lane_prefix_inputs(goals, head, live, bft):
     """The non-turn inputs a prefix is valid under, or None when the prefix must not be used this build: no leaf head
-    (the caller holds no prefix, or the leaf could not be stat'd), or an unshared mutable goals store with content.
-    The store by its seams' value (_seams_fp), the only part of it the bars read; the captions are not an input (the
-    held bars are re-captioned instead, the comment above _lane_prefix_memo)."""
+    (the caller holds no prefix, or the leaf could not be stat'd), an unshared mutable goals store with content, or
+    seams the fingerprint cannot read. The store by its seams' value (_seams_fp), the only part of it the bars read;
+    the captions are not an input (the held bars are re-captioned instead, the comment above _lane_prefix_memo).
+    Unreadable seams (a truthy scalar where a list belongs) raised out of the whole build from here, outside the
+    turn loop's seams guard, so no lane got a bars frame (the post-merge review of the inputs-by-value change,
+    2026-10-06): the lane now derives whole, and that guard complains for this lane alone, as it did before."""
     if head is None:
         return None
     if not (isinstance(goals, jd.FrozenStore) or goals is None or (not goals.get("seams") and not goals.get("nodes"))):
         return None
-    return (head, _seams_fp(goals), bool(live), bft, tuple(_downtime))
+    try:
+        seams = _seams_fp(goals)
+    except Exception:
+        return None
+    return (head, seams, bool(live), bft, tuple(_downtime))
 
 
 def _lane_bar_index(bars, base=None, start=0):
@@ -54953,10 +54967,12 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, head
                     _lanes_stats["prefix_hit"] += 1
                     _lanes_stats["prefix_segs"] += nsegs_held
             else:
-                # a held turn changed or went (a rewind, a compaction re-seat, a late record, a re-recorded uuid): the
-                # whole lane re-derives, as it always has; partial reuse is not attempted (the count says whether a
-                # per-turn form would pay). A leftover from the design that did attempt it walked every atom of the
-                # standing turns into a set nobody read (2026-09-16): nothing here reads a turn.
+                # a held turn changed or went (a rewind, a compaction re-seat, a late record, a re-recorded uuid, or the
+                # turn that just closed before the next turn's state row landed: its idle span runs to the parse clock
+                # until that row ends it, so its end moves, at every turn boundary whose state row follows the new
+                # turn's first record): the whole lane re-derives, as it always has; partial reuse is not attempted
+                # (the count says whether a per-turn form would pay). A leftover from the design that did attempt it
+                # walked every atom of the standing turns into a set nobody read (2026-09-16): nothing here reads a turn.
                 with _LANES_LOCK:
                     _lanes_stats["prefix_partial"] += 1
     snap = None

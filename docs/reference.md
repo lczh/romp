@@ -4086,8 +4086,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   only nodes keeps them), liveness, the branch clip and the suspensions
   stand: `prefix_hit` counts those derivations and `prefix_segs` the segments
   they reused; `prefix_partial` counts derivations whose held turns diverged
-  before the prefix's end (a rewind, a compaction, a late record), each of
-  which re-walks the whole lane, and `prefix_reset` derivations whose held
+  before the prefix's end (a rewind, a compaction, a late record, or a turn
+  boundary whose state row lands after the new turn's first record: until it
+  lands, the turn that just closed runs its idle span to the parse's clock,
+  so that turn's end moves), each of which re-walks the whole lane, and
+  `prefix_reset` derivations whose held
   bars were dropped because one of those inputs moved. A caption write drops
   nothing: the held bars it can change have their captions looked up again
   (`prefix_recap`), after an append only the bars whose segment key an

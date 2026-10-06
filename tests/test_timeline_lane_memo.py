@@ -23,6 +23,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -1466,6 +1467,30 @@ class NotHeld(LaneMemoBase):
         self.assertEqual(len(tl["turns"][LIVE_SID]), 1, "the seams fell back to the plain segments; the bar still draws")
         self.assertIn("seams failed", err.getvalue())
 
+    def test_a_seams_field_that_is_a_truthy_scalar_costs_the_seams_not_the_frame(self):
+        """RED FIRST (the post-merge review of the lane prefix's inputs by value, 2026-10-06): the prefix fingerprints a
+        shared store's seams by value, outside the turn loop's seams guard, so a store whose seams field is a truthy
+        scalar where a list belongs (1, true, 1.5) raised TypeError out of the whole build, and no lane got a bars frame.
+        Such seams now cost the lane its prefix: it derives whole, the seams guard complains for it alone, and the frame
+        ships with its bars, as it did before the seams were keyed by value."""
+        self.append_records([_rec("user", self.t0 + 100, "u2", "a1", "and cap the delay"),
+                             _rec("assistant", self.t0 + 120, "a2", "u2", "Capped at two minutes.")])
+        p = km.jd.GOALDIR / (LIVE_SID + ".json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        for i, bad in enumerate((1, True, 1.5)):
+            p.write_text(json.dumps({"nodes": {}, "status": {}, "seams": bad}))
+            os.utime(p, (self.now - 300 + i, self.now - 300 + i))
+            store = km.jd.load_goals_shared(LIVE_SID)
+            self.assertIsInstance(store, km.jd.FrozenStore, "(the premise) %r: a shared store" % bad)
+            self.assertEqual(store.get("seams"), bad, "(the premise) %r: the store carries the scalar" % bad)
+            err = io.StringIO()
+            with redirect_stderr(err):
+                tl = self.build()
+            self.assertEqual(len(tl["turns"][LIVE_SID]), 2, "%r: the frame ships with the lane's bars" % bad)
+            self.assertIn("seams failed", err.getvalue(), "%r: the seams guard complains for the lane" % bad)
+            self.assertNotIn(LIVE_SID, km._lane_prefix_memo, "%r: no prefix is held under seams nobody can read" % bad)
+        self.assertEqual(self.outcomes()["complain_skip"], 3, "each build derived the lane and held nothing")
+
     def test_a_complaining_marks_stage_is_not_held(self):
         km._derive_judging_marks = lambda *a, **k: (_ for _ in ()).throw(KeyError("t"))
         err = io.StringIO()
@@ -1732,6 +1757,13 @@ class PerfWiring(LaneMemoBase):
         for k in km._lanes_memo_report():
             self.assertIn("`%s`" % k, passage, k)
 
+    def test_the_reports_docstring_names_every_key_of_the_block(self):
+        """RED FIRST: the report's docstring lists the block's counters for a reader of the code, and it lacked the six
+        prefix counters (the two from 2026-09-12 and the four from 2026-10-06) until the post-merge review named them."""
+        words = set(re.findall(r"[a-z_]+", km._lanes_memo_report.__doc__))
+        for k in km._lanes_memo_report():
+            self.assertIn(k, words, k)
+
 
 def _boundary(t, uuid, parent):
     """A compact_boundary record as Claude Code writes one (parentUuid null, the anchor under logicalParentUuid). It
@@ -1790,7 +1822,14 @@ class PrefixMemo(LaneMemoBase):
     order and every other bar the same object; the leaf's path and inode (the head) and each turn's uuids
     (_turn_hold_key) in the key. Red first: the caption-row, open-segment, rewrite, republish and re-recorded-uuid
     tests fail on the kernel before that change (the prefix was not served, or was served with another record's
-    ids); the seam test and the unshared-store test pin rules that held before and hold still."""
+    ids); the seam test and the unshared-store test pin rules that held before and hold still.
+
+    The post-merge review of that change (2026-10-06) found roads no test reached, each giving the right bars and each
+    left green by a mutant that broke it: five captions-version roads (a prefix held with no captions meeting its first
+    row, an unknown version on both sides, an append whose reader entry went, a mapping the reader memo moved past, a
+    row landing during the derivation), the host's suspensions as a prefix input, and the leaf's head (a file renamed
+    over the leaf between builds, and during the parse). Each has a test below, red under the mutant its docstring
+    names; each compares the bars with a whole derivation's."""
 
     def _prefix_counts(self):
         st = self.stats()
@@ -2166,6 +2205,242 @@ class PrefixMemo(LaneMemoBase):
         self.assertEqual(list(bare), [k for k in km._BAR_ORDER if k not in ("c", "m")],
                          "an empty caption is omitted, as the builder omits it")
         self.assertEqual(full["c"], "v-c", "the bar it was rebuilt from is untouched")
+
+    # ── the roads the post-merge review named (2026-10-06): each red under the mutant its docstring names ──
+    def cap_path(self):
+        return km.jd.CAPDIR / (LIVE_SID + ".jsonl")
+
+    def test_a_prefix_held_with_no_captions_meets_its_first_row(self):
+        """The usual order, since a lane's turns close before the captioner writes their first rows. A prefix held while
+        the lane had no captions file is held under the "empty" version, which names no file and no records, so the first
+        row is no append to it: every held bar is looked up again, and the one the row names carries its caption. The
+        same after the file is truncated to no rows and then appended to. Red under the mutant in which
+        _caption_rows_since answers no rows from the "empty" version to a tuple (the closed turns would lack their first
+        captions until a later row reached their bars, a rewrite, or a reset)."""
+        self.assertFalse(self.cap_path().exists(), "(the premise) no captions file")
+        self.three_turns()
+        self.assertEqual(km._lane_prefix_memo[LIVE_SID][9], "empty", "(the premise) the prefix is held under the empty version")
+        seg0 = self.seg_ids()[0]
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("c"), "first summary", "the first row reaches its held bar")
+        self.assertEqual((self._prefix_counts()[0], self.recap()), (2, (2, 1)),
+                         "the prefix served; both held bars were looked up again, the one the row names rebuilt")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+        self.cap_path().write_text("")                               # the file truncated to no rows: empty again
+        os.utime(self.cap_path(), (self.now - 5, self.now - 5))
+        tl5 = self.build()
+        self.assertNotIn("c", tl5["turns"][LIVE_SID][0], "the truncation took the caption")
+        self.assertEqual(km._lane_prefix_memo[LIVE_SID][9], "empty", "(the premise) held under the empty version again")
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "second summary")
+        tl6 = self.build()
+        bars = tl6["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("c"), "second summary", "the append after the truncation reaches its held bar")
+        self.assertEqual(self._prefix_counts()[0], 4)
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_an_unknown_version_on_both_sides_re_captions_every_held_bar(self):
+        """A mapping _captions answered without holding it (the reader's entry gone after the read) has no version
+        (None), and a prefix held under None can meet a derivation under None again: in the kernel two uncached reads in
+        a row, the rarest of these roads. Two unknowns are not one version, so every held bar is looked up again and a
+        changed row reaches its bar. The reader's entry for the captions is dropped after every read here. Red under the
+        mutant in which _lane_segments re-captions only when the two versions differ (the held bar would keep its older
+        caption)."""
+        real_read, cap = km.em._read_jsonl_incremental, str(self.cap_path())
+
+        def read_not_kept(path, *a, **k):
+            out = real_read(path, *a, **k)
+            if str(path) == cap:
+                with km.em._JSONL_CACHE_LOCK:
+                    km.em._cache_pop_locked(cap)
+            return out
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        with mock.patch.object(km.em, "_read_jsonl_incremental", read_not_kept):
+            self.three_turns()
+            self.assertIsNone(km._lane_prefix_memo[LIVE_SID][9], "(the premise) the prefix is held under no version")
+            km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "Added backoff")
+            tl4 = self.build()
+            self.assertIsNone(km._lane_prefix_memo[LIVE_SID][9], "(the premise) and derived under none again")
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("c"), "Added backoff", "the changed row reaches its held bar")
+        self.assertEqual(self._prefix_counts()[0], 2, "the prefix served")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_an_append_whose_reader_entry_went_before_the_derivation_re_captions_every_held_bar(self):
+        """An append's version names the reader's entry that holds the appended records, and the derivation reads them
+        from that entry. An entry evicted between the captions read and the derivation holds none of them, so every held
+        bar is looked up again, not none of them. Red under the mutant in which _caption_rows_since answers no rows when
+        the reader's entry is gone (the held bar would keep its older caption)."""
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        self.three_turns()
+        held_ver = km._lane_prefix_memo[LIVE_SID][9]
+        self.assertIsInstance(held_ver, tuple, "(the premise) the prefix is held under a version of the file")
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "Added backoff")
+        real, read = km._captions, []
+
+        def evicted_after_the_read(fsid):
+            caps = real(fsid)
+            if fsid == LIVE_SID and not read:
+                read.append(km._caption_rows_version(fsid, caps))
+                with km.em._JSONL_CACHE_LOCK:
+                    km.em._cache_pop_locked(str(self.cap_path()))
+            return caps
+        km._captions = evicted_after_the_read
+        tl4 = self.build()
+        km._captions = real
+        self.assertEqual((read[0][:3], read[0][3]), (held_ver[:3], held_ver[3] + 1), "(the premise) an append to the held version")
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("c"), "Added backoff", "the appended row reaches its held bar")
+        self.assertEqual((self._prefix_counts()[0], self.recap()), (2, (2, 1)),
+                         "the prefix served; both held bars were looked up again, the one the row names rebuilt")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_a_derivation_over_a_mapping_the_reader_memo_moved_past_then_one_over_the_newer_mapping(self):
+        """A build that read its captions before an append, while another thread's read after the append moved the
+        reader memo on, derives over a mapping the memo no longer holds. The bars it holds were captioned from the older
+        rows, so they are held under no version, never the memo's newer one: the next derivation, over the newer mapping,
+        looks them up again, and the held bar the append changed carries the new caption. Asserted on the caption, not on
+        the version helper's answer. Red under the mutant in which _caption_rows_version answers the memo's version for
+        a mapping it no longer holds."""
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        self.three_turns()
+        session = km._parse(str(self.tpath()), LIVE_SID, self.now)
+        goals = km.jd.load_goals_shared(LIVE_SID)
+        older = km._captions(LIVE_SID)
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "Added backoff")
+        newer = []
+        t = threading.Thread(target=lambda: newer.append(km._captions(LIVE_SID)))
+        t.start()
+        t.join(30)
+        self.assertIsNot(newer[0], older, "(the premise) the other thread read the newer mapping")
+        self.assertIs(km._CAPTION_ROWS_MEMO[str(self.cap_path())][3], newer[0], "(the premise) and the reader memo holds it")
+        v1 = self.derive(session, goals, older, self.head())
+        self.assertEqual(v1[0][0].get("c"), "first summary", "the older rows caption the derivation over them")
+        self.assertEqual(self._prefix_counts()[0], 2, "the prefix served it")
+        v2 = self.derive(session, goals, km._captions(LIVE_SID), self.head())
+        self.assertEqual(v2[0][0].get("c"), "Added backoff", "the derivation over the newer mapping carries the new caption")
+        self.assertEqual(json.dumps(v2[0]), json.dumps(self.whole()[0]))
+
+    def test_a_row_landing_during_a_derivation_the_prefix_serves_reaches_its_bar_on_the_next_build(self):
+        """The prefix records the version its bars were captioned under, the one the derivation read, never the file's
+        newer one. A row appended while a build the prefix serves is deriving (here from a hook on the work-caption
+        lookup, at the open segment's) is not in that build's bars; the next build's captions are an append to the
+        recorded version, so the held bar the row names is looked up again and carries it. The build needs a whole-lane
+        memo miss first (a captions row for the open segment), or the lane memo serves it and no derivation runs. Red
+        under the mutant in which the prefix records the version of a captions read taken when it stores."""
+        seg0 = self.seg_id()
+        km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "first summary")
+        self.three_turns()
+        tail = self.seg_ids()[-1]
+        km.jd.append_caption(LIVE_SID, tail, "segment", self.t0 + 200, "Logging each retry")
+        real, landed = km._seg_work_caption, []
+        self.addCleanup(setattr, km, "_seg_work_caption", real)
+
+        def row_lands(caps, seg_id):
+            if not landed:
+                landed.append(seg_id)
+                km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "Added backoff")
+            return real(caps, seg_id)
+        km._seg_work_caption = row_lands
+        tl4 = self.build()
+        km._seg_work_caption = real
+        self.assertEqual((landed, self._prefix_counts()[0]), ([tail], 2),
+                         "(the premise) the row landed during the open segment's lookup, in a build the prefix served")
+        self.assertEqual(tl4["turns"][LIVE_SID][0].get("c"), "first summary", "that build read the rows before it landed")
+        tl5 = self.build()
+        bars = tl5["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("c"), "Added backoff", "the next build looks the held bar up again")
+        self.assertEqual(self._prefix_counts()[0], 3)
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_a_host_sleep_inside_a_held_segment_drops_the_prefix_and_cuts_the_bar(self):
+        """The host's recorded suspensions are a prefix input: the bars excise every sleep inside a segment, so a held bar
+        drawn before a sleep was recorded would span it. A three-turn lane, so the prefix holds two turns; a sleep
+        inside the first held segment drops the held bars (prefix_reset) and the bar is cut at the sleep, equal to a
+        whole derivation's. Red under the mutant in which _lane_prefix_inputs keys an empty tuple for the suspensions (the
+        kept bar would span the sleep until the leaf, the seams or a kept turn moved)."""
+        tl3 = self.three_turns()
+        self.assertEqual((self._prefix_counts()[0], len(tl3["turns"][LIVE_SID])), (1, 3), "(the premise) two turns held")
+        km._downtime[:] = [(self.t0 + 5, self.t0 + 10)]
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(self.stats()["prefix_reset"], 1, "the suspensions moved: the held bars were dropped")
+        self.assertEqual(len(bars), 4, "the first bar is cut at the sleep")
+        self.assertTrue(bars[1].get("t"), "the second piece is a continuation: no new prompt dot")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def tool_lane(self):
+        """The lane's first turn with a tool call between its prompt and its reply: the call's record is neither the
+        turn's trigger nor its newest, so re-recording it under a new uuid moves no turn key, and it is the bar's work
+        anchor (`w`)."""
+        self.add_lane(LIVE_SID, "web", [
+            _rec("user", self.t0, "u1", None, "make the retry loop back off"),
+            _tool_use(self.t0 + 10, "c1", "u1", "toolu_1"), _tool_result(self.t0 + 15, "r1", "c1", "toolu_1"),
+            _rec("assistant", self.t0 + 20, "a1", "r1", "Added exponential backoff.")])
+
+    def rename_over(self):
+        """The leaf's records, the tool call re-recorded under a new uuid, written to a new file renamed over the leaf:
+        a new inode at the same path, every turn key standing."""
+        body = self.tpath().read_text()
+        new = body.replace('"uuid": "c1"', '"uuid": "c1x"').replace('"parentUuid": "c1"', '"parentUuid": "c1x"')
+        self.assertEqual(new.count('"c1x"'), 2, "(the premise) the call and its result's parent re-recorded")
+        tmp = Path(str(self.tpath()) + ".new")
+        tmp.write_text(new)
+        os.replace(str(tmp), str(self.tpath()))
+
+    def test_a_new_file_renamed_over_the_leaf_is_not_served_the_old_files_bars(self):
+        """A file renamed over the leaf whose one changed record (the tool call, under a new uuid) moves no turn key is
+        another file at the same path: the prefix is headed by the leaf's path and inode, which build_timeline stats, so
+        the held bars are dropped (prefix_reset) and the bar names the new record, equal to a whole derivation's. Red
+        under the mutant in which build_timeline's head carries a constant in place of the inode (the old file's bar
+        would be served)."""
+        self.tool_lane()
+        tl3 = self.three_turns()
+        self.assertEqual(tl3["turns"][LIVE_SID][0].get("w"), "c1", "(the premise) the call is the bar's work anchor")
+        keys = [km._turn_hold_key(t) for t in km._parse(str(self.tpath()), LIVE_SID, self.now)["turns"]]
+        ino = os.stat(self.tpath()).st_ino
+        self.rename_over()
+        self.assertNotEqual(os.stat(self.tpath()).st_ino, ino, "(the premise) a new file at the path")
+        self.assertEqual([km._turn_hold_key(t) for t in km._parse(str(self.tpath()), LIVE_SID, self.now)["turns"]], keys,
+                         "(the premise) every turn key stands")
+        tl4 = self.build()
+        bars = tl4["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("w"), "c1x", "the bar names the new file's record")
+        self.assertEqual((self.stats()["prefix_reset"], self._prefix_counts()[0]), (1, 1), "the held bars were dropped, not served")
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
+
+    def test_a_file_renamed_over_the_leaf_during_the_parse_is_dropped_on_the_next_build(self):
+        """build_timeline stats the leaf BEFORE the parse reads it. A file renamed over the leaf after the parse returns
+        leaves this build's bars, the old file's, under the old file's head, so the next build, whose head is the new
+        file's, drops them and names the new record. The build needs a whole-lane memo miss (a captions row for the open
+        segment), or the lane memo serves it and no derivation runs. Red under the mutant in which build_timeline stats
+        the leaf after the parse (the new file's head would hold the old file's bars, and the next build would serve
+        them)."""
+        self.tool_lane()
+        self.three_turns()
+        km.jd.append_caption(LIVE_SID, self.seg_ids()[-1], "segment", self.t0 + 200, "Logging each retry")
+        real, renamed = km._parse, []
+
+        def parse_then_rename(path, sid, now):
+            out = real(path, sid, now)
+            if sid == LIVE_SID and not renamed:
+                renamed.append(1)
+                self.rename_over()
+            return out
+        km._parse = parse_then_rename
+        tl4 = self.build()
+        km._parse = real
+        self.assertEqual(renamed, [1], "(the premise) the file was renamed over the leaf after the build's parse returned")
+        self.assertEqual(tl4["turns"][LIVE_SID][0].get("w"), "c1", "that build parsed the old file")
+        tl5 = self.build()
+        bars = tl5["turns"][LIVE_SID]
+        self.assertEqual(bars[0].get("w"), "c1x", "the next build drops the held bars and names the new record")
+        self.assertEqual(self.stats()["prefix_reset"], 1)
+        self.assertEqual(json.dumps(bars), json.dumps(self.whole()[0]))
 
     # ── the closed turns' compaction markers ride the prefix (2026-09-16) ──
     def _lazy_closed_turns(self, session):
