@@ -715,6 +715,10 @@ class _Lanes(_Root):
 
 # ── FrameWalk ────────────────────────────────────────────────────────────────────────────────────────────────────
 class FrameWalk(_Lanes):
+    def live_map(self):                           # the walk's own liveness: a lane can die, and its dead lane is compared too
+        live = getattr(self, "live", None)
+        return {sid: _live_row(self.now - 100) for sid in self.present if live is None or sid in live}
+
     def check(self, i, label):
         tl = self.build()
         with self.cold():
@@ -758,6 +762,8 @@ class FrameWalk(_Lanes):
 
     def test_every_lanes_frame_equals_the_reference_build_after_every_step(self):
         rng = random.Random(20261006)
+        self.live = set(self.present)
+        ln0 = dict(km._lanes_stats)
         km.TL_HORIZON, km.JUDGE_CAP_LIMIT = 1800, 5
         for sid in (WEB, API):
             rows = [{"id": "%s:%d:%08x" % (sid, self.now - 900 - 60 * j, j), "grain": "segment", "t": self.now - 900 - 60 * j,
@@ -765,8 +771,9 @@ class FrameWalk(_Lanes):
             self.caps[sid].extend(rows)
             self.append(self.cap_path(sid), rows)
         tl = self.check(-1, "start")
-        ops = ("cap", "caprw", "st", "strw", "turn", "clock", "edge", "depart", "noop")
-        weights = (30, 4, 16, 3, 6, 10, 10, 4, 6)
+        ops = ("cap", "caprw", "st", "strw", "turn", "clock", "edge", "ivedge", "die", "wake", "depart", "noop")
+        weights = (30, 4, 16, 3, 6, 10, 10, 10, 5, 4, 4, 6)
+        wanted = set(km._NEEDS_INPUT_STATES) | {"compacting"}
         for i in range(70):
             op = rng.choices(ops, weights)[0]
             if i == 20:
@@ -801,11 +808,28 @@ class FrameWalk(_Lanes):
                       if isinstance(r.get("t"), int) and r["t"] + km.TL_HORIZON >= self.now - 600]
                 if ts:
                     self.now = rng.choice(ts) + km.TL_HORIZON
+            elif op == "ivedge":                  # the horizon exactly on the end of a wanted state's interval
+                ends = []
+                for s in self.present:
+                    ev = sorted((r["t"], r["state"]) for r in self.states[s] if r.get("t") and r.get("state"))
+                    ends.extend(ev[j + 1][0] for j in range(len(ev) - 1) if ev[j][1] in wanted)
+                ends = [e for e in ends if e + km.TL_HORIZON >= self.now - 300]
+                if ends:
+                    self.now = rng.choice(ends) + km.TL_HORIZON
+            elif op == "die":                     # a lane goes dead: its frame comes off the dead-lane road
+                if self.live:
+                    self.live.discard(rng.choice(sorted(self.live)))
+            elif op == "wake":
+                dead = sorted(set(self.present) - self.live)
+                if dead:
+                    self.live.add(rng.choice(dead))
             elif op == "depart":
                 if API in self.present:
                     self.depart(API)
+                    self.live.discard(API)
                 else:
                     self.arrive("api", API)
+                    self.live.add(API)
             tl = self.check(i, op)
         if hasattr(km, "_JUDGING_MARKS_STATS"):           # the walk took every road of both tables
             st, sv = self.stats("_JUDGING_MARKS_STATS"), self.stats("_STATE_IV_STATS")
@@ -813,6 +837,8 @@ class FrameWalk(_Lanes):
                 self.assertGreater(st[k], 0, "judgingMarks.%s" % k)
             for k in ("hit", "sort", "forget"):
                 self.assertGreater(sv[k], 0, "stateIntervals.%s" % k)
+        for k in ("dead_miss", "dead_serve"):                # and the dead-lane road, derived and served
+            self.assertGreater(km._lanes_stats[k] - ln0.get(k, 0), 0, "lanes.%s" % k)
 
 
 # ── Bounds ───────────────────────────────────────────────────────────────────────────────────────────────────────
