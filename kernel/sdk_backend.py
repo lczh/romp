@@ -8560,6 +8560,22 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("model learn (%s): registry write failed: %s" % (self.name, e))
             if cleared:
+                # the flag from the marker, before the poke, as the context refresh and the write below put it: the
+                # prune writes the flag down after its hold of the session lock, so a pick landing between the two
+                # (set_model on the kernel's thread: its marker, its seed write and its own flag) had its flag
+                # overwritten, and this road wrote nothing more. A hard kernel death before the pick's next report then
+                # healed nothing, and the session revived on the model from before the pick: a Latest or default pick
+                # resolving below that model had its first report read as a fallback, carded and, with Retry upgrades
+                # on, armed (the review of #42 after it merged).
+                # The marker is read inside the registry lock: set_model sets it in its hold of the session lock before
+                # its own flag write takes the registry lock, so a pick landing as this write runs is read here or
+                # writes its flag after this one. Read just before the lock, as the context refresh's write and the
+                # write below read it, a pick landing between the read and the lock had its flag overwritten
+                try:
+                    with self.backend._reg_lock:
+                        self.backend._update_reg_held(self.sid, modelPending=bool(self._model_pending))
+                except Exception as e:
+                    self.backend._log("model learn (%s): registry write failed: %s" % (self.name, e))
                 self.backend._poke()
             return
         if self.model and not self._model_pending and not cleared \
@@ -8714,7 +8730,13 @@ class SdkSession:
         The list's check and rewrite and the marker's read and clear sit in one hold of the session lock, under which
         set_model writes both on the kernel's thread. Held for the rewrite alone, a pick landing during the check, or
         between the rewrite and the marker's clear, left the pick this report reflects listed, and a refusal of the new
-        pick gave it its dots back (round four). __new__-built test doubles have no lock, and take a fresh one."""
+        pick gave it its dots back (round four). __new__-built test doubles have no lock, and take a fresh one.
+
+        The registry's flag is written after the hold, so a pick landing between the two has its own flag overwritten.
+        Each caller given True writes the flag again from the marker before it pokes: the context refresh, and both of
+        _learn_model's roads, the early return for a report that names the live model included (the review of #42
+        after it merged). The early return reads the marker inside the registry lock, so no pick overtakes its write;
+        the other two read it just before the lock."""
         with (getattr(self, "_lock", None) or threading.Lock()):
             unlanded = getattr(self, "_pick_unlanded", ())   # getattr: __new__-built test doubles skip __init__
             kept = tuple(p for p in unlanded if not _lands_on_pick(pm, p))
@@ -18828,19 +18850,25 @@ class SdkBackend:
 
     def _update_reg(self, sid: str, **fields):
         with self._reg_lock:                       # kernel + loop threads both write (queue mirror);
-            reg = read_reg(self.state_dir, sid)    # unserialized RMWs would drop fields
-            if reg is None:
-                if not _reg_absent_for_write(_reg_path(self.state_dir, sid)):
-                    # the reg EXISTS but would not read: writing {sid}+fields here GUTS it — no
-                    # alive, no name — and a gutted reg vanishes from every listing until a full
-                    # rewrite (the 2026-08-31 blink class). Losing one mirror update is the far
-                    # smaller harm: the next update lands on the healed read.
-                    sys.stderr.write("update_reg: %s unreadable — skipping a %s write rather than "
-                                     "gutting the reg\n" % (sid[:8], "/".join(sorted(fields))))
-                    return
-                reg = {"sid": sid}
-            reg.update(fields)
-            write_reg(self.state_dir, sid, reg)
+            self._update_reg_held(sid, **fields)   # unserialized RMWs would drop fields
+
+    def _update_reg_held(self, sid: str, **fields):
+        """_update_reg's read-modify-write, for a caller that already holds _reg_lock: one that reads the value it
+        writes inside the same hold, so that no writer taking the lock lands between the read and the write
+        (_learn_model's flag from the pick marker)."""
+        reg = read_reg(self.state_dir, sid)
+        if reg is None:
+            if not _reg_absent_for_write(_reg_path(self.state_dir, sid)):
+                # the reg EXISTS but would not read: writing {sid}+fields here GUTS it — no
+                # alive, no name — and a gutted reg vanishes from every listing until a full
+                # rewrite (the 2026-08-31 blink class). Losing one mirror update is the far
+                # smaller harm: the next update lands on the healed read.
+                sys.stderr.write("update_reg: %s unreadable — skipping a %s write rather than "
+                                 "gutting the reg\n" % (sid[:8], "/".join(sorted(fields))))
+                return
+            reg = {"sid": sid}
+        reg.update(fields)
+        write_reg(self.state_dir, sid, reg)
 
     def _reg_for_flip(self, sid: str):
         """The RMW base for a VISIBILITY FLIP (kill/resume/promote) when the disk read fails but
