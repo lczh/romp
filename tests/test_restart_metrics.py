@@ -277,8 +277,10 @@ class BootJoin(unittest.TestCase):
     def test_a_killed_exit_is_measured_never_clean_and_counted_apart(self):
         """An exit killed after its cut row (no done row) counts the turns its cut row predicted and is never clean: with an
         empty prediction the head read it as a clean restart. When its prediction failed too (cutTurnsError) its turns are
-        unknown, as a crash boot's are, so it leaves both sides of the rate. The rate, over a completed exit and cut rows
-        with no done row, with and without the fault."""
+        unknown, as a crash boot's are, so it leaves both sides of the rate and is counted with the unknown counts, not
+        with the killed exits, which are all measured (the review of 2026-10-06); so is a completed exit whose prediction
+        failed and whose drain raised. The rate, over a completed exit and cut rows with no done row, with and without the
+        fault, and the line's text, which names the rate's top (measuredCutTurns) when it differs from the turns cut."""
         web, api = {"sid": SID, "name": "web"}, {"sid": SID2, "name": "api"}
         completed = [{"t": D0 + 100, "pid": 7, "cutTurns": [], "stopped": 1, "expectsDone": True},
                      {"t": D0 + 102, "pid": 7, "exitDone": True, "cutT": D0 + 100, "stopped": 1, "drainCutTurns": [web]}]
@@ -297,24 +299,40 @@ class BootJoin(unittest.TestCase):
         self.assertEqual(b["cutTurnsPerRestart"], 0.67, "2 turns over 3 measured restarts")
         b = bucket(completed + [killed_fault])
         self.assertEqual((b["restarts"], b["cutTurns"], b["cleanRestarts"], b["killedExits"], b["measuredRestarts"],
-                          b["unmeasuredRestarts"]), (2, 1, 0, 1, 1, 1),
-                         "with no prediction the killed exit's turns are unknown: out of the measured restarts")
+                          b["unmeasuredRestarts"]), (2, 1, 0, 0, 1, 1),
+                         "with no prediction the killed exit's turns are unknown: out of the measured restarts, and so out of "
+                         "the killed count, which is counted among them (the review of 2026-10-06: it was counted in both)")
         self.assertEqual(b["cutTurnsPerRestart"], 1.0, "1 turn over the 1 measured restart (the head: 0.5, and 1 clean)")
         b = bucket(completed + [dict(killed_fault, cutTurns=[api])])     # a Codex turn read, the SDK prediction failed
         self.assertEqual((b["cutTurns"], b["measuredRestarts"], b["cutTurnsPerRestart"]), (2, 1, 1.0),
                          "an unmeasured exit's known turns count as cut, and leave the rate's top with its bottom")
+        self.assertEqual(b.get("measuredCutTurns"), 1, "the rate's top is kept: 1 turn by the 1 measured restart")
+        present = {k: {"present": True} for k in ("restartCuts", "restartAudit", "sessionEvents", "turns")}
+
+        def text_of(b):
+            return rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
+                               "buckets": [b], "live": {"skipped": True}})
+        self.assertIn("restarts 2 · turns cut 2 (1 by the measured restarts, 1.0 per measured restart) · clean restarts 0", text_of(b),
+                      "the line names the rate's top when it differs from the total, so 1.0 can be checked against its figures "
+                      "(before this fix: 2 turns, 2 restarts, one unknown count and 1.0)")
         b = bucket([dict(completed[0], cutTurnsError="RuntimeError: synthetic"), completed[1]])
         self.assertEqual((b["measuredRestarts"], b["cutTurnsPerRestart"]), (1, 1.0),
                          "a completed exit's drain result stands in for a failed prediction: measured")
-        present = {k: {"present": True} for k in ("restartCuts", "restartAudit", "sessionEvents", "turns")}
-        text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
-                           "buckets": [bucket(completed + [killed, killed_empty])], "live": {"skipped": True}})
-        self.assertIn("clean restarts 0 · boots with no cut row 0 · killed after the cut row 2", text)
+        raised = [{"t": D0 + 500, "pid": 11, "cutTurns": [], "stopped": 1, "expectsDone": True,
+                   "cutTurnsError": "RuntimeError: synthetic predicate fault"},
+                  {"t": D0 + 502, "pid": 11, "exitDone": True, "cutT": D0 + 500, "drainError": "RuntimeError: synthetic drain fault"}]
+        b = bucket(completed + raised)                                   # a completed exit with no prediction and a raising drain
+        self.assertEqual((b["restarts"], b["measuredRestarts"], b["unmeasuredRestarts"], b["cleanRestarts"], b["killedExits"]),
+                         (2, 1, 1, 0, 0), "no prediction and no drain result: the drain-error half of the rule leaves it "
+                                          "unmeasured, never a clean restart of 0 turns")
+        text = text_of(bucket(completed + [killed, killed_empty]))
+        self.assertIn("restarts 3 · turns cut 2 (0.67 per measured restart) · clean restarts 0 · boots with no cut row 0 · "
+                      "killed after the cut row 2", text)
         self.assertNotIn("unknown cut count", text, "every exit here has a known count")
-        text = rm.summary({"window": {"kind": "week", "anchor": "2026-09-10", "tz": TZ}, "sources": present, "label": "TESTHOST",
-                           "buckets": [bucket(completed + [killed_fault])], "live": {"skipped": True}})
-        self.assertIn("· killed after the cut row 1 · exits with an unknown cut count 1", text,
+        text = text_of(bucket(completed + [killed_fault]))
+        self.assertIn("clean restarts 0 · boots with no cut row 0 · exits with an unknown cut count 1", text,
                       "the text names the exit the per-measured-restart rate leaves out, so the rate reconciles")
+        self.assertNotIn("killed after the cut row", text, "the killed exit with an unknown count is counted with the unknown ones")
 
     def test_rotated_predecessor_is_read_first(self):
         state = Path(tempfile.mkdtemp())
