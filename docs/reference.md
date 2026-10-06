@@ -3918,6 +3918,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
   derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
   memo's outcomes on the same block, so one block carries every lane.
+  `msgScan` is the message-caption scan's hold. A peer message's caption on
+  the timeline and in the chat is the caption of the segment that received
+  it, joined through the segment's message ids; each session's closed turns
+  keep their (segment id, message ids) pairs between scans, under the turns'
+  identities, the leaf's path and inode and the seams by value, so a scan
+  walks only the turns from the first that moved, the open one always, and
+  joins the captions fresh. `scans` (scans whose walk finished),
+  `heldTurns` and `walkedTurns` (closed turns served from the hold, and turns
+  walked), `partial` (a held entry whose turns diverged before its end: a
+  rewind, a compaction, a late record), `reset` (an entry discarded whole
+  because the leaf or the seams moved), `raised` (a walk that raised, which
+  stores nothing), `evict` (entries the byte bound shed), and the gauges
+  `entries`, `bytes` (estimated) and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`,
+  else a 256th of the machine's memory).
   `judgingBand` is the timeline's judging band memo: a completed judge run's
   entry is held under its usage row while the row and the gloss it borrowed
   stand, so an unchanged entry is the same object build after build and the
