@@ -513,7 +513,7 @@ class LaneRoads(_Captions):
     def test_a_mapping_the_memo_moved_past_or_never_held_has_no_version(self):
         """A mapping read before another thread's read moved the reader memo on, and one _captions answered without
         holding it, are no version of the file: the version is None for both, never the memo's held one. Red under the
-        mutant in which the version answers the memo's held version for any mapping."""
+        mutant in which the version answers the memo's held version for a mapping the memo does not hold."""
         self.write(first_rows())
         older = km._captions(SID)
         self.assertIsInstance(km._caption_rows_version(SID, older), tuple)

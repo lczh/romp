@@ -38,7 +38,8 @@ Two tests drive the same road. One compares warm with cold at every step and che
 (so the equality is not a comparison of two empty maps). The other counts the turns the warm build walked at each step
 (the spy on _segs_seam): one or two where only the open turn moved, every turn where the leaf or the seams moved; and,
 for web's lane, one where only the open turn, the captions or the store's nodes moved (red before 2026-10-06, when a
-caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn moved.
+caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn's hold key
+moved (a state row that moves only the end of a held turn's first idle span moves no key: one).
 
 Synthetic data only: placeholder uuids, the web and api names, invented notes-api text, a private state root with
 session hosts off."""
