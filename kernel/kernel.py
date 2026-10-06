@@ -54715,9 +54715,11 @@ def _lanes_forget(keep):
 # are keyed by _turn_hold_key (a turn's identity plus its trigger's and newest atom's uuids), so a resume into another
 # file, a file replaced at the same path, or records re-recorded under the same times and text start a new prefix and
 # are never served another file's bars; a caller that passes no head (a dead lane, a direct derivation) holds none.
-# The judging marks read the store's nodes and every caption row: they stay outside the prefix, derived after the
-# loop on every derivation, and the lane memo above keeps the store's identity and the captions stat in its key,
-# since it serves them. Counted beside: prefix_partial, prefix_reset, prefix_recap, prefix_recap_new.
+# The judging marks read the store's nodes and the caption rows: they stay outside the prefix, derived after the
+# loop on every derivation, where the captioner's marks are served from their own table while the captions version
+# stands (_judging_cap_marks, reading no row) and carried across an append; the lane memo above keeps the store's
+# identity and the captions stat in its key, since it serves them. Counted beside: prefix_partial, prefix_reset,
+# prefix_recap, prefix_recap_new.
 # The closed turns' COMPACTION markers ride the prefix too (2026-09-16): the lane's compactions were a comprehension
 # over every atom of every turn, run after the prefix reuse on every derivation (a live lane whose tail moved derives
 # once per build that draws it, about three lanes a build on the measured board), so a prefix hit still walked the
@@ -55041,7 +55043,8 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     not held, as the dead-lane path derives and never caches one. `full_prompts` (T278b) receives the lane's whole
     prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way.
     `head` is the leaf's head for the derivation's prefix (_lane_segments), stat'd before the parse; the captions key
-    here stays the file's stat, since this memo also serves the judging marks, which read every caption row."""
+    here stays the file's stat, since this memo also serves the judging marks, the captioner's among them (held per
+    captions version by _judging_cap_marks, so a derivation under a standing version reads no caption row)."""
     if isinstance(goals, jd.FrozenStore):
         gobj, gtag = goals, "shared"
     elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
