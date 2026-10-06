@@ -792,7 +792,8 @@ class PromptIdAdoptable(unittest.TestCase):
     detached pair only behind a /compact episode). Each other shape demotes, named by its reason: an adopted pair (`adopted`, a
     live manual /compact, whose splice a later episode record moves), a pid with no summary on record (`nosummary`), a pid a
     restored adapter's seed names (`seed`: its document's gates name the summaries before its cut, whose pairs the restored
-    adapter never read), a pair that is not attached when a record on hand wearing its id names /compact (under the pair's
+    adapter never read), a pair that is not attached when a record on hand that the episode filter admits, wearing its id,
+    names /compact (under the pair's
     shape), and one whose id a restored adapter's seed lists (`seedEpisode`: its document's compact_pids, or the prompt ids of
     a document written before that field)."""
 
@@ -816,7 +817,8 @@ class PromptIdAdoptable(unittest.TestCase):
     def _refusal(self, ad, pid):
         """_asm_pid_refusal's (why, how), checked against the reasons the gate counts (_ASM_PID_REFUSALS, review of 2026-10-05,
         round one): a refusal's reason is listed, and so is the shape the episode rule vouched for, which the gate counts as the
-        reason when the record itself names /compact. Every shape below asks through here, so a reason one of them returns
+        reason when the record itself is one adoption would put in the episode and names /compact. Every shape below asks
+        through here, so a reason one of them returns
         that the list lacks, renamed or new, fails."""
         why, how = emi._asm_pid_refusal(ad, pid)
         self.assertIn(why if why is not None else how, emi._ASM_PID_REFUSALS + (("attached",) if why is None else ()),
@@ -849,9 +851,9 @@ class PromptIdAdoptable(unittest.TestCase):
         self.assertFalse(emi._asm_on_path(hidden, "cbc"), "the premise: the detached pair is off the path")
         self.assertEqual(self._refusal(hidden, "pc"), (None, "offpath"),
                          "a detached pair with no /compact episode on record: the episode rule vouches (the gate still refuses "
-                         "a record that names /compact itself)")
+                         "a record that adoption would put in the episode and that itself names /compact)")
         # as a restored adapter: its document's writer had read records wearing the id (the turn's own), and compact_pids
-        # lists the ids that a record before the cut naming /compact wears (2026-10-05)
+        # lists the ids that a user record before the cut, not a compaction summary, naming /compact wears (2026-10-05)
         hidden.seed = {"boundary_pids": set(), "prompt_ids": {"pc"}, "compact_pids": set()}
         self.assertEqual(self._refusal(hidden, "pc"), (None, "offpath"),
                          "no record before the cut wearing the id names /compact: the episode rule vouches, whatever prompt ids "
@@ -1002,7 +1004,8 @@ class PromptIdAdoptable(unittest.TestCase):
 
     def test_the_documents_gates_name_the_ids_a_pre_cut_compact_wears(self):
         """What the episode rule's seed check reads (_asm_doc_compact_pids, 2026-10-05): the prompt ids that a user record before
-        the cut naming /compact wears, a rewound manual /compact's included, and never the ids the turn's own records wear, which
+        the cut, not a compaction summary, naming /compact wears, a rewound manual /compact's included, and never the ids
+        the turn's own records wear, which
         the gates' prompt_ids holds."""
         side, _so = G.manual_compact_lines(T0 + 20, T0 + 30, "c", parent="a1")
         records = [G.uline(T0, "first ask", "u1"), G.aline(T0 + 10, "first reply", "a1", "u1")] + side[2:] + [

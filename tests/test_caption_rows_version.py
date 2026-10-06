@@ -24,7 +24,8 @@ identity (the mapping _captions holds is always a _CaptionRows, so a plain dict 
 the type check as its early exit.
 
 The old pairs and the marks' old caller are copied below as the REFERENCE (1a5906d35, verbatim but for the module
-prefix and the comments), and both classes compare against it:
+prefix, the comments and the marks' over-bound count, which follows the kernel's later overBound key), and both classes
+compare against it:
   Road        one road of captions states: no file, rows the fold skips, appended rows (new ids, a drifted id, a '#p'
               row, an overwrite), the file rewritten, the reader's entry evicted, the memo swept, the file read back, a
               version replaced on another thread, the file rewritten on another thread, the file removed and back. At
@@ -75,7 +76,7 @@ SID2 = "11111111-2222-3333-4444-0000000cb1d2"
 T = 1_781_000_000
 
 
-# ── the REFERENCE: 1a5906d35's two pairs and the marks' caller, verbatim but for the module prefix ──────────────────
+# ── the REFERENCE: 1a5906d35's two pairs and the marks' caller, verbatim but for the module prefix and overBound ────
 def ref_lane_version(fsid, caps):
     """_caption_rows_version as the lane prefix had it."""
     if not caps:
@@ -125,7 +126,8 @@ def ref_marks_tail(old, new):
 
 
 def ref_judging_cap_marks(sid, caps):
-    """_judging_cap_marks as it asked its own pair."""
+    """_judging_cap_marks as it asked its own pair (its count for marks over the bound by themselves follows the kernel's
+    overBound key, which came after the fold, so the two differ only in the pair they ask)."""
     ver = ref_marks_version(sid, caps)
     if ver is None:
         if caps:
@@ -152,11 +154,11 @@ def ref_judging_cap_marks(sid, caps):
     size = km._judging_marks_bytes(marks, ids)
     with km._JUDGING_MARKS_LOCK:
         st = km._JUDGING_MARKS_STATS
-        st[kind] += 1
         km._JUDGING_MARKS_MEMO.pop(sid, None)
         if size > km.JUDGING_MARKS_MEMO_BYTES:
-            st["evict"] += 1
+            st["overBound"] += 1
         else:
+            st[kind] += 1
             km._JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
             total = sum(e[4] for e in km._JUDGING_MARKS_MEMO.values())
             while total > km.JUDGING_MARKS_MEMO_BYTES:
@@ -470,6 +472,69 @@ class Exceptions(_Captions):
         self.assertIs(m2, m1, "the held marks served")
         self.assertEqual(calls, [], "one version twice is a hit, never a since question")
         self.assertEqual((km._JUDGING_MARKS_STATS["build"], km._JUDGING_MARKS_STATS["hit"]), (1, 1))
+
+
+class LaneRoads(_Captions):
+    """The pair's answers three of the lane prefix's captions roads rest on, asked directly (the post-merge review of the
+    prefix's inputs by value, 2026-10-06; tests/test_timeline_lane_memo.py drives each road through the prefix and
+    compares the bars with a whole derivation's). Each is red under the mutant its docstring names."""
+
+    def test_the_empty_version_meeting_its_first_rows_is_no_append(self):
+        """"empty" names no file and no records, so the rows of a later version are no append to it: since answers None
+        (look every held bar up again), after no file and after a file truncated to no rows alike. Red under the mutant
+        in which since answers no rows from "empty" to a tuple."""
+        empty = km._caption_rows_version(SID, km._captions(SID))
+        self.assertEqual(empty, "empty", "(the premise) no file")
+        self.write(first_rows())
+        v = km._caption_rows_version(SID, km._captions(SID))
+        self.assertIsInstance(v, tuple)
+        self.assertIsNone(km._caption_rows_since(empty, v), "no file, then rows")
+        self.write([])
+        self.assertEqual(km._caption_rows_version(SID, km._captions(SID)), "empty", "(the premise) truncated to no rows")
+        self.append([crow(A, "segment", T, "back")])
+        v2 = km._caption_rows_version(SID, km._captions(SID))
+        self.assertIsInstance(v2, tuple)
+        self.assertIsNone(km._caption_rows_since("empty", v2), "truncated, then an append")
+
+    def test_an_append_whose_reader_entry_went_names_no_records(self):
+        """An append's records are read from the reader's entry its version names; once that entry is gone, since answers
+        None (look every held bar up again), not the empty list. Red under the mutant in which since answers no rows when
+        the reader's entry is gone."""
+        self.write(first_rows())
+        v1 = km._caption_rows_version(SID, km._captions(SID))
+        self.append([crow(D, "segment", T + 300, "fourth")])
+        caps = km._captions(SID)
+        v2 = km._caption_rows_version(SID, caps)
+        self.assertEqual((v2[:3], v2[3]), (v1[:3], v1[3] + 1), "(the premise) an append")
+        self.assertEqual([r["caption"] for r in km._caption_rows_since(v1, v2)], ["fourth"])
+        with em._JSONL_CACHE_LOCK:
+            em._cache_pop_locked(str(self.path))
+        self.assertEqual(km._caption_rows_version(SID, caps), v2, "(the premise) the memo still holds the mapping")
+        self.assertIsNone(km._caption_rows_since(v1, v2), "the entry that held the appended records went")
+
+    def test_a_mapping_the_memo_moved_past_or_never_held_has_no_version(self):
+        """A mapping read before another thread's read moved the reader memo on, and one _captions answered without
+        holding it, are no version of the file: the version is None for both, never the memo's held one. Red under the
+        mutant in which the version answers the memo's held version for a mapping the memo does not hold."""
+        self.write(first_rows())
+        older = km._captions(SID)
+        self.assertIsInstance(km._caption_rows_version(SID, older), tuple)
+        self.append([crow(D, "segment", T + 300, "fourth")])
+        self.on_another_thread(lambda: km._captions(SID))
+        self.assertIsNot(self.held()[3], older, "(the premise) the memo moved on")
+        self.assertIsNone(km._caption_rows_version(SID, older), "a mapping the memo moved past")
+        self.assertIsInstance(km._caption_rows_version(SID, km._captions(SID)), tuple)
+        real = em._read_jsonl_incremental
+
+        def read_not_kept(path, *a, **k):
+            out = real(path, *a, **k)
+            with em._JSONL_CACHE_LOCK:
+                em._cache_pop_locked(str(path))
+            return out
+        with mock.patch.object(em, "_read_jsonl_incremental", read_not_kept):
+            unheld = km._captions(SID)
+        self.assertTrue(unheld, "(the premise) rows read")
+        self.assertIsNone(km._caption_rows_version(SID, unheld), "a read the memo did not hold")
 
 
 class OnePair(unittest.TestCase):

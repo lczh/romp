@@ -441,11 +441,12 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
             b["unmeasuredRestarts"] += 1
         else:
             killed = r.get("exitDone") is False   # killed after its cut row (no done row): measured by the turns its row
-            if killed:                            #  predicted, and never clean, whatever it predicted
-                b["killedExits"] += 1
+            #                                       predicted, and never clean, whatever it predicted
             if r.get("cutTurnsError") and (killed or r.get("drainError")):
                 b["unmeasuredRestarts"] += 1      # no prediction and no drain result to stand in for it: its turns are unknown,
             else:                                 #  as a crash boot's are, so it is out of both sides of the rate
+                if killed:                        # counted among the MEASURED restarts only (the review of 2026-10-06): a killed
+                    b["killedExits"] += 1         #  exit whose prediction failed is one of the unknown counts, never both
                 b["_measuredCutTurns"] += r["cutTurns"]
                 if not killed and r["cutTurns"] == 0:
                     b["cleanRestarts"] += 1
@@ -555,8 +556,9 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
         b["measuredRestarts"] = b["restarts"] - b["unmeasuredRestarts"]   # a boot with no cut row cut an UNKNOWN number of
         #                                                                     turns, not zero (review find), and so did an exit
         #                                                                     killed after a cut row whose prediction failed
-        mturns = b.pop("_measuredCutTurns")                               # the turns the measured restarts cut (the rate's top)
-        b["cutTurnsPerRestart"] = round(mturns / b["measuredRestarts"], 2) if b["measuredRestarts"] else None
+        b["measuredCutTurns"] = b.pop("_measuredCutTurns")               # the turns the measured restarts cut (the rate's top,
+        #                                                                     kept so the rate can be checked against its figures)
+        b["cutTurnsPerRestart"] = round(b["measuredCutTurns"] / b["measuredRestarts"], 2) if b["measuredRestarts"] else None
         out.append(b)
     return out
 
@@ -971,7 +973,11 @@ def summary(doc: dict) -> str:
         lines.append("")
         tz = None if w.get("tz") in (None, "local") else w["tz"]
         lines.append("%s  (%s to %s)" % (b["key"], local_date(b["start"], tz), local_date(b["end"] - 1, tz)))
-        per = (" (%s per measured restart)" % b["cutTurnsPerRestart"]) if b["cutTurnsPerRestart"] is not None else ""
+        mturns = b.get("measuredCutTurns", b["cutTurns"])   # the rate's top: said when it differs from the total, so the rate
+        per = ["%d by the measured restarts" % mturns] if mturns != b["cutTurns"] else []   # can be checked against the line
+        if b["cutTurnsPerRestart"] is not None:
+            per.append("%s per measured restart" % b["cutTurnsPerRestart"])
+        per = (" (%s)" % ", ".join(per)) if per else ""
         killed = (" · killed after the cut row %d" % b["killedExits"]) if b.get("killedExits") else ""
         unknown = int(b.get("unmeasuredRestarts", 0)) - int(b.get("restartsWithoutCutRow", 0))   # a cut row whose turns are
         if unknown > 0:                                                                            #  unknown: out of the rate

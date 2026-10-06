@@ -3112,8 +3112,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `replaced` (a later record reused the summary's uuid), `parent` (the
   summary hangs off a record that is no compaction boundary) or `offpath`
   (the boundary is off the conversation's path), these three only when a
-  record wearing the id names /compact, one the entry holds or the new
-  record itself, and `seedEpisode` for a pair of those three shapes when
+  user record wearing the id, not a compaction summary, names /compact,
+  one the entry holds or the new record itself, and `seedEpisode` for a pair of those three shapes when
   no such record is on hand but the entry was restored from a document
   that lists the id: a document's gates carry `compact_pids`, the prompt
   ids that a user record before its cut, not a compaction summary, naming
@@ -3657,13 +3657,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the leaf's path and inode and the goal store's seams by value, so a
   derivation folds only the turns that closed since and the open one.
   `segWalks` counts the walks that finished, `segHeld` and `segWalkTurns`
-  the closed turns served from the hold and the turns folded, `segPartial`
-  a held aggregate whose turns diverged inside it (a rewind, an edit, a
-  compaction re-seat, a late record: every turn is walked), `segReset` one
-  discarded whole (another leaf, other seams, or no closed turn left to
-  hold), `segRaised` the walks that met a failure and stored nothing, and
-  `segEvict` the aggregates shed by the byte bound or with their departed
-  session; `segEntries`, `segBytes`
+  those walks' closed turns served from the hold and the turns they folded,
+  `segPartial` a held aggregate whose turns diverged inside it (a rewind,
+  an edit, a compaction re-seat, a late record: it is dropped and every
+  turn is walked), `segReset` one discarded whole (another leaf, other
+  seams, or no closed turn left to hold), `segRaised` the walks that met a
+  failure and stored nothing, `segEvict` the aggregates shed by the byte
+  bound or with their departed session and the new ones the bound did not
+  admit, and `overBound` the aggregates over the bound by themselves,
+  served to their derivation but never held. Past the bound, a store sheds
+  the least recently used aggregates that no derivation of the same board
+  build used; when every other aggregate was used in that build, the new
+  one is not held and its session keeps the one it was served from, so
+  the sessions a build is working on keep theirs.
+  `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
   record's state plus the two fields a card reads, `bgLedger` and
@@ -4086,8 +4093,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   only nodes keeps them), liveness, the branch clip and the suspensions
   stand: `prefix_hit` counts those derivations and `prefix_segs` the segments
   they reused; `prefix_partial` counts derivations whose held turns diverged
-  before the prefix's end (a rewind, a compaction, a late record), each of
-  which re-walks the whole lane, and `prefix_reset` derivations whose held
+  before the prefix's end (a rewind, a compaction, a late record, or a turn
+  boundary whose state row lands after the new turn's first record: until it
+  lands, the turn that just closed runs its idle span to the parse's clock,
+  so that turn's end moves), each of which re-walks the whole lane, and
+  `prefix_reset` derivations whose held
   bars were dropped because one of those inputs moved. A caption write drops
   nothing: the held bars it can change have their captions looked up again
   (`prefix_recap`), after an append only the bars whose segment key an
@@ -4171,9 +4181,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   its time stands); `build`: every row sorted (a first derivation, a
   rewrite, a rewritten row whose time moved or appeared, or times the
   bisection cannot order); `uncached`: a mapping that is not the one held
-  for its file, derived and not held; `evict`: entries the byte bound shed;
-  `forget`: entries of lanes a full build no longer draws. The gauges:
-  `entries`, `marks`, `bytes` (estimated) and `bound`
+  for its file, derived and not held; `overBound`: marks over the byte bound
+  by themselves, derived and served but not held, and no other lane shed for
+  them. Each derivation over captions that returns counts once, under one of
+  those five (a session with no caption rows has no marks to count, and a
+  sort that raises on a held version counts nowhere). `evict`:
+  entries the byte bound shed to make room for a newer one; `forget`:
+  entries of lanes a full build no longer draws, and of a lane the dead-lane
+  memo takes over (that memo serves a dead lane's marks; the lane's
+  `stateIntervals` entry stays, since every build reads its states log).
+  The gauges: `entries`, `marks`, `bytes` (estimated) and `bound`
   (`ROMP_JUDGING_MARKS_MEMO_BYTES`, else a 256th of the machine's memory).
   `stateIntervals` is the states logs' transitions, sorted, held per session
   on the log's fold cursor (its record count and the reader's generation)
@@ -4184,9 +4201,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   bisection. `hit`: the held transitions served; `sort`: a version sorted
   and held; `uncached`: a fold answer that is not the cursor's state (a last
   row still without its newline, a failed read), sorted and not held;
-  `evict` and `forget` as above; the gauges `entries`, `transitions`,
-  `bytes` (estimated) and `bound` (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a
-  512th of the machine's memory).
+  `overBound`: a version whose entry is over the byte bound by itself,
+  sorted and served but not held, and no other lane shed for it. Each read
+  that returns counts once, under one of those four (a sort that raises
+  counts nowhere). `evict` as above; `forget`: entries
+  of lanes a full build no longer draws. The gauges: `entries`,
+  `transitions`, `bytes` (estimated) and `bound`
+  (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a 512th of the machine's memory).
   Four memos cover the chat build's per-build fixed costs, each keyed on the
   inputs it reads and evicted by the pusher with the tab set (a comment thread
   built this cycle is kept, like its fold prefix). `chatMergeSets` is the
@@ -5435,7 +5456,11 @@ writes the row. When one restart signals two kernels under the same state
 root, the first kernel's cut row consumes the request within milliseconds; the
 second still names that request, not its own `manager-sigterm` note, as long
 as the manager's note for the second kernel's pid sits above the request in
-the audit file. The manager's log says `exited without a restart request
+the audit file and the first kernel's cut row was written after the second
+kernel started, or, when both fall in one second, the first kernel is still
+running. A request the second kernel's predecessor consumed stays spent, even
+when it was filed in the second the new kernel started.
+The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
 
@@ -5480,11 +5505,17 @@ and `reasonError` when those faults happened,
 (`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
 priming-to-assembly window as older cut rows carried it, `drainS`), the
 checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`,
-`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row that could
-not be built at the start, or whose append failed, is written after the drain
-instead, from the drain's own result, as the exit's one row: `t` is still the
-handler's start, and it carries `exitDone: true`, the phases and the counts,
-with no done row. The done row carries no
+`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row whose append
+failed is written after the drain instead, as the exit's one row: the row the
+exit built, with the done row's fields applied the way `romp restart-metrics`
+joins the pair, so a drain that raised leaves the prediction and the session
+count standing there too. A cut row that could not be built at the start is
+written after the drain from the drain's own result, with `cutTurnsError`
+naming the fault, since no prediction stands behind its turns. Either way `t`
+is still the handler's start, the process sample is the one taken as the exit
+began, and the row carries `exitDone: true`, the phases and the counts, with no
+done row. An append to the ledger that fails is said on the kernel's log, one
+line naming the row and the fault. The done row carries no
 `cutTurns`, `reason` or `auditT`, so every reader that keys on those reads the
 cut row alone; `romp restart-metrics` joins the pair on the pid and `cutT`, and
 a cut row with `expectsDone` and no done row reads as `exitDone: false`, an
@@ -5538,7 +5569,8 @@ background task's notification, a scheduled prompt) has no feed, so its row
 carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
 kept, so each pair stays under 64 MB; the reader reads both. The restart rows
 of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
-sampled as its exit starts (the cut row) and at its settled boot (the boot row), so
+sampled as its exit starts (the cut row, or a late full row, which carries the
+sample taken then) and at its settled boot (the boot row), so
 the kernel's growth between restarts is a series without a sampler of its own.
 And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
 parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's
@@ -5664,8 +5696,10 @@ whose cut count is unknown, and the exits killed after their cut row, which
 count the turns their cut row predicted and are never clean; an exit whose
 prediction failed (`cutTurnsError`) with no drain result to stand in for it,
 killed or with a drain that raised, cut an unknown number too, and the text
-names how many such exits there were; the per-restart rate divides the
-measured restarts' turns by the measured restarts alone),
+names how many such exits there were, counting a killed one there and not
+among the killed exits, which are all measured; the per-restart rate divides
+the measured restarts' turns (`measuredCutTurns`) by the measured restarts
+alone, and the text names those turns when they differ from the total),
 the reasons, the outage from exit to first serve and the reconcile settle (from
 the `bootSettled` rows), the quiet windows' waits and backstop firings (from
 the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes

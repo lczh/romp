@@ -23,7 +23,9 @@ edited in place would ship its old bytes, the cold side with no cache. The road'
 the prefix held from whole-parse turns meets restored ones, under hold keys that do not tell the two apart.
 
 THE ROAD (the notes-api demo: web works, api is its peer). Appends to the open turn; the open turn closing with its
-state row before and after the record; captions for an old segment, the open one, a drifted id and an overwrite; the
+state row before and after the record; state rows inside a closed turn's idle span with the turn's end standing (an idle
+notice that splits the span, then a row that moves the first span's end while the turn's atom count stands too, which
+no hold key sees); captions for an old segment, the open one, a drifted id and an overwrite; the
 goal store republished with the same seams; a seam splitting an old segment, then removed; a peer delivery whose sender
 the postal log learns later; the leaf rewritten in place with one turn's prompt and then another's reply re-recorded
 under new uuids, and replaced by a new file at the same path, each carrying a different message id under turn
@@ -39,7 +41,8 @@ Two tests drive the same road. One compares warm with cold at every step and che
 (so the equality is not a comparison of two empty maps). The other counts the turns the warm build walked at each step
 (the spy on _segs_seam): one or two where only the open turn moved, every turn where the leaf or the seams moved; and,
 for web's lane, one where only the open turn, the captions or the store's nodes moved (red before 2026-10-06, when a
-caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn moved.
+caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn's hold key
+moved (a state row that moves only the end of a held turn's first idle span moves no key: one).
 
 Synthetic data only: placeholder uuids, the web and api names, invented notes-api text, a private state root with
 session hosts off."""
@@ -492,6 +495,17 @@ class BuildRoad(RoadWorld):
         self.step("a new turn opens before its state row", walks=2)
         self.state(SID_WEB, t, "working")
         self.step("the new turn's state row after its record", walks=2)
+
+        # state rows inside a closed turn's idle span, the turn's end standing (the post-merge review of the lane prefix's
+        # inputs by value, 2026-10-06): the idle notice after a Stop splits the span in two, one more atom, which the hold
+        # key sees; then a row inside the first span moves that span's end while the turn's end and atom count stand,
+        # which no hold key sees, and the held bars must still be a cold derivation's
+        t6 = self.t0 + 300 * 6                         # web's turn 6: a typed ask, its Stop at t6 + 65, turn 7 at t6 + 300
+        self.state(SID_WEB, t6 + 125, "idle")
+        self.step("an idle notice inside a closed turn's idle span, the turn's end standing",
+                  walks=self.turns() - 6, lane="whole")
+        self.state(SID_WEB, t6 + 95, "working")
+        self.step("a state row moving a closed turn's first idle end, its end and atom count standing", walks=1, lane=1)
 
         # the judges write: captions, a republish, a seam and its removal
         s4, s10, s13 = self.seg_of(SID_WEB, "m-p04"), self.seg_of(SID_WEB, "m-p10"), self.seg_of(SID_WEB, "m-p13")

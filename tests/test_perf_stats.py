@@ -147,11 +147,11 @@ class Collector(unittest.TestCase):
                                                            "indexBuild", "indexLookup", "scanLookup", "orphanRows", "orphanBytes"},
                          "the captions mapping held per file version: its occupancy, its paths and the drifted lookups (2026-10-05), "
                          "and the rows only it keeps (2026-10-06)")
-        self.assertEqual(set(snap["memos"]["judgingMarks"]), {"hit", "extend", "build", "uncached", "evict", "forget",
+        self.assertEqual(set(snap["memos"]["judgingMarks"]), {"hit", "extend", "build", "uncached", "overBound", "evict", "forget",
                                                             "entries", "marks", "bytes", "bound"},
                          "the captioner's marks held per captions version: its counters, occupancy and bytes against its bound")
         self.assertEqual(snap["memos"]["judgingMarks"]["bound"], km.JUDGING_MARKS_MEMO_BYTES)
-        self.assertEqual(set(snap["memos"]["stateIntervals"]), {"hit", "sort", "uncached", "evict", "forget",
+        self.assertEqual(set(snap["memos"]["stateIntervals"]), {"hit", "sort", "uncached", "overBound", "evict", "forget",
                                                               "entries", "transitions", "bytes", "bound"},
                          "the states logs' sorted transitions held per fold cursor: counters, occupancy, bytes, bound")
         self.assertEqual(snap["memos"]["stateIntervals"]["bound"], km.STATE_IV_MEMO_BYTES)
@@ -264,7 +264,8 @@ class Collector(unittest.TestCase):
                                      # the card anchor walk's held aggregates (2026-10-06): walks, held and folded turns, partial and
                                      # reset entries, walks that raised, evictions, and the occupancy against the bound
                                      "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised", "segEvict",
-                                     "segEntries", "segBytes", "segBound"})
+                                     "segEntries", "segBytes", "segBound",
+                                     "overBound"})   # an aggregate over the bound by itself, never held (the review after the merge)
         self.assertEqual(set(memo["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
         self.assertEqual(set(memo["row_by"]), set(km._FEED_ROW_FIELDS) | {"presence"})
         self.assertEqual(memo["bound"], km.FEED_MEMO_BYTES)

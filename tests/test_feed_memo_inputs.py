@@ -807,8 +807,8 @@ class Census(unittest.TestCase):
             self.assertTrue(found and callable(obj), name)
 
     def test_the_module_read_names_resolve_in_the_kernel_and_a_const_is_immutable(self):
-        """Every MODULE_READS name reaches a value the same way (`jd.CITE_MIN_CHARS` is `km.jd`, then
-        `.CITE_MIN_CHARS`), and a `const` entry is an uppercase name whose value is of a type that cannot change
+        """Every MODULE_READS name reaches a value the same way (`jd.STATE` is `km.jd`, then
+        `.STATE`), and a `const` entry is an uppercase name whose value is of a type that cannot change
         under it: a tuple or frozenset of such values, an int, a string, a regex, a class, a module, a path. A
         dict, list or set read under `const` is a table whose content can move, and belongs under `sig` with a
         label."""

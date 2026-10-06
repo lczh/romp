@@ -40,7 +40,8 @@ the mark, and a turn's later compaction alone in its append restores, its own su
 And when the turn's later records hang on an api_error spur off its opener, so the pair is off the path, they still fold onto
 the restored entry: no record wearing the id names /compact, so adoption has no episode to splice the pair behind (2026-10-05).
 They fold too on an entry restored from a document written in the middle of the turn, whose prompt ids hold the turn's id: the
-restored entry reads the document's compact_pids, the ids that a record before its cut naming /compact wears, and refuses
+restored entry reads the document's compact_pids, the ids that a user record before its cut, not a compaction summary,
+naming /compact wears, and refuses
 under `seedEpisode` only when one does, or when the document was written before that field and lists the id among its prompt
 ids (the gate review of the same day).
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
@@ -583,8 +584,10 @@ class CompactionRestore(Harness):
         restored entry cannot read the records before its document's cut, so it asks the seed whether one of them wears the id.
         Read off the document's prompt_ids, every prompt id its writer had read, the open turn's own included, the seed would
         refuse each later result wearing the id for the rest of the turn once a restart or a dropped entry restored the entry
-        from a document written mid-turn; at the base each of them parses whole. The document now records compact_pids, the ids that a record
-        before its cut naming /compact wears, and here none does: the result folds onto the restored entry, and every served
+        from a document written mid-turn; at the base each of them parses whole. The document now records compact_pids, the
+        ids that a user record
+        before its cut, not a compaction summary, naming /compact wears, and here none does: the result folds onto the
+        restored entry, and every served
         tree equals a cold parse."""
         steps, doc = self._spur_past_a_mid_turn_document("pid-midturn")
         self.assertMidTurnPremises(steps, doc)

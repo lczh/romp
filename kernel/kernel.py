@@ -30607,7 +30607,8 @@ def _kernel_sample_tick(now=None):
 # reserve (EXIT_DRAIN_BUDGET_S, 35 percent of the deadline and never under EXIT_DRAIN_FLOOR_S, the top of the drain times
 # recorded with session hosts on, nor over the deadline) is held back from the start: every phase before the drain ends
 # by the pre-drain line (the deadline less the reserve), so an overrun shrinks the later best-effort phases, and the
-# drain only by the one item in flight at the line; the drain is handed what the deadline has left (at least 0.25 s). The
+# drain only by the memos and the listing, which run whole, and the one item in flight at the line; the drain is handed
+# what the deadline has left (at least 0.25 s). The
 # reserve is smaller than the drain's old share of the grace (1.12 s at the manager's 8 s, where the old share was 2.625 s;
 # 0.9 s at the default 5 s, where it was 1.575 s): the drain is handed every second the earlier phases leave, but a slow
 # drain past its reserve now meets the deadline sooner than it met the old share. The three phase budgets are CAPS inside
@@ -30650,7 +30651,7 @@ EXIT_CKPT_WRITE_BUDGET_S = _EXIT_BUDGETS["ckpt"]        # its fold checkpoint wr
 EXIT_ASM_BUDGET_S = _EXIT_BUDGETS["asm"]                # its assembly-document writes, a cap
 
 
-def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None):
+def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None, sample=None):
     """One ledger row per restart — what THIS restart cut (T121: the drain's effect is measurable
     only if every restart writes its row, so a clean drain's row with an empty cutTurns list is the
     success metric, not noise). cutTurns names the sessions whose in-flight turns the drain
@@ -30663,7 +30664,9 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phas
     mid-turn; romp does not rewrite CLI transcripts (ever), and romp's OWN records already
     distinguish machine cuts (the INTR_RESTART_SIG resume notice + the machine-cut stop record) —
     so the ledger documents the cut honestly on our side and the stamps stay a documented CLI
-    artifact."""
+    artifact. `sample` is the process sample to carry (_kernel_process_sample's dict): the exit takes ONE at its start and
+    passes it to the row it writes then and to a late full row written after the drain, so both say what the process was
+    as its exit began (the review of 2026-10-06); None samples the process now."""
     d = drain_res if isinstance(drain_res, dict) else {}
     row = {"t": int(now if now is not None else time.time()),
            "pid": os.getpid(),
@@ -30675,8 +30678,8 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phas
            "reason": str(audit_reason or "")}
     if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints and assembly documents
         row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # written), drainS (the sessions closed)
-    row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU when the row is built (the exit's start, 2026-10-05)
-    return row
+    row.update(_kernel_process_sample() if sample is None else dict(sample))   # T304: the kernel's own size and CPU as its
+    return row                                                                 #  exit began (the exit's start, 2026-10-05)
 
 
 EXIT_DONE_PHASES = ("rowS", "memosS", "listS", "primeS", "writeS", "asmS", "ckptS", "drainS")
@@ -30728,10 +30731,44 @@ def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="",
     return row
 
 
+def _exit_late_row(cut_row, done):
+    """The exit's LATE FULL ROW (the review of 2026-10-06): written after the drain as the exit's one row when no cut row
+    reached the disk at its start (the row could not be built, or its append failed). It is `cut_row`, the row the exit
+    built (its prediction, its session count, its auditT, its process sample, its cutTurnsError), with the done row's fields
+    applied exactly as the reader joins the pair (cli/restart_metrics.py fold_exit_done): the drain's stopped / unjoined /
+    reaped when the done row has them, drainCutTurns as cutTurns, drainError and reasonError, finalReason as the reason,
+    the phases (ckptS and drainS where older cut rows carried them), the checkpoint counts, deadlineS and elapsedS; then
+    `exitDone` True and no `expectsDone`, since no done row follows. So a late row reads as the pair would have, where the
+    row built from the drain's result alone dropped a prediction the drain's raise left standing. Pure."""
+    row = {k: v for k, v in cut_row.items() if k != "expectsDone"}
+    for k in ("stopped", "unjoined", "reaped"):
+        if k in done:
+            row[k] = done[k]
+    if isinstance(done.get("drainCutTurns"), list):
+        row["cutTurns"] = list(done["drainCutTurns"])
+    for k in ("drainError", "reasonError"):
+        if done.get(k):
+            row[k] = done[k]
+    if "finalReason" in done:
+        row["reason"] = done["finalReason"]
+    ph = done.get("phases") if isinstance(done.get("phases"), dict) else {}
+    for k in ("ckptS", "drainS"):
+        if k in ph:
+            row[k] = ph[k]
+    if ph:
+        row["phases"] = dict(ph)
+    for k in EXIT_DONE_COUNTS + ("deadlineS", "elapsedS"):
+        if k in done:
+            row[k] = done[k]
+    row["exitDone"] = True
+    return row
+
+
 def _kernel_process_sample() -> dict:
     """{rssKb, cpuS} of THIS kernel process (T304): its resident size and CPU seconds, sampled at the two
     events the restart ledger already records, the exit (the cut row: the process as its exit starts, since the cut row
-    is written before the exit's work, 2026-10-05) and the settled boot (the boot row: the process just born), so the
+    is written before the exit's work, 2026-10-05; a late full row written after the drain carries the same sample, taken
+    at the exit's start, 2026-10-06) and the settled boot (the boot row: the process just born), so the
     kernel's own growth between restarts
     is a series with no sampler of its own. _process_stats reads /proc (macOS: ru_maxrss, the peak). Never
     raises; an unreadable process is an empty dict, and the row simply lacks the two fields."""
@@ -30746,13 +30783,24 @@ def _append_restart_cut(row):
     """Best-effort append in a dying process: flushed line-buffered write, never raises — the
     ledger must not be able to break the restart itself (the audit's discipline). Returns whether the
     line landed (the exit path, 2026-10-05: an exit whose cut row failed to append writes its late full
-    row after the drain instead of a done row no reader could join)."""
+    row after the drain instead of a done row no reader could join). A line that did not land is said
+    once, on one stderr line through _exit_log naming the row and the fault (the review of 2026-10-06):
+    under a lasting fault (a full or unwritable state directory) an exit otherwise left no row while its
+    phase lines read as normal, and a completed exit whose done row was lost read as killed."""
     try:
         with open(RESTART_CUTS_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
             f.flush()
         return True
-    except Exception:
+    except Exception as e:
+        try:
+            r = row if isinstance(row, dict) else {}
+            what = (("the exit's done row" if "cutTurns" not in r else "the exit's late full row") if r.get("exitDone") is True
+                    else "the exit's cut row" if "cutTurns" in r else "the boot row" if r.get("bootSettled")
+                    else "the boot health row" if r.get("bootHealth") else "a row")
+            _exit_log("romp-kernel: the restart ledger did not take %s: %s: %s\n" % (what, type(e).__name__, str(e)[:160]))
+        except Exception:
+            pass
         return False
 
 
@@ -31098,13 +31146,14 @@ def _consumed_audit_t():
 
 
 def _consumed_audit():
-    """(t, pid) of the audit row the NEWEST cut row already joined and of the kernel that wrote that cut row ((0, None)
-    for none): _consumed_audit_t's walk, with the consumer's pid, so the reader can tell a request this kernel's
-    predecessor spent from one a sibling kernel under the same root spent on the same restart (_recent_restart_audit)."""
+    """(t, pid, cutT) of the audit row the NEWEST cut row already joined, of the kernel that wrote that cut row and of
+    that cut row's own t ((0, None, None) for none): _consumed_audit_t's walk, with the consumer's pid, so the reader can
+    tell a request this kernel's predecessor spent from one a sibling kernel under the same root spent on the same restart
+    (_recent_restart_audit)."""
     try:
         lines = RESTART_CUTS_FILE.read_text().strip().splitlines()
     except Exception:
-        return 0, None
+        return 0, None, None
     for line in reversed(lines[-50:]):
         try:
             r = json.loads(line)
@@ -31114,8 +31163,20 @@ def _consumed_audit():
             # the newest cut that CONSUMED a row — walked back past anonymous cuts (a service stop, a
             # Ctrl+C, a bare kill), which used to reset consumption to 0 and let the next anonymous cut
             # re-inherit the still-in-window row (review find: rows alternated consumed/anonymous/consumed)
-            return int(r["auditT"]), r.get("pid")
-    return 0, None
+            return int(r["auditT"]), r.get("pid"), r.get("t")
+    return 0, None, None
+
+
+def _consumer_alive(pid):
+    """Whether the kernel that consumed a request (a cut row's pid, as _consumed_audit reads it) is still running: the
+    tie-break between a SIBLING under the same root and this kernel's PREDECESSOR when the consumer's cut row falls in the
+    wall-clock second this kernel started (a cut row from a later second is a sibling's, alive or not: an idle sibling's
+    exit can finish before this kernel reads the tail) (the review of 2026-10-06). Only a positive int is a pid (os.kill(0)
+    and os.kill(-1) address groups); anything else, and a pid os.kill refuses, reads as not running. Never raises."""
+    try:
+        return isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and _pid_alive(pid)
+    except Exception:
+        return False
 
 
 def _recent_restart_reason(window=90, now=None, started=None):
@@ -31167,12 +31228,16 @@ def _recent_restart_audit(window=90, now=None, started=None):
         predecessors' parks only;
       - a row with an action is a request and wins, unless a cut row already consumed it: spent on the
         cut it asked for, this cut is anonymous. The exception is a request ANOTHER kernel's cut row
-        consumed while the manager's note for THIS pid lies above it: one restart signaled both kernels
-        under the root, and since the exit path (2026-10-05) a sibling's cut row lands milliseconds after
-        its signal, before this kernel reads the tail, where it used to land after the sibling's drain.
-        The request still answers then, and this cut row consumes it too, as both did before. A later,
-        separate signal the manager noted for this kernel alone, inside the window and above a request a
-        sibling spent, is read the same way: the rows cannot tell the two apart;
+        consumed while the manager's note for THIS pid lies above it, by a cut row written after this kernel
+        started (or, in the second it started, by a kernel still running): one restart signaled both kernels
+        under the root, and since the exit path (2026-10-05) a sibling's cut row lands milliseconds after its
+        signal, before this kernel reads the tail, where it used to land after the sibling's drain. The
+        request still answers then, and this cut row consumes it too, as both did before, even when the
+        sibling's exit has already finished. A predecessor's cut row was written before this kernel started
+        and its kernel has exited, so the request it spent stays spent even when it was filed in the second
+        this kernel started, which the start bound reads as this kernel's lifetime (_consumer_alive decides
+        only that second). A later, separate signal the manager noted for this kernel alone, inside the
+        window and above a request a sibling spent, is read the same way: the rows cannot tell the two apart;
       - a `when: quiet` request is pending until the restart it asked for lands, up to the far manager's
         15-minute backstop, so its window is RESTART_EXPECT_MAX_S and it names a cut well past the
         immediate window (T238); any other row older than the window ends the walk;
@@ -31207,7 +31272,7 @@ def _recent_restart_audit(window=90, now=None, started=None):
         tail = (jd.STATE / "restart-audit.jsonl").read_text().strip().splitlines()
         if not tail:
             return None
-        consumed, consumed_pid = _consumed_audit()
+        consumed, consumed_pid, consumed_cut_t = _consumed_audit()
         t0 = int(now if now is not None else time.time())
         born = int(_STARTED if started is None else started)
         via_manager = None                                  # the newest manager-sigterm note about us, if any
@@ -31252,8 +31317,11 @@ def _recent_restart_audit(window=90, now=None, started=None):
                 break                                       # older rows are older still
             spent = bool(consumed) and rec["t"] == consumed  # a cut row already joined it (auditT)
             if spent and consumed_pid not in (None, os.getpid()) and isinstance(via_manager, dict) \
-                    and via_manager.get("pid") == os.getpid():
+                    and via_manager.get("pid") == os.getpid() \
+                    and ((isinstance(consumed_cut_t, int) and consumed_cut_t > (_STARTED if started is None else started))
+                         or _consumer_alive(consumed_pid)):
                 spent = False                               # a sibling's cut spent it on the restart whose note for us lies above
+                #  (a sibling's cut row follows this kernel's start, or its kernel still runs; a predecessor's does neither)
             if rec["t"] < born:
                 # a predecessor's row; only a parked quiet request survives the kernel that filed it
                 if quiet and not park_settled and not spent:
@@ -48370,19 +48438,29 @@ def _feed_key_with_deps(key, ctx, entry):
 # segment or an atom: the landing's (turn, atoms) is segmented again on demand from the parse in hand (_FeedSegTurns). The
 # two failures stay apart, as they were (the critique's F7): a fold that raises leaves the maps as far as it got, the
 # one-pass loop's try, and a plain-prompt read that raises fails the derivation; a walk that met either stores nothing.
-# Bounded by its bytes (FEED_SEG_HELD_BYTES, least recently used first) and by the living sessions (_feed_memo_forget);
-# GET /perf reports it inside builds.feed.memo (the seg* keys).
-_FEED_SEG_HELD = collections.OrderedDict()   # fsid -> (head, seams, keys, maps, plain_t, bytes), least recently used first;
-#                                              maps = (seg_uuid, seg_trig, seg_best, cite_uuids, positions), never mutated
-#                                              once held (a derivation folds into copies)
+# An entry the walk finds unusable (another leaf, other seams, keys that diverged inside it) leaves the table in that walk,
+# whatever the walk meets after, and only an entry that passes is marked used (the review after the merge, 2026-10-06).
+# Bounded by its bytes (FEED_SEG_HELD_BYTES) and by the living sessions (_feed_memo_forget). Past the bound, a store sheds
+# the least recently used entries that no derivation of the current board build used (each entry carries the number of
+# the last build that used it, _FEED_SEG_BUILD, raised once per build_feed, never a clock), and when every other entry
+# was used in this build the newcomer is not held: before, the shed took the entry the same build's next derivation was
+# about to use, so once the working sessions' aggregates outgrew the bound every one of them walked every turn on every
+# build. GET /perf reports it inside builds.feed.memo (the seg* keys and overBound).
+_FEED_SEG_HELD = collections.OrderedDict()   # fsid -> (head, seams, keys, maps, plain_t, bytes, build), least recently
+#                                              used first; maps = (seg_uuid, seg_trig, seg_best, cite_uuids, positions),
+#                                              never mutated once held (a derivation folds into copies); build = the
+#                                              number of the last board build that used the entry
 _FEED_SEG_LOCK = threading.Lock()            # the table and its counters: the pusher and a handler thread can build at once
+_FEED_SEG_BUILD = [0]                        # the current board build's number (_feed_seg_build_begin), under the lock
 _FEED_SEG_STATS = {"segWalks": 0, "segHeld": 0, "segWalkTurns": 0, "segPartial": 0, "segReset": 0, "segRaised": 0,
-                   "segEvict": 0}
-#   segWalks: walks over a parse that finished (the anchor fold and the plain-prompt time); segHeld / segWalkTurns: closed
-#   turns served from the hold / turns folded (the open one always); segPartial: a held entry whose keys diverged inside
-#   it (a rewind, an edit, a compaction re-seat, a late record: every turn walked); segReset: a held entry discarded whole
-#   (another leaf or other seams, or a history with no closed turn left); segRaised: walks that met a failure and stored
-#   nothing; segEvict: entries shed by the byte bound, an entry over the bound alone (not held), and departed sessions'
+                   "segEvict": 0, "overBound": 0}
+#   segWalks: walks over a parse that finished (the anchor fold and the plain-prompt time); segHeld / segWalkTurns: those
+#   walks' closed turns served from the hold / turns folded (the open one always); segPartial: a held entry whose keys
+#   diverged inside it (a rewind, an edit, a compaction re-seat, a late record: dropped, every turn walked); segReset: a
+#   held entry discarded whole (another leaf or other seams, or a history with no closed turn left); segRaised: walks
+#   that met a failure and stored nothing; segEvict: entries shed by the byte bound, newcomers it did not admit (every
+#   other entry used in the same build), and departed sessions'; overBound: an aggregate over the bound by itself,
+#   served to its derivation and never held
 _FEED_SEG_KEY_BYTES = 480        # one held turn key's estimated bytes: the _HOLD_KEY_BYTES tuple and its turn id string
 _FEED_SEG_SEG_BYTES = 700        # one held segment key's estimated bytes across the five maps (the key, two anchor uuids,
 #                                  the latest-prose tuple, the position tuple, five table slots)
@@ -48407,6 +48485,13 @@ def _feed_seg_held_bound():
 def _feed_seg_entry_bytes(keys, maps):
     """An estimate of one held aggregate's bytes, from its sizes alone (no walk over its strings)."""
     return 64 + _FEED_SEG_KEY_BYTES * len(keys) + _FEED_SEG_SEG_BYTES * len(maps[0]) + _FEED_SEG_CITE_BYTES * len(maps[3])
+
+
+def _feed_seg_build_begin():
+    """A board build begins (build_feed, once per build): the held entries its derivations use from here on carry its
+    number, and past the byte bound a store sheds only entries no derivation of this build used."""
+    with _FEED_SEG_LOCK:
+        _FEED_SEG_BUILD[0] += 1
 
 
 def _feed_seg_copy(maps):
@@ -48497,32 +48582,41 @@ def _feed_seg_walk(fsid, head, turns, store):
     (path, inode), stat'd by the key before the parse was read (ctx["leaf_head"]); None holds nothing. Returns a
     _FeedSegWalk whose seg_uuid, seg_trig, seg_best, cite_uuids and seg_turn are the one-pass loop's five maps; the body
     then calls _feed_seg_plain_t on it, which finishes the walk and stores the aggregate. No turns: empty maps, the table
-    untouched."""
+    untouched. The held entry is judged inside the lock: one that cannot serve this parse (no leaf to vouch for it, no
+    closed turn left, another leaf, other seams, held keys that diverged) is deleted there, so a walk that then fails
+    leaves no unusable entry behind to stay newest or to be counted again; one that serves is marked used in this build
+    and moved to the newest end. Seams the fingerprint cannot read (a truthy scalar where a list belongs) hold nothing,
+    and the fold meets them inside its guard, as the one-pass loop's try did."""
     w = _FeedSegWalk()
     turns = turns if turns is not None else []
     n = len(turns)
     n_closed = n - 1 if n else 0
     w.fsid, w.head, w.turns, w.n_closed, w.closed, w.ok = fsid, head, turns, n_closed, None, True
-    w.fp = _seams_fp(store) if n else ()
+    try:
+        w.fp = _seams_fp(store) if n else ()
+    except Exception:
+        w.fp, head = None, None                      # seams the fingerprint cannot read (a truthy scalar where a list
+        #                                              belongs): hold nothing; the fold's guard below keeps the maps as
+        #                                              far as it gets, as the one-pass loop's try did
     w.keys = tuple(_turn_hold_key(t) for t in turns[:n_closed]) if (head is not None and n_closed) else ()
-    ent, start, partial, reset = None, 0, False, False
+    ent, start = None, 0
     if n:
         with _FEED_SEG_LOCK:
             ent = _FEED_SEG_HELD.get(fsid)
             if ent is not None:
-                if not w.keys:                       # no leaf to vouch for it, or no closed turn left: nothing to reuse
-                    del _FEED_SEG_HELD[fsid]
-                    ent, reset = None, True
+                hk = ent[2]
+                if not w.keys or ent[0] != head or ent[1] != w.fp:
+                    del _FEED_SEG_HELD[fsid]         # nothing to reuse: no leaf, no closed turn, another leaf or seams
+                    ent = None
+                    _FEED_SEG_STATS["segReset"] += 1
+                elif len(hk) <= n_closed and w.keys[:len(hk)] == hk:
+                    start = len(hk)
+                    _FEED_SEG_HELD[fsid] = ent[:6] + (_FEED_SEG_BUILD[0],)   # used in this build: the shed passes it by
+                    _FEED_SEG_HELD.move_to_end(fsid)   # ...and the newest: past the bound, colder sessions go first
                 else:
-                    _FEED_SEG_HELD.move_to_end(fsid)   # a used entry is the newest: the bound sheds colder sessions first
-    if ent is not None:
-        hk = ent[2]
-        if ent[0] != head or ent[1] != w.fp:
-            ent, reset = None, True
-        elif len(hk) <= n_closed and w.keys[:len(hk)] == hk:
-            start = len(hk)
-        else:
-            ent, partial = None, True
+                    del _FEED_SEG_HELD[fsid]         # the held keys diverged inside it: every turn is walked
+                    ent = None
+                    _FEED_SEG_STATS["segPartial"] += 1
     if ent is not None:
         maps, w.base_plain = _feed_seg_copy(ent[3]), ent[4]
     else:
@@ -48536,14 +48630,8 @@ def _feed_seg_walk(fsid, head, turns, store):
         _feed_seg_fold(maps, turns, n_closed, n, store)
     except Exception:
         w.closed, w.ok = None, False                 # the maps as far as the fold got (the one-pass loop's try); nothing stored
-    if n:
         with _FEED_SEG_LOCK:
-            st = _FEED_SEG_STATS
-            st["segHeld"] += start
-            st["segWalkTurns"] += n - start
-            st["segPartial"] += 1 if partial else 0
-            st["segReset"] += 1 if reset else 0
-            st["segRaised"] += 0 if w.ok else 1
+            _FEED_SEG_STATS["segRaised"] += 1        # its held and folded turns are not counted: it did not finish
     w.seg_uuid, w.seg_trig, w.seg_best, w.cite_uuids = maps[0], maps[1], maps[2], maps[3]
     w.seg_turn = _FeedSegTurns(maps[4], turns, store)
     return w
@@ -48553,9 +48641,12 @@ def _feed_seg_plain_t(w):
     """The re-check's plain-prompt time for the walk `w` (_feed_seg_walk): the larger of the held aggregate's and
     _last_plain_user_turn_t over the turns it did not hold, the closed ones and the open one apart, so the closed part is
     what the aggregate stores. A read that raises fails the derivation, as the one walk over every turn did, and stores
-    nothing (counted under segRaised). Then, when the anchor fold finished and closed turns were folded, the aggregate is
-    stored under the walk's keys, leaf and seams, and the byte bound sheds the least recently used sessions first; an
-    aggregate over the bound alone is not held and sheds no other session."""
+    nothing (counted under segRaised). A walk whose anchor fold and plain-prompt read both finished is counted with its
+    held and folded turns (segWalks, segHeld, segWalkTurns). Then, when closed turns were folded, the aggregate is stored
+    under the walk's keys, leaf and seams, marked used in the current build. Past the byte bound the least recently used
+    entries that no derivation of this build used are shed first; when every other entry was used in this build the
+    newcomer is not held and the entry its walk was served from stays (both counted under segEvict). An aggregate over
+    the bound by itself is not held and sheds no other session (overBound)."""
     try:
         closed_t = w.base_plain
         if w.start < w.n_closed:
@@ -48566,23 +48657,31 @@ def _feed_seg_plain_t(w):
             with _FEED_SEG_LOCK:
                 _FEED_SEG_STATS["segRaised"] += 1
         raise
-    if not w.turns:
+    if not w.turns or not w.ok:
         return best
     with _FEED_SEG_LOCK:
         st = _FEED_SEG_STATS
-        st["segWalks"] += 1 if w.ok else 0
-        if w.ok and w.closed is not None:
+        st["segWalks"] += 1
+        st["segHeld"] += w.start
+        st["segWalkTurns"] += len(w.turns) - w.start
+        if w.closed is not None:
             size = _feed_seg_entry_bytes(w.keys, w.closed)
-            _FEED_SEG_HELD.pop(w.fsid, None)
+            old = _FEED_SEG_HELD.pop(w.fsid, None)
             if size > FEED_SEG_HELD_BYTES:
-                st["segEvict"] += 1                  # an aggregate over the bound alone is not held, and sheds no other session
+                st["overBound"] += 1                 # served to this derivation, never held, and sheds no other session
             else:
-                _FEED_SEG_HELD[w.fsid] = (w.head, w.fp, w.keys, w.closed, closed_t, size)
+                build = _FEED_SEG_BUILD[0]
+                _FEED_SEG_HELD[w.fsid] = (w.head, w.fp, w.keys, w.closed, closed_t, size, build)
                 total = sum(e[5] for e in _FEED_SEG_HELD.values())
                 while total > FEED_SEG_HELD_BYTES:
-                    _k, old = _FEED_SEG_HELD.popitem(last=False)   # the least recently used first; the newest fits alone
-                    total -= old[5]
+                    # the least recently used entry this build has not used; none left: the newcomer is not held
+                    k = next((k for k, e in _FEED_SEG_HELD.items() if e[6] != build), w.fsid)
+                    total -= _FEED_SEG_HELD.pop(k)[5]
                     st["segEvict"] += 1
+                    if k == w.fsid:
+                        if old is not None and total + old[5] <= FEED_SEG_HELD_BYTES:
+                            _FEED_SEG_HELD[w.fsid] = old   # not admitted: the entry it was served from stays
+                        break
     return best
 
 
@@ -49784,6 +49883,8 @@ def build_feed(now, live_map=None):
     cmap = _colormap()                               # the age tint's colormap, once per build: the FOLD's input (never the memo's)
     ctx = {"now": now, "live_map": live_map, "cleared": cleared, "dbg_rows": dbg_rows, "wmap": wmap,
            "stalls": _stalls, "jauth_map": _jauth_map, "jactive": _jactive}
+    _feed_seg_build_begin()                          # the held anchor aggregates this build's derivations use are kept past
+    #                                                  the bound before any other (2026-10-06, the comment above _FEED_SEG_HELD)
     for s in alive:
         # THE PER-SESSION CARD MEMO (T368, see _feed_session_key): the session's entry is served while every input
         # of its derivation stands, re-derived when one moved, and folded into the board here in `alive` order.
@@ -54124,7 +54225,9 @@ def _derive_judging(sid, caps, goals, t0, out, seg_ends=None, stamp=False):
 # record count, valid while the fold's answer IS the cursor's own state object, which a fold never mutates), with each
 # state set's intervals, so a build bisects the horizon. Both are byte-bounded LRU tables (the user's caches rule: a
 # fraction of memory with an override) dropped for the lanes a full build no longer draws, and /perf reports them as
-# memos.judgingMarks and memos.stateIntervals. No clock is read in either: the horizon is the caller's.
+# memos.judgingMarks and memos.stateIntervals. A lane the dead-lane memo takes over drops its marks entry (that memo
+# serves its marks from then on) and keeps its states entry, which every build reads. No clock is read in either: the
+# horizon is the caller's.
 _CAP_T_TYPES = (int, float, bool)   # a time the bisection can order: JSON's numbers (NaN is refused separately)
 
 
@@ -54178,19 +54281,26 @@ STATE_IV_MEMO_BYTES = _floor_memo_bound("ROMP_STATE_INTERVALS_MEMO_BYTES", 512) 
 _JUDGING_MARKS_LOCK = threading.Lock()   # the table and its counters: the pusher and a connect push can build at once
 _JUDGING_MARKS_MEMO = collections.OrderedDict()   # sid -> (version, id count, marks, ids, bytes), least recently used first;
 #                                                   ids are the caption ids of the marks, in the marks' order
-_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "evict": 0, "forget": 0}
-#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows; build:
-#   every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the bisection
-#   cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read not held,
-#   a version another thread has replaced since), derived and not held; evict: entries the byte bound shed (an entry
-#   over the bound alone is not held); forget: entries of lanes a full build no longer draws
+_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
+#   Each derivation over caption rows that returns counts once, under one of the first five (an empty mapping has no
+#   marks to count; a sort that raises on a held version counts nowhere).
+#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows;
+#   build: every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the
+#   bisection cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read
+#   not held, a version another thread has replaced since), derived and not held; overBound: marks over the byte bound
+#   by themselves, derived (built whole or extended), served and not held, and no other lane shed for them. evict:
+#   entries the byte bound shed to make room for a newer one; forget: entries of lanes a full build no longer draws, and
+#   of a lane the dead-lane memo takes over
 _STATE_IV_LOCK = threading.Lock()
 _STATE_IV_MEMO = collections.OrderedDict()   # sid -> (version, the fold's state, sorted transitions, plain, {state set:
 #                                              (starts, ends, open start)}, bytes), least recently used first
-_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "evict": 0, "forget": 0}
-#   hit: the held transitions served; sort: a version sorted and held; uncached: a fold answer that is not the cursor's
-#   own state (a newline-less last row folded provisionally, served records, a failed read, another thread's newer fold),
-#   sorted and not held; evict and forget as above
+_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
+#   Each read that returns counts once, under one of the first four (a sort that raises counts nowhere).
+#   hit: the held transitions served; sort: a version sorted and
+#   held; uncached: a fold answer that is not the cursor's own state (a newline-less last row folded provisionally,
+#   served records, a failed read, another thread's newer fold), sorted and not held; overBound: a version whose entry
+#   is over the byte bound by itself, sorted, served and not held, and no other lane shed for it. evict as above;
+#   forget: entries of lanes a full build no longer draws
 
 
 def _cap_mark(sid, c):
@@ -54311,11 +54421,11 @@ def _judging_cap_marks(sid, caps):
     size = _judging_marks_bytes(marks, ids)
     with _JUDGING_MARKS_LOCK:
         st = _JUDGING_MARKS_STATS
-        st[kind] += 1
         _JUDGING_MARKS_MEMO.pop(sid, None)
         if size > JUDGING_MARKS_MEMO_BYTES:
-            st["evict"] += 1                             # over the bound alone: served, not held, and sheds no other lane
+            st["overBound"] += 1                         # over the bound alone: served, not held, and sheds no other lane
         else:
+            st[kind] += 1
             _JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
             total = sum(e[4] for e in _JUDGING_MARKS_MEMO.values())
             while total > JUDGING_MARKS_MEMO_BYTES:
@@ -54367,11 +54477,11 @@ def _state_ev_sorted(sid, path):
     ent = (ver, res, ev, _state_ev_plain(ev), {}, 200 + 40 * len(ev))   # the transitions and two state sets' intervals
     with _STATE_IV_LOCK:
         st = _STATE_IV_STATS
-        st["sort"] += 1
         _STATE_IV_MEMO.pop(sid, None)
         if ent[5] > STATE_IV_MEMO_BYTES:
-            st["evict"] += 1
+            st["overBound"] += 1                         # over the bound alone: served, not held, and sheds no other lane
         else:
+            st["sort"] += 1
             _STATE_IV_MEMO[sid] = ent
             total = sum(e[5] for e in _STATE_IV_MEMO.values())
             while total > STATE_IV_MEMO_BYTES:
@@ -54682,7 +54792,10 @@ _lanes_stats = {"hit": 0, "miss": 0, "live_tail": 0, "complain_skip": 0, "unshar
                 # those prefixes carried (work a whole-lane derivation would have redone); segs_miss counts only the derived
                 "prefix_hit": 0, "prefix_segs": 0,
                 # (2026-10-06) prefix_partial: a held prefix whose turns diverged before its end under the same inputs (a
-                # rewind, a compaction re-seat, a late record, a re-recorded uuid), which re-walks the whole lane;
+                # rewind, a compaction re-seat, a late record, a re-recorded uuid, or the turn that just closed before the
+                # next turn's state row landed: its idle span runs to the parse clock until that row ends it, so its end
+                # moves, at every turn boundary whose state row follows the new turn's first record), which re-walks the
+                # whole lane;
                 # prefix_reset: a held prefix discarded because an input moved (another leaf, the seams, liveness, the
                 # branch clip, the host's suspensions); prefix_recap and prefix_recap_new: held bars whose captions were
                 # looked up again because the captions moved, and those of them rebuilt because a caption changed
@@ -54698,8 +54811,10 @@ _LANES_LOCK = threading.Lock()
 
 def _lanes_memo_report():
     """The memo's counters plus its occupancy, for /perf (memos.lanes). hit, miss, live_tail, complain_skip,
-    unshared_skip, evict, entries, segs_hit and segs_miss are the LIVE lanes'; dead_serve, dead_miss and
-    dead_failed_serve are the dead lanes' (build_timeline counts them here, so one block carries every lane)."""
+    unshared_skip, evict, entries, segs_hit and segs_miss are the LIVE lanes'; prefix_hit, prefix_segs,
+    prefix_partial, prefix_reset, prefix_recap and prefix_recap_new are the lane prefix's, which those lanes'
+    derivations read (_lane_segments); dead_serve, dead_miss and dead_failed_serve are the dead lanes'
+    (build_timeline counts them here, so one block carries every lane)."""
     with _LANES_LOCK:
         out = dict(_lanes_stats)
         out["entries"] = len(_lanes_memo)
@@ -54747,9 +54862,11 @@ def _lanes_forget(keep):
 # are keyed by _turn_hold_key (a turn's identity plus its trigger's and newest atom's uuids), so a resume into another
 # file, a file replaced at the same path, or records re-recorded under the same times and text start a new prefix and
 # are never served another file's bars; a caller that passes no head (a dead lane, a direct derivation) holds none.
-# The judging marks read the store's nodes and every caption row: they stay outside the prefix, derived after the
-# loop on every derivation, and the lane memo above keeps the store's identity and the captions stat in its key,
-# since it serves them. Counted beside: prefix_partial, prefix_reset, prefix_recap, prefix_recap_new.
+# The judging marks read the store's nodes and the caption rows: they stay outside the prefix, derived after the
+# loop on every derivation, where the captioner's marks are served from their own table while the captions version
+# stands (_judging_cap_marks, reading no row) and carried across an append; the lane memo above keeps the store's
+# identity and the captions stat in its key, since it serves them. Counted beside: prefix_partial, prefix_reset,
+# prefix_recap, prefix_recap_new.
 # The closed turns' COMPACTION markers ride the prefix too (2026-09-16): the lane's compactions were a comprehension
 # over every atom of every turn, run after the prefix reuse on every derivation (a live lane whose tail moved derives
 # once per build that draws it, about three lanes a build on the measured board), so a prefix hit still walked the
@@ -54772,20 +54889,29 @@ _BAR_ORDER = ("id", "start", "end", "p", "w", "r", "q", "c", "m", "s", "d", "u",
 
 
 def _turn_prefix_key(turn):
-    """A closed turn's identity for the prefix: its id, whether it ended, its atom count and its end."""
+    """The first four fields of a closed turn's _turn_hold_key, in its order: its id, whether it ended, its atom count
+    and its end. The lane prefix keyed its closed turns on this until 2026-10-06 and keys them on _turn_hold_key now;
+    no kernel code calls it, and it stays as the reference a test pins the hold key's leading fields against."""
     return (turn.get("id"), bool(turn.get("ended")), len(turn.get("atoms") or ()), turn.get("end"))
 
 
 def _lane_prefix_inputs(goals, head, live, bft):
     """The non-turn inputs a prefix is valid under, or None when the prefix must not be used this build: no leaf head
-    (the caller holds no prefix, or the leaf could not be stat'd), or an unshared mutable goals store with content.
-    The store by its seams' value (_seams_fp), the only part of it the bars read; the captions are not an input (the
-    held bars are re-captioned instead, the comment above _lane_prefix_memo)."""
+    (the caller holds no prefix, or the leaf could not be stat'd), an unshared mutable goals store with content, or
+    seams the fingerprint cannot read. The store by its seams' value (_seams_fp), the only part of it the bars read;
+    the captions are not an input (the held bars are re-captioned instead, the comment above _lane_prefix_memo).
+    Unreadable seams (a truthy scalar where a list belongs) raised out of the whole build from here, outside the
+    turn loop's seams guard, so no lane got a bars frame (the post-merge review of the inputs-by-value change,
+    2026-10-06): the lane now derives whole, and that guard complains for this lane alone, as it did before."""
     if head is None:
         return None
     if not (isinstance(goals, jd.FrozenStore) or goals is None or (not goals.get("seams") and not goals.get("nodes"))):
         return None
-    return (head, _seams_fp(goals), bool(live), bft, tuple(_downtime))
+    try:
+        seams = _seams_fp(goals)
+    except Exception:
+        return None
+    return (head, seams, bool(live), bft, tuple(_downtime))
 
 
 def _lane_bar_index(bars, base=None, start=0):
@@ -54924,10 +55050,12 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, head
                     _lanes_stats["prefix_hit"] += 1
                     _lanes_stats["prefix_segs"] += nsegs_held
             else:
-                # a held turn changed or went (a rewind, a compaction re-seat, a late record, a re-recorded uuid): the
-                # whole lane re-derives, as it always has; partial reuse is not attempted (the count says whether a
-                # per-turn form would pay). A leftover from the design that did attempt it walked every atom of the
-                # standing turns into a set nobody read (2026-09-16): nothing here reads a turn.
+                # a held turn changed or went (a rewind, a compaction re-seat, a late record, a re-recorded uuid, or the
+                # turn that just closed before the next turn's state row landed: its idle span runs to the parse clock
+                # until that row ends it, so its end moves, at every turn boundary whose state row follows the new
+                # turn's first record): the whole lane re-derives, as it always has; partial reuse is not attempted
+                # (the count says whether a per-turn form would pay). A leftover from the design that did attempt it
+                # walked every atom of the standing turns into a set nobody read (2026-09-16): nothing here reads a turn.
                 with _LANES_LOCK:
                     _lanes_stats["prefix_partial"] += 1
     snap = None
@@ -55073,7 +55201,8 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     not held, as the dead-lane path derives and never caches one. `full_prompts` (T278b) receives the lane's whole
     prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way.
     `head` is the leaf's head for the derivation's prefix (_lane_segments), stat'd before the parse; the captions key
-    here stays the file's stat, since this memo also serves the judging marks, which read every caption row."""
+    here stays the file's stat, since this memo also serves the judging marks, the captioner's among them (held per
+    captions version by _judging_cap_marks, so a derivation under a standing version reads no caption row)."""
     if isinstance(goals, jd.FrozenStore):
         gobj, gtag = goals, "shared"
     elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
@@ -56100,10 +56229,16 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
                 # the parse has done its work for this dead lane: drop it (the RSS lever); a lane that moves
                 # re-parses once, and a session that revives is parsed by its chat build as before. The live-lane
                 # memo's entry from the lane's live days goes with it: its key is that parse object, so it cannot
-                # hit again and would hold the parse the pop just released
+                # hit again and would hold the parse the pop just released. So does the lane's entry in the
+                # captioner's marks table: the dead-lane memo now serves its marks, and a dead miss (a keyed input
+                # moved) builds them whole once, as before that table. Its states entry stays: every build reads
+                # every lane's states log
                 _parse_cache.pop(s["path"], None)
                 with _LANES_LOCK:
                     _lanes_memo.pop(sid, None)
+                with _JUDGING_MARKS_LOCK:
+                    if _JUDGING_MARKS_MEMO.pop(sid, None) is not None:
+                        _JUDGING_MARKS_STATS["forget"] += 1
                 _release_dead_lane(sid, s["path"], lane_key[0], alive, live_map)   # and its assembly entry and records (2026-10-01)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
         # chip), keyed on the DERIVED chip `state` computed above, not the raw row state. The old form read
@@ -82200,6 +82335,7 @@ def _graceful_term(signum, frame):
         return
     _TERMINATING[0] = True                          # the parent-watch stands down (see _parent_watch)
     _exit_quiesce()                                 # nothing else competes with the exit from here (idempotent, never raises)
+    sample = _kernel_process_sample()               # the process as its exit began: the cut row, or a late full row, carries it
     _broadcast_restarting()                        # T217: announce the death FIRST: the frame is
     #                                                the shims' eager-reconnect event, and its
     #                                                sub-second budget cannot widen the shutdown
@@ -82233,7 +82369,7 @@ def _graceful_term(signum, frame):
             # restart the manager sends clears its park first) and the self-bounce's stop note with trigger
             # `refresh` (shutdownAll clears the park before it notes) deliver the park and consume it.
             rec = note
-    _drain_and_exit(_audit_reason_text(rec), signum=signum, what="SIGTERM", audit=rec, t0=t0, t0_wall=t0_wall)
+    _drain_and_exit(_audit_reason_text(rec), signum=signum, what="SIGTERM", audit=rec, t0=t0, t0_wall=t0_wall, sample=sample)
 
 
 def _codex_cut_turns():
@@ -82253,7 +82389,7 @@ def _codex_cut_turns():
         return []
 
 
-def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0_wall=None):
+def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0_wall=None, sample=None):
     """Write the restart-cut row, drain the SDK sessions, write the done row, exit: the tail every kernel exit shares
     (_graceful_term, _parent_watch). `reason` is the request on record when the exit was decided, and
     `audit` the audit row it was read from (the cut row records its t as `auditT`, so the same request
@@ -82277,8 +82413,14 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
     wait, its `signal` row) and the DONE row (_exit_done_row) records the drain's result, the phases and that verdict when
     it differs; the judges' child is joined with what the deadline has left. One line per phase on the log
     (_exit_phase_log). A cut row that cannot be built at the start, or whose append fails (_append_restart_cut returns
-    False), is written after the drain from the drain's own result, as the exit's one row: complete (`exitDone`, the phases
-    and counts), its t the handler's entry, and no done row. The checkpoint writes start only before their line (no write
+    False, and says so on the log), is written after the drain as the exit's one row, the LATE FULL ROW (_exit_late_row):
+    the row the exit built, with the done row's fields applied as the reader joins the pair, so a drain that raised leaves
+    the prediction and the session count standing there too; complete (`exitDone`, the phases and counts), its t the
+    handler's entry, and no done row. A row that could not be built is the drain's own result instead, and has no prediction
+    behind its turns, so it carries `cutTurnsError` (the build's fault), and the reader counts it unmeasured when the drain
+    raised as well (the review of 2026-10-06). `sample` is the process sample taken as the exit began (_graceful_term
+    takes it once it owns the exit; the parent watch passes none and it is taken here): the cut row and a late full row both
+    carry it. The checkpoint writes start only before their line (no write
     starts past it), and the assembly documents wait for a leaf's key lock only until their line, a wait that runs out
     counted as `asmBusy`.
     The quiesce (_exit_quiesce) runs first, and the whole body sits inside one try whose finally reaches the process exit,
@@ -82288,6 +82430,8 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
     elif t0_wall is None:
         t0_wall = time.time() - (time.monotonic() - t0)
     _exit_quiesce()                       # again for the parent watch's road (idempotent, never raises)
+    if sample is None:
+        sample = _kernel_process_sample()  # the process as its exit began, for the parent watch's road (never raises)
     _judge_end = None
     _deadline_s, _end = 0.0, t0           # set first inside the try; the finally below reads them on every road
     try:
@@ -82311,7 +82455,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
             _exit_log("romp-kernel: ending the judges' child failed\n")
         # the CUT ROW, first, with everything knowable before the drain: a SIGKILL anywhere after this line still leaves it
         _t = time.monotonic()
-        cut_row, _cut_landed = None, False
+        cut_row, _cut_landed, _cut_err = None, False, ""
         try:
             provisional = reason
             if not reason and signum is not None:
@@ -82327,7 +82471,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
                 n_sessions = 0
             cut_row = _restart_cut_row({"cutTurns": planned, "stopped": n_sessions},
                                        watches_armed=len(_pr_watches) + len(_watches),
-                                       audit_reason=provisional, now=t0_wall)
+                                       audit_reason=provisional, now=t0_wall, sample=sample)
             cut_row["cutTurns"].extend(_codex_cut_turns())   # the Codex work this exit cuts too: open turns and running compactions
             if audit:
                 cut_row["auditT"] = int(audit["t"])          # the audit row this cut CONSUMED (see _recent_restart_audit)
@@ -82337,8 +82481,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
             _cut_landed = _append_restart_cut(cut_row)       # False: the line never landed, so the late full row stands in for it
         except Exception:
             cut_row = None
+            _cut_err = traceback.format_exc().strip().splitlines()[-1][:200]
             _exit_log("romp-kernel: the exit's cut row could not be built at its start; it is written after the drain: %s\n"
-                      % traceback.format_exc().strip().splitlines()[-1][:200])
+                      % _cut_err)
         _phase("rowS", "cutRow", _t, _pre_drain - _t)
         # the memos the next kernel starts from, each persisted on its own: one memo's raise never costs the others
         # (1610 round two, medium 3), and a failure is logged by name
@@ -82415,7 +82560,8 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
         _phase("asmS", "assembly", _t, _asm_end - _t, "%d left unwritten, %d busy" % (_asm_skipped, _asm_busy))
         _phases["ckptS"] = round(time.monotonic() - _t_prime, 2)   # the window older cut rows carried as ckptS
         _t = time.monotonic()
-        _drain_timeout = max(0.25, _end - _t)   # what the deadline has left: only an item in flight at the line shrinks this
+        _drain_timeout = max(0.25, _end - _t)   # what the deadline has left: only the memos and the listing (they run whole)
+        #                                         and an item in flight at the line shrink this
         try:
             if be is not None and hasattr(be, "drain"):
                 res = be.drain(_drain_timeout)
@@ -82446,31 +82592,25 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
                         reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
                         _exit_log("romp-kernel: the signal's reason helper failed, the cut row carries the "
                                   "plain verdict and reasonError: %s\n" % reason_err)
-                if cut_row is not None and not _cut_landed:
-                    cut_row = None            # built but never on disk: a done row would join nothing, so the late full row is written
-                if cut_row is not None:
-                    done = _exit_done_row(cut_row, res, list(_d.get("cutTurns") or []) + _codex_cut_turns(), reason,
+                _drained = list(_d.get("cutTurns") or []) + _codex_cut_turns()   # what the drain cut, and the Codex work
+                if cut_row is not None and _cut_landed:
+                    done = _exit_done_row(cut_row, res, _drained, reason,
                                           err=err, reason_err=reason_err, phases=_phases, counts=_counts,
                                           deadline_s=_deadline_s, elapsed_s=time.monotonic() - t0)
                     _append_restart_cut(done)
-                else:                         # no cut row on disk from the start (unbuilt, or its append failed): written now, from
-                    #                           the drain's own result, as the one row of this exit, complete (exitDone: no done row
-                    #                           follows it, and every reader reads it as an exit that finished), its t the entry's
-                    row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
-                                           audit_reason=reason, phases=_phases)
-                    row["t"] = int(t0_wall)           # the outage clock starts at the handler's entry, as the early row's does
-                    row["cutTurns"].extend(_codex_cut_turns())   # the Codex work this exit cuts too: open turns and running compactions (2026-09-22, 2026-09-23)
-                    if audit:
-                        row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
-                    if err:
-                        row["drainError"] = err.strip().splitlines()[-1][:200]
-                    if reason_err:
-                        row["reasonError"] = reason_err     # the reason helper's fault: no `signal` row was filed
-                    row["exitDone"] = True
-                    row["phases"] = {k: _phases[k] for k in EXIT_DONE_PHASES if k in _phases}
-                    row.update({k: int(v) for k, v in _counts.items() if k in EXIT_DONE_COUNTS})
-                    row["deadlineS"], row["elapsedS"] = round(_deadline_s, 2), round(time.monotonic() - t0, 2)
-                    _append_restart_cut(row)
+                else:                         # no cut row on disk from the start (unbuilt, or its append failed): the LATE FULL ROW,
+                    #                           the one row of this exit, complete (exitDone: no done row follows it, and every
+                    #                           reader reads it as an exit that finished), its t the entry's (_exit_late_row)
+                    if cut_row is None:       # never built: the drain's own result stands in, with no prediction behind its turns
+                        cut_row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches), now=t0_wall,
+                                                   sample=sample, audit_reason=reason, phases=_phases)
+                        cut_row["cutTurns"] = list(_drained)   # the Codex work this exit cuts too: open turns and running compactions (2026-09-22, 2026-09-23)
+                        if audit:
+                            cut_row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
+                        cut_row["cutTurnsError"] = _cut_err or "the cut row could not be built at the exit's start"
+                    done = _exit_done_row(cut_row, res, _drained, reason, err=err, reason_err=reason_err, phases=_phases,
+                                          counts=_counts, deadline_s=_deadline_s, elapsed_s=time.monotonic() - t0)
+                    _append_restart_cut(_exit_late_row(cut_row, done))   # the built row, joined as the reader joins the pair
             except Exception:
                 _exit_log("romp-kernel: cut ledger failed: %s\n" % traceback.format_exc())
             _exit_phase_log("doneRow", time.monotonic() - _t, _end - _t, _end, _deadline_s)
