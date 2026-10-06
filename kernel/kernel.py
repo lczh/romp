@@ -36182,6 +36182,40 @@ def _captions(fsid):
     return rows
 
 
+def _caption_rows_version(fsid, caps):
+    """The captions version `caps` was built from, for a memo that holds what it derived from those rows (the lane
+    prefix, 2026-10-06): "empty" for an empty mapping (no file, or no rows: every lookup answers ''); (path,
+    generation, base, record count) when `caps` is the mapping _captions holds for that version of
+    captions/<fsid>.jsonl; else None, an unknown version (a plain dict, a read the memo did not hold, or a version
+    another thread has replaced since this build's read): the caller re-captions every held bar under it, even when the
+    held version is None too."""
+    if not caps:
+        return "empty"
+    path = str(jd.CAPDIR / (fsid + ".jsonl"))
+    with _CAPTION_ROWS_LOCK:
+        held = _CAPTION_ROWS_MEMO.get(path)
+    if held is not None and held[3] is caps:
+        return (path, held[0], held[1], held[2])
+    return None
+
+
+def _caption_rows_since(old, new):
+    """The caption records appended between two versions of one captions file (_caption_rows_version), or None when
+    `new` is not `old` lengthened: another path, generation or base, a count that shrank, a version that is not a
+    tuple, or a reader entry that no longer holds them. The reader keeps a generation and base only across appends,
+    each a new records list with the old records first (_captions' docstring), so the records past `old`'s count are
+    exactly the rows the appends added."""
+    if not (isinstance(old, tuple) and isinstance(new, tuple)) or old[:3] != new[:3] or old[3] > new[3]:
+        return None
+    if old[3] == new[3]:
+        return []
+    with em._JSONL_CACHE_LOCK:
+        ent = em._JSONL_CACHE.get(new[0])
+    if ent is None or ent[6] != new[1] or ent[5] != new[2] or len(ent[4]) < new[3]:
+        return None
+    return ent[4][old[3]:new[3]]
+
+
 # ───────────────────────── view-builder: atoms → chat ChatEvent[] (parity: chat = KEEP) ─────────────────────────
 def _edit_diff(inp):
     """A minimal unified-ish diff string for an Edit/MultiEdit tool_use input (the render folds it)."""
@@ -52471,13 +52505,28 @@ def _turn_hold_key(turn):
     that reuses its times, are told apart by their records' uuids. A restored pre-cut turn (em.PreTurn) answers both
     from its stored uuids, so no atom is built. There is no restored-turn bit: a restored turn and the whole parse's
     agree on every field here by construction (em._pre_turns_of; the document's turns are written from the tree it
-    restores), so a restore reuses what the whole road held instead of walking every turn once more."""
-    trig = (turn.get("trigger") or {}).get("uuid")
-    if turn.get("pre") and turn.get("uuids") is not None:
-        last = next((u for u in reversed(turn["uuids"]) if u), None)
+    restores), so a restore reuses what the whole road held instead of walking every turn once more.
+    Spelled out in one frame (2026-10-06): the lane prefix keys every closed turn of a working lane with it on every
+    derivation too (12,030 turns at the build-cost lab's 3x history, beside the message-caption scan's 12,030), and in
+    that lab a quiet timeline build came out about 15 ms slower than with the prefix key it replaced; the nested
+    _turn_prefix_key call, the two generators and the tuple concatenation were extra frames and tuples per turn.
+    The first four fields are _turn_prefix_key's, in its order (a test pins the two together)."""
+    get = turn.get
+    atoms = get("atoms") or ()
+    trig = (get("trigger") or {}).get("uuid")
+    last = None
+    if get("pre") and get("uuids") is not None:
+        for u in reversed(turn["uuids"]):
+            if u:
+                last = u
+                break
     else:
-        last = next((u for u in (a.get("uuid") for a in reversed(turn.get("atoms") or [])) if u), None)
-    return _turn_prefix_key(turn) + (trig, last)
+        for a in reversed(atoms):
+            u = a.get("uuid")
+            if u:
+                last = u
+                break
+    return (get("id"), bool(get("ended")), len(atoms), get("end"), trig, last)
 
 
 def _hold_fp_val(v):
@@ -53999,6 +54048,12 @@ _lanes_stats = {"hit": 0, "miss": 0, "live_tail": 0, "complain_skip": 0, "unshar
                 # the PREFIX memo (2026-09-12): derivations that reused a held prefix of closed turns, and the segments
                 # those prefixes carried (work a whole-lane derivation would have redone); segs_miss counts only the derived
                 "prefix_hit": 0, "prefix_segs": 0,
+                # (2026-10-06) prefix_partial: a held prefix whose turns diverged before its end under the same inputs (a
+                # rewind, a compaction re-seat, a late record, a re-recorded uuid), which re-walks the whole lane;
+                # prefix_reset: a held prefix discarded because an input moved (another leaf, the seams, liveness, the
+                # branch clip, the host's suspensions); prefix_recap and prefix_recap_new: held bars whose captions were
+                # looked up again because the captions moved, and those of them rebuilt because a caption changed
+                "prefix_partial": 0, "prefix_reset": 0, "prefix_recap": 0, "prefix_recap_new": 0,
                 # the DEAD lanes of a bars build, counted by build_timeline (this memo never sees one): served from
                 # _dead_lane_memo (dead_serve), derived through _lane_segments (dead_miss: cached after, unless the
                 # store faulted, the transcript could not be stat'd or a stage complained), or served as the empty
@@ -54036,13 +54091,32 @@ def _lanes_forget(keep):
 # live tail was merged (a turn in flight: `session is not parsed`, 35 % of the per-lane memo's lookups on the devbox),
 # re-derived EVERY turn of its history each build: 1.19 million segments re-walked in 25 minutes for 149 builds of
 # 3.4 s each, a third of the pusher's wall time. Every closed turn's bars depend only on that turn and the lane's
-# inputs (the goals object for the seams, the captions file for the captions, live, the branch clip, the host's
-# downtime), never on its neighbours, so the bars of the turns BEFORE the last one are held per lane and reused
-# while those turns' identities and the inputs stand; only the tail (and any turn after the first that changed) is
-# derived. Keyed like _lanes_memo (its comment names the inputs); the goals object is compared by identity, so an
-# unshared mutable store disables the prefix for that build (the derivation stays whole). Bounded by the lanes the
-# builds draw (_lanes_forget drops the rest) and by _LANES_MEMO_MAX like the lane memo; the bars it holds are the
-# same objects the lane memo and the wire cache hold. Counted under memos.lanes as prefix_hit and prefix_segs.
+# inputs (the store's seams, the captions, live, the branch clip, the host's downtime), never on its neighbors, so
+# the bars of the turns BEFORE the last one are held per lane and reused while those turns' identities and the
+# inputs stand; only the tail (and any turn after the first that changed) is derived. An unshared mutable store
+# disables the prefix for that build (the derivation stays whole). Bounded by the lanes the builds draw
+# (_lanes_forget drops the rest) and by _LANES_MEMO_MAX like the lane memo; the bars it holds are the same objects
+# the lane memo and the wire cache hold. Counted under memos.lanes as prefix_hit and prefix_segs.
+# THE INPUTS BY VALUE (2026-10-06, the build-cost changes' lane part). The prefix was keyed on the store's identity
+# and the captions file's stat, so every judge write for the working session discarded it: a caption row moved the
+# stat, a republish made a new FrozenStore, and that build re-walked the lane's whole history (the build-cost lab: the
+# prefix held in none of the builds a judge wrote in, 12,031 segments re-walked each at its 3x history). The bars read
+# the store only through its seams (_segs_seam), so the store is keyed by _seams_fp, the seams by value: a republish
+# that moves nodes or status keeps the prefix; a seam stamped, moved or removed discards it. The captions are no input
+# at all. The entry records the captions version its bars were captioned under (_caption_rows_version: the reader's
+# version, which _captions holds its mapping on), and a derivation under another version re-captions the held bars
+# instead of re-walking their turns (_lane_prefix_recaption): after an append (the same path, generation and base,
+# more records) only the bars whose _seg_key an appended row shares (the entry's bar index, built when a prefix is
+# first stored and carried after), after anything else every held bar. A bar whose two captions stand stays the SAME
+# object, so the bars wire cache (_delta_split) still skips it; a changed one is a NEW dict in the builder's key order
+# (_BAR_ORDER), never the held dict edited, which the wire cache would go on serving with its old caption. The entry
+# is headed by the leaf (_msg_scan_head: its path and inode, stat'd by build_timeline before the parse) and its turns
+# are keyed by _turn_hold_key (a turn's identity plus its trigger's and newest atom's uuids), so a resume into another
+# file, a file replaced at the same path, or records re-recorded under the same times and text start a new prefix and
+# are never served another file's bars; a caller that passes no head (a dead lane, a direct derivation) holds none.
+# The judging marks read the store's nodes and every caption row: they stay outside the prefix, derived after the
+# loop on every derivation, and the lane memo above keeps the store's identity and the captions stat in its key,
+# since it serves them. Counted beside: prefix_partial, prefix_reset, prefix_recap, prefix_recap_new.
 # The closed turns' COMPACTION markers ride the prefix too (2026-09-16): the lane's compactions were a comprehension
 # over every atom of every turn, run after the prefix reuse on every derivation (a live lane whose tail moved derives
 # once per build that draws it, about three lanes a build on the measured board), so a prefix hit still walked the
@@ -54055,8 +54129,13 @@ def _lanes_forget(keep):
 # turn's markers land in turn order as the one-pass form had them), snapshotted before the tail beside the bars, and
 # held as the ninth field; a hit walks only the tail's atoms. A partial prefix still re-derives the whole lane,
 # markers included.
-_lane_prefix_memo = {}    # sid -> (inputs, turn_keys, bars, seg_ends, prompts, last_t, nsegs, complained, compactions)
+_lane_prefix_memo = {}    # sid -> (inputs, turn_keys, bars, seg_ends, prompts, last_t, nsegs, complained, compactions,
+#                           cap_ver, bar_index): cap_ver the captions version the held bars were captioned under
+#                           (_caption_rows_version), bar_index {_seg_key(bar id): (positions of its bars,)}
 _LANE_PREFIX_LOCK = threading.Lock()
+# The wire bar's keys in the order the loop in _lane_segments writes them (a test pins it against the loop): a held bar
+# whose captions changed is rebuilt in this order, so its encoded bytes are the ones a whole derivation encodes.
+_BAR_ORDER = ("id", "start", "end", "p", "w", "r", "q", "c", "m", "s", "d", "u", "t", "a", "o")
 
 
 def _turn_prefix_key(turn):
@@ -54064,21 +54143,96 @@ def _turn_prefix_key(turn):
     return (turn.get("id"), bool(turn.get("ended")), len(turn.get("atoms") or ()), turn.get("end"))
 
 
-def _lane_prefix_inputs(goals, cap_key, live, bft):
-    """The non-turn inputs a prefix is valid under, or None when the prefix must not be used this build (an unshared
-    mutable goals store, captions read with no file key)."""
-    if isinstance(goals, jd.FrozenStore):
-        gkey = ("shared", id(goals))
-    elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
-        gkey = "empty"
-    else:
+def _lane_prefix_inputs(goals, head, live, bft):
+    """The non-turn inputs a prefix is valid under, or None when the prefix must not be used this build: no leaf head
+    (the caller holds no prefix, or the leaf could not be stat'd), or an unshared mutable goals store with content.
+    The store by its seams' value (_seams_fp), the only part of it the bars read; the captions are not an input (the
+    held bars are re-captioned instead, the comment above _lane_prefix_memo)."""
+    if head is None:
         return None
-    if not (isinstance(cap_key, tuple) or cap_key == "empty"):   # a stat key, or the lane memo's "no file, no rows"
+    if not (isinstance(goals, jd.FrozenStore) or goals is None or (not goals.get("seams") and not goals.get("nodes"))):
         return None
-    return (gkey, cap_key, bool(live), bft, tuple(_downtime))
+    return (head, _seams_fp(goals), bool(live), bft, tuple(_downtime))
 
 
-def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, cap_key=None):
+def _lane_bar_index(bars, base=None, start=0):
+    """The held bars' index for re-captioning: {_seg_key(bar id): (positions,)} over bars[start:], added to a copy of
+    `base` (its tuples are replaced, never extended in place, so the index an older entry carries stands)."""
+    idx = dict(base) if base else {}
+    for i in range(start, len(bars)):
+        k = _seg_key(bars[i]["id"])
+        g = idx.get(k)
+        idx[k] = (i,) if g is None else g + (i,)
+    return idx
+
+
+def _lane_recaption_positions(index, records):
+    """The positions of the held bars that appended caption `records` can re-caption, in order, or None when every
+    bar must be looked up again (a row id that is not a string). A row reaches a bar only through the bar's exact id,
+    its id + '#p', or an id sharing the _seg_key of either (_seg_work_caption, _seg_caption), and _seg_key(x + '#p')
+    is _seg_key(x) + '#p', so a row whose key is K touches the bars indexed under K and under K less its '#p'. A row
+    _captions does not fold (not a dict, no id) touches nothing."""
+    pos = set()
+    for o in records:
+        if not (isinstance(o, dict) and o.get("id")):
+            continue
+        k = o["id"]
+        if not isinstance(k, str):
+            return None
+        sk = _seg_key(k)
+        pos.update(index.get(sk, ()))
+        if sk.endswith("#p"):
+            pos.update(index.get(sk[:-2], ()))
+    return sorted(pos)
+
+
+def _bar_caption_stands(have, want):
+    """Does a held bar's caption field (`have`, None when the builder omitted it) already carry `want`, byte for byte?
+    An omitted field and an empty caption agree, two strings by value; anything else is rebuilt (exact either way)."""
+    if not want:
+        return have is None
+    return type(have) is str and type(want) is str and have == want
+
+
+def _bar_recaptioned(bar, cap, msg_cap):
+    """`bar` with its work caption (`c`) and message caption (`m`) replaced, as a NEW dict in the builder's key order
+    (_BAR_ORDER), an empty caption omitted as the builder omits it, so its bytes are a whole derivation's. The held
+    dict is never edited: the bars wire cache serves an encoded bar by its object's identity."""
+    out = {}
+    for k in _BAR_ORDER:
+        if k == "c":
+            if cap:
+                out["c"] = cap
+        elif k == "m":
+            if msg_cap:
+                out["m"] = msg_cap
+        elif k in bar:
+            out[k] = bar[k]
+    return out
+
+
+def _lane_prefix_recaption(bars, caps, positions):
+    """The held `bars` captioned under `caps`: a new list in which each bar at `positions` (None: every bar) whose
+    work or message caption moved is replaced by _bar_recaptioned, every other bar the same object. Each bar id is
+    looked up once (a post-sleep continuation piece shares its segment's id), with the lookups the loop makes. Returns
+    (bars, bars looked up, bars rebuilt)."""
+    out = list(bars)
+    seen = {}
+    looked = rebuilt = 0
+    for i in (range(len(out)) if positions is None else positions):
+        b = out[i]
+        pair = seen.get(b["id"])
+        if pair is None:
+            pair = seen[b["id"]] = (_seg_work_caption(caps, b["id"]), _seg_caption(caps, b["id"]))
+        looked += 1
+        if _bar_caption_stands(b.get("c"), pair[0]) and _bar_caption_stands(b.get("m"), pair[1]):
+            continue
+        out[i] = _bar_recaptioned(b, pair[0], pair[1])
+        rebuilt += 1
+    return out, looked, rebuilt
+
+
+def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, head=None):
     """The SEGMENT part of one timeline lane: the turn loop build_timeline ran inline, moved here so the per-lane
     memo (_lane_memo; the comment above _lanes_memo names every input) can hold its result: (bars, seg_ends,
     last_t, compactions, cap_marks, other_marks, nsegs, complained). bars are the lane's wire bars in turn order
@@ -54091,42 +54245,58 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, cap_
     not compare, and _bars_complain said so; such a lane is not memoized. No clock is read here. `full_prompts`, when given,
     receives each segment's WHOLE prompt under its bar id (T278b): the bar carries the wire form (_wire_prompt,
     the first line capped) and _bind_message_execs's sender heuristic reads the whole text through this map; a
-    memo that serves the bars serves the map beside them."""
+    memo that serves the bars serves the map beside them. `head`, when given, is the lane's leaf as _msg_scan_head
+    stat'd it before the parse: the closed turns' bars are then held per lane and reused (the comment above
+    _lane_prefix_memo); with none, nothing is held or served."""
     if full_prompts is None:
         full_prompts = {}
     st_turns = session["turns"]
     bars, last_t, seg_ends, nsegs, complained, compactions = [], None, {}, 0, False, []   # seg_ends: seg-start t → work-END t (for completion marks)
-    # the prefix: the held bars of the closed turns before the last one, reused while their identities and the inputs stand
-    inputs = _lane_prefix_inputs(goals, cap_key, live, bft)
+    # the prefix: the held bars of the closed turns before the last one, reused while their identities and the inputs
+    # stand, re-captioned when the captions moved (the comment above _lane_prefix_memo)
+    inputs = _lane_prefix_inputs(goals, head, live, bft)
     n_last = len(st_turns) - 1
-    turn_keys = [_turn_prefix_key(t) for t in st_turns[:n_last]] if inputs is not None and n_last > 0 else []
+    turn_keys = [_turn_hold_key(t) for t in st_turns[:n_last]] if inputs is not None and n_last > 0 else []
     start_k = 0
+    cap_ver = _caption_rows_version(sid, caps) if turn_keys else None   # the version this derivation's bars are captioned under
+    bar_index, held_nbars, nsegs_held = None, 0, 0   # the held entry's bar index, bar count and segments, when its bars are reused
     if turn_keys:
         with _LANE_PREFIX_LOCK:
             held = _lane_prefix_memo.get(sid)
-        if held is not None and held[0] == inputs:
+        if held is not None and held[0] != inputs:
+            with _LANES_LOCK:
+                _lanes_stats["prefix_reset"] += 1          # another leaf, the seams, liveness, the branch clip or a nap moved
+        elif held is not None:
             k = 0
             for a, b in zip(held[1], turn_keys):
                 if a != b:
                     break
                 k += 1
-            if k > 0:
-                if k == len(held[1]):                       # the whole held prefix stands: reuse its objects
-                    bars = list(held[2]); seg_ends = dict(held[3]); prompts_held = held[4]; last_t = held[5]; nsegs_held = held[6]
-                    complained = held[7]; compactions = list(held[8])
-                else:                                       # a shorter common prefix: a changed middle turn re-derives all
-                    nsegs_held = 0; prompts_held = {}
-                    # partial reuse is not attempted. A leftover from the design that did attempt it walked every atom of
-                    # the k standing turns here into a set nobody read (a generator whose filter was a constant False still
-                    # binds each element): on a restored lane that is one lock round trip or row decode per atom, paid
-                    # right before the whole derivation below reads the same turns again (2026-09-16).
-                    k = 0
-                if k > 0:
-                    full_prompts.update(prompts_held)
-                    start_k = k
-                    with _LANES_LOCK:
-                        _lanes_stats["prefix_hit"] += 1
-                        _lanes_stats["prefix_segs"] += nsegs_held
+            if k == len(held[1]):                           # the whole held prefix stands: reuse its objects
+                prefix_bars = held[2]
+                if cap_ver is None or held[9] != cap_ver:   # the captions moved: re-caption the held bars, never re-walk them
+                    since = _caption_rows_since(held[9], cap_ver)
+                    positions = None if since is None else _lane_recaption_positions(held[10], since)
+                    if positions is None or positions:
+                        prefix_bars, looked, rebuilt = _lane_prefix_recaption(prefix_bars, caps, positions)
+                        with _LANES_LOCK:
+                            _lanes_stats["prefix_recap"] += looked
+                            _lanes_stats["prefix_recap_new"] += rebuilt
+                bars = list(prefix_bars); seg_ends = dict(held[3]); last_t = held[5]
+                complained = held[7]; compactions = list(held[8])
+                bar_index, held_nbars, nsegs_held = held[10], len(bars), held[6]
+                full_prompts.update(held[4])
+                start_k = k
+                with _LANES_LOCK:
+                    _lanes_stats["prefix_hit"] += 1
+                    _lanes_stats["prefix_segs"] += nsegs_held
+            else:
+                # a held turn changed or went (a rewind, a compaction re-seat, a late record, a re-recorded uuid): the
+                # whole lane re-derives, as it always has; partial reuse is not attempted (the count says whether a
+                # per-turn form would pay). A leftover from the design that did attempt it walked every atom of the
+                # standing turns into a set nobody read (2026-09-16): nothing here reads a turn.
+                with _LANES_LOCK:
+                    _lanes_stats["prefix_partial"] += 1
     snap = None
     for ti, turn in enumerate(st_turns[start_k:], start=start_k):
         if ti == n_last and turn_keys and snap is None:
@@ -54229,12 +54399,18 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, cap_
                     bar["o"] = True
                 bars.append(bar)
     if turn_keys and snap is not None and not snap[5]:
+        # the bar index: the held entry's own while its bars are the prefix's (the positions stand, a re-caption replaces
+        # bars in place in the new list), extended by the bars of the turns that closed since, or built whole after a walk
+        if bar_index is None:
+            bar_index = _lane_bar_index(snap[0])
+        elif len(snap[0]) > held_nbars:
+            bar_index = _lane_bar_index(snap[0], bar_index, held_nbars)
         with _LANE_PREFIX_LOCK:                             # hold the closed turns' part for the next derivation of this lane
             _lane_prefix_memo.pop(sid, None)
             while len(_lane_prefix_memo) >= _LANES_MEMO_MAX:
                 _lane_prefix_memo.pop(next(iter(_lane_prefix_memo)))
             _lane_prefix_memo[sid] = (inputs, turn_keys, snap[0], snap[1], snap[2], snap[3], snap[4] + (nsegs_held if start_k else 0), False,
-                                      snap[6])
+                                      snap[6], cap_ver, bar_index)
     try:
         cap_marks, other_marks = _derive_judging_marks(sid, caps, goals, seg_ends) if goals is not None else ([], [])
         # The horizon comparisons run in _judging_assemble, per build, outside this lane's guard; the one-pass form
@@ -54252,7 +54428,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None, cap_
     return bars, seg_ends, last_t, compactions, cap_marks, other_marks, nsegs, complained
 
 
-def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=True, full_prompts=None):
+def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=True, full_prompts=None, head=None):
     """_lane_segments through the per-lane memo (the comment above _lanes_memo names every input): the six
     pieces build_timeline reads, bars, seg_ends, last_t, compactions, cap_marks and other_marks, served from the
     lane's entry when its inputs are the previous build's and derived otherwise. LIVE lanes only: build_timeline
@@ -54262,7 +54438,9 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     read it (None when the file could not be stat'd); `parse_ok` is False when the parse failed and `session` is the
     empty stand-in; `goals` is None when the store faulted (build_timeline complained), and such a lane is derived and
     not held, as the dead-lane path derives and never caches one. `full_prompts` (T278b) receives the lane's whole
-    prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way."""
+    prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way.
+    `head` is the leaf's head for the derivation's prefix (_lane_segments), stat'd before the parse; the captions key
+    here stays the file's stat, since this memo also serves the judging marks, which read every caption row."""
     if isinstance(goals, jd.FrozenStore):
         gobj, gtag = goals, "shared"
     elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
@@ -54304,7 +54482,7 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
             if ent[0] is not parsed:
                 _lanes_memo.pop(sid, None)                    # its parse object is no longer the build's: it cannot hit again
     lane_prompts = {}
-    value = _lane_segments(sid, session, goals, caps, live, bft, lane_prompts, cap_key=ckey)
+    value = _lane_segments(sid, session, goals, caps, live, bft, lane_prompts, head=head)
     if full_prompts is not None:
         full_prompts.update(lane_prompts)
     outcome = skip or ("complain_skip" if value[7] else "miss")
@@ -55155,6 +55333,8 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
                 _lanes_stats["dead_failed_serve" if cached.get("failed") else "dead_serve"] += 1
             full_prompts.update(cached.get("prompts") or {})   # the memoized lane's full prompts, for the binder (T278b)
         elif with_bars:
+            # the lane prefix's leaf (_lane_segments): its path and inode, stat'd BEFORE the parse reads it (_msg_scan_head)
+            lane_head = _msg_scan_head(s["path"]) if live else None
             try:
                 session = _parse(s["path"], sid, now)
             except Exception as e:
@@ -55252,7 +55432,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             # per build.
             if live:
                 bars, seg_ends, last_t, compactions, cap_marks, other_marks = _lane_memo(
-                    sid, parsed, session, goals, caps, cap_key, live, _bft, parse_ok, full_prompts)
+                    sid, parsed, session, goals, caps, cap_key, live, _bft, parse_ok, full_prompts, head=lane_head)
             else:
                 value = _lane_segments(sid, session, goals, caps, live, _bft, full_prompts)
                 bars, seg_ends, last_t, compactions, cap_marks, other_marks = value[:6]

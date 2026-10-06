@@ -4064,8 +4064,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   so the lane was derived and not held), `complain_skip` (the parse or a stage
   failed) and `unshared_skip` (a private store with content); `evict` and the
   gauge `entries`; `segs_hit` and `segs_miss` count the segments served and
-  derived. `dead_serve`, `dead_miss` and `dead_failed_serve` are the dead-lane
-  memo's outcomes on the same block, so one block carries every lane.
+  derived. A derivation reuses the bars of the lane's closed turns from its
+  last derivation while the leaf (its path and inode), those turns'
+  identities, the goal store's seams (by value, so a republish that moves
+  only nodes keeps them), liveness, the branch clip and the suspensions
+  stand: `prefix_hit` counts those derivations and `prefix_segs` the segments
+  they reused; `prefix_partial` counts derivations whose held turns diverged
+  before the prefix's end (a rewind, a compaction, a late record), each of
+  which re-walks the whole lane, and `prefix_reset` derivations whose held
+  bars were dropped because one of those inputs moved. A caption write drops
+  nothing: the held bars it can change have their captions looked up again
+  (`prefix_recap`), after an append only the bars whose segment key an
+  appended row shares, after a rewrite every one, and a bar whose caption
+  changed is rebuilt as a new bar (`prefix_recap_new`), so of the held bars
+  the frame re-encodes only that one. `dead_serve`, `dead_miss` and
+  `dead_failed_serve` are the dead-lane memo's outcomes on the same block, so
+  one block carries every lane.
   `msgScan` is the message-caption scan's hold. A peer message's caption on
   the timeline and in the chat is the caption of the segment that received
   it, joined through the segment's message ids; each session's closed turns
