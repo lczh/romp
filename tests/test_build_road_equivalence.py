@@ -8,11 +8,22 @@ code argues that; this module checks it. One synthetic road drives a session thr
 history, and after every step the warm build (every memo as the previous step left it) is compared with a cold one over
 the same inputs, built with the builders' own memos cleared: for the map, the message-caption scan's (_msg_sum_cache,
 its held turns included) and the captions mapping (_CAPTION_ROWS_MEMO); for the lanes, the lane prefix memo and the
-captions mapping. The parse and the record cache under it, which hold the inputs as read, stay as the warm build left
-them. The cold build's memos are put back afterwards, so each step builds on the warm chain and never on what the cold
-build left. This change compares the message-caption map (_msg_summaries, the map the timeline's connectors and the
-chat's incoming cards read); a later change that holds the board's or the Sessions pane's results adds its builder to
-the comparison.
+captions mapping; for the card anchor walk, its held aggregates (_FEED_SEG_HELD); for the judging marks, the marks memo
+and the captions mapping. The parse and the record cache under it, which hold the inputs as read, stay as the warm build
+left them. The cold build's memos are put back afterwards, so each step builds on the warm chain and never on what the
+cold build left. The road compares the message-caption map (_msg_summaries, the map the timeline's connectors and the
+chat's incoming cards read), the Sessions pane's lanes (below), the card anchor walk and the judging marks; a later
+change that holds a builder's results adds that builder here.
+
+The card anchor walk and the judging marks joined on 2026-10-06, after the review of the message-caption change found
+them merged without a place on the road. The anchor walk (_feed_seg_walk, then _feed_seg_plain_t, which stores the
+closed turns' aggregate) is derived per session over the parse with the leaf's head stat'd before it, its held
+aggregates as the last step left them and again from a cleared table: its five maps (the work and prompt anchors, the
+latest prose, the citable uuids, each key's landing as the turn id and segment atoms the landing reads) and the
+plain-prompt time must agree. The feed walks the live-merged session; the road's sessions have no live tail (no backend
+owns them, and a session with no tail merges to itself), so the parse is that session here. The judging marks
+(_judging_cap_marks over the captions mapping) are derived per lane with the marks memo and the captions mapping as the
+last step left them and again from both cleared, and must agree mark for mark.
 
 The Sessions pane's lanes joined on 2026-10-06, when the lane prefix (the held bars of a lane's closed turns) began to
 survive caption writes and store republishes. Each session's lane is derived as the bars build derives a live lane
@@ -34,8 +45,9 @@ held pairs would be served for the new records); auto and manual compaction; two
 store fault and its recovery; the captions file rewritten; a document written and a restart that restores from it; a
 walk that raises partway through, over the restored turns; a demote; a late record whose time sorts into a closed turn;
 a rewind cut and its release; a past-prompt edit; a resume into a new file; a /clear. A dropped echo's flag is
-not a step here: echoes live in the live-merged session, which the message-caption scan never reads; it joins the road
-with the first builder compared here that reads the merged session.
+not a step here: echoes live in the live-merged session, which the message-caption scan never reads and the road's
+sessions do not have (above); it joins the road with a backend that owns a session and a builder compared here that
+reads its tail.
 
 Two tests drive the same road. One compares warm with cold at every step and checks the steps changed what they claim
 (so the equality is not a comparison of two empty maps). The other counts the turns the warm build walked at each step
@@ -187,6 +199,9 @@ class RoadWorld(unittest.TestCase):
         km._msg_sum_cache.clear()
         self.saved_prefix = dict(km._lane_prefix_memo)              # the lane prefix memo: the road's own, put back after
         km._lane_prefix_memo.clear()
+        self.saved_held = (list(km._FEED_SEG_HELD.items()), list(km._JUDGING_MARKS_MEMO.items()))   # the anchor walk's
+        km._FEED_SEG_HELD.clear()                                     # aggregates and the marks memo: the road's own too
+        km._JUDGING_MARKS_MEMO.clear()
         km._delta_entry_memo.pop(ROAD_WIRE, None)
         self.walked, self.counting = 0, False
         self.lane_walked, self.lane_counting = 0, False
@@ -215,6 +230,10 @@ class RoadWorld(unittest.TestCase):
         (state, ckpt, km._sessions, km._sdk, km._codex, km._segs_seam, cut_fn, msc, cyc) = self.saved
         km._lane_prefix_memo.clear()
         km._lane_prefix_memo.update(self.saved_prefix)
+        km._FEED_SEG_HELD.clear()
+        km._FEED_SEG_HELD.update(self.saved_held[0])
+        km._JUDGING_MARKS_MEMO.clear()
+        km._JUDGING_MARKS_MEMO.update(self.saved_held[1])
         km._delta_entry_memo.pop(ROAD_WIRE, None)
         jd.set_pending_cut_provider(cut_fn)
         km._msg_sum_cache.clear()
@@ -430,6 +449,50 @@ class RoadWorld(unittest.TestCase):
             return order, {k: v[1] for k, v in ents.items()}
         return warm, cold, wire(warm, ROAD_WIRE), wire(cold, None)
 
+    def anchors(self, sid):
+        """One session's card anchor walk as the feed derives it: _feed_seg_walk with the leaf's head stat'd before the
+        parse, the parse's turns and the store's shared view, then _feed_seg_plain_t, which finishes the walk and stores
+        the closed turns' aggregate. (the work anchors, the prompt anchors, the latest prose, the citable uuids, each
+        key's landing as (turn id, segment atom uuids), the plain-prompt time)."""
+        head = km._msg_scan_head(self.leaf[sid])
+        turns = self.tree(sid)["turns"]
+        w = km._feed_seg_walk(sid, head, turns, jd.load_goals_shared(sid))
+        plain = km._feed_seg_plain_t(w)
+        landing = {}
+        for k in w.seg_uuid:
+            if k not in w.seg_turn:
+                landing[k] = "absent"
+                continue
+            got = w.seg_turn.get(k)
+            landing[k] = None if got is None else (got[0].get("id"), tuple(a.get("uuid") for a in got[1]))
+        return dict(w.seg_uuid), dict(w.seg_trig), dict(w.seg_best), set(w.cite_uuids), landing, plain
+
+    def marks(self, sid):
+        """One lane's captioner marks as the judging band derives them: _judging_cap_marks over the captions mapping
+        _captions holds, the marks memo as it stands."""
+        return [dict(m) for m in km._judging_cap_marks(sid, km._captions(sid))]
+
+    def held_builds(self):
+        """(warm, cold) for the card anchor walk and the judging marks: {sid: (anchors, marks)} with the anchor walk's
+        aggregates, the marks memo and the captions mapping as the last step left them, then over the same inputs with
+        all three cleared (_FEED_SEG_HELD, _JUDGING_MARKS_MEMO and _CAPTION_ROWS_MEMO, so the cold marks are built from
+        a captions mapping read anew), the warm tables put back after."""
+        warm = {sid: (self.anchors(sid), self.marks(sid)) for sid in NAMES}
+        saved = (list(km._FEED_SEG_HELD.items()), list(km._JUDGING_MARKS_MEMO.items()), dict(km._CAPTION_ROWS_MEMO))
+        km._FEED_SEG_HELD.clear()
+        km._JUDGING_MARKS_MEMO.clear()
+        km._CAPTION_ROWS_MEMO.clear()
+        try:
+            cold = {sid: (self.anchors(sid), self.marks(sid)) for sid in NAMES}
+        finally:
+            km._FEED_SEG_HELD.clear()
+            km._FEED_SEG_HELD.update(saved[0])
+            km._JUDGING_MARKS_MEMO.clear()
+            km._JUDGING_MARKS_MEMO.update(saved[1])
+            km._CAPTION_ROWS_MEMO.clear()
+            km._CAPTION_ROWS_MEMO.update(saved[2])
+        return warm, cold
+
 
 def cap_row(seg, text, t=None, seg_id=None):
     return {"id": seg_id or seg["id"], "grain": "segment", "t": seg["t"] if t is None else t, "caption": text}
@@ -452,7 +515,16 @@ class BuildRoad(RoadWorld):
         message-caption scan's counter deltas across the warm build where the step decides them ({"partial": 1, ...})."""
         warm, cold = self.builds()
         lw, lc, ww, wc = self.lane_builds()
+        hw, hc = self.held_builds()
         if self.mode == "equal":
+            for sid in NAMES:
+                for i, part in enumerate(("work anchors", "prompt anchors", "latest prose", "citable uuids", "landings",
+                                          "plain-prompt time")):
+                    self.assertEqual(hw[sid][0][i], hc[sid][0][i], "%s: %s's card anchor walk, warm and cold: its %s"
+                                     % (name, NAMES[sid], part))
+                self.assertEqual(hw[sid][1], hc[sid][1], "%s: %s's judging marks, warm and cold" % (name, NAMES[sid]))
+            self.assertTrue(hw[SID_WEB][0][0], "%s: web's anchor walk has anchors" % name)
+            self.assertTrue(hw[SID_WEB][1], "%s: web's lane has captioner marks" % name)
             self.assertEqual(warm, cold, "%s: the warm message-caption map is the cold one" % name)
             for mid, cap in (expect or {}).items():
                 if cap is None:
