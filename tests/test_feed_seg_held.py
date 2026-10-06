@@ -328,6 +328,7 @@ class HoldWorld(unittest.TestCase):
             self.assertIsNotNone(got, "%s: seg_turn answers %s" % (label, k))
             self.assertIs(got[0], turn, "%s: %s answers the same turn object" % (label, k))
             self.assertEqual(sig(got[1]), sig(atoms), "%s: %s answers the segment the dict held" % (label, k))
+        self.assertEqual(set(w.seg_turn._pos), set(seg_turn), "%s: seg_turn holds exactly the dict's keys" % label)
         self.assertNotIn("no-such-key", w.seg_turn, "%s: a key the dict never held" % label)
         self.assertIsNone(w.seg_turn.get("no-such-key"))
         self.assertEqual(w.seg_turn.get("no-such-key", "dflt"), "dflt")

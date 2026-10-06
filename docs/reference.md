@@ -3511,9 +3511,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the closed turns served from the hold and the turns folded, `segPartial`
   a held aggregate whose turns diverged inside it (a rewind, an edit, a
   compaction re-seat, a late record: every turn is walked), `segReset` one
-  discarded whole (another leaf or other seams), `segRaised` the walks that
-  met a failure and stored nothing, and `segEvict` the aggregates shed by
-  the byte bound or with their departed session; `segEntries`, `segBytes`
+  discarded whole (another leaf, other seams, or no closed turn left to
+  hold), `segRaised` the walks that met a failure and stored nothing, and
+  `segEvict` the aggregates shed by the byte bound or with their departed
+  session; `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
   record's state plus the two fields a card reads, `bgLedger` and
