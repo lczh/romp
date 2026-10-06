@@ -530,16 +530,28 @@ class MsgScanHold(unittest.TestCase):
         """The held entry's head is stat'd before the parse reads the leaf: a leaf replaced right after the parse
         returns leaves the old head beside the records read, and the next scan, under the new inode, walks whole. With
         the head stat'd after the parse, the new head would vouch for the old records and the next scan would serve the
-        old message id until a closed turn's key moved (the review after the merge: nothing pinned the order)."""
-        self.session(SID_WEB, 8)
-        self.assertIn("m-web05", self.build(), "the premise: a middle turn's peer message is captioned")
-        self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r08", "web-c08", "toolu_1", "ok")])
+        old message id until a closed turn's key moved (the review after the merge: nothing pinned the order). The id
+        changed is a tool output's inside a middle turn, never a prompt's: a turn's id hashes its prompt's text, so an id
+        changed in a prompt moves that turn's key and the scan walks it under either order."""
+        self.session(SID_WEB, 4)
+        t = self.open_t[SID_WEB]
+        self.append(SID_WEB, [tool_out(t + 10, "web-r04", "web-c04", "toolu_1", "inbox: <!-- romp-msg-id: m-in04 -->"),
+                              reply(t + 20, "web-a04", "web-r04", "Read the inbox."),
+                              user(self.t + 600, "web-u05", "web-a04", "page 5 of the notes-api index"),
+                              reply(self.t + 620, "web-a05", "web-u05", "Paged 5."),
+                              user(self.t + 720, "web-u06", "web-a05", "page 6 of the notes-api index"),
+                              reply(self.t + 740, "web-a06", "web-u06", "Paged 6."),
+                              user(self.t + 840, "web-u07", "web-a06", "ship it"),
+                              tool_call(self.t + 850, "web-c07", "web-u07", "toolu_2")])
+        self.caption_closed(SID_WEB)                                    # turns 4 to 6, now closed, get their captions
+        self.assertIn("m-in04", self.build(), "the premise: a middle turn's tool output carries a captioned id")
+        self.append(SID_WEB, [tool_out(self.t + 860, "web-r07", "web-c07", "toolu_2", "ok")])
         real, swapped = km._parse, []
 
         def parse_then_replace(path, sid, now):
             got = real(path, sid, now)
             if not swapped and str(path) == self.leaf[SID_WEB]:
-                body = Path(path).read_text().replace("m-web05", "m-wxb05")   # one middle record's id, the same length
+                body = Path(path).read_text().replace("m-in04", "m-xn04")   # one middle record's id, the same length
                 with open(str(path) + ".new", "w") as f:
                     f.write(body)
                 os.replace(str(path) + ".new", path)                        # a new file at the path: a new inode
@@ -551,7 +563,8 @@ class MsgScanHold(unittest.TestCase):
         self.assertTrue(swapped, "the premise: the leaf was replaced inside the scan, after its parse")
         got = self.build()
         self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()), "the warm map is the cold one")
-        self.assertNotIn("m-web05", got, "the replaced leaf's records are walked: the old id is gone")
+        self.assertNotIn("m-in04", got, "the replaced leaf's records are walked: the old id is gone")
+        self.assertIn("m-xn04", got, "and the new one carries its segment's caption")
 
     def test_an_id_in_two_turns_takes_the_later_turns_caption(self):
         """The join assigns in turn and segment order, as the one-pass loop did, so an id named in a peer prompt and
