@@ -21,7 +21,7 @@ os.environ.pop("ROMP_STATE_DIR", None)
 
 rep = load_source("romp_restart_metrics_report", os.path.join(ROOT, "scripts", "restart_metrics_report.py"))
 rm = load_source("romp_restart_metrics_for_report", os.path.join(ROOT, "bin", "romp-restart-metrics"))
-from test_restart_metrics import _fixture, SID   # noqa: E402  (the synthetic week)
+from test_restart_metrics import _fixture, SID, D0   # noqa: E402  (the synthetic week)
 
 HAVE_PLOT = importlib.util.find_spec("cleanplots") is not None and importlib.util.find_spec("matplotlib") is not None \
     and importlib.util.find_spec("pandas") is not None
@@ -92,14 +92,34 @@ class Frames(unittest.TestCase):
         the two fields reads as it did."""
         doc = _doc()
         b = doc["buckets"][0]
-        b.update(killedExits=2, unmeasuredRestarts=2, measuredRestarts=1)
+        b.update(killedExits=1, unmeasuredRestarts=2, measuredRestarts=1)
         w = rep.frames([("after", doc)], anonymize=False)["windows"][0]
-        self.assertEqual((w["killedExits"], w["unmeasuredRestarts"], w["measuredRestarts"]), (2, 2, 1))
+        self.assertEqual((w["killedExits"], w["unmeasuredRestarts"], w["measuredRestarts"]), (1, 2, 1))
         for k in ("killedExits", "unmeasuredRestarts", "measuredRestarts"):
             b.pop(k)
         w = rep.frames([("before", doc)], anonymize=False)["windows"][0]
         self.assertEqual((w["killedExits"], w["unmeasuredRestarts"], w["measuredRestarts"]), (0, 1, 2),
                          "an older document: the crash boots are its unmeasured restarts")
+
+    def test_the_cut_turns_label_puts_the_killed_exits_among_the_measured_ones(self):
+        """The cut-turns bar's annotation (the review of 2026-10-06: only the drawing tests reached it, and they skip without
+        cleanplots), as a pure helper over a frames row. The reader counts a killed exit only among the measured restarts, so
+        the label places it inside them: a clean exit, an exit killed after its cut row (measured by its prediction), and a
+        killed exit whose prediction failed (unmeasured) read 1 of 2 measured clean, 1 of them killed, 1 unmeasured."""
+        label = getattr(rep, "cut_turns_label", None)
+        self.assertIsNotNone(label, "the annotation is a helper the frames test can read (it was drawn inline before this fix)")
+        w = rep.frames([("after", _doc())], anonymize=False)["windows"][0]
+        self.assertEqual(label(w), "0 of 2 measured restarts clean, 1 unmeasured", "the synthetic week: one crash boot")
+        rows = [{"t": D0 + 100, "pid": 7, "cutTurns": [], "stopped": 1, "expectsDone": True},
+                {"t": D0 + 102, "pid": 7, "exitDone": True, "cutT": D0 + 100, "stopped": 1},                       # clean
+                {"t": D0 + 200, "pid": 8, "cutTurns": [{"sid": SID, "name": "web"}], "stopped": 1, "expectsDone": True},   # killed
+                {"t": D0 + 300, "pid": 9, "cutTurns": [], "stopped": 1, "expectsDone": True,
+                 "cutTurnsError": "RuntimeError: synthetic predicate fault"}]                                       # unknown
+        (b,) = rm.build_buckets(rm.parse_restarts(rows), [], [], [], [], [], {}, "week", "2026-09-10", "UTC")
+        w = rep.frames([("after", {"buckets": [b]})], anonymize=False)["windows"][0]
+        self.assertEqual(label(w), "1 of 2 measured restarts clean (1 killed after the cut row), 1 unmeasured",
+                         "before this fix: 1 of 2 clean, 2 killed after the cut row, 1 unmeasured, the unmeasured exit counted "
+                         "as killed too")
 
 
 @unittest.skipUnless(HAVE_PLOT, "cleanplots, matplotlib and pandas are not importable here; run under uvx --with cleanplots --with matplotlib --with pandas")
