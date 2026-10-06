@@ -3657,13 +3657,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the leaf's path and inode and the goal store's seams by value, so a
   derivation folds only the turns that closed since and the open one.
   `segWalks` counts the walks that finished, `segHeld` and `segWalkTurns`
-  the closed turns served from the hold and the turns folded, `segPartial`
-  a held aggregate whose turns diverged inside it (a rewind, an edit, a
-  compaction re-seat, a late record: every turn is walked), `segReset` one
-  discarded whole (another leaf, other seams, or no closed turn left to
-  hold), `segRaised` the walks that met a failure and stored nothing, and
-  `segEvict` the aggregates shed by the byte bound or with their departed
-  session; `segEntries`, `segBytes`
+  those walks' closed turns served from the hold and the turns they folded,
+  `segPartial` a held aggregate whose turns diverged inside it (a rewind,
+  an edit, a compaction re-seat, a late record: it is dropped and every
+  turn is walked), `segReset` one discarded whole (another leaf, other
+  seams, or no closed turn left to hold), `segRaised` the walks that met a
+  failure and stored nothing, `segEvict` the aggregates shed by the byte
+  bound or with their departed session and the new ones the bound did not
+  admit, and `overBound` the aggregates over the bound by themselves,
+  served to their derivation but never held. Past the bound, a store sheds
+  the least recently used aggregates that no derivation of the same board
+  build used; when every other aggregate was used in that build, the new
+  one is not held and its session keeps the one it was served from, so
+  the sessions a build is working on keep theirs.
+  `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
   record's state plus the two fields a card reads, `bgLedger` and

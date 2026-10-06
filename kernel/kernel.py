@@ -48401,19 +48401,29 @@ def _feed_key_with_deps(key, ctx, entry):
 # segment or an atom: the landing's (turn, atoms) is segmented again on demand from the parse in hand (_FeedSegTurns). The
 # two failures stay apart, as they were (the critique's F7): a fold that raises leaves the maps as far as it got, the
 # one-pass loop's try, and a plain-prompt read that raises fails the derivation; a walk that met either stores nothing.
-# Bounded by its bytes (FEED_SEG_HELD_BYTES, least recently used first) and by the living sessions (_feed_memo_forget);
-# GET /perf reports it inside builds.feed.memo (the seg* keys).
-_FEED_SEG_HELD = collections.OrderedDict()   # fsid -> (head, seams, keys, maps, plain_t, bytes), least recently used first;
-#                                              maps = (seg_uuid, seg_trig, seg_best, cite_uuids, positions), never mutated
-#                                              once held (a derivation folds into copies)
+# An entry the walk finds unusable (another leaf, other seams, keys that diverged inside it) leaves the table in that walk,
+# whatever the walk meets after, and only an entry that passes is marked used (the review after the merge, 2026-10-06).
+# Bounded by its bytes (FEED_SEG_HELD_BYTES) and by the living sessions (_feed_memo_forget). Past the bound, a store sheds
+# the least recently used entries that no derivation of the current board build used (each entry carries the number of
+# the last build that used it, _FEED_SEG_BUILD, raised once per build_feed, never a clock), and when every other entry
+# was used in this build the newcomer is not held: before, the shed took the entry the same build's next derivation was
+# about to use, so once the working sessions' aggregates outgrew the bound every one of them walked every turn on every
+# build. GET /perf reports it inside builds.feed.memo (the seg* keys and overBound).
+_FEED_SEG_HELD = collections.OrderedDict()   # fsid -> (head, seams, keys, maps, plain_t, bytes, build), least recently
+#                                              used first; maps = (seg_uuid, seg_trig, seg_best, cite_uuids, positions),
+#                                              never mutated once held (a derivation folds into copies); build = the
+#                                              number of the last board build that used the entry
 _FEED_SEG_LOCK = threading.Lock()            # the table and its counters: the pusher and a handler thread can build at once
+_FEED_SEG_BUILD = [0]                        # the current board build's number (_feed_seg_build_begin), under the lock
 _FEED_SEG_STATS = {"segWalks": 0, "segHeld": 0, "segWalkTurns": 0, "segPartial": 0, "segReset": 0, "segRaised": 0,
-                   "segEvict": 0}
-#   segWalks: walks over a parse that finished (the anchor fold and the plain-prompt time); segHeld / segWalkTurns: closed
-#   turns served from the hold / turns folded (the open one always); segPartial: a held entry whose keys diverged inside
-#   it (a rewind, an edit, a compaction re-seat, a late record: every turn walked); segReset: a held entry discarded whole
-#   (another leaf or other seams, or a history with no closed turn left); segRaised: walks that met a failure and stored
-#   nothing; segEvict: entries shed by the byte bound, an entry over the bound alone (not held), and departed sessions'
+                   "segEvict": 0, "overBound": 0}
+#   segWalks: walks over a parse that finished (the anchor fold and the plain-prompt time); segHeld / segWalkTurns: those
+#   walks' closed turns served from the hold / turns folded (the open one always); segPartial: a held entry whose keys
+#   diverged inside it (a rewind, an edit, a compaction re-seat, a late record: dropped, every turn walked); segReset: a
+#   held entry discarded whole (another leaf or other seams, or a history with no closed turn left); segRaised: walks
+#   that met a failure and stored nothing; segEvict: entries shed by the byte bound, newcomers it did not admit (every
+#   other entry used in the same build), and departed sessions'; overBound: an aggregate over the bound by itself,
+#   served to its derivation and never held
 _FEED_SEG_KEY_BYTES = 480        # one held turn key's estimated bytes: the _HOLD_KEY_BYTES tuple and its turn id string
 _FEED_SEG_SEG_BYTES = 700        # one held segment key's estimated bytes across the five maps (the key, two anchor uuids,
 #                                  the latest-prose tuple, the position tuple, five table slots)
@@ -48438,6 +48448,13 @@ def _feed_seg_held_bound():
 def _feed_seg_entry_bytes(keys, maps):
     """An estimate of one held aggregate's bytes, from its sizes alone (no walk over its strings)."""
     return 64 + _FEED_SEG_KEY_BYTES * len(keys) + _FEED_SEG_SEG_BYTES * len(maps[0]) + _FEED_SEG_CITE_BYTES * len(maps[3])
+
+
+def _feed_seg_build_begin():
+    """A board build begins (build_feed, once per build): the held entries its derivations use from here on carry its
+    number, and past the byte bound a store sheds only entries no derivation of this build used."""
+    with _FEED_SEG_LOCK:
+        _FEED_SEG_BUILD[0] += 1
 
 
 def _feed_seg_copy(maps):
@@ -48528,32 +48545,41 @@ def _feed_seg_walk(fsid, head, turns, store):
     (path, inode), stat'd by the key before the parse was read (ctx["leaf_head"]); None holds nothing. Returns a
     _FeedSegWalk whose seg_uuid, seg_trig, seg_best, cite_uuids and seg_turn are the one-pass loop's five maps; the body
     then calls _feed_seg_plain_t on it, which finishes the walk and stores the aggregate. No turns: empty maps, the table
-    untouched."""
+    untouched. The held entry is judged inside the lock: one that cannot serve this parse (no leaf to vouch for it, no
+    closed turn left, another leaf, other seams, held keys that diverged) is deleted there, so a walk that then fails
+    leaves no unusable entry behind to stay newest or to be counted again; one that serves is marked used in this build
+    and moved to the newest end. Seams the fingerprint cannot read (a truthy scalar where a list belongs) hold nothing,
+    and the fold meets them inside its guard, as the one-pass loop's try did."""
     w = _FeedSegWalk()
     turns = turns if turns is not None else []
     n = len(turns)
     n_closed = n - 1 if n else 0
     w.fsid, w.head, w.turns, w.n_closed, w.closed, w.ok = fsid, head, turns, n_closed, None, True
-    w.fp = _seams_fp(store) if n else ()
+    try:
+        w.fp = _seams_fp(store) if n else ()
+    except Exception:
+        w.fp, head = None, None                      # seams the fingerprint cannot read (a truthy scalar where a list
+        #                                              belongs): hold nothing; the fold's guard below keeps the maps as
+        #                                              far as it gets, as the one-pass loop's try did
     w.keys = tuple(_turn_hold_key(t) for t in turns[:n_closed]) if (head is not None and n_closed) else ()
-    ent, start, partial, reset = None, 0, False, False
+    ent, start = None, 0
     if n:
         with _FEED_SEG_LOCK:
             ent = _FEED_SEG_HELD.get(fsid)
             if ent is not None:
-                if not w.keys:                       # no leaf to vouch for it, or no closed turn left: nothing to reuse
-                    del _FEED_SEG_HELD[fsid]
-                    ent, reset = None, True
+                hk = ent[2]
+                if not w.keys or ent[0] != head or ent[1] != w.fp:
+                    del _FEED_SEG_HELD[fsid]         # nothing to reuse: no leaf, no closed turn, another leaf or seams
+                    ent = None
+                    _FEED_SEG_STATS["segReset"] += 1
+                elif len(hk) <= n_closed and w.keys[:len(hk)] == hk:
+                    start = len(hk)
+                    _FEED_SEG_HELD[fsid] = ent[:6] + (_FEED_SEG_BUILD[0],)   # used in this build: the shed passes it by
+                    _FEED_SEG_HELD.move_to_end(fsid)   # ...and the newest: past the bound, colder sessions go first
                 else:
-                    _FEED_SEG_HELD.move_to_end(fsid)   # a used entry is the newest: the bound sheds colder sessions first
-    if ent is not None:
-        hk = ent[2]
-        if ent[0] != head or ent[1] != w.fp:
-            ent, reset = None, True
-        elif len(hk) <= n_closed and w.keys[:len(hk)] == hk:
-            start = len(hk)
-        else:
-            ent, partial = None, True
+                    del _FEED_SEG_HELD[fsid]         # the held keys diverged inside it: every turn is walked
+                    ent = None
+                    _FEED_SEG_STATS["segPartial"] += 1
     if ent is not None:
         maps, w.base_plain = _feed_seg_copy(ent[3]), ent[4]
     else:
@@ -48567,14 +48593,8 @@ def _feed_seg_walk(fsid, head, turns, store):
         _feed_seg_fold(maps, turns, n_closed, n, store)
     except Exception:
         w.closed, w.ok = None, False                 # the maps as far as the fold got (the one-pass loop's try); nothing stored
-    if n:
         with _FEED_SEG_LOCK:
-            st = _FEED_SEG_STATS
-            st["segHeld"] += start
-            st["segWalkTurns"] += n - start
-            st["segPartial"] += 1 if partial else 0
-            st["segReset"] += 1 if reset else 0
-            st["segRaised"] += 0 if w.ok else 1
+            _FEED_SEG_STATS["segRaised"] += 1        # its held and folded turns are not counted: it did not finish
     w.seg_uuid, w.seg_trig, w.seg_best, w.cite_uuids = maps[0], maps[1], maps[2], maps[3]
     w.seg_turn = _FeedSegTurns(maps[4], turns, store)
     return w
@@ -48584,9 +48604,12 @@ def _feed_seg_plain_t(w):
     """The re-check's plain-prompt time for the walk `w` (_feed_seg_walk): the larger of the held aggregate's and
     _last_plain_user_turn_t over the turns it did not hold, the closed ones and the open one apart, so the closed part is
     what the aggregate stores. A read that raises fails the derivation, as the one walk over every turn did, and stores
-    nothing (counted under segRaised). Then, when the anchor fold finished and closed turns were folded, the aggregate is
-    stored under the walk's keys, leaf and seams, and the byte bound sheds the least recently used sessions first; an
-    aggregate over the bound alone is not held and sheds no other session."""
+    nothing (counted under segRaised). A walk whose anchor fold and plain-prompt read both finished is counted with its
+    held and folded turns (segWalks, segHeld, segWalkTurns). Then, when closed turns were folded, the aggregate is stored
+    under the walk's keys, leaf and seams, marked used in the current build. Past the byte bound the least recently used
+    entries that no derivation of this build used are shed first; when every other entry was used in this build the
+    newcomer is not held and the entry its walk was served from stays (both counted under segEvict). An aggregate over
+    the bound by itself is not held and sheds no other session (overBound)."""
     try:
         closed_t = w.base_plain
         if w.start < w.n_closed:
@@ -48597,23 +48620,31 @@ def _feed_seg_plain_t(w):
             with _FEED_SEG_LOCK:
                 _FEED_SEG_STATS["segRaised"] += 1
         raise
-    if not w.turns:
+    if not w.turns or not w.ok:
         return best
     with _FEED_SEG_LOCK:
         st = _FEED_SEG_STATS
-        st["segWalks"] += 1 if w.ok else 0
-        if w.ok and w.closed is not None:
+        st["segWalks"] += 1
+        st["segHeld"] += w.start
+        st["segWalkTurns"] += len(w.turns) - w.start
+        if w.closed is not None:
             size = _feed_seg_entry_bytes(w.keys, w.closed)
-            _FEED_SEG_HELD.pop(w.fsid, None)
+            old = _FEED_SEG_HELD.pop(w.fsid, None)
             if size > FEED_SEG_HELD_BYTES:
-                st["segEvict"] += 1                  # an aggregate over the bound alone is not held, and sheds no other session
+                st["overBound"] += 1                 # served to this derivation, never held, and sheds no other session
             else:
-                _FEED_SEG_HELD[w.fsid] = (w.head, w.fp, w.keys, w.closed, closed_t, size)
+                build = _FEED_SEG_BUILD[0]
+                _FEED_SEG_HELD[w.fsid] = (w.head, w.fp, w.keys, w.closed, closed_t, size, build)
                 total = sum(e[5] for e in _FEED_SEG_HELD.values())
                 while total > FEED_SEG_HELD_BYTES:
-                    _k, old = _FEED_SEG_HELD.popitem(last=False)   # the least recently used first; the newest fits alone
-                    total -= old[5]
+                    # the least recently used entry this build has not used; none left: the newcomer is not held
+                    k = next((k for k, e in _FEED_SEG_HELD.items() if e[6] != build), w.fsid)
+                    total -= _FEED_SEG_HELD.pop(k)[5]
                     st["segEvict"] += 1
+                    if k == w.fsid:
+                        if old is not None and total + old[5] <= FEED_SEG_HELD_BYTES:
+                            _FEED_SEG_HELD[w.fsid] = old   # not admitted: the entry it was served from stays
+                        break
     return best
 
 
@@ -49815,6 +49846,8 @@ def build_feed(now, live_map=None):
     cmap = _colormap()                               # the age tint's colormap, once per build: the FOLD's input (never the memo's)
     ctx = {"now": now, "live_map": live_map, "cleared": cleared, "dbg_rows": dbg_rows, "wmap": wmap,
            "stalls": _stalls, "jauth_map": _jauth_map, "jactive": _jactive}
+    _feed_seg_build_begin()                          # the held anchor aggregates this build's derivations use are kept past
+    #                                                  the bound before any other (2026-10-06, the comment above _FEED_SEG_HELD)
     for s in alive:
         # THE PER-SESSION CARD MEMO (T368, see _feed_session_key): the session's entry is served while every input
         # of its derivation stands, re-derived when one moved, and folded into the board here in `alive` order.
