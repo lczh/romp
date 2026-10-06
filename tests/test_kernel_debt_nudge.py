@@ -211,6 +211,17 @@ class ReminderOutcomes(DebtBase):
         km._debt_backstop_tick(NOW)
         self.assertEqual(self._d["debtNudged"], {}, "malformed records drop rather than loop forever")
 
+    def test_a_non_finite_fire_time_never_raises_out_of_the_backstop(self):
+        # a fire time of Infinity or NaN (the ledger's JSON reads both back) has no backstop instant to compute: the sweep
+        # passes over it, and the malformed key after it is still dropped
+        for bad in (float("inf"), float("nan")):
+            self._esc.clear()
+            self._ask()
+            self._d["debtNudged"] = {self._key: bad, "not-a-key": NOW - 600}
+            km._debt_backstop_tick(NOW)
+            self.assertEqual(self._esc, [], repr(bad))
+            self.assertEqual(list(self._d["debtNudged"]), [self._key], "%r: the malformed key dropped, this one stands" % bad)
+
     def test_a_returned_ask_retires_the_reminder_without_escalating(self):
         # 2026-09-08: the debtor exited before the reminder's turn read the ask; ORPHAN_GRACE later the
         # sweep destroyed the mail and wrote the terminal bounced row, and the bus told the asker. The

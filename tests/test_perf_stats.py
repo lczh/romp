@@ -956,7 +956,11 @@ class JobsCpu(unittest.TestCase):
 
     JOBS_KEYS = {"passes", "pass_ms_sum", "pass_ms_max", "pass_ms_last", "pass_cpu_ms_sum", "passFailed", "splitFailed",
                  "firstPass", "stageRing", "stageRingLen", "ring_n", "pass_ms_p50", "pass_ms_p90", "pass_ms_ring_max",
-                 "cpuByJob"}   # cpuByJob: per job on the jobs thread, {runs, cpuMs}
+                 "cpuByJob",   # cpuByJob: per job on the jobs thread, {runs, cpuMs}
+                 "gate"}       # gate: the jobs pass's gate in shadow (stage one of the event-driven jobs pass, 2026-10-05)
+    GATE_KEYS = {"ticks", "wouldSkipPass", "wouldSkipPassCpuMs", "quietDeclared", "passMs", "passCpuMs", "wouldRunMs", "wouldRunCpuMs",
+                 "closedMs", "closedCpuMs", "tickMs", "tickCpuMs", "gateFaults", "marks", "floorCaught", "treeFloor", "byJob",
+                 "wrongQuietLast", "today", "projected", "mode", "asked", "lastPass"}
 
     def setUp(self):
         self.ps = km._PerfStats()
@@ -998,6 +1002,31 @@ class JobsCpu(unittest.TestCase):
         doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
         i = doc.index("- `jobs`: the jobs thread")
         self.assertIn("`cpuByJob`", doc[i:doc.index("\n- `pusher`:", i)], "the reference's jobs bullet names it")
+
+    def test_the_jobs_block_carries_the_gate_at_zero_beside_cpu_by_job(self):
+        """T8 of the event-driven jobs pass: /perf jobs.gate is the gate's block in shadow, every key at zero on a fresh collector,
+        a JSON-plain copy, documented in the reference's jobs bullets; a job run on a thread no observed pass opened (here, the
+        jobs owner's thread with no _jobs_cycle around it) records under cpuByJob and nothing under the gate."""
+        snap = self.ps.snapshot()
+        gate = snap["jobs"]["gate"]
+        self.assertEqual(set(gate), self.GATE_KEYS, "the gate block's documented keys")
+        self.assertEqual((gate["ticks"], gate["byJob"], gate["wrongQuietLast"], gate["floorCaught"]), (0, {}, [], {}))
+        self.assertEqual(gate["marks"], {"session": 0, "all": 0})
+        self.assertEqual(set(gate["treeFloor"]), {"unsignaled", "signaled", "checks", "caught", "signalCaught", "lagMsMax",
+                                                  "lagMsSum", "floorS"})
+        self.assertEqual(gate["treeFloor"]["floorS"], km.JOBS_GATE_TREE_FLOOR_S)
+        self.assertEqual(set(gate["projected"]), {"periodMs", "passesPerHour", "cpuMsPerHour"})
+        self._on_thread(lambda: km._job_stage("probe", lambda: None))
+        snap = self.ps.snapshot()
+        self.assertEqual(set(snap["jobs"]["cpuByJob"]), {"probe"})
+        self.assertEqual(snap["jobs"]["gate"]["ticks"], 0)
+        self.assertEqual(snap["jobs"]["gate"]["byJob"], {}, "no observed pass: the gate recorded nothing")
+        json.dumps(snap["jobs"]["gate"])
+        doc = Path(HERE).parent.joinpath("docs", "reference.md").read_text()
+        i = doc.index("- `jobs`: the jobs thread")
+        jobs_doc = doc[i:doc.index("\n- `pusher`:", i)]
+        for k in sorted(self.GATE_KEYS | {"byJob", "open", "owed", "raced", "projectedCpuMsPerHour", "jobs-gate"}):
+            self.assertIn("`%s`" % k, jobs_doc, "the reference's jobs bullets name %s" % k)
 
     def test_a_busy_job_counts_its_cpu_and_a_sleeping_job_of_the_same_wall_does_not(self):
         """Two synthetic jobs on the jobs thread: one spins for 60 ms of its own CPU, the other sleeps for as long as the
