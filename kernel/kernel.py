@@ -54186,7 +54186,9 @@ def _derive_judging(sid, caps, goals, t0, out, seg_ends=None, stamp=False):
 # record count, valid while the fold's answer IS the cursor's own state object, which a fold never mutates), with each
 # state set's intervals, so a build bisects the horizon. Both are byte-bounded LRU tables (the user's caches rule: a
 # fraction of memory with an override) dropped for the lanes a full build no longer draws, and /perf reports them as
-# memos.judgingMarks and memos.stateIntervals. No clock is read in either: the horizon is the caller's.
+# memos.judgingMarks and memos.stateIntervals. A lane the dead-lane memo takes over drops its marks entry (that memo
+# serves its marks from then on) and keeps its states entry, which every build reads. No clock is read in either: the
+# horizon is the caller's.
 _CAP_T_TYPES = (int, float, bool)   # a time the bisection can order: JSON's numbers (NaN is refused separately)
 
 
@@ -54240,19 +54242,26 @@ STATE_IV_MEMO_BYTES = _floor_memo_bound("ROMP_STATE_INTERVALS_MEMO_BYTES", 512) 
 _JUDGING_MARKS_LOCK = threading.Lock()   # the table and its counters: the pusher and a connect push can build at once
 _JUDGING_MARKS_MEMO = collections.OrderedDict()   # sid -> (version, id count, marks, ids, bytes), least recently used first;
 #                                                   ids are the caption ids of the marks, in the marks' order
-_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "evict": 0, "forget": 0}
-#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows; build:
-#   every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the bisection
-#   cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read not held,
-#   a version another thread has replaced since), derived and not held; evict: entries the byte bound shed (an entry
-#   over the bound alone is not held); forget: entries of lanes a full build no longer draws
+_JUDGING_MARKS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
+#   Each derivation over caption rows that returns counts once, under one of the first five (an empty mapping has no
+#   marks to count; a sort that raises on a held version counts nowhere).
+#   hit: the held marks served; extend: the held marks carried to an appended version by placing the appended rows;
+#   build: every row sorted (a first derivation, a rewrite, an overwrite that moved a row's time, a held list the
+#   bisection cannot order); uncached: a mapping that is not the one _captions holds for its file (a plain dict, a read
+#   not held, a version another thread has replaced since), derived and not held; overBound: marks over the byte bound
+#   by themselves, derived (built whole or extended), served and not held, and no other lane shed for them. evict:
+#   entries the byte bound shed to make room for a newer one; forget: entries of lanes a full build no longer draws, and
+#   of a lane the dead-lane memo takes over
 _STATE_IV_LOCK = threading.Lock()
 _STATE_IV_MEMO = collections.OrderedDict()   # sid -> (version, the fold's state, sorted transitions, plain, {state set:
 #                                              (starts, ends, open start)}, bytes), least recently used first
-_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "evict": 0, "forget": 0}
-#   hit: the held transitions served; sort: a version sorted and held; uncached: a fold answer that is not the cursor's
-#   own state (a newline-less last row folded provisionally, served records, a failed read, another thread's newer fold),
-#   sorted and not held; evict and forget as above
+_STATE_IV_STATS = {"hit": 0, "sort": 0, "uncached": 0, "overBound": 0, "evict": 0, "forget": 0}
+#   Each read that returns counts once, under one of the first four (a sort that raises counts nowhere).
+#   hit: the held transitions served; sort: a version sorted and
+#   held; uncached: a fold answer that is not the cursor's own state (a newline-less last row folded provisionally,
+#   served records, a failed read, another thread's newer fold), sorted and not held; overBound: a version whose entry
+#   is over the byte bound by itself, sorted, served and not held, and no other lane shed for it. evict as above;
+#   forget: entries of lanes a full build no longer draws
 
 
 def _cap_mark(sid, c):
@@ -54373,11 +54382,11 @@ def _judging_cap_marks(sid, caps):
     size = _judging_marks_bytes(marks, ids)
     with _JUDGING_MARKS_LOCK:
         st = _JUDGING_MARKS_STATS
-        st[kind] += 1
         _JUDGING_MARKS_MEMO.pop(sid, None)
         if size > JUDGING_MARKS_MEMO_BYTES:
-            st["evict"] += 1                             # over the bound alone: served, not held, and sheds no other lane
+            st["overBound"] += 1                         # over the bound alone: served, not held, and sheds no other lane
         else:
+            st[kind] += 1
             _JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
             total = sum(e[4] for e in _JUDGING_MARKS_MEMO.values())
             while total > JUDGING_MARKS_MEMO_BYTES:
@@ -54429,11 +54438,11 @@ def _state_ev_sorted(sid, path):
     ent = (ver, res, ev, _state_ev_plain(ev), {}, 200 + 40 * len(ev))   # the transitions and two state sets' intervals
     with _STATE_IV_LOCK:
         st = _STATE_IV_STATS
-        st["sort"] += 1
         _STATE_IV_MEMO.pop(sid, None)
         if ent[5] > STATE_IV_MEMO_BYTES:
-            st["evict"] += 1
+            st["overBound"] += 1                         # over the bound alone: served, not held, and sheds no other lane
         else:
+            st["sort"] += 1
             _STATE_IV_MEMO[sid] = ent
             total = sum(e[5] for e in _STATE_IV_MEMO.values())
             while total > STATE_IV_MEMO_BYTES:
@@ -54814,9 +54823,11 @@ def _lanes_forget(keep):
 # are keyed by _turn_hold_key (a turn's identity plus its trigger's and newest atom's uuids), so a resume into another
 # file, a file replaced at the same path, or records re-recorded under the same times and text start a new prefix and
 # are never served another file's bars; a caller that passes no head (a dead lane, a direct derivation) holds none.
-# The judging marks read the store's nodes and every caption row: they stay outside the prefix, derived after the
-# loop on every derivation, and the lane memo above keeps the store's identity and the captions stat in its key,
-# since it serves them. Counted beside: prefix_partial, prefix_reset, prefix_recap, prefix_recap_new.
+# The judging marks read the store's nodes and the caption rows: they stay outside the prefix, derived after the
+# loop on every derivation, where the captioner's marks are served from their own table while the captions version
+# stands (_judging_cap_marks, reading no row) and carried across an append; the lane memo above keeps the store's
+# identity and the captions stat in its key, since it serves them. Counted beside: prefix_partial, prefix_reset,
+# prefix_recap, prefix_recap_new.
 # The closed turns' COMPACTION markers ride the prefix too (2026-09-16): the lane's compactions were a comprehension
 # over every atom of every turn, run after the prefix reuse on every derivation (a live lane whose tail moved derives
 # once per build that draws it, about three lanes a build on the measured board), so a prefix hit still walked the
@@ -55151,7 +55162,8 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     not held, as the dead-lane path derives and never caches one. `full_prompts` (T278b) receives the lane's whole
     prompts by bar id, on a hit from the entry and on a miss from the derivation, so the binder reads them either way.
     `head` is the leaf's head for the derivation's prefix (_lane_segments), stat'd before the parse; the captions key
-    here stays the file's stat, since this memo also serves the judging marks, which read every caption row."""
+    here stays the file's stat, since this memo also serves the judging marks, the captioner's among them (held per
+    captions version by _judging_cap_marks, so a derivation under a standing version reads no caption row)."""
     if isinstance(goals, jd.FrozenStore):
         gobj, gtag = goals, "shared"
     elif goals is None or (not goals.get("seams") and not goals.get("nodes")):
@@ -56178,10 +56190,16 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
                 # the parse has done its work for this dead lane: drop it (the RSS lever); a lane that moves
                 # re-parses once, and a session that revives is parsed by its chat build as before. The live-lane
                 # memo's entry from the lane's live days goes with it: its key is that parse object, so it cannot
-                # hit again and would hold the parse the pop just released
+                # hit again and would hold the parse the pop just released. So does the lane's entry in the
+                # captioner's marks table: the dead-lane memo now serves its marks, and a dead miss (a keyed input
+                # moved) builds them whole once, as before that table. Its states entry stays: every build reads
+                # every lane's states log
                 _parse_cache.pop(s["path"], None)
                 with _LANES_LOCK:
                     _lanes_memo.pop(sid, None)
+                with _JUDGING_MARKS_LOCK:
+                    if _JUDGING_MARKS_MEMO.pop(sid, None) is not None:
+                        _JUDGING_MARKS_STATS["forget"] += 1
                 _release_dead_lane(sid, s["path"], lane_key[0], alive, live_map)   # and its assembly entry and records (2026-10-01)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
         # chip), keyed on the DERIVED chip `state` computed above, not the raw row state. The old form read

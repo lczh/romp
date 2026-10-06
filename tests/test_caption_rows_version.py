@@ -24,7 +24,8 @@ identity (the mapping _captions holds is always a _CaptionRows, so a plain dict 
 the type check as its early exit.
 
 The old pairs and the marks' old caller are copied below as the REFERENCE (1a5906d35, verbatim but for the module
-prefix and the comments), and both classes compare against it:
+prefix, the comments and the marks' over-bound count, which follows the kernel's later overBound key), and both classes
+compare against it:
   Road        one road of captions states: no file, rows the fold skips, appended rows (new ids, a drifted id, a '#p'
               row, an overwrite), the file rewritten, the reader's entry evicted, the memo swept, the file read back, a
               version replaced on another thread, the file rewritten on another thread, the file removed and back. At
@@ -75,7 +76,7 @@ SID2 = "11111111-2222-3333-4444-0000000cb1d2"
 T = 1_781_000_000
 
 
-# ── the REFERENCE: 1a5906d35's two pairs and the marks' caller, verbatim but for the module prefix ──────────────────
+# ── the REFERENCE: 1a5906d35's two pairs and the marks' caller, verbatim but for the module prefix and overBound ────
 def ref_lane_version(fsid, caps):
     """_caption_rows_version as the lane prefix had it."""
     if not caps:
@@ -125,7 +126,8 @@ def ref_marks_tail(old, new):
 
 
 def ref_judging_cap_marks(sid, caps):
-    """_judging_cap_marks as it asked its own pair."""
+    """_judging_cap_marks as it asked its own pair (its count for marks over the bound by themselves follows the kernel's
+    overBound key, which came after the fold, so the two differ only in the pair they ask)."""
     ver = ref_marks_version(sid, caps)
     if ver is None:
         if caps:
@@ -152,11 +154,11 @@ def ref_judging_cap_marks(sid, caps):
     size = km._judging_marks_bytes(marks, ids)
     with km._JUDGING_MARKS_LOCK:
         st = km._JUDGING_MARKS_STATS
-        st[kind] += 1
         km._JUDGING_MARKS_MEMO.pop(sid, None)
         if size > km.JUDGING_MARKS_MEMO_BYTES:
-            st["evict"] += 1
+            st["overBound"] += 1
         else:
+            st[kind] += 1
             km._JUDGING_MARKS_MEMO[sid] = (ver, len(caps), marks, ids, size)
             total = sum(e[4] for e in km._JUDGING_MARKS_MEMO.values())
             while total > km.JUDGING_MARKS_MEMO_BYTES:

@@ -882,9 +882,15 @@ class DerivationSplit(unittest.TestCase):
         finally:
             km.time = real
         self.assertTrue(cap_marks and other)
-        tree = ast.parse(inspect.getsource(km._derive_judging_marks))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        self.assertFalse(names & {"now", "time", "TL_HORIZON", "JUDGE_CAP_LIMIT"}, repr(names))
+        # the run above takes a plain dict, so it reaches neither table's held roads; the names check covers the helpers
+        # of the captioner's marks on the build, hit and extend roads (2026-10-06) and the states table's three, which
+        # the floors' comment holds to the same rule
+        for fn in (km._derive_judging_marks, km._judging_cap_marks, km._cap_marks_build, km._cap_marks_extend, km._cap_mark,
+                   km._caption_rows_version, km._caption_rows_since, km._state_ev_sorted, km._state_iv_cands,
+                   km._state_ev_plain):
+            tree = ast.parse(inspect.getsource(fn))
+            names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            self.assertFalse(names & {"now", "time", "datetime", "TL_HORIZON", "JUDGE_CAP_LIMIT"}, "%s: %r" % (fn.__name__, names))
         self.assertIn("JUDGE_CAP_LIMIT", inspect.getsource(km._judging_assemble), "the cap is read at assembly")
 
 
