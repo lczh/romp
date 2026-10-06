@@ -4138,16 +4138,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   version of the file (its path, the reader entry's generation and base, and
   the record count) and handed to every caller that asks while that version
   stands, where each call used to fold every row into a fresh dict (the
-  timeline asks once per live lane per build). `hit`: the held mapping served;
-  `extend`: an append, served as the held mapping copied and extended by the
-  appended rows; `build`: every row folded (the file's first read, or a new
-  generation: a rewrite, a truncation, another file renamed over it, an
-  evicted entry read back); `uncached`: a read the reader's entry no longer
-  holds (no file, or another thread's newer read), answered and not held;
-  `swept`: mappings dropped because the record cache let their entry go,
-  checked whenever the memo holds a new version of any file, so a mapping
-  the cache released stays at most until that next version. A caption lookup
-  whose
+  timeline asks once per live lane per build). `hit`: the held mapping served,
+  also to a read that finds its own version stored by another thread
+  meanwhile; `extend`: an append, served as the held mapping copied and
+  extended by the appended rows; `build`: every row folded (the file's first
+  read, or a new generation: a rewrite, a truncation, another file renamed
+  over it, an evicted entry read back); `uncached`: a read the reader's entry
+  no longer holds (no file, or another thread's newer read), or one that
+  finds a newer version stored meanwhile (a later generation, or more records
+  of its own), answered and not held; `swept`: mappings dropped because the
+  record cache let their entry go, checked whenever the memo holds a new
+  version of any file, so a mapping the cache released stays at most until
+  that next version. A caption lookup whose
   segment id has drifted from the judge's (the two parses place a triggered
   segment's start differently, and a segment's message caption is missing
   until the captioner writes it) used to scan every row; it now reads the
@@ -4157,10 +4159,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the earlier row on a tie, and the first message row. `indexBuild` counts
   the indexes built, `indexLookup` the drifted lookups the index answered and
   `scanLookup` those that scanned (a mapping that is not the builds' own, or
-  an id that is not a string, where the scan's answer is kept as it was).
-  The gauges: `entries` (mappings held), `rows` (their rows) and `bytes`
-  (their dicts and indexes, estimated; the rows themselves are the record
-  cache's).
+  an id that is not a string, where the scan's answer is kept as it was);
+  a lookup on an empty mapping, the one a session with no captions file is
+  served, builds no index and moves neither. The gauges: `entries`
+  (mappings held), `rows` (their rows), `bytes` (their dicts and indexes,
+  each index group's key and list included, estimated), and `orphanRows`
+  and `orphanBytes`, the rows of the mappings whose reader entry is gone or
+  replaced (evicted from the record cache, or the file read again from byte
+  zero) and their bytes, estimated one level deep (each row's dict, keys and
+  values). A mapping's rows are the record cache's while its reader entry
+  stands; an orphan's are held by this memo alone, until the next sweep.
   `judgingMarks` is the captioner's marks on the timeline's judging lane
   (2026-10-06): one mark per timed caption row, in caption-time order, held
   per session on that captions mapping's version, where every derivation of

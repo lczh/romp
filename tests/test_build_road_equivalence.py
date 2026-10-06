@@ -5,11 +5,14 @@ THE QUESTION. The kernel's builds keep results between builds so a quiet session
 the message-caption scan (_msg_sum_scan_session) keeps each closed turn's (segment id, message ids) pairs too and walks
 only the turns that moved. A held result is safe only while every event that can change it moves its key. Reading the
 code argues that; this module checks it. One synthetic road drives a session through the events that change its
-history, and after every step the warm build (every memo as the previous step left it) is compared with a cold one (the
-memos the build holds cleared, over the same inputs). The cold build's memos are put back afterwards, so each step
-builds on the warm chain and never on what the cold build left. This change compares the message-caption map
-(_msg_summaries, the map the timeline's connectors and the chat's incoming cards read); a later change that holds the
-board's or the Sessions pane's results adds its builder to the comparison.
+history, and after every step the warm build (every memo as the previous step left it) is compared with a cold one over
+the same inputs, built with the builders' own memos cleared: for the map, the message-caption scan's (_msg_sum_cache,
+its held turns included) and the captions mapping (_CAPTION_ROWS_MEMO); for the lanes, the lane prefix memo and the
+captions mapping. The parse and the record cache under it, which hold the inputs as read, stay as the warm build left
+them. The cold build's memos are put back afterwards, so each step builds on the warm chain and never on what the cold
+build left. This change compares the message-caption map (_msg_summaries, the map the timeline's connectors and the
+chat's incoming cards read); a later change that holds the board's or the Sessions pane's results adds its builder to
+the comparison.
 
 The Sessions pane's lanes joined on 2026-10-06, when the lane prefix (the held bars of a lane's closed turns) began to
 survive caption writes and store republishes. Each session's lane is derived as the bars build derives a live lane
@@ -361,20 +364,25 @@ class RoadWorld(unittest.TestCase):
     # ── the comparison ──
 
     def builds(self):
-        """(warm, cold): the message-caption map as the warm memos give it, then from cleared memos over the same inputs.
-        The warm memos are put back after the cold build, so the next step builds on the warm chain."""
+        """(warm, cold): the message-caption map as the warm memos give it, then over the same inputs with the scan's
+        memo (_msg_sum_cache) and the captions mapping (_CAPTION_ROWS_MEMO) cleared, so the cold side reads every
+        captions file into a mapping of its own. The warm memos are put back after the cold build, so the next step
+        builds on the warm chain."""
         self.walked, self.counting = 0, True
         try:
             warm = dict(km._msg_summaries())
         finally:
             self.counting = False
-        saved = dict(km._msg_sum_cache)
+        saved, saved_caps = dict(km._msg_sum_cache), dict(km._CAPTION_ROWS_MEMO)
         km._msg_sum_cache.clear()
+        km._CAPTION_ROWS_MEMO.clear()
         try:
             cold = dict(km._msg_summaries())
         finally:
             km._msg_sum_cache.clear()
             km._msg_sum_cache.update(saved)
+            km._CAPTION_ROWS_MEMO.clear()
+            km._CAPTION_ROWS_MEMO.update(saved_caps)
         return warm, cold
 
     def lane(self, sid):
@@ -389,9 +397,10 @@ class RoadWorld(unittest.TestCase):
         return v[0], v[1], v[2], v[3], prompts
 
     def lane_builds(self):
-        """(warm, cold, warm bytes, cold bytes) for the lanes: each session's lane derived with the prefix memo as the last
-        step left it (web's walks counted), then from a cleared prefix memo over the same inputs (the warm memo put back
-        after), and each side's bars split as the bars frame splits them, the warm side through the road's wire cache."""
+        """(warm, cold, warm bytes, cold bytes) for the lanes: each session's lane derived with the prefix memo and the
+        captions mapping as the last step left them (web's walks counted), then over the same inputs with both cleared
+        (_lane_prefix_memo and _CAPTION_ROWS_MEMO, the warm memos put back after), and each side's bars split as the
+        bars frame splits them, the warm side through the road's wire cache."""
         warm = {}
         for sid in NAMES:
             self.lane_walked, self.lane_counting = (0, True) if sid == SID_WEB else (self.lane_walked, False)
@@ -399,13 +408,16 @@ class RoadWorld(unittest.TestCase):
                 warm[sid] = self.lane(sid)
             finally:
                 self.lane_counting = False
-        saved = dict(km._lane_prefix_memo)
+        saved, saved_caps = dict(km._lane_prefix_memo), dict(km._CAPTION_ROWS_MEMO)
         km._lane_prefix_memo.clear()
+        km._CAPTION_ROWS_MEMO.clear()
         try:
             cold = {sid: self.lane(sid) for sid in NAMES}
         finally:
             km._lane_prefix_memo.clear()
             km._lane_prefix_memo.update(saved)
+            km._CAPTION_ROWS_MEMO.clear()
+            km._CAPTION_ROWS_MEMO.update(saved_caps)
 
         def wire(lanes, key):
             ents, order = km._delta_split("dictlist:id", {sid: lanes[sid][0] for sid in NAMES}, memo_key=key)

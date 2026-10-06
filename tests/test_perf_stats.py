@@ -144,8 +144,9 @@ class Collector(unittest.TestCase):
         self.assertEqual(snap["memos"]["msgScan"]["bound"], km.MSG_SCAN_HELD_BYTES)
         self.assertEqual(set(snap["memos"]["notices"]), {"entries", "bytes", "bound", "hit", "miss", "evicted"}, "the notice memo: occupancy against its bound, and its counters")
         self.assertEqual(set(snap["memos"]["captionRows"]), {"entries", "rows", "bytes", "hit", "extend", "build", "uncached", "swept",
-                                                           "indexBuild", "indexLookup", "scanLookup"},
-                         "the captions mapping held per file version: its occupancy, its paths and the drifted lookups (2026-10-05)")
+                                                           "indexBuild", "indexLookup", "scanLookup", "orphanRows", "orphanBytes"},
+                         "the captions mapping held per file version: its occupancy, its paths and the drifted lookups (2026-10-05), "
+                         "and the rows only it keeps (2026-10-06)")
         self.assertEqual(set(snap["memos"]["judgingMarks"]), {"hit", "extend", "build", "uncached", "overBound", "evict", "forget",
                                                             "entries", "marks", "bytes", "bound"},
                          "the captioner's marks held per captions version: its counters, occupancy and bytes against its bound")
