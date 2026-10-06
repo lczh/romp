@@ -36,14 +36,20 @@ class FakeBE:
         self.killed.append(sid)
 
 
+def _exchange(msgs, gap="", oldest=0):
+    """A stand-in for _thread_exchange's answer: the thread's whole discussion `msgs`, and why part of it could not be read."""
+    return lambda tsid, cut, floor_t=0: {"msgs": list(msgs), "capped": list(msgs), "sent": "", "gap": gap,
+                                         "oldestT": oldest}
+
+
 class CommentMerge(unittest.TestCase):
     def setUp(self):
         self.be = FakeBE()
-        self._saved = (km.Sessions.backend_for, km._thread_messages, km._push_soon)
+        self._saved = (km.Sessions.backend_for, km._thread_exchange, km._push_soon)
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
-        km._thread_messages = lambda tsid, cut, floor_t=0: [
-            {"who": "user", "text": "should the cache be write-through?", "t": 1},
-            {"who": "assistant", "text": "Yes; it removes the stale-read window.", "t": 2}]
+        self.msgs = [{"who": "user", "text": "should the cache be write-through?", "t": 1},
+                     {"who": "assistant", "text": "Yes; it removes the stale-read window.", "t": 2}]
+        km._thread_exchange = _exchange(self.msgs)
         km._push_soon = lambda: None
         with km._comments_lock:
             km._save_comments(PARENT, {"threads": [{
@@ -53,7 +59,7 @@ class CommentMerge(unittest.TestCase):
                 "exact": "the caching layer", "createdT": 100, "lastSeenT": 100}]})
 
     def tearDown(self):
-        km.Sessions.backend_for, km._thread_messages, km._push_soon = self._saved
+        km.Sessions.backend_for, km._thread_exchange, km._push_soon = self._saved
         with km._comments_lock:
             km._save_comments(PARENT, {"threads": []})
 
@@ -87,7 +93,7 @@ class CommentMerge(unittest.TestCase):
         self.assertEqual([u for _, _, u in self.be.sent], [True], "the merge speaks as the user")
 
     def test_nothing_to_merge_reverts_the_latch_loudly(self):
-        km._thread_messages = lambda tsid, cut, floor_t=0: []
+        km._thread_exchange = _exchange([])
         err = km._comment_merge(PARENT, TSID)
         self.assertIn("no discussion to send back", err or "")
         self.assertEqual(self._row().get("status"), "open", "the latch never sticks on a refusal")
@@ -105,7 +111,7 @@ class CommentMerge(unittest.TestCase):
     def test_a_read_that_raises_releases_the_latch(self):
         def unreadable(tsid, cut, floor_t=0):
             raise OSError("the thread's transcript is unreadable")
-        km._thread_messages = unreadable
+        km._thread_exchange = unreadable
         err = km._comment_merge(PARENT, TSID)
         self.assertIn("unreadable", err or "", "loud: the reason reaches the user")
         self.assertEqual(self._row().get("status"), "open", "the latch never outlives the relay that took it")
@@ -151,9 +157,9 @@ class CommentMerge(unittest.TestCase):
         self.assertIsNone(km._comment_reply(PARENT, TSID, "one more thought"))
         self.assertEqual(self._row().get("status"), "open")
         # …and the next relay sends ONLY messages past the floor
-        base = km._thread_messages(TSID, "", 0)
+        base = self.msgs
         newer = base + [{"who": "user", "text": "one more thought", "t": (base[-1]["t"] if base else 0) + 10}]
-        km._thread_messages = lambda tsid, cut, floor_t=0: newer
+        km._thread_exchange = _exchange(newer)
         self.assertIsNone(km._comment_merge(PARENT, TSID))
         self.assertEqual(len(self.be.sent), 3, "the relay + the reply + the tail-only relay")
         self.assertIn("one more thought", self.be.sent[-1][1])
@@ -168,19 +174,40 @@ class CommentMerge(unittest.TestCase):
         body = self.be.sent[0][1]
         self.assertIn("<!-- romp-injected --><!-- romp-tag: relay -->", body)
         self.assertNotIn("romp-system", body, "relayed content is a conversation, not a kernel status notice")
-        for m in km._thread_messages(TSID, "", 0):
+        for m in self.msgs:
             if (m.get("text") or "").strip():
                 self.assertIn(m["text"], body, "the WHOLE exchange goes — no summary, no slice")
 
-    def test_the_transcript_cap_keeps_the_recent_tail(self):
+    def test_the_transcript_cap_cuts_the_middle_never_the_question(self):
         # T145 raised the cap to 48k (the whole exchange goes; 6k trimmed real discussions — the
-        # user's 'only part merged'); the trim marker remains the honest pathological backstop
+        # user's 'only part merged'); the trim note remains the honest pathological backstop. It cuts
+        # the MIDDLE (2026-10-05): the first message, the question the discussion is about, always goes
         body = km._merge_body("q", [{"who": "user", "text": "x" * 9000}])
-        self.assertNotIn("earlier discussion trimmed", body, "9k is a normal discussion now — untrimmed")
-        big = km._merge_body("q", [{"who": "user", "text": "x" * 60000}])
-        self.assertIn("earlier discussion trimmed", big)
+        self.assertNotIn(km.MERGE_TRIM_NOTE, body, "9k is a normal discussion now — untrimmed")
+        big = km._merge_body("q", [{"who": "user", "text": "why write-through?"}, {"who": "agent", "text": "x" * 60000},
+                                   {"who": "user", "text": "and the cost?"}, {"who": "agent", "text": "One write each."}])
+        self.assertIn(km.MERGE_TRIM_NOTE, big)
+        self.assertIn("Me: why write-through?", big)
+        self.assertIn("Me: and the cost?\n\nThem: One write each.", big, "the newest exchange goes whole")
         self.assertLess(len(big), 60000, "the pathological backstop still bounds the injection")
 
+    def test_a_relay_missing_its_beginning_says_so_and_tells_the_person(self):
+        km._thread_exchange = _exchange(self.msgs, gap="its record breaks off before its first message", oldest=1)
+        notes = []
+        self.assertIsNone(km._comment_merge(PARENT, TSID, notes=notes))
+        body = self.be.sent[0][1]
+        self.assertIn(km.MERGE_GAP_LEAD, body)
+        self.assertIn("Me: should the cache be write-through?", body, "what could be read still goes")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("without the start of the discussion: its record breaks off before its first message", notes[0])
+
+    def test_a_discussion_with_nothing_readable_is_refused_with_the_reason(self):
+        km._thread_exchange = _exchange([], gap="its transcript can't be read (No such file or directory)")
+        err = km._comment_merge(PARENT, TSID)
+        self.assertIn("could not be read", err or "")
+        self.assertIn("transcript can't be read", err or "")
+        self.assertEqual(self._row().get("status"), "open")
+        self.assertEqual(self.be.sent, [])
 
 if __name__ == "__main__":
     unittest.main()

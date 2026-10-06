@@ -63,6 +63,8 @@ class FallbackCard(unittest.TestCase):
         src = open(os.path.join(HERE, "..", "kernel", "sdk_backend.py")).read()
         self.assertIn("if self.model and not self._model_pending and not cleared \\", src,
                       "first learns and user-driven picks never mint")
+        self.assertIn('and not _lands_on_pick(pm, getattr(self, "chosen_model", "")) \\', src,
+                      "a move onto a versioned pick's own model is that pick landing, never a fallback (the #33 follow-up)")
         self.assertIn('on_model_fallback', src)
         ksrc = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("jd.mint_fallback_card(sid, frm, to)", ksrc, "the kernel wires the hook at boot")
@@ -115,6 +117,42 @@ class DowngradeOnlyGate(unittest.TestCase):
     def test_the_learn_path_wires_the_gate(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
         self.assertIn("and _model_downgrade(self.model, pm):", src)
+
+    def test_a_move_onto_a_versioned_pick_is_the_pick_landing(self):
+        # (2026-09-30, the #33 follow-up) a fallback moves a session AWAY from what was picked, so a move onto the very
+        # model a versioned pick names is that pick landing, even where a report from before the pick had moved the live
+        # name above it; an alias or the default names no version, so nothing lands on it by name
+        self.assertTrue(hasattr(sb, "_lands_on_pick"), "the learn has no reading of a move onto the pick's own model")
+        lands = sb._lands_on_pick
+        for pm, pick in (("Opus 4.8", "claude-opus-4-8"), ("Opus 4.8", "claude-opus-4-8[1m]"), ("Opus 5", "claude-opus-5")):
+            self.assertTrue(lands(pm, pick), "%s is the very model %s names: the pick landing" % (pm, pick))
+        for pm, pick, why in (("Opus 5", "claude-opus-5-5", "a lower version than the pick is a fallback"),
+                              ("Opus 4.8", "claude-opus-5-5", "a lower version than the pick is a fallback"),
+                              ("Opus 5", "opus", "an alias names no version"),
+                              ("Sonnet 5", "default", "the default names no model"),
+                              ("Sonnet 5", "", "an empty pick is the default"),
+                              ("Sonnet 4.8", "claude-opus-4-8", "the same number in another family"),
+                              ("gw-mini", "gw-mini", "a name with no family word carries no version")):
+            self.assertFalse(lands(pm, pick), "%s on a %r pick: %s" % (pm, pick, why))
+
+    def test_a_session_rebuilt_with_a_pick_in_flight_starts_from_the_picks_name_unless_the_pick_is_above_it(self):
+        # (2026-09-30, the #33 follow-up's review) the name a session rebuilt with a model pick in flight starts from:
+        # the pick's own, so the pick's first report is not read as a fallback from the model it replaced; but the old
+        # one for a pick ABOVE it, since the rebuilt session can attach to a CLI that never got the pick (an attach tells
+        # the CLI nothing) or replay a reply from before it, and relabeled, that report of the old model read as the
+        # pick falling back
+        self.assertTrue(hasattr(sb, "_heal_pick_label"), "a rebuilt session has no reading of the name to start from")
+        heal = sb._heal_pick_label
+        for pick, old, want, why in (("claude-opus-4-8", "Opus 5.5", "Opus 4.8", "an older version: the pick's name"),
+                                     ("claude-sonnet-5", "Opus 5.5", "Sonnet 5", "a lower family: the pick's name"),
+                                     ("opus", "Opus 5.5", "Opus", "a Latest click names no version: the pick's name"),
+                                     ("default", "Opus 5.5", "", "the account default names no model"),
+                                     ("", "Opus 5.5", "", "an empty pick is the default"),
+                                     ("opus", "", "Opus", "no name before the pick"),
+                                     ("claude-opus-5-5", "Opus 4.8", "Opus 4.8", "a newer version: the old name stays"),
+                                     ("fable", "Opus 5.5", "Opus 5.5", "a higher family: the old name stays"),
+                                     ("opus", "Sonnet 5", "Sonnet 5", "a Latest click above the old family: the old name stays")):
+            self.assertEqual(heal(pick, old), want, "%r picked on %r: %s" % (pick, old, why))
 
 
 class SidechainNeverLearns(unittest.TestCase):

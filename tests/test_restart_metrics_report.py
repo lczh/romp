@@ -48,6 +48,7 @@ class Frames(unittest.TestCase):
         w = fr["windows"][0]
         self.assertEqual((w["window"], w["restarts"], w["cutTurns"], w["cutTurnsPerRestart"]), ("week of 2026-09-10", 3, 3, 1.5))
         self.assertEqual((w["measuredRestarts"], w["unmeasuredRestarts"]), (2, 1))
+        self.assertEqual(w["killedExits"], 0)
         self.assertEqual(rep.SMALL_N, 5)
         self.assertEqual((w["outageP50"], w["outageP90"], w["quietP50"], w["backstopFires"]), (2.5, 4.0, 297.0, 1))
         self.assertEqual(w["events"]["orphansReaped"], 1)
@@ -84,6 +85,21 @@ class Frames(unittest.TestCase):
         (d / "bad.json").write_text("{}")
         with self.assertRaises(SystemExit):
             rep.load_docs([str(d / "bad.json")])
+
+    def test_the_frames_carry_the_killed_exits_and_every_unmeasured_restart(self):
+        """An exit killed after its cut row is its own count beside the clean ones, and the unmeasured restarts are the
+        reader's (crash boots plus killed exits whose prediction failed), not the crash boots alone; a document from before
+        the two fields reads as it did."""
+        doc = _doc()
+        b = doc["buckets"][0]
+        b.update(killedExits=2, unmeasuredRestarts=2, measuredRestarts=1)
+        w = rep.frames([("after", doc)], anonymize=False)["windows"][0]
+        self.assertEqual((w["killedExits"], w["unmeasuredRestarts"], w["measuredRestarts"]), (2, 2, 1))
+        for k in ("killedExits", "unmeasuredRestarts", "measuredRestarts"):
+            b.pop(k)
+        w = rep.frames([("before", doc)], anonymize=False)["windows"][0]
+        self.assertEqual((w["killedExits"], w["unmeasuredRestarts"], w["measuredRestarts"]), (0, 1, 2),
+                         "an older document: the crash boots are its unmeasured restarts")
 
 
 @unittest.skipUnless(HAVE_PLOT, "cleanplots, matplotlib and pandas are not importable here; run under uvx --with cleanplots --with matplotlib --with pandas")
