@@ -919,7 +919,8 @@ class TheBoundAndTheDepartures(_Board):
                                              "coldLive", "coldFlip",  # the cache-only parse misses and the in-place re-reads (2026-09-18)
                                              # the card anchor walk's held aggregates (2026-10-06): its counters and gauges
                                              "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised",
-                                             "segEvict", "segEntries", "segBytes", "segBound"})
+                                             "segEvict", "segEntries", "segBytes", "segBound",
+                                             "overBound"})   # an aggregate over the bound by itself, never held (the review after the merge)
         self.assertEqual(feed["memo"]["segBound"], km.FEED_SEG_HELD_BYTES)
         self.assertEqual((feed["memo"]["failed"], feed["memo"]["failing"]), (0, 0))
         self.assertEqual(set(feed["memo"]["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
