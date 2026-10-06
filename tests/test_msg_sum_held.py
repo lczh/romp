@@ -16,8 +16,17 @@ nothing; the byte bound shedding the least recently scanned session first; the h
 the held records holding strings and tuples only; the /perf block. tests/test_build_road_equivalence.py drives the
 road of history events through warm and cold builds.
 
-Synthetic data only: placeholder uuids, the web and api names, invented notes-api text, a private state root with
-session hosts off."""
+From the review that came after the merge (2026-10-06): a rewrite that leaves fewer closed turns than the entry held
+counts under partial; an entry whose seams moved is dropped at the comparison, before its walk, so a walk that then
+raises leaves no dead entry to shed valid ones; a fault outside the walk counts under faulted and is said on stderr
+once per episode; an entry over the bound by itself counts under overBound, not evict; the leaf's head is stat'd
+before the parse (a leaf replaced right after the parse returns); the join's order (an id in two turns takes the later
+turn's caption); the reference names every key of the block.
+
+Synthetic data only: placeholder uuids, the web, api and tests names, invented notes-api text, a private state root
+with session hosts off."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -44,7 +53,8 @@ jd, em = km.jd, km.em
 
 SID_WEB = "b0ad0000-1005-4aaa-8bbb-00000000b001"   # private synthetic sids (CLAUDE.md, goal-store fixtures)
 SID_API = "b0ad0000-1005-4aaa-8bbb-00000000b002"
-NAMES = {SID_WEB: "web", SID_API: "api"}
+SID_TESTS = "b0ad0000-1005-4aaa-8bbb-00000000b003"
+NAMES = {SID_WEB: "web", SID_API: "api", SID_TESTS: "tests"}   # a session is discovered only once its leaf exists
 REAL_SEGS_SEAM = km._segs_seam
 
 
@@ -237,7 +247,7 @@ class MsgScanHold(unittest.TestCase):
             self.build()
             self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10 * (k + 1), "web-r%d" % k, "web-c12" if k == 0 else "web-r%d" % (k - 1),
                                            "toolu_1", "inbox: <!-- romp-msg-id: m-x%d -->" % k)])
-            for sid in NAMES:
+            for sid in (SID_WEB, SID_API):
                 self.assertEqual(km._msg_sum_scan_session(sid, self.leaf[sid], time.time()),
                                  one_pass(sid, self.leaf[sid], time.time()), "%s after %d appends" % (NAMES[sid], k + 1))
 
@@ -255,7 +265,7 @@ class MsgScanHold(unittest.TestCase):
     def test_a_walk_that_raises_stores_nothing_and_is_counted(self):
         self.session(SID_WEB, 8)
         first = self.build()
-        held, raised = self.held(), km._msg_scan_report()["raised"]
+        held, s0 = self.held(), km._msg_scan_report()
         t = self.open_t[SID_WEB]
         self.append(SID_WEB, [reply(t + 20, "web-a08", "web-c08", "Shipped."),
                               peer(t + 300, "web-u09", "web-a08", "api asks: and the cursor?", "m-web09")])
@@ -265,7 +275,10 @@ class MsgScanHold(unittest.TestCase):
         with mock.patch.object(km, "_segs_seam", raising):
             self.assertEqual(self.build(), first, "the last-known map is served")
         self.assertIs(self.held(), held, "the walk that raised stored nothing")
-        self.assertEqual(km._msg_scan_report()["raised"], raised + 1)
+        rep = km._msg_scan_report()
+        self.assertEqual(rep["raised"], s0["raised"] + 1)
+        self.assertEqual(rep["faulted"], s0["faulted"] + 1, "a walk's raise is a faulted scan too")
+        self.assertEqual(rep["scans"], s0["scans"], "a scan whose walk raised did not finish: scans does not move")
         self.append(SID_WEB, [tool_call(t + 310, "web-c09", "web-u09", "toolu_2")])
         got = self.build()
         self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
@@ -275,7 +288,7 @@ class MsgScanHold(unittest.TestCase):
         self.session(SID_WEB, 6)
         self.session(SID_API, 6)
         self.build()
-        sizes = {sid: self.held(sid)[4] for sid in NAMES}
+        sizes = {sid: self.held(sid)[4] for sid in (SID_WEB, SID_API)}
         self.assertTrue(all(n > 0 for n in sizes.values()), sizes)
         bound = max(sizes.values()) + min(sizes.values()) - 1          # room for one entry, never two
         evict = km._msg_scan_report()["evict"]
@@ -363,8 +376,8 @@ class MsgScanHold(unittest.TestCase):
         self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r06", "web-c06", "toolu_1", "ok")])
         self.build()
         snap = km._PERF_STATS.snapshot()["memos"]["msgScan"]
-        self.assertEqual(set(snap), {"scans", "heldTurns", "walkedTurns", "partial", "reset", "raised", "evict", "entries",
-                                     "bytes", "bound"})
+        self.assertEqual(set(snap), {"scans", "heldTurns", "walkedTurns", "partial", "reset", "raised", "faulted", "evict",
+                                     "overBound", "entries", "bytes", "bound"})
         self.assertEqual(snap["scans"] - s0["scans"], 2)
         self.assertEqual(snap["heldTurns"] - s0["heldTurns"], 6, "the second scan served the six closed turns")
         self.assertEqual(snap["walkedTurns"] - s0["walkedTurns"], 7 + 1)
@@ -395,11 +408,180 @@ class MsgScanHold(unittest.TestCase):
         self.build()
         small, big = self.held(SID_WEB)[4], self.held(SID_API)[4]
         self.assertLess(small, big)
+        s0 = km._msg_scan_report()
         with mock.patch.object(km, "MSG_SCAN_HELD_BYTES", big - 1):
             self.append(SID_API, [tool_out(self.open_t[SID_API] + 10, "api-r12", "api-c12", "toolu_1", "ok")])
             self.build()
+            self.append(SID_API, [tool_out(self.open_t[SID_API] + 20, "api-r13", "api-r12", "toolu_1", "ok")])
+            self.build()
+        rep = km._msg_scan_report()
         self.assertIsNone(self.held(SID_API), "api's entry alone is over the bound: not held")
         self.assertIsNotNone(self.held(SID_WEB), "and web's, which fits, is not shed for it")
+        self.assertEqual(rep["overBound"] - s0["overBound"], 2, "each scan of the over-bound session counts under overBound")
+        self.assertEqual(rep["evict"], s0["evict"], "nothing was shed: evict stays for entries the bound shed (it read "
+                                                    "+1 per scan of the over-bound session before)")
+
+    def test_a_rewrite_that_drops_closed_turns_counts_partial(self):
+        """A held entry cut short is a hold not served whole: the leaf rewritten in place down to six closed turns where
+        the entry held twelve, every one of the six standing. partial stayed 0 here before, since the prefix that matched
+        reached the end of the shorter list (the review after the merge)."""
+        self.session(SID_WEB, 12)
+        self.build()
+        self.assertEqual(len(self.held()[2]), 12, "the premise: twelve closed turns held")
+        s0 = km._msg_scan_report()
+        recs = [json.loads(ln) for ln in Path(self.leaf[SID_WEB]).read_text().splitlines()]
+        with open(self.leaf[SID_WEB], "w") as f:                       # in place: the same inode, so the same head
+            f.write("".join(json.dumps(r) + "\n" for r in recs[:14]))  # turns 0 to 6, the last of them now the open one
+        self.stamp(self.leaf[SID_WEB])
+        got = self.build()
+        rep = km._msg_scan_report()
+        self.assertEqual(self.walked, 1, "the six closed turns stood: the last turn alone walked")
+        self.assertEqual(rep["partial"] - s0["partial"], 1, "a hold cut short counts under partial")
+        self.assertEqual(rep["reset"] - s0["reset"], 0, "the same leaf and seams: nothing discarded whole")
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
+        self.assertIn("m-web05", got)
+        self.assertNotIn("m-web07", got, "the premise: the dropped turns' ids left the map")
+        self.assertEqual(len(self.held()[2]), 6)
+        self.append(SID_WEB, [user(self.t + 120 * 7, "web-u07b", "web-a06", "page 7 again")])
+        self.build()
+        self.assertEqual(km._msg_scan_report()["partial"] - s0["partial"], 1, "a turn boundary after it is no partial")
+
+    def test_an_entry_the_seams_moved_is_dropped_before_its_walk(self):
+        """An entry under other seams can never be served. It is dropped at the comparison, under the lock and before the
+        walk, so a walk that then raises leaves nothing of it in the table to count toward the bound and shed a valid
+        entry. Before, the dead entry was moved to the newest end first and outlasted valid ones: with the bound one
+        byte short of all three entries, api's next store shed tests and kept web (the review after the merge)."""
+        for sid in (SID_WEB, SID_API, SID_TESTS):
+            self.session(sid, 6)
+        self.build()                                                   # web, api, tests: web the least recently scanned
+        sizes = {sid: self.held(sid)[4] for sid in (SID_WEB, SID_API, SID_TESTS)}
+        seg = next(s for _i, s in self.segs(SID_WEB) if "m-web01" in km._seg_mids(s))
+        p = jd.GOALDIR / (SID_WEB + ".json")
+        p.write_text(json.dumps({"nodes": {}, "status": {}, "rev": 2,
+                                 "seams": [{"segs": [jd._seg_key(seg["id"])], "t": seg["t"] + 5, "top": "g1",
+                                            "text": "Back off the retries"}]}))
+        self.stamp(p)
+        s0 = km._msg_scan_report()
+
+        def raising(turn, store):
+            raise em.LazyBodyRead("a synthetic body read fault")
+        with mock.patch.object(km, "_segs_seam", raising):
+            with self.assertRaises(em.LazyBodyRead):
+                km._msg_sum_scan_session(SID_WEB, self.leaf[SID_WEB], time.time())
+        rep = km._msg_scan_report()
+        self.assertIsNone(self.held(SID_WEB), "web's entry, under other seams, was dropped before its walk raised")
+        self.assertEqual(rep["reset"] - s0["reset"], 1, "counted when it was discarded, though the walk then raised")
+        self.assertEqual(rep["raised"] - s0["raised"], 1)
+        with mock.patch.object(km, "MSG_SCAN_HELD_BYTES", sum(sizes.values()) - 1):   # one byte short of all three
+            self.append(SID_API, [tool_out(self.open_t[SID_API] + 10, "api-r06", "api-c06", "toolu_1", "ok")])
+            km._msg_sum_scan_session(SID_API, self.leaf[SID_API], time.time())
+            after = km._msg_scan_report()
+        self.assertIsNotNone(self.held(SID_TESTS), "tests, valid, is not shed for a dead entry")
+        self.assertIsNotNone(self.held(SID_API))
+        self.assertEqual(after["evict"], rep["evict"], "the two valid entries fit: nothing shed")
+
+    def test_a_fault_outside_the_walk_is_counted_and_said_once_per_episode(self):
+        """A scan that faults before its walk (the captions read, the parse, the store read, a seams field the
+        fingerprint cannot read) serves the last-known map and is scanned again on every build. Each such scan counts
+        under faulted (raised counts the walk's raises alone, scans the finished scans), and stderr says it once per
+        episode, until a clean scan of the session ends the episode. Before, these faults were counted and said nowhere,
+        so /perf read healthy while the session's captions stayed at the last-known map (the review after the merge)."""
+        self.session(SID_WEB, 4)
+        first = self.build()
+        self.assertIn("m-web01", first, "the premise: a captioned peer message")
+        store = jd.GOALDIR / (SID_WEB + ".json")
+
+        @contextlib.contextmanager
+        def seams_unreadable():
+            store.write_text(json.dumps({"nodes": {}, "status": {}, "seams": 5, "rev": 2}))
+            self.stamp(store)
+            try:
+                yield
+            finally:
+                store.write_text(json.dumps({"nodes": {}, "status": {}, "seams": [], "rev": 3}))
+                self.stamp(store)
+        faults = (("the captions read", lambda: mock.patch.object(km, "_captions", side_effect=OSError("a synthetic captions fault"))),
+                  ("the parse", lambda: mock.patch.object(km, "_parse", side_effect=OSError("a synthetic parse fault"))),
+                  ("the store read", lambda: mock.patch.object(jd, "load_goals_shared", side_effect=OSError("a synthetic store fault"))),
+                  ("the seams' fingerprint", seams_unreadable))
+        parent = "web-c04"
+        for k, (what, fault) in enumerate(faults):
+            s0 = km._msg_scan_report()
+            self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10 * (k + 1), "web-r%d" % k, parent, "toolu_1", "ok")])
+            parent = "web-r%d" % k
+            err = io.StringIO()
+            with fault(), mock.patch("sys.stderr", err):
+                self.assertEqual(self.build(), first, "%s: the last-known map is served" % what)
+                self.assertEqual(self.build(), first, "%s: scanned again, and faulted again" % what)
+            rep = km._msg_scan_report()
+            self.assertEqual(rep["faulted"] - s0["faulted"], 2, "%s: each faulted scan is counted" % what)
+            self.assertEqual((rep["raised"], rep["scans"]), (s0["raised"], s0["scans"]), "%s: no walk raised or finished" % what)
+            said = [ln for ln in err.getvalue().splitlines() if ln.startswith("[msg-scan]")]
+            self.assertEqual(len(said), 1, "%s: said once for the episode: %r" % (what, said))
+            self.assertIn("sid=%s" % SID_WEB[:8], said[0])
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                got = self.build()
+            self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()), "%s: the clean scan's map" % what)
+            self.assertEqual(km._msg_scan_report()["faulted"], rep["faulted"], "%s: a clean scan is no fault" % what)
+            self.assertNotIn("[msg-scan]", err.getvalue(), "%s: a clean scan says nothing (and ends the episode)" % what)
+
+    def test_the_head_is_taken_before_the_parse_reads_the_leaf(self):
+        """The held entry's head is stat'd before the parse reads the leaf: a leaf replaced right after the parse
+        returns leaves the old head beside the records read, and the next scan, under the new inode, walks whole. With
+        the head stat'd after the parse, the new head would vouch for the old records and the next scan would serve the
+        old message id until a closed turn's key moved (the review after the merge: nothing pinned the order)."""
+        self.session(SID_WEB, 8)
+        self.assertIn("m-web05", self.build(), "the premise: a middle turn's peer message is captioned")
+        self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r08", "web-c08", "toolu_1", "ok")])
+        real, swapped = km._parse, []
+
+        def parse_then_replace(path, sid, now):
+            got = real(path, sid, now)
+            if not swapped and str(path) == self.leaf[SID_WEB]:
+                body = Path(path).read_text().replace("m-web05", "m-wxb05")   # one middle record's id, the same length
+                with open(str(path) + ".new", "w") as f:
+                    f.write(body)
+                os.replace(str(path) + ".new", path)                        # a new file at the path: a new inode
+                self.stamp(path)
+                swapped.append(1)
+            return got
+        with mock.patch.object(km, "_parse", parse_then_replace):
+            self.build()
+        self.assertTrue(swapped, "the premise: the leaf was replaced inside the scan, after its parse")
+        got = self.build()
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()), "the warm map is the cold one")
+        self.assertNotIn("m-web05", got, "the replaced leaf's records are walked: the old id is gone")
+
+    def test_an_id_in_two_turns_takes_the_later_turns_caption(self):
+        """The join assigns in turn and segment order, as the one-pass loop did, so an id named in a peer prompt and
+        again in a later captioned turn carries the later turn's caption, cold and warm (nothing pinned the order: the
+        road and the tests above name each id once)."""
+        self.session(SID_WEB, 6)
+        t = self.open_t[SID_WEB]
+        self.append(SID_WEB, [tool_out(t + 10, "web-r06", "web-c06", "toolu_1", "inbox: <!-- romp-msg-id: m-web01 -->"),
+                              reply(t + 20, "web-a06", "web-r06", "Answered api again."),
+                              user(t + 300, "web-u07", "web-a06", "next page")])
+        self.caption_closed(SID_WEB)                                    # turn 6, now closed, gets its caption
+        segs = [(i, s) for i, s in self.segs(SID_WEB) if "m-web01" in km._seg_mids(s)]
+        self.assertEqual([i for i, _s in segs], [1, 6], "the premise: the id is in turns 1 and 6")
+        later, earlier = "web: work at %d" % segs[1][1]["t"], "web: work at %d" % segs[0][1]["t"]
+        self.assertNotEqual(later, earlier)
+        got = self.build()
+        self.assertEqual(got.get("m-web01"), later, "the later turn's caption, as the one-pass loop gave it")
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
+        self.append(SID_WEB, [tool_call(t + 310, "web-c07", "web-u07", "toolu_2")])
+        got = self.build()
+        self.assertEqual(self.walked, 1, "the premise: the closed turns were served from the hold")
+        self.assertEqual(got.get("m-web01"), later, "warm too")
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
+
+    def test_the_reference_names_every_key_of_the_block(self):
+        doc = (Path(HERE).parent / "docs" / "reference.md").read_text(encoding="utf-8")
+        at = doc.index("`msgScan` is the message-caption scan's hold")
+        passage = doc[at:doc.index("`judgingBand` is", at)]
+        for k in km._msg_scan_report():
+            self.assertIn("`%s`" % k, passage, k)
 
 
 if __name__ == "__main__":

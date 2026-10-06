@@ -52893,7 +52893,8 @@ def _usage_for_client():
 
 
 _msg_sum_cache = {}                               # {"per": {sid: (key, submap)}, "map": union {mid: caption},
-#                                                    "held": the scan's held turn records (_msg_scan_held)}
+#                                                    "held": the scan's held turn records (_msg_scan_held),
+#                                                    "faulting": the sids whose last scan faulted (_msg_scan_fault)}
 
 
 # HELD PER-TURN RESULTS (2026-10-05, the first of the build-cost changes). Every turn of a session but its last is closed,
@@ -52976,11 +52977,17 @@ def _msg_scan_held_bound():
 
 MSG_SCAN_HELD_BYTES = _msg_scan_held_bound()
 _MSG_SCAN_LOCK = threading.Lock()    # the held table and its counters: the pusher and a handler thread can scan at once
-_MSG_SCAN_STATS = {"scans": 0, "heldTurns": 0, "walkedTurns": 0, "partial": 0, "reset": 0, "raised": 0, "evict": 0}
+_MSG_SCAN_STATS = {"scans": 0, "heldTurns": 0, "walkedTurns": 0, "partial": 0, "reset": 0, "raised": 0, "faulted": 0,
+                   "evict": 0, "overBound": 0}
 #   scans: scans whose walk finished (a walk that raised counts under raised instead); heldTurns / walkedTurns: closed turns served from the hold / turns walked (the
-#   open one always); partial: a held entry whose turns diverged before its end (a rewind, a compaction re-seat, a late
-#   record); reset: a held entry discarded whole (another leaf, or the seams moved); raised: a walk that raised (stored
-#   nothing); evict: entries the byte bound shed
+#   open one always); partial: a finished scan whose held entry was not served whole: a held turn's key moved (an
+#   in-place rewrite, a late record) or the session has fewer closed turns than the entry held (a rewind cut, a past
+#   prompt edited, a rewrite that drops turns); an append, a compaction's included, moves neither this nor reset;
+#   reset: a held entry discarded whole (another leaf, or the seams moved), counted when it is discarded, before the
+#   walk, so a walk that then raises does not hide it; raised: a walk that raised (stored nothing); faulted: every scan
+#   _msg_summaries made that raised, the walk's included, so faulted minus raised counts the faults outside the walk
+#   (the captions read, the parse, the store read, the seams' fingerprint); evict: entries the byte bound shed;
+#   overBound: a scan whose own entry was over the bound by itself (served, not held, and shedding no other session)
 _HOLD_KEY_BYTES = 360                # one held key's estimated bytes beside its turn id: the tuple, the end, two uuids
 
 
@@ -53030,30 +53037,35 @@ def _msg_mid_records(sid, turns, store, head):
     """Every turn's _msg_mid_turn pairs, the closed turns' served from the hold where they stand (2026-10-05, the
     message-caption part of the build-cost changes). The held entry stands under the same leaf (`head`,
     _msg_scan_head) and the same seams (_seams_fp, by value); then its closed turns are reused up to the first whose
-    _turn_hold_key moved, and the walk runs from there, the open turn always. The closed turns' records are stored for
-    the next scan, only when the walk finished: a walk that raises stores nothing and the caller keeps its last-known
-    submap."""
+    _turn_hold_key moved, and the walk runs from there, the open turn always. An entry under another leaf or other seams
+    can never be served: it is dropped at the comparison, under the lock and before the walk, so a walk that then raises
+    leaves no dead entry newest in the table, counting toward the bound and shedding valid ones. The closed turns'
+    records are stored for the next scan, only when the walk finished. A fault raises: a walk that raises stores
+    nothing and raises on through _msg_sum_scan_session to _msg_summaries, which keeps its last-known submap under no
+    key so the next build retries."""
     fp = _seams_fp(store)
     n_closed = len(turns) - 1
     keys = [_turn_hold_key(t) for t in turns[:n_closed]] if head is not None and n_closed > 0 else []
-    held, start, partial, reset = (), 0, False, False
+    held, start, partial = (), 0, False
     if keys:
         with _MSG_SCAN_LOCK:
             table = _msg_scan_held()
             ent = table.get(sid)
             if ent is not None:
-                table.move_to_end(sid)               # a used entry is the newest: the bound sheds colder sessions first
+                if ent[0] == head and ent[1] == fp:
+                    table.move_to_end(sid)           # a used entry is the newest: the bound sheds colder sessions first
+                else:
+                    del table[sid]                   # another leaf or other seams: never servable, dropped here
+                    _MSG_SCAN_STATS["reset"] += 1
+                    ent = None
         if ent is not None:
-            if ent[0] == head and ent[1] == fp:
-                k = 0
-                for a, b in zip(ent[2], keys):
-                    if a != b:
-                        break
-                    k += 1
-                held, start = ent[3][:k], k
-                partial = k < len(ent[2]) and k < len(keys)
-            else:
-                reset = True
+            k = 0
+            for a, b in zip(ent[2], keys):
+                if a != b:
+                    break
+                k += 1
+            held, start = ent[3][:k], k
+            partial = k < len(ent[2])                # a held turn moved, or fewer closed turns than the entry held
     walked = []
     try:
         for t in turns[start:]:
@@ -53070,12 +53082,11 @@ def _msg_mid_records(sid, turns, store, head):
         st["heldTurns"] += start
         st["walkedTurns"] += len(walked)
         st["partial"] += 1 if partial else 0
-        st["reset"] += 1 if reset else 0
         if keys:
             table = _msg_scan_held()
             table.pop(sid, None)
             if size > MSG_SCAN_HELD_BYTES:
-                st["evict"] += 1                     # an entry over the bound alone is not held, and sheds no other session
+                st["overBound"] += 1                 # an entry over the bound alone is not held, and sheds no other session
             else:
                 table[sid] = (head, fp, tuple(keys), tuple(recs[:n_closed]), size)
                 total = sum(e[4] for e in table.values())
@@ -53088,11 +53099,41 @@ def _msg_mid_records(sid, turns, store, head):
 
 def _msg_scan_forget(live):
     """Drop the held records of the sessions outside `live`, the scan's discovered set, as _msg_summaries drops their
-    submaps: the hold is bounded by the sessions discovery returns and by its bytes."""
+    submaps: the hold is bounded by the sessions discovery returns and by its bytes. A departed session's fault episode
+    ends with it (_msg_scan_fault)."""
     with _MSG_SCAN_LOCK:
         table = _msg_scan_held()
         for sid in [k for k in table if k not in live]:
             del table[sid]
+        faulting = _msg_sum_cache.get("faulting")
+        if faulting:
+            faulting.intersection_update(live)
+
+
+def _msg_scan_fault(sid, e):
+    """A scan of `sid` that raised, from _msg_summaries' fault path: counted under faulted (every fault, the walk's
+    included; raised counts the walk's alone), and said on stderr once per episode, an episode being the run of faulted
+    scans of one session up to its next clean one (_msg_scan_clean). The session keeps its last-known captions under no
+    key, so it is scanned again on every build until a scan comes back clean: without the line and the counter, a
+    session whose captions read, parse or store read keeps failing would serve stale captions while /perf read
+    healthy."""
+    with _MSG_SCAN_LOCK:
+        _MSG_SCAN_STATS["faulted"] += 1
+        faulting = _msg_sum_cache.setdefault("faulting", set())
+        first = sid not in faulting
+        faulting.add(sid)
+    if first:
+        print("[msg-scan] sid=%s: the message-caption scan faulted (%s: %s); serving its last-known captions and "
+              "scanning it again each build (said once until a scan of it comes back clean)"
+              % (str(sid)[:8], type(e).__name__, str(e)[:120]), file=sys.stderr)
+
+
+def _msg_scan_clean(sid):
+    """A scan of `sid` that came back clean: the end of its fault episode, so the next fault is said again."""
+    with _MSG_SCAN_LOCK:
+        faulting = _msg_sum_cache.get("faulting")
+        if faulting:
+            faulting.discard(sid)
 
 
 def _msg_scan_report():
@@ -53106,7 +53147,9 @@ def _msg_scan_report():
 
 def _msg_sum_scan_session(sid, path, now):
     """Scan ONE session's transcript for its msgId→caption entries (the caption of each peer-message
-    segment it bore). Returns {mid: caption}; {} when it has no captions yet or on error.
+    segment it bore). Returns {mid: caption}; {} when it has no captions yet. Raises on a fault (the captions read, the
+    parse, the store read or the walk); _msg_summaries keeps its last-known submap under no key so the next build
+    retries.
 
     The walk is _msg_mid_records: each closed turn's (segment id, message ids) pairs are held between scans, so an
     append, a caption row or a store republish walks the open turn alone where it re-segmented every turn and read
@@ -53191,12 +53234,14 @@ def _msg_summaries():
             continue
         try:
             sub = _msg_sum_scan_session(sid, s["path"], now)
-        except Exception:
+        except Exception as e:
             # keep last-known on a transient error, under no key: the next build retries the scan (the held turns make a
-            # retry cheap) instead of serving the pre-raise map until an input moves
+            # retry cheap) instead of serving the pre-raise map until an input moves; counted and said (_msg_scan_fault)
+            _msg_scan_fault(sid, e)
             per[sid] = (None, ent[1] if ent else {})
             dirty = True
             continue
+        _msg_scan_clean(sid)
         per[sid] = (key, sub)
         dirty = True
     for sid in [k for k in per if k not in live]:    # forget dead sessions so `per` can't grow unbounded

@@ -42,7 +42,10 @@ Two tests drive the same road. One compares warm with cold at every step and che
 (the spy on _segs_seam): one or two where only the open turn moved, every turn where the leaf or the seams moved; and,
 for web's lane, one where only the open turn, the captions or the store's nodes moved (red before 2026-10-06, when a
 caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn's hold key
-moved (a state row that moves only the end of a held turn's first idle span moves no key: one).
+moved (a state row that moves only the end of a held turn's first idle span moves no key: one). It also reads the
+message-caption scan's counters across the warm build where a step decides them: partial at the in-place rewrites, the
+late record, the rewind cut and its release and the past-prompt edit; reset at the seams' moves, the replacement, the
+resume and the /clear; neither at an append, a republish or a compaction.
 
 Synthetic data only: placeholder uuids, the web and api names, invented notes-api text, a private state root with
 session hosts off."""
@@ -367,12 +370,15 @@ class RoadWorld(unittest.TestCase):
         """(warm, cold): the message-caption map as the warm memos give it, then over the same inputs with the scan's
         memo (_msg_sum_cache) and the captions mapping (_CAPTION_ROWS_MEMO) cleared, so the cold side reads every
         captions file into a mapping of its own. The warm memos are put back after the cold build, so the next step
-        builds on the warm chain."""
+        builds on the warm chain. The scan's counters across the warm build are left in self.scan_delta."""
         self.walked, self.counting = 0, True
+        r0 = km._msg_scan_report()
         try:
             warm = dict(km._msg_summaries())
         finally:
             self.counting = False
+        r1 = km._msg_scan_report()
+        self.scan_delta = {k: r1[k] - r0[k] for k in ("scans", "partial", "reset", "raised", "faulted")}
         saved, saved_caps = dict(km._msg_sum_cache), dict(km._CAPTION_ROWS_MEMO)
         km._msg_sum_cache.clear()
         km._CAPTION_ROWS_MEMO.clear()
@@ -438,11 +444,12 @@ def drifted(seg_id, dt):
 
 class BuildRoad(RoadWorld):
     """The road, step by step. `mode` "equal" asserts warm == cold after each step and what the step changed; "walks"
-    asserts the turns the warm build walked."""
+    asserts the turns the warm build walked and the scan's counters it moved."""
 
-    def step(self, name, walks=None, whole=False, expect=None, lane=None):
+    def step(self, name, walks=None, whole=False, expect=None, lane=None, scan=None):
         """One step's comparison. `lane` is web's lane walk where this module asserts one: a count (at most that many of
-        its turns walked: the prefix held) or "whole" (every turn: the prefix was dropped or diverged)."""
+        its turns walked: the prefix held) or "whole" (every turn: the prefix was dropped or diverged). `scan` is the
+        message-caption scan's counter deltas across the warm build where the step decides them ({"partial": 1, ...})."""
         warm, cold = self.builds()
         lw, lc, ww, wc = self.lane_builds()
         if self.mode == "equal":
@@ -467,6 +474,8 @@ class BuildRoad(RoadWorld):
                 self.assertEqual(self.lane_walked, n, "%s: every turn of web's lane walked once" % name)
             elif lane is not None:
                 self.assertLessEqual(self.lane_walked, lane, "%s: at most %d of web's %d turns walked for its lane" % (name, lane, n))
+            for k, v in (scan or {}).items():
+                self.assertEqual(self.scan_delta[k], v, "%s: the scan's %s moved by %d" % (name, k, v))
         return warm
 
     def cap_of(self, sid, mid):
@@ -485,7 +494,7 @@ class BuildRoad(RoadWorld):
         # the open turn grows, then closes and another opens
         n = self.TURNS
         self.append(SID_WEB, [tool_out(self.tick(), "w-r%02d" % n, "w-c%02d" % n, "toolu_w%02d" % n, "tests: 41 passed")])
-        self.step("an append to the open turn", walks=1, lane=1)
+        self.step("an append to the open turn", walks=1, lane=1, scan={"partial": 0, "reset": 0})
         self.state(SID_WEB, self.web_t + 40, "waiting")
         self.step("the open turn's state row before its last record", walks=1, lane=1)
         self.append(SID_WEB, [reply(self.tick(20), "w-a%02d" % n, "w-r%02d" % n, "Shipped step %d." % n)])
@@ -519,18 +528,19 @@ class BuildRoad(RoadWorld):
                           "m-p13": "web: weighing cursor paging", "m-p10": "web: rebuilt it for step 10",
                           "m-p01": "web: rebuilt the index, told api"})
         self.store(SID_WEB, rev=2)
-        self.step("the goal store republished with the same seams", walks=1, lane=1)
+        self.step("the goal store republished with the same seams", walks=1, lane=1, scan={"partial": 0, "reset": 0})
         s2 = self.seg_of(SID_WEB, "m-q02")
         seam = {"segs": [jd._seg_key(s2["id"])], "t": s2["t"] + 30, "top": "w-g1", "text": "Back off the retries"}
         self.store(SID_WEB, seams=[seam], rev=3)
-        self.step("a seam splits an old segment", whole=True, lane="whole", expect={"m-q02": None})
+        self.step("a seam splits an old segment", whole=True, lane="whole", expect={"m-q02": None}, scan={"partial": 0, "reset": 1})
         tail = self.seg_of(SID_WEB, "m-q02")
         if self.mode == "equal":
             self.assertNotEqual(tail["id"], s2["id"], "the premise: the seam moved m-q02 into the tail segment")
         self.caption_rows(SID_WEB, [cap_row(tail, "web: kept checking past the settle")])
         self.step("the seam's tail captioned", walks=1, lane=1, expect={"m-q02": "web: kept checking past the settle"})
         self.store(SID_WEB, seams=[], rev=4)
-        self.step("the seam removed", whole=True, lane="whole", expect={"m-q02": self.cap_of(SID_WEB, "m-q02")})
+        self.step("the seam removed", whole=True, lane="whole", expect={"m-q02": self.cap_of(SID_WEB, "m-q02")},
+                  scan={"partial": 0, "reset": 1})
         self.postal("m-p13", SID_API, SID_WEB, self.web_t)
         self.step("a peer delivery whose sender the postal log learns later", walks=0, lane=1)
 
@@ -545,7 +555,7 @@ class BuildRoad(RoadWorld):
                 r["message"] = json.loads(json.dumps(r["message"]).replace("m-i04", "m-j04"))
         self.rewrite(SID_WEB, recs)
         self.step("the leaf rewritten in place, one turn's prompt under a new uuid", walks=self.turns() - 4, lane="whole",
-                  expect={"m-j04": "web: rebuilt the index for step 4", "m-i04": None})
+                  expect={"m-j04": "web: rebuilt the index for step 4", "m-i04": None}, scan={"partial": 1, "reset": 0})
         recs = [dict(r) for r in self.recs[SID_WEB]]
         for r in recs:
             if r.get("uuid") == "w-a07":
@@ -557,7 +567,7 @@ class BuildRoad(RoadWorld):
                 r["message"] = json.loads(json.dumps(r["message"]).replace("m-i07", "m-k07"))
         self.rewrite(SID_WEB, recs)
         self.step("the leaf rewritten in place, one turn's reply under a new uuid", walks=self.turns() - 7, lane="whole",
-                  expect={"m-k07": self.cap_of(SID_WEB, "m-k07"), "m-i07": None})
+                  expect={"m-k07": self.cap_of(SID_WEB, "m-k07"), "m-i07": None}, scan={"partial": 1, "reset": 0})
         ino = os.stat(self.leaf[SID_WEB]).st_ino
         recs = [dict(r) for r in self.recs[SID_WEB]]
         for r in recs:
@@ -567,7 +577,7 @@ class BuildRoad(RoadWorld):
         if self.mode == "equal":
             self.assertNotEqual(os.stat(self.leaf[SID_WEB]).st_ino, ino, "the premise: a new file under the path")
         self.step("the leaf replaced by a new file, every turn identity standing", whole=True, lane="whole",
-                  expect={"m-z01": "web: rebuilt the index, told api", "m-i01": None})
+                  expect={"m-z01": "web: rebuilt the index, told api", "m-i01": None}, scan={"partial": 0, "reset": 1})
 
         # compactions and repeated prompt text
         t = self.tick(30)
@@ -578,11 +588,11 @@ class BuildRoad(RoadWorld):
         self.append(SID_WEB, recs + [user(t, "w-u%02d" % (n + 2), s, "after the compaction: what remains of the search?"),
                                      reply(t + 20, "w-a%02d" % (n + 2), "w-u%02d" % (n + 2), "The cursor and the cap remain.")])
         self.state(SID_WEB, t, "working")
-        self.step("an auto compaction", walks=4)
+        self.step("an auto compaction", walks=4, scan={"partial": 0, "reset": 0})
         recs, s = compaction(self.tick(300), "2", self.last(SID_WEB), "manual")
         t = self.tick(10)
         self.append(SID_WEB, recs + [user(t, "w-u%02d" % (n + 3), s, "after the second compaction: close out the cap")])
-        self.step("a manual compaction", walks=4)
+        self.step("a manual compaction", walks=4, scan={"partial": 0, "reset": 0})
         self.append(SID_WEB, [reply(self.tick(20), "w-a%02d" % (n + 3), "w-u%02d" % (n + 3), "Closed out the cap.")])
         for k, mid in ((4, "m-c01"), (5, "m-c02")):
             t = self.tick(300)
@@ -602,11 +612,15 @@ class BuildRoad(RoadWorld):
         before, held = dict(km._msg_summaries()), (km._msg_sum_cache.get("held") or {}).get(SID_WEB)
         t = self.tick(300)
         self.append(SID_WEB, [user(t, "w-u%02d" % (n + 7), self.last(SID_WEB), "page the archive")])
+        r0 = km._msg_scan_report()
         with mock.patch.object(jd, "load_goals_shared", side_effect=OSError("a synthetic store fault")):
             faulted = dict(km._msg_summaries())
+        r1 = km._msg_scan_report()
         if self.mode == "equal":
             self.assertEqual(faulted, before, "the store fault: the last-known map is served")
             self.assertIs((km._msg_sum_cache.get("held") or {}).get(SID_WEB), held, "the store fault: nothing was stored")
+            self.assertEqual({k: r1[k] - r0[k] for k in ("faulted", "raised", "scans")}, {"faulted": 1, "raised": 0, "scans": 0},
+                             "the store fault: a faulted scan outside the walk, counted under faulted alone")
         self.append(SID_WEB, [tool_call(self.tick(), "w-c%02d" % (n + 7), "w-u%02d" % (n + 7), "toolu_w%02d" % (n + 7))])
         self.step("the store readable again", walks=2)
 
@@ -637,15 +651,23 @@ class BuildRoad(RoadWorld):
             if len(calls) == 3:
                 raise em.LazyBodyRead("a synthetic body read fault, partway through the walk")
             return REAL_SEGS_SEAM(turn, store)
+        r0 = km._msg_scan_report()
         with mock.patch.object(km, "_segs_seam", raising):
             faulted = dict(km._msg_summaries())
+        r1 = km._msg_scan_report()
         if self.mode == "equal":
             self.assertEqual(len(calls), 3, "the premise: the walk raised at its third turn")
             self.assertEqual(faulted, before, "a walk that raised: the last-known map is served")
-            self.assertIs((km._msg_sum_cache.get("held") or {}).get(SID_WEB), held, "a walk that raised stored nothing")
+            self.assertIsNotNone(held, "the premise: web's entry was held under the old seams")
+            self.assertIsNone((km._msg_sum_cache.get("held") or {}).get(SID_WEB),
+                              "the entry the seams moved was dropped before the walk, and the walk that raised stored nothing")
+            self.assertEqual({k: r1[k] - r0[k] for k in ("reset", "raised", "faulted", "scans")},
+                             {"reset": 1, "raised": 1, "faulted": 1, "scans": 0},
+                             "the discard counted when it happened; the raise counted, the scan not finished")
         self.append(SID_WEB, [reply(self.tick(), "w-a%02d" % (n + 7), "w-r%02d" % (n + 7), "Archive paged.")])
         self.step("the walk again with nothing raising, over the restored turns", whole=True, lane="whole",
-                  expect={"m-q02": "web: kept checking past the settle"})
+                  expect={"m-q02": "web: kept checking past the settle"},
+                  scan={"partial": 0, "reset": 0})   # the entry the seams moved went at the raising build (above)
         with em._JSONL_CACHE_LOCK:
             em._JSONL_CACHE.pop(leaf, None)
         em._read_jsonl_entry(leaf, tail_ok=False)     # a from-zero read: a fresh generation, the next parse demotes
@@ -658,16 +680,19 @@ class BuildRoad(RoadWorld):
         # parse takes, the scan reads the tree it serves
         late_t = self.t0 + 300 * 5 + 25                # inside turn 5, closed hours ago
         self.append(SID_WEB, [reply(late_t, "w-l05", self.last(SID_WEB), "noted <!-- romp-msg-id: m-l05 -->")])
-        self.step("a late record whose time sorts into a closed turn", expect={"m-l05": self.cap_of(SID_WEB, "m-l05")})
+        self.step("a late record whose time sorts into a closed turn", expect={"m-l05": self.cap_of(SID_WEB, "m-l05")},
+                  scan={"partial": 1, "reset": 0})
 
         # a rewind cut and its release; a past-prompt edit
         self.backend.cut[SID_WEB] = "w-a08"            # the cut world ends at turn 8 (and leaves out the late record)
-        self.step("a rewind cut armed at an old reply", expect={"m-p13": None, "m-p01": "web: rebuilt the index, told api"})
+        self.step("a rewind cut armed at an old reply", expect={"m-p13": None, "m-p01": "web: rebuilt the index, told api"},
+                  scan={"partial": 1, "reset": 0})
         self.backend.cut[SID_WEB] = ""
-        self.step("the cut released", expect={"m-p13": "web: paged by cursor"})
+        self.step("the cut released", expect={"m-p13": "web: paged by cursor"}, scan={"partial": 1, "reset": 0})
         t = self.tick(300)
         self.append(SID_WEB, [user(t, "w-v03", "w-a03", "edit: page by offset instead"), reply(t + 20, "w-v03a", "w-v03", "Paging by offset.")])
-        self.step("a past prompt edited: a new branch from turn 3", expect={"m-p13": None, "m-p01": "web: rebuilt the index, told api"})
+        self.step("a past prompt edited: a new branch from turn 3", expect={"m-p13": None, "m-p01": "web: rebuilt the index, told api"},
+                  scan={"partial": 1, "reset": 0})
 
         # a resume into a new file, then a /clear
         res = str(self.proj / (RESUME_FILE + ".jsonl"))
@@ -681,7 +706,8 @@ class BuildRoad(RoadWorld):
         self.leaf[SID_WEB], self.recs[SID_WEB] = res, []
         self.caption_segments(SID_WEB)
         self.step("a resume into a new file", whole=True, lane="whole", expect={"m-r01": self.cap_of(SID_WEB, "m-r01"),
-                                                                 "m-p01": "web: rebuilt the index, told api"})
+                                                                 "m-p01": "web: rebuilt the index, told api"},
+                  scan={"partial": 0, "reset": 1})
         clr = str(self.proj / (CLEAR_FILE + ".jsonl"))
         t = self.tick(300)
         with open(clr, "w") as f:
@@ -692,7 +718,8 @@ class BuildRoad(RoadWorld):
         self.stamp(clr)
         self.leaf[SID_WEB], self.recs[SID_WEB] = clr, []
         self.caption_segments(SID_WEB)
-        self.step("a /clear", whole=True, lane="whole", expect={"m-f01": self.cap_of(SID_WEB, "m-f01"), "m-p01": None, "m-r01": None})
+        self.step("a /clear", whole=True, lane="whole", expect={"m-f01": self.cap_of(SID_WEB, "m-f01"), "m-p01": None, "m-r01": None},
+                  scan={"partial": 0, "reset": 1})
 
     def test_after_every_step_the_warm_map_equals_a_cold_one(self):
         self.mode = "equal"

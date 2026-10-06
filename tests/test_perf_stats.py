@@ -139,6 +139,7 @@ class Collector(unittest.TestCase):
                                               "notices",   # the notice files' parsed rows (T370, plans/notice-cards.md): bytes against their bound
                                               "msgScan"})   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
         self.assertEqual(set(snap["memos"]["msgScan"]), {"scans", "heldTurns", "walkedTurns", "partial", "reset", "raised", "evict",
+                                                       "faulted", "overBound",   # every faulted scan; an entry over the bound by itself (2026-10-06)
                                                        "entries", "bytes", "bound"},
                          "the message-caption scan's hold: its counters, occupancy and bytes against its bound")
         self.assertEqual(snap["memos"]["msgScan"]["bound"], km.MSG_SCAN_HELD_BYTES)
