@@ -2787,15 +2787,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `closedMs` and `closedCpuMs` (the runs it called closed with nothing to
   show for them: the saving), `tickMs` and `tickCpuMs` (the gate's own
   observation, never inside a job's `cpuByJob`. The observation makes a few
-  reads before the job they serve: the pass's sessions at the first job's
-  turn (the listing at first sight's, the alive ones at the lift's), the
-  nudge ledger and the working notes when their caches miss, and at the
+  reads before the job they serve: the pass's sessions at the first two
+  jobs' turns (the listing at first sight's, the alive ones at the lift's),
+  the nudge ledger and the working notes when their caches miss, and at the
   settle write's turn each listed session's settle evidence and, once its
   period has passed or is a second from passing, its leaf's stat. That cost
-  moves out of those jobs'
-  `cpuByJob` and their `jobs.<job>` stage walls into these two,
-  `liftSpentAwaiting` dropping most; it changes what is measured, not what
-  the jobs do), `gateFaults`
+  moves out of those jobs' `cpuByJob` and their `jobs.<job>` stage walls
+  into these two, `checkpointFirstSight` losing the listing's sweep; the
+  gate and the write each pay for the stats the write takes again (each
+  session's settle evidence, a leaf near its period); it changes what is
+  measured, not what the jobs do), `gateFaults`
   (a fault of the gate's own, or a turn that found another observed run
   still open, which leaves that run unobserved and no record, so the job's next pass is owed, or a fault in the pass's close;
   stderr names each job and exception type once), `marks`
