@@ -307,8 +307,8 @@ OFF_FEED = (
     "_session_row",                # the /sessions row and the fork, comment and rewind handlers: cwd, name
     "_settle_event_key",           # the nudge and compaction ticks: lastStopAt
     "_thread_events",              # comment threads: forkOf
+    "_thread_exchange",            # comment threads (the frame's projection and the relay): forkOf
     "_thread_mail_off",            # the mail-off gate: threadOf
-    "_thread_messages",            # comment threads: forkOf
     "_thread_names",               # name claims and the sid resolve: name
     "_thread_owes_first_reply",    # comment threads: forkOf
     "_thread_transcript_path",     # comment threads' transcript resolve (a `reg` parameter): cwd, lastSid

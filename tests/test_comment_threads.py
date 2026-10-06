@@ -2860,13 +2860,14 @@ class CommentOps(CommentBase):
         # resolved -> relay -> reply must not become the reopen door the direct reply refuses
         _, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
         km._comment_resolve(PARENT, tid)
-        saved = km._thread_messages
-        km._thread_messages = lambda tsid, cut, floor_t=0: [{"who": "user", "text": "the ask", "t": 5},
-                                                             {"who": "assistant", "text": "the answer", "t": 6}]
+        saved = km._thread_exchange
+        msgs = [{"who": "user", "text": "the ask", "t": 5}, {"who": "assistant", "text": "the answer", "t": 6}]
+        km._thread_exchange = lambda tsid, cut, floor_t=0: {"msgs": msgs, "capped": msgs, "sent": "", "gap": "",
+                                                            "oldestT": 5}
         try:
             self.assertIsNone(km._comment_merge(PARENT, tid))
         finally:
-            km._thread_messages = saved
+            km._thread_exchange = saved
         self.assertEqual(km._comment_thread(PARENT, tid)["status"], "resolved", "sent back, still closed")
         err = km._comment_reply(PARENT, tid, "one more")
         self.assertTrue(err and "closed" in err, err)
@@ -3422,6 +3423,316 @@ class ForkCommentRoutes(CommentBase):
         self.assertIn('if u.path in ("/fork-comment", "/fork-promote"):', src)
         self.assertIn('res = (_fork_comment_request(b) if u.path == "/fork-comment"', src)
         self.assertIn('return self._send(res.pop("_status", 200), json.dumps(res), "application/json")', src)
+
+
+
+# ── the relay hands over the WHOLE discussion (2026-10-05) ────────────────────────────────────────────────────────────
+MISSING = "99999999-8888-7777-6666-555555555555"   # a uuid no record of the transcript carries
+
+
+class RelayWholeDiscussion(CommentBase):
+    """A thread's relay sends the whole discussion from the cut on. It used to walk the thread's records by parentUuid
+    alone, so a context compaction (whose boundary record has no parentUuid, the leaf before it in logicalParentUuid)
+    ended the walk and a relay after one carried only the exchange since it, with no word that anything was missing
+    (the user 2026-10-05: a thirteen-message discussion relayed as its last two). The same projection capped every
+    message at 4000 characters and kept the newest 40, and left out what the person sent while the agent was working;
+    the relay inherited all of it. The 48,000-character backstop cut from the front, the opening question first.
+    SYNTHETIC: a notes-api thread cut at the agent's answer a1."""
+
+    def setUp(self):
+        super().setUp()
+        (Path(self._td) / "session-hosts").write_text("off")   # a minted state root starts no session host
+        self.t0 = self.now - 3000
+        self.be = FakeBackend()
+        saved = (km.Sessions.__dict__["backend_for"], km._push_soon)
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+        km._push_soon = lambda: None
+
+        def restore():
+            km.Sessions.backend_for, km._push_soon = saved
+        self.addCleanup(restore)
+
+    def _copied(self):
+        t = self.t0
+        return [uline(t, "How should the notes-api sync loop back off?", "u1"),
+                aline(t + 5, "Use exponential backoff with ten percent jitter.", "a1", parent="u1")]
+
+    def _before(self):
+        """The thread's exchange before its compaction: the opener and the agent's answer, a follow-up answered
+        through a tool call."""
+        t = self.t0
+        return [uline(t + 100, km._comment_first_message("exponential backoff", "Why jitter at all?"), "cu1",
+                      parent="a1"),
+                aline(t + 110, "Jitter keeps the clients from retrying in lockstep.", "ca1", parent="cu1"),
+                uline(t + 200, "Would five percent be enough?", "cu2", parent="ca1"),
+                tline(t + 205, "ct2", "cu2"),
+                tool_result_line(t + 206, "cr2", "ct2", "ct2"),
+                aline(t + 210, "Five percent is enough at this scale.", "ca2", parent="cr2")]
+
+    def _after(self, link="ca2", **boundary_fields):
+        """The compaction as the CLI writes it (the summary stamped a second BEFORE its boundary, as it often is), then
+        the exchange after it."""
+        t = self.t0
+        b = cli_boundary(t + 300, "cb1", link)
+        b.update(boundary_fields)
+        return [b, summary_line(t + 299, "cs1", "cb1"),
+                uline(t + 400, "Then write it into the README.", "cu3", parent="cs1"),
+                aline(t + 410, "Done: the README documents five percent jitter.", "ca3", parent="cu3")]
+
+    WHOLE = ["Me: Why jitter at all?", "Them: Jitter keeps the clients from retrying in lockstep.",
+             "Me: Would five percent be enough?", "Them: Five percent is enough at this scale.",
+             "Me: Then write it into the README.", "Them: Done: the README documents five percent jitter."]
+
+    def _seed(self, records, cut="a1", status="open", relayed=0):
+        self._write(THREAD, records)
+        (jd.SDKDIR / (THREAD + ".json")).write_text(json.dumps(
+            {"sid": THREAD, "name": "thread-x", "cwd": self.cdir, "lastSid": THREAD, "alive": True,
+             "threadOf": PARENT}))
+        row = {"tid": THREAD, "sid": THREAD, "anchorUuid": "a1", "cutUuid": cut, "exact": "exponential backoff",
+               "status": status, "createdT": self.t0 + 90, "lastSeenT": self.now}
+        if relayed:
+            row["relayedT"] = relayed
+        km._save_comments(PARENT, {"threads": [row]})
+        km._thread_msgs_cache.clear(); km._built_thread.clear(); km._comments_memo.clear()
+        forget_parses()
+
+    def _relay(self, notes=None):
+        """(error, the body the parent received or None) for one relay of the seeded thread; `notes`, a list, receives
+        what the person is told beside the result."""
+        del self.be.sent[:]
+        km._thread_msgs_cache.clear()
+        err = km._comment_merge(PARENT, THREAD) if notes is None else km._comment_merge(PARENT, THREAD, notes=notes)
+        sent = [text for sid, text in self.be.sent if sid == PARENT]
+        self.assertLessEqual(len(sent), 1)
+        return err, (sent[0] if sent else None)
+
+    def _assert_in_order(self, body, lines):
+        at = [body.find(ln) for ln in lines]
+        self.assertNotIn(-1, at, "every line reaches the relay: %r" % [ln for ln, i in zip(lines, at) if i < 0])
+        self.assertEqual(at, sorted(at), "in the order it was said")
+
+    def test_the_relay_carries_the_discussion_from_before_a_compaction(self):
+        self._seed(self._copied() + self._before() + self._after())
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self._assert_in_order(body, self.WHOLE)
+        self.assertNotIn("being continued from a previous conversation", body, "the summary is nobody's message")
+        self.assertNotIn("How should the notes-api sync loop back off?", body, "the copied history is the parent's")
+        self.assertIn("Here is how it went:", body, "nothing is missing, so nothing says so")
+        self.assertEqual(km._comment_thread(PARENT, THREAD)["relayedT"], self.t0 + 410)
+
+    def test_the_frames_messages_include_those_from_before_a_compaction(self):
+        self._seed(self._copied() + self._before() + self._after())
+        msgs = km._thread_messages(THREAD, "a1")
+        self.assertEqual([m["who"] for m in msgs], ["you", "agent"] * 3)
+        self.assertEqual(msgs[0]["text"], "Why jitter at all?")
+        self.assertEqual(msgs[3]["text"], "Five percent is enough at this scale.")
+
+    def test_the_popover_shows_the_discussion_from_before_a_compaction(self):
+        self._seed(self._copied() + self._before() + self._after())
+        st = ThreadProjection._State("")
+        km._sdk = lambda: st
+        km.Sessions.backend_for = staticmethod(lambda sid: st)
+        th = km._comments_frame(PARENT)["threads"][0]
+        users = [e.get("md") for e in th["events"] if e.get("kind") == "user"]
+        self.assertEqual(users, ["Why jitter at all?", "Would five percent be enough?", "Then write it into the README."])
+        self.assertEqual([m["text"] for m in th["msgs"] if m["who"] == "you"], users)
+
+    def test_a_second_relay_across_a_compaction_sends_only_what_is_new(self):
+        first = self._before()[:2]
+        self._seed(self._copied() + first)
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self.assertEqual(km._comment_thread(PARENT, THREAD)["relayedT"], self.t0 + 110)
+        # the person replies (the thread reopens), the discussion goes on, and the thread compacts mid-way
+        self._seed(self._copied() + self._before() + self._after(), status="open", relayed=self.t0 + 110)
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self._assert_in_order(body, self.WHOLE[2:])
+        self.assertNotIn("Why jitter at all?", body, "the first relay's part is not sent again")
+        self.assertNotIn("retrying in lockstep", body)
+        self.assertIn("Here is how it went:", body)
+        # …and with nothing past the floor, nothing goes
+        err, body = self._relay()
+        self.assertIn("already relayed", err or "")
+
+    def test_a_second_relay_says_nothing_of_a_break_wholly_before_the_first(self):
+        before = self._before()
+        before[2] = dict(before[2], parentUuid=MISSING)        # the record cu2 links to was never written
+        self._seed(self._copied() + before)
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self.assertIn(km.MERGE_GAP_LEAD, body)
+        self._seed(self._copied() + before + self._after(), status="open", relayed=self.t0 + 210)
+        notes = []
+        err, body = self._relay(notes)
+        self.assertIsNone(err)
+        self._assert_in_order(body, self.WHOLE[4:])
+        self.assertNotIn(km.MERGE_GAP_LEAD, body, "the unreadable part was before the first relay's floor")
+        self.assertEqual(notes, [])
+
+    def test_the_first_message_survives_the_length_cap(self):
+        t = self.t0
+        recs = self._copied() + self._before()[:2]
+        prev = "ca1"
+        for i in range(30):
+            recs.append(uline(t + 300 + 20 * i, "And case %d?" % i, "cq%d" % i, parent=prev))
+            recs.append(aline(t + 305 + 20 * i, ("Case %d: " % i) + "the backoff holds. " * 130, "cr%d" % i,
+                              parent="cq%d" % i))
+            prev = "cr%d" % i
+        self._seed(recs)
+        notes = []
+        err, body = self._relay(notes)
+        self.assertIsNone(err)
+        self.assertEqual(len(notes), 1, "the person is told the relay was cut")
+        self.assertIn("part of the middle cut", notes[0])
+        self.assertIn("Me: Why jitter at all?", body, "the question the discussion is about always goes")
+        self.assertIn(km.MERGE_TRIM_NOTE, body, "the cut says where it is")
+        self.assertIn("Them: Case 29: " + "the backoff holds. " * 129 + "the backoff holds.", body,
+                      "the newest reply goes whole")
+        self.assertLess(body.index("Me: Why jitter at all?"), body.index(km.MERGE_TRIM_NOTE))
+        self.assertLess(body.index(km.MERGE_TRIM_NOTE), body.index("Case 29: "))
+        self.assertNotIn("Case 0: ", body, "the middle is what is cut")
+        self.assertLess(len(body), km.MERGE_BODY_CAP + 2000)
+
+    def test_a_long_reply_reaches_the_relay_whole(self):
+        long = "The retry budget explained: " + "each attempt waits longer. " * 250
+        self.assertGreater(len(long), 6000)
+        recs = self._copied() + self._before()[:1] + [aline(self.t0 + 110, long, "ca1", parent="cu1")]
+        self._seed(recs)
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self.assertIn("Them: " + long.strip(), body)
+        # the frame's copy stays capped: it rides every push
+        self.assertEqual(len(km._thread_messages(THREAD, "a1")[1]["text"]), km._THREAD_MSG_CAP)
+
+    def test_a_message_sent_while_the_agent_worked_reaches_the_relay(self):
+        t = self.t0
+        recs = self._copied() + self._before()[:2] + [
+            tline(t + 115, "ct1", "ca1"),
+            tool_result_line(t + 120, "cr1", "ct1", "ct1"),
+            attline(t + 118, CORRECTION, "cq1", "cr1"),
+            aline(t + 125, "Understood: under five percent.", "ca9", parent="cq1")]
+        self._seed(recs)
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self._assert_in_order(body, ["Me: Why jitter at all?", "Them: Jitter keeps the clients",
+                                     "Me: " + CORRECTION, "Them: Understood: under five percent."])
+
+    def test_a_task_notification_spliced_mid_turn_is_not_the_persons(self):
+        t = self.t0
+        recs = self._copied() + self._before()[:2] + [
+            tline(t + 115, "ct1", "ca1"),
+            tool_result_line(t + 120, "cr1", "ct1", "ct1"),
+            attline(t + 118, "<task-notification>the build finished</task-notification>", "cq1", "cr1",
+                    commandMode="task-notification"),
+            aline(t + 125, "The build is green.", "ca9", parent="cq1")]
+        self._seed(recs)
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self.assertNotIn("the build finished", body)
+        self.assertIn("The build is green.", body)
+
+    def test_a_prompt_restored_after_the_compaction_is_sent_once(self):
+        t = self.t0
+        after = self._after()
+        replay = uline(t + 301, "Would five percent be enough?", "cy1", parent="cs1")   # a CLI restoring its recent tail
+        after[2] = dict(after[2], parentUuid="cy1")
+        self._seed(self._copied() + self._before() + after[:2] + [replay] + after[2:])
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self.assertEqual(body.count("Me: Would five percent be enough?"), 1)
+        self._assert_in_order(body, self.WHOLE)
+
+    def test_a_compaction_link_to_a_record_never_written_is_repaired_from_its_preserved_segment(self):
+        self._seed(self._copied() + self._before()
+                   + self._after(link=MISSING, compactMetadata={"preservedSegment": {"tailUuid": "ca2"}}))
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self._assert_in_order(body, self.WHOLE)
+        self.assertIn("Here is how it went:", body)
+
+    def test_a_break_in_the_record_is_said_in_the_relay_and_to_the_person(self):
+        for name, recs in (
+                ("a record links to one never written",
+                 self._copied() + self._before()[:2] + [dict(self._before()[2], parentUuid=MISSING)]
+                 + self._before()[3:] + self._after()),
+                ("a compaction links to a record never written",
+                 self._copied() + self._before() + self._after(link=MISSING))):
+            with self.subTest(name):
+                self._seed(recs)
+                notes = []
+                err, body = self._relay(notes)
+                self.assertIsNone(err)
+                self.assertIn(km.MERGE_GAP_LEAD, body, "the relay says its beginning is missing")
+                self.assertNotIn("Here is how it went:", body)
+                self.assertNotIn("Why jitter at all?", body, "premise: the opener is past the break")
+                self.assertIn("Me: Then write it into the README.", body, "what could be read still goes")
+                self.assertEqual(len(notes), 1, "the person is told too")
+                self.assertIn("without the start of the discussion", notes[0])
+                self.assertIn("breaks off before its first message", notes[0])
+                km._comment_update(PARENT, THREAD, status="open")
+
+    def test_a_thread_resumed_into_a_new_file_relays_from_both(self):
+        # a resume that forked the transcript: the new file opens on a fresh head (no link back), and the backend's
+        # resumeFork row in the thread's states log is the record of which file it continues
+        resumed = "66666666-7777-8888-9999-bbbbbbbbbbbb"
+        self._seed(self._copied() + self._before())
+        t = self.t0
+        self._write(resumed, [uline(t + 400, "Then write it into the README.", "cu3"),
+                              aline(t + 410, "Done: the README documents five percent jitter.", "ca3", parent="cu3")])
+        (jd.SDKDIR / (THREAD + ".json")).write_text(json.dumps(
+            {"sid": THREAD, "name": "thread-x", "cwd": self.cdir, "lastSid": resumed, "alive": True,
+             "threadOf": PARENT}))
+        jd.STATESDIR.mkdir(parents=True, exist_ok=True)
+        (jd.STATESDIR / (THREAD + ".jsonl")).write_text(json.dumps(
+            {"t": t + 390, "resumeFork": {"from": THREAD, "to": resumed}}) + "\n")
+        forget_parses()
+        err, body = self._relay()
+        self.assertIsNone(err)
+        self._assert_in_order(body, self.WHOLE)
+        self.assertIn("Here is how it went:", body)
+
+    def test_a_thread_whose_start_is_not_in_its_transcript_is_refused_loudly(self):
+        self._seed(self._before()[1:] + self._after())                # no cut record a1 (and no opener)
+        err, body = self._relay()
+        self.assertIn("could not be read", err or "")
+        self.assertIn("nothing was sent", err or "")
+        self.assertIsNone(body)
+        self.assertEqual(km._comment_thread(PARENT, THREAD)["status"], "open", "the latch is released")
+
+    def test_a_thread_whose_transcript_is_gone_is_refused_loudly(self):
+        self._seed(self._copied() + self._before())
+        (self.proj / (THREAD + ".jsonl")).unlink()
+        err, body = self._relay()
+        self.assertIn("transcript can't be read", err or "")
+        self.assertIsNone(body)
+
+    def test_the_socket_handler_shows_the_person_what_the_relay_left_out(self):
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertIn('err = _comment_merge(sid, str(msg["tid"]), notes=notes)', src)
+        self.assertIn('for text in ([err] if err else notes):', src)
+
+    def test_the_length_cap_cuts_the_middle_and_keeps_the_first_line(self):
+        first = {"who": "you", "text": "Why jitter at all?"}
+        mid = [{"who": "agent", "text": "x" * 20000}, {"who": "you", "text": "and then?"},
+               {"who": "agent", "text": "y" * 20000}]
+        last = {"who": "agent", "text": "z" * 10000}
+        body = km._merge_body("q", [first] + mid + [last])
+        self.assertIn("Me: Why jitter at all?\n\n" + km.MERGE_TRIM_NOTE, body)
+        self.assertIn("Them: " + "z" * 10000, body)
+        self.assertNotIn("x" * 100, body)
+        # a newest reply too long to fit whole keeps its end
+        body = km._merge_body("q", [first, {"who": "agent", "text": "w" * 30000 + "the end"},
+                                    {"who": "agent", "text": "v" * 60000 + "the very end"}])
+        self.assertIn("Me: Why jitter at all?", body)
+        self.assertIn(km.MERGE_TRIM_NOTE + "\n\nThem: …", body)
+        self.assertTrue(body.split("<!--")[0].rstrip().endswith("account for it in everything you do on this from here "
+                                                                "on."))
+        self.assertIn("the very end", body)
+        self.assertLess(len(body), km.MERGE_BODY_CAP + 1000)
+        # under the cap nothing is cut
+        self.assertNotIn(km.MERGE_TRIM_NOTE, km._merge_body("q", [first] + mid[:2]))
 
 
 if __name__ == "__main__":
