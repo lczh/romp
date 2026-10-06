@@ -24,7 +24,8 @@ identity (the mapping _captions holds is always a _CaptionRows, so a plain dict 
 the type check as its early exit.
 
 The old pairs and the marks' old caller are copied below as the REFERENCE (1a5906d35, verbatim but for the module
-prefix and the comments), and both classes compare against it:
+prefix, the comments and the marks' over-bound count, which follows the kernel's later overBound key), and both classes
+compare against it:
   Road        one road of captions states: no file, rows the fold skips, appended rows (new ids, a drifted id, a '#p'
               row, an overwrite), the file rewritten, the reader's entry evicted, the memo swept, the file read back, a
               version replaced on another thread, the file rewritten on another thread, the file removed and back. At
@@ -75,7 +76,7 @@ SID2 = "11111111-2222-3333-4444-0000000cb1d2"
 T = 1_781_000_000
 
 
-# ── the REFERENCE: 1a5906d35's two pairs and the marks' caller, verbatim but for the module prefix ──────────────────
+# ── the REFERENCE: 1a5906d35's two pairs and the marks' caller, verbatim but for the module prefix and overBound ────
 def ref_lane_version(fsid, caps):
     """_caption_rows_version as the lane prefix had it."""
     if not caps:
