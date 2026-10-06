@@ -1316,6 +1316,9 @@ class RequestOnRecord(unittest.TestCase):
                      "trigger": "restart-all"})
         self.assertEqual(self._reason(), "kernel-asks-manager-restart-all: self-update",
                          "a cut row written after this kernel started is a sibling's, alive or not")
+        with mock.patch.object(km, "_STARTED", 900.0):
+            self.assertEqual(km._recent_restart_reason(window=90, now=1002), "kernel-asks-manager-restart-all: self-update",
+                             "the handler passes no start: the bound is this process's own (_STARTED)")
         km.RESTART_CUTS_FILE.write_text(json.dumps({"pid": gone.pid, "cutTurns": [], "auditT": 1000,
                                                     "expectsDone": True}) + "\n")
         self.assertEqual(self._reason(), "manager-sigterm: restart-all",
