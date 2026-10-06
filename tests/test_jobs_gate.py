@@ -1721,16 +1721,17 @@ class TheLookScope(_GateLab):
         self.assertEqual(self.last()["autoNudge"], "open:regs", "the row moved after the gate looked: the next pass opens on it")
 
     def test_a_ledger_write_inside_the_looks_key_is_a_race_whatever_it_names(self):
-        """The ten-file key carries the nudge ledger's stat whole: a write for web that lands after the gate looked and before
-        api's look takes a fresh key moves api's key there, and that memo counts the ledger whole (a memo noted with no key, as a
-        stub notes it, reads web's record as web's: SharedParts)."""
+        """The ten-file key carries the nudge ledger's stat whole: a record for a session outside api's scope (neither api nor
+        web, its keyed asker) that lands after the gate looked and before api's look takes a fresh key moves api's key there,
+        and that memo counts the ledger whole (a memo noted with no key, as a stub notes it, reads another session's record as
+        that session's: SharedParts)."""
         km = self.km
         self.ledger(enabled=True, nudged={})
         self.quiet()
         self.assertEqual(self.last()["autoNudge"], "closed")
         km._FILES_STAT_STANDING[(SID, self.sessions[0]["path"])][1] -= km.NUDGE_FLOOR_S + 1   # api's next view is a fresh stat
         w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
-        self.armed[0] = lambda: self.ledger(enabled=True, nudged={SID2 + ":g1": {"count": 1, "lastTurnId": "t1"}})
+        self.armed[0] = lambda: self.ledger(enabled=True, nudged={GONE + ":g1": {"count": 1, "lastTurnId": "t1"}})
         self.passes()
         self.assertIsNone(self.armed[0])
         self.assertEqual(self.last()["autoNudge"], "closed")
