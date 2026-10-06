@@ -3116,7 +3116,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   record itself, and `seedEpisode` for a pair of those three shapes when
   no such record is on hand but the entry was restored from a document
   that lists the id: a document's gates carry `compact_pids`, the prompt
-  ids that a user record before its cut naming /compact wears, and a
+  ids that a user record before its cut, not a compaction summary, naming
+  /compact wears, and a
   document written before that field (an optional one, so the document's
   version is unchanged) is read by its prompt ids, every id its writer had
   read, the open turn's included, which only refuses more. Otherwise
