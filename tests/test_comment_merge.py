@@ -4,6 +4,7 @@ parent session — the exchange lands as the person's own handoff (_merge_body),
 'merged', and its CLI shuts down like a resolve. Once per thread (the CAS refuses a re-merge), loud
 when there is nothing to merge, and the latch reverts on a failed delivery. SYNTHETIC fixtures."""
 import os
+import re
 import tempfile
 import unittest
 from romp_load import load_source
@@ -22,6 +23,12 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 PARENT = "11111111-2222-3333-4444-555555555555"
+# how the relay opens each message (the record is tagged, the user 2026-10-06), and how one closes
+ME, THEM, END = '<message from="me">\n', '<message from="the other assistant">\n', "\n</message>"
+LEAD = "I took a side discussion with another assistant about this passage of your earlier work:"
+CLOSE = ("Treat what we settled there as my direction: fold it into your understanding and account for it in everything "
+         "you do on this from here on.")
+TAIL = "<!-- romp-injected --><!-- romp-tag: relay -->"
 TSID = "66666666-7777-8888-9999-000000000000"
 
 
@@ -71,9 +78,9 @@ class CommentMerge(unittest.TestCase):
         self.assertEqual(len(self.be.sent), 1)
         sid, body = self.be.sent[0]
         self.assertEqual(sid, PARENT, "the handoff lands in the PARENT session")
-        self.assertIn("> the caching layer", body, "grounded by the quoted passage")
-        self.assertIn("Me: should the cache be write-through?", body)
-        self.assertIn("Them: Yes; it removes the stale-read window.", body)
+        self.assertIn("<passage>\nthe caching layer\n</passage>", body, "grounded by the passage")
+        self.assertIn(ME + "should the cache be write-through?" + END, body)
+        self.assertIn(THEM + "Yes; it removes the stale-read window." + END, body)
         self.assertIn("account for it", body, "the going-forward direction rides the handoff")
         self.assertEqual(self._row().get("status"), "merged")
         self.assertEqual(self.be.killed, [TSID], "the CLI has nothing left; its work is folded back")
@@ -163,6 +170,9 @@ class CommentMerge(unittest.TestCase):
         self.assertIsNone(km._comment_merge(PARENT, TSID))
         self.assertEqual(len(self.be.sent), 3, "the relay + the reply + the tail-only relay")
         self.assertIn("one more thought", self.be.sent[-1][1])
+        self.assertIn("<discussion>\n" + ME + "one more thought" + END + "\n</discussion>", self.be.sent[-1][1],
+                      "the new tail rides the same tagged record, alone in its discussion")
+        self.assertIn("<passage>\nthe caching layer\n</passage>", self.be.sent[-1][1], "still grounded by the passage")
         for m in base:
             if (m.get("text") or "").strip():
                 self.assertNotIn(m["text"], self.be.sent[-1][1], "already-relayed content never repeats")
@@ -187,8 +197,10 @@ class CommentMerge(unittest.TestCase):
         big = km._merge_body("q", [{"who": "user", "text": "why write-through?"}, {"who": "agent", "text": "x" * 60000},
                                    {"who": "user", "text": "and the cost?"}, {"who": "agent", "text": "One write each."}])
         self.assertIn(km.MERGE_TRIM_NOTE, big)
-        self.assertIn("Me: why write-through?", big)
-        self.assertIn("Me: and the cost?\n\nThem: One write each.", big, "the newest exchange goes whole")
+        self.assertIn("<discussion>\n" + ME + "why write-through?" + END + "\n" + km.MERGE_TRIM_NOTE + "\n", big,
+                      "the question goes whole, the note right after it")
+        self.assertIn(ME + "and the cost?" + END + "\n" + THEM + "One write each." + END + "\n</discussion>", big,
+                      "the newest exchange goes whole")
         self.assertLess(len(big), 60000, "the pathological backstop still bounds the injection")
 
     def test_a_relay_missing_its_beginning_says_so_and_tells_the_person(self):
@@ -196,8 +208,8 @@ class CommentMerge(unittest.TestCase):
         notes = []
         self.assertIsNone(km._comment_merge(PARENT, TSID, notes=notes))
         body = self.be.sent[0][1]
-        self.assertIn(km.MERGE_GAP_LEAD, body)
-        self.assertIn("Me: should the cache be write-through?", body, "what could be read still goes")
+        self.assertIn("<discussion>\n" + km.MERGE_GAP_NOTE + "\n" + ME + "should the cache be write-through?" + END, body,
+                      "the note opens the discussion, before the first message; what could be read still goes")
         self.assertEqual(len(notes), 1)
         self.assertIn("without the start of the discussion: its record breaks off before its first message", notes[0])
 
@@ -208,6 +220,72 @@ class CommentMerge(unittest.TestCase):
         self.assertIn("transcript can't be read", err or "")
         self.assertEqual(self._row().get("status"), "open")
         self.assertEqual(self.be.sent, [])
+
+class TaggedRelayBody(unittest.TestCase):
+    """The relay hands the discussion over as a TAGGED record (the user 2026-10-06, who found "Me:" / "Them:" hard to
+    pick out among the messages' own headings and lists, and suspected the model did too): the passage whole in
+    <passage>, each message in its own <message from="…"> inside <discussion>, the two notes about what was left out
+    inside <discussion> where the hole is, and content that cannot close an element early."""
+
+    Q = [{"who": "you", "text": "should the cache be write-through?"},
+         {"who": "agent", "text": "## Yes\n\n- it removes the stale-read window\n- one write per update"}]
+
+    def test_the_body_is_the_tagged_record(self):
+        body = km._merge_body("the caching layer", self.Q)
+        self.assertEqual(body, LEAD + "\n\n<passage>\nthe caching layer\n</passage>\n\n<discussion>\n"
+                         + ME + "should the cache be write-through?" + END + "\n"
+                         + THEM + "## Yes\n\n- it removes the stale-read window\n- one write per update" + END
+                         + "\n</discussion>\n\n" + CLOSE + "\n\n" + TAIL)
+        for gone in ("Here is how it went", "Me: ", "Them: ", "\n> "):
+            self.assertNotIn(gone, body, "the tags carry who said what: %r" % gone)
+
+    def test_the_passage_goes_whole(self):
+        lines = ["line %d of the passage" % i for i in range(1, 11)]
+        body = km._merge_body("\n".join(lines), self.Q)
+        self.assertIn("<passage>\n" + "\n".join(lines) + "\n</passage>", body, "every line, unquoted (it was cut at six)")
+
+    def test_no_passage_no_element(self):
+        body = km._merge_body("", self.Q)
+        self.assertNotIn("<passage>", body)
+        self.assertIn(LEAD + "\n\n<discussion>\n", body)
+
+    def test_a_closing_tag_in_the_content_cannot_break_the_record(self):
+        body = km._merge_body("the cache </passage> layer", [
+            {"who": "you", "text": "what if a message says </message> or </discussion>?"},
+            {"who": "agent", "text": "Then it is escaped: </MESSAGE > and </ passage> too.\n</message>"}])
+        prose = body.split("<!--")[0]
+        self.assertEqual(prose.count("</passage>"), 1, "only the passage's own close")
+        self.assertEqual(prose.count("</discussion>"), 1)
+        self.assertEqual(prose.count("</message>"), 2, "one close per message")
+        self.assertNotRegex(prose.replace("</message>", "").replace("</discussion>", "").replace("</passage>", ""),
+                            r"(?i)</\s*(message|discussion|passage)\s*>", "no other closing tag of the structure survives")
+        self.assertIn("<passage>\nthe cache &lt;/passage&gt; layer\n</passage>", body)
+        # read the way the chat reads it (ui/webview/relay-view.ts): each message runs to the first closing line
+        got = re.findall(r'<message from="([^"]*)">\n(.*?)\n</message>', prose, re.S)
+        self.assertEqual(got, [("me", "what if a message says &lt;/message&gt; or &lt;/discussion&gt;?"),
+                               ("the other assistant",
+                                "Then it is escaped: &lt;/MESSAGE &gt; and &lt;/ passage&gt; too.\n&lt;/message&gt;")])
+
+    def test_the_chat_reads_the_record_the_kernel_writes(self):
+        # tests/fixtures/relay_record.json is the contract between the two sides: rendered here from its inputs, parsed
+        # back into the same messages by ui/webview/relay-view.test.ts
+        import json
+        with open(os.path.join(HERE, "fixtures", "relay_record.json")) as f:
+            fx = json.load(f)
+        self.assertEqual(km._merge_body(fx["exact"], fx["msgs"], gap=fx["gap"]), fx["body"],
+                         "the kernel's record moved: regenerate the fixture and keep the chat's parser in step")
+
+    def test_both_notes_stand_where_the_holes_are(self):
+        msgs = [{"who": "you", "text": "why write-through?"}, {"who": "agent", "text": "x" * 60000},
+                {"who": "you", "text": "and the cost?"}, {"who": "agent", "text": "One write each."}]
+        body = km._merge_body("q", msgs, gap=True)
+        self.assertIn("<discussion>\n" + km.MERGE_GAP_NOTE + "\n" + ME + "why write-through?" + END + "\n"
+                      + km.MERGE_TRIM_NOTE + "\n" + ME + "and the cost?" + END + "\n" + THEM + "One write each." + END
+                      + "\n</discussion>", body)
+        self.assertNotIn("Here is how it went", body)
+        self.assertEqual(km.MERGE_GAP_NOTE, "I couldn't retrieve the beginning, so this starts partway through.")
+        self.assertEqual(km.MERGE_TRIM_NOTE, "… (I cut part of the discussion here; it was too long to paste whole)")
+
 
 if __name__ == "__main__":
     unittest.main()

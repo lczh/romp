@@ -21244,35 +21244,53 @@ MERGE_BODY_CAP = 48000  # the relay sends the WHOLE exchange (T145, the user 202
 #                           trim note still says so honestly when it fires
 
 # What the relay says when it had to leave something out (injected-voice rules: the person handing over the record of a
-# discussion; tests/test_injected_voice.py renders both). The GAP lead replaces "Here is how it went:" when the walk could
-# not reach the start of the thread (_thread_exchange's gap); the TRIM note marks where the length cap cut the middle.
-MERGE_GAP_LEAD = "Here is how it went. I couldn't retrieve the beginning, so this starts partway through:"
+# discussion; tests/test_injected_voice.py renders both). Both sit INSIDE <discussion>, where the hole is: the GAP note
+# opens it when the walk could not reach the start of the thread (_thread_exchange's gap), the TRIM note stands between
+# the messages where the length cap cut the middle.
+MERGE_GAP_NOTE = "I couldn't retrieve the beginning, so this starts partway through."
 MERGE_TRIM_NOTE = "… (I cut part of the discussion here; it was too long to paste whole)"
+# who said each message, as the relay's <message from="…"> names them: the person, and the assistant they talked to
+MERGE_FROM_ME, MERGE_FROM_THEM = "me", "the other assistant"
+# A closing tag of the relay's own structure inside a passage or a message would end that element early, for the model
+# reading the relay and for the chat that renders it (ui/webview/relay-view.ts takes the first closing line as the end),
+# so the content carries it escaped: </message> becomes &lt;/message&gt;.
+_MERGE_CLOSE_RE = re.compile(r"</(\s*(?:message|discussion|passage)\s*)>", re.I)
 
 
-def _merge_trim(lines, cap=MERGE_BODY_CAP):
-    """`lines`, the relay's (prefix, text) lines oldest first, joined, held to about `cap` characters by cutting from the
-    MIDDLE: the first line always goes whole (on a first relay it is the person's opening message, the question the
-    whole discussion is about: the user 2026-10-05), then as many of the newest lines as fit after MERGE_TRIM_NOTE, which
-    marks the cut; when not even the newest one fits whole, its end does. Before this the cap kept the last `cap`
-    characters, and a long thread's relay lost the question first."""
-    joined = lambda ls: "\n\n".join(p + t for p, t in ls)
-    convo = joined(lines)
-    if len(convo) <= cap or len(lines) < 2:
-        return convo
-    head, rest = lines[0], lines[1:]
-    budget = cap - len(head[0] + head[1]) - len(MERGE_TRIM_NOTE) - 4
+def _merge_escape(text):
+    """`text` with every closing tag of the relay's structure escaped, so a passage or a message cannot break it."""
+    return _MERGE_CLOSE_RE.sub(lambda m: "&lt;/" + m.group(1) + "&gt;", text)
+
+
+def _merge_message(who, text):
+    return '<message from="%s">\n%s\n</message>' % (who, text)
+
+
+def _merge_trim(msgs, cap=MERGE_BODY_CAP):
+    """The relay's <discussion> lines for `msgs`, its (from, escaped text) messages oldest first, one <message> element
+    each, held to about `cap` characters by cutting from the MIDDLE: the first message always goes whole (on a first
+    relay it is the person's opening message, the question the whole discussion is about: the user 2026-10-05), then as
+    many of the newest as fit after MERGE_TRIM_NOTE, which marks the cut; when not even the newest one fits whole, its
+    end does. Before this the cap kept the last `cap` characters, and a long thread's relay lost the question first."""
+    lines = [_merge_message(w, t) for w, t in msgs]
+    if len("\n".join(lines)) <= cap or len(lines) < 2:
+        return lines
+    head, rest = lines[0], msgs[1:]
+    budget = cap - len(head) - len(MERGE_TRIM_NOTE) - 2
     kept = []
-    for p, t in reversed(rest):
-        if len(p + t) + 2 > budget:
+    for w, t in reversed(rest):
+        line = _merge_message(w, t)
+        if len(line) + 1 > budget:
             break
-        kept.append((p, t))
-        budget -= len(p + t) + 2
+        kept.append(line)
+        budget -= len(line) + 1
     kept.reverse()
-    if not kept and budget > len(rest[-1][0]) + 1:
-        p, t = rest[-1]
-        kept = [(p, "…" + t[-(budget - len(p) - 1):])]
-    return "\n\n".join([joined([head]), MERGE_TRIM_NOTE] + ([joined(kept)] if kept else []))
+    if not kept:
+        w, t = rest[-1]
+        room = budget - len(_merge_message(w, "")) - 2          # its newline and the "…"
+        if room > 0:
+            kept = [_merge_message(w, "…" + t[-room:])]
+    return [head, MERGE_TRIM_NOTE] + kept
 
 
 def _merge_body(exact, msgs, gap=False):
@@ -21285,11 +21303,16 @@ def _merge_body(exact, msgs, gap=False):
     the user's own typed bubble (their 2026-08-28 complaint). prose() in the voice test splits at
     the first marker, so the voice audit covers exactly what the agent reads.
 
+    The record is TAGGED (the user 2026-10-06, who found "Me:" / "Them:" lost among the messages' own headings and
+    lists, and suspected the model did too): the passage whole in <passage>, then <discussion> holding one
+    <message from="me"> or <message from="the other assistant"> per message, the content escaped (_merge_escape) so it
+    cannot close an element early. The chat renders the same tags as a small transcript (ui/webview/relay-view.ts).
+
     `gap`: the start of the discussion could not be read (_thread_exchange), so what follows begins partway through
-    and the body says so (MERGE_GAP_LEAD) rather than passing a fragment off as the whole. Over MERGE_BODY_CAP the
-    middle is cut, never the first message (_merge_trim)."""
-    quote = (exact or "").strip()
-    lines = []
+    and the discussion opens by saying so (MERGE_GAP_NOTE) rather than passing a fragment off as the whole. Over
+    MERGE_BODY_CAP the middle is cut, never the first message (_merge_trim)."""
+    quote = _merge_escape((exact or "").strip())
+    convo = []
     for m in msgs or []:
         t = (m.get("text") or "").strip()
         if not t:
@@ -21297,13 +21320,12 @@ def _merge_body(exact, msgs, gap=False):
         # the projection's who is "you"/"agent" ("user" accepted for older fixtures) — the first lab
         # run of this path shipped every line as "Them:", and the parent model read the incoherent
         # log as fabricated and refused it (T145 lab find)
-        lines.append(("Me: " if m.get("who") in ("you", "user") else "Them: ", t))
-    convo = _merge_trim(lines)
+        convo.append((MERGE_FROM_ME if m.get("who") in ("you", "user") else MERGE_FROM_THEM, _merge_escape(t)))
+    lines = ([MERGE_GAP_NOTE] if gap else []) + _merge_trim(convo)
     parts = ["I took a side discussion with another assistant about this passage of your earlier work:"]
     if quote:
-        parts.append("\n".join("> " + ln for ln in quote.splitlines()[:6]))
-    parts.append(MERGE_GAP_LEAD if gap else "Here is how it went:")
-    parts.append(convo)
+        parts.append("<passage>\n" + quote + "\n</passage>")
+    parts.append("<discussion>\n" + "\n".join(lines) + "\n</discussion>")
     parts.append("Treat what we settled there as my direction: fold it into your understanding and "
                  "account for it in everything you do on this from here on.")
     # romp-injected: the arrival wears the T130 machine attribution (the gray romp bubble + swirl),

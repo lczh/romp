@@ -106,6 +106,8 @@ test("the user bubble renders the user's OWN words with userMd, harness notes an
   assert.match(RENDER, /if \(!t\.romp && !isCmd\) bubble\.innerHTML = userMd\(t\.md\);/);
   assert.doesNotMatch(RENDER, /bubble\.innerHTML = md\(t\.md\);/);
   // romp-authored surfaces keep the assistant grammar: nudges, notices, the Continue gesture, tagged sends
-  assert.match(RENDER, /full\.innerHTML = md\(raw\);/, "the romp nudge fold");
+  assert.match(RENDER, /full\.innerHTML = rompFullHtml\(ev\.md, raw\);/, "the romp nudge fold");
+  assert.match(RENDER, /function rompFullHtml\(src: string, raw: string\): string \{\n  if \(!isRelay\(src\)\) return md\(raw\);/,
+               "…on the assistant grammar, and a relay's blocks through md too (relay-view.ts)");
   assert.match(RENDER, /if \(more\) body\.innerHTML = md\(text\);[^\n]*\n\s*return notice\(\{ src: "romp", glyph: "romp", sev: "romp"/, "the romp system notice (a one-liner gets no body, T243; the one builder since 2026-09-08)");
 });

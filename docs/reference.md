@@ -6722,6 +6722,26 @@ is read from the thread's record, or for a thread made before the record kept
 it, from the opening message itself, so it is there after a reload too. A thread
 whose opening message romp added nothing to shows no note.
 
+## What a relay sends
+
+Relay sends a thread's discussion back into the session as one message in your
+voice: a line saying you took a side discussion about a passage of its earlier
+work, the passage whole inside `<passage>` tags, then `<discussion>` holding each
+message in its own `<message from="me">` or `<message from="the other
+assistant">` element, then a line asking the session to treat what was settled
+as your direction. A closing tag of that structure inside the passage or a
+message is sent escaped (`&lt;/message&gt;`), so no content can end an element
+early. When the start of the discussion could not be read, its first line says
+so; when the discussion ran past 48,000 characters, a line stands where the
+middle was cut. A later relay of the same thread sends only the messages since
+the last one, in the same shape.
+
+In the chat the relay is a grey romp bubble folded to its first line. Unfolded,
+it shows the passage as a quote and each message as its own block labelled You
+or Thread, with its formatting rendered, and those two lines as dim notes. A
+relay sent before this format shows as it always did, and one whose tags do not
+parse shows its text without the tags.
+
 ## A comment on a passage from before a compaction
 
 A comment thread normally forks the session at the highlighted message, so its

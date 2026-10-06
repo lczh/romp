@@ -2473,6 +2473,18 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .romp-bubble .nudge-full { display: none; }
 .romp-bubble.expanded .nudge-full { display: block; }
 .romp-bubble.expanded .nudge-gist { display: none; }
+/* A comment-thread RELAY unfolded (relay-view.ts, the user 2026-10-06): the passage is the bubble's own quote, then the
+   discussion as a small transcript, each message a flat block under its speaker's label (You in your voice colour, the
+   Thread in the dim ink, the source-label rung), and the notes about what was left out as dim lines between them. */
+.relay-disc { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.relay-msg { padding: 5px 10px 6px; border-radius: 8px; background: var(--overlay-05); }
+.relay-msg.relay-you { background: color-mix(in srgb, var(--you) 10%, transparent); }
+.relay-who { font-size: 0.72em; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); }
+.relay-you .relay-who { color: var(--you); }
+.relay-body > :first-child, .relay-lead > :first-child, .relay-close > :first-child { margin-top: 0; }
+.relay-body > :last-child, .relay-lead > :last-child, .relay-close > :last-child { margin-bottom: 0; }
+.relay-note { color: var(--dim); font-size: 0.92em; font-style: italic; padding: 0 2px; }
+.romp-bubble .relay-passage { margin: 6px 0 0; }
 /* The Continue button's reply wears the SAME fold in the USER family (the user 2026-08-13): your
    gesture in your colour — blue, judge-filed as your reply — but not your prose, so the gist speaks
    and the canned words sit one click deeper. White-on-blue, not the dim gray of romp bookkeeping. */

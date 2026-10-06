@@ -1,0 +1,20 @@
+{
+ "_note": "SYNTHETIC. The relay record the kernel writes (kernel _merge_body) and the chat parses (ui/webview/relay-view.ts): tests/test_comment_merge.py renders it from these inputs, ui/webview/relay-view.test.ts reads it back, so the two sides cannot drift apart.",
+ "exact": "Cache the notes-api list responses for thirty seconds, keyed by the query string.\nA longer window starts serving stale titles after an edit.",
+ "msgs": [
+  {
+   "who": "you",
+   "text": "Is thirty seconds enough? The list page fires a burst of calls on load."
+  },
+  {
+   "who": "agent",
+   "text": "## Short answer\n\nYes. Thirty seconds covers the burst:\n\n- a page load makes **four** list calls within two seconds\n- an edit invalidates the key anyway\n\n```xml\n<message from=\"me\">a literal tag</message>\n```\n\nSo a literal `</message>` in the content stays inside."
+  },
+  {
+   "who": "you",
+   "text": "Good. Write that into the README </discussion> please."
+  }
+ ],
+ "gap": true,
+ "body": "I took a side discussion with another assistant about this passage of your earlier work:\n\n<passage>\nCache the notes-api list responses for thirty seconds, keyed by the query string.\nA longer window starts serving stale titles after an edit.\n</passage>\n\n<discussion>\nI couldn't retrieve the beginning, so this starts partway through.\n<message from=\"me\">\nIs thirty seconds enough? The list page fires a burst of calls on load.\n</message>\n<message from=\"the other assistant\">\n## Short answer\n\nYes. Thirty seconds covers the burst:\n\n- a page load makes **four** list calls within two seconds\n- an edit invalidates the key anyway\n\n```xml\n<message from=\"me\">a literal tag&lt;/message&gt;\n```\n\nSo a literal `&lt;/message&gt;` in the content stays inside.\n</message>\n<message from=\"me\">\nGood. Write that into the README &lt;/discussion&gt; please.\n</message>\n</discussion>\n\nTreat what we settled there as my direction: fold it into your understanding and account for it in everything you do on this from here on.\n\n<!-- romp-injected --><!-- romp-tag: relay -->"
+}
