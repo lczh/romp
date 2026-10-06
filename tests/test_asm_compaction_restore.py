@@ -37,6 +37,12 @@ parse does not build), and a turn compacted twice still demotes on the seed afte
 The re-seat steps aside for such a delta that passed on a parallel batch's link, so the kept check rules: a result of a
 parallel call an automatic compaction was anchored on parses whole, on an entry marked for its re-seat and on one without
 the mark, and a turn's later compaction alone in its append restores, its own summary marking nothing (round two).
+And when the turn's later records hang on an api_error spur off its opener, so the pair is off the path, they still fold onto
+the restored entry: no record wearing the id names /compact, so adoption has no episode to splice the pair behind (2026-10-05).
+They fold too on an entry restored from a document written in the middle of the turn, whose prompt ids hold the turn's id: the
+restored entry reads the document's compact_pids, the ids that a record before its cut naming /compact wears, and refuses
+under `seedEpisode` only when one does, or when the document was written before that field and lists the id among its prompt
+ids (the gate review of the same day).
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
 import json
 import os
@@ -61,12 +67,15 @@ from test_asm_checkpoint import em, G, SID, NOW, Harness, _strip, _doc, _write_d
 WORDS = ("search", "index", "notes", "query", "ranking", "cursor", "page", "cache", "schema", "migration", "endpoint", "fixture")
 
 
-def episode(t0, turns=240, compact_every=80, skill_at=None, orphan_at=None, wrapper_at=None):
+def episode(t0, turns=240, compact_every=80, skill_at=None, orphan_at=None, wrapper_at=None, compact_branch_at=None):
     """A long synthetic session: `turns` prompt-and-reply turns, with an auto compaction (the boundary anchored on the last
     record, its summary the next prompt's parent) every `compact_every` turns. `skill_at` chains a skill payload (a meta user
     record naming the Skill call `tu_skill_<k>` by sourceToolUseID) after turn k; `orphan_at` adds, after turn k, a prompt and
     reply off the chain whose parent `ghost-<k>` no record holds; `wrapper_at` chains, after turn k, a local command's wrapper
-    record wearing the prompt id `pp_usage_<k>`. None of them draws from the random stream."""
+    record wearing the prompt id `pp_usage_<k>`; `compact_branch_at` = (k, pid) adds, after turn k, a manual /compact's
+    wrapper and stdout wearing `pid` that the next turn rewinds away (it hangs on turn k's reply too), with no boundary, and
+    (k, pid, False) the wrapper alone, an invocation whose stdout never landed, so its episode's splice is its last record.
+    None of them draws from the random stream."""
     rnd = random.Random(924)
     recs, parent, t = [], None, t0
     for k in range(turns):
@@ -95,6 +104,14 @@ def episode(t0, turns=240, compact_every=80, skill_at=None, orphan_at=None, wrap
                                         "<command-args></command-args>", "uw%d" % k, parent), promptId="pp_usage_%d" % k))
             parent = "uw%d" % k
             t += 5
+        if compact_branch_at is not None and k == compact_branch_at[0]:
+            cpid = compact_branch_at[1]
+            recs.append(dict(G.uline(t, "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n"
+                                        "<command-args></command-args>", "ucw%d" % k, parent, ps=None), promptId=cpid))
+            if compact_branch_at[2:3] != (False,):
+                recs.append(dict(G.uline(t + 1, "<local-command-stdout>Compacted (ctrl+o to see full summary)</local-command-stdout>",
+                                         "ucs%d" % k, "ucw%d" % k, ps=None), promptId=cpid))
+            t += 5                                       # `parent` stays: the next turn hangs on turn k's reply
     return recs
 
 
@@ -353,6 +370,55 @@ class CompactionRestore(Harness):
                 ran.append(entry)
         self.assertEqual(ran, ["restored", "whole"])
 
+    def test_tool_results_on_a_spur_off_the_compactions_pair_fold_onto_the_restored_entry(self):
+        """The episode rule on the restored entry (2026-10-05). The turn compacts automatically, its summary wearing the turn's
+        prompt id, and then a rate-limit storm's buffered api_error records flush at a message queued in the middle of the turn,
+        chained off the turn's opener (the eclipse spur, T209); the turn's next call hangs on the spur, so the pair is off the
+        path. The document's cut is before the turn, so the restored entry reads every record wearing the id, and none names
+        /compact: the turn's later results fold onto the restored entry (`fold:attachedPass:offpath`), where the boundary arm
+        parsed each of them whole, and each served tree equals a cold parse."""
+        path, recs = self._documented("pid-spur")
+        self._restart(path)
+        t = self.after(recs, 60)
+        opener = dict(G.uline(t, "rebuild the notes-api search index", "pf_u", recs[-1]["uuid"]), promptId="pf")
+        call1 = G.aline(t + 10, "rebuilding the index", "pf_a1", "pf_u", tools=("Bash",), stop="tool_use")
+        res1 = dict(G.trline(t + 20, "tu_pf_a1_0", "pf_r1", "pf_a1", content="rebuilt shard 1 of 12"), promptId="pf")
+        self._append(path, [opener, call1, res1])
+        self._parse_counted(path)                                            # the turn opens: a fold onto the restored entry
+        pair, s = compaction(t + 30, "pf", "pf_r1")
+        pair[1]["promptId"] = "pf"                                           # the summary wears the prompt id of the turn it compacted in
+        call2 = G.aline(t + 40, "checking the rebuilt index", "pf_a2", s, tools=("Bash",), stop="tool_use")
+        self._append(path, pair + [call2])
+        _tree1, modes1, moved1 = self._parse_counted(path)                  # the compaction: the restore road
+        self._append(path, [dict(G.trline(t + 50, "tu_pf_a2_0", "pf_r2", "pf_a2", content="12 shards, 0 errors"), promptId="pf")])
+        _tree2, modes2, moved2 = self._parse_counted(path)                  # a result on the attached pair: the attached rule
+        err = {"message": "429 rate_limit_error (synthetic)"}
+        spur = [G.sysline(t + 11, "api_error", "pf_e1", "pf_u", level="error", error=err),
+                G.sysline(t + 15, "api_error", "pf_e2", "pf_e1", level="error", error=err),
+                G.attline(t + 55, "and log the shard counts too", "pf_q", "pf_e2"),
+                G.aline(t + 60, "querying the rebuilt index", "pf_a3", "pf_q", tools=("Bash",), stop="tool_use")]
+        self._append(path, spur)
+        _tree3, modes3, moved3 = self._parse_counted(path)                  # the spur: the descent's road
+        res3 = dict(G.trline(t + 70, "tu_pf_a3_0", "pf_r3", "pf_a3", content="the search answers from the new index"), promptId="pf")
+        self._append(path, [res3])
+        tree4, modes4, moved4 = self._parse_counted(path)
+        got4, cut4 = self._served(tree4)
+        ref4 = self._snapshot(path, "pid-spur-result")
+        self._append(path, [G.aline(t + 80, "the index is rebuilt and answering", "pf_a4", "pf_r3", stop="end_turn")])
+        tree5, modes5, moved5 = self._parse_counted(path)
+        got5, cut5 = self._served(tree5)
+        self.assertSameTree(got4, self.cold(ref4), "after the result past the spur")
+        self.assertSameTree(got5, self.cold(path), "after the turn's end")
+        self.assertRestored(modes1, moved1, "boundary", "the premise: the compaction")
+        self.assertEqual((modes2, moved2.get("fold:attachedPass", 0)), (["fold"], 1), "the premise: the attached rule: %s" % moved2)
+        self.assertEqual((modes3, moved3.get("g:descent", 0)), (["restore"], 1), "the premise: the spur restores: %s" % moved3)
+        self.assertEqual((modes4, moved4.get("full", 0), moved4.get("g:promptid", 0), moved4.get("fold:attachedPass", 0),
+                          moved4.get("fold:attachedPass:offpath", 0)), (["fold"], 0, 0, 1, 1),
+                         "the result past the spur folds onto the restored entry: counters moved %s" % moved4)
+        self.assertGreater(cut4, 0, "still the restored shape, the render floor at the cut")
+        self.assertEqual((modes5, moved5.get("full", 0)), (["fold"], 0), "the turn's end folds: %s" % moved5)
+        self.assertGreater(cut5, 0, "still the restored shape at the turn's end")
+
     def test_tool_results_fold_on_an_entry_restored_from_a_document_written_after_the_compaction(self):
         """The same turn when a settle rewrites the document after its compaction (2026-10-03). Here the compaction lands with
         the tail past the churn bound's share, so it parses whole, and the settle writes a document whose cut is before the
@@ -439,6 +505,142 @@ class CompactionRestore(Harness):
                 ran.append(road)
         self.assertEqual(ran, ["reseat", "reseat-refused", "restart"])
 
+    def _spur_past_a_mid_turn_document(self, name, older=False, compare=None, **shape):
+        """The restart road of the test above, the settle after every parse, then the eclipse spur off the turn's opener (two
+        buffered api_error records, the message queued in the middle of the turn, the call hanging on it), so the pair is off
+        the path; then a result and a call, the assembly entry dropped (an eviction, a release: the reader cache and the
+        document stay), and two results and a call. The spur hangs off a record before the rewritten document's cut, so the
+        chain proof refuses it and it parses whole; the settle after it writes a document whose prompt ids hold the turn's id,
+        and the entry restored from that one after the drop meets the turn's next result. With `older`, that document as a
+        writer before compact_pids wrote it. Returns each step's (road, counters moved, cut) by label and the document the
+        restore after the drop read; every served tree is compared with a cold parse, or, with `compare`, the named steps'."""
+        path, recs = self._documented(name, **shape)
+        pre0, cut0 = doc_cut(path)
+        grow = filler(self.after(recs, 60), name, recs[-1]["uuid"], pre0 // em._ASM_TAIL_SHARE - (os.path.getsize(path) - cut0) + 1)
+        t = self.after(recs + grow, 60)
+        steps, served, doc = {}, [], None
+
+        def step(label, new):
+            self._append(path, new)
+            tree, modes, moved = self._parse_counted(path)
+            got, cut = self._served(tree)
+            served.append((label, got, self._snapshot(path, "%s-%s" % (name, label))))
+            self.doc(path)                                           # the settle after every parse
+            steps[label] = (modes, moved, cut)
+
+        opener = dict(G.uline(t, "rebuild the notes-api search index", "pw_u", grow[-1]["uuid"]), promptId="pw")
+        call1 = G.aline(t + 10, "rebuilding the index", "pw_a1", "pw_u", tools=("Bash",), stop="tool_use")
+        res1 = dict(G.trline(t + 20, "tu_pw_a1_0", "pw_r1", "pw_a1", content="rebuilt shard 1 of 12"), promptId="pw")
+        step("open", grow + [opener, call1, res1])
+        pair, s = compaction(t + 30, "pw", "pw_r1")
+        pair[1]["promptId"] = "pw"                                   # the summary wears the prompt id of the turn it compacted in
+        step("compact", pair + [G.aline(t + 40, "checking the rebuilt index", "pw_a2", s, tools=("Bash",), stop="tool_use")])
+        self._restart(path)
+        step("attached", [dict(G.trline(t + 50, "tu_pw_a2_0", "pw_r2", "pw_a2", content="12 shards, 0 errors"), promptId="pw")])
+        err = {"message": "429 rate_limit_error (synthetic)"}
+        step("spur", [G.sysline(t + 11, "api_error", "pw_e1", "pw_u", level="error", error=err),
+                      G.sysline(t + 15, "api_error", "pw_e2", "pw_e1", level="error", error=err),
+                      G.attline(t + 55, "and log the shard counts too", "pw_q", "pw_e2"),
+                      G.aline(t + 60, "querying the rebuilt index", "pw_a3", "pw_q", tools=("Bash",), stop="tool_use")])
+        last = "pw_a3"
+        for k in range(3):
+            if k == 1:
+                with em._ASM_LOCK:                                   # the assembly entry dropped: the next parse restores
+                    em._ASM_CACHE.clear()
+                doc = _doc(path)
+                if older:
+                    doc["gates"].pop("compact_pids", None)            # the document as a writer before the field wrote it
+                    _write_doc(path, doc)
+            uid = "pw_r%d" % (3 + k)
+            step("res%d" % k, [dict(G.trline(t + 70 + 20 * k, "tu_%s_0" % last, uid, last, content="hits %d" % k), promptId="pw")])
+            if k < 2:
+                last = "pw_a%d" % (4 + k)
+                step("call%d" % k, [G.aline(t + 80 + 20 * k, "next query %d" % k, last, uid, tools=("Bash",), stop="tool_use")])
+        for label, got, ref in served:                               # the cold parses last: each clears the caches
+            if compare is None or label in compare:
+                self.assertSameTree(got, self.cold(ref), "after the %s step" % label)
+        return steps, doc
+
+    def assertMidTurnPremises(self, steps, doc):
+        """What every run of the road above shares, at the base too: the compaction parses whole past the share, the spur
+        parses whole at the chain proof, the restore after the drop serves, the call after it folds onto the restored entry,
+        and the document that restore read holds the turn's prompt id among its prompt ids."""
+        for label, want in (("compact", "g:tailShare"), ("spur", "g:descent")):
+            modes, moved, _cut = steps[label]
+            self.assertEqual((modes, moved.get(want, 0)), (["full"], 1), "the premise: the %s step: %s" % (label, moved))
+        self.assertEqual(steps["res1"][0], ["restore"], "the premise: the restore after the drop serves: %s" % steps["res1"][1])
+        self.assertEqual(steps["call1"][0], ["fold"], "the premise: the call after it folds: %s" % steps["call1"][1])
+        self.assertIn("pw", doc["gates"]["prompt_ids"], "the premise: the document was written after the turn opened")
+
+    @staticmethod
+    def _reasons(moved):
+        """The boundary arm's demotions one step moved, by reason (g:promptid:boundary:<reason>)."""
+        pre = "g:promptid:boundary:"
+        return {k[len(pre):]: n for k, n in moved.items() if k.startswith(pre)}
+
+    def test_tool_results_past_a_spur_fold_on_an_entry_restored_from_a_document_written_mid_turn(self):
+        """The episode rule on an entry restored from a document written after the turn opened (gate review, 2026-10-05). The
+        restored entry cannot read the records before its document's cut, so it asks the seed whether one of them wears the id.
+        Read off the document's prompt_ids, every prompt id its writer had read, the open turn's own included, the seed would
+        refuse each later result wearing the id for the rest of the turn once a restart or a dropped entry restored the entry
+        from a document written mid-turn; at the base each of them parses whole. The document now records compact_pids, the ids that a record
+        before its cut naming /compact wears, and here none does: the result folds onto the restored entry, and every served
+        tree equals a cold parse."""
+        steps, doc = self._spur_past_a_mid_turn_document("pid-midturn")
+        self.assertMidTurnPremises(steps, doc)
+        modes, moved, cut = steps["res2"]
+        self.assertEqual((modes, moved.get("full", 0), moved.get("g:promptid", 0), moved.get("fold:attachedPass:offpath", 0)),
+                         (["fold"], 0, 0, 1), "the result folds onto the entry restored from the mid-turn document: %s" % moved)
+        self.assertGreater(cut, 0, "the restored shape, the render floor at the cut")
+        modes0, moved0, _cut0 = steps["res0"]
+        self.assertEqual((modes0, moved0.get("fold:attachedPass:offpath", 0)), (["fold"], 1),
+                         "on the whole entry the spur's parse left, the result folds too: %s" % moved0)
+        self.assertEqual(doc["gates"].get("compact_pids"), [], "the document lists no pre-cut /compact episode")
+
+    def test_a_result_past_a_spur_still_demotes_when_a_record_before_the_cut_wearing_its_id_names_compact(self):
+        """The twin: a manual /compact invocation wearing the turn's prompt id, long before the cut and rewound away, so the id's
+        episode is a /compact one that adoption reads (its splice is off the path, so it splices nothing here). The whole entry
+        reads that record and refuses under the pair's shape (`offpath`); the restored entry cannot read it, the document lists
+        the id under compact_pids, and it refuses under `seedEpisode`, counted apart from the shapes. Every served tree equals
+        a cold parse."""
+        steps, doc = self._spur_past_a_mid_turn_document("pid-midturn-compact", compact_branch_at=(200, "pw"))
+        self.assertMidTurnPremises(steps, doc)
+        modes, moved, _cut = steps["res2"]
+        self.assertEqual((modes, moved.get("fold:attachedPass", 0), self._reasons(moved)), (["full"], 0, {"seedEpisode": 1}),
+                         "the restored entry refuses on its seed's list: %s" % moved)
+        modes0, moved0, _cut0 = steps["res0"]
+        self.assertEqual((modes0, self._reasons(moved0)), (["full"], {"offpath": 1}),
+                         "the whole entry reads the /compact episode and refuses under the pair's shape: %s" % moved0)
+        self.assertEqual(doc["gates"].get("compact_pids"), ["pw"], "the document lists the pre-cut /compact episode's id")
+
+    def test_a_result_past_a_spur_parses_whole_where_a_pre_cut_compact_episode_would_adopt_the_pair(self):
+        """The seedEpisode refusal where the served tree tells (review of 2026-10-05, round one). The /compact invocation before
+        the cut wears the turn's prompt id and its stdout never landed, so its episode's splice is the episode's last record:
+        once the turn's results past the spur land on the path, the cold parse splices the off-path pair behind the latest of
+        them. The restored entry cannot read the invocation, the document lists its id under compact_pids, and the result the
+        restored entry's gate meets refuses under `seedEpisode` and parses whole, its tree the cold parse's; a gate that
+        ignored the seed's list folded it onto the restored entry, whose adoption reads no /compact episode. Only that step's
+        tree is compared: three steps before it (the call after the spur's first result, re-seated on the restore road; the
+        restore after the drop; the call folded after it) serve a tree without the card the cold parse adopts, none through
+        the gate and, by the review, at the base as well, since a restored adapter cannot adopt a pair behind an episode that
+        began before its cut (a gap of its own)."""
+        steps, doc = self._spur_past_a_mid_turn_document("pid-midturn-bare", compare=("res2",), compact_branch_at=(200, "pw", False))
+        modes, moved, _cut = steps["res2"]
+        self.assertEqual((modes, moved.get("fold:attachedPass", 0), self._reasons(moved)), (["full"], 0, {"seedEpisode": 1}),
+                         "the restored entry refuses on its seed's list: %s" % moved)
+        self.assertEqual(doc["gates"].get("compact_pids"), ["pw"], "the document lists the pre-cut /compact episode's id")
+
+    def test_a_result_past_a_spur_demotes_on_an_entry_restored_from_a_document_without_compact_pids(self):
+        """A document written before compact_pids carries no such field and is still this version's document: the seed reads
+        its prompt ids instead, every id its writer had read, the open turn's included, a superset that only refuses more. The
+        result refuses under `seedEpisode`, and every served tree equals a cold parse."""
+        steps, doc = self._spur_past_a_mid_turn_document("pid-midturn-older", older=True)
+        self.assertMidTurnPremises(steps, doc)
+        modes, moved, _cut = steps["res2"]
+        self.assertEqual((modes, moved.get("fold:attachedPass", 0), self._reasons(moved)), (["full"], 0, {"seedEpisode": 1}),
+                         "an entry restored from a document without compact_pids refuses on its prompt ids: %s" % moved)
+        self.assertNotIn("compact_pids", doc["gates"], "the premise: the document as an older writer wrote it")
+
     def test_a_prompt_id_only_the_documents_seed_names_still_demotes(self):
         """The narrowed arm's other side: a restored entry holds the tail's records alone, and the document's gates name the
         prompt ids of the summaries before its cut, for which the entry cannot see whether the boundary is attached. A tail
@@ -464,6 +666,8 @@ class CompactionRestore(Harness):
         self.assertEqual((modes, moved.get("g:promptid", 0), moved.get("g:promptid:boundary", 0), moved.get("g:promptid:boundarySeed", 0),
                           moved.get("fold:attachedPass", 0), moved.get("full:demoted", 0)), (["full"], 1, 1, 1, 0, 1),
                          "the restored entry cannot vouch for the pre-cut summary: the boundary arm demotes, a whole parse: %s" % moved)
+        self.assertEqual({k: n for k, n in moved.items() if k.startswith("g:promptid:boundary:")}, {"g:promptid:boundary:seed": 1},
+                         "the demotion is counted under its reason, the seed (2026-10-05): %s" % moved)
 
     def test_a_record_wearing_the_summarys_id_that_rewinds_onto_the_pre_compaction_leaf_parses_whole(self):
         """A delta the narrowed arm lets through and the descent then refuses parses whole, as before the narrowing (review of
@@ -617,8 +821,10 @@ class CompactionRestore(Harness):
         result as a turn of its own), and the settle, which writes nothing for a restored entry, left that tree for the next
         record and every boot. Now the fold's kept check rules (the result moves the leaf off the pair), the delta parses
         whole under `g:promptid:passedDemote`, and the settle writes a document from that whole entry. A parse with nothing
-        new then re-seats on it: the thread bits that result's delta left speak for no other parse. Each served tree equals a
-        cold parse: at the result, at the re-seat, at the call's second result, and at the restart."""
+        new then re-seats on it: the thread bits that result's delta left speak for no other parse. The call's second result
+        then folds on the episode rule (`fold:attachedPass:offpath`, 2026-10-05): the first result moved the leaf off the pair,
+        and no record wearing the id names /compact. Each served tree equals a cold parse: at the result, at the re-seat, at the
+        call's second result, and at the restart."""
         path, t = self._parallel_call_compaction("pid-parallel-reseat")
         self._append(path, [dict(G.trline(t, "tu_pk_a1_0", "pk_r0", "pk_a1", content="rebuilt shard 1 of 12"), promptId="pk")])
         tree1, modes1, moved1 = self._parse_counted(path)
@@ -630,6 +836,8 @@ class CompactionRestore(Harness):
         got2, _cut2 = self._served(tree2)
         self._append(path, [dict(G.trline(t + 10, "tu_pk_a1_1", "pk_r1", "pk_a1", content="rebuilt shard 2 of 12"), promptId="pk")])
         tree3, modes3, moved3 = self._parse_counted(path)
+        self.assertEqual((modes3, moved3.get("fold:attachedPass:offpath", 0)), (["fold"], 1),
+                         "the call's second result folds on the episode rule, the pair off the path: counters moved %s" % moved3)
         got3, _cut3 = self._served(tree3)
         ref3 = self._snapshot(path, "parallel-reseat-second")
         self.doc(path)

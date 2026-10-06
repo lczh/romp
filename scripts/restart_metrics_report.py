@@ -87,8 +87,9 @@ def frames(docs, anonymize=True) -> dict:
             rows.append({
                 "label": label, "window": b["key"], "restarts": b.get("restarts", 0), "cutTurns": b.get("cutTurns", 0),
                 "cutTurnsPerRestart": b.get("cutTurnsPerRestart"), "cleanRestarts": b.get("cleanRestarts", 0),
-                "measuredRestarts": b.get("measuredRestarts", b.get("restarts", 0) - b.get("restartsWithoutCutRow", 0)),
-                "unmeasuredRestarts": b.get("restartsWithoutCutRow", 0),
+                "measuredRestarts": b.get("measuredRestarts", b.get("restarts", 0) - b.get("unmeasuredRestarts", b.get("restartsWithoutCutRow", 0))),
+                "unmeasuredRestarts": b.get("unmeasuredRestarts", b.get("restartsWithoutCutRow", 0)),
+                "killedExits": b.get("killedExits", 0),
                 "outageP50": out.get("p50"), "outageP90": out.get("p90"), "outageN": out.get("n", 0),
                 "settleP50": set_.get("p50"), "settleP90": set_.get("p90"),
                 "quietWindows": b.get("quietWindows", 0), "quietP50": qw.get("p50"), "quietP90": qw.get("p90"),
@@ -175,7 +176,8 @@ def fig_cut_turns(cp, fr, out):
     ax1.barh(ys, vals, color=[pal[r["label"]] for r in rows], legend=False)
     for y, r in zip(ys, rows):
         unm = (", %d unmeasured" % r["unmeasuredRestarts"]) if r["unmeasuredRestarts"] else ""
-        ax1.annotate("%d of %d measured restarts cut%s" % (r["measuredRestarts"] - r["cleanRestarts"], r["measuredRestarts"], unm),
+        killed = (", %d killed after the cut row" % r["killedExits"]) if r.get("killedExits") else ""   # measured, never clean
+        ax1.annotate("%d of %d measured restarts clean%s%s" % (r["cleanRestarts"], r["measuredRestarts"], killed, unm),
                      (r["cutTurns"], y), xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
     ax1.set_yticks(ys)
     ax1.set_yticklabels(_ylabels(rows))

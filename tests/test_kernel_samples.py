@@ -82,6 +82,32 @@ class RestartPhasesScript(unittest.TestCase):
         text = subprocess.run([_sys.executable, script, "--state", d], capture_output=True, text=True, timeout=30).stdout
         self.assertIn("ckptS", text); self.assertIn("life pid 2", text); self.assertIn("cache 50M", text)
 
+    def test_the_reader_takes_the_exit_phases_from_the_done_row(self):
+        """The kernel's exit path (2026-10-05) writes the cut row at the exit's start and a done row after the drain, joined on
+        the pid and cutT: the exit's ckptS, drainS and stopped come from the done row, exitDone says whether the exit
+        completed, and an older kernel's cut row is read for its own phases."""
+        import subprocess, sys as _sys
+        d = tempfile.mkdtemp()
+        rows = [{"t": 1000, "pid": 1, "cutTurns": [], "stopped": 3, "rssKb": 4096000, "expectsDone": True},
+                {"t": 1002, "pid": 1, "exitDone": True, "cutT": 1000, "stopped": 4, "drainCutTurns": [{"sid": "s", "name": "web"}],
+                 "phases": {"rowS": 0.0, "ckptS": 0.7, "drainS": 0.3}},
+                {"t": 1005, "pid": 2, "bootSettled": True, "firstServe": 1005.0, "reconcileDone": 1005.1, "settleS": 0.1, "prevCutT": 1000, "outageS": 5.0},
+                {"t": 2000, "pid": 2, "cutTurns": [], "stopped": 5, "rssKb": 2048000, "expectsDone": True},     # killed after its row
+                {"t": 3000, "pid": 3, "cutTurns": [], "stopped": 2, "rssKb": 1024000, "ckptS": 0.4, "drainS": 0.1},   # an older kernel
+                {"t": 4000, "pid": 4, "cutTurns": [], "stopped": 1, "rssKb": 1024000, "ckptS": 0.6, "drainS": 0.2,
+                 "exitDone": True, "phases": {"ckptS": 0.6, "drainS": 0.2}}]   # an exit's late full row: complete, no done row
+        with open(os.path.join(d, "restart-cuts.jsonl"), "w") as f:
+            for r in rows: f.write(json.dumps(r) + "\n")
+        script = os.path.join(os.path.dirname(HERE), "scripts", "perf", "restart-phases.py")
+        out = subprocess.run([_sys.executable, script, "--state", d, "--json"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        cyc = json.loads(out.stdout)["cycles"]
+        self.assertEqual([c["cutT"] for c in cyc], [1000, 2000, 3000, 4000], "a done row is no cycle of its own")
+        self.assertEqual([(c["ckptS"], c["drainS"], c.get("exitDone"), c["stopped"], c["cutTurns"]) for c in cyc],
+                         [(0.7, 0.3, True, 4, 1), (None, None, False, 5, 0), (0.4, 0.1, None, 2, 0), (0.6, 0.2, True, 1, 0)],
+                         "the late full row reads as an exit that completed, not an older kernel's")
+        self.assertEqual(cyc[0]["outageS"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
