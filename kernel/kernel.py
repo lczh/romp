@@ -1265,6 +1265,7 @@ class _PerfStats:
                           ("lanes", _lanes_memo_report),   # the timeline's per-lane segment memo, live lanes; the dead lanes beside
                           ("msgScan", _msg_scan_report),   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
                           ("judgingBand", _judging_band_report),   # the judging band's per-row memo and horizon cursor (2026-09-16)
+                          ("captionRows", _caption_rows_report),   # the captions mapping the builds share and its drift index (2026-10-05)
                           ("spendTree", _spend_tree_memo_report),   # the spend guard's subagent-tree memos: bytes against their bound
                           ("subagentTree", _subagent_tree_memo_report),   # the subagents directory walk memo (2026-09-16): served vs walked, scoped
                           ("summaryAnchor", _summary_anchor_memo_report),   # the brief line's text-atom landings (T388): bytes against their bound
@@ -35533,15 +35534,193 @@ def _ask_poll():
         time.sleep(1.2)
 
 
+class _CaptionRows(dict):
+    """The mapping _captions serves, {unit id -> caption row} (2026-10-05): a dict, so every reader keeps the dict's own
+    get, items and values, that refuses every write, because one object now serves every build until the captions file
+    moves and a write would reach the next build's cards and bars. (Not a types.MappingProxyType: the drift index rides
+    on the mapping, and a proxy carries no attribute.) dict(rows) is a plain copy to edit. The rows are the reader's
+    own records, read-only as before. `_idx` is the drift index _caption_index builds at the first drifted lookup: None
+    until then, _CAPTION_IDX_SCAN when an id is not a string (the lookups then scan, exactly as before), else
+    {_seg_key(id): [ids with that key, in the rows' order]}; never mutated once set."""
+    __slots__ = ("_idx",)
+
+    def __init__(self, rows=()):
+        dict.__init__(self, rows)
+        self._idx = None
+
+    def _read_only(self, *a, **k):
+        raise TypeError("caption rows are shared by every build until the captions file moves; edit a copy (dict(rows))")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _read_only
+
+
+_CAPTION_IDX_SCAN = object()      # a _CaptionRows._idx that says: scan, an id is not a string
+_CAPTION_ROWS_EMPTY = _CaptionRows()   # no captions file: one shared empty mapping
+_CAPTION_ROWS_LOCK = threading.Lock()
+_CAPTION_ROWS_MEMO = {}           # captions path -> (generation, base, record count, rows): the reader's version of the file
+#                                   and the mapping built from exactly those records (_captions)
+_CAPTION_ROWS_STATS = {"hit": 0, "extend": 0, "build": 0, "uncached": 0, "swept": 0,
+                       "indexBuild": 0, "indexLookup": 0, "scanLookup": 0}
+#                                   hit: the held mapping served; extend: copied and extended by the appended rows; build: built
+#                                   from every row (a new generation, or the file's first read); uncached: a read whose records
+#                                   the reader's entry no longer holds (no file, or another thread's newer read), answered and
+#                                   not held; swept: entries dropped because the reader
+#                                   let their entry go; indexBuild: drift indexes built; indexLookup and scanLookup: drifted
+#                                   lookups served by the index, and by the scan (a mapping that is not a _CaptionRows, or an
+#                                   id that is not a string)
+
+
+def _caption_rows_fold(out, records):
+    """Fold caption records into the plain dict `out` as the original loop did: a dict record with an id, the last write
+    of an id wins and the id keeps the place of its first. Returns the ids that were new to `out`, in order."""
+    added = []
+    for o in records:
+        if isinstance(o, dict) and o.get("id"):
+            k = o["id"]
+            if k not in out:
+                added.append(k)
+            out[k] = o
+    return added
+
+
+def _caption_rows_extend(old, records):
+    """`old` copied and extended by the appended `records`, the rows' order and values exactly what one fold over every
+    record gives, since an append only lengthens the reader's list. `old` is left as it was served. Its drift index,
+    when built, is carried: the same index when no id is new (an overwrite keeps its place), else a copy with the new
+    ids added under their keys (new lists, so the old index stands), or the scan sentinel when a new id is not a string;
+    an index not built yet stays unbuilt."""
+    plain = dict(old)
+    added = _caption_rows_fold(plain, records)
+    out = _CaptionRows(plain)
+    idx = old._idx
+    if idx is None or idx is _CAPTION_IDX_SCAN or not added:
+        out._idx = idx
+    elif any(not isinstance(k, str) for k in added):
+        out._idx = _CAPTION_IDX_SCAN
+    else:
+        idx = dict(idx)
+        for k in added:
+            sk = _seg_key(k)
+            g = idx.get(sk)
+            idx[sk] = [k] if g is None else g + [k]
+        out._idx = idx
+    return out
+
+
+def _caption_index(caps):
+    """The drift index of `caps` (see _CaptionRows), built on first use, or None when the lookups must scan: `caps` is
+    not a _CaptionRows (a test's dict, the skeleton's {}), or one of its ids is not a string (the scan's own handling of
+    such an id, a raise included, is then the answer). Built by the kernel's _seg_key over the ids in the rows' order,
+    so a group lists exactly the ids the scan would have matched, in the order it would have met them."""
+    if type(caps) is not _CaptionRows:
+        return None
+    idx = caps._idx
+    if idx is None:
+        idx = {}
+        for k in caps:
+            if not isinstance(k, str):
+                idx = _CAPTION_IDX_SCAN
+                break
+            sk = _seg_key(k)
+            g = idx.get(sk)
+            if g is None:
+                idx[sk] = [k]
+            else:
+                g.append(k)
+        caps._idx = idx                                 # two threads may both build it: equal indexes, either stands
+        _CAPTION_ROWS_STATS["indexBuild"] += 1
+    return None if idx is _CAPTION_IDX_SCAN else idx
+
+
+def _caption_rows_sweep(keep):
+    """Drop the held mappings whose reader entry is gone or is of another generation or base (an eviction, a rewrite
+    read back, the file removed): such an entry can only rebuild at its next read, and holding it would keep rows the
+    reader's byte budget let go. Run whenever a new version is held, so at that moment the memo holds nothing the record
+    cache does not, beyond the version just installed; a mapping whose entry the cache lets go between two installs
+    stays until the next one. `keep` is that path."""
+    with _CAPTION_ROWS_LOCK:
+        held = [(p, e) for p, e in _CAPTION_ROWS_MEMO.items() if p != keep]
+    if not held:
+        return
+    with em._JSONL_CACHE_LOCK:
+        stale = []
+        for p, e in held:
+            ent = em._JSONL_CACHE.get(p)
+            if ent is None or ent[6] != e[0] or ent[5] != e[1]:
+                stale.append((p, e))
+    if stale:
+        with _CAPTION_ROWS_LOCK:
+            for p, e in stale:
+                if _CAPTION_ROWS_MEMO.get(p) is e:
+                    del _CAPTION_ROWS_MEMO[p]
+                    _CAPTION_ROWS_STATS["swept"] += 1
+
+
+def _caption_rows_report():
+    """GET /perf memos.captionRows: the counters (_CAPTION_ROWS_STATS), the mappings held (`entries`), their rows
+    (`rows`) and their containers' bytes, estimated (`bytes`: each mapping's dict and its drift index; the rows
+    themselves are the record cache's)."""
+    with _CAPTION_ROWS_LOCK:
+        out = dict(_CAPTION_ROWS_STATS)
+        held = [e[3] for e in _CAPTION_ROWS_MEMO.values()]
+    nbytes = 0
+    for m in held:
+        nbytes += sys.getsizeof(m)
+        idx = m._idx
+        if isinstance(idx, dict):
+            nbytes += sys.getsizeof(idx) + 64 * len(idx)   # a one-id group's list, about 64 bytes
+    out.update(entries=len(held), rows=sum(len(m) for m in held), bytes=nbytes)
+    return out
+
+
 def _captions(fsid):
     """{unit id -> caption row} from captions/<fsid>.jsonl — append-incremental like the states logs
     (2026-09-03): the chat build, the feed and the timeline each re-read and re-decoded the whole file
-    per build. Rows are the cache's objects: read-only."""
-    out = {}
-    for o in em._read_jsonl_incremental(jd.CAPDIR / (fsid + ".jsonl")):
-        if isinstance(o, dict) and o.get("id"):
-            out[o["id"]] = o
-    return out
+    per build. Rows are the cache's objects: read-only.
+
+    The mapping is held on the reader's version of the file (2026-10-05): its path, the reader entry's generation and
+    base, and the record count. The reader takes a new generation for every read from byte zero that replaces its
+    records (a rewrite, a truncation, another file renamed over this one, an evicted entry read back) and keeps it
+    across an append, which only lengthens its records (a new list, the old records first); the one other road that
+    keeps it, a tail entry read whole, moves the base to zero, and the base is in the key. So an unchanged version
+    serves the held mapping
+    and a longer one serves it copied and extended by the appended rows alone. Every call used to fold every row into
+    a fresh dict: fifteen calls per timeline build in the build-cost lab, about 170 profiled ms of a build at its 3x
+    history. The mapping is a _CaptionRows, a dict that refuses writes, since the builds now share it. A read whose
+    records the reader's entry no longer holds (no file, or another thread's newer read) is answered and not held; each
+    newly held version sweeps the entries whose reader entry is gone (_caption_rows_sweep), so the memo holds at most
+    what the record cache held at the last install."""
+    path = str(jd.CAPDIR / (fsid + ".jsonl"))
+    records = em._read_jsonl_incremental(path)
+    with em._JSONL_CACHE_LOCK:
+        ent = em._JSONL_CACHE.get(path)
+    if ent is None or ent[4] is not records:          # no entry (no file), or another thread already replaced it
+        with _CAPTION_ROWS_LOCK:
+            _CAPTION_ROWS_STATS["uncached"] += 1
+            if ent is None:
+                _CAPTION_ROWS_MEMO.pop(path, None)
+        if not records:
+            return _CAPTION_ROWS_EMPTY
+        out = {}
+        _caption_rows_fold(out, records)
+        return _CaptionRows(out)
+    gen, base, count = ent[6], ent[5], len(records)
+    with _CAPTION_ROWS_LOCK:
+        held = _CAPTION_ROWS_MEMO.get(path)
+        if held is not None and held[0] == gen and held[1] == base and held[2] == count:
+            _CAPTION_ROWS_STATS["hit"] += 1
+            return held[3]
+    if held is not None and held[0] == gen and held[1] == base and held[2] < count:
+        rows, kind = _caption_rows_extend(held[3], records[held[2]:]), "extend"
+    else:
+        out = {}
+        _caption_rows_fold(out, records)
+        rows, kind = _CaptionRows(out), "build"
+    with _CAPTION_ROWS_LOCK:
+        _CAPTION_ROWS_MEMO[path] = (gen, base, count, rows)
+        _CAPTION_ROWS_STATS[kind] += 1
+    _caption_rows_sweep(path)
+    return rows
 
 
 # ───────────────────────── view-builder: atoms → chat ChatEvent[] (parity: chat = KEEP) ─────────────────────────
@@ -52710,11 +52889,22 @@ def _seg_caption(caps, seg_id):
     """The captioner's MESSAGE caption for a segment (store id '<seg>#p'), resilient to the same seg-id
     timestamp drift as _seg_placed — the captioner keys its store from the JUDGE's parse. The drift made
     the provisional card silently fall back to the raw prompt instead of its 'Analyzing: <gist>' line, and
-    dropped timeline message-dot gists, for any queued/forwarded SDK message. '' when absent."""
+    dropped timeline message-dot gists, for any queued/forwarded SDK message. '' when absent.
+    On a miss the answer is the FIRST row, in the rows' order, whose id ends in '#p' and shares the key, of any grain.
+    A _captions mapping finds it through its drift index (_caption_index: the ids sharing the key, in the rows' order),
+    where the scan visited every row on every miss: the open segment's message caption, not yet written, missed on
+    every build (2026-10-05). Any other mapping scans as before."""
     hit = caps.get(seg_id + "#p")
     if hit is None:
         want = _seg_key(seg_id + "#p")
-        hit = next((v for k, v in caps.items() if k.endswith("#p") and _seg_key(k) == want), None)
+        idx = _caption_index(caps)
+        if idx is None:
+            if caps:
+                _CAPTION_ROWS_STATS["scanLookup"] += 1
+            hit = next((v for k, v in caps.items() if k.endswith("#p") and _seg_key(k) == want), None)
+        else:
+            _CAPTION_ROWS_STATS["indexLookup"] += 1
+            hit = next((caps[k] for k in idx.get(want, ()) if k.endswith("#p")), None)
     return (hit or {}).get("caption", "")
 
 
@@ -52729,7 +52919,10 @@ def _seg_work_caption(caps, seg_id):
     _seg_key (em._segment_id anchors them on their atom uuid, the user 2026-07-22), so they no longer
     collide with each other; the nearest-t pick remains only to absorb a drifted t and to disambiguate
     the rare TWO segments that share real trigger text (e.g. two 'continue's) — drift runs seconds,
-    distinct segments sit minutes apart. '' when absent."""
+    distinct segments sit minutes apart. '' when absent.
+    On a miss a _captions mapping visits only the rows sharing the key, through its drift index (_caption_index), in
+    the rows' order, so the grain filter, the nearest-t pick and its strict < (a tie goes to the earlier row) see the
+    rows the scan saw, in the order it saw them (2026-10-05). Any other mapping scans as before."""
     hit = caps.get(seg_id)
     if hit is not None:
         return hit.get("caption", "")
@@ -52742,12 +52935,25 @@ def _seg_work_caption(caps, seg_id):
         return ""
     want = _seg_key(seg_id)
     best = None
-    for k, v in caps.items():
-        if v.get("grain") != "segment" or _seg_key(k) != want:
+    idx = _caption_index(caps)
+    if idx is None:
+        if caps:
+            _CAPTION_ROWS_STATS["scanLookup"] += 1
+        for k, v in caps.items():
+            if v.get("grain") != "segment" or _seg_key(k) != want:
+                continue
+            d = abs((v.get("t") or 0) - seg_t)
+            if best is None or d < best[0]:
+                best = (d, v)
+        return best[1].get("caption", "") if best else ""
+    _CAPTION_ROWS_STATS["indexLookup"] += 1
+    for k in idx.get(want, ()):                         # the ids with this key, in the rows' order
+        row = caps[k]
+        if row.get("grain") != "segment":
             continue
-        d = abs((v.get("t") or 0) - seg_t)
-        if best is None or d < best[0]:
-            best = (d, v)
+        gap = abs((row.get("t") or 0) - seg_t)
+        if best is None or gap < best[0]:
+            best = (gap, row)
     return best[1].get("caption", "") if best else ""
 
 
