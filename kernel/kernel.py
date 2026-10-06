@@ -48534,8 +48534,8 @@ def _feed_seg_plain_t(w):
     held and folded turns (segWalks, segHeld, segWalkTurns). Then, when closed turns were folded, the aggregate is stored
     under the walk's keys, leaf and seams, marked used in the current build. Past the byte bound the least recently used
     entries that no derivation of this build used are shed first; when every other entry was used in this build the
-    newcomer is not held (both counted under segEvict). An aggregate over the bound by itself is not held and sheds no
-    other session (overBound)."""
+    newcomer is not held and the entry its walk was served from stays (both counted under segEvict). An aggregate over
+    the bound by itself is not held and sheds no other session (overBound)."""
     try:
         closed_t = w.base_plain
         if w.start < w.n_closed:
@@ -48555,7 +48555,7 @@ def _feed_seg_plain_t(w):
         st["segWalkTurns"] += len(w.turns) - w.start
         if w.closed is not None:
             size = _feed_seg_entry_bytes(w.keys, w.closed)
-            _FEED_SEG_HELD.pop(w.fsid, None)
+            old = _FEED_SEG_HELD.pop(w.fsid, None)
             if size > FEED_SEG_HELD_BYTES:
                 st["overBound"] += 1                 # served to this derivation, never held, and sheds no other session
             else:
@@ -48568,6 +48568,8 @@ def _feed_seg_plain_t(w):
                     total -= _FEED_SEG_HELD.pop(k)[5]
                     st["segEvict"] += 1
                     if k == w.fsid:
+                        if old is not None and total + old[5] <= FEED_SEG_HELD_BYTES:
+                            _FEED_SEG_HELD[w.fsid] = old   # not admitted: the entry it was served from stays
                         break
     return best
 

@@ -3667,7 +3667,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   served to their derivation but never held. Past the bound, a store sheds
   the least recently used aggregates that no derivation of the same board
   build used; when every other aggregate was used in that build, the new
-  one is not held, so the sessions a build is working on keep theirs.
+  one is not held and its session keeps the one it was served from, so
+  the sessions a build is working on keep theirs.
   `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry

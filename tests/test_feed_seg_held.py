@@ -28,7 +28,8 @@ the one-pass walk over the closed turns alone (the two copies the walk makes); a
 table in that walk even when the walk then fails, counted once; a walk that did not finish counts no turns; GET /perf's
 report moves by one walk, one folded turn and thirty held turns on a reuse; an aggregate over the bound by itself counts
 under overBound, not segEvict; a reused entry is the newest, so a colder session is shed first; and past the bound a
-build keeps the entries it uses and holds no newcomer, so two of three sessions walk only their open turn.
+build keeps the entries it uses and holds no newcomer, so two of three sessions walk only their open turn, and a
+session whose grown aggregate the bound turns away keeps the entry its walk was served from.
 
 Synthetic data only: placeholder uuids, the notes-api demo's web, api and tests, invented text, a private state root
 with session hosts off."""
@@ -746,6 +747,33 @@ class BoundAndDepartures(HoldWorld):
             self.check("build 2: tests", sid=SID_TESTS, whole=True)
             self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB, SID_API], "build 2: the same two entries stand")
             self.assertEqual(self.stats()["segEvict"] - e0, 1)
+
+    def test_a_grown_aggregate_the_bound_does_not_admit_leaves_the_entry_its_walk_was_served_from(self):
+        """Past the bound with every other entry used in this build, a session whose aggregate grew by a closed turn is
+        not admitted; the entry its walk was served from still stands, so the next build folds the turns since it."""
+        self.history(SID_WEB, "w")
+        self.history(SID_API, "p")
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        self.check("build 1: api", sid=SID_API, whole=True)
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        self.assertEqual(km._FEED_SEG_HELD[SID_API][5], size, "the premise: the histories weigh the same")
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", 2 * size):   # fits the two as they stand, not a grown one
+            self.new_build()
+            self.check("build 2: web", folded=1)
+            n = self.TURNS
+            self.append(SID_API, [tool_out(self.tick(SID_API), "p-r%02d" % n, "p-c%02d" % n, "toolu_p%02d" % n,
+                                           "tests: 41 passed")])
+            self.open_new_turn(SID_API, 1, "next: page the archive")
+            e0 = self.stats()["segEvict"]
+            self.check("build 2: api, a turn closed", sid=SID_API, folded=2)
+            self.assertEqual(self.stats()["segEvict"] - e0, 1, "the premise: the grown aggregate was not admitted")
+            self.assertIn(SID_WEB, km._FEED_SEG_HELD, "the premise: web's entry, used in this build, stands")
+            self.assertIn(SID_API, km._FEED_SEG_HELD, "the entry api's walk was served from still stands")
+            self.assertEqual(len(km._FEED_SEG_HELD[SID_API][2]), n, "...the one held before the turn closed")
+            self.new_build()
+            self.check("build 3: web", folded=1)
+            self.check("build 3: api", sid=SID_API, folded=2)
 
     def test_the_bound_is_a_fraction_of_the_machines_memory_unless_the_environment_names_bytes(self):
         with mock.patch.dict(os.environ, {"ROMP_FEED_SEG_HELD_BYTES": "4096"}):
