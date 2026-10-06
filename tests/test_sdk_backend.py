@@ -2074,6 +2074,46 @@ class SetModelModePure(unittest.TestCase):
         self.assertFalse(sb.read_reg(self.d, "g").get("modelPending") or False)
         self.assertEqual(sb.read_reg(self.d, "g").get("liveModel"), "Opus", "and lands a best-effort label, not blank")
 
+    def test_every_live_pick_is_in_flight_until_a_report_of_it_lands(self):
+        # (2026-09-30, the #33 follow-up) a pick was marked in flight only when the live name did not already carry the
+        # pick's family word, so an older version of the live family (claude-opus-4-8 on Opus 5.5), a re-pick of the
+        # live model and the account default went unmarked; since the learn reads versions inside a family, the pick's
+        # first report could then read as an automatic fallback
+        _hosts_off(self.d)
+        sid = self.be.spawn("m", self.d)
+        sb.write_reg(self.d, sid, {**sb.read_reg(self.d, sid), "model": "claude-opus-5-5", "liveModel": "Opus 5.5",
+                                   "liveModelId": "claude-opus-5-5"})
+        sess = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
+        self.be.sessions[sid] = sess
+        sent = []
+        sess.set_model_live = lambda model, prev=None: sent.append((model, prev))   # the loop hop, stubbed
+        self.assertTrue(self.be.set_model(sid, "claude-opus-4-8"))
+        self.assertEqual(sess._model_pending, "claude-opus-4-8",
+                         "an older version of the live family is in flight from the click, like any pick")
+        self.assertTrue(sb.read_reg(self.d, sid).get("modelPending"), "…persisted for the dormant row")
+        self.assertTrue(sess.snapshot()["modelPending"], "…and the badge shows its switching dots")
+
+        class _Client:
+            model = "claude-opus-5-5"                 # the CLI runs the model before the pick until it has the pick
+
+            async def set_model(self, model=None):
+                self.model = model
+
+            async def get_context_usage(self):
+                return {"percentage": 12, "model": self.model}
+        sess.client = _Client()
+        asyncio.run(sess._do_refresh_context())       # a refresh the CLI answers before the pick's request reaches it
+        self.assertEqual((sess._model_pending, sess.model), ("claude-opus-4-8", "Opus 5.5"),
+                         "a refresh the CLI answered before it had the pick answered for the pick")
+        asyncio.run(sess._do_set_model(*sent[-1]))     # the CLI takes the pick; the refresh behind its answer reports it
+        self.assertEqual((sess._model_pending, sess.model), ("", "Opus 4.8"), "the refresh's report of the pick lands it")
+        self.assertFalse(sb.read_reg(self.d, sid).get("modelPending"))
+        self.assertTrue(self.be.set_model(sid, "claude-opus-4-8"))
+        self.assertEqual(sess._model_pending, "claude-opus-4-8", "a re-pick of the live model is in flight until its report too")
+        self.assertTrue(self.be.set_model(sid, ""))
+        self.assertEqual(sess._model_pending, "default", "an empty pick is the account default, and in flight as one")
+        self.assertIsNone(sent[-1][0], "…which goes out as set_model(None)")
+
     def test_set_mode_persists_to_registry(self):
         sid = self.be.spawn("m", self.d)
         self.assertTrue(self.be.set_mode(sid, "plan"))
@@ -5297,12 +5337,13 @@ class SpawnedAtStampedOncePerCli(unittest.TestCase):
         sb.write_lease(root, {"sid": self.SID, "fsid": self.SID, "name": "web", "pid": pid, "start": start,
                               "holder": {"kind": "host", "pid": pid, "start": start}, "version": "test", "spawnedAt": self.T0, "t": now})
 
-    def _drive(self, be, s, root, roads, marking_raises=False):
+    def _drive(self, be, s, root, roads, marking_raises=False, ctx=None):
         """Run the real connect loop. `roads` is one dict per iteration: {"road": "attach" | "spawn-host" | "child",
         "hello": the host's hello (host roads), "fail": None | "before-hello" (the connect fails before any CLI exists) |
         "after-hello" (the host's CLI is up and its hello arrived, then the SDK's initialize fails: the loop's own retry
         road)}. The fake client's connect delivers the hello as HostTransport.connect does, then fails or completes; the
-        thread ends after the last road's connect. Returns the reg's (spawnedAt, spawnedAtCli) after each fresh-CLI block."""
+        thread ends after the last road's connect. `ctx` is the model id every context refresh reports (None: no answer).
+        Returns the reg's (spawnedAt, spawnedAtCli) after each fresh-CLI block."""
         seen = []; calls = {"n": 0}; sid = self.SID; roads = list(roads)
         class FakeTransport:
             hello = None; _init_pending = True; exit_info = None; ack_offset = -1
@@ -5342,7 +5383,7 @@ class SpawnedAtStampedOncePerCli(unittest.TestCase):
                 if False:
                     yield None
             async def get_context_usage(self):
-                return None
+                return {"percentage": 3, "model": ctx} if ctx else None
             async def get_server_info(self):
                 return None
         if marking_raises:
@@ -5502,6 +5543,108 @@ class SpawnedAtStampedOncePerCli(unittest.TestCase):
                 else:
                     self.assertEqual(seen, [], "the CLI the reg names keeps its epoch")
                     self.assertEqual(self._reg(root), (self.T0, "4242:a1"))
+
+
+class APickIsCarriedByALaunchNeverByAnAttach(unittest.TestCase):
+    """(2026-09-30, the #33 follow-up's review) A context refresh answers for a model pick only once the CLI has had the
+    pick: its set_model answered, or a launch whose --model carried it. A pick made while no client is up is sent nowhere,
+    so a LAUNCH carries it and its connect's refresh lands it, while an ATTACH to a CLI that outlived its client tells that
+    CLI nothing: the attach's refresh reports the model the surviving CLI still runs and must not end the pick's switching
+    dots (for a Latest click that report named the pick's family and cleared it, and the pick's later launch on a lower
+    version then read as a fallback). Drives the real connect loop with the road pins' harness (SpawnedAtStampedOncePerCli)."""
+
+    SID = SpawnedAtStampedOncePerCli.SID
+    CLI_A, CLI_B = SpawnedAtStampedOncePerCli.CLI_A, SpawnedAtStampedOncePerCli.CLI_B
+    T_HOST = SpawnedAtStampedOncePerCli.T_HOST
+    setUp = SpawnedAtStampedOncePerCli.setUp
+    tearDown = SpawnedAtStampedOncePerCli.tearDown
+    _hello = SpawnedAtStampedOncePerCli._hello
+    _drive = SpawnedAtStampedOncePerCli._drive
+
+    def test_a_pick_made_with_no_client_is_landed_by_a_launch_and_never_by_an_attach(self):
+        # a host launch whose handshake fails after the hello leaves its CLI up, launched with the pick's --model, and the
+        # loop's retry ATTACHES to it, so the launch is what carried the pick (the #33 follow-up's review, round one); an
+        # attach whose handshake fails the same way carried nothing, and neither does the attach that retries it
+        a, b = self.CLI_A, self.CLI_B
+        for road, hosts, iters, ctx, want in (
+                ("attach", "on", [{"road": "attach", "hello": self._hello(a)}], "claude-opus-5-5", ("opus", "Opus 5.5")),
+                ("spawn-host", "on", [{"road": "spawn-host", "hello": self._hello(b)}], "claude-opus-5", ("", "Opus 5")),
+                ("child", "off", [{"road": "child"}], "claude-opus-5", ("", "Opus 5")),
+                ("a host launch whose handshake fails after the hello, then the attach that retries it", "on",
+                 [{"road": "spawn-host", "hello": self._hello(b), "fail": "after-hello"},
+                  {"road": "attach", "hello": self._hello(b)}],
+                 "claude-opus-5", ("", "Opus 5")),
+                ("an attach whose handshake fails after the hello, then the attach that retries it", "on",
+                 [{"road": "attach", "hello": self._hello(a), "fail": "after-hello"},
+                  {"road": "attach", "hello": self._hello(a)}],
+                 "claude-opus-5-5", ("opus", "Opus 5.5"))):
+            with self.subTest(road=road):
+                root = tempfile.mkdtemp()
+                open(os.path.join(root, "session-hosts"), "w").write(hosts)
+                logs = []
+                be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=logs.append)
+                be._ack_cmd_chip = lambda *a, **k: None          # the acknowledging chip needs a chat this lab has none of
+                sb.write_reg(root, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "spawnedAt": 1700000000,
+                                              "spawnedAtCli": "4242:a1", "model": "claude-opus-5-5",
+                                              "liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5"})
+                s = sb.SdkSession(be, sb.read_reg(root, self.SID))
+                be.sessions[self.SID] = s
+                self.assertTrue(be.set_model(self.SID, "opus"))   # a Latest click with no client up: nothing is sent
+                self.assertEqual(s._model_pending, "opus", "the pick is in flight from the click")
+                seen = []
+                real = s._do_refresh_context
+
+                async def refresh():
+                    asked = s.client is not None
+                    await real()
+                    if asked:
+                        seen.append((s._model_pending, s.model))
+                s._do_refresh_context = refresh                    # the connect's refresh, observed as it answers
+                self._drive(be, s, root, iters, ctx=ctx)
+                if len(iters) > 1:
+                    self.assertTrue(any("attach did not complete" in str(m) for m in logs),
+                                    "%s: the loop's own retry road was taken" % road)
+                self.assertEqual(seen[:1], [want], "%s: %s" % (road, (
+                    "the launch carried the pick, so its refresh lands it" if want[0] == "" else
+                    "the refresh of a CLI the attach told nothing answered for the pick")))
+
+    def test_an_attach_after_a_restart_arms_from_an_upward_pick_and_nothing_for_a_downward_one(self):
+        """The attach's own re-arm (_arm_if_below_pick, called by the connect loop on an attach): Retry upgrades on, a pick
+        in flight at a hard kernel death, the construction heal, one attach to the CLI that survived. An upward pick keeps
+        the old name (_heal_pick_label), so the session sits below its pick and the attach arms from it, the way a pick the
+        surviving CLI never got reaches it (the retry's reconnect launches on it); a downward pick is healed onto its own
+        name and arms nothing. Through the real connect loop: until the #33 follow-up's review the attach's call ran only
+        with Retry upgrades off, and its one guard was a source pin a commented-out call satisfies."""
+        for road, pick, live, armed in (
+                ("an upward pick, Opus 5.5 stranded in flight over Opus 4.8", "claude-opus-5-5",
+                 ("Opus 4.8", "claude-opus-4-8"), ("Opus 5.5", "Opus 4.8")),
+                ("a downward pick, Opus 4.8 stranded in flight under Opus 5.5", "claude-opus-4-8",
+                 ("Opus 5.5", "claude-opus-5-5"), None)):
+            with self.subTest(road=road):
+                root = tempfile.mkdtemp()
+                open(os.path.join(root, "session-hosts"), "w").write("on")
+                open(os.path.join(root, sb.RETRY_UPGRADE_STORE), "w").write("on")
+                logs = []
+                be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=logs.append)
+                sb.write_reg(root, self.SID, {"sid": self.SID, "name": "web", "cwd": "/tmp", "spawnedAt": 1700000000,
+                                              "spawnedAtCli": "4242:a1", "model": pick, "modelPending": True,
+                                              "liveModel": live[0], "liveModelId": live[1]})
+                s = sb.SdkSession(be, sb.read_reg(root, self.SID))   # the construction heal
+                be.sessions[self.SID] = s
+                before = (s.model, s._model_pending, s._upgrade_retry)
+                self._drive(be, s, root, [{"road": "attach", "hello": self._hello(self.CLI_A)}], ctx="claude-opus-4-8")
+                arm = s._upgrade_retry
+                if armed:
+                    self.assertEqual(before, ("Opus 4.8", "", None), "%s: the heal keeps the old name, nothing armed yet" % road)
+                    self.assertIsNotNone(arm, "%s: the session sits below its pick with Retry upgrades on, and the "
+                                              "attach armed nothing to ask for the pick" % road)
+                    self.assertEqual((arm["from"], arm["to"], arm["pick"]), armed + (pick,), road)
+                    self.assertTrue(any(str(m).startswith("retry upgrade (web): Opus 5.5 fell back to Opus 4.8") for m in logs),
+                                    "%s: the arm is said in the log" % road)
+                else:
+                    self.assertEqual(before, ("Opus 4.8", "", None), "%s: the heal lands the pick's name" % road)
+                    self.assertIsNone(arm, "%s: the attach armed a retry for a pick nothing sits below" % road)
+
 
 class HealCwdPendingUnderAnUnreadableSlug(unittest.TestCase):
     """The queued low (b): the boot reconcile decided a mid-move reg by two os.path.exists calls, so an unsearchable pending slug

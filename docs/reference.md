@@ -409,15 +409,50 @@ following to every connected machine's kernel):
   (`Model changed automatically: … → …`). A lower tier is a smaller model family
   or an older version of the same one (Opus 4.8 answering for Opus 5.5); a bare
   alias pick such as `opus` names no version, so the requested-model mark below
-  compares its family alone. Every ten minutes the kernel asks for
+  compares its family alone. A model you pick yourself is not read as an
+  automatic fallback, even an older version or a family alias that resolves
+  below the version the session was on: from the pick until the session reports
+  a model of the picked family (any model, for the account default), no change
+  counts as a fallback, and the session landing on the exact version you picked
+  is that pick. Four cases can still read a pick as a fallback: a reply from a
+  turn the session started on its own (a background task's notice, a scheduled
+  prompt) arriving after a Latest or default pick, or after any pick above the
+  model the session was on; a Latest or default pick made while the session is
+  reconnecting, or any pick above the model the session was on made after a
+  kernel restart before the session reconnects, either of which can miss its CLI;
+  a reply from before the pick that the session replays after a kernel
+  restart; and, for a pick made while an earlier one is still taking effect, a
+  report of the earlier pick arriving after the later one has taken effect, or
+  after a reply on the model the session was on when that model is of the later
+  pick's family.
+  When any of them follows a Latest or default pick that
+  resolves below the model the session was on, and the switch is on, the session
+  is then reconnected every ten minutes on the pick, and turns served on it never
+  end that. One more case shows a pick as not answering: a pick above the model the
+  session was on, still taking effect when the session's CLI ends while idle or
+  the kernel restarts, gracefully or not, keeps the old model's name, so the
+  requested-model mark below shows the pick as not answering until the first
+  reply served on it, even where the CLI runs it. With the switch on, a session
+  that then reattaches to a CLI that outlived it arms the retry, and when that CLI
+  already runs the pick, a `Model back on …` card follows its first reply. Every ten
+  minutes the kernel asks for
   the picked model again by reconnecting the session as soon as it is quiet, the
   same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
-  below its pick when you turn the switch on is taken up at once. A fallback that
+  below its pick when you turn the switch on is taken up at once, unless a pick
+  of its own is still taking effect. It is also taken up, and the pick's first
+  reply then shows a `Model back on …` card, when a reply on the model the
+  session was on arrived after a pick above that model and no reply has been
+  served on the pick yet; when the two are of one family, this holds even
+  before the pick has taken effect. A fallback that
   happens again is logged once per attempt; its card follows the board's usual
-  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
+  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the model
+  the session fell from or above it, or on the version you picked or above it, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
-  A pick of your own ends it too, as does turning the switch off. While a
+  A pick of your own ends it too, as does turning the switch off. A fallback to
+  a model at or above the version you picked is carded but arms no retry. A pick
+  the CLI refuses puts back the model you had, and the retry is judged again
+  against it. While a
   fallback stands, the session's model picker, in the chat statusline and in the
   timeline's lane picker alike, marks the requested model with a yellow tick
   beside the blue tick on the model that answers; its tooltip says why
