@@ -302,6 +302,7 @@ OFF_FEED = (
     "_lift_decisions",             # the lift tick (_lift_spent_awaiting): bgLedgerEnded
     "_model_alias_boot_pass",      # main's model-alias migration, a rewrite of every record: model, name
     "_page_sig",                   # the chat history page's signature: forkedFrom
+    "_reg_launched_login",         # the spend detail's session rows (_spend_detail_local): launchedLogin
     "_reported_model_ids",         # the learned model versions: liveModelId
     "_session_row",                # the /sessions row and the fork, comment and rewind handlers: cwd, name
     "_settle_event_key",           # the nudge and compaction ticks: lastStopAt

@@ -12,6 +12,8 @@ name ("TESTHOST sign-in", "token on PEERHOST") and the email only in the hover. 
     unrecorded, never matched by its label; a signed-out machine's sign-in is Unknown.
   * The local half carries the route series and the routes' identities; the single-host and merged payloads carry the
     accounts, the merged one naming an older peer whose series carry no routes.
+  * A machine's sign-in is named by the account signed in now, and its account's hover says so; a session row names the
+    stored login its last launch carried, never the pick (the #74 review's account-switch and bills-suffix findings).
 
 Synthetic only: the notes-api world of tests/test_spend_detail.py (placeholder uuids, TESTHOST), dev@example.com,
 Example Org, invented digests and record ids."""
@@ -34,6 +36,7 @@ NOW, WEB, API = _sd.NOW, _sd.WEB, _sd.API
 DIGEST = "a1a1a1a1a1a1"            # an invented account digest (the shape _claude_account prints)
 OTHER = "b2b2b2b2b2b2"
 ORGD = "c3c3c3c3c3c3"
+ORGD2 = "d4d4d4d4d4d4"
 LID = "%012x" % 0x0A0B0C0D0E0F     # an invented stored-login record id
 LID2 = "%012x" % 0x0F0E0D0C0B0A
 
@@ -116,6 +119,96 @@ class Accounts(unittest.TestCase):
         self.assertEqual(_names(accts), ["Enterprise seat · Example Org", "Enterprise seat · Other Org"])
         accts = km._spend_accounts([("TESTHOST", [_machine(kind="personal")]), ("PEERHOST", [_stored(acct=OTHER, kind="enterprise")])])
         self.assertEqual(_names(accts), ["Personal plan", "Enterprise seat"])
+
+    def test_a_shared_email_never_makes_two_accounts_one(self):
+        # one address on two accounts: another organisation, or another kind, says so, and where the identities cannot
+        # tell the email does not decide either; it is never the identity
+        accts = km._spend_accounts([("TESTHOST", [_machine()]),
+                                    ("PEERHOST", [_stored(org="Other Org", kind="enterprise", email="dev@example.com")])])
+        self.assertEqual(_names(accts), ["Enterprise seat · Example Org", "Enterprise seat · Other Org"], json.dumps(accts))
+        accts = km._spend_accounts([("TESTHOST", [_machine()]),
+                                    ("PEERHOST", [_stored(org="Example Org", kind="personal", email="dev@example.com")])])
+        self.assertEqual(_names(accts), ["Enterprise seat", "Personal plan"], json.dumps(accts))
+        accts = km._spend_accounts([("THIRDHOST", [_machine(kind="", org="")]),
+                                    ("PEERHOST", [_stored(org="Example Org", kind="enterprise", email="dev@example.com")])])
+        self.assertEqual(len(accts), 2, "a digest-only sign-in and an organisation-only login cannot tell: " + json.dumps(accts))
+
+    def test_a_route_joins_a_group_only_when_no_member_refuses_it(self):
+        # PEERHOST's stored login knows only its organisation and kind, so it joins the machine's seat; THIRDHOST's names
+        # another account digest; PEERHOST's login matches it (the same organisation and kind) but the machine's sign-in
+        # refuses it, and one refusal keeps it out. Asserted by property: the other account's row carries no route of
+        # this one
+        machine, peer = _machine(), _stored(org="Example Org", kind="enterprise")
+        third = _stored(lid=LID2, label="work", acct=OTHER, org="Example Org", kind="enterprise")
+        # the world this needs, asserted so that a change to the account rule rebuilds the test instead of leaving it green
+        # and testing nothing: THIRDHOST faces a group with one member that matches it and one that refuses it
+        self.assertEqual([km._same_account(dict(machine), dict(peer)), km._same_account(dict(peer), dict(third)),
+                          km._same_account(dict(machine), dict(third))], [True, True, False],
+                         "machine~PEERHOST, PEERHOST~THIRDHOST, machine~THIRDHOST: rebuild this world if the rule changed")
+        accts = km._spend_accounts([("TESTHOST", [machine]), ("PEERHOST", [peer]), ("THIRDHOST", [third])])
+        seat = next(a for a in accts if any(r["route"] == "machine" for r in a["routes"]))
+        self.assertIn(("PEERHOST", "login:" + LID), [(r["host"], r["route"]) for r in seat["routes"]],
+                      "PEERHOST's login sits in the machine's row, so THIRDHOST meets both verdicts: " + json.dumps(accts))
+        other = next(a for a in accts if any(r["route"] == "login:" + LID2 for r in a["routes"]))
+        self.assertNotIn(("TESTHOST", "machine"), [(r["host"], r["route"]) for r in other["routes"]],
+                         "two account digests never share a row: " + json.dumps(accts))
+
+    # every road _same_account takes, as two logins' identities and its verdict on them: where they tell the two apart
+    # (False) and where they cannot tell (None)
+    ROADS = (
+        ("the account digests differ", {"acct": DIGEST}, {"acct": OTHER}, False),
+        ("a kind word is missing", {"acct": DIGEST}, {"org": "Example Org", "kind": "enterprise"}, None),
+        ("the organisation digests differ", {"org": "Example Org", "orgDigest": ORGD, "kind": "enterprise"},
+         {"org": "Example Org", "orgDigest": ORGD2, "kind": "enterprise"}, False),
+        ("the kind words differ under one organisation digest", {"org": "Example Org", "orgDigest": ORGD, "kind": "enterprise"},
+         {"org": "Example Org", "orgDigest": ORGD, "kind": "personal"}, False),
+        ("the organisations differ", {"org": "Example Org", "kind": "enterprise"}, {"org": "Other Org", "kind": "enterprise"}, False),
+        ("an organisation is missing", {"acct": DIGEST, "kind": "enterprise"}, {"org": "Example Org", "kind": "enterprise"}, None),
+        ("the kind words differ under one organisation name", {"org": "Example Org", "kind": "enterprise"},
+         {"org": "Example Org", "kind": "personal"}, False),
+    )
+
+    def test_a_shared_label_or_email_never_makes_two_accounts_one_on_any_road(self):
+        # the label is the user's word and an email is an address two accounts can share: neither is the identity. Two
+        # logins under one label and one email stay two accounts on every road, so a rule by either fails here wherever
+        # in _same_account it sits
+        for road, a, b, verdict in self.ROADS:
+            with self.subTest(road=road):
+                self.assertIs(km._same_account(dict(a), dict(b)), verdict, "the world gets the verdict its road gives")
+                accts = km._spend_accounts([("PEERHOST", [_stored(label="work", email="dev@example.com", **a)]),
+                                            ("THIRDHOST", [_stored(lid=LID2, label="work", email="dev@example.com", **b)])])
+                self.assertEqual([[r["host"] for r in x["routes"]] for x in accts], [["PEERHOST"], ["THIRDHOST"]],
+                                 "two accounts: " + json.dumps(accts))
+
+    def test_the_hover_says_a_machines_sign_in_is_named_by_the_account_signed_in_now(self):
+        # the ledger stamps no account per turn, so a machine's sign-in spend is filed under the account signed in now
+        # and a switch of account moves its earlier sign-in spend to the new account's row: the hover says so (the #74
+        # review's account-switch finding)
+        accts = km._spend_accounts([("TESTHOST", [_machine()]), ("PEERHOST", [_stored(acct=DIGEST)])])
+        title = accts[0]["title"]
+        self.assertTrue(title.startswith("dev@example.com · Example Org · enterprise. "), "the account's identity first: " + title)
+        self.assertIn("TESTHOST is signed in to this account now", title)
+        # …and says what that means after a switch, which docs/reference.md promises the hover says
+        self.assertIn("including any from before a switch of account", title, "the switch clause, one host: " + title)
+        accts = km._spend_accounts([("TESTHOST", [_machine()]), ("THIRDHOST", [_machine(kind="")]), ("PEERHOST", [_machine()])])
+        self.assertIn("TESTHOST, THIRDHOST and PEERHOST are signed in to this account now", accts[0]["title"])
+        self.assertIn("including any from before a switch of account", accts[0]["title"], "the switch clause, three hosts: " + accts[0]["title"])
+        # a sign-in whose identity names only its account digest (no email, organisation or kind): the hover is the
+        # sentence alone, with no separator before it
+        accts = km._spend_accounts([("TESTHOST", [_machine(kind="", org="", email="")])])
+        self.assertTrue(accts[0]["title"].startswith("TESTHOST is signed in to this account now"), accts[0]["title"])
+        # a stored login's token is no sign-in: its account is its record's, and a linked one's is the account copied at
+        # the link, so neither is said to be the one signed in now
+        accts = km._spend_accounts([("PEERHOST", [_stored(acct=DIGEST, org="Example Org", kind="enterprise", linked="TESTHOST")])])
+        self.assertNotIn("signed in to this account now", accts[0]["title"], accts[0]["title"])
+        self.assertIn("Token on PEERHOST linked by you to TESTHOST's sign-in.", accts[0]["title"])
+        # a sign-in and a linked token in one account: the sentence comes before the link's
+        accts = km._spend_accounts([("TESTHOST", [_machine()]), ("PEERHOST", [_stored(acct=DIGEST, linked="TESTHOST")])])
+        title = accts[0]["title"]
+        self.assertEqual(len(accts), 1, json.dumps(accts))
+        self.assertIn("linked by you", title)
+        self.assertIn("TESTHOST is signed in to this account now", title)
+        self.assertLess(title.index("TESTHOST is signed in to this account now"), title.index("linked by you"), title)
 
     def test_a_stored_login_whose_record_names_no_account_is_said_to_be_unrecorded_never_matched_by_its_label(self):
         accts = km._spend_accounts([("TESTHOST", [_machine()]), ("PEERHOST", [_stored(label="enterprise")])])
@@ -239,15 +332,51 @@ class Payload(unittest.TestCase):
         self.assertEqual((pr[0]["usd"][-1], pr[0]["turns"][-1]), (7.0, 3), "the peer's route series on our axis")
         self.assertEqual(d["accountsMissing"], ["OLDHOST"], "an older build's dollars are not in the summary: said by name")
 
-    def test_a_session_on_a_stored_login_carries_the_record_id_and_label(self):
+    def test_an_account_switch_on_the_machine_names_its_spend_by_the_account_signed_in_now_and_says_so(self):
+        # the same ledger read under the account signed in before and after a switch: the machine's sign-in spend moves to
+        # the new account's row (the ledger keeps no per-turn account), and that row's hover says why (the #74 review's
+        # account-switch finding)
+        before = km._spend_detail(now=NOW)["accounts"]
+        km._machine_identity = lambda: {k: v for k, v in _machine(acct=OTHER, kind="personal", org="", email="me@example.com").items()
+                                        if k != "route"}
+        after = km._spend_detail(now=NOW)["accounts"]
+        self.assertEqual(_vias(before[0]), ["TESTHOST sign-in", "token on TESTHOST"])
+        seat = next(a for a in after if "TESTHOST sign-in" in _vias(a))
+        self.assertEqual(seat["name"], "Personal plan")
+        self.assertIn("TESTHOST is signed in to this account now", seat["title"])
+
+    def _session_row(self, reg):
+        """WEB's row in the local half, its reg row as given (the backend's module, as the kernel loads it)."""
         from romp_load import load_source
-        reg = km.lg   # the registry module the kernel loaded
         sbm = load_source("romp_sdk_backend_spendaccts", os.path.join(os.path.dirname(HERE), "bin", "romp_sdk_backend.py"))
         be = sbm.SdkBackend(self.state, "/bin/true", lambda *a, **k: None)
         km._sdk = lambda: be
-        sbm.write_reg(Path(self.state), WEB, {"sid": WEB, "name": "web", "cwd": "/tmp", "auth": "login", "authLogin": LID, "alive": True})
-        row = next(s for s in km._spend_detail_local(now=NOW)["sessions"] if s["sid"] == WEB)
+        sbm.write_reg(Path(self.state), WEB, dict({"sid": WEB, "name": "web", "cwd": "/tmp", "alive": True}, **reg))
+        return next(s for s in km._spend_detail_local(now=NOW)["sessions"] if s["sid"] == WEB)
+
+    def test_a_session_on_a_stored_login_carries_the_record_id_and_label(self):
+        reg = km.lg   # the registry module the kernel loaded
+        row = self._session_row({"auth": "login", "authLogin": LID, "launchedLogin": LID, "authLoginLive": LID})
         self.assertEqual((row["loginId"], row["loginLabel"], row["login"]), (LID, "enterprise", reg.display(reg.read_record(self.state, LID))))
+
+    def test_the_row_names_the_login_its_launch_carried_never_the_pick(self):
+        # the recorder files a turn's byLogin dollars under the login its launch carried (the reg's launchedLogin), so the
+        # row reads that field (the #74 review's bills-suffix finding). A token the CLI did not use leaves the pick set and
+        # clears the launch's login, and the key or the machine's sign-in billed: no stored login is named
+        row = self._session_row({"auth": "login", "authLogin": LID, "launchedLogin": "", "authLoginLive": ""})
+        self.assertFalse({"login", "loginId", "loginLabel"} & set(row), "a refused pick billed nothing to it: " + json.dumps(row))
+        # a session with no pick, launched on the stored login the machine defaults to: its dollars sit in that login's row
+        row = self._session_row({"launchedLogin": LID, "authLoginLive": LID})
+        self.assertEqual((row.get("loginId"), row.get("loginLabel")), (LID, "enterprise"), json.dumps(row))
+        # a value that is not a record id is no login
+        row = self._session_row({"authLogin": LID, "launchedLogin": "../" + LID})
+        self.assertNotIn("loginId", row)
+        # nor is a reg that is not a mapping (read_reg returns whatever JSON the file holds, a corrupt one's list included)
+        for junk in ([LID], "launchedLogin", None):
+            self.assertEqual(km._reg_launched_login(junk), "", repr(junk))
+        # nor a value that is not a string: a corrupt reg's twelve-digit JSON number, whose digits alone would pass the
+        # record id's pattern
+        self.assertEqual(km._reg_launched_login({"launchedLogin": 123456789012}), "", "a number is no record id")
 
 
 if __name__ == "__main__":

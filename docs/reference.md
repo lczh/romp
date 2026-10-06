@@ -665,17 +665,29 @@ the link is your statement and romp has not verified it. Two
 accounts that would share a name are told apart by organisation, else by
 route. The email is in the hover over the account's name, never on the row. A
 machine's sign-in is named by the account signed in now, since the ledger does
-not stamp which account each turn billed; a machine signed out now reads as
-Unknown, as does spend from before the ledger tracked billing, and a machine
-on an older build is named under the summary with its dollars left out.
+not stamp which account each turn billed: after a switch of account, that
+machine's earlier sign-in spend shows under the new account, and the hover over
+the account's name says so. A machine signed out now reads as Unknown, as does
+spend from before the ledger tracked billing, and a machine on an older build
+is named under the summary with its dollars left out. The summary counts
+turns whatever billed them, so it can count turns that a machine's chart, list
+and totals leave out: where those three count only the machine's key-billed
+turns, a line under the summary names the machine if it has other spend in
+the range. On a narrow screen, such as a phone, the summary shows as one line
+with each account's dollars, cut short where they do not fit. Click it to see
+the full rows and the lines under them, including the one that names those
+machines.
 
 Dollars billed to a subscription seat, through a sign-in or a stored login,
 are Claude Code's own cost for those turns at API prices. A seat is not billed
 per token, so these figures are estimates: they wear `≈`, the hover and a line
 under the summary say so, and a session row whose dollars include such turns
 wears the mark too. Key-billed dollars are what the key was billed and stay
-plain. A session billed to a stored login reads `bills <account>` beside its
-name, with the login's full label in the hover.
+plain. A session whose last launch was billed to a stored login reads
+`bills <account>` beside its name, with the login's full label in the hover.
+The name comes from the last launch: if a session changed logins within the
+range, the row names only the latest launch's stored login, or none when that
+launch billed the machine's sign-in or the key.
 
 The token count beside the dollars is every kind together: fresh input,
 output, cache writes, and cache reads. Cache reads are most of it: every API
