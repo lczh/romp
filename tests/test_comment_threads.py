@@ -3735,5 +3735,131 @@ class RelayWholeDiscussion(CommentBase):
         self.assertNotIn(km.MERGE_TRIM_NOTE, km._merge_body("q", [first] + mid[:2]))
 
 
+
+class ThreadReadsWhereTheCliWrites(CommentBase):
+    """A thread whose agent cd'd lost its popover after the person replied in it (2026-10-06). Each turn's init reports
+    the CLI's current directory, which follows the agent's shell, and the registry took it as the session's cwd; every
+    thread read derived the transcript from that cwd, a projects dir that does not exist. The popover then held only the
+    backend's echo of the reply, rendered as the thread's opening message ("sending…" under the quote), with every other
+    message gone, and a relay had nothing to send. The thread reads where the CLI said it writes (the reg's
+    transcriptPath); the registry no longer takes a cwd that holds no transcript (test_create_dir_case covers that).
+    SYNTHETIC: a notes-api thread whose agent cd'd into tests/, as a tip fork (a passage from before the summary) and as
+    a cut fork."""
+
+    PRIOR = km._precompact_block(("me", "How should the sync loop back off?"), None,
+                                 "/TESTDIR/.claude/projects/-TESTDIR-notes-api/" + PARENT + ".jsonl", "a1")
+
+    def setUp(self):
+        super().setUp()
+        (Path(self._td) / "session-hosts").write_text("off")   # a minted state root starts no session host
+        self.t0 = self.now - 3000
+        self.be = FakeBackend()
+        saved = (km.Sessions.__dict__["backend_for"], km._push_soon, ThreadProjection._State.live)
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+        km._push_soon = lambda: None
+
+        def restore():
+            km.Sessions.backend_for, km._push_soon = saved[0], saved[1]
+            ThreadProjection._State.live = saved[2]
+        self.addCleanup(restore)
+        self.moved = os.path.join(self.cdir, "notes-api", "tests")   # where the agent's shell went
+        os.makedirs(self.moved)
+
+    def _seed(self, cut):
+        """The copied history, then the thread's own exchange: the opening comment, the agent's answer after a cd into
+        tests/ (its records carry the new cwd, as the CLI writes them), the person's reply and the answer to it. The reg
+        as the init adoption left it: cwd the directory the shell moved to, transcriptPath where the CLI writes."""
+        t = self.t0
+        sent, said = km._comment_opener_parts("exponential backoff", "Why jitter at all?", "" if cut else self.PRIOR)
+
+        def at(r, cwd):
+            r["cwd"] = cwd
+            return r
+        home, moved = self.cdir, self.moved
+        recs = [at(uline(t, "How should the sync loop back off?", "u1"), home),
+                at(aline(t + 5, "Use exponential backoff with ten percent jitter.", "a1", parent="u1"), home),
+                at(uline(t + 100, sent + "\n\n" + said, "cu1", parent="a1"), home),
+                at(tline(t + 105, "ct1", "cu1"), home),
+                at(tool_result_line(t + 106, "cr1", "ct1", "ct1"), moved),
+                at(aline(t + 110, "Jitter keeps the clients from retrying in lockstep.", "ca1", parent="cr1"), moved),
+                at(uline(t + 200, "Would five percent be enough?", "cu2", parent="ca1"), moved),
+                at(aline(t + 210, "Five percent is enough at this scale.", "ca2", parent="cu2"), moved)]
+        path = self._write(THREAD, recs)
+        (jd.SDKDIR / (THREAD + ".json")).write_text(json.dumps(
+            {"sid": THREAD, "name": "notes-api-comment-1", "cwd": moved, "lastSid": THREAD, "alive": True,
+             "threadOf": PARENT, "transcriptPath": str(path)}))
+        self.assertFalse(os.path.exists(km.jd._proj_dir(moved) / (THREAD + ".jsonl")), "the moved cwd holds no transcript")
+        row = {"tid": THREAD, "sid": THREAD, "anchorUuid": "a1", "cutUuid": cut, "anchorT": t + 5,
+               "exact": "exponential backoff", "status": "open", "sent": sent, "createdT": t + 90, "lastSeenT": t + 205}
+        if not cut:
+            row["beforeSummary"] = True
+        km._save_comments(PARENT, {"threads": [row]})
+        km._thread_msgs_cache.clear(); km._built_thread.clear(); km._comments_memo.clear()
+        forget_parses()
+
+    WHO = ["you", "agent", "you", "agent"]
+    SAID = ["Why jitter at all?", "Jitter keeps the clients from retrying in lockstep.",
+            "Would five percent be enough?", "Five percent is enough at this scale."]
+
+    def _popover(self):
+        """The comments frame's thread, its backend still holding the echo of the reply (the backend retires an echo
+        when the transcript holds its text, which only a read of the transcript can see)."""
+        st = ThreadProjection._State("")
+        ThreadProjection._State.live = [{"type": "user", "author": "human", "t": self.t0 + 199, "uuid": "echo:r1",
+                                         "_echo_text": "Would five percent be enough?"}]
+        km._sdk = lambda: st
+        km.Sessions.backend_for = staticmethod(lambda sid: st)
+        return km._comments_frame(PARENT)["threads"][0]
+
+    def _assert_whole(self, cut):
+        floor = 0 if cut else self.t0 + 90
+        msgs = km._thread_messages(THREAD, cut, floor)
+        self.assertEqual([m["who"] for m in msgs], self.WHO, "every message of the thread")
+        self.assertEqual([m["text"] for m in msgs], self.SAID)
+        self.assertEqual(km._thread_exchange(THREAD, cut, floor)["gap"], "", "the walk reached the thread's start")
+        th = self._popover()
+        users = [e.get("md") for e in th["events"] if e.get("kind") == "user"]
+        self.assertEqual(users, ["Why jitter at all?", "Would five percent be enough?"],
+                         "the opening comment first, the reply after it")
+        self.assertFalse([e for e in th["events"] if str(e.get("uuid") or "").startswith("echo:")],
+                         "the landed reply is no unsent echo")
+        self.assertIn("Five percent is enough at this scale.", [e.get("md") for e in th["events"]])
+        self.assertEqual([m["text"] for m in th["msgs"]], self.SAID)
+        self.assertFalse(th["replyOwed"], "the reply was answered")
+
+    def test_a_tip_fork_shows_every_message_after_its_agent_cd(self):
+        self._seed("")
+        self._assert_whole("")
+
+    def test_a_cut_fork_shows_every_message_after_its_agent_cd(self):
+        self._seed("a1")
+        self._assert_whole("a1")
+
+    def test_the_relay_sends_the_whole_thread_after_its_agent_cd(self):
+        for cut in ("", "a1"):
+            self._seed(cut)
+            del self.be.sent[:]
+            self.assertIsNone(km._comment_merge(PARENT, THREAD))
+            body = [text for sid, text in self.be.sent if sid == PARENT][0]
+            lines = [("Me: " if w == "you" else "Them: ") + s for w, s in zip(self.WHO, self.SAID)]
+            at = [body.find(ln) for ln in lines]
+            self.assertNotIn(-1, at, "cut %r: every message goes" % cut)
+            self.assertEqual(at, sorted(at))
+            self.assertIn("Here is how it went:", body, "nothing is missing")
+
+    def test_a_thread_with_nothing_recorded_still_reads_from_its_cwd(self):
+        # before its first turn ends the CLI has said nothing about where it writes: the cwd derivation stands
+        self._seed("a1")
+        reg = json.loads((jd.SDKDIR / (THREAD + ".json")).read_text())
+        reg.pop("transcriptPath"); reg["cwd"] = self.cdir
+        self.assertEqual(km._thread_transcript_path(reg, THREAD), str(self.proj / (THREAD + ".jsonl")))
+        # …and a recorded file the lastSid moved on from leaves the read on the lastSid's file beside it
+        self._write("77777777-8888-9999-aaaa-bbbbbbbbbbbb", [])
+        reg = dict(reg, transcriptPath=str(self.proj / (THREAD + ".jsonl")),
+                   lastSid="77777777-8888-9999-aaaa-bbbbbbbbbbbb", cwd=self.moved)
+        self.assertEqual(km._thread_transcript_path(reg, THREAD),
+                         str(self.proj / "77777777-8888-9999-aaaa-bbbbbbbbbbbb.jsonl"))
+
+
 if __name__ == "__main__":
     unittest.main()

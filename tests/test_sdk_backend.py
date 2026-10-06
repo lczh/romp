@@ -3599,8 +3599,13 @@ class SpendRecord(unittest.TestCase):
         run(self._costed(13.0, {"m": {"inputTokens": 1500, "outputTokens": 260}}))
         self.assertAlmostEqual(day()["usd"], 0.5, msg="the first result records only this turn")
         self.assertEqual(day()["tokIn"], 500)
-        # a cwd correction AFTER a settle (none is expected; the guard is the point) leaves them alone
-        init({"cwd": self._private_dir(), "session_id": self._FSID, "model": "claude-x"})
+        # a cwd correction AFTER a settle (none is expected; the guard is the point) leaves them alone: to a directory
+        # that holds the transcript, the only kind registry_cwd_for adopts, with a record a re-seed would read
+        moved = self._private_dir()
+        os.makedirs(os.path.dirname(sb.transcript_path(moved, self._FSID)), exist_ok=True)
+        Path(sb.transcript_path(moved, self._FSID)).write_text(self._cost_state(99.0, mu) + "\n")
+        init({"cwd": moved, "session_id": self._FSID, "model": "claude-x"})
+        self.assertEqual(s.cwd, moved, "adopted")
         self.assertEqual(s._last_cost_total, 13.0, "no re-seed once a result has settled")
         run(self._costed(13.2, {"m": {"inputTokens": 1600, "outputTokens": 260}}))
         self.assertAlmostEqual(day()["usd"], 0.7)
