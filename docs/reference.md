@@ -3501,7 +3501,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `coldFlip` counts the subset the memo held warm and re-read in place with
   one kernel parse (also under `parses.kernel`) instead of deriving cold;
   `coldFlip` climbing every build for one session with no appends means its
-  parse never stores, which should not occur. `reg` is the SDK registry
+  parse never stores, which should not occur. Beside the memo's counters sit
+  the card anchor walk's: a derivation builds the cards' click-to-jump
+  anchors from every segment of the session's parse, and the part over its
+  closed turns is held between derivations under those turns' identities,
+  the leaf's path and inode and the goal store's seams by value, so a
+  derivation folds only the turns that closed since and the open one.
+  `segWalks` counts the walks that finished, `segHeld` and `segWalkTurns`
+  the closed turns served from the hold and the turns folded, `segPartial`
+  a held aggregate whose turns diverged inside it (a rewind, an edit, a
+  compaction re-seat, a late record: every turn is walked), `segReset` one
+  discarded whole (another leaf or other seams), `segRaised` the walks that
+  met a failure and stored nothing, and `segEvict` the aggregates shed by
+  the byte bound or with their departed session; `segEntries`, `segBytes`
+  (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
+  the machine's memory) are the gauges. `reg` is the SDK registry
   record's state plus the two fields a card reads, `bgLedger` and
   `spawnedAt`, and the death marker's identity; the record's other fields
   move `reg` no further, and a transcript-less live row's `cwd`, `lastSid`

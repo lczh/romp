@@ -248,10 +248,15 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(memo), {"hit", "miss", "evict", "entries", "bytes", "bound", "derived", "miss_by",
                                      "failed", "failing",   # failed: derivations that raised, cumulative; failing: sessions whose last one did (2026-09-17)
                                      "row_by",            # a row miss by the row position that moved (2026-09-18)
-                                     "coldLive", "coldFlip"})   # coldLive: living sessions whose cache-only parse read missed, per build; coldFlip: those re-read in place because the memo held them warm (2026-09-18)
+                                     "coldLive", "coldFlip",   # coldLive: living sessions whose cache-only parse read missed, per build; coldFlip: those re-read in place because the memo held them warm (2026-09-18)
+                                     # the card anchor walk's held aggregates (2026-10-06): walks, held and folded turns, partial and
+                                     # reset entries, walks that raised, evictions, and the occupancy against the bound
+                                     "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised", "segEvict",
+                                     "segEntries", "segBytes", "segBound"})
         self.assertEqual(set(memo["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
         self.assertEqual(set(memo["row_by"]), set(km._FEED_ROW_FIELDS) | {"presence"})
         self.assertEqual(memo["bound"], km.FEED_MEMO_BYTES)
+        self.assertEqual(memo["segBound"], km.FEED_SEG_HELD_BYTES, "the held aggregates' bound beside their bytes")
         self.assertEqual(memo, km._feed_memo_report())
         for k, v in memo.items():
             self.assertIsInstance(v, (int, dict), k)
