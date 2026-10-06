@@ -34,12 +34,17 @@ prefix and the comments), and both classes compare against it:
               answers alike under every held version; the marks' caller (the kernel's _judging_cap_marks against the
               old one, each run from the same memo) leaves the same counters and held entries, serves the same marks,
               and asks since the same questions with the same answers, never one version twice.
-  Exceptions  the two answers the pairs gave differently, each on its own: an empty mapping, and one version twice.
+  Exceptions  two of the three answers the pairs gave differently, each on its own (Road asks the third, a version that is
+              not a tuple): an empty mapping, and one version twice.
+  OnePair     both callers name the one pair, _caption_rows_version and _caption_rows_since.
 Every answer compared here is equal on the kernel before the fold (the reference is that code), yet Road is red there:
 its marks asked their own tail, which the spy on the shared since cannot see, so the since questions differ. That is
-the one thing the fold changes, and it holds the fold in place: a private copy for either memo turns Road red again.
+the one thing the fold changes. Road compares answers, so of the private copies that answer alike it catches only one: a
+private since for the marks. OnePair holds the rest by reading _lane_segments' and _judging_cap_marks' source for the two
+calls.
 Synthetic data only: placeholder uuids and invented captions."""
 import collections
+import inspect
 import json
 import os
 import tempfile
@@ -465,6 +470,18 @@ class Exceptions(_Captions):
         self.assertIs(m2, m1, "the held marks served")
         self.assertEqual(calls, [], "one version twice is a hit, never a since question")
         self.assertEqual((km._JUDGING_MARKS_STATS["build"], km._JUDGING_MARKS_STATS["hit"]), (1, 1))
+
+
+class OnePair(unittest.TestCase):
+    """Both memos ask the one pair by name. Road compares answers, which a private copy that answers alike keeps equal,
+    and its spy sees only the marks' since; this holds the rest."""
+
+    def test_the_lane_prefix_and_the_marks_ask_the_one_pair(self):
+        for fn, since in ((km._lane_segments, "_caption_rows_since(held[9], cap_ver)"),
+                          (km._judging_cap_marks, "_caption_rows_since(held[0], ver)")):
+            src = inspect.getsource(fn)
+            self.assertIn("_caption_rows_version(sid, caps)", src, fn.__name__)
+            self.assertIn(since, src, fn.__name__)
 
 
 if __name__ == "__main__":
