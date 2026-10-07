@@ -67,7 +67,7 @@ await page.addInitScript((sid) => { window.__frameN = 0; window.__injN = 0; wind
   if (m.id === sid && rows && rows.length && (m.type === "status" || m.type === "session" || m.type === "chatTail")) window.__lastStatus = { type: "status", id: sid, status: m.status }; }, true); }, cfg.sid);   // the kernel's frames counted and the session's latest status (the box's rows ride the chatTail frames' status here) kept, so a scene can post a status frame of its own that differs in one field and wait for the page to handle it, never on a delay
 const errors = []; page.on("pageerror", (e) => errors.push(String(e).slice(0, 300)));
 const out = { errors };
-const mark = () => process.stdout.write("PARTIAL:" + JSON.stringify(out) + "\n");   // the record so far, after most scenes (the shell's scenes share one): what a run that hits the driver's budget still reports
+const mark = () => process.stdout.write("PARTIAL:" + JSON.stringify(out) + "\n");   // the record so far, after most scenes (the opening scenes, 1 to 0b, share one, and so do the shell's): what a run that hits the driver's budget still reports
 const rowSel = (id) => '#notices .ntc-row[data-item="' + id + '"]';
 // a row's LINE (read as `.ntc-secs > .fask-distill` or `.ntc-body` below): on a goal row the card's distill line (the brief or the takeaway), drawn by the card's
 // own builder since the box content round (plans/needs-you.md); on a notice row and on the credential row the kernel's markdown body, as before. A page
@@ -703,7 +703,7 @@ def _overrun_record(stdout):
     leaves."""
     line = next((ln for ln in reversed((stdout or "").splitlines()) if ln.startswith("PARTIAL:")), None)
     if line is None:
-        return "its record so far: (no scene completed)"
+        return "its record so far: (no PARTIAL line: the driver had not finished the opening scenes, 1 to 0b)"
     tail = "its record so far: %s" % line[-3000:]
     try:
         rec = json.loads(line[len("PARTIAL:"):])
@@ -1391,7 +1391,7 @@ class OverrunRecord(unittest.TestCase):
         self.assertEqual(_overrun_record("a driver log line\n" + cut), "its record so far: " + cut[-3000:])
         self.assertEqual(_overrun_record("PARTIAL:[1, 2]\n"), "its record so far: PARTIAL:[1, 2]", "JSON that is not a record: the tail")
         for empty in ("", None, "a driver log line\n"):
-            self.assertEqual(_overrun_record(empty), "its record so far: (no scene completed)")
+            self.assertEqual(_overrun_record(empty), "its record so far: (no PARTIAL line: the driver had not finished the opening scenes, 1 to 0b)")
 
     def test_a_record_of_the_wrong_shape_names_what_it_can_and_never_raises(self):
         msg = _overrun_record(self._line({"premise": 3, "hiddenPane": [1]}))
