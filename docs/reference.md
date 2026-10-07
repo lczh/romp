@@ -3654,22 +3654,36 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the card anchor walk's: a derivation builds the cards' click-to-jump
   anchors from every segment of the session's parse, and the part over its
   closed turns is held between derivations under those turns' identities,
-  the leaf's path and inode and the goal store's seams by value, so a
-  derivation folds only the turns that closed since and the open one.
+  the leaf's path and inode and the goal store's seams by value; while all
+  of them stand, a derivation folds only the turns that closed since and
+  the open one.
   `segWalks` counts the walks that finished, `segHeld` and `segWalkTurns`
   those walks' closed turns served from the hold and the turns they folded,
   `segPartial` a held aggregate whose turns diverged inside it (a rewind,
-  an edit, a compaction re-seat, a late record: it is dropped and every
+  an edit, a compaction re-seat, a late record, or a turn boundary whose
+  working state row lands after the new turn's first record: until it
+  lands, the turn that just closed runs its idle span to the parse's
+  clock, so that turn's end moves; the aggregate is dropped and every
   turn is walked), `segReset` one discarded whole (another leaf, other
   seams, or no closed turn left to hold), `segRaised` the walks that met a
   failure and stored nothing, `segEvict` the aggregates shed by the byte
   bound or with their departed session and the new ones the bound did not
-  admit, and `overBound` the aggregates over the bound by themselves,
-  served to their derivation but never held. Past the bound, a store sheds
-  the least recently used aggregates that no derivation of the same board
-  build used; when every other aggregate was used in that build, the new
-  one is not held and its session keeps the one it was served from, so
-  the sessions a build is working on keep theirs.
+  admit, and `segOverBound` the aggregates over the bound by themselves,
+  served to their derivation but never held. Each aggregate carries the
+  number of the last board build that used it. Past the bound, a store
+  sheds the least recently used aggregates that no derivation of the
+  current build has used so far, until the new one fits; when shedding
+  all of them would still leave no room, it sheds nothing and the new one
+  is not held. Then, and for an aggregate over the bound by itself, the
+  session keeps the aggregate it was served from, so its next walk folds
+  only the turns since. Only aggregates the build has already used are
+  protected: one it has yet to use still carries an earlier build's
+  number, so a session whose grown aggregate is stored first, whichever
+  session that is, can shed the aggregate of a session derived after it,
+  which then walks every turn while the two do not fit together. While
+  two builds overlap, the aggregates used carry the number of the build
+  that began last, so one the earlier build used before then is not
+  protected either.
   `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
