@@ -97,6 +97,8 @@ ALLOW = {
     ("kernel.py", "_first_cycle_sampler_start", "_first_cycle_sampler_run"): "the first-pass stack sampler: reads frames, builds nothing",
     ("kernel.py", "_dispatch_ws", "_pf"): "a native file dialog for the paperclip",
     ("kernel.py", "_dispatch_ws", "_gl"): "a git link subprocess for a file",
+    ("kernel.py", "_repo_index_spawn", "_repo_index_refresh"): "the path links' repo listing: two `git ls-files` subprocesses "
+                                                               "and a dict of paths, no record read, no atom built (2026-10-07)",
     ("kernel.py", "_dispatch_ws", "_bd"): "a native folder dialog for a field",
     ("kernel.py", "_spend_detail", "_ask"): "one peer's spend call over its tunnel",
     ("kernel.py", "pairs_snapshot", "one"): "one peer's status call over its tunnel",

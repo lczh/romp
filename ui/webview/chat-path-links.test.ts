@@ -4,8 +4,8 @@
 // now resolves every shape-matched token at message-build time (build_session's _path_links: tier 1
 // exact stat, tiers 2/3 a UNIQUE match in the repo's tracked and untracked-unignored files, `git ls-files -c`
 // and `-o --exclude-standard` in the session's cwd) and ships {token: open target} as `pathLinks` on
-// user + assistant events. The client keeps every shape gate it had and merely requires map membership; the map's value is what a click opens,
-// so a unique `sub/deep.py` mention opens the real kernel/sub/deep.py and hover shows that target.
+// user + assistant events. The client keeps every shape gate it had and merely requires map membership;
+// the map's value is what a click opens, so a unique `sub/deep.py` mention opens the real kernel/sub/deep.py and hover shows that target.
 // Zero or several candidates → absent from the map → prose (a silently-wrong link is worse than no
 // link). The matcher lives in path-links.ts (lifted out of render.ts, which binds the click per span); neither
 // has a jsdom harness → source pins + an executed tokenizer parity check over the shared fixture (the kernel
