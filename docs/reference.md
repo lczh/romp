@@ -3766,11 +3766,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   after the pull, after-pull with the checkout it moved, which the successor
   boots on; either way a `main-converge-declined` row stands in the
   restart-audit ledger where a second sigterm used to); `sessionsListing` is
-  the kept GET /sessions listing (`built` by the pusher's cycle when its key
-  moved, `served` to requests from memory, `requestBuilt` once before the first
-  cycle, `faultBuilt` per request while a cycle's build failed and the kept
-  listing may be stale, `missBy` the key input that moved: rows, names, notes
-  or registry); `nudgeWalk` is the auto-nudge walk's
+  the kept GET /sessions listing, which the pusher's cycle builds as three
+  products, each under its own key: the rows (`built`, `missBy` the key input
+  that moved: rows, names, notes or registry), the comment-thread rows behind
+  `?threads=1` (`threadsBuilt`, `threadsMissBy`: table, state, comments, flags,
+  names or reg) and the transcript claims GET /sessions/by-fsid answers from
+  (`claimsBuilt`). `served` and `byFsidServed` count the requests the two routes
+  answered from memory, `requestBuilt` the one build a request makes before the
+  first cycle, and `refused` the requests answered 503 because a product's
+  build failed since it was built (the kept copy may be stale, so it is not
+  served and no request builds its own); `nudgeWalk` is the auto-nudge walk's
   parse gate (T401): `looks`, `skippedParses` (a session whose files are
   unchanged since its last completed look and whose clock legs, noted by that
   look with the instant each could flip, have not come due; the skip repeats

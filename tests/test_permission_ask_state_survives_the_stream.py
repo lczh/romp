@@ -121,11 +121,11 @@ def _callers_of_the_gate(src):
 
 
 # the holders of the constant "working" in kernel/sdk_backend.py, by def and by the node that holds it (a count each): two
-# state tuples at module level, _mark's comparison, snapshot's conditional and tuple, drive_idle_queue's and _live_row's
-# tuples, and the gate's call, the module's ONE writer
+# state tuples at module level, _mark's comparison, live_state's conditional and tuple (the snapshot's state half, which the
+# listing's comment threads read alone), drive_idle_queue's and _live_row's tuples, and the gate's call, the module's ONE writer
 WORKING_HOLDERS = sorted([(("<module>", "Tuple"), 2), (("_live_row", "Tuple"), 1), (("_mark", "Compare"), 1),
-                          (("_mark_producing", "Call"), 1), (("drive_idle_queue", "Tuple"), 1), (("snapshot", "IfExp"), 1),
-                          (("snapshot", "Tuple"), 1)])
+                          (("_mark_producing", "Call"), 1), (("drive_idle_queue", "Tuple"), 1), (("live_state", "IfExp"), 1),
+                          (("live_state", "Tuple"), 1)])
 
 
 class ParkedPermissionKeepsItsState(unittest.TestCase):

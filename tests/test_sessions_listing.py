@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """GET /sessions is served from the cycle's snapshot (plans/sessions-route-from-the-cycle.md): the pusher's cycle builds the
 listing once when its exact key moved (the live rows, the names snapshot, the working-notes store, the registry revision, the
-compacting bits, the launch errors) and every request serves the kept JSON; a request before the first cycle builds once and is served from the
-kept listing by the next; ?threads=1 rides its own key. The postal bus reads this route for its roster (list_agents, the
+compacting bits, the launch errors) and every request serves the kept JSON; a request before the first cycle builds once and the
+cycle keeps that build under its key; the ?threads=1 rows and GET /sessions/by-fsid's claims are the cycle's too, each under its
+own key, and no request reads a session, a thread or a record. The postal bus reads this route for its roster (list_agents, the
 send's liveness check), so a session's start, rename and death reach the roster within one cycle, and the rows keep the
 fields the bus reads. Hermetic: a temp state root, two synthetic sessions on disk, the live map stubbed."""
 import http.client
@@ -90,7 +91,11 @@ class _Listing(unittest.TestCase):
         serve = getattr(km, "_sessions_listing_serve", None)
         if serve is None:                                            # the base: the route builds per request
             return km._session_rows() + (km._thread_rows() if threads else [])
-        return json.loads(serve(threads=threads))
+        out = serve(threads=threads)
+        if isinstance(out, tuple):                                   # (status, body): a stale listing is refused, not served
+            self.assertEqual(out[0], 200, out[1])
+            out = out[1]
+        return json.loads(out)
 
     def _stats(self):
         L = getattr(km, "_SESSIONS_LISTING", {})
@@ -294,14 +299,14 @@ class OneListingPerChange(_Listing):
         return landed, notice, memos
 
     def test_a_requests_own_row_build_with_no_refresh_open_reads_the_pair_compacting_then_notice(self):
-        """The request path: a request thread's own build (the serve before the first cycle, the fault build after a
-        cycle's build raised, GET /sessions/by-fsid) runs with no pair memo open on its thread, so the pair reader takes
-        its memo-less branch and reads the two seams fresh, compacting then notice. The order case above arms its hook
+        """A row built outside a refresh (a direct _session_rows() call; the routes serve the cycle's kept rows, and the one
+        request-side build before the first cycle opens the refresh's memo like the cycle) runs with no pair memo open on its
+        thread, so the pair reader takes its memo-less branch and reads the two seams fresh, compacting then notice. The order case above arms its hook
         inside the listing's key, the refresh path, and pinned nothing here: with the memo-less branch rewritten to read
         the launch error before the compacting bit, this module and every sibling that stubs the two seams stayed green
         (the post-merge review of the listing pairing, 2026-09-22). Under that rewrite a loud end landing between the two
-        reads gives a request's row (False, None), the clean end's shape, and `romp compact --wait` polling the route
-        before the first cycle or while the kept listing is stale from a fault prints done over an uncompacted thread.
+        reads gives such a row (False, None), the clean end's shape, which `romp compact --wait` reads as done over an
+        uncompacted thread.
         The pin: the memo asserted absent before one direct row build on this thread and at the read the end lands on,
         the row's name and dir checked as the head's before its pair is read (the builder's catch-all fallback row, which
         any other field's raise produces, carries (False, None) too, so a red on the pair alone could not tell the order
@@ -319,25 +324,23 @@ class OneListingPerChange(_Listing):
         self.assertEqual(memos, [None], "no pair memo at the read the end landed on: the memo-less branch, not one the build opened around itself")
         self.assertIsNone(getattr(km._live_scope, "listing_pairs", None), "and none left open after the build")
 
-    def test_the_by_fsid_route_reaches_the_same_memo_less_branch_and_reads_the_pair_in_the_same_order(self):
-        """GET /sessions/by-fsid builds the one row it serves through the same row builder on the request thread, with no
-        refresh open: the same memo-less branch, pinned on its own route since the route's other reads (the live map, the
-        registry's lastSid, the transcript path) come before the row build and touch neither seam; the same guards as the
-        direct build's, the memo recorded at the landing read and the row checked as the head's before its pair
-        (2026-09-22)."""
-        landed, notice, memos = self._loud_end_landing_on_the_first_read()
-        self.assertIsNone(getattr(km._live_scope, "listing_pairs", None), "no refresh is open on this thread")
-        landed.append("armed")
+    def test_the_by_fsid_route_serves_the_listings_kept_row_and_builds_none(self):
+        """GET /sessions/by-fsid answers with the row the listing keeps, built by the cycle's refresh under its pair memo
+        (compacting then notice, the order the two cases above pin), so its compacting bit and launch error are the
+        listing's and no ask reads either seam (2026-10-07: it built its own row per ask, on the request thread)."""
+        comp, errs, reads = {SID: True, SID2: False}, {}, []
+        self._compaction_seams(comp, errs, reads)
+        self._cycle()
+        built = []
+        real = km._session_listing_row
+        km._session_listing_row = lambda *a, **k: (built.append(1), real(*a, **k))[1]
+        self.addCleanup(setattr, km, "_session_listing_row", real)
+        del reads[:]
         code, row = km._session_by_fsid(SID)
         self.assertEqual(code, 200, row)
-        self.assertEqual(row["id"], SID)
-        self.assertEqual(landed, ["landed"], "the end landed between the pair's two reads, inside the route's one row build")
-        self.assertEqual((row["name"], row["dir"]), ("web", str(self.cdir)),
-                         "the head's row, not the builder's catch-all fallback: a red on the pair below is the read order")
-        self.assertEqual((row["compacting"], row["launchError"]), (True, notice),
-                         "the by-fsid row reads the pair compacting then notice, as the listing's rows do")
-        self.assertEqual(memos, [None], "no pair memo at the read the end landed on: the route reached the memo-less branch")
-        self.assertIsNone(getattr(km._live_scope, "listing_pairs", None), "and none left open after the route's build")
+        self.assertEqual(row, next(r for r in self._body() if r["id"] == SID), "the listing's own row")
+        self.assertIs(row["compacting"], True)
+        self.assertEqual((built, reads), ([], []), "no row is built and no seam is read at the ask")
 
     def test_the_compacting_bit_alone_moving_rebuilds_once_each_way_and_the_row_carries_it(self):
         """The compacting bit is a key input in its own right (the design's compacting edge): a compaction starting and
@@ -438,25 +441,28 @@ class OneListingPerChange(_Listing):
             a = self._body(); b = self._body()
             self.assertEqual(len(builds), 1, "one build, from the registry (no cycle yet), served to both requests (the base built twice)")
             self._cycle()
-            self.assertEqual(len(builds), 2, "the first cycle rebuilds under its key from its snapshot")
+            self.assertEqual(len(builds), 1, "the build is kept under its key: the first cycle finds nothing moved (rule 1)")
             self.assertEqual(self._body(), a)
+            self.row[SID]["state"] = "working"
+            self._cycle()
+            self.assertEqual(len(builds), 2, "and rebuilds once something does")
         finally:
             setattr(km, name, real)
         st, _ = self._stats()
-        self.assertEqual((st["requestBuilt"], st["built"]), (1, 1))
+        self.assertEqual((st["requestBuilt"], st["built"]), (1, 2))
 
-    def test_a_fault_in_the_listing_never_skips_the_parked_ops_and_requests_build_for_themselves_until_a_build_lands(self):
+    def test_a_fault_in_the_listing_never_skips_the_parked_ops_and_requests_are_refused_until_a_build_lands(self):
         """1752 round two, the medium: the listing job sat inside the pending ops' try, so a raise in the key or the build skipped
-        _apply_pending_ops for the cycle and the stderr line blamed pending operations; now the job has its own try and line,
-        and the served listing falls back to a per-request build while the kept one is stale from a fault."""
+        _apply_pending_ops for the cycle and the stderr line blamed pending operations; now the job has its own try and line.
+        While the kept listing is stale from a fault a request is refused, loudly, and never builds for itself (2026-10-07:
+        the per-request build was the walk that hung the kernel; ListingFaultAndFirstBuild below drives the route)."""
         import io
         self._cycle()
         ops = []
         real_ops = km._apply_pending_ops
-        real_build = getattr(km, "_session_rows_from", km._session_rows)
-        name = "_session_rows_from" if hasattr(km, "_session_rows_from") else "_session_rows"
+        real_build = km._session_rows_from
         km._apply_pending_ops = lambda: ops.append(1)
-        setattr(km, name, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the build failed")))
+        km._session_rows_from = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the build failed"))
         err = io.StringIO()
         try:
             self.row[SID]["state"] = "working"                       # the key moves: the cycle rebuilds and the build raises
@@ -464,32 +470,31 @@ class OneListingPerChange(_Listing):
                 self._cycle()
             self.assertEqual(ops, [1], "the parked ops still ran this cycle (the base skipped them)")
             self.assertIn("sessions-listing:", err.getvalue(), "the line names the listing, not pending operations: %r" % err.getvalue()[:200])
-            setattr(km, name, real_build)
-            body = self._body()
-            self.assertEqual(next(r for r in body if r["id"] == SID)["state"], "working", "a request builds for itself while the kept listing is stale")
-            st, _ = self._stats()
-            self.assertEqual(getattr(km, "_SESSIONS_LISTING", {}).get("faultBuilt"), 1, "counted as a fault build")
+            code, body = km._sessions_listing_serve()
+            self.assertEqual(code, 503, body)
+            self.assertIn("the build failed", json.loads(body)["error"], "the refusal names the fault")
+            km._session_rows_from = real_build
             self._cycle()                                              # the next cycle's build lands: served from memory again
-            self.assertIsNone(getattr(km, "_SESSIONS_LISTING", {}).get("fault"))
-            self._body()
-            self.assertEqual(getattr(km, "_SESSIONS_LISTING", {}).get("faultBuilt"), 1, "no fault build once a build landed")
+            self.assertIsNone(km._SESSIONS_LISTING["view"]["fault"])
+            self.assertEqual(next(r for r in self._body() if r["id"] == SID)["state"], "working")
         finally:
             km._apply_pending_ops = real_ops
-            setattr(km, name, real_build)
+            km._session_rows_from = real_build
 
     def test_a_plain_rebuild_keeps_the_thread_rows_under_their_own_key(self):
         self._cycle()
-        self._body(threads=True)
-        L = getattr(km, "_SESSIONS_LISTING", {})
-        tkey = L.get("threadsKey")
-        self.assertIsNotNone(tkey, "the thread rows were built and keyed")
+        L = km._SESSIONS_LISTING
+        tkey = L["threadsKey"]
+        self.assertIsNotNone(tkey, "the cycle built the thread rows and keyed them")
+        self.assertEqual(L["threadsBuilt"], 1)
         self.row[SID]["state"] = "working"                           # a plain input moves: the listing rebuilds
         self._cycle()
-        self.assertEqual(L.get("threadsKey"), tkey, "the thread rows keep their key")
-        self.assertIsNotNone(L.get("threads"), "and their rows: no thread build for a plain rebuild")
+        self.assertEqual((L["threadsKey"], L["threadsBuilt"]), (tkey, 1), "the thread rows keep their key and their build")
+        self.assertIsNotNone(L["view"]["threads"])
         (jd.STATE / "session-flags.json").write_text(json.dumps({SID: {"postalServiceOff": True}}))   # the mailbox fields' store
-        self._body(threads=True)
-        self.assertNotEqual(L.get("threadsKey"), tkey, "the flags store's stat is in the threads key")
+        self._cycle()
+        self.assertNotEqual(L["threadsKey"], tkey, "the flags store's stat is in the threads key")
+        self.assertEqual(L["threadsMissBy"].get("flags"), 1, "and the miss names it")
 
     def test_the_notes_key_carries_the_inode_as_the_notes_memo_does(self):
         key = getattr(km, "_sessions_listing_key", None)
@@ -512,7 +517,7 @@ class OneListingPerChange(_Listing):
                 return resp.status, body
             status, body = get("/sessions")
             self.assertEqual(status, 200)
-            self.assertEqual(body, getattr(km, "_SESSIONS_LISTING", {}).get("json"), "the kept JSON, byte for byte (the base keeps none)")
+            self.assertEqual(body, km._SESSIONS_LISTING["view"]["json"], "the kept JSON, byte for byte (the base keeps none)")
             self.assertEqual({r["id"] for r in json.loads(body)}, {SID, SID2})
             status, body = get("/sessions?threads=1")
             self.assertEqual(status, 200)
@@ -591,100 +596,374 @@ class OneListingPerChange(_Listing):
         self.assertEqual(offenders, [], "registry files written or removed outside write_reg")
 
 
-if __name__ == "__main__":
-    unittest.main()
+T1 = "66666666-7777-8888-9999-0000000000b1"          # web's comment threads (synthetic)
+T2 = "66666666-7777-8888-9999-0000000000b2"
+T3 = "66666666-7777-8888-9999-0000000000b3"
+OLD_WEB = "aaaaaaaa-2222-3333-4444-5555555555c1"     # web's transcript before its /clear
+OLD_T1 = "aaaaaaaa-2222-3333-4444-5555555555b1"      # T1's transcript before a resume landed on a fresh head
+NEW_T1 = "aaaaaaaa-2222-3333-4444-5555555555b2"      # the head that resume landed on: T1's lastSid now
+UNKNOWN = "aaaaaaaa-2222-3333-4444-5555555555ff"
 
 
-class ThreadRowsSingleFlight(_Listing):
-    """GET /sessions?threads=1 walks every thread twice over (the key, then a miss's rebuild), and every session's and
-    thread's postal service asks for it. With nothing shared, concurrent requests each ran their own walk: on a host with
-    ~150 live threads and ~240 postal services every request outran the callers' 6 s cap, the callers asked again, the
-    abandoned handlers kept walking, and the kernel stopped accepting connections (2026-10-07). One walk at a time,
-    shared with every request that waited on it."""
+class _Running:
+    """A comment thread whose session runs in this process, as the backend keeps one: a live thread object and the state the
+    session reports. snapshot() counts its calls: the listing reads the state alone, never the whole snapshot."""
 
-    N = 20
+    def __init__(self, state):
+        self.state, self.snapshots = state, 0
+        self.thread = type("Alive", (), {"is_alive": staticmethod(lambda: True)})()
 
-    def _run_concurrently(self, target, walks, key_name, real_key):
-        """Run N requests at once while the key walk is held until every request has read its arrival mark, so the
-        shared result is the only one a waiter can take (no timing in the assertion)."""
-        L = km._SESSIONS_LISTING
-        readers = set()
-        all_arrived = threading.Event()
+    def live_state(self, subs=None):
+        return self.state, ""
 
-        class Watched(dict):
-            def __getitem__(self, k):
-                if k == "threadsGen":
-                    readers.add(threading.get_ident())
-                    if len(readers) >= ThreadRowsSingleFlight.N:
-                        all_arrived.set()
-                return dict.__getitem__(self, k)
+    def snapshot(self, retry_on=None):
+        self.snapshots += 1
+        return {"state": self.state, "backend": "sdk"}
 
-        watched = Watched(L)
 
-        def held_key():
-            walks.append(1)
-            all_arrived.wait(10)
-            return real_key()
+class _Threads(_Listing):
+    """Two sessions and two comment threads of web, over a real SDK backend on this test's state root (its registry and its
+    two transcript ledgers), with the kernel's real route in front: what the postal services ask, over HTTP."""
 
-        out, errs = [], []
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.td.name)
+        (self.root / "session-hosts").write_text("off\n")                  # a backend over a root of its own starts no host
+        self.saved_dirs = (jd.SDKDIR, jd.EPIDIR)
+        jd.SDKDIR, jd.EPIDIR = self.root / "sdk", self.root / "episodes"    # the rows' lastSid read and the episode writer
+        self.be = sb.SdkBackend(self.root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        km._sdk = lambda: self.be
+        for sid in (SID, SID2):
+            sb.write_reg(self.root, sid, {"sid": sid, "cwd": str(self.cdir), "alive": True, "lastSid": sid})
+        self.comments = []
+        self._thread(T1, "web-comment-1")
+        self._thread(T2, "web-comment-2")
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
-        def one():
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        jd.SDKDIR, jd.EPIDIR = self.saved_dirs
+        super().tearDown()
+
+    def _write_comments(self):
+        p = self.root / "comments" / (SID + ".json")
+        p.parent.mkdir(exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"threads": self.comments}))
+        os.replace(tmp, p)                                                  # the store's own publish: a rename
+
+    def _thread(self, tsid, name, **reg):
+        """A comment thread of web as the kernel keeps one: its row in web's comments store and a registration carrying
+        threadOf, written by the backend's one registry writer."""
+        self.comments = [t for t in self.comments if t["tid"] != tsid] + [{"tid": tsid, "sid": tsid, "name": name, "status": "open"}]
+        self._write_comments()
+        sb.write_reg(self.root, tsid, dict({"sid": tsid, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": tsid}, **reg))
+
+    def _get(self, path):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", path, headers={"X-Romp-Token": km.TOKEN})
+        resp = c.getresponse()
+        body = resp.read().decode()
+        c.close()
+        return resp.status, body
+
+    def _rows(self):
+        status, body = self._get("/sessions?threads=1")
+        self.assertEqual(status, 200, body)
+        return json.loads(body)
+
+    def _row(self, sid):
+        return next((r for r in self._rows() if r["id"] == sid), None)
+
+    def _count_walks(self):
+        """Every read the thread rows or the by-fsid answer can cost: the backend's thread table and registry scan, the row
+        builders, and each session's transcript records. Returns the list the reads append their names to."""
+        walks = []
+
+        def wrap(obj, name, instance=False):
+            real = getattr(obj, name, None)
+            if real is None:
+                return
+            setattr(obj, name, lambda *a, **k: (walks.append(name), real(*a, **k))[1])
+            self.addCleanup((lambda: obj.__dict__.pop(name, None)) if instance else (lambda: setattr(obj, name, real)))
+
+        for name in ("thread_sessions", "known_fsids", "recorded_fsids", "fork_parents", "fork_children"):
+            wrap(self.be, name, instance=True)
+        for name in ("_thread_rows", "_session_rows_from", "_session_rows"):
+            wrap(km, name)
+        for name in ("list_regs", "known_fsids", "read_fsid_ledger"):
+            wrap(sb, name)
+        return walks
+
+    def _count_thread_builds(self):
+        builds = []
+        real = km._thread_rows
+        km._thread_rows = lambda *a, **k: (builds.append(1), real(*a, **k))[1]
+        self.addCleanup(setattr, km, "_thread_rows", real)
+        return builds
+
+
+class ThreadRowsFromTheCycle(_Threads):
+    """The thread rows are a product of the pusher's cycle, like the base rows (plans/sessions-route-from-the-cycle.md, rule 3):
+    built once per change under an exact key, and every request serves them from memory. Every session's and thread's postal
+    service asks for this listing; when each request walked every thread for itself (the key on every request, a rebuild on a
+    miss) the work grew as threads times callers, and on a host with ~150 live threads and ~240 postal services the requests
+    outran the callers' 6 s cap and the kernel stopped accepting connections (2026-10-07)."""
+
+    def test_after_a_cycle_concurrent_requests_walk_nothing_and_serve_one_body(self):
+        self._cycle()
+        walks = self._count_walks()
+        got, errs = [], []
+
+        def one(path):
             try:
-                out.append(target())
-            except Exception as e:                                   # surfaced by the assertion below
+                got.append((path,) + self._get(path))
+            except Exception as e:                                          # surfaced by the assertion below
                 errs.append(e)
 
-        with mock.patch.object(km, "_SESSIONS_LISTING", watched), mock.patch.object(km, key_name, held_key):
-            ts = [threading.Thread(target=one) for _ in range(self.N)]
-            for t in ts:
-                t.start()
-            for t in ts:
-                t.join(15)
+        paths = ["/sessions?threads=1"] * 20 + ["/sessions/by-fsid?fsid=" + T1] * 10 + ["/sessions"] * 5
+        ts = [threading.Thread(target=one, args=(p,)) for p in paths]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(15)
         self.assertEqual(errs, [])
-        return out
+        self.assertEqual(len(got), len(paths), "every request answered")
+        self.assertEqual({s for _, s, _ in got}, {200})
+        self.assertEqual(walks, [], "no request read a thread, a registry file or a transcript record: they serve the cycle's rows")
+        listing = {b for p, _, b in got if p == "/sessions?threads=1"}
+        self.assertEqual(len(listing), 1, "every request got the same body")
+        rows = json.loads(listing.pop())
+        self.assertEqual({r["id"] for r in rows}, {SID, SID2, T1, T2})
+        by = {b for p, _, b in got if p.startswith("/sessions/by-fsid")}
+        self.assertEqual(len(by), 1)
+        self.assertEqual(json.loads(by.pop()), next(r for r in rows if r["id"] == T1), "by-fsid serves the listing's own row")
 
-    def test_concurrent_thread_listing_requests_share_one_walk(self):
+    def test_each_thread_input_moving_rebuilds_once_in_the_next_cycle_and_the_row_carries_it(self):
+        builds = self._count_thread_builds()
         self._cycle()
-        walks = []
-        out = self._run_concurrently(lambda: km._sessions_listing_serve(threads=True), walks,
-                                     "_thread_rows_key", km._thread_rows_key)
-        self.assertEqual(len(out), self.N, "every request answered")
-        self.assertEqual(len(set(out)), 1, "every request got the same body")
-        self.assertEqual(len(walks), 1, "one walk of the threads for %d concurrent requests (each walked its own before)" % self.N)
-
-    def test_a_request_after_a_walk_ended_walks_again_and_sees_a_change(self):
-        """Sharing never serves a walk that ended before the request arrived: a later request walks for itself."""
         self._cycle()
-        first = km._sessions_listing_serve(threads=True)
-        walks = []
-        real = km._thread_rows_key
-        with mock.patch.object(km, "_thread_rows_key", lambda: (walks.append(1), real())[1]):
-            second = km._sessions_listing_serve(threads=True)
-        self.assertEqual(len(walks), 1, "a request with no walk in flight walks for itself")
-        self.assertEqual(first, second)
+        self.assertEqual(len(builds), 1, "the first cycle builds the thread rows, a quiet one keeps them")
+        walks = self._count_walks()
 
-    def test_requests_before_the_first_cycle_build_the_base_rows_once(self):
-        builds = []
-        name, real = self._count_builds(builds)
-        try:
-            gate = threading.Event()
-            started = []
+        def moves(what, step, check):
+            n = len(builds)
+            step()
+            del walks[:]
+            self._get("/sessions?threads=1")
+            self.assertEqual(walks, [], "%s: a request before the cycle reads nothing" % what)
+            self._cycle()
+            self._cycle()
+            self.assertEqual(len(builds), n + 1, "%s: one rebuild in the next cycle, none in the one after" % what)
+            check()
 
-            def slow(*a):
-                started.append(1)
-                gate.wait(10)
-                return real(*a)
+        moves("a thread starting", lambda: self._thread(T3, "web-comment-3"),
+              lambda: self.assertEqual(self._row(T3)["name"], "web-comment-3"))
 
-            setattr(km, name, slow)
-            out = []
-            ts = [threading.Thread(target=lambda: out.append(km._sessions_listing_serve())) for _ in range(self.N)]
-            for t in ts:
-                t.start()
-            gate.set()
-            for t in ts:
-                t.join(15)
-        finally:
-            setattr(km, name, real)
-        self.assertEqual(len(out), self.N)
-        self.assertEqual(len(set(out)), 1)
-        self.assertEqual(len(started), 1, "one request-side build before the first cycle, however many requests")
+        def rename():
+            next(t for t in self.comments if t["tid"] == T1)["name"] = "web-comment-renamed"
+            self._write_comments()
+        moves("a rename (the comments store)", rename, lambda: self.assertEqual(self._row(T1)["name"], "web-comment-renamed"))
+        self.be.sessions[T1] = _Running("working")
+        moves("its state changing", lambda: None, lambda: self.assertEqual(self._row(T1)["state"], "working"))
+        moves("its state changing back", lambda: setattr(self.be.sessions[T1], "state", "waiting"),
+              lambda: self.assertEqual(self._row(T1)["state"], "waiting"))
+        self.assertEqual(self.be.sessions[T1].snapshots, 0, "the state alone is read, never the whole snapshot")
+        self.assertEqual(self._row(T1)["mailOffWhy"], "thread", "a thread's mail is off until it is broken out")
+        moves("a flags-store write", lambda: (jd.STATE / "session-flags.json").write_text(json.dumps({T1: {"threadMail": True}})),
+              lambda: self.assertEqual((self._row(T1)["mailOffWhy"], self._row(T1)["postalServiceOff"]), ("", False)))
+        moves("its transcript id moving", lambda: sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True,
+                                                                                "threadOf": SID, "lastSid": NEW_T1}),
+              lambda: self.assertEqual(self._row(T1)["lastSid"], NEW_T1))
+        moves("its names entry (the row's dir)", lambda: (self.names / T1).write_text("web-comment-1\t/tmp/notes-api\n"),
+              lambda: self.assertEqual(self._row(T1)["dir"], "/tmp/notes-api"))
+        moves("a thread ending", lambda: sb.write_reg(self.root, T2, {"sid": T2, "alive": False, "threadOf": SID, "lastSid": T2}),
+              lambda: self.assertIsNone(self._row(T2)))
+        if os.geteuid() != 0:                                               # root reads a mode-0 file, so the case cannot arise
+            reg = self.root / "sdk" / (T1 + ".json")
+            try:
+                moves("its registration becoming unreadable", lambda: os.chmod(reg, 0),
+                      lambda: self.assertEqual(self._row(T1)["mailOffWhy"], "unreadable"))
+            finally:
+                os.chmod(reg, 0o644)
+
+    def test_a_registry_write_no_thread_row_reads_rescans_nothing(self):
+        """The thread set is the registry's rows table: re-read when the rows revision moves (a thread's start, end and
+        promotion each write alive or threadOf), never on the per-cycle writes of fields no row reads."""
+        self._cycle()
+        walks = self._count_walks()
+        for i in range(3):
+            sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": T1,
+                                         "ctxTokens": 100 + i})
+            self._cycle()
+        self.assertEqual(walks.count("list_regs"), 0, "three writes of a field no row reads: the registry is not scanned again")
+        self._thread(T3, "web-comment-3")
+        self._cycle()
+        self.assertEqual(walks.count("list_regs"), 1, "a thread starting re-reads it once")
+        self.assertIn(T3, {r["id"] for r in self._rows()})
+
+    def test_by_fsid_answers_from_the_cycle_with_the_listings_row_and_reads_no_record(self):
+        """GET /sessions/by-fsid serves the same kept rows, through a claims map the cycle keeps beside them: the sid, the
+        current transcript, each /clear head and both ends of every resume fork, after the lineage rule."""
+        jd.append_episode(SID, "head-1", OLD_WEB, 1)                        # web /cleared once: its episode log holds the old head
+        sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": NEW_T1})
+        sb.append_resume_fork(self.root, T1, OLD_T1, NEW_T1, 2)            # T1 resumed onto a fresh head
+        self._cycle()
+        rows = self._rows()
+        walks = self._count_walks()
+        for fsid, sid in ((OLD_WEB, SID), (SID, SID), (OLD_T1, T1), (NEW_T1, T1), (T2, T2)):
+            status, body = self._get("/sessions/by-fsid?fsid=" + fsid)
+            self.assertEqual(status, 200, (fsid, body))
+            self.assertEqual(json.loads(body), next(r for r in rows if r["id"] == sid), "the listing's row for %s" % fsid)
+        status, body = self._get("/sessions/by-fsid?fsid=" + UNKNOWN)
+        self.assertEqual(status, 404, body)
+        self.assertEqual(walks, [], "no request read a record: the claims are the cycle's")
+        sb.append_resume_fork(self.root, SID2, OLD_WEB, UNKNOWN, 3)        # api's records now hold web's old transcript too
+        self.assertEqual(self._get("/sessions/by-fsid?fsid=" + OLD_WEB)[0], 200, "a cycle old: the new record waits for the cycle")
+        self._cycle()
+        status, body = self._get("/sessions/by-fsid?fsid=" + OLD_WEB)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=" + UNKNOWN)[1])["id"], SID2)
+
+    def test_a_growing_ledger_is_read_from_where_the_last_read_ended(self):
+        """A session's states ledger grows by a row per state change, so the cycle's claims read only what was appended; a row
+        still being written is read whole next time."""
+        self._cycle()
+        reads = []
+        real = sb.read_fsid_ledger
+        sb.read_fsid_ledger = lambda path, pick, start=0: (reads.append((Path(path).parent.name, Path(path).stem, start)),
+                                                           real(path, pick, start))[1]
+        self.addCleanup(setattr, sb, "read_fsid_ledger", real)
+        self._cycle()
+        self.assertEqual(reads, [], "nothing appended: no ledger read")
+        p = self.root / "states" / (SID2 + ".jsonl")
+        sb.append_state(self.root, SID2, "working")
+        size = p.stat().st_size
+        self._cycle()
+        self.assertEqual(reads, [("states", SID2, 0)], "api's states ledger appeared: read once, from its start")
+        del reads[:]
+        with open(p, "a") as f:
+            f.write(json.dumps({"t": 3, "resumeFork": {"from": OLD_WEB, "to": UNKNOWN}}))   # no newline yet: mid-write
+        self._cycle()
+        self.assertEqual(reads, [("states", SID2, size)], "only the appended bytes are read")
+        self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=" + UNKNOWN)[1])["id"], SID2,
+                         "a row that already decodes is taken")
+        del reads[:]
+        with open(p, "a") as f:
+            f.write("\n")
+        self._cycle()
+        self.assertEqual(reads, [("states", SID2, size)], "the row being written is read again from its start, whole")
+        del reads[:]
+        self._cycle()
+        self.assertEqual(reads, [])
+
+
+class ListingFaultAndFirstBuild(_Threads):
+    def test_requests_before_the_first_cycle_build_once_and_the_cycle_keeps_that_build(self):
+        """Rule 1: a request arriving before the first cycle builds once (however many arrive), keeps the result under the
+        same key, and the first cycle rebuilds only what moved since."""
+        base, threads = [], []
+        real_base, real_threads = km._session_rows_from, km._thread_rows
+        km._session_rows_from = lambda *a, **k: (base.append(1), real_base(*a, **k))[1]
+        km._thread_rows = lambda *a, **k: (threads.append(1), real_threads(*a, **k))[1]
+        self.addCleanup(setattr, km, "_session_rows_from", real_base)
+        self.addCleanup(setattr, km, "_thread_rows", real_threads)
+        N = 12
+        entered, all_in = [], threading.Event()
+        real_serve = km._sessions_listing_serve
+
+        def serve(*a, **k):
+            entered.append(1)
+            if len(entered) >= N:
+                all_in.set()
+            return real_serve(*a, **k)
+        km._sessions_listing_serve = serve
+        self.addCleanup(setattr, km, "_sessions_listing_serve", real_serve)
+        held = km._session_rows_from
+        km._session_rows_from = lambda *a, **k: (all_in.wait(10), held(*a, **k))[1]   # the build ends after every request arrived
+        got = []
+        ts = [threading.Thread(target=lambda: got.append(self._get("/sessions?threads=1"))) for _ in range(N)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(15)
+        km._session_rows_from = held
+        self.assertEqual(len(got), N)
+        self.assertEqual({s for s, _ in got}, {200})
+        self.assertEqual(len({b for _, b in got}), 1, "one body")
+        self.assertEqual((len(base), len(threads)), (1, 1), "one build of each before the first cycle, for %d requests" % N)
+        self._cycle()
+        self.assertEqual((len(base), len(threads)), (1, 1), "the first cycle keeps that build: nothing moved")
+        self.row[SID]["state"] = "working"
+        self._cycle()
+        self.assertEqual((len(base), len(threads)), (2, 1), "and rebuilds what moved, alone")
+
+    def test_a_fault_in_the_cycles_build_is_answered_loudly_until_a_build_lands(self):
+        """The cycle is the listing's one builder: when its build fails the kept rows may be stale, and the route says so (a
+        503 naming the fault, which the postal bus reads as a kernel that did not answer) rather than serving them, or
+        rebuilding per request, the walk that hung the kernel."""
+        self._cycle()
+        real = km._session_rows_from
+        km._session_rows_from = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the build failed"))
+        self.addCleanup(setattr, km, "_session_rows_from", real)
+        self.row[SID]["state"] = "working"
+        import io
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self._cycle()
+        self.assertIn("sessions-listing:", err.getvalue())
+        walks = self._count_walks()
+        for path in ("/sessions", "/sessions?threads=1", "/sessions/by-fsid?fsid=" + T1):
+            status, body = self._get(path)
+            self.assertEqual(status, 503, (path, body))
+            self.assertIn("the build failed", json.loads(body)["error"], path)
+        self.assertEqual(walks, [], "no request builds for itself")
+        km._session_rows_from = real
+        self._cycle()
+        self.assertEqual(self._row(SID)["state"], "working", "the next build landed: served again")
+
+    def test_a_fault_in_the_listings_key_is_answered_loudly_too(self):
+        self._cycle()
+        real = km._sessions_listing_key
+        km._sessions_listing_key = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the key failed"))
+        self.addCleanup(setattr, km, "_sessions_listing_key", real)
+        import io
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self._cycle()
+        status, body = self._get("/sessions")
+        self.assertEqual(status, 503, "a key that cannot be read cannot vouch for the kept rows: %s" % body)
+        km._sessions_listing_key = real
+        self._cycle()
+        self.assertEqual(self._get("/sessions")[0], 200)
+
+    def test_a_fault_in_the_thread_rows_leaves_the_plain_listing_served(self):
+        self._cycle()
+        real = km._thread_rows
+        km._thread_rows = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the thread rows failed"))
+        self.addCleanup(setattr, km, "_thread_rows", real)
+        self._thread(T3, "web-comment-3")                                   # a thread input moves: the cycle rebuilds them
+        import io
+        with mock.patch.object(sys, "stderr", io.StringIO()):
+            self._cycle()
+        self.assertEqual(self._get("/sessions")[0], 200, "the plain listing does not carry the threads")
+        self.assertEqual(self._get("/sessions?threads=1")[0], 503)
+        self.assertEqual(self._get("/sessions/by-fsid?fsid=" + SID)[0], 503, "the claims ride the thread rows")
+        km._thread_rows = real
+        self._cycle()
+        self.assertIn(T3, {r["id"] for r in self._rows()})
+
+
+class ThreadStateReadAlone(unittest.TestCase):
+    def test_the_snapshots_state_is_the_state_half_the_listing_reads(self):
+        """SdkSession.snapshot() takes its state from live_state(), the read the listing makes of every running comment
+        thread each cycle, so the two cannot disagree."""
+        src = inspect.getsource(sb.SdkSession.snapshot)
+        self.assertIn("self.live_state(", src)
+        self.assertIn("thread_state", inspect.getsource(sb.SdkBackend.thread_sessions))
+
+
+if __name__ == "__main__":
+    unittest.main()
