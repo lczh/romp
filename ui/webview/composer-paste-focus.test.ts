@@ -77,10 +77,42 @@ test("it stands down when the box is focused, a typing target is active, or any 
   // modals + meta menus, and the T236 hand-over note — each one a gate the keystroke already had
   assert.match(g, /if \(activeId && liveAsks\.has\(activeId\)\) return null;/);
   assert.match(g, /if \(ctxMenuEl \|\| pickerOverlayUp\(\)\) return null;/, "a SHOWN overlay: the picker hides in place (tab-cycle-standdown-exec.test.ts)");
-  assert.match(g, /document\.getElementById\("romp-fileview"\) \|\| document\.getElementById\("romp-filebrowse"\)\s*\n\s*\|\| document\.getElementById\("romp-lightbox"\)\) return null;/);
+  assert.match(g, /if \(document\.getElementById\("romp-filebrowse"\) \|\| document\.getElementById\("romp-lightbox"\)\) return null;/);
+  // the file viewer is the ACTIVE INPUT rule's (2026-10-07, active-input.test.ts): its bar takes the paste, or, with no
+  // bar, nothing does; a comment popover's reply box likewise. The message box's own gates apply only when it is the box
+  assert.match(g, /const box = activeInputBox\(\);/);
+  assert.match(g, /if \(box !== ta\) return box;/);
+  assert.ok(g.indexOf("if (box !== ta) return box;") < g.indexOf("if (activeId && liveAsks.has(activeId)) return null;"),
+    "the live-ask card and the hand-over note gate the message box, never a popover's or a viewer's box");
   assert.match(g, /document\.querySelector\("#rsettings:not\(\[hidden\]\), #ranalytics-back:not\(\[hidden\]\), #rkeys-back, \.meta-menu"\)\) return null;/);
   assert.match(g, /if \(composerNoteHolds\(\)\) return null;/);
   assert.match(g, /return ta;\s*$/, "the box comes back only once every gate has passed");
+});
+
+// ── SELECT → DICTATE → ⌘⏎ (the user 2026-10-07): the dictated text's own event, through the same gate ──────────────────
+// The operating system's dictation inserts text through the browser's text-input path: with nothing editable focused, the
+// one event it produces is a `textInput` (TextEvent, the words in `data`) at the focused element or the body. The served
+// test (tests/test_composer_parity_served.py) drives that path for real through CDP's Input.insertText.
+const DICTATE_MARK = "// SELECT → DICTATE → ⌘⏎";
+function dictateHandler(): string {
+  const mark = RENDER.indexOf(DICTATE_MARK);
+  assert.ok(mark > RENDER.indexOf(PASTE_MARK), "the dictation handler follows paste-to-focus");
+  const at = RENDER.indexOf('window.addEventListener("textInput"', mark);
+  assert.ok(at > mark, "the handler follows its design note");
+  return RENDER.slice(at, RENDER.indexOf("\n}", at) + 5);
+}
+
+test("dictated text nobody claimed lands in the active input: one window listener, bubble phase, the shared gate", () => {
+  const block = dictateHandler();
+  assert.equal(RENDER.match(/window\.addEventListener\("textInput"/g)?.length, 1, "one window textInput listener");
+  assert.match(block, /^window\.addEventListener\("textInput", \(e\) => \{\n\s*if \(e\.defaultPrevented\) return;/, "plain listener, an element handler that acted wins");
+  assert.ok(block.endsWith("\n});\n"), "no capture flag: bubble phase");
+  assert.match(block, /const text = \(e as Event & \{ data\?: unknown \}\)\.data;\s*\n\s*if \(typeof text !== "string" \|\| !text\) return;/, "the words ride the event's data; nothing to insert changes nothing");
+  assert.match(block, /const ta = typeFromAnywhereTarget\(e\);\s*\n\s*if \(!ta\) return;/, "the gate the keystroke and the paste share");
+  assert.match(block, /e\.preventDefault\(\);\s*\n\s*ta\.focus\(\{ preventScroll: true \}\);\s*\n\s*insertAtCaret\(ta, text\);/, "cancel the dispatch at the body, focus, insert through the one helper");
+  const inline = /isTypingTarget|pickerOverlayUp|romp-fileview|romp-filebrowse|romp-lightbox|rsettings|liveAsks|ctxMenuEl|composerNoteHolds|ta\.disabled|cmt-pop/;
+  assert.doesNotMatch(block, inline, "no gate of its own");
+  assert.doesNotMatch(block, /composerCitations|seedTranscriptQuote|getSelection/, "the quote chip is the selection's, never touched here");
 });
 
 test("a plain-text paste is claimed: preventDefault, focus without scrolling, insert at the caret, input event", () => {
