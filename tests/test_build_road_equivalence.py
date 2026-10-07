@@ -56,8 +56,9 @@ for web's lane, one where only the open turn, the captions or the store's nodes 
 caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn's hold key
 moved (a state row that moves only the end of a held turn's first idle span moves no key: one). It also reads the
 message-caption scan's counters across the warm build where a step decides them: partial at the in-place rewrites, the
-late record, the rewind cut and its release and the past-prompt edit; reset at the seams' moves, the replacement, the
-resume and the /clear; neither at an append, a republish or a compaction.
+late record, the rewind cut and its release (the release only because the cut world leaves out the late record inside
+turn 5; a release that restores whole turns counts nothing) and the past-prompt edit; reset at the seams' moves, the
+replacement, the resume and the /clear; neither at an append, a republish or a compaction.
 
 Synthetic data only: placeholder uuids, the web and api names, invented notes-api text, a private state root with
 session hosts off."""

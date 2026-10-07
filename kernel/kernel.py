@@ -52982,7 +52982,8 @@ _MSG_SCAN_STATS = {"scans": 0, "heldTurns": 0, "walkedTurns": 0, "partial": 0, "
 #   scans: scans whose walk finished (a walk that raised counts under raised instead); heldTurns / walkedTurns: closed turns served from the hold / turns walked (the
 #   open one always); partial: a finished scan whose held entry was not served whole: a held turn's key moved (an
 #   in-place rewrite, a late record) or the session has fewer closed turns than the entry held (a rewind cut, a past
-#   prompt edited, a rewrite that drops turns); an append, a compaction's included, moves neither this nor reset;
+#   prompt edited, a rewrite that drops turns); an append, a compaction's included, and a cut's release that restores
+#   whole turns move neither this nor reset (the entry the cut stored is served whole, the restored turns walked);
 #   reset: a held entry discarded whole (another leaf, or the seams moved), counted when it is discarded, before the
 #   walk, so a walk that then raises does not hide it; raised: a walk that raised (stored nothing); faulted: every scan
 #   _msg_summaries made that raised, the walk's included, so faulted minus raised counts the faults outside the walk

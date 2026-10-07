@@ -446,6 +446,38 @@ class MsgScanHold(unittest.TestCase):
         self.build()
         self.assertEqual(km._msg_scan_report()["partial"] - s0["partial"], 1, "a turn boundary after it is no partial")
 
+    def test_a_cut_released_that_restores_whole_turns_counts_nothing(self):
+        """A rewind cut armed at an old reply, then released. The cut world's closed turns are the full world's first six
+        (the turn the cut ends in is its open turn), so the entry the cut stored is a prefix of the restored keys: the
+        release serves it whole and walks the restored turns, as after an append, and neither partial nor reset moves.
+        The build road's release counts under partial only because its cut world leaves out a late record inside a held
+        turn (the review of the follow-up)."""
+        cut = {}
+        self.addCleanup(jd.set_pending_cut_provider, jd._PENDING_CUT_FN)
+        jd.set_pending_cut_provider(lambda sid: cut.get(sid, ""))     # the parse's cut
+        backend = _Backend()
+        backend.pending_cut = lambda sid: cut.get(sid, "")            # the scan key's cut (tearDown puts km._sdk back)
+        km._sdk = lambda: backend
+        self.session(SID_WEB, 12)
+        self.build()
+        s0 = km._msg_scan_report()
+        cut[SID_WEB] = "web-a06"                                      # the cut world ends in turn 6, its open turn
+        got = self.build()
+        s1 = km._msg_scan_report()
+        self.assertEqual(len(self.held()[2]), 6, "the premise: the cut world's six closed turns held")
+        self.assertEqual(s1["partial"] - s0["partial"], 1, "the premise: the cut is a hold cut short")
+        self.assertNotIn("m-web07", got, "the premise: the cut world drops turn 7's id")
+        cut[SID_WEB] = ""
+        got = self.build()
+        rep = km._msg_scan_report()
+        self.assertEqual(rep["partial"] - s1["partial"], 0, "a release that restores whole turns counts nothing")
+        self.assertEqual(rep["reset"] - s0["reset"], 0, "the same leaf and seams throughout: nothing discarded whole")
+        self.assertEqual(rep["heldTurns"] - s1["heldTurns"], 6, "the cut's six closed turns served from the hold")
+        self.assertEqual(self.walked, 7, "the restored turns walked, the open one with them")
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
+        self.assertIn("m-web07", got)
+        self.assertEqual(len(self.held()[2]), 12)
+
     def test_an_entry_the_seams_moved_is_dropped_before_its_walk(self):
         """An entry under other seams can never be served. It is dropped at the comparison, under the lock and before the
         walk, so a walk that then raises leaves nothing of it in the table to count toward the bound and shed a valid

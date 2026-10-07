@@ -4117,9 +4117,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walked), `partial` (a finished scan whose held entry was not served whole:
   a held turn moved, as an in-place rewrite or a late record moves one, or
   the session has fewer closed turns than the entry held, as a rewind cut or
-  a past prompt edited leaves it; an append, a compaction's included, moves
-  neither this nor `reset`), `reset` (an entry discarded whole because the
-  leaf or the seams moved, counted when it is discarded, before the walk),
+  a past prompt edited leaves it; an append, a compaction's included, and a
+  cut's release that restores whole turns move neither this nor `reset`),
+  `reset` (an entry discarded whole because the leaf or the seams moved,
+  counted when it is discarded, before the walk),
   `raised` (a walk that raised, which stores nothing), `faulted` (every scan
   that raised, the walk's included, so `faulted` above `raised` means scans
   are failing before their walk: the captions read, the parse, or the goal
