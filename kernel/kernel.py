@@ -31901,7 +31901,7 @@ def _supervisor_wait_s(now, rows=None):
     return SUPERVISOR_FAST_PASS_S if fast else SUPERVISOR_PASS_S
 
 
-_SESSIONS_LISTING = {"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "fault": None,
+_SESSIONS_LISTING = {"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "threadsGen": 0, "fault": None,
                      "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}}   # GET /sessions from the cycle's snapshot
 #                      (plans/sessions-route-from-the-cycle.md): the rows built once per change by the pusher's cycle under an
 #                      exact key, served from memory to every request; `missBy` names the key input that moved
@@ -31922,8 +31922,8 @@ def _reg_rev():
 def _sessions_listing_reset():
     """The kept listing back to empty (a test's setUp; the listing is process-global, so a module that stubs the row builder
     per test must drop what an earlier build kept)."""
-    _SESSIONS_LISTING.update({"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "fault": None,
-                              "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}})
+    _SESSIONS_LISTING.update({"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "threadsGen": 0,
+                              "fault": None, "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}})
 
 
 def _sessions_listing_key(live_map, names):
@@ -32086,8 +32086,10 @@ def _sessions_listing_serve(threads=False):
     revision and the parents' comments stores (a thread's editable name lives there)."""
     L = _SESSIONS_LISTING
     if L["json"] is None:
-        rows = _session_rows()
-        L.update({"rows": rows, "json": json.dumps(rows), "requestBuilt": L["requestBuilt"] + 1})
+        with _SESSIONS_LISTING_FLIGHT:                             # one build before the first cycle, however many ask (below)
+            if L["json"] is None:
+                rows = _session_rows()
+                L.update({"rows": rows, "json": json.dumps(rows), "requestBuilt": L["requestBuilt"] + 1})
     L["served"] += 1
     if L["fault"] is not None:                                     # the cycle's build failed since the kept listing: it may be
         body = json.dumps(_session_rows())                         #  stale, so this request builds for itself, as the base did
@@ -32096,14 +32098,38 @@ def _sessions_listing_serve(threads=False):
         body = L["json"]
     if not threads:
         return body
-    tkey = _thread_rows_key()
-    th = L["threads"] if L["threadsKey"] == tkey else None         # both read under the same test: a refresh between them cannot
-    if th is None:                                                 #  hand a None to the join below
-        th = json.dumps(_thread_rows())
-        L["threads"], L["threadsKey"] = th, tkey
+    th = _thread_rows_shared()
     if th == "[]":
         return body
     return body[:-1] + ("," if body != "[]" else "") + th[1:]
+
+
+_SESSIONS_LISTING_FLIGHT = threading.Lock()   # the request-side build before the first cycle (_sessions_listing_serve)
+_THREAD_ROWS_FLIGHT = threading.Lock()        # the thread rows' key read and rebuild (_thread_rows_shared)
+
+
+def _thread_rows_shared():
+    """The thread rows' JSON for GET /sessions?threads=1, computed by ONE request at a time and shared with every request
+    that waited while it ran (single flight, 2026-10-07). Both halves cost a walk of every thread: the key
+    (_thread_rows_key reads each thread's registry row and snapshot) on every request, and a miss's rebuild
+    (_thread_rows, a session-flags read per thread). Every session's and thread's postal service fetches this
+    listing, so with nothing shared the work grew as threads times callers: on a host with ~150 live threads and
+    ~240 postal services the requests ran side by side, each past the callers' 6 s cap, the callers fetched again,
+    and the abandoned handlers kept computing, until ~2,000 handler threads queued on the GIL and the kernel stopped
+    accepting connections (it re-hung within minutes of each restart, when every postal service asked at once).
+    One flight bounds the work to one walk at a time whatever the request count. A request that arrived while a walk
+    was running takes that walk's result when it ends (threadsGen moved): it is one walk old at most, the same order
+    of staleness as the base rows, which are a cycle old at most."""
+    L = _SESSIONS_LISTING
+    arrived = L["threadsGen"]
+    with _THREAD_ROWS_FLIGHT:
+        if L["threadsGen"] != arrived and L["threads"] is not None:
+            return L["threads"]                                    # a walk ended while this request waited: share it
+        tkey = _thread_rows_key()
+        if L["threads"] is None or L["threadsKey"] != tkey:
+            L["threads"], L["threadsKey"] = json.dumps(_thread_rows()), tkey
+        L["threadsGen"] += 1
+        return L["threads"]
 
 
 def _thread_rows_key():
