@@ -35,7 +35,8 @@ test("the picker's Billing row shows for SDK whenever availability is known", ()
   assert.match(RENDER, /auWrap\.style\.display = "none";\s*\/\/ hidden until a sessionList reply carries authAvail/);
   assert.match(RENDER, /beWrap\.addEventListener\("click", \(\) => \{ syncPickerAuth\(\); syncPickerTags\(\); \}\);/);   // the Tags row follows the backend pick too (tab groups)
   // a host switch clears the availability — the choices on screen belong to the OLD host
-  assert.match(RENDER, /pickerAuthAvail = null;\s*\n\s*syncPickerAuth\(\);/);
+  assert.match(RENDER, /pickerAuthAvail = null;\s*\n(?:\s*\/\/[^\n]*\n)*\s*document\.querySelectorAll\("#picker \.picker-auth \.picker-be-opt"\)\.forEach\(\(x\) => x\.classList\.remove\("sel"\)\);\s*\n\s*pickerAuthPicked = false;\s*\n\s*syncPickerAuth\(\);/,
+    "…and a billing chosen for the old host is dropped with it: the row re-seeds from the new host's default (2026-10-07)");
   // …and the reply that re-arms it is dropped-if-stale by the same host check the list itself uses
   assert.match(RENDER, /pickerAuthAvail = \(m\.authAvail && typeof m\.authAvail === "object"\) \? m\.authAvail : null;/);
 });
@@ -53,6 +54,11 @@ test("one real choice renders WRITTEN OUT in the buttons' place, naming the logi
 
 test("the pick rides createSession, omitted when the row is hidden or written-out", () => {
   assert.match(RENDER, /function pickerAuthChoice\(\): string/);
+  // …and omitted unless the user CHOSE in the row (2026-10-07): the seeded selection is the machine default, which a session
+  // with no billing of its own follows, so sending it minted a pick of the session's own on every create
+  assert.match(RENDER, /const auth = pickerAuthPicked \? pickerAuthChoice\(\) : "";/);
+  assert.match(RENDER, /pickerAuthPicked = false;   \/\/ the seeded selection follows the default until the user picks/);
+  assert.equal((RENDER.match(/pickerAuthPicked = true;/g) || []).length, 3, "the two button rows' clicks and the many-login dropdown's change");
   // (the picker's Tags row rides the same create since tab groups, 2026-09-04 — omitted the same way when nothing is picked)
   assert.match(RENDER, /host: hostSel, \.\.\.\(auth \? \{ auth \} : \{\}\), \.\.\.\(tags\.length \? \{ tags \} : \{\}\) \}\);/);
   assert.match(RENDER, /interface CreateReq \{ name: string; backend: string; dir: string; host: string; auth\?: string; tags\?: string\[\] \}/);
@@ -84,7 +90,7 @@ test("the switching CONTROL is the tab menu's Billing submenu, both sides listed
   assert.match(RENDER, /if \(!cur && vscodeApi\) vscodeApi\.postMessage\(\{ type: "setAuth", id, value: c\.value \}\);/);
   // the item's sub-line names the current billing, or the applying reconnect
   assert.match(RENDER, /st\.authPending \? \(st\.relaunchWaits \? `applies after \$\{st\.relaunchWaits\}` : "applying…"\)/);   // 2026-10-01: a pick waits for a quiet session, and says on what
-  assert.match(RENDER, /auth\?: string; authLive\?: string; authPending\?: boolean; authBoth\?: boolean; authAvail\?: AuthAvail; authPickUnavailable\?: string; authPickFell\?: string; authAcct\?: string; authLogin\?: string; authLabel\?: string;/);   // 2026-09-09: the fall the launch took rides beside the unavailable pick; T346: WHICH login
+  assert.match(RENDER, /auth\?: string; authLive\?: string; authPending\?: boolean; authOwn\?: boolean; authBoth\?: boolean; authAvail\?: AuthAvail; authPickUnavailable\?: string; authPickFell\?: string; authAcct\?: string; authLogin\?: string; authLabel\?: string;/);   // 2026-09-09: the fall the launch took rides beside the unavailable pick; T346: WHICH login
 });
 
 test("no key material reaches the webview — no tail plumbing survives anywhere", () => {
@@ -99,7 +105,10 @@ test("the chat tab hover says Billing whenever the backend reports it, naming th
   // ungated on machine shape (the user 2026-08-09: one-auth machines included) — and 'Login (account)' when known
   // the name beside Login is the kernel's authLabel (a stored login's display, else the machine's own as
   // email · organisation · kind), falling back to authAcct for an older kernel (T346, loginName)
-  assert.match(RENDER, /s\.status\.auth === "key" \? "API key"\s*\n\s*: \(loginName\(s\.status\) \? `Login \(\$\{loginName\(s\.status\)\}\)` : "Login"\)\]\);/);
+  assert.match(RENDER, /: authWords\(s\.status\) \+ \(authFollows\(s\.status\) \? " · machine default" : ""\)\]\);/,
+    "the plain reading, and where it comes from for a session that follows the machine default (2026-10-07)");
+  assert.match(RENDER, /function authWords\(st: Status\): string \{\s*\n\s*return st\.auth === "key" \? "API key" : \(loginName\(st\) \? `Login \(\$\{loginName\(st\)\}\)` : "Login"\);/);
+  assert.match(RENDER, /function authFollows\(st: Status\): boolean \{\s*\n\s*return st\.authOwn === false;/, "an older kernel sends no authOwn: read as the session's own");
   assert.match(RENDER, /function loginName\(st: Status\): string \{ return st\.authLabel \|\| st\.authAcct \|\| ""; \}/);
   assert.match(RENDER, /: s\.status\.authPickUnavailable === s\.status\.auth\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `⚠ /);   // 2026-09-08: a pick this box cannot bill is said on the hover too
   // …and the row tells the TRUTH in every landing shape (T124, superseding the quiet-parenthetical

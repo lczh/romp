@@ -60,7 +60,7 @@ function lift(avail: Avail, auth = "", acct = "", extra: Record<string, unknown>
   const a = RENDER.indexOf("    const openBillingFly = (): HTMLElement | null => {");
   const b = RENDER.indexOf('    wireFlyout(menu, item, ".ctx-sub-billing"', a);
   assert.ok(a > 0 && b > a, "openBillingFly: anchors not found; re-anchor");
-  const helpers = ["function billingChoices(", "function authLoginChoices(", "function authChoiceCurrent(", "function placeFlyBeside(", "function wireFlyout(",
+  const helpers = ["function billingChoices(", "function authLoginChoices(", "function authChoiceCurrent(", "function authFollows(", "function placeFlyBeside(", "function wireFlyout(",
                    "function applyNowRow("].map((anchor) => {   // the two login helpers the merged slice calls (T346); the Apply now row's builder (2026-10-01)
     const h = RENDER.indexOf(anchor); if (h < 0) return "";
     return RENDER.slice(h, RENDER.indexOf("\n}\n", h) + 2);
@@ -231,7 +231,42 @@ test("source: ONE entry-list function feeds both menus, both flyouts ride wireFl
     "the flyout is measured at the window's left edge, where its whole width is available (a wrapping label re-flows once placed otherwise)");
   assert.doesNotMatch(BILL, /ctx-sub-head|ctx-radio|autoWord|machineChoices|Default for /, "the Default group, its head, note and radios are gone");
   assert.doesNotMatch(BILL, /ctx-item-sub/, "no sub-line is built anywhere in the flyout");
-  assert.equal((RENDER.match(/type: "setAuth"/g) || []).length, 2, "two senders: the session pick and the machine default (the census in feed-cap-offer.test.ts)");
+  assert.equal((RENDER.match(/type: "setAuth"/g) || []).length, 3, "three senders: the session pick, the machine default, and following it again (the census in feed-cap-offer.test.ts)");
+});
+
+test("a session that FOLLOWS the machine default: Machine default first, named by what it bills, check-marked; no pick is (2026-10-07)", () => {
+  const { sub, posted, dismissed } = lift(BOTH, "key", "user@example.com", { authOwn: false });
+  assert.deepEqual(lines(sub), ["Machine default · API key", "Login (user@example.com)", "API key", "---", "Set default billing"]);
+  assert.ok(has(sub.children[0], "ctx-item-followdefault"), sub.children[0].className);
+  assert.deepEqual(sub.children.slice(0, 3).map((c) => has(c, "current")), [true, false, false],
+                   "the default it follows wears the check, the key it resolves to does not: it has no pick of its own");
+  assert.equal(subLines(sub), 0, "no sub-line: the entry says what it is");
+  sub.children[0].fire("click");
+  assert.deepEqual(posted, [], "already following: posts nothing");
+  assert.equal(dismissed.length, 1);
+  sub.children[2].fire("click");
+  assert.deepEqual(posted, [{ type: "setAuth", id: "11111111-2222-3333-4444-555555555555", value: "key" }],
+                   "picking the same billing as the default is a pick of its own: it stays when the default moves");
+});
+
+test("a session with a pick of its own: its pick check-marked, Machine default unmarked, and a click on it posts setAuth default", () => {
+  const { sub, posted, dismissed } = lift({ ...BOTH, default: "login", defaultExplicit: true }, "key", "user@example.com", { authOwn: true });
+  assert.deepEqual(lines(sub), ["Machine default · Login (user@example.com)", "Login (user@example.com)", "API key", "---", "Set default billing"],
+                   "named by the default's own entry: the machine's login here");
+  assert.deepEqual(sub.children.slice(0, 3).map((c) => has(c, "current")), [false, false, true]);
+  sub.children[0].fire("click");
+  assert.deepEqual(posted, [{ type: "setAuth", id: "11111111-2222-3333-4444-555555555555", value: "default" }], "back to following the default");
+  assert.equal(dismissed.length, 1);
+});
+
+test("a stored login as the machine default names the entry by that login", () => {
+  const work = "0123456789ab";   // the stored login's synthetic record id, the one the tests above use
+  const avail = { login: true, key: true, default: "login:" + work, defaultExplicit: true,
+    logins: [{ id: "", value: "login", label: "user@example.com", machine: true, available: true },
+             { id: work, value: "login:" + work, label: "Work", machine: false, available: true }] };
+  const { sub } = lift(avail as Avail, "login", "", { authOwn: false, authLogin: work });
+  assert.equal(lines(sub)[0], "Machine default · Login (Work)");
+  assert.deepEqual(sub.children.slice(0, 4).map((c) => has(c, "current")), [true, false, false, false]);
 });
 
 test("styles: the head and note rules are gone; both flyouts take their longest label's width whole, bounded by the window only", () => {

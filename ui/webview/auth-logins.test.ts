@@ -41,9 +41,11 @@ test("the tab menu's Billing submenu lists every login plus the key, the current
   assert.match(RENDER, /out\.push\(\{ label: "API key", value: "key", why: avail\.key \? "" : \(avail\.keyWhy \|\| "no apiKeyHelper configured"\) \}\);/);
   // the current mark: the key, or a login by st.authLogin ("" = the machine's own)
   assert.match(RENDER, /return st\.auth === "login" && \("login" \+ \(st\.authLogin \? `:\$\{st\.authLogin\}` : ""\)\) === value;/);
-  // the sub-line and the hover name the login by the kernel's label, the account name as the fallback
-  assert.match(RENDER, /: \(st\.auth === "key" \? "API key" : \(loginName\(st\) \? `Login \(\$\{loginName\(st\)\}\)` : "Login"\)\);/);
-  assert.match(RENDER, /: \(loginName\(s\.status\) \? `Login \(\$\{loginName\(s\.status\)\}\)` : "Login"\)\]\);/);
+  // the sub-line and the hover name the login by the kernel's label, the account name as the fallback: ONE wording,
+  // authWords, which both read (2026-10-07, when both gained the billing's source)
+  assert.match(RENDER, /function authWords\(st: Status\): string \{\s*\n\s*return st\.auth === "key" \? "API key" : \(loginName\(st\) \? `Login \(\$\{loginName\(st\)\}\)` : "Login"\);/);
+  assert.match(RENDER, /: \(authFollows\(st\) \? `Machine default · \$\{authWords\(st\)\}` : authWords\(st\)\);/);
+  assert.match(RENDER, /: authWords\(s\.status\) \+ \(authFollows\(s\.status\) \? " · machine default" : ""\)\]\);/);
 });
 
 test("the picker's Billing row keeps the two-option path and adds the many-login rebuild", () => {

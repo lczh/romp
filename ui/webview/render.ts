@@ -382,7 +382,7 @@ interface ChatNotice { itemId: string; key: string; rev: number; title: string; 
                        warns?: BadgeItem["warns"]; failLog?: BadgeItem["failLog"]; doneConfirming?: boolean | null;
                        summaryAnchorUuid?: string | null; summaryAnchorQuote?: string | null; summaryAnchorsPara?: SectionItem["summaryAnchorsPara"];
                        blocked?: unknown; column?: string | null; judging?: boolean | null; working?: SpinFields["working"]; sessState?: string | null }
-interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; fastPending?: boolean; }   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line and the effort change's chat line say it beside the pending dots   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; fastPending?: boolean; }   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line and the effort change's chat line say it beside the pending dots   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -409,10 +409,21 @@ function authLoginChoices(avail: AuthAvail): { label: string; value: string; why
   return out;
 }
 // Whether a Billing choice IS the session's current pick: the key, or a login by WHICH login (st.authLogin names a
-// stored one, "" the machine's own).
+// stored one, "" the machine's own). A session that follows the machine default has no pick of its own, so no choice
+// is (its flyout check-marks Machine default instead).
 function authChoiceCurrent(st: Status, value: string): boolean {
+  if (authFollows(st)) return false;
   if (value === "key") return st.auth === "key";
   return st.auth === "login" && ("login" + (st.authLogin ? `:${st.authLogin}` : "")) === value;
+}
+// Whether the session FOLLOWS its machine's default billing rather than carrying a pick of its own (the kernel's authOwn,
+// 2026-10-07). An older kernel sends no authOwn and is read as it always was: the billing is the session's own.
+function authFollows(st: Status): boolean {
+  return st.authOwn === false;
+}
+// The billing a session bills, in the Billing row's words: "API key" or "Login (name)".
+function authWords(st: Status): string {
+  return st.auth === "key" ? "API key" : (loginName(st) ? `Login (${loginName(st)})` : "Login");
 }
 interface Color { bg: string; fg: string; }
 // A run_in_background task surfaced in the #bg-tasks box (the kernel's _bg_tasks): a one-line summary +
@@ -6300,8 +6311,7 @@ function showTabTip(tab: HTMLElement, s: Session): void {
       : s.status.authLive && s.status.authLive !== s.status.auth
         ? `⚠ ${s.status.auth === "key" ? "API key" : "Login"} picked, but the CLI reports `
           + `${s.status.authLive === "key" ? "the API key" : "the login"} — this session bills that`
-        : s.status.auth === "key" ? "API key"
-          : (loginName(s.status) ? `Login (${loginName(s.status)})` : "Login")]);
+        : authWords(s.status) + (authFollows(s.status) ? " · machine default" : "")]);
   for (const [k, v, color] of rows) {
     const r = el("div", "tab-tip-row");
     const ke = el("span", "tab-tip-k"); ke.textContent = k;
@@ -8191,7 +8201,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   // a click there posts setAuth with scope "machine", which writes the seed every NEW session and every
   // session with no pick of its own launches on and touches no session that carries its own pick. The
   // rule and the entry appear only when there is more than one billing to choose from here. No sub-line
-  // under anything: the entries say what they are.
+  // under anything: the entries say what they are. Since 2026-10-07 a session FOLLOWS its machine's default
+  // unless it carries a pick of its own (st.authOwn): the row's sub-line says which ("Machine default · API key"
+  // for a follower, the billing alone for a pick), the flyout's first entry, Machine default, is checked for a
+  // follower and posts setAuth "default" to put a picked session back on it, and a pick is recorded at once and
+  // shown pending ("applies after …") until the CLI relaunches onto it; nothing is written into the chat.
   const st = s ? s.status : null;
   if (st && st.auth && (st.authAvail || st.authBoth)) {
     const avail: AuthAvail = st.authAvail || { login: true, key: true };
@@ -8212,7 +8226,8 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         ? `⚠ ${wordOf(st.auth)} unavailable` + (authFellTo(st) ? `, billing ${wordOf(authFellTo(st))}` : "")
       : st.authLive && st.authLive !== st.auth
         ? `⚠ CLI reports ${st.authLive === "key" ? "API key" : "login"}`   // the pick did not take — say so where the switch lives (T124)
-        : (st.auth === "key" ? "API key" : (loginName(st) ? `Login (${loginName(st)})` : "Login"));
+        // where the billing comes from (2026-10-07): the machine default it follows, or the session's own pick
+        : (authFollows(st) ? `Machine default · ${authWords(st)}` : authWords(st));
     bodyEl.appendChild(sb);
     item.appendChild(bodyEl);
     const caret = el("span", "ctx-caret"); caret.textContent = "▸"; item.appendChild(caret);
@@ -8231,6 +8246,22 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
         none.textContent = all.map((c) => c.why).filter(Boolean).join("; ");
         none.addEventListener("click", (ev2) => { ev2.stopPropagation(); });
         sub.appendChild(none);
+      }
+      // ── Machine default (2026-10-07) ── first, the way back from a pick of the session's own: the session follows its
+      // host's default billing (setAuth "default"), and moves with it when the default changes. Named by what the
+      // default bills now (the kernel's authAvail.default, one of the entries below). Only from a kernel that says
+      // whether the billing is the session's own (authOwn): an older one takes no "default" value.
+      if (st.authOwn !== undefined && choices.length) {
+        const follows = authFollows(st);
+        const defChoice = all.find((c) => c.value === avail.default);
+        const opt = el("div", "ctx-item ctx-item-followdefault" + (follows ? " current" : ""));
+        opt.textContent = `Machine default · ${defChoice ? defChoice.label : (avail.default === "key" ? "API key" : "Login")}`;
+        opt.addEventListener("click", (ev2) => {
+          ev2.stopPropagation();
+          dismissTabMenu();
+          if (!follows && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: "default" });
+        });
+        sub.appendChild(opt);
       }
       for (const c of choices) {
         const cur = authChoiceCurrent(st, c.value);   // the key, or a login by WHICH login (st.authLogin)
@@ -9311,6 +9342,9 @@ let kernelNativeDialogs = true;
 // the open reset the row, re-applies the effective default only while no explicit pick stands, and never undoes a
 // pick the user made
 let pickerBackendPicked = false;
+// whether the user CHOSE a billing in this open's Billing row (2026-10-07): the row's seeded selection is the machine
+// default and creates a session that follows it, so only a click or a change makes the create carry a pick of its own
+let pickerAuthPicked = false;
 
 // The two cases are shown differently, because one of them can change and the other cannot. A REMOTE host
 // is one click back to local, so the button stays in place, disabled, saying so. A kernel with no desktop
@@ -9337,6 +9371,10 @@ function requestSessionList(host: string): void {
   // row until ITS kernel's sessionList answers with its own availability (the same staleness rule the
   // dir status follows; an older kernel never answers with one and the row simply stays away)
   pickerAuthAvail = null;
+  // …and a billing chosen for the old host is not a choice made for this one: the row re-seeds from ITS default, which is
+  // what the create then follows (2026-10-07), so the selection on screen is always what the create will do
+  document.querySelectorAll("#picker .picker-auth .picker-be-opt").forEach((x) => x.classList.remove("sel"));
+  pickerAuthPicked = false;
   syncPickerAuth();
   if (vscodeApi) vscodeApi.postMessage({ type: "requestSessions", host });
 }
@@ -9458,7 +9496,7 @@ function syncPickerAuthMany(wrap: HTMLElement, a: AuthAvail): void {
       b.type = "button"; b.textContent = c.label; b.dataset.auth = c.value; b.dataset.many = "1";
       b.title = c.why ? `${c.label} unavailable: ${c.why}` : `Bill this session to ${c.label}.`;
       if (c.why) b.disabled = true;
-      b.addEventListener("click", () => wrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", x === b)));
+      b.addEventListener("click", () => { pickerAuthPicked = true; wrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", x === b)); });
       wrap.insertBefore(b, fixed);
     }
     return;
@@ -9476,6 +9514,7 @@ function syncPickerAuthMany(wrap: HTMLElement, a: AuthAvail): void {
       dd.appendChild(o);
     }
     dd.value = prev;
+    dd.addEventListener("change", () => { pickerAuthPicked = true; });
     wrap.insertBefore(dd, fixed);
   }
 }
@@ -9766,7 +9805,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     const mkAu = (val: string, txt: string, tip: string) => {
       const b = el("button", "picker-be-opt") as HTMLButtonElement;
       b.type = "button"; b.textContent = txt; b.title = tip; b.dataset.auth = val;
-      b.addEventListener("click", () => auWrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", x === b)));
+      b.addEventListener("click", () => { pickerAuthPicked = true; auWrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", x === b)); });
       return b;
     };
     const auFixed = el("span", "picker-auth-fixed");   // the written-out single choice
@@ -9818,9 +9857,10 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
       const beSel = beWrap.querySelector(".picker-be-opt.sel") as HTMLElement | null;
       // host: local ("") or an attached SSH host — the federation manager routes createSession there.
       const hostSel = (hostWrap.querySelector(".picker-be-opt.sel") as HTMLElement | null)?.dataset.host || "";
-      // billing: the picker's Billing row when it is showing (both choices real on that host); ""
-      // omits the field and the kernel's own default stands (the user 2026-08-08)
-      const auth = pickerAuthChoice();
+      // billing: the picker's Billing row when it is showing (both choices real on that host) AND the user chose in it;
+      // "" omits the field and the session follows its host's machine default (the user 2026-08-08; the choice rule
+      // 2026-10-07: the seeded selection IS that default, and sending it minted a pick of the session's own)
+      const auth = pickerAuthPicked ? pickerAuthChoice() : "";
       // tags: the Tags row's selected chips (prefilled from the active tab, edited or not) ride the
       // create as names; the owning kernel resolves them by name, minting a missing one like POST /tag.
       // Every offered backend's create takes them (the kernel applies parent/tags on a Claude Code or a Codex create).
@@ -9890,6 +9930,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
   if (auWrapEl) {   // fresh open: forget last time's pick + availability; the local sessionList reply re-arms it
     auWrapEl.style.display = "none";
     auWrapEl.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.remove("sel"));
+    pickerAuthPicked = false;   // the seeded selection follows the default until the user picks
   }
   const hostWrapEl = overlay.querySelector(".picker-host") as HTMLElement | null;
   if (hostWrapEl) {   // rebuild the host options each open (attach/detach is live); hide with no remotes

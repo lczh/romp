@@ -76,16 +76,17 @@ class CapSwitchOffer(unittest.TestCase):
         self.assertIsNone(km._cap_switch_offer(SID, ERR))
 
     def test_no_path_flips_billing_without_the_explicit_pick_both_directions(self):
-        # CENSUS PIN: the ONLY set_auth call sites in the kernel are the setAuth route's helper and
-        # the parked-op replay of that same user pick — no auto path, either direction. A new caller
-        # lands here first.
+        # CENSUS PIN: the ONLY set_auth call sites in the kernel are the setAuth route and the boot's
+        # migration of a pick the user made that an earlier kernel parked (2026-10-07: a pick is recorded
+        # at once and never parked) — no auto path, either direction. A new caller lands here first.
         src = Path(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read_text()
         sites = [l.strip() for l in src.splitlines() if re.search(r"\bbe\.set_auth\(", l)]
-        self.assertEqual(len(sites), 2, "exactly the helper + the parked replay: %r" % sites)
-        self.assertTrue(any("return be.set_auth(sid, value)" in l for l in sites))
-        self.assertTrue(any("be.set_auth(sid, op[1])" in l for l in sites))
-        self.assertIn('elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:', src,
-                      "the route is a user gesture, and the ONLY door (T346: 'login' | 'key' | 'login:<id>')")
+        self.assertEqual(len(sites), 2, "exactly the route + the parked pick's migration: %r" % sites)
+        self.assertTrue(any('_took, _oswhy = be.set_auth(sid, str(msg["value"])), ""' in l for l in sites))
+        self.assertTrue(any("took = bool(be.owns(sid) and be.set_auth(sid, value))" in l for l in sites))
+        self.assertIn('elif t == "setAuth" and (msg.get("value") == "default" or lg.parse_pick(msg.get("value"))[0]):', src,
+                      "the route is a user gesture, and the ONLY door (T346: 'login' | 'key' | 'login:<id>'; 'default' follows "
+                      "the machine default)")
         self.assertNotIn("set_auth", src[src.index("def _cap_switch_offer"):
                                          src.index("def _judge_limit_view")],
                          "the offer itself never switches anything")
