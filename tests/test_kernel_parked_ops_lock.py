@@ -477,17 +477,17 @@ class OneLockAroundEveryMutation(_Drain):
         self.be.open = False
         d = tempfile.mkdtemp()
         env = {"A": "1"}
-        km._pending_ops[SID] = [("model", "opus"), ("effort", "high"), ("fast", "on"), ("auth", "key"), ("env", env),
+        km._pending_ops[SID] = [("model", "opus"), ("effort", "high"), ("fast", "on"), ("env", env),
                                 ("send", "hello", None),
                                 ("cwd", d, km._MOVE_BUSY_RETRIES, 0)]         # behind the send: waits on turn_seq
-        km._apply_pending_ops()                            # busy (gate) → 5 setters → send → busy (the hold check)
-        self.assertEqual(self.be.calls, [("model", "opus"), ("effort", "high"), ("fast", "on"), ("auth", "key"),
+        km._apply_pending_ops()                            # busy (gate) → 4 setters → send → busy (the hold check)
+        self.assertEqual(self.be.calls, [("model", "opus"), ("effort", "high"), ("fast", "on"),
                                          ("env", env), ("send", "hello")])
         self.be.open = False                               # the send's turn ends
         km._apply_pending_ops()                            # busy (gate) → turn_seq: the move waits on its turn end
         self.assertEqual(km._pending_ops[SID], [("cwd", d, km._MOVE_BUSY_RETRIES, 0)], "still parked, waiting")
         names = [n for n, _, _ in probes]
-        self.assertEqual(names, ["busy", "set_model", "set_effort", "set_fast", "set_auth", "set_env", "send",
+        self.assertEqual(names, ["busy", "set_model", "set_effort", "set_fast", "set_env", "send",
                                  "busy", "busy", "turn_seq"])
         self.assertEqual([o for _, o, _ in probes], [False] * len(probes), "the drain never owns the lock in a backend call")
         self.assertEqual([f for _, _, f in probes], [True] * len(probes), "…and another thread can take it every time")

@@ -22076,6 +22076,7 @@ def _sdk_locked():
             # The backend's flag-consumption events resolve held rewinds (two-phase goal cleanup:
             # archive at the branch-take, restore on failure — _on_rewind_resolved).
             _sdk_backend.rewind_resolved_cb = _on_rewind_resolved
+            _migrate_parked_auth(_sdk_backend)     # billing picks an earlier kernel parked become recorded picks (2026-10-07)
             _mark_boot("reconcileDone")            # T217: the boot reconcile ran inside the
             #                                        construct above — the settle's other bookend
         except Exception:
@@ -22226,10 +22227,10 @@ def _auth_avail():
     (a managed helper outranks the per-session layer a login pick rides, so no pick could apply; set_auth
     refuses it with the same reason). key = an apiKeyHelper is configured in Claude Code's settings (read,
     never run; romp holds no key: see _auth_key_present). acct = the login's display name
-    (_claude_account_label), so 'Login' can say WHICH account it means. default = what a fresh session
-    would use absent an explicit pick: the remembered pick when this box can bill it, else the side that
-    exists, in BOTH directions (the user 2026-09-08: a remembered login pick on a box with no login falls
-    to the key, exactly as a remembered key pick on a helper-less box already fell to the login). The
+    (_claude_account_label), so 'Login' can say WHICH account it means. default = the machine default every
+    session with no pick of its own follows: the explicit one when set and this box can bill it, else the
+    helper rule, falling to the side that exists in BOTH directions (the user 2026-09-08: a login default on a
+    box with no login falls to the key, exactly as a key default on a helper-less box falls to the login). The
     reason sentences are credentials.py's, one vocabulary for every surface."""
     key = _auth_key_present()
     d = {}
@@ -22246,10 +22247,14 @@ def _auth_avail():
     # review 2026-09-09: a remembered login pick must not fall to the key on a read failure)
     login_ok = (bool(_claude_account()) or _claude_account_state() == "unreadable") and not managed
     logins = _login_choices(login_ok, managed)
-    default = d.get("auth") if d.get("auth") in ("login", "key") else ("key" if key else "login")
-    # a remembered pick of a STORED login (T346) stands as "login:<id>" while that login is usable; otherwise
-    # it falls through the machine-login rules below like any remembered login pick
-    dlid = _reg_login(d) if (default == "login" and d.get("auth") == "login") else ""
+    # the machine default: the EXPLICIT one (the Set default billing submenu's) when set, else the helper rule. The
+    # remembered seed a per-session pick wrote while no default was explicit is retired (2026-10-07): it is not what any
+    # session follows, so it is not the default
+    explicit = bool(d.get("authExplicit")) and d.get("auth") in ("login", "key")
+    default = d.get("auth") if explicit else ("key" if key else "login")
+    # an explicit default of a STORED login (T346) stands as "login:<id>" while that login is usable; otherwise
+    # it falls through the machine-login rules below like any login default
+    dlid = _reg_login(d) if (explicit and default == "login") else ""
     if dlid:
         stored = next((row for row in logins if row.get("id") == dlid), None)
         if stored and stored.get("available"):
@@ -22262,7 +22267,7 @@ def _auth_avail():
            "acct": _claude_account_label(), "default": default, "logins": logins,
            # T380: the default is EXPLICIT (set in the Billing flyout's Default group) or the helper rule; the
            # group marks Automatic otherwise and its sub-line says which
-           "defaultExplicit": bool(d.get("authExplicit")) and d.get("auth") in ("login", "key")}
+           "defaultExplicit": explicit}
     if not login_ok:
         out["loginWhy"] = jd._cred.WHY_MANAGED_HELPER if managed else jd._cred.WHY_NO_LOGIN
     if not key:
@@ -23365,23 +23370,26 @@ def _drive(msg, client):
                                        else "Couldn't set this machine's default billing."}))
         _push_soon()
     elif t == "setAuth" and msg.get("value") == "auto":
-        # Automatic is a choice for the MACHINE default only (T380 review): a session's own billing is Login or API
-        # key. Reachable from an older remote kernel's flyout, which shows the radio and posts the scoped value the
-        # host cannot take; said, never swallowed.
+        # Automatic is a choice for the MACHINE default only (T380 review): a session's own billing is a login, the API
+        # key, or "default" (follow the machine default). Reachable from an older remote kernel's flyout, which shows the
+        # radio and posts the scoped value the host cannot take; said, never swallowed.
         client["send"](json.dumps({"type": "warn",
-                                   "text": "Automatic is a choice for the machine's default billing, not for one session: pick Login or API key here."}))
+                                   "text": "Automatic is a choice for the machine's default billing, not for one session: pick Machine default, Login or API key here."}))
     elif t == "setAuth" and msg.get("scope") == "machine":
         # a scoped value that is no billing choice at all: said, never dropped. This arm sits before the per-session
         # arm so a scoped value is never read as a session's own pick.
         client["send"](json.dumps({"type": "warn",
                                    "text": "Couldn't set this machine's default billing: '%s' is not a billing choice." % str(msg.get("value") or "")[:40]}))
-    elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:   # "login" | "key" | "login:<id>" (T346)
-        # per-session billing (login vs the manager env's API key) — SDK-only, applied via reconnect
-        # like /effort; mid-compaction → parked in the same FIFO. LOUD on refusal (fail loudly): Codex
-        # sessions and a keyless manager can't apply it, and a silent swallow leaves a dead control.
+    elif t == "setAuth" and (msg.get("value") == "default" or lg.parse_pick(msg.get("value"))[0]):
+        # per-session billing: "login" | "key" | "login:<id>" (T346) is the session's own pick, "default" clears it so the
+        # session follows the machine default (2026-10-07). SDK-only. A SETTING, recorded at once whatever the session is
+        # doing and never parked in the chat's queue (until 2026-10-07 a busy session's pick sat there as an "/auth" chip,
+        # behind compactions, queues and the account hold it would have got past); the backend relaunches the CLI onto it
+        # once nothing would be cut (SdkBackend.set_auth). LOUD on refusal (fail loudly): Codex sessions and a box that
+        # cannot bill the side refuse it, and a silent swallow leaves a dead control.
         try:
-            _took, _oswhy = _set_auth_or_park(be, sid, str(msg["value"])), ""
-        except OSError as e:                          # the park's or the backend's state write refused: said on the frame below, never a torn socket (the second executed review of PR 1935, 2026-09-21)
+            _took, _oswhy = be.set_auth(sid, str(msg["value"])), ""
+        except OSError as e:                          # the backend's state write refused: said on the frame below, never a torn socket (the second executed review of PR 1935, 2026-09-21)
             _took, _oswhy = False, "romp could not write its state (%s)" % _store_fault_copy(e)
         if not _took:
             # the backend names the reason it refused (no login signed in / no apiKeyHelper / a managed
@@ -24246,6 +24254,7 @@ class Sessions:
                                 "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
                                 "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
                                 "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
+                                "authOwn": bool(st.get("authOwn")),   # its own pick (an override), else it follows the machine default
                                 # the CLI's own init report ('key'|'login', "" until one lands): the
                                 # Billing row's live truth. Merged since 2026-09-08 — the status push read
                                 # it off this map from the start, and nothing had ever put it here
@@ -40275,20 +40284,61 @@ _PENDING_OPS_FILE = Path(jd.STATE) / "pending-ops.json"
 _pending_ops_lock = threading.RLock()
 
 
+_parked_auth_picks: dict = {}   # sid -> the latest billing pick an earlier kernel PARKED in the queue (before 2026-10-07):
+#                                 taken out of the queue at load and recorded as the session's pick once the SDK backend is
+#                                 built (_migrate_parked_auth)
+
+
 def _load_pending_ops():
     """Restore the parked-ops queues a previous kernel mirrored to disk (_save_pending_ops) — a kernel
     restart used to drop them SILENTLY (in-memory only), losing every message/pick the user queued
     against a busy session (2026-07-05: the LaunchAgent outage ate all of them). Best-effort: an
-    unreadable file logs and starts empty rather than blocking boot."""
+    unreadable file logs and starts empty rather than blocking boot.
+
+    A parked billing op (kind "auth") is no queue entry any more (2026-10-07: a billing pick is a setting, recorded at once
+    and never parked): each session's LATEST one leaves the queue here and becomes its recorded pick once the SDK backend
+    is built (_parked_auth_picks, _migrate_parked_auth); the rest of the queue keeps its order."""
     try:
         d = json.loads(_PENDING_OPS_FILE.read_text())
-        return {str(k): [tuple(o) for o in v if isinstance(o, list) and o]
-                for k, v in d.items() if isinstance(v, list) and v}
+        out = {}
+        for k, v in d.items():
+            if not (isinstance(v, list) and v):
+                continue
+            ops = [tuple(o) for o in v if isinstance(o, list) and o]
+            auth = [o for o in ops if o[0] == "auth" and len(o) > 1 and isinstance(o[1], str)]
+            if auth:
+                _parked_auth_picks[str(k)] = auth[-1][1]
+            ops = [o for o in ops if o[0] != "auth"]
+            if ops:
+                out[str(k)] = ops
+        return out
     except OSError:
         return {}                                     # first boot / nothing parked — normal
     except Exception:
         sys.stderr.write("pending-ops load: %s\n" % traceback.format_exc())
         return {}
+
+
+def _migrate_parked_auth(be):
+    """Record each billing pick an earlier kernel parked (_parked_auth_picks, filled at load) as that session's pick on
+    the SDK backend, which applies it the way any pick applies (SdkBackend.set_auth: pending, then one relaunch at a quiet
+    moment), and mirror the queue without them, so a later boot cannot re-apply a pick over one the user has made since.
+    Once, when the backend is built (_sdk_locked). A session the SDK backend does not own, or a pick it refuses, is said
+    and dropped: a parked pick was never a promise beyond the session it was made on."""
+    picks = dict(_parked_auth_picks)
+    _parked_auth_picks.clear()
+    if not picks:
+        return
+    for sid, value in picks.items():
+        try:
+            took = bool(be.owns(sid) and be.set_auth(sid, value))
+        except Exception:
+            took = False
+            sys.stderr.write("pending-ops: recording the parked billing pick for %s failed: %s\n" % (sid[:8], traceback.format_exc()))
+        sys.stderr.write("pending-ops: the billing pick (%s) an earlier kernel parked for %s is %s\n"
+                         % (value, sid[:8], "recorded as the session's pick" if took
+                            else "dropped (the SDK backend does not own the session, or refused the pick)"))
+    _save_pending_ops()
 
 
 def _save_pending_ops():
@@ -41880,17 +41930,6 @@ def _set_env_or_park(be, sid, value):
         be.set_env(sid, value)
 
 
-def _set_auth_or_park(be, sid, value):
-    """Apply a billing-account change now — or park it while the session compacts, in the same FIFO as
-    /model and /effort (it reconnects the session, which mid-compaction would derail the compaction
-    exactly the way a model switch would). Returns the backend's verdict so the caller can be loud."""
-    if not lg.parse_pick(value)[0]:          # "login" | "key" | "login:<id>" (a stored login, T346)
-        return False
-    if _gate_or_park(sid, ("auth", value)):
-        return True
-    return be.set_auth(sid, value)
-
-
 def _set_fast_or_park(be, sid, value):
     """Apply a fast-mode toggle now — or park it while the session compacts, exactly like /model and
     /effort (it is a slash command and must keep press order in the same FIFO). Returns (took, parked):
@@ -42648,8 +42687,6 @@ def _apply_pending_ops(now=None):
                         refused = be.set_effort(sid, op[1]) is False
                     elif op[0] == "fast":
                         refused = be.set_fast(sid, op[1]) is False   # its bool was dropped the same way
-                    elif op[0] == "auth":
-                        be.set_auth(sid, op[1])
                     elif op[0] == "env":
                         be.set_env(sid, op[1])
                     # (an unknown op kind gets no call: it is popped below and dropped — never wedge the queue)
@@ -45711,6 +45748,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # The key is labelled 'API key', never any fragment of it (2026-08-08: even a last-4
                   # tail is more key than a label needs); authAcct names WHICH login account.
                   "auth": tm.get("auth", ""),
+                  # whether that is the session's own pick (an override) or the machine default it follows (2026-10-07):
+                  # the Billing row says which, and its flyout check-marks Machine default or the pick
+                  "authOwn": bool(tm.get("authOwn")),
                   # the CLI's OWN report ('key'/'login', "" until an init lands) — the Billing row
                   # renders it when it disagrees with the intent above (a key found via apiKeyHelper
                   # bills the key while `auth` still reads login; the user 2026-08-15)

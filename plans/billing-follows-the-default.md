@@ -1,6 +1,6 @@
 # A session's billing is a setting that follows the machine default
 
-**Status:** a design line before code (written 2026-10-07, after a day of switching every session between an enterprise login and the API key during an outage; the design was approved by the repository owner before this was written). Two pull requests, cut from main, red first: the spend hold's release (a `fix`), then the billing model (a `feature`).
+**Status:** a design line before code (written 2026-10-07, after a day of switching every session between an enterprise login and the API key during an outage; the design was approved by the repository owner before this was written). Two pull requests, cut from main, red first: the spend hold's release (a `fix`, #144), then the billing model (a `feature`).
 
 ## Why now
 
@@ -15,7 +15,7 @@ Switching the account a session bills went wrong five ways in one afternoon, acr
 ## The premise, checked in code
 
 - **The park.** `setAuth` reaches `_set_auth_or_park` (kernel.py), which runs `_gate_or_park` → `_ops_gate`: compacting, an open turn, an existing queue, a move (`_moving`) or `_limit_hold` parks `("auth", value)`. The drain's `auth` arm calls `be.set_auth` when the queue reaches it. `_park_op_locked` replaces model/effort/fast/env/cwd in place, not auth.
-- **The recorded road already waits.** `SdkBackend.set_auth` writes the reg (`auth`, `authLogin`, `authPending`), records the waiting pick (`relaunchWait`) and calls `request_reconnect(why="billing")`, which since 2026-10-01 waits for `quiet()`: no turn in flight or queued, the CLI not producing, no subagent, no background task, no question waiting on the user. A compaction is a turn (a delivered `/compact` is fed through the feeder, `inflight`; an automatic one runs inside a turn the CLI produces, `_cli_working`), so quiet already excludes it. A MOVE is not: `move()` arms `_move_settle_expected` and sends `set_cwd` with no turn open, so a relaunch could tear the CLI down mid-request. The park covered that through `_moving`; with the park gone, quiet must say it.
+- **The recorded road already waits.** `SdkBackend.set_auth` writes the reg (`auth`, `authLogin`, `authPending`), records the waiting pick (`relaunchWait`) and calls `request_reconnect(why="billing")`, which since 2026-10-01 waits for `quiet()`: no turn in flight or queued, the CLI not producing, no subagent, no background task, no question waiting on the user. A compaction is a turn (a delivered `/compact` is fed through the feeder, `inflight`; an automatic one runs inside a turn the CLI produces, `_cli_working`), so quiet already excludes it. A MOVE is not: `move()` sends `set_cwd` with no turn open, so a relaunch could tear the CLI down mid-request. The park covered that through `_moving`; with the park gone, quiet must say it. Not through the move's settle arm (`_move_settle_expected`), which a lost turn-less result leaves standing and which a reconnect is one of the events that lower: gated on it, the two would wait on each other.
 - **The hold.** `_limit_hold`'s spend arms: the global pause (`retry-paused.json` with reason `spend`) holds every session, and `_api_error(path).spendLimit` holds a session whose last record is a cap error. The pause records `bills` (the capped session's side) and, when it lifts, `liftedAt` (the evidence's time). The engage (`_spend_capped_session(after=liftedAt)`) and the lift (`_auto_resume_retry`, comparing sides through `_bills_login`) honour both; `_limit_hold` honours neither.
 - **Which side a session is on.** `_bills_login(row)` reads the CLI's own report (`authLive`) first, then the intent (`auth`). `set_auth` clears `auth_live` at the PICK, so for the whole wait the session reads as already on the new side while the old CLI still serves it.
 - **The attach.** `_reconcile_waiting_picks` compares only picks already waiting with the attached CLI's launch record (the host's echo, `cli.launch`). The construction heal clears `authPending` unless billing is in `relaunchWait`. A session whose reg and CLI disagree with nothing waiting is never compared.
@@ -24,7 +24,7 @@ Switching the account a session bills went wrong five ways in one afternoon, acr
 ## The rules
 
 1. **A billing pick is a session setting.** `setAuth` records it at once (`SdkBackend.set_auth`), always, whatever the session is doing. It is never parked in the chat's queue, so no account hold, compaction, queue or move can stand in front of it. The Billing menu shows it at once, pending while the CLI serving the session was launched on another billing.
-2. **It applies at the next moment nothing would be cut**, through #67's relaunch (`request_reconnect` → `want_switch_reconnect` → `quiet()`), with Apply now as the way through. `quiet()` also reads a move in flight (`_move_settle_expected`) as work, and the move's end carries a standing ask, as a turn's end does.
+2. **It applies at the next moment nothing would be cut**, through #67's relaunch (`request_reconnect` → `want_switch_reconnect` → `quiet()`), with Apply now as the way through. `quiet()` also reads a move's `set_cwd` round trip as work (`_cwd_request_open`, raised and lowered around the request), and the round trip's end carries a standing ask, as a turn's end does.
 3. **A newer pick replaces an unapplied one.** The reg holds one billing; the relaunch reads the reg when it launches, so however many picks land while it waits, one relaunch carries the latest. A pick equal to what the serving CLI was launched with clears the pending mark (nothing to apply); the standing ask, if any, still relaunches once, carrying nothing new.
 4. **Input goes out on the current account until the switch lands.** A billing preference never holds a conversation (a relaunch can wait hours behind background tasks); romp holds input only when the account cannot serve it, which is the account hold's job.
 5. **A session follows the machine default unless the user picks otherwise for it.** The setting has two scopes, the machine and the session, and one writer each: the Billing flyout's session entries write the session's override, its **Set default billing** submenu writes the machine's. A pick never moves the default (the legacy seed, written by a per-session pick while the default was not explicit, is retired). The machine default is the explicit one when set, else Automatic (the helper rule: the key when an apiKeyHelper is configured, else the login), exactly what an unpicked session already followed.
@@ -53,7 +53,7 @@ The tab menu's Billing row says where the session's billing comes from: `Machine
 |---|---|
 | A pick is recorded and shown | the `setAuth` op |
 | A pick goes pending | the serving CLI's launch record differing from the session's effective billing (at the pick, at a default change, at an attach) |
-| The relaunch | `quiet()` turning true: a turn's result, a subagent's stop, a background task's end, a move's settle (the 30 s tick behind them) |
+| The relaunch | `quiet()` turning true: a turn's result, a subagent's stop, a background task's end, a move's `set_cwd` answer (the 30 s tick behind them) |
 | Pending clears | the connect whose CLI's launch record carries the billing |
 | The cap hold on a session's own record lets go | the pause's `liftedAt`, or `authSwitchedAt`, passing the record's time |
 | The global pause holds a session | the pause's `bills` matching the side of the CLI serving it |
@@ -66,7 +66,7 @@ The tab menu's Billing row says where the session's billing comes from: `Machine
 - A cap record older than the pause's lift, or older than a landed switch, no longer holds; a newer one does. The global pause holds only its billing side; the engage skips a record older than its session's landing.
 - A default change re-targets following sessions and leaves overrides; `value: "default"` returns a session to following.
 - An attach whose launch record names other billing shows pending and relaunches when quiet; one with no record says it cannot vouch.
-- A move in flight is not quiet; its settle carries the standing ask.
+- A move's `set_cwd` round trip is not quiet and its end carries the standing ask; a stale settle arm alone holds nothing.
 - Parked auth ops migrate on load, the latest per session, the rest of the queue intact.
 - Spawn and fork mint no override; the picker sends no billing unless clicked.
 

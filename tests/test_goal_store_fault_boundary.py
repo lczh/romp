@@ -2662,7 +2662,10 @@ class ActsUnderAFailedWrite(_World):
 
     def test_a_billing_pick_and_a_manual_retry_whose_write_refuses_are_said_on_their_frames(self):
         boom = OSError(errno.EROFS, "Read-only file system", str(jd.STATE / "pending-ops" / (A + ".json")))
-        with mock.patch.object(km, "_set_auth_or_park", mock.Mock(side_effect=boom)):
+        class _Refusing:                     # the backend's state write refuses (the pick is recorded at once, never parked)
+            def set_auth(self, sid, value):
+                raise boom
+        with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: _Refusing())):
             sent = self._dispatch({"type": "setAuth", "id": A, "value": "login"})
         warns = [m for m in sent if m.get("type") == "warn"]
         self.assertEqual(len(warns), 1)

@@ -35,11 +35,12 @@ test("only the explicit pick switches — the gesture census, both surfaces", ()
   // T380: the Billing flyout gained a SECOND sender, the machine-default pick, which carries scope "machine" and
   // switches no session (it writes the seed new sessions and unpicked sessions launch on); the per-session pick stays
   // the one sender that switches a session
-  assert.equal((RENDER.match(/type: "setAuth"/g) || []).length, 2, "chat: the Billing flyout's session pick and its machine-default pick");
+  assert.equal((RENDER.match(/type: "setAuth"/g) || []).length, 3, "chat: the Billing flyout's session pick, its machine-default pick, and its way back to following the default (2026-10-07)");
   // T387: the machine-default pick moved into the Set default billing submenu, whose entries and its Automatic way back all
   // post through ONE helper (post(value)), so the second sender reads `value`, not `c.value`; still two senders in the chat
   assert.equal((RENDER.match(/type: "setAuth", id, value, scope: "machine"/g) || []).length, 1, "the second sender is the machine default: scope machine, no session switched");
   assert.equal((RENDER.match(/type: "setAuth", id, value: c\.value \}/g) || []).length, 1, "the per-session pick stays the one session switcher");
+  assert.equal((RENDER.match(/type: "setAuth", id, value: "default" \}/g) || []).length, 1, "…and the one way back: the session follows the machine default again");
   assert.match(KERNEL, /a session must NEVER\s*\n\s*silently switch billing in either direction/, "the ruling, verbatim at the mint");
 });
 

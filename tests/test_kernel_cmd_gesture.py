@@ -67,13 +67,16 @@ class CmdGestureMarkerRoundTrip(unittest.TestCase):
 
 class CmdGestureSourcePins(unittest.TestCase):
     def test_backend_writes_the_marker_beside_each_synthesized_live_chip(self):
-        # every setter that synthesizes a live command chip (set_model / set_effort / set_auth) writes the
+        # every setter that synthesizes a live command chip (set_model / set_effort) writes the
         # durable twin with the SAME t and disp, so build_session's (t, text) dedup holds while the chip is
-        # live and the durable event takes over seamlessly once stale_cmd retires it. The three share ONE
+        # live and the durable event takes over seamlessly once stale_cmd retires it. They share ONE
         # builder (_ack_cmd_chip — so the chip fires on a dormant session too); the property is pinned on
         # the builder, and every setter must go through it.
-        for cmd in ("/model", "/effort", "/auth"):
+        for cmd in ("/model", "/effort"):
             self.assertEqual(BACKEND_SRC.count('self._ack_cmd_chip(sid, "%s", "%s " + value, ' % (cmd, cmd)), 1, cmd)
+        # a billing pick writes nothing into the chat since 2026-10-07: it is a setting, shown in the Billing menu, and a
+        # change of the machine default that re-targets every following session would otherwise chip every chat
+        self.assertNotIn('self._ack_cmd_chip(sid, "/auth"', BACKEND_SRC)
         i = BACKEND_SRC.index("def _ack_cmd_chip(")
         self.assertIn('uid = "cmd:%d:%s" % (t, command.lstrip("/"))', BACKEND_SRC[i:i + 3000])
         j = BACKEND_SRC.index("append_cmd_gesture(self.state_dir, sid, disp, t=t)", i)

@@ -508,7 +508,8 @@ a later flip installs nothing and changes nothing. `/version` carries
 ### Per-session billing (login vs API key)
 
 An SDK session bills either the machine's Claude login (subscription usage) or
-the API key, chosen per session. The key is Claude Code's own: the CLI runs the
+the API key. Each session follows the machine's default billing unless it has a
+billing of its own, picked for it. The key is Claude Code's own: the CLI runs the
 `apiKeyHelper` configured in its settings (the helper; setup under [A key from
 a secret manager](#a-key-from-a-secret-manager)) and holds what it prints.
 Romp holds no key and passes none to a session (the user 2026-09-08, who wants
@@ -535,34 +536,54 @@ availability as `authAvail` (`authBoth` rides beside it for older clients),
 and the machine's default beside it. The flyout opens on hover over the
 Billing row, as the Tags flyout does (one gesture: a short hover opens, a
 click opens at once, leaving both the row and the flyout closes it), and on
-click. Switching reconnects the session to apply, with the same switching-dots
-the effort badge wears, and waits the same way for a quiet session: until then
-the row's sub-line reads "applying…", or "applies after 2 background tasks"
-when work the reconnect would end is still running. While it waits, the flyout
-carries **Apply now** under the choices, behind a rule, its sub-line naming what
-it ends ("ends 2 background tasks").
+click. Its first entry, **Machine default · API key** (named by what the default
+bills), is check-marked for a session that follows the default, and a click on
+it puts a session with its own pick back on the default (`setAuth` with
+`value: "default"` over the dashboard socket, the same op as a pick); the
+choices below it are the session's own picks, the current one check-marked.
+The Billing row's sub-line says where the billing comes from: `Machine default
+· API key` for a session that follows it, the billing alone for its own pick.
+
+A pick is a setting: it is recorded at once, whatever the session is doing, and
+never queued in the chat (until 2026-10-07 a pick on a busy session waited in
+the chat's queue as an `/auth` chip, behind the very account hold it could have
+got past). It applies by relaunching the session's CLI, which waits for a quiet
+session: until then the row's sub-line reads "applying…", or "applies after 2
+background tasks" when work the relaunch would end is still running, and
+messages sent meanwhile go out on the account the running CLI bills. A newer
+pick replaces one not yet applied, and one relaunch carries the latest; a pick
+back to what the running CLI already bills clears the pending mark. While a
+switch waits, the flyout carries **Apply now** under the choices, behind a rule,
+its sub-line naming what it ends ("ends 2 background tasks"). Nothing is
+written into the chat for a pick.
 
 Below the session's choices, behind a rule, the flyout carries one entry,
 **Set default billing**, which opens a submenu holding exactly the same
 choices, a stored login among them (the user 2026-09-14; until then the
 submenu offered the machine's own login and the key only), the current
 explicit default check-marked. That default is
-the seed every new session, and every session with no pick of its own, launches
-on; it lives in the state root's `sdk-defaults.json` as `auth` (never a token;
+what every session with no pick of its own bills, a new one included; it lives
+in the state root's `sdk-defaults.json` as `auth` with `authExplicit` (never a token;
 a stored login as `auth: login` with its record id under `authLogin`, and an
 unpicked session then launches with that login's helper, reads it in its
 status and bills its judges to it, exactly as a session that picked it would;
 a stored login the machine cannot bill just now, refused, expired or removed,
 falls through to the machine's own login),
-and a pick there changes no session that carries its own pick; a session
-with no pick of its own follows it, in its status at once and at its next
-launch. A third choice, Automatic, is the rule that held before: the API key
-when a helper is configured, else the login; it clears the explicit default,
-and the group's sub-line says which rule holds. Until the default is set here,
-the last per-session pick seeds it (as a model or effort pick does); once set
-here, a per-session pick is about that session alone and moves no default. A
-remote session's flyout names its host, and the pick sets that host's default
-(the op routes to the session's owning kernel). The judges follow the same
+and a pick there changes no session that carries its own pick. Every session
+that follows the default reads the new one in its status at once, and each
+whose CLI was launched on something else relaunches onto it at its own next
+quiet moment, so switching every following session is one action. A third
+choice, Automatic, is the rule that held before: the API key when a helper is
+configured, else the login; it clears the explicit default, and the group's
+sub-line says which rule holds. A per-session pick is about that session alone
+and never moves the default (until 2026-10-07 a pick did while no default was
+explicit; an `auth` without `authExplicit` left in the file by that rule is read
+by nothing). A new session follows the default unless a billing was chosen for
+it: the new-session picker's Billing row starts on the default and sends a pick
+only when clicked, `romp new --auth` is a pick, and a fork or a comment thread
+starts following the default whatever its parent picked. A remote session's
+flyout names its host, and the pick sets that host's default (the op routes to
+the session's owning kernel). The judges follow the same
 resolution: a judge on a session with no pick of its own bills the machine's
 default when the machine can bill it, else the helper rule, exactly as the
 launch does. The flyout places itself to the right of its row, to the left
@@ -570,11 +591,10 @@ when the right would clip and the left has room, below the row when neither
 side has room, above it when below does not fit, and only then clamped inside
 the window; it never covers its row while a place beside or beyond it exists.
 
-On a one-auth box the picker never chooses the missing side. The remembered
-default falls to the side that exists, in both directions: a remembered login
-pick on a machine with no login seeds new sessions on the API key, exactly as
-a remembered key pick on a helper-less machine already fell to the login, and
-the fall is said once per process as a problem row. An explicit pick that
+On a one-auth box the picker never chooses the missing side. The machine
+default falls to the side that exists, in both directions: a login default on a
+machine with no login bills the API key, exactly as a key default on a
+helper-less machine falls to the login. An explicit pick that
 names the missing side (a session picked "login" on a box that later lost its
 login) launches on the other side when one exists and says so once per session
 start, on the tab menu's Billing sub-line as `⚠ login unavailable, billing API key`
@@ -602,10 +622,8 @@ login-billed launches.
 The login is named by its account (the email the credential store records);
 the key option is labelled plainly `API key`. No fragment of the key, not even
 a last-4 tail, ever reaches a browser or a screen, and romp never sees the key
-at all. A new session defaults to the last pick made anywhere, and before any
-pick to the key when a helper is configured. A remembered key pick on a box
-whose settings carry no helper leaves new sessions unpicked, and the kernel
-log says so once, naming the settings file to configure.
+at all. A new session follows the machine default: the explicit one when set,
+else the key when a helper is configured, else the login.
 
 A tab not yet loaded after a reconnect shows "Not loaded yet, click to load"
 as its hover tooltip, prefixed with what needs you when a card of it does, until its transcript arrives.
@@ -614,7 +632,7 @@ A Claude Code session's chat tab carries the same fact as a `Billing` row in its
 hover tooltip, one-auth machines included; Codex sessions, which bill no Claude
 account, show no row. The row has four readings. Unless one of the three cases below applies, it reads
 `API key` or `Login (name@example.com)` (`Login` alone when the account name is
-unknown). While a switch is still reconnecting the session, the row appends
+unknown), followed by `· machine default` for a session that follows the default. While a switch is still reconnecting the session, the row appends
 `(applying — not confirmed yet)` to the side: `Login (applying — not confirmed
 yet)`. A pick naming a side this machine cannot bill leads with the warning,
 the reason, and the side the launch fell to: `⚠ Login picked, but no Claude
@@ -624,8 +642,9 @@ CLI's own report contradicts (a login pick whose CLI reports a key, a key pick
 whose CLI landed on the login) leads with the warning too: `⚠ Login picked, but
 the CLI reports the API key — this session bills that`, and, for a key pick,
 the same with the sides swapped. The tab menu's Billing sub-line says the same
-in fewer words: `API key` or `Login (name@example.com)`, `applying…`, `⚠ login
-unavailable, billing API key`, and `⚠ CLI reports API key`.
+in fewer words: `API key` or `Login (name@example.com)`, `Machine default · API
+key`, `applying…`, `⚠ login unavailable, billing API key`, and `⚠ CLI reports
+API key`.
 
 Failures are loud rather than silent: a session that lands on the other auth
 than it was launched for is flagged in the Log panel, and a dead credential
@@ -640,10 +659,11 @@ flagged, naming the declaration. On a box with a helper every session without
 a login pick bills the key, so `ROMP_EXPECTED_AUTH=key` describes such a box
 truthfully. An undeclared box (the variable unset, or any other value)
 compares each landing against what that session was launched for and stays
-quiet when they agree. One explicit gear **Billing** pick supersedes the
-declaration from then on: the remembered pick becomes the box's expectation
-and the env var goes inert (it described the unpicked design), so re-seeded
-spawns are judged against your pick, never against stale doctrine.
+quiet when they agree. An explicit machine default (**Set default billing**)
+supersedes the declaration from then on: it becomes the box's expectation for
+every session without a pick of its own, and the env var goes inert (it
+described the unpicked design). A session with its own pick is judged against
+that pick.
 
 The kernel also checks, once at boot and before anything is spawned, that no
 retired key path is still configured. A `service.env` that still carries a key
@@ -1582,7 +1602,12 @@ which the session host keeps and reports back when a kernel attaches. A kernel
 attaching to a CLI launched before the setting keeps its pending mark and its
 wait for a quiet session; one attaching to a CLI that already carries it marks
 it applied. A host too old to report its launch cannot vouch for anything, so
-the setting is applied at the next quiet moment. The attaching kernel also
+the setting is applied at the next quiet moment. Billing is compared at every
+attach whether or not a pick waits: a session whose CLI was launched on another
+billing than the one it is set to (its own pick, or the machine default it
+follows) shows the switch pending and relaunches at the next quiet moment, and
+a CLI no launch record vouches for is said so in the log and relaunched once.
+The attaching kernel also
 reads the background tasks the surviving CLI runs from the registry, so the
 wait holds for them; a re-attach to the same CLI inside one kernel's life (a
 host re-exec, a retried attach) keeps them as they were.

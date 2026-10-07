@@ -15,8 +15,8 @@ auth login with authExplicit true while api keeps its key pick and web has none,
 offers Automatic behind a rule; clicks Automatic and reads the seed cleared. ServedBillingFlyoutOneSide's machine has
 NO apiKeyHelper: the flyout lists both sides with the key greyed and shows neither the rule nor the entry.
 BILLING_FLYOUT_DIST=<dir> serves another tree's UI bundle (the red run's before; the driver falls back to a click when
-the hover opens nothing, so the rest is still read); BILLING_FLYOUT_SHOTS=<prefix> writes <prefix>-dark.png and
-<prefix>-light.png of the open flyout with its submenu. Since 2026-09-14 (the user): the flyout lists the billings the
+the hover opens nothing, so the rest is still read); BILLING_FLYOUT_SHOTS=<prefix> writes <prefix>-dark.png,
+<prefix>-light.png and <prefix>-yatharth.png of the open flyout with its submenu. Since 2026-09-14 (the user): the flyout lists the billings the
 machine can apply and those only (nothing greyed: the one-side lab lists the login alone), every label whole (the machine
 login's long synthetic email · organisation label is measured: no row truncates, the flyout is as wide as its longest
 label and content-sized, and at 560 px the label wraps at the window's bound rather than clipping), and the two-sided
@@ -100,11 +100,15 @@ const readFly = () => page.evaluate(() => {
   const rect = (e) => { const b = e.getBoundingClientRect(); return { left: b.left, top: b.top, w: b.width, h: b.height, right: b.right, bottom: b.bottom }; };
   const kids = Array.from(fly.children);
   const lines = kids.map((k) => k.classList.contains("ctx-sep") ? "---" : k.classList.contains("ctx-item-setdefault") ? "[set default]" : k.textContent.trim());
-  const choices = kids.filter((k) => k.classList.contains("ctx-item") && !k.classList.contains("ctx-item-setdefault") && !k.closest(".ctx-sub-default"))
-    .map((i) => ({ text: i.textContent.trim(), current: i.classList.contains("current"), disabled: i.classList.contains("disabled"), title: i.title,
+  const measure = (i) => ({ text: i.textContent.trim(), current: i.classList.contains("current"), disabled: i.classList.contains("disabled"), title: i.title,
       // the label whole (2026-09-14): a truncating row reports its full content width in scrollWidth against a smaller clientWidth
       scrollW: i.scrollWidth, clientW: i.clientWidth, h: i.getBoundingClientRect().height, textOverflow: getComputedStyle(i).textOverflow,
-      textW: (() => { const rg = document.createRange(); rg.selectNodeContents(i); return rg.getBoundingClientRect().width; })() }));
+      textW: (() => { const rg = document.createRange(); rg.selectNodeContents(i); return rg.getBoundingClientRect().width; })() });
+  // the session's billings to pick from; the Machine default entry above them (2026-10-07) is read on its own
+  const choices = kids.filter((k) => k.classList.contains("ctx-item") && !k.classList.contains("ctx-item-setdefault") && !k.classList.contains("ctx-item-followdefault") && !k.closest(".ctx-sub-default"))
+    .map(measure);
+  const followEl = fly.querySelector(":scope > .ctx-item-followdefault");
+  const follow = followEl ? measure(followEl) : null;
   const entry = fly.querySelector(":scope > .ctx-item-setdefault");
   const readSub = (d) => Array.from(d.children).map((k) => k.classList.contains("ctx-sep") ? { sep: true } : {
     text: k.textContent.trim(), current: k.classList.contains("current"), disabled: k.classList.contains("disabled"), scope: k.dataset.scope,
@@ -113,7 +117,7 @@ const readFly = () => page.evaluate(() => {
   const d = fly.querySelector(".ctx-sub-default");
   const row = document.querySelector(".ctx-menu .ctx-item-billing .ctx-item-sub");
   const rowEl = document.querySelector(".ctx-menu .ctx-item-billing"); const rr = rowEl ? rect(rowEl) : null;
-  return { lines, choices, sep: kids.some((k) => k.classList.contains("ctx-sep")), subLines: fly.querySelectorAll(".ctx-item-sub").length,
+  return { lines, choices, follow, sep: kids.some((k) => k.classList.contains("ctx-sep")), subLines: fly.querySelectorAll(".ctx-item-sub").length,
     heads: fly.querySelectorAll(".ctx-sub-head").length, radios: fly.querySelectorAll(".ctx-radio").length,
     entry: entry ? { label: entry.querySelector(".ctx-item-label").textContent, caret: (entry.querySelector(".ctx-caret") || {}).textContent || "", rect: rect(entry),
                      caretInset: entry.querySelector(".ctx-caret") ? rect(entry).right - rect(entry.querySelector(".ctx-caret")).right : null } : null,
@@ -174,15 +178,15 @@ if (row) {
 out.beforeEscape = await page.evaluate(() => ({ fly: !!document.querySelector(".ctx-sub-billing"), menu: !!document.querySelector(".ctx-menu") }));
 await page.keyboard.press("Escape"); await page.waitForTimeout(150);
 out.afterEscape = await page.evaluate(() => ({ fly: !!document.querySelector(".ctx-sub-billing"), menu: !!document.querySelector(".ctx-menu") }));
-// the screenshots: the open flyout with its submenu, dark and light
-for (const theme of ["dark", "light"]) {
-  await page.evaluate((t) => document.body.classList.toggle("theme-light", t === "light"), theme);
+// the screenshots: the open flyout with its submenu, dark, light and Yatharth light (theme-light with chat-theme-yatharth)
+for (const theme of ["dark", "light", "yatharth"]) {
+  await page.evaluate((t) => { document.body.classList.toggle("theme-light", t !== "dark"); document.body.classList.toggle("chat-theme-yatharth", t === "yatharth"); }, theme);
   await page.mouse.move(5, 690); await page.waitForTimeout(100);
   await menuOpen(); await hoverBilling(); await openSub();
   if (cfg.shots) await page.screenshot({ path: cfg.shots + "-" + theme + ".png", clip: { x: 0, y: 0, width: 1100, height: 520 } });
   await page.keyboard.press("Escape"); await page.waitForTimeout(100);
 }
-await page.evaluate(() => document.body.classList.remove("theme-light"));
+await page.evaluate(() => { document.body.classList.remove("theme-light"); document.body.classList.remove("chat-theme-yatharth"); });
 // narrow windows (review: at 560, 760 and 886 px the flyout covered its menu and ran off-screen): inside the viewport, never over the row
 out.narrow = {};
 for (const [w, h] of [[560, 700], [760, 700], [886, 700], [560, 420], [560, 300]]) {
@@ -390,16 +394,19 @@ class ServedBillingFlyout(unittest.TestCase):
         self.assertIsNotNone(f, "the flyout was read")
         table = "\n  " + json.dumps(f)
         self.assertEqual([c["text"].split(" (")[0] for c in f["choices"]], ["Login", "Login", "API key"], "the machine's login, the stored login, the key" + table)
-        self.assertEqual(f["lines"][3:], ["---", "[set default]"], "below the picks: a rule, then the ONE entry, nothing else" + table)
+        self.assertEqual(f["follow"]["text"], "Machine default · API key", "first, the default web follows, named by what it bills (2026-10-07)" + table)
+        self.assertTrue(f["follow"]["current"] and not any(c["current"] for c in f["choices"]), "web follows it: it wears the check, no pick does" + table)
+        self.assertEqual(f["lines"][0], f["follow"]["text"], table)
+        self.assertEqual(f["lines"][4:], ["---", "[set default]"], "below the picks: a rule, then the ONE entry, nothing else" + table)
         self.assertEqual(f["entry"]["label"], "Set default billing", table)
         self.assertEqual(f["entry"]["caret"], "▸", "the entry opens a further submenu: its caret says so" + table)
         self.assertEqual(f["subLines"], 0, "no sub-line under anything (the user: self-explanatory)" + table)
         self.assertEqual((f["heads"], f["radios"]), (0, 0), "the Default group's head and radios are gone" + table)
         self.assertFalse(any(c["disabled"] for c in f["choices"]), "nothing greyed: every listed billing applies here" + table)
-        self.assertEqual(f["subLine"], "API key", "web follows the automatic default: the key (the helper)" + table)
+        self.assertEqual(f["subLine"], "Machine default · API key", "web follows the automatic default: the key (the helper), and says so" + table)
         # every label whole (the user 2026-09-14): the long machine label is not cut, the flyout as wide as its longest row and no
         # wider than its content, inside the window; the measured numbers FIRST (CI truncates a long table)
-        rows = f["choices"]
+        rows = f["choices"] + [f["follow"]]
         nums = json.dumps([{k: round(c[k], 1) if isinstance(c[k], float) else c[k] for k in ("scrollW", "clientW", "h", "textW", "textOverflow")} for c in rows] + [{"flyW": f["rect"]["w"], "right": f["rect"]["right"], "vw": f["viewport"]}])
         self.assertIn(self.ACCOUNT[0] + " · " + self.ACCOUNT[1], rows[0]["text"], "the machine's label carries the whole email and organisation\n  " + nums)
         for c in rows:
@@ -449,8 +456,9 @@ class ServedBillingFlyout(unittest.TestCase):
         a = r["afterPick"]
         self.assertIsNotNone(a and a["sub"], "the submenu was read again after the pick")
         table = "\n  " + json.dumps(a)
-        self.assertEqual(a["subLine"], "Login (Work)", "web (no pick of its own) now reads the STORED login it follows, at once (the user 2026-09-14)" + table)
-        self.assertEqual([c["current"] for c in a["choices"]], [False, True, False], "…and its own choice marks that login" + table)
+        self.assertEqual(a["subLine"], "Machine default · Login (Work)", "web (no pick of its own) now reads the STORED login it follows, at once (the user 2026-09-14)" + table)
+        self.assertEqual((a["follow"]["text"], a["follow"]["current"]), ("Machine default · Login (Work)", True), "…the entry it follows names that login" + table)
+        self.assertEqual([c["current"] for c in a["choices"]], [False, False, False], "…and no pick is its own (2026-10-07)" + table)
         items = a["sub"]["items"]
         self.assertEqual([i.get("text", "---") for i in items], [a["choices"][0]["text"], "Login (Work)", "API key", "---", "Automatic"], "the list, then the rule, then Automatic at the END" + table)
         self.assertEqual([i.get("current") for i in items if not i.get("sep")], [False, True, False, False], "the explicit stored-login default wears the check; Automatic none" + table)
@@ -473,7 +481,7 @@ class ServedBillingFlyout(unittest.TestCase):
         z = r["afterAuto"]
         self.assertEqual([i.get("current") for i in z["sub"]["items"] if not i.get("sep")], [False, False, False], "\n  " + json.dumps(z))
         self.assertFalse(any(i.get("sep") for i in z["sub"]["items"]), "no Automatic while the default is automatic" + "\n  " + json.dumps(z))
-        self.assertEqual(z["subLine"], "API key", "web follows the helper rule again")
+        self.assertEqual(z["subLine"], "Machine default · API key", "web follows the helper rule again")
 
     def test_in_a_narrow_or_short_window_both_levels_stay_inside_the_viewport_and_the_flyout_never_covers_its_row_while_a_place_exists(self):
         r = self._run()
@@ -536,7 +544,8 @@ class ServedBillingFlyoutOneSide(ServedBillingFlyout):
         self.assertIn(self.ACCOUNT[0] + " · " + self.ACCOUNT[1], f["choices"][0]["text"], table)
         self.assertLess(f["choices"][0]["h"], f["fontPx"]["fly"] * 2.4, "one line at 1100 px" + table)
         self.assertLessEqual(f["rect"]["right"], f["viewport"] - 8 + 0.5, table)
-        self.assertEqual(f["lines"], [c["text"] for c in f["choices"]], "one billing to choose from: no rule, no Set default billing entry" + table)
+        self.assertEqual(f["lines"], [f["follow"]["text"]] + [c["text"] for c in f["choices"]], "one billing to choose from: Machine default and it, no rule, no Set default billing entry" + table)
+        self.assertTrue(f["follow"]["text"].startswith("Machine default · Login ("), table)
         self.assertFalse(f["sep"], table)
         self.assertIsNone(f["entry"], table)
         self.assertEqual(f["subLines"], 0, table)

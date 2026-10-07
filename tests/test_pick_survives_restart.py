@@ -269,8 +269,9 @@ class APickWaitingAcrossAKernelRestart(_Harness):
         # the restart: a new kernel over the same state, the host still running CLI A with its monitor
         be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"},
                                 {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=True)
-        self.assertEqual((s2._effort_pending, s2._auth_pending, s2._fast_pending), ("max", "login", "on"),
+        self.assertEqual((s2._effort_pending, s2._fast_pending), ("max", "on"),
                          "the marks stand from construction: the pick was not applied")
+        self.assertEqual(s2._auth_pending, "", "billing is the connect's to decide, against the CLI's launch record (2026-10-07)")
         c2 = self._connect(s2, 2)
         self._settle()
         self.assertEqual(len(_Client.instances), 2, "attached, not relaunched: the surviving monitor is still running")

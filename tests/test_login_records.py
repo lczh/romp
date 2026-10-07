@@ -447,15 +447,14 @@ class AvailabilityLists(unittest.TestCase):
         a = km._auth_avail()
         self.assertEqual(a["logins"][1]["why"], km.jd._cred.WHY_MANAGED_HELPER)
 
-    def test_a_remembered_stored_login_is_the_default_while_usable(self):
+    def test_a_retired_stored_login_seed_is_no_default(self):
+        """The remembered seed a per-session pick wrote while no default was explicit is retired (2026-10-07): it is not
+        what any session follows, so the default is the helper rule beside it."""
         self._world(FAKE_KEY, "aaaaaaaaaaaa")
         ok = _rec(self.state, "Work")
         (self.state / "sdk-defaults.json").write_text(json.dumps({"auth": "login", "authLogin": ok["id"]}))
-        self.assertEqual(km._auth_avail()["default"], "login:" + ok["id"])
-        lg.mark_refused(self.state, ok["id"], "refused by the API")
-        self.assertEqual(km._auth_avail()["default"], "login", "a refused stored login falls through the machine rules")
-        lg.remove(self.state, ok["id"])
-        self.assertEqual(km._auth_avail()["default"], "login")
+        a = km._auth_avail()
+        self.assertEqual((a["default"], a["defaultExplicit"]), ("key", False))
 
     def test_an_explicit_stored_login_default_is_reported_as_the_explicit_default(self):
         """The user 2026-09-14: a stored login set under Set default billing reads "login:<id>" with defaultExplicit true
@@ -549,48 +548,44 @@ class StoredLoginPick(_Backend):
         self.be._stamp_launch_login(s)
         return kw
 
-    def test_set_auth_persists_the_login_and_seeds_the_next_session(self):
+    def test_set_auth_persists_the_login_and_moves_no_default(self):
         rec = _rec(self.be.state_dir, "Work", org="Acme", kind="enterprise")
         sid = self.be.spawn("n", "/tmp")
         self.assertTrue(self.be.set_auth(sid, "login:" + rec["id"]))
         reg = sb.read_reg(self.be.state_dir, sid)
-        self.assertEqual((reg["auth"], reg["authLogin"], reg["authPending"]), ("login", rec["id"], True))
+        self.assertEqual((reg["auth"], reg["authLogin"]), ("login", rec["id"]))
+        self.assertFalse(reg.get("authPending"), "no CLI runs it: its next launch carries the pick")
         d = sb.read_sdk_defaults(self.be.state_dir)
-        self.assertEqual((d.get("auth"), d.get("authLogin")), ("login", rec["id"]))
-        sid2 = self.be.spawn("m", "/tmp")
-        reg2 = sb.read_reg(self.be.state_dir, sid2)
-        self.assertEqual((reg2.get("auth"), reg2.get("authLogin")), ("login", rec["id"]), "the next spawn seeds the stored login")
-        # a plain login pick clears the stored one, in the reg and in the remembered default
+        self.assertEqual((d.get("auth") or "", d.get("authLogin") or ""), ("", ""), "a pick moves no default (2026-10-07)")
+        reg2 = sb.read_reg(self.be.state_dir, self.be.spawn("m", "/tmp"))
+        self.assertNotIn("auth", reg2, "the next session follows the machine default")
+        # a plain login pick clears the stored one
         self.assertTrue(self.be.set_auth(sid, "login"))
         self.assertEqual(sb.read_reg(self.be.state_dir, sid).get("authLogin"), "")
-        self.assertEqual(sb.read_sdk_defaults(self.be.state_dir).get("authLogin"), "")
 
     def test_an_explicit_machine_default_clears_a_stored_login_left_in_the_seed(self):
         """The merge of T380 read (2026-09-12): set_auth_default wrote auth and authExplicit and left authLogin as a
-        per-session stored-login pick had seeded it (the not-explicit seed), so every new session billed the stored
-        login while the Default group marked the machine's own, and the stale id survived Automatic and came back
-        with the next explicit Login. An explicit default is always the machine's own side: login, key and auto each
-        clear the id."""
+        per-session stored-login pick had seeded it (the not-explicit seed, retired 2026-10-07; an older kernel's file
+        may still carry one), so every new session billed the stored login while the Default group marked the
+        machine's own, and the stale id survived Automatic and came back with the next explicit Login. The machine's
+        own login, the key and auto each clear the id."""
         rec = _rec(self.be.state_dir, "Work")
-        sid = self.be.spawn("n", "/tmp")
-        self.assertTrue(self.be.set_auth(sid, "login:" + rec["id"]))
-        self.assertEqual(sb.read_sdk_defaults(self.be.state_dir).get("authLogin"), rec["id"], "the not-explicit seed")
+        sid = self.be.spawn("n", "/tmp", auth="login:" + rec["id"])
+        sb.write_sdk_default(self.be.state_dir, auth="login", authLogin=rec["id"])   # a seed an older kernel wrote
         self.assertTrue(self.be.set_auth_default("login"))
         d = sb.read_sdk_defaults(self.be.state_dir)
         self.assertEqual((d.get("auth"), d.get("authExplicit"), d.get("authLogin")), ("login", True, ""), "the machine's own login, no stored id")
         reg = sb.read_reg(self.be.state_dir, self.be.spawn("m", "/tmp"))
-        self.assertEqual((reg.get("auth"), reg.get("authLogin") or ""), ("login", ""), "a new session bills the machine's own login")
-        # the id must not survive Automatic and come back with the next explicit Login
-        self.assertTrue(self.be.set_auth_default("auto"))
-        self.assertTrue(self.be.set_auth(sid, "login:" + rec["id"]))          # seeds again while automatic
-        self.assertEqual(sb.read_sdk_defaults(self.be.state_dir).get("authLogin"), rec["id"])
+        self.assertEqual(self.be.billing_pick(reg), ("login", ""), "a new session follows the machine's own login")
+        # the id must not survive Automatic or a key default and come back with the next explicit Login
+        sb.write_sdk_default(self.be.state_dir, authLogin=rec["id"])
         self.assertTrue(self.be.set_auth_default("auto"))
         self.assertEqual(sb.read_sdk_defaults(self.be.state_dir).get("authLogin"), "", "auto clears the id too")
-        self.assertTrue(self.be.set_auth(sid, "login:" + rec["id"]))
+        sb.write_sdk_default(self.be.state_dir, authLogin=rec["id"])
         self.assertTrue(self.be.set_auth_default("key"))
         self.assertEqual(sb.read_sdk_defaults(self.be.state_dir).get("authLogin"), "", "key clears it")
         self.assertTrue(self.be.set_auth_default("login"))
-        self.assertEqual(sb.read_reg(self.be.state_dir, self.be.spawn("o", "/tmp")).get("authLogin") or "", "")
+        self.assertEqual(self.be.billing_pick(sb.read_reg(self.be.state_dir, self.be.spawn("o", "/tmp"))), ("login", ""))
         self.assertEqual(sb.read_reg(self.be.state_dir, sid).get("authLogin"), rec["id"], "the session's own pick is untouched")
 
     def test_a_stored_login_can_be_the_explicit_machine_default_and_unpicked_sessions_follow_it(self):
@@ -609,7 +604,8 @@ class StoredLoginPick(_Backend):
         self.assertEqual(self.be.default_login({"auth": "key"}), "", "a key pick of its own: no login")
         self.assertEqual(self.be.default_login({"auth": "login"}), "", "a machine-login pick of its own: the machine's own")
         reg = sb.read_reg(self.be.state_dir, self.be.spawn("m", "/tmp"))
-        self.assertEqual((reg.get("auth"), reg.get("authLogin")), ("login", rec["id"]), "a new session seeds the stored default")
+        self.assertNotIn("auth", reg, "a new session records no pick of its own (2026-10-07)…")
+        self.assertEqual((self.be.default_auth(reg), self.be.default_login(reg)), ("login", rec["id"]), "…and follows the stored default")
         s = self._sess(1)                                   # no pick of its own
         snap = s.snapshot()
         self.assertEqual((snap["auth"], snap["authLogin"], snap["authLabel"]), ("login", rec["id"], "Work · Acme"), "the live status reads the login it follows")
@@ -1013,15 +1009,15 @@ class StoredLoginPick(_Backend):
         self.be._note_auth_source(s, "none")
         self.assertFalse(s._wrong_landing_reconnected)
 
-    def test_the_seed_skip_names_a_dead_remembered_stored_login(self):
+    def test_a_dead_stored_default_seeds_nothing_and_its_followers_fall_to_the_machines_login(self):
         rec = _rec(self.be.state_dir, "Work")
+        self.assertTrue(self.be.set_auth_default("login:" + rec["id"]))
         lg.mark_refused(self.be.state_dir, rec["id"], "refused")
-        sb.write_sdk_default(self.be.state_dir, auth="login", authLogin=rec["id"])
-        logs = []
-        self.be._log = lambda m, problem=False: logs.append(m)
         sid = self.be.spawn("n", "/tmp")
-        self.assertNotIn("auth", sb.read_reg(self.be.state_dir, sid), "a dead remembered pick seeds nothing")
-        self.assertTrue(any("Work" in m and "start unpicked" in m for m in logs), logs)
+        reg = sb.read_reg(self.be.state_dir, sid)
+        self.assertNotIn("auth", reg, "spawn records no pick of its own, dead default or not")
+        self.assertEqual((self.be.default_auth(reg), self.be.default_login(reg)), ("login", ""),
+                         "the dead stored login falls through to the machine's own, as the launch does")
 
     def test_spend_folds_by_login(self):
         rec = _rec(self.be.state_dir, "Work")
@@ -1173,8 +1169,7 @@ class Doors(unittest.TestCase):
 
     def test_the_op_doors_take_the_stored_login_value(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn('elif t == "setAuth" and lg.parse_pick(msg.get("value"))[0]:', src)
-        self.assertIn('if not lg.parse_pick(value)[0]:', src)
+        self.assertIn('elif t == "setAuth" and (msg.get("value") == "default" or lg.parse_pick(msg.get("value"))[0]):', src)
         self.assertEqual(src.count('auth=(a if lg.parse_pick(a)[0] else "")'), 2, "both create doors")
         self.assertIn('msg.get("type") == "loginRemove"', src)
         self.assertIn('jd._API_HEALTH_NOTE_FN = _judge_api_health_note', src)

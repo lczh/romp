@@ -161,15 +161,15 @@ class AllKeyedUsageLineHonorsTheDeclaration(_Declared):
 
 
 class GearPickMakesTheDeclarationInert(_Declared):
-    """Q3 (2026-08-26): ONE explicit gear Billing pick supersedes ROMP_EXPECTED_AUTH from then on —
-    the env var described the box's UNPICKED design, and once billing is hand-managed its per-init
-    alarms fought the user's own choice on every spawn re-seeded from the remembered default. The
-    pick's durable trace is the remembered auth default (set_auth is its only writer), so inertness
-    keys on the PICK EVENT — a spawn's seeded reg.auth never counts as explicit."""
+    """Q3 (2026-08-26): billing set by hand for the box's unpicked sessions supersedes ROMP_EXPECTED_AUTH from then on —
+    the env var described the box's UNPICKED design, and once billing is hand-managed its per-init alarms fought the
+    user's own choice. Since 2026-10-07 that hand-set billing is the EXPLICIT machine default (set_auth_default, the
+    Set default billing submenu): a per-session pick no longer writes the remembered seed, so it says nothing about
+    what an unpicked session launches on."""
 
     def test_the_pick_supersedes_the_env_declaration(self):
         os.environ["ROMP_EXPECTED_AUTH"] = "key"
-        sb.write_sdk_default(Path(self.d), auth="login")   # set_auth's durable trace — the gear pick
+        sb.write_sdk_default(Path(self.d), auth="login", authExplicit=True)   # the machine default, set by hand
         s = self._sess(11)
         s._launched_keyed = True
         self.be._note_auth_source(s, "none")               # a login landing: contradicts the ENV, honors the PICK
@@ -179,7 +179,7 @@ class GearPickMakesTheDeclarationInert(_Declared):
         s2._launched_keyed = False
         self.be._note_auth_source(s2, "apiKeyHelper")      # a keyed landing: contradicts the PICK
         texts = self._problem_texts()
-        self.assertTrue(any("the remembered Billing pick is login" in t and "billing the API key" in t
+        self.assertTrue(any("the machine's default billing is login" in t and "billing the API key" in t
                             for t in texts),
                         "a landing contradicting the pick rings, NAMING THE PICK not the env var: %r" % texts)
         self.assertFalse(any("ROMP_EXPECTED_AUTH" in t for t in texts),
@@ -200,7 +200,7 @@ class GearPickMakesTheDeclarationInert(_Declared):
 
     def test_all_keyed_gate_follows_the_pick(self):
         os.environ["ROMP_EXPECTED_AUTH"] = "login"
-        sb.write_sdk_default(Path(self.d), auth="key")     # the user picked key billing by hand
+        sb.write_sdk_default(Path(self.d), auth="key", authExplicit=True)     # the user set key billing as the default by hand
         be2 = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=self.logs.append)
         s = sb.SdkSession(be2, {"sid": "11111111-2222-3333-4444-%012d" % 14, "name": "s14", "cwd": "/tmp"})
         s.connected = True
@@ -211,11 +211,16 @@ class GearPickMakesTheDeclarationInert(_Declared):
         self.assertFalse(probs, "all-keyed under a KEY pick is the design — an info line, not a problem "
                                 "(the env =login is inert)")
 
-    def test_the_real_set_auth_leaves_the_trace(self):
-        # end to end: the gear pick itself writes the durable trace _declared_auth keys on
+    def test_the_machine_default_leaves_the_trace_and_a_session_pick_does_not(self):
+        # end to end: the default's writer leaves the durable trace _declared_auth keys on; a session's own pick is about
+        # that session alone (2026-10-07), and a seed an older kernel left without authExplicit is no trace either
         sb.write_reg(Path(self.d), "11111111-2222-3333-4444-%012d" % 15,
                      {"sid": "11111111-2222-3333-4444-%012d" % 15, "name": "s15", "cwd": "/tmp"})
         self.assertTrue(self.be.set_auth("11111111-2222-3333-4444-%012d" % 15, "login"))
+        self.assertEqual(sb._declared_auth(Path(self.d)), ("", ""))
+        sb.write_sdk_default(Path(self.d), auth="key")
+        self.assertEqual(sb._declared_auth(Path(self.d)), ("", ""))
+        self.assertTrue(self.be.set_auth_default("login"))
         self.assertEqual(sb._declared_auth(Path(self.d)), ("login", "pick"))
 
 
