@@ -244,7 +244,7 @@ ROW_READERS = {
     "_feed_session_entry": ("tm", {"state", "since", "authLogin"}),        # perm_state, the blocked placeholder's since, the refused-login mark
     "_login_refusal_label": ("row", {"authLogin", "authLoginLive", "authLabel"}),
     "_session_retrying": ("tm", {"state", "retryCount", "retryInfo"}),
-    "_cap_switch_offer": ("tm", {"authLive", "auth"}),
+    "_cap_switch_offer": ("tm", {"authLive", "auth", "authPending"}),
     "_bg_live_norm": ("live", {"bgTasks"}),
     "_awaiting_live_rows": ("tm", {"subagents"}),
     "_session_awaiting": ("live", set()),                                   # `live is not None` alone: no field
@@ -903,10 +903,10 @@ class RowFieldCensus(unittest.TestCase):
         self.assertEqual(_row_fields(km._bg_live_norm, "t"), set(km._FEED_ROW_TASK_FIELDS))
 
     def test_the_billing_position_names_the_billing_reads(self):
-        """The billing position's fields are written as five named reads in _feed_row_key so the derivation above sees
+        """The billing position's fields are written as six named reads in _feed_row_key so the derivation above sees
         them; _FEED_ROW_AUTH_FIELDS documents the position (named `billing`, not `auth`: miss_by's `auth` is the
-        machine's key on hand) and must be those same five: the billing offer's two, the refused login's three (one
-        shared with the body's mark)."""
+        machine's key on hand) and must be those same six: the billing offer's three (its stand-down while a switch
+        waits, 2026-10-07), the refused login's three (one shared with the body's mark)."""
         auth = (ROW_READERS["_cap_switch_offer"][1] | ROW_READERS["_login_refusal_label"][1]
                 | (ROW_READERS["_feed_session_entry"][1] - {"state", "since"}))
         self.assertEqual(set(km._FEED_ROW_AUTH_FIELDS), auth)

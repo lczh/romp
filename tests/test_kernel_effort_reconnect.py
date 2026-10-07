@@ -92,7 +92,7 @@ class EffortReconnect(unittest.TestCase):
         # whose ultracode sessions seemed to downgrade at random). The whole setter family goes
         # through _update_reg now.
         for pin in ('self._update_reg(sid, effort=value, effortPending=True)',
-                    'self._update_reg(sid, auth=side, authLogin=login_id, authPending=True, apiKeyAuth=None)',
+                    'self._update_reg(sid, **fields)',   # set_auth: the pick, pending, and for a session no CLI serves the landing (2026-10-07)
                     'self._update_reg(sid, mode=mode)',
                     'self._update_reg(sid, fast=(value == "on"), fastOff=(value == "off"), fastRuleRefused="", liveFast=value)',   # + the explicit Slow and the switch's refusal memory (2026-09-17)
                     'self._update_reg(sid, name=new_name,',   # + the rename ping rides the same locked RMW when owed (2026-08-24/25)

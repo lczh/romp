@@ -57,6 +57,12 @@ class CapSwitchOffer(unittest.TestCase):
             self.assertIsNone(km._cap_switch_offer(SID, dict(ERR, **{k: True})),
                               k + " carries its own remedy — no billing offer rides it")
 
+    def test_never_while_a_switch_is_on_its_way(self):
+        # the CLI's own report stands until a picked switch lands (2026-10-07), so the row still reads the login;
+        # the switch the offer would propose is already waiting for its relaunch
+        km._live_map = lambda: {SID: {"authLive": "login", "auth": "key", "authPending": True}}
+        self.assertIsNone(km._cap_switch_offer(SID, ERR))
+
     def test_never_without_a_key_to_offer(self):
         km._auth_key_present = lambda: False
         self.assertIsNone(km._cap_switch_offer(SID, ERR))

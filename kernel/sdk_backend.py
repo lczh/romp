@@ -6031,7 +6031,13 @@ class SdkSession:
         #   gate exists to prevent).
         self.auth_live = ("key" if _aka else "login") if isinstance(_aka, bool) else ""   # what the
         #   CLI's init actually reported ("" until one ever lands) → snapshot()'s authLive, the
-        #   Billing row's live truth; restored with the flag so the hover stays honest across restarts
+        #   Billing row's live truth; restored with the flag so the hover stays honest across restarts.
+        #   It describes the CLI SERVING the session, so a pick leaves it standing until the switch
+        #   lands (_reconcile_waiting_picks clears it then): the spend pause reads a session's side
+        #   off it (kernel _bills_login), and the old account's CLI serves until the relaunch.
+        self.auth_switched_at = float(reg.get("authSwitchedAt") or 0)   # when the session's CLI came up on a
+        #   new billing (0 = never on record); persisted. The kernel's spend hold reads it: a cap record older
+        #   than it describes an account the session no longer runs on (kernel _spend_record_stands)
         self.auth = reg.get("auth") if reg.get("auth") in ("login", "key") else ""   # the user's
         #   per-session auth pick (the user 2026-08-08: some sessions on the personal login, some on
         #   the work key). "" = no explicit pick → effective_auth() preserves the pre-selector world.
@@ -7438,6 +7444,7 @@ class SdkSession:
                 picks.append(name)               # a pending mark the record lacks (a pick made before the record existed)
         if not picks:
             return
+        billing_waited = "billing" in picks      # a switch was waiting: carried below, it LANDS at this connect
         want = self.launch_values()
         known = isinstance(launch, dict)
         left = [p for p in picks if not known or any(launch.get(k) != want.get(k) for k in PICK_LAUNCH_KEYS[p])]
@@ -7449,6 +7456,21 @@ class SdkSession:
             fields["effortPending"] = False
         if "billing" in done:
             fields["authPending"] = False
+        if "billing" in done and billing_waited:
+            # THE SWITCH LANDS (2026-10-07): the CLI this connect reached was launched on the billing the session waited
+            # for. Stamped now for a launch made here, at that CLI's own spawn for one an earlier kernel made (its kernel
+            # died before this record): the moment the old account's CLI stopped serving the session. The kernel's spend
+            # hold reads it, so a cap record the old account wrote no longer holds the session's input; a cap error the
+            # new account answers with is newer, and holds again. A fresh launch's CLI has reported nothing yet, so the
+            # report the old one left (authLive, apiKeyAuth) goes with it and the side reads this launch's intent until
+            # the new CLI's init confirms it (_note_auth_source).
+            landed = time.time() if launched_here else float(spawned_at or 0)
+            if landed:
+                fields["authSwitchedAt"] = landed
+                self.auth_switched_at = landed
+            if launched_here:
+                fields["apiKeyAuth"] = None
+                self.auth_live = ""
         try:                                    # the record first: a death before the marker below never writes it twice
             if still:
                 self.backend._update_reg(self.sid, relaunchWait={"why": wait.get("why") or "a settings change",
@@ -11239,6 +11261,7 @@ class SdkSession:
                 #   lands) — the Billing row says so when it disagrees with the launch intent above
                 #   (a key found via apiKeyHelper bills the key while `auth` still reads login)
                 "authPending": bool(self._auth_pending),   # an /auth switch reconnecting → badge dots
+                "authSwitchedAt": self.auth_switched_at,   # the CLI's landing on a new billing (the spend hold's floor)
                 # what a standing relaunch ask waits for ("2 background tasks"; "" when none stands): the pending marks
                 # above say a pick is waiting, this says on what (relaunch_waits)
                 "relaunchWaits": self.relaunch_waits(),
@@ -17678,27 +17701,39 @@ class SdkBackend:
             self._log("auth: a %s pick cannot apply on this box: %s"
                       % (("'%s' login" % self.login_display(login_id)) if login_id else value, why), problem=True)
             return False
-        if not read_reg(self.state_dir, sid):
+        reg = read_reg(self.state_dir, sid)
+        if not reg:
             return False
+        s = self.sessions.get(sid)
+        serving = s is not None and getattr(s, "thread", None) is not None and s.thread.is_alive()
         # authPending: the applying reconnect hasn't completed → badge dots. Locked RMW — see set_effort.
-        # apiKeyAuth=None: the persisted CLI report described the process this reconnect replaces,
-        # so a restart must restore "no init has landed yet", never the old side (both readers guard
-        # with isinstance(..., bool), so None reads as absent). authLogin: the stored login a login pick
-        # names, "" for the machine's own (written as "" so a plain pick clears an earlier stored one).
-        self._update_reg(sid, auth=side, authLogin=login_id, authPending=True, apiKeyAuth=None)
+        # authLogin: the stored login a login pick names, "" for the machine's own (written as "" so a plain pick
+        # clears an earlier stored one). The CLI's persisted report (apiKeyAuth) describes the CLI SERVING the
+        # session: while one runs it stands until the switch lands (_reconcile_waiting_picks clears it there), since
+        # the old account serves until the relaunch, and the spend pause reads the session's side off it. With no CLI
+        # running nothing serves the session, and its next launch carries this pick: the report goes now ("no init
+        # has landed yet"; both readers guard with isinstance(..., bool), so None reads as absent), and a pick that
+        # changes the billing is the session's landing on it (authSwitchedAt, the spend hold's floor), since the
+        # account a cap record was written on is no longer the one any CLI of this session will run on.
+        fields = dict(auth=side, authLogin=login_id, authPending=True)
+        if not serving:
+            fields["apiKeyAuth"] = None
+            if self.billing_pick(reg) != (side, login_id):
+                fields["authSwitchedAt"] = time.time()
+        self._update_reg(sid, **fields)
         # the seed for the NEXT new session, like model/effort — until the user sets the machine's default
         # EXPLICITLY (set_auth_default, the Billing flyout's Default group, T380): from then on a per-session
         # pick is about that session and moves no default
         if not read_sdk_defaults(self.state_dir).get("authExplicit"):
             write_sdk_default(self.state_dir, auth=side, authLogin=login_id)
-        s = self.sessions.get(sid)
         if s:
             s.auth = side
             s.auth_login = login_id
             s._auth_pending = side
             s._wrong_landing_reconnected = False   # a new pick may take the documented fall again (review 2026-09-11)
-            s.auth_live = ""   # the last init's report predates this switch — the Billing row shows
-            #   the plain intent (no "CLI reports" parenthetical) until the next init re-confirms
+            if not serving:
+                s.auth_live = ""                   # nothing serves it: the next launch's init reports afresh
+                s.auth_switched_at = float(fields.get("authSwitchedAt") or s.auth_switched_at)
             self._note_pick_waits(s, "billing", "billing")
             s.request_reconnect(why="billing")   # once the session is quiet (request_reconnect): authPending waits with it
             # Acknowledge the pick in the chat exactly as set_effort does: the reconnect writes no
@@ -17743,6 +17778,16 @@ class SdkBackend:
         self._log("auth: the machine's default billing is now %s (new sessions, and sessions with no pick of their own)"
                   % (self.login_display(lid) if lid else side))
         return True
+
+    def billing_pick(self, reg: dict | None = None) -> tuple:
+        """(side, stored login id) a reg's session is set to bill, in romp's own words: its own pick when it has one, else
+        the machine's explicit default as the user set it, else ("", "") for Automatic (the helper rule). The inputs a
+        launch decides from (_options' _decide), never the availability fall or the helper rule's resolution: a reading
+        that cannot be taken just now must not read as a change of billing."""
+        a = (reg or {}).get("auth")
+        if a in ("login", "key"):
+            return a, (SdkBackend.reg_login(reg) if a == "login" else "")
+        return self._explicit_default()
 
     def default_auth(self, reg: dict | None = None) -> str:
         """The auth a session with no live SdkSession object would launch with — the dormant twin of
@@ -18236,6 +18281,7 @@ class SdkBackend:
                     "authLive": ("key" if reg.get("apiKeyAuth") else "login")
                                 if isinstance(reg.get("apiKeyAuth"), bool) else "",
                     "authPending": bool(reg.get("authPending")),
+                    "authSwitchedAt": float(reg.get("authSwitchedAt") or 0),   # as snapshot()
                     "mode": reg.get("mode", ""),
                     # last persisted fast state (liveFast, like liveCtx above) → the badge
                     # survives idle/restart instead of vanishing until the next turn
