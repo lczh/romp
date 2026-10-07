@@ -164,6 +164,15 @@ def _save(f, out: Path, name: str):
     return str(p)
 
 
+def cut_turns_label(r) -> str:
+    """The cut-turns bar's annotation for one frames row: the clean restarts out of the measured ones, the killed exits
+    among those measured restarts (the reader counts a killed exit only when its turns are known: measured, and never
+    clean), then the unmeasured restarts. Pure, so the frames test reads the text the figure draws."""
+    killed = (" (%d killed after the cut row)" % r["killedExits"]) if r.get("killedExits") else ""
+    unm = (", %d unmeasured" % r["unmeasuredRestarts"]) if r.get("unmeasuredRestarts") else ""
+    return "%d of %d measured restarts clean%s%s" % (r["cleanRestarts"], r["measuredRestarts"], killed, unm)
+
+
 def fig_cut_turns(cp, fr, out):
     rows = fr["windows"]
     if not rows:
@@ -175,10 +184,7 @@ def fig_cut_turns(cp, fr, out):
     vals = [r["cutTurns"] for r in rows]
     ax1.barh(ys, vals, color=[pal[r["label"]] for r in rows], legend=False)
     for y, r in zip(ys, rows):
-        unm = (", %d unmeasured" % r["unmeasuredRestarts"]) if r["unmeasuredRestarts"] else ""
-        killed = (", %d killed after the cut row" % r["killedExits"]) if r.get("killedExits") else ""   # measured, never clean
-        ax1.annotate("%d of %d measured restarts clean%s%s" % (r["cleanRestarts"], r["measuredRestarts"], killed, unm),
-                     (r["cutTurns"], y), xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
+        ax1.annotate(cut_turns_label(r), (r["cutTurns"], y), xytext=(4, 0), textcoords="offset points", va="center", fontsize=11)
     ax1.set_yticks(ys)
     ax1.set_yticklabels(_ylabels(rows))
     ax1.clean(xlabel="Turns cut by restarts, per window, fewer is better", ylabel="")

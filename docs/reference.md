@@ -2824,7 +2824,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   observation, never inside a job's `cpuByJob`. The observation makes a few
   reads before the job they serve: the pass's sessions at the first two
   jobs' turns (the listing at first sight's, the alive ones at the lift's),
-  the nudge ledger and the working notes when their caches miss, and at the
+  the nudge ledger and the working notes when their caches miss, each input
+  whose records belong to sessions once per version of it (the ledger, the
+  session flags, and the relay queue's and the working notes' listings), and at the
   settle write's turn each listed session's settle evidence and, once its
   period has passed or is a second from passing, its leaf's stat. That cost
   moves out of those jobs' `cpuByJob` and their `jobs.<job>` stage walls
@@ -2866,9 +2868,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   that pass took. A write no such signal covers stays a `wrongQuiet` even
   when the floor, a later stat or an all-sessions mark brings the job back:
   a standing view is never re-statted, since it cannot tell a write during
-  the run from one before the pass. A memo names its session, so another
-  session's input moving never makes it raced, and a run whose memos name
-  several sessions is raced only when each of them is). `wrongQuietLast` keeps the newest
+  the run from one before the pass. A memo names the sessions its key
+  carries, and the walk's look names the askers whose registry rows its key
+  holds beside the session it looks at. It is tested on those sessions'
+  inputs alone: their registry rows, judge writes, judge calls in flight,
+  compaction clicks and settle evidence, and their records in the nudge
+  ledger, the session flags, the relay queue and the working notes, beside
+  the records that name no session. So another session's input moving never
+  makes it raced, unless the memo's own key carried that input whole: the
+  ten-file key carries the ledger's stat, and a key that moved there counts
+  any ledger write. The inputs every session reads whole, such as the
+  clears, postal and downtime logs, count whole. A run whose memos name
+  several sessions is raced only when each memo is. The settle write's
+  work is an act only when the gate saw what it acted on: a settle key or
+  a leaf that moved after the gate read it makes the session's memo
+  instead, a `miss`, raced by that input read again). `wrongQuietLast` keeps the newest
   sixteen, and `lastPass` each job's verdict on the newest observed pass
   (`closed`, `open:<reason>`, `owed:<reason>`, or `unobserved` after a gate
   fault).
@@ -3112,11 +3126,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `replaced` (a later record reused the summary's uuid), `parent` (the
   summary hangs off a record that is no compaction boundary) or `offpath`
   (the boundary is off the conversation's path), these three only when a
-  record wearing the id names /compact, one the entry holds or the new
-  record itself, and `seedEpisode` for a pair of those three shapes when
+  user record wearing the id, not a compaction summary, names /compact,
+  one the entry holds or the new record itself, and `seedEpisode` for a pair of those three shapes when
   no such record is on hand but the entry was restored from a document
   that lists the id: a document's gates carry `compact_pids`, the prompt
-  ids that a user record before its cut naming /compact wears, and a
+  ids that a user record before its cut, not a compaction summary, naming
+  /compact wears, and a
   document written before that field (an optional one, so the document's
   version is unchanged) is read by its prompt ids, every id its writer had
   read, the open turn's included, which only refuses more. Otherwise
@@ -3653,16 +3668,37 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the card anchor walk's: a derivation builds the cards' click-to-jump
   anchors from every segment of the session's parse, and the part over its
   closed turns is held between derivations under those turns' identities,
-  the leaf's path and inode and the goal store's seams by value, so a
-  derivation folds only the turns that closed since and the open one.
+  the leaf's path and inode and the goal store's seams by value; while all
+  of them stand, a derivation folds only the turns that closed since and
+  the open one.
   `segWalks` counts the walks that finished, `segHeld` and `segWalkTurns`
-  the closed turns served from the hold and the turns folded, `segPartial`
-  a held aggregate whose turns diverged inside it (a rewind, an edit, a
-  compaction re-seat, a late record: every turn is walked), `segReset` one
-  discarded whole (another leaf, other seams, or no closed turn left to
-  hold), `segRaised` the walks that met a failure and stored nothing, and
-  `segEvict` the aggregates shed by the byte bound or with their departed
-  session; `segEntries`, `segBytes`
+  those walks' closed turns served from the hold and the turns they folded,
+  `segPartial` a held aggregate whose turns diverged inside it (a rewind,
+  an edit, a compaction re-seat, a late record, or a turn boundary whose
+  working state row lands after the new turn's first record: until it
+  lands, the turn that just closed runs its idle span to the parse's
+  clock, so that turn's end moves; the aggregate is dropped and every
+  turn is walked), `segReset` one discarded whole (another leaf, other
+  seams, or no closed turn left to hold), `segRaised` the walks that met a
+  failure and stored nothing, `segEvict` the aggregates shed by the byte
+  bound or with their departed session and the new ones the bound did not
+  admit, and `segOverBound` the aggregates over the bound by themselves,
+  served to their derivation but never held. Each aggregate carries the
+  number of the last board build that used it. Past the bound, a store
+  sheds the least recently used aggregates that no derivation of the
+  current build has used so far, until the new one fits; when shedding
+  all of them would still leave no room, it sheds nothing and the new one
+  is not held. Then, and for an aggregate over the bound by itself, the
+  session keeps the aggregate it was served from, so its next walk folds
+  only the turns since. Only aggregates the build has already used are
+  protected: one it has yet to use still carries an earlier build's
+  number, so a session whose grown aggregate is stored first, whichever
+  session that is, can shed the aggregate of a session derived after it,
+  which then walks every turn while the two do not fit together. While
+  two builds overlap, the aggregates used carry the number of the build
+  that began last, so one the earlier build used before then is not
+  protected either.
+  `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
   record's state plus the two fields a card reads, `bgLedger` and
@@ -4085,8 +4121,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   only nodes keeps them), liveness, the branch clip and the suspensions
   stand: `prefix_hit` counts those derivations and `prefix_segs` the segments
   they reused; `prefix_partial` counts derivations whose held turns diverged
-  before the prefix's end (a rewind, a compaction, a late record), each of
-  which re-walks the whole lane, and `prefix_reset` derivations whose held
+  before the prefix's end (a rewind, a compaction, a late record, or a turn
+  boundary whose state row lands after the new turn's first record: until it
+  lands, the turn that just closed runs its idle span to the parse's clock,
+  so that turn's end moves), each of which re-walks the whole lane, and
+  `prefix_reset` derivations whose held
   bars were dropped because one of those inputs moved. A caption write drops
   nothing: the held bars it can change have their captions looked up again
   (`prefix_recap`), after an append only the bars whose segment key an
@@ -4103,12 +4142,23 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walks only the turns from the first that moved, the open one always, and
   joins the captions fresh. `scans` (scans whose walk finished),
   `heldTurns` and `walkedTurns` (closed turns served from the hold, and turns
-  walked), `partial` (a held entry whose turns diverged before its end: a
-  rewind, a compaction, a late record), `reset` (an entry discarded whole
-  because the leaf or the seams moved), `raised` (a walk that raised, which
-  stores nothing), `evict` (entries the byte bound shed), and the gauges
-  `entries`, `bytes` (estimated) and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`,
-  else a 256th of the machine's memory).
+  walked), `partial` (a finished scan whose held entry was not served whole:
+  a held turn moved, as an in-place rewrite or a late record moves one, or
+  the session has fewer closed turns than the entry held, as a rewind cut or
+  a past prompt edited leaves it; an append, a compaction's included, and a
+  cut's release that restores whole turns move neither this nor `reset`),
+  `reset` (an entry discarded whole because the leaf or the seams moved,
+  counted when it is discarded, before the walk),
+  `raised` (a walk that raised, which stores nothing), `faulted` (every scan
+  that raised, the walk's included, so `faulted` above `raised` means scans
+  are failing before their walk: the captions read, the parse, or the goal
+  store's read or its seams; the session serves its last-known captions, is
+  scanned again each build, and the kernel's log says so once until a scan
+  of it comes back clean), `evict` (entries the byte bound shed), `overBound`
+  (scans whose own entry was over the bound by itself: served, not held, and
+  shedding no other session), and the gauges `entries`, `bytes` (estimated)
+  and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`, else a 256th of the machine's
+  memory).
   `judgingBand` is the timeline's judging band memo: a completed judge run's
   entry is held under its usage row while the row and the gloss it borrowed
   stand, so an unchanged entry is the same object build after build and the
@@ -4127,16 +4177,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   version of the file (its path, the reader entry's generation and base, and
   the record count) and handed to every caller that asks while that version
   stands, where each call used to fold every row into a fresh dict (the
-  timeline asks once per live lane per build). `hit`: the held mapping served;
-  `extend`: an append, served as the held mapping copied and extended by the
-  appended rows; `build`: every row folded (the file's first read, or a new
-  generation: a rewrite, a truncation, another file renamed over it, an
-  evicted entry read back); `uncached`: a read the reader's entry no longer
-  holds (no file, or another thread's newer read), answered and not held;
-  `swept`: mappings dropped because the record cache let their entry go,
-  checked whenever the memo holds a new version of any file, so a mapping
-  the cache released stays at most until that next version. A caption lookup
-  whose
+  timeline asks once per live lane per build). `hit`: the held mapping served,
+  also to a read that finds its own version stored by another thread
+  meanwhile; `extend`: an append, served as the held mapping copied and
+  extended by the appended rows; `build`: every row folded (the file's first
+  read, or a new generation: a rewrite, a truncation, another file renamed
+  over it, an evicted entry read back); `uncached`: a read the reader's entry
+  no longer holds (no file, or another thread's newer read), or one that
+  finds a newer version stored meanwhile (a later generation, or more records
+  of its own), answered and not held; `swept`: mappings dropped because the
+  record cache let their entry go, checked whenever the memo holds a new
+  version of any file, so a mapping the cache released stays at most until
+  that next version. A caption lookup whose
   segment id has drifted from the judge's (the two parses place a triggered
   segment's start differently, and a segment's message caption is missing
   until the captioner writes it) used to scan every row; it now reads the
@@ -4146,10 +4198,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the earlier row on a tie, and the first message row. `indexBuild` counts
   the indexes built, `indexLookup` the drifted lookups the index answered and
   `scanLookup` those that scanned (a mapping that is not the builds' own, or
-  an id that is not a string, where the scan's answer is kept as it was).
-  The gauges: `entries` (mappings held), `rows` (their rows) and `bytes`
-  (their dicts and indexes, estimated; the rows themselves are the record
-  cache's).
+  an id that is not a string, where the scan's answer is kept as it was);
+  a lookup on an empty mapping, the one a session with no captions file is
+  served, builds no index and moves neither. The gauges: `entries`
+  (mappings held), `rows` (their rows), `bytes` (their dicts and indexes,
+  each index group's key and list included, estimated), and `orphanRows`
+  and `orphanBytes`, the rows of the mappings whose reader entry is gone or
+  replaced (evicted from the record cache, or the file read again from byte
+  zero) and their bytes, estimated one level deep (each row's dict, keys and
+  values). A mapping's rows are the record cache's while its reader entry
+  stands; an orphan's are held by this memo alone, until the next sweep.
   `judgingMarks` is the captioner's marks on the timeline's judging lane
   (2026-10-06): one mark per timed caption row, in caption-time order, held
   per session on that captions mapping's version, where every derivation of
@@ -4162,9 +4220,16 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   its time stands); `build`: every row sorted (a first derivation, a
   rewrite, a rewritten row whose time moved or appeared, or times the
   bisection cannot order); `uncached`: a mapping that is not the one held
-  for its file, derived and not held; `evict`: entries the byte bound shed;
-  `forget`: entries of lanes a full build no longer draws. The gauges:
-  `entries`, `marks`, `bytes` (estimated) and `bound`
+  for its file, derived and not held; `overBound`: marks over the byte bound
+  by themselves, derived and served but not held, and no other lane shed for
+  them. Each derivation over captions that returns counts once, under one of
+  those five (a session with no caption rows has no marks to count, and a
+  sort that raises on a held version counts nowhere). `evict`:
+  entries the byte bound shed to make room for a newer one; `forget`:
+  entries of lanes a full build no longer draws, and of a lane the dead-lane
+  memo takes over (that memo serves a dead lane's marks; the lane's
+  `stateIntervals` entry stays, since every build reads its states log).
+  The gauges: `entries`, `marks`, `bytes` (estimated) and `bound`
   (`ROMP_JUDGING_MARKS_MEMO_BYTES`, else a 256th of the machine's memory).
   `stateIntervals` is the states logs' transitions, sorted, held per session
   on the log's fold cursor (its record count and the reader's generation)
@@ -4175,9 +4240,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   bisection. `hit`: the held transitions served; `sort`: a version sorted
   and held; `uncached`: a fold answer that is not the cursor's state (a last
   row still without its newline, a failed read), sorted and not held;
-  `evict` and `forget` as above; the gauges `entries`, `transitions`,
-  `bytes` (estimated) and `bound` (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a
-  512th of the machine's memory).
+  `overBound`: a version whose entry is over the byte bound by itself,
+  sorted and served but not held, and no other lane shed for it. Each read
+  that returns counts once, under one of those four (a sort that raises
+  counts nowhere). `evict` as above; `forget`: entries
+  of lanes a full build no longer draws. The gauges: `entries`,
+  `transitions`, `bytes` (estimated) and `bound`
+  (`ROMP_STATE_INTERVALS_MEMO_BYTES`, else a 512th of the machine's memory).
   Four memos cover the chat build's per-build fixed costs, each keyed on the
   inputs it reads and evicted by the pusher with the tab set (a comment thread
   built this cycle is kept, like its fold prefix). `chatMergeSets` is the
@@ -5426,7 +5495,11 @@ writes the row. When one restart signals two kernels under the same state
 root, the first kernel's cut row consumes the request within milliseconds; the
 second still names that request, not its own `manager-sigterm` note, as long
 as the manager's note for the second kernel's pid sits above the request in
-the audit file. The manager's log says `exited without a restart request
+the audit file and the first kernel's cut row was written after the second
+kernel started, or, when both fall in one second, the first kernel is still
+running. A request the second kernel's predecessor consumed stays spent, even
+when it was filed in the second the new kernel started.
+The manager's log says `exited without a restart request
 (signal or crash); respawning` when a kernel exits that it did not ask to stop
 or restart.
 
@@ -5471,11 +5544,17 @@ and `reasonError` when those faults happened,
 (`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
 priming-to-assembly window as older cut rows carried it, `drainS`), the
 checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`,
-`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row that could
-not be built at the start, or whose append failed, is written after the drain
-instead, from the drain's own result, as the exit's one row: `t` is still the
-handler's start, and it carries `exitDone: true`, the phases and the counts,
-with no done row. The done row carries no
+`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row whose append
+failed is written after the drain instead, as the exit's one row: the row the
+exit built, with the done row's fields applied the way `romp restart-metrics`
+joins the pair, so a drain that raised leaves the prediction and the session
+count standing there too. A cut row that could not be built at the start is
+written after the drain from the drain's own result, with `cutTurnsError`
+naming the fault, since no prediction stands behind its turns. Either way `t`
+is still the handler's start, the process sample is the one taken as the exit
+began, and the row carries `exitDone: true`, the phases and the counts, with no
+done row. An append to the ledger that fails is said on the kernel's log, one
+line naming the row and the fault. The done row carries no
 `cutTurns`, `reason` or `auditT`, so every reader that keys on those reads the
 cut row alone; `romp restart-metrics` joins the pair on the pid and `cutT`, and
 a cut row with `expectsDone` and no done row reads as `exitDone: false`, an
@@ -5529,7 +5608,8 @@ background task's notification, a scheduled prompt) has no feed, so its row
 carries neither rather than the previous turn's stamps. Both files rotate at 32 MB to `<name>.1`, one predecessor
 kept, so each pair stays under 64 MB; the reader reads both. The restart rows
 of `restart-cuts.jsonl` carry the kernel process's own `rssKb` and `cpuS`,
-sampled as its exit starts (the cut row) and at its settled boot (the boot row), so
+sampled as its exit starts (the cut row, or a late full row, which carries the
+sample taken then) and at its settled boot (the boot row), so
 the kernel's growth between restarts is a series without a sampler of its own.
 And the manager writes a `quiet-window` row to `restart-audit.jsonl` when a
 parked deploy refresh applies (`since`, `waitedS`, `reason` as the gate's
@@ -5655,8 +5735,10 @@ whose cut count is unknown, and the exits killed after their cut row, which
 count the turns their cut row predicted and are never clean; an exit whose
 prediction failed (`cutTurnsError`) with no drain result to stand in for it,
 killed or with a drain that raised, cut an unknown number too, and the text
-names how many such exits there were; the per-restart rate divides the
-measured restarts' turns by the measured restarts alone),
+names how many such exits there were, counting a killed one there and not
+among the killed exits, which are all measured; the per-restart rate divides
+the measured restarts' turns (`measuredCutTurns`) by the measured restarts
+alone, and the text names those turns when they differ from the total),
 the reasons, the outage from exit to first serve and the reconcile settle (from
 the `bootSettled` rows), the quiet windows' waits and backstop firings (from
 the manager's `quiet-window` rows), the boot sweeps' orphans reaped, scopes
@@ -6038,6 +6120,32 @@ holds a passage of a message in a session that can take a comment.
 On a touch screen each control in the chip row and the staged strip (Comment, Stage, a chip's x,
 Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
 pixels each way, with none of them touching, while keeping its compact look.
+
+### Quoting and staging in a comment thread
+
+In a comment thread that takes replies (open, or relayed back to the session), a passage selected
+in the thread's own messages becomes a quote chip above the thread's reply box, by the message
+box's rules: selecting again replaces the chip, holding ⌘ (Ctrl elsewhere) while you select adds
+one, and the same text never lists twice. **⌘⏎** stages what is typed, with its chips, in a staged
+strip inside the thread's box (the message box's own strip, over the thread's own list); **⏎** sends
+everything staged and then what is in the box as one reply to the thread, each quote under
+`Replying to this part of the conversation:`. **⏎** on an empty box sends what is staged, and the
+strip's **Send now** sends it alone. **Esc** first drops the chips, then closes the box. The staged
+replies are kept per thread through a reload, and deleting the thread drops them. A resolved
+thread keeps its plain reply, and the new-comment box sends its comment on either key.
+
+### Where typing, pasting and dictation go
+
+With no box holding the caret, as after selecting a passage, what you type, paste or dictate goes
+to the box of the topmost surface that is open: the file viewer's message bar while the viewer is
+open over the chat, an open comment thread's reply box, the message bar of a file tab while it is
+shown, and otherwise the message box. The viewer sits over a comment thread's box when both are
+open. A viewer or file tab with no bar takes nothing, and a box you are already typing in keeps
+what you type. **⏎** from the bare chat area puts the caret in that same box; with the viewer open
+over the chat it never reaches the message box hidden underneath. A quote chip made by the
+selection stays where it was made when the caret moves in. Space typed first stays a scroll key.
+Dictation by the operating system reaches the page as one text insertion, neither keys nor a paste,
+and is taken the same way.
 
 ### Stepping through your messages and comments
 

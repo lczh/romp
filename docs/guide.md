@@ -36,7 +36,8 @@ in the box.
 A path or a markdown link in the chat opens the file in the viewer, rendered. A
 passage selected there becomes a quote in the viewer's own message bar, which
 writes to the session the file came from; ⌘⏎ stages it with the chat's staged
-messages and ⏎ sends.
+messages and ⏎ sends. While the viewer is open, typing, pasting and dictation go
+to its bar.
 
 The viewer's pop-out button keeps the file open as a tab, right after the
 session it came from. File tabs sit in the strip with your sessions, the arrows
@@ -46,6 +47,10 @@ Select a passage in the chat itself and comment on it, and a side conversation
 opens on the highlight; a reload brings you back to where you were reading with
 that thread still open, back where you had moved its box, though anything you
 typed and did not send is gone.
+
+An open thread's box works like the message box: it takes what you type, paste
+or dictate, a passage selected in the thread becomes a quote, ⌘⏎ stages and ⏎
+sends everything staged as one reply.
 
 A narrow column of arrows in the chat's bottom-left corner steps through, top to
 bottom, the comment threads with a reply you have not read, every comment thread,

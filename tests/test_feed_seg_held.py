@@ -22,8 +22,23 @@ landing's fault; the byte bound sheds the least recently used session first and 
 a departed session's aggregate leaves with it; the held aggregate holds strings, numbers and tuples only.
 tests/test_feed_session_memo.py drives the same kind of road through build_feed and compares whole boards.
 
-Synthetic data only: placeholder uuids, the notes-api demo's web and api, invented text, a private state root with
-session hosts off."""
+The review after the merge (2026-10-06) added: a cut inside the open turn (a rolled-back mid-turn prompt) is served the
+closed turns from the hold and nothing of the removed segment, and after a cold walk and a reuse walk the held maps are
+the one-pass walk over the closed turns alone (the two copies the walk makes); an entry the walk cannot use leaves the
+table in that walk even when the walk then fails, counted once; a walk that did not finish counts no turns; GET /perf's
+report moves by one walk, one folded turn and thirty held turns on a reuse; an aggregate over the bound by itself counts
+under segOverBound, not segEvict; a reused entry is the newest, so a colder session is shed first; and past the bound a
+build keeps the entries it has used and holds no newcomer, so two of three sessions walk only their open turn, and a
+session whose grown aggregate the bound turns away keeps the entry its walk was served from.
+
+The review after that follow-up merged (2026-10-07) added: an aggregate grown over the bound by itself leaves the entry
+its walk was served from, so the next build folds only the turns since; a newcomer that cannot fit beside the entries
+the build has used sheds nothing, so a small third session keeps its entry; and, pinned as it stands, past the bound a
+grown aggregate stored first in a build sheds the entry of a session the same build derives after it, which then walks
+every turn, in either order.
+
+Synthetic data only: placeholder uuids, the notes-api demo's web, api and tests, invented text, a private state root
+with session hosts off."""
 import collections
 import json
 import os
@@ -53,6 +68,7 @@ SID_WEB = "c4d00000-1006-4aaa-8bbb-00000000c001"   # private synthetic sids (CLA
 SID_API = "c4d00000-1006-4aaa-8bbb-00000000c002"
 RESUME_FILE = "c4d00000-1006-4aaa-8bbb-00000000c003"   # the CLI session ids a resume and a /clear write their files under
 CLEAR_FILE = "c4d00000-1006-4aaa-8bbb-00000000c004"
+SID_TESTS = "c4d00000-1006-4aaa-8bbb-00000000c005"      # the third session the byte bound's tests need
 REAL_SEGS_SEAM = km._segs_seam
 PROSE = "the notes-api search now pages twenty results at a time and hands back a cursor for the next page"
 
@@ -201,7 +217,7 @@ class HoldWorld(unittest.TestCase):
         km._segs_seam = spy
         self.proj = self.td / "projects" / "-w-notes-api"
         self.proj.mkdir(parents=True)
-        self.leaf = {sid: str(self.proj / (sid + ".jsonl")) for sid in (SID_WEB, SID_API)}
+        self.leaf = {sid: str(self.proj / (sid + ".jsonl")) for sid in (SID_WEB, SID_API, SID_TESTS)}
         self.recs = {sid: [] for sid in self.leaf}
         self.clock = int(time.time()) - 5000                          # every write's mtime, a second apart
         self.t0 = int(time.time()) - 6 * 3600
@@ -268,14 +284,15 @@ class HoldWorld(unittest.TestCase):
                 f.write(body)
         self.stamp(path)
 
-    def history(self, sid=SID_WEB, p="w"):
-        """TURNS closed turns of the six kinds and an open one (a typed ask whose tool call is running)."""
+    def history(self, sid=SID_WEB, p="w", turns=None):
+        """`turns` (TURNS unless named) closed turns of the six kinds and an open one (a typed ask whose tool call is
+        running)."""
         parent = None
-        for i in range(self.TURNS):
+        n = self.TURNS if turns is None else turns
+        for i in range(n):
             recs, parent = turn_records(i, self.t0 + 300 * i, parent, p, sid)
             self.append(sid, recs)
-        t = self.t0 + 300 * self.TURNS
-        n = self.TURNS
+        t = self.t0 + 300 * n
         self.append(sid, [user(t, "%s-u%02d" % (p, n), parent, "ship step %d" % n),
                           tool_call(t + 10, "%s-c%02d" % (p, n), "%s-u%02d" % (p, n), "toolu_%s%02d" % (p, n))])
         self.next_t[sid] = t + 20
@@ -294,6 +311,15 @@ class HoldWorld(unittest.TestCase):
         t = self.tick(sid, 200)
         self.append(sid, [user(t, u, a, text), tool_call(t + 10, c, u, "toolu_y%02d" % k)])
         self.next_t[sid] = t + 10
+
+    def close_turn(self, sid, k):
+        """One more closed turn: the open turn's running tool call returns, its reply lands and a new typed ask opens the
+        next turn with a running tool call (open_new_turn). `k` numbers the records, so each close on a session takes
+        its own, and the new ask's text is its own, so its segment key is new."""
+        call = self.recs[sid][-1]
+        self.append(sid, [tool_out(self.tick(sid), "w-yr%02d" % k, call["uuid"], call["message"]["content"][0]["id"],
+                                   "tests: 41 passed")])
+        self.open_new_turn(sid, k, "next: page archive %d" % k)
 
     # ── the walk and its oracle ──
 
@@ -351,6 +377,29 @@ class HoldWorld(unittest.TestCase):
         with km._FEED_SEG_LOCK:
             return dict(km._FEED_SEG_STATS)
 
+    def new_build(self):
+        """A board build begins, as build_feed begins one (tests/test_feed_session_memo.py pins that it does, once per
+        build). A kernel without the build number (the base commit this module's red-first run pins against) has nothing
+        to begin, so there every walk is one build and a test runs red on its own assertion rather than erroring here."""
+        begin = getattr(km, "_feed_seg_build_begin", None)
+        if begin is not None:
+            begin()
+
+    def held_is_the_closed_turns(self, label, sid=SID_WEB):
+        """The held entry's maps equal the one-pass walk over the session's closed turns alone: no open turn's segment is
+        ever held, and no derivation folded into a held map."""
+        turns = self.tree(sid)["turns"]
+        seg_uuid, seg_trig, seg_best, cite, seg_turn = one_pass(turns[:-1], self.store)
+        with km._FEED_SEG_LOCK:
+            maps = km._FEED_SEG_HELD[sid][3]
+        self.assertEqual(maps[0], seg_uuid, "%s: the held work anchors are the closed turns'" % label)
+        self.assertEqual(maps[1], seg_trig, "%s: the held prompt anchors are the closed turns'" % label)
+        self.assertEqual(maps[2], seg_best, "%s: the held latest prose is the closed turns'" % label)
+        self.assertEqual(maps[3], cite, "%s: the held citable uuids are the closed turns'" % label)
+        self.assertEqual(set(maps[4]), set(seg_turn), "%s: the held positions name the closed turns' keys" % label)
+        for k, (ti, _si) in maps[4].items():
+            self.assertEqual(turns[ti]["id"], seg_turn[k][0]["id"], "%s: %s's position names its turn" % (label, k))
+
 
 class TheRoad(HoldWorld):
     def test_after_every_step_the_maps_equal_the_one_pass_walk_and_only_the_moved_turns_fold(self):
@@ -360,9 +409,12 @@ class TheRoad(HoldWorld):
         self.assertGreaterEqual(len(w.seg_uuid), n // 2, "the premise: the maps are not empty")
         self.assertTrue(w.cite_uuids, "the premise: the history holds citable prose")
         self.assertIn(SID_WEB, km._FEED_SEG_HELD, "the closed turns are held")
-        s0 = self.stats()
+        r0 = km._feed_memo_report()                     # read as GET /perf reads them (builds.feed.memo), not the table
         self.check("the same parse again", folded=1)
-        self.assertEqual(self.stats()["segHeld"] - s0["segHeld"], n, "every closed turn served from the hold")
+        r1 = km._feed_memo_report()
+        self.assertEqual({k: r1[k] - r0[k] for k in ("segWalks", "segWalkTurns", "segHeld")},
+                         {"segWalks": 1, "segWalkTurns": 1, "segHeld": n},
+                         "a reuse of the same parse: one walk, the open turn folded, every closed turn served from the hold")
 
         # the open turn grows, then closes and another opens
         self.append(SID_WEB, [tool_out(self.tick(), "w-r%02d" % n, "w-c%02d" % n, "toolu_w%02d" % n, "tests: 41 passed")])
@@ -500,7 +552,11 @@ class Failures(HoldWorld):
             self.assert_maps("the walk that raised, against the oracle meeting the same fault", w, plain_t, turns)
         self.assertLess(len(w.seg_uuid), len(whole[0]), "the premise: the maps stopped short")
         self.assertNotIn(SID_WEB, km._FEED_SEG_HELD, "a walk that raised stored nothing")
-        self.assertEqual(self.stats()["segRaised"] - s0["segRaised"], 1)
+        s1 = self.stats()
+        self.assertEqual(s1["segRaised"] - s0["segRaised"], 1)
+        self.assertEqual({k: s1[k] - s0[k] for k in ("segWalks", "segHeld", "segWalkTurns")},
+                         {"segWalks": 0, "segHeld": 0, "segWalkTurns": 0},
+                         "a walk that did not finish counts no turns (the review after the merge)")
         self.check("the next walk, nothing raising", whole=True)
         self.assertIn(SID_WEB, km._FEED_SEG_HELD)
         self.check("and the one after it", folded=1)
@@ -515,8 +571,68 @@ class Failures(HoldWorld):
                 km._feed_seg_plain_t(w)
         self.assertNotIn(SID_WEB, km._FEED_SEG_HELD, "a plain-prompt read that raised stored nothing")
         self.assertEqual(w.seg_uuid, one_pass(turns, self.store)[0], "the two failures stay apart: the anchor maps are whole")
-        self.assertEqual(self.stats()["segRaised"] - s0["segRaised"], 1)
+        s1 = self.stats()
+        self.assertEqual(s1["segRaised"] - s0["segRaised"], 1)
+        self.assertEqual({k: s1[k] - s0[k] for k in ("segWalks", "segHeld", "segWalkTurns")},
+                         {"segWalks": 0, "segHeld": 0, "segWalkTurns": 0},
+                         "a walk whose plain-prompt read raised did not finish: it counts no turns")
         self.check("the next walk", whole=True)
+
+    def _failing_walks(self, label, store):
+        """Two walks over the current parse whose anchor fold raises at its first segment: (stats before, stats after)."""
+        turns = self.tree()["turns"]
+        s0 = self.stats()
+        with mock.patch.object(km, "_seg_anchors", side_effect=em.LazyBodyRead("a synthetic body read fault")):
+            for i in (1, 2):
+                w = km._feed_seg_walk(SID_WEB, self.head(), turns, store)
+                km._feed_seg_plain_t(w)
+                self.assertFalse(w.ok, "the premise: %s, walk %d raised" % (label, i))
+                self.assertNotIn(SID_WEB, km._FEED_SEG_HELD, "%s: walk %d left no entry it could not use" % (label, i))
+        return s0, self.stats()
+
+    def test_an_entry_the_walk_cannot_use_leaves_the_table_even_when_the_walk_then_fails(self):
+        """The review after the merge: the entry was compared outside the lock and only dropped by a later successful
+        store, so while the walk kept failing an entry for other seams, or one whose keys diverged, stayed in the table
+        (newest in its order, ahead of colder sessions' valid entries) and was counted again by every derivation. Now the
+        walk that finds it deletes it, and it is counted once."""
+        self.history()
+        self.check("cold", whole=True)
+        s13 = next(s for s in REAL_SEGS_SEAM(self.tree()["turns"][13], {}) if s["trigger"] == "w-u13")
+        seam = {"segs": [jd._seg_key(s13["id"])], "t": s13["t"] + 30, "top": SID_WEB + ":g4", "text": "Paged the results"}
+        s0, s1 = self._failing_walks("other seams", {"nodes": {}, "status": {}, "seams": [seam]})
+        self.assertEqual((s1["segReset"] - s0["segReset"], s1["segRaised"] - s0["segRaised"]), (1, 2),
+                         "discarded whole once, by the walk that found it; both walks raised")
+        self.check("the walk after, nothing raising", whole=True)
+        self.assertIn(SID_WEB, km._FEED_SEG_HELD)
+        self.backend.cut[SID_WEB] = "w-a20"            # a rewind: the held keys diverge inside the entry
+        s0, s1 = self._failing_walks("a rewind cut", self.store)
+        self.assertEqual((s1["segPartial"] - s0["segPartial"], s1["segRaised"] - s0["segRaised"]), (1, 2),
+                         "the diverged entry is dropped once, by the walk that found it")
+        self.check("the cut world walked, nothing raising", whole=True)
+
+    def test_seams_that_are_a_truthy_scalar_hold_nothing_and_raise_nothing_out_of_the_walk(self):
+        """A goal store whose seams field is a truthy scalar where a list belongs (1, True, 1.5). The one-pass loop met
+        it inside its try, so it cost only the anchors; the held walk read the seams' fingerprint before the fold's try,
+        so the raise left the derivation and, on a cold kernel, the session's cards left the board. Now the walk holds
+        nothing for such a store, drops the entry held under good seams, and its maps are the oracle's (empty: the
+        oracle meets the seams at its first segment)."""
+        self.history()
+        self.check("cold, the seams a list", whole=True)
+        self.assertIn(SID_WEB, km._FEED_SEG_HELD, "the premise: web's closed turns are held")
+        turns = self.tree()["turns"]
+        for bad in (1, True, 1.5):
+            store = {"nodes": {}, "status": {}, "seams": bad}
+            s0 = self.stats()
+            w = km._feed_seg_walk(SID_WEB, self.head(), turns, store)
+            plain_t = km._feed_seg_plain_t(w)
+            self.assertFalse(w.ok, "%r: the fold met the seams inside its guard" % (bad,))
+            self.assertNotIn(SID_WEB, km._FEED_SEG_HELD, "%r: nothing is held under seams the walk cannot read" % (bad,))
+            self.assert_maps("seams %r" % (bad,), w, plain_t, turns, store)
+            s1 = self.stats()
+            self.assertEqual(s1["segRaised"] - s0["segRaised"], 1, "%r: counted as a walk that stored nothing" % (bad,))
+            self.assertEqual(s1["segWalks"] - s0["segWalks"], 0, "%r: a walk that did not finish" % (bad,))
+        self.check("the seams a list again: every turn", whole=True)
+        self.assertIn(SID_WEB, km._FEED_SEG_HELD, "held again under seams it can read")
 
     def test_a_lazy_lookup_whose_segmentation_raises_answers_none_and_counts_the_landing_fault(self):
         self.history()
@@ -528,6 +644,39 @@ class Failures(HoldWorld):
             self.assertIsNone(w.seg_turn.get(k), "a turn that cannot be segmented answers the default")
         self.assertEqual(km._SUMMARY_ANCHOR_STATS["fault"] - f0, 1, "...counted as the landing tier's fault (served, not memoized)")
         self.assertIsNotNone(w.seg_turn.get(k), "the next lookup segments again")
+
+
+class TheCutInsideTheOpenTurn(HoldWorld):
+    def test_a_cut_inside_the_open_turn_is_served_the_closed_turns_and_nothing_of_the_removed_segment(self):
+        """The two copies the walk makes (the review after the merge): it copies the held maps before folding into them,
+        and copies the closed turns' maps before folding the open turn, so the held aggregate is the closed turns alone.
+        Every rewind the road drives cuts at a closed turn's reply, where the held keys diverge and every turn walks from
+        fresh maps, so neither copy was pinned. A bare rollback that deletes a mid-turn prompt cuts the parse at the
+        prompt's parent, inside the open turn, with every closed turn standing: without the second copy the cold walk
+        holds the open turn's second segment, without the first a reuse walk folds it into the held maps, and either way
+        the cut's walk is served an anchor at work the rollback removed."""
+        self.history()
+        n = self.TURNS
+        r, m, c2 = "w-r%02d" % n, "w-m%02d" % n, "w-n%02d" % n
+        t = self.tick()
+        self.append(SID_WEB, [tool_out(t, r, "w-c%02d" % n, "toolu_w%02d" % n, "tests: 41 passed"),
+                              user(t + 10, m, r, "also page the archive while the tests run"),
+                              tool_call(t + 20, c2, m, "toolu_wn%02d" % n)])
+        self.next_t[SID_WEB] = t + 20
+        w, _t, turns = self.check("cold, the open turn in two segments", whole=True)
+        segs = REAL_SEGS_SEAM(turns[-1], self.store)
+        self.assertEqual(len(segs), 2, "the premise: the typed prompt opened a second segment in the open turn")
+        k2 = km._seg_key(segs[1]["id"])
+        self.assertIn(k2, w.seg_uuid, "the premise: the second segment has a work anchor")
+        self.held_is_the_closed_turns("after the cold walk")
+        self.check("a reuse of the same parse", folded=1)
+        self.held_is_the_closed_turns("after a reuse walk")
+        self.backend.cut[SID_WEB] = r                   # the mid-turn prompt rolled back: the parse ends at its parent
+        w, _t, turns = self.check("the cut inside the open turn", folded=1)
+        self.assertEqual(len(turns), n + 1, "the premise: every closed turn stands")
+        self.assertEqual(len(REAL_SEGS_SEAM(turns[-1], self.store)), 1, "the premise: the cut took the second segment")
+        self.assertNotIn(k2, w.seg_uuid, "no anchor of the removed segment")
+        self.held_is_the_closed_turns("after the cut")
 
 
 class Isolation(HoldWorld):
@@ -556,13 +705,19 @@ class Isolation(HoldWorld):
 
 
 class BoundAndDepartures(HoldWorld):
+    def histories(self):
+        for sid, p in ((SID_WEB, "w"), (SID_API, "p"), (SID_TESTS, "t")):
+            self.history(sid, p)
+
     def test_the_byte_bound_sheds_the_least_recently_used_session_and_the_report_says_so(self):
         self.history(SID_WEB, "w")
         self.history(SID_API, "p")
+        self.new_build()
         self.check("web", whole=True)
         size = km._FEED_SEG_HELD[SID_WEB][5]
-        head, fp, keys, maps, _plain, _size = km._FEED_SEG_HELD[SID_WEB]
+        head, fp, keys, maps, _plain, _size = km._FEED_SEG_HELD[SID_WEB][:6]
         self.assertEqual(size, km._feed_seg_entry_bytes(keys, maps), "the entry carries its estimate")
+        self.new_build()                                # api's store is the next build's: web is not used in it
         with mock.patch.object(km, "FEED_SEG_HELD_BYTES", size):
             e0 = self.stats()["segEvict"]
             self.check("api", sid=SID_API, whole=True)
@@ -574,12 +729,183 @@ class BoundAndDepartures(HoldWorld):
             self.assertLessEqual(rep["segBytes"], size)
             self.assertEqual(rep["segBound"], size)
         with mock.patch.object(km, "FEED_SEG_HELD_BYTES", 64):
-            e0 = self.stats()["segEvict"]
+            s0 = self.stats()
             self.check("web over the bound alone", whole=True)
             self.assertNotIn(SID_WEB, km._FEED_SEG_HELD, "an aggregate over the bound alone is not held")
             self.assertIn(SID_API, km._FEED_SEG_HELD, "...and sheds no other session")
-            self.assertEqual(self.stats()["segEvict"] - e0, 1)
+            s1 = self.stats()
+            self.assertEqual((s1.get("segOverBound", 0) - s0.get("segOverBound", 0), s1["segEvict"] - s0["segEvict"]),
+                             (1, 0), "an aggregate that was never held is counted under segOverBound, not as an eviction "
+                             "(the review after the merge)")
+            self.assertEqual(km._feed_memo_report()["segOverBound"], s1["segOverBound"], "...and GET /perf reports it")
             self.check("web again: nothing held, so every turn", whole=True)
+
+    def test_a_reused_entry_is_the_newest_so_the_bound_sheds_a_colder_session_first(self):
+        """The mark that makes a reused entry the newest (the review after the merge): web is stored, then api, then web
+        is reused; a third session's store past a bound that fits two sheds api and keeps web. A third is needed, since a
+        store re-inserts its own session as the newest."""
+        self.histories()
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        self.check("build 1: api", sid=SID_API, whole=True)
+        self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB, SID_API], "the premise: stored in that order")
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        self.assertEqual(km._FEED_SEG_HELD[SID_API][5], size, "the premise: the histories weigh the same")
+        self.new_build()
+        self.check("build 2: web reused after api was stored", folded=1)
+        self.assertEqual(list(km._FEED_SEG_HELD), [SID_API, SID_WEB], "a reused entry is the newest")
+        self.new_build()
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", 2 * size):   # fits two of the three
+            e0 = self.stats()["segEvict"]
+            self.check("build 3: tests", sid=SID_TESTS, whole=True)
+            self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB, SID_TESTS], "api, the colder, was shed; web kept")
+            self.assertEqual(self.stats()["segEvict"] - e0, 1)
+
+    def test_past_the_bound_a_build_keeps_the_entries_it_uses_and_holds_no_newcomer(self):
+        """The shed past the bound (the review after the merge): it took the least recently used entry, which every build
+        derives first, so once the working sessions' aggregates outgrew the bound each store shed the entry the build's
+        next derivation needed and every session walked every turn on every build. Now an entry carries the number of the
+        last build that used it, a store sheds only entries no derivation of this build has used so far, and when that
+        would not make room the newcomer is not held. Three sessions, a bound that fits two, two builds and no turn
+        closing: in the second, two sessions walk only their open turn. A turn closing past the bound is another road
+        (the test of a grown aggregate stored first, below)."""
+        self.histories()
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", 2 * size):   # fits two of the three
+            self.check("build 1: api", sid=SID_API, whole=True)
+            self.assertEqual(km._FEED_SEG_HELD[SID_API][5], size, "the premise: the histories weigh the same")
+            e0 = self.stats()["segEvict"]
+            self.check("build 1: tests", sid=SID_TESTS, whole=True)
+            self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB, SID_API],
+                             "build 1: the two entries the build used stay, and the newcomer is not held")
+            self.assertEqual(self.stats()["segEvict"] - e0, 1, "the newcomer the bound did not admit is counted")
+            self.new_build()
+            e0 = self.stats()["segEvict"]
+            self.check("build 2: web", folded=1)
+            self.check("build 2: api", sid=SID_API, folded=1)
+            self.check("build 2: tests", sid=SID_TESTS, whole=True)
+            self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB, SID_API], "build 2: the same two entries stand")
+            self.assertEqual(self.stats()["segEvict"] - e0, 1)
+
+    def test_a_grown_aggregate_the_bound_does_not_admit_leaves_the_entry_its_walk_was_served_from(self):
+        """Past the bound with every other entry used in this build, a session whose aggregate grew by a closed turn is
+        not admitted; the entry its walk was served from still stands, so the next build folds the turns since it."""
+        self.history(SID_WEB, "w")
+        self.history(SID_API, "p")
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        self.check("build 1: api", sid=SID_API, whole=True)
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        self.assertEqual(km._FEED_SEG_HELD[SID_API][5], size, "the premise: the histories weigh the same")
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", 2 * size):   # fits the two as they stand, not a grown one
+            self.new_build()
+            self.check("build 2: web", folded=1)
+            n = self.TURNS
+            self.append(SID_API, [tool_out(self.tick(SID_API), "p-r%02d" % n, "p-c%02d" % n, "toolu_p%02d" % n,
+                                           "tests: 41 passed")])
+            self.open_new_turn(SID_API, 1, "next: page the archive")
+            e0 = self.stats()["segEvict"]
+            self.check("build 2: api, a turn closed", sid=SID_API, folded=2)
+            self.assertEqual(self.stats()["segEvict"] - e0, 1, "the premise: the grown aggregate was not admitted")
+            self.assertIn(SID_WEB, km._FEED_SEG_HELD, "the premise: web's entry, used in this build, stands")
+            self.assertIn(SID_API, km._FEED_SEG_HELD, "the entry api's walk was served from still stands")
+            self.assertEqual(len(km._FEED_SEG_HELD[SID_API][2]), n, "...the one held before the turn closed")
+            self.new_build()
+            self.check("build 3: web", folded=1)
+            self.check("build 3: api", sid=SID_API, folded=2)
+
+    def test_an_aggregate_grown_over_the_bound_by_itself_leaves_the_entry_its_walk_was_served_from(self):
+        """A held session whose aggregate grows over the bound by itself (the review after the follow-up's merge,
+        2026-10-07): the grown aggregate is not held, and the entry the walk was served from, which the table held under
+        the same bound, stays, so the next build folds only the turns since it. Before, the store popped that entry and
+        never put it back, uncounted, so every later build walked every turn."""
+        self.history(SID_WEB, "w")
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", size):      # fits web's aggregate as it stands, not a grown one
+            self.new_build()
+            self.close_turn(SID_WEB, 1)
+            s0 = self.stats()
+            self.check("build 2: web, a turn closed", folded=2)
+            s1 = self.stats()
+            self.assertEqual((s1["segOverBound"] - s0["segOverBound"], s1["segEvict"] - s0["segEvict"]), (1, 0),
+                             "the premise: the grown aggregate is over the bound by itself")
+            self.assertIn(SID_WEB, km._FEED_SEG_HELD, "the entry web's walk was served from stays")
+            self.assertEqual(len(km._FEED_SEG_HELD[SID_WEB][2]), self.TURNS, "...the one held before the turn closed")
+            self.new_build()
+            self.check("build 3: web, the turn since and the open one", folded=2)
+
+    def test_a_newcomer_that_cannot_fit_beside_the_entries_the_build_used_sheds_nothing(self):
+        """The check before the shed (the review after the follow-up's merge, 2026-10-07): when shedding every entry this
+        build has not used would still leave no room, the newcomer is turned away before anything is shed. Before, the
+        loop shed those entries first and then turned the newcomer away anyway, so a session lost its entry for nothing
+        and walked every turn on its next derivation. Two 30-turn sessions and a one-turn third under a bound that fits
+        the three: api's aggregate grows by two closed turns in a build that has used web's entry, so even with the
+        third's entry shed it would not fit beside web's. Nothing is shed, the turn-away is counted once under segEvict,
+        and the third session walks only its open turn in the next build."""
+        self.history(SID_WEB, "w")
+        self.history(SID_API, "p")
+        self.history(SID_TESTS, "t", turns=1)
+        self.new_build()
+        for label, sid in (("web", SID_WEB), ("api", SID_API), ("tests", SID_TESTS)):
+            self.check("build 1: " + label, sid=sid, whole=True)
+        sizes = {sid: km._FEED_SEG_HELD[sid][5] for sid in (SID_WEB, SID_API, SID_TESTS)}
+        bound = sum(sizes.values())
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", bound):     # fits the three as they stand
+            self.new_build()
+            self.check("build 2: web", folded=1)
+            self.close_turn(SID_API, 1)
+            self.close_turn(SID_API, 2)
+            closed = self.tree(SID_API)["turns"][:-1]
+            grown = km._feed_seg_entry_bytes(tuple(km._turn_hold_key(t) for t in closed), one_pass(closed, self.store))
+            self.assertGreater(grown + sizes[SID_WEB], bound, "the premise: api's grown aggregate cannot fit beside web's")
+            self.assertLessEqual(grown, bound, "the premise: ...though it is not over the bound by itself")
+            e0 = self.stats()["segEvict"]
+            self.check("build 2: api, two turns closed", sid=SID_API, folded=3)
+            self.assertEqual(self.stats()["segEvict"] - e0, 1, "the newcomer turned away, counted once")
+            self.assertEqual(set(km._FEED_SEG_HELD), {SID_WEB, SID_API, SID_TESTS}, "nothing was shed")
+            self.assertEqual(len(km._FEED_SEG_HELD[SID_API][2]), self.TURNS, "api keeps the entry its walk was served from")
+            self.new_build()
+            self.check("build 3: tests", sid=SID_TESTS, folded=1)
+
+    def test_past_the_bound_a_grown_aggregate_stored_first_sheds_an_entry_the_build_has_yet_to_use(self):
+        """The guarantee is narrow, and this pins it as it stands (the review after the follow-up's merge, 2026-10-07): a
+        store sheds only entries no derivation of this build has used SO FAR, so an entry a later derivation of the same
+        build would use still carries the previous build's number and is not protected. Two sessions under a bound of
+        their two aggregates plus 1000 bytes. In build 2 web closes a turn and is derived first: its grown aggregate sheds
+        api's entry, and api, derived next, walks every turn and is not held beside it. In build 3 api is derived first,
+        with nothing held: its store sheds web's entry, which build 3 has not used yet, and web walks every turn. So the
+        order of derivation does not decide it. Every map matches the one-pass walk, so the cost is walk time only.
+        Protecting the entries the previous build used as well was measured and declined (the comment above
+        _FEED_SEG_HELD)."""
+        self.history(SID_WEB, "w")
+        self.history(SID_API, "p")
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        self.check("build 1: api", sid=SID_API, whole=True)
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        self.assertEqual(km._FEED_SEG_HELD[SID_API][5], size, "the premise: the histories weigh the same")
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", 2 * size + 1000):
+            self.new_build()
+            self.close_turn(SID_WEB, 1)
+            e0 = self.stats()["segEvict"]
+            self.check("build 2: web, a turn closed", folded=2)
+            self.assertEqual(len(km._FEED_SEG_HELD[SID_WEB][2]), self.TURNS + 1, "web's grown aggregate is held")
+            self.assertGreater(km._FEED_SEG_HELD[SID_WEB][5], size + 1000,
+                               "the premise: web's grown aggregate and api's do not fit together")
+            self.assertNotIn(SID_API, km._FEED_SEG_HELD, "api's entry, which build 2 had yet to use, was shed")
+            self.assertEqual(self.stats()["segEvict"] - e0, 1)
+            self.check("build 2: api, derived after web", sid=SID_API, whole=True)
+            self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB], "api's aggregate is not held beside web's, used in build 2")
+            self.assertEqual(self.stats()["segEvict"] - e0, 2)
+            self.new_build()
+            self.check("build 3: api, derived first", sid=SID_API, whole=True)
+            self.assertEqual(list(km._FEED_SEG_HELD), [SID_API], "api's store shed web's entry, which build 3 had yet to use")
+            self.check("build 3: web, derived after api", whole=True)
+            self.assertEqual(list(km._FEED_SEG_HELD), [SID_API], "...and web's grown aggregate is not held beside api's")
 
     def test_the_bound_is_a_fraction_of_the_machines_memory_unless_the_environment_names_bytes(self):
         with mock.patch.dict(os.environ, {"ROMP_FEED_SEG_HELD_BYTES": "4096"}):
@@ -607,12 +933,14 @@ class BoundAndDepartures(HoldWorld):
     def test_the_held_aggregate_holds_strings_numbers_and_tuples_only(self):
         self.history()
         self.check("cold", whole=True)
-        head, fp, keys, maps, plain, size = km._FEED_SEG_HELD[SID_WEB]
+        head, fp, keys, maps, plain, size = km._FEED_SEG_HELD[SID_WEB][:6]
+        rest = km._FEED_SEG_HELD[SID_WEB][6:]            # the build number that last used it (2026-10-06)
         scalar = (str, int, float, bool, type(None))
 
         def flat(v):
             return all(flat(x) for x in v) if isinstance(v, tuple) else isinstance(v, scalar)
-        self.assertTrue(flat(head) and flat(fp) and flat(keys) and flat(plain), "head, seams, keys, plain time")
+        self.assertTrue(flat(head) and flat(fp) and flat(keys) and flat(plain) and flat(rest),
+                        "head, seams, keys, plain time, build number")
         for i in (0, 1, 2, 4):
             self.assertIs(type(maps[i]), dict)
             for k, v in maps[i].items():

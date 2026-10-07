@@ -5,6 +5,8 @@
 // re-rendered turn, and the small derivations the popover renders from. All DOM wiring lives in
 // render.ts (source-pinned by comments.test.ts, the repo convention).
 
+import { stagedRunBody, type StagedStack } from "./staged-messages";
+
 export type CommentMsg = { who: "you" | "agent"; text: string; t: number };
 
 export type CommentThread = {
@@ -344,6 +346,36 @@ export function holdForPassage(holds: Iterable<CommentCreate>, sid: string, uuid
  *  their passage starts a new thread. */
 export function threadTakesReplies(status: CommentThread["status"]): boolean {
   return status === "open" || status === "merged" || status === "merging";
+}
+
+// ── select, quote, stage, in a thread (the user 2026-10-07, who wanted the message box's behaviours in comment threads) ──
+// A passage selected in the thread's own messages becomes a quote chip in its reply box; Cmd/Ctrl+Enter stages the typed
+// words with their chips; Enter sends the whole staged run. A thread IS a session with its own id, so its staged stack is
+// keyed by that id (the thread's tid) on a stack of its own, never the chat's: the chat's stack belongs to the tabs. The
+// release is ONE reply through the comment reply door (commentReply), its body the chat's own staged run (stagedRunBody):
+// each staged item's quote under the conversation's lead-in and then its words, the typed reply last. render.ts owns the
+// popover's DOM; these are the rules, executed by comments.test.ts.
+
+const hasQuote = (cites: readonly unknown[]): boolean =>
+  cites.some((c) => !!c && typeof (c as { quote?: unknown }).quote === "string" && !!(c as { quote: string }).quote);
+
+/** Cmd/Ctrl+Enter in a thread's reply box: hold the words and their quote chips on the thread's own stack. A quote alone
+ *  stages (select, stage, repeat, then one typed reply sends the run); nothing at all stages nothing. */
+export function stageThreadReply(stack: StagedStack, tid: string, text: string, cites: readonly unknown[]): boolean {
+  if (!text && !hasQuote(cites)) return false;
+  stack.push(tid, { text, cites: cites.slice() });
+  return true;
+}
+
+/** Enter in a thread's reply box (or its strip's Send now, which passes no typed reply): the commentReply frame that sends
+ *  the thread's staged run and the typed reply as one message, the stack emptied, or null when there is nothing to send
+ *  (no stack, no words, no quote). Addressed as every reply is: the parent session and the thread. */
+export function threadReply(stack: StagedStack, parentSid: string, tid: string,
+                            typed: { text: string; cites?: unknown[] } | null): { type: "commentReply"; id: string; tid: string; text: string } | null {
+  const text = stagedRunBody(stack.list(tid), typed);
+  if (!text) return null;
+  stack.takeAll(tid);
+  return { type: "commentReply", id: parentSid, tid, text };
 }
 
 /** The thread a new Comment on this passage should open instead of a new one (the user 2026-10-01: one passage never

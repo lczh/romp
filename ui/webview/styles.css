@@ -4314,6 +4314,15 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 /* the popover's message row mirrors the CHAT composer (the user 2026-08-17): clip left, ➤ right,
    pill input — the attach/send buttons share the chat's own selectors above, so they stay in sync */
 .cmt-composer { display: flex; align-items: flex-end; gap: 4px; }
+/* a thread's quote chips and staged strip (render.ts paintCmtChips / paintCmtStaged, the user 2026-10-07): the message
+   box's own pieces above the reply box, at the popover's width; the staged list caps lower than the chat's four items,
+   since the popover's height is shared with the conversation */
+.cmt-chips { flex: 0 0 auto; display: flex; flex-flow: row wrap; align-items: center; gap: 6px; }
+.cmt-chips[hidden] { display: none; }
+.cmt-chips .composer-chip { max-width: 100%; }
+.cmt-staged { flex: 0 0 auto; flex-direction: column; gap: 3px; min-width: 0; }
+.cmt-staged .staged-list { max-height: 104px; }
+.cmt-pop .cmt-chips, .cmt-pop .cmt-staged { cursor: auto; }
 .cmt-input {
   order: 2; flex: 1 1 auto; min-width: 0; box-sizing: border-box; resize: vertical; min-height: 34px;
   padding: 6px 12px; border: 1px solid var(--vscode-input-border, var(--box-border));

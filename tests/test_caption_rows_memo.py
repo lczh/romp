@@ -21,14 +21,22 @@ here is against it, on synthetic captions files:
   Lanes         a lane's bars derived through the shared mapping equal the bars of the scanning path;
   Cost          what failed before the change: a second call serves the same object, a write raises, the open
                 segment's message-caption miss no longer calls _seg_key once per row, and an append folds only the
-                appended rows;
-  Bound         the memo holds nothing the reader let go, and /perf memos.captionRows reports it.
+                appended rows; a lookup on an empty mapping moves no counter (2026-10-06);
+  Race          another read landing inside a call (2026-10-06, from the review of the merged change): a rewrite read
+                between a call's read and its identity check is answered and never held, driven with no thread; and,
+                with one thread parked past its identity check while another call runs whole, a newer version stored
+                meanwhile stands, one version stored meanwhile is the mapping both calls serve, and a read that found no
+                file never drops a later read's version;
+  Bound         the memo holds nothing the reader let go, and /perf memos.captionRows reports it: the rows only the
+                memo keeps (orphanRows, orphanBytes) and the drift index's keys and lists in its bytes (2026-10-06).
 The equality classes are green on the code before the change by construction (the reference is that code); the
 mutants of this change turn them red. Synthetic data only: placeholder uuids and invented captions."""
 import json
 import os
 import random
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -502,6 +510,189 @@ class Cost(_CaptionsBase):
             km._captions(SID)
         self.assertEqual(folded, [2], "the two appended records, once")
 
+    def test_a_lookup_on_an_empty_mapping_moves_no_counter(self):
+        # Every session with no captions file is served the one shared empty mapping, and its lookups cost nothing
+        # before the index: the scan's counter moved only for a mapping with rows. Neither road counts them now, and
+        # no index is built on the shared mapping.
+        no_file = km._captions(SID)
+        self.assertIs(no_file, km._CAPTION_ROWS_EMPTY, "(the premise) no file: the shared empty mapping")
+        self.write([{"grain": "segment", "caption": "a row with no id"}])
+        held_empty = km._captions(SID)
+        self.assertEqual((len(held_empty), type(held_empty)), (0, km._CaptionRows),
+                         "(the premise) a held empty mapping")
+        for label, caps in (("the shared empty mapping", no_file), ("a held empty mapping", held_empty)):
+            for fn in (km._seg_caption, km._seg_work_caption):
+                before = dict(km._CAPTION_ROWS_STATS)
+                self.assertEqual(fn(caps, seg(1599, A[1])), "", "%s, %s" % (label, fn.__name__))
+                self.assertEqual(dict(km._CAPTION_ROWS_STATS), before,
+                                 "%s, %s: a drifted lookup moved no counter" % (label, fn.__name__))
+            self.assertIsNone(caps._idx, "%s: no index built" % label)
+
+
+def recaptioned(rows, tag):
+    """`rows` with every caption new and the ids, grains and times kept: a rewrite that only the generation tells."""
+    return [dict(r, caption="%s, %s" % (r.get("caption", ""), tag)) for r in rows]
+
+
+class _Park:
+    """Stands in for a kernel function or for _CAPTION_ROWS_LOCK: the first use on `thread` waits until `go` is set, so
+    another call can run whole inside that window; every other use passes straight through. As a lock, the parked
+    thread waits before it takes the real lock, so it holds nothing while it waits."""
+
+    def __init__(self, real):
+        self.real, self.thread, self.used = real, None, False
+        self.parked, self.go = threading.Event(), threading.Event()
+
+    def _wait(self):
+        if threading.current_thread() is self.thread and not self.used:
+            self.used = True
+            self.parked.set()
+            if not self.go.wait(30):
+                raise AssertionError("the parked thread was never released")
+
+    def __call__(self, *a, **k):
+        self._wait()
+        return self.real(*a, **k)
+
+    def __enter__(self):
+        self._wait()
+        self.real.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.real.release()
+        return False
+
+
+class Race(_CaptionsBase):
+    """Another read landing inside a call (2026-10-06). _captions answers a read the reader's entry no longer holds
+    without holding it (its identity guard); its store re-reads the memo's entry under the lock, serving its own version
+    stored meanwhile and leaving a newer one standing; and a read that found no file drops only a version read before
+    it. The guard is driven with no thread: the reader is patched for one call to read, have the file rewritten and
+    read again (the reader's entry is then the rewrite's), and answer the first read. The rest park one call past its
+    identity check, inside the fold or at the lock, while another call runs whole on the test's thread."""
+
+    def _rewrite_inside_the_read(self, label, new_rows):
+        """One call whose read is overtaken by a read of the file rewritten to `new_rows`, then the checks after it."""
+        real, first = em._read_jsonl_incremental, []
+
+        def racing(path, *a, **k):
+            got = real(path, *a, **k)
+            if not first:
+                first.append(got)
+                self.write(new_rows)              # another thread rewrites the file and reads it, inside this call
+                real(path, *a, **k)
+            return got
+        with em._JSONL_CACHE_LOCK:
+            gen = em._JSONL_CACHE[str(self.path)][6]
+        uncached = km._CAPTION_ROWS_STATS["uncached"]
+        with mock.patch.object(em, "_read_jsonl_incremental", racing):
+            got = km._captions(SID)
+        with em._JSONL_CACHE_LOCK:
+            ent = em._JSONL_CACHE[str(self.path)]
+        self.assertTrue(ent[6] != gen and len(ent[4]) >= len(first[0]),
+                        "(the premise) %s: the reader's entry is a new generation of as many records or more" % label)
+        self.assertEqual(list(got.items()), list(ref_fold(first[0]).items()),
+                         "%s: the call answered its own read" % label)
+        self.assertEqual(km._CAPTION_ROWS_STATS["uncached"] - uncached, 1, "%s: a read not held, counted" % label)
+        self.check("%s: the next call serves the file's current rows" % label)
+        self.append([row((6000, "abab7777"), "segment", 6000, "appended after %s" % label)])
+        self.check("%s: an append after it" % label)
+
+    def test_a_rewrite_of_as_many_rows_read_inside_a_call_is_never_held(self):
+        self.write(road_rows())
+        self.check("before the race")
+        self._rewrite_inside_the_read("as many rows", recaptioned(road_rows(), "rewritten"))
+
+    def test_a_rewrite_to_more_rows_read_inside_a_call_is_never_held(self):
+        self.write(road_rows())
+        self.check("before the race")
+        self._rewrite_inside_the_read("more rows", recaptioned(road_rows(), "rewritten") + [
+            row((7000, "cdcd8888"), "segment", 7000, "a row the rewrite added"),
+            row((7100, "cdcd8888"), "prompt", 7100, "its gist", p=True)])
+
+    def parked_call(self, name, between):
+        """_captions(SID) on another thread, parked at its first use of km.<name> while `between()` runs on this thread;
+        returns (what the parked call answered, what `between` returned)."""
+        park = _Park(getattr(km, name))
+        got, err = [], []
+
+        def run():
+            try:
+                got.append(km._captions(SID))
+            except Exception as e:                # noqa: BLE001  reported on the test's own thread
+                err.append(e)
+        t = threading.Thread(target=run)
+        park.thread = t
+        with mock.patch.object(km, name, park):
+            t.start()
+            try:
+                self.assertTrue(park.parked.wait(30), "(the premise) the other call reached %s" % name)
+                mid = between()
+            finally:
+                park.go.set()
+                t.join(30)
+        self.assertFalse(t.is_alive(), "the parked call finished")
+        if err:
+            raise err[0]
+        return got[0], mid
+
+    def moved(self, before):
+        return {k: km._CAPTION_ROWS_STATS[k] - before[k] for k in ("hit", "extend", "build", "uncached")}
+
+    def _newer_stored_inside(self, label, change):
+        self.write(road_rows())
+        mine = ref_fold(self.decoded())           # the version the parked call reads, before `change`
+        before = dict(km._CAPTION_ROWS_STATS)
+
+        def between():
+            change()
+            return km._captions(SID)              # the newer read, held while the parked call folds
+        got, theirs = self.parked_call("_caption_rows_fold", between)
+        self.assertEqual(list(got.items()), list(mine.items()), "%s: the parked call answered its own read" % label)
+        self.assertIs(km._CAPTION_ROWS_MEMO[str(self.path)][3], theirs, "%s: the newer version stands" % label)
+        self.assertEqual(self.moved(before), {"hit": 0, "extend": 0, "build": 1, "uncached": 1},
+                         "%s: the newer read built and was held, the parked one answered and not held" % label)
+        self.assertIs(km._captions(SID), theirs, "%s: the next call serves the newer version, held" % label)
+        self.check("%s: after the race" % label)
+
+    def test_an_append_stored_inside_a_call_stands(self):
+        self._newer_stored_inside("an append (this generation, more records)", lambda: self.append(
+            [row((6000, "abab7777"), "segment", 6000, "a row appended inside the call")]))
+
+    def test_a_rewrite_stored_inside_a_call_stands(self):
+        self._newer_stored_inside("a rewrite (a later generation)",
+                                  lambda: self.write(recaptioned(road_rows(), "rewritten")))
+
+    def test_one_version_stored_inside_a_call_is_the_mapping_both_serve(self):
+        self.write(road_rows())
+        before = dict(km._CAPTION_ROWS_STATS)
+        got, theirs = self.parked_call("_caption_rows_fold", lambda: km._captions(SID))
+        held = km._CAPTION_ROWS_MEMO[str(self.path)]
+        self.assertIs(held[3], theirs, "the first version stored stands")
+        self.assertIs(got, theirs, "the parked call serves the mapping stored for its own version meanwhile")
+        self.assertEqual(self.moved(before), {"hit": 1, "extend": 0, "build": 1, "uncached": 0},
+                         "one build held, the parked call's answer a hit")
+        self.assertEqual(km._caption_rows_version(SID, got), (str(self.path),) + held[:3],
+                         "the version both calls hold answers for the mapping the parked call served")
+        self.check("after the race")
+
+    def test_a_read_that_found_no_file_never_drops_a_later_reads_version(self):
+        def between():
+            self.write(road_rows())               # the file lands after the parked call found none; read and held
+            return km._captions(SID)
+        uncached = km._CAPTION_ROWS_STATS["uncached"]
+        got, theirs = self.parked_call("_CAPTION_ROWS_LOCK", between)
+        self.assertIs(got, km._CAPTION_ROWS_EMPTY, "the parked call answered its own read: no file")
+        self.assertIs((km._CAPTION_ROWS_MEMO.get(str(self.path)) or (None,) * 4)[3], theirs,
+                      "the later read's version stands")
+        self.assertEqual(km._CAPTION_ROWS_STATS["uncached"] - uncached, 1, "the parked call, answered and not held")
+        self.assertIs(km._captions(SID), theirs, "the next call serves it, held")
+        os.unlink(self.path)
+        self.assertIs(km._captions(SID), km._CAPTION_ROWS_EMPTY)
+        self.assertNotIn(str(self.path), km._CAPTION_ROWS_MEMO,
+                         "a version read before a call that finds no file: dropped")
+
 
 class Bound(_CaptionsBase):
     def test_the_memo_lets_go_of_what_the_reader_let_go(self):
@@ -534,8 +725,8 @@ class Bound(_CaptionsBase):
         km._captions(SID)
         km._seg_work_caption(caps, seg(1599, A[1]))
         rep = km._PerfStats().snapshot()["memos"]["captionRows"]
-        self.assertEqual(set(rep), {"entries", "rows", "bytes", "hit", "extend", "build", "uncached", "swept",
-                                    "indexBuild", "indexLookup", "scanLookup"})
+        self.assertEqual(set(rep), {"entries", "rows", "bytes", "orphanRows", "orphanBytes", "hit", "extend", "build",
+                                    "uncached", "swept", "indexBuild", "indexLookup", "scanLookup"})
         self.assertTrue(all(type(v) is int for v in rep.values()), rep)
         self.assertGreaterEqual(rep["entries"], 1)
         self.assertGreaterEqual(rep["rows"], len(caps))
@@ -544,6 +735,72 @@ class Bound(_CaptionsBase):
         self.assertEqual(rep["indexBuild"] - before["indexBuild"], 1)
         self.assertEqual(rep["indexLookup"] - before["indexLookup"], 1)
         self.assertEqual(rep["scanLookup"] - before["scanLookup"], 0, "the builds' mappings never scan")
+
+    def own_memo(self):
+        """The memo emptied for this test and put back after, so its gauges are this test's alone."""
+        saved = dict(km._CAPTION_ROWS_MEMO)
+        km._CAPTION_ROWS_MEMO.clear()
+
+        def put_back():
+            km._CAPTION_ROWS_MEMO.clear()
+            km._CAPTION_ROWS_MEMO.update(saved)
+        self.addCleanup(put_back)
+
+    def test_perf_counts_the_rows_only_the_memo_keeps(self):
+        # After the record cache lets a captions entry go, or the file is read again from byte zero, the memo alone
+        # keeps that mapping's rows until the next sweep; /perf counted none of them, and called the rows the cache's.
+        self.own_memo()
+        other = km.jd.CAPDIR / (SID2 + ".jsonl")
+        self.write(road_rows())
+        self.write(road_rows()[:6], path=other)
+        caps, caps2 = km._captions(SID), km._captions(SID2)
+
+        def one_level(m):                         # each row's dict, its keys and its values
+            return sum(sys.getsizeof(r) + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in r.items())
+                       for r in m.values())
+
+        def gauges():
+            rep = km._caption_rows_report()
+            return {k: rep[k] for k in ("entries", "rows", "orphanRows", "orphanBytes")}
+        both = {"entries": 2, "rows": len(caps) + len(caps2)}
+        self.assertEqual(gauges(), dict(both, orphanRows=0, orphanBytes=0), "both reader entries stand: no orphan")
+        with em._JSONL_CACHE_LOCK:
+            em._cache_pop_locked(str(self.path))      # the record cache lets this file go
+        self.assertEqual(gauges(), dict(both, orphanRows=len(caps), orphanBytes=one_level(caps)),
+                         "an evicted entry's mapping: its rows the memo's alone")
+        self.write(recaptioned(road_rows()[:6], "rewritten"), path=other)
+        em._read_jsonl_incremental(str(other))        # another reader's read of the rewrite replaces the entry
+        with em._JSONL_CACHE_LOCK:
+            regen = em._JSONL_CACHE[str(other)][6]
+        self.assertNotEqual(regen, km._CAPTION_ROWS_MEMO[str(other)][0], "(the premise) the rewrite read anew")
+        self.assertEqual(gauges(), dict(both, orphanRows=len(caps) + len(caps2),
+                                        orphanBytes=one_level(caps) + one_level(caps2)),
+                         "a replaced entry's mapping: an orphan too")
+        km._captions(SID2)                            # a new version held: the sweep drops the evicted file's mapping
+        self.assertEqual(gauges(), {"entries": 1, "rows": len(km._captions(SID2)), "orphanRows": 0, "orphanBytes": 0},
+                         "after the sweep: no orphan")
+
+    def test_the_bytes_estimate_counts_each_index_groups_key_and_list(self):
+        # The estimate priced each drift-index group as a 64-byte one-id list and left out its key, a fresh string
+        # no id shares. Here groups of one id and of two.
+        self.own_memo()
+        rows = []
+        for i in range(90):
+            h = "%08x" % (0x20000 + (i if i < 30 else 30 + i // 2))
+            rows.append(row((1000 + 60 * i, h), "segment", 1000 + 60 * i, "work %d" % i))
+        self.write(rows)
+        caps = km._captions(SID)
+        self.assertIsNone(caps._idx, "(the premise) no index yet")
+        before = km._caption_rows_report()["bytes"]
+        km._seg_work_caption(caps, seg(1001, "%08x" % 0x20000))   # a drifted lookup builds the index
+        idx = caps._idx
+        self.assertIsInstance(idx, dict, "(the premise) the index is built")
+        self.assertEqual(sorted({len(g) for g in idx.values()}), [1, 2], "(the premise) groups of one id and of two")
+        keys = sum(sys.getsizeof(k) for k in idx)
+        lists = sum(sys.getsizeof(g) for g in idx.values())
+        grew = km._caption_rows_report()["bytes"] - before
+        self.assertGreaterEqual(grew, sys.getsizeof(idx) + lists + keys,
+                                "the index's dict, its lists and its keys (%d of keys): grew by %d" % (keys, grew))
 
     def test_the_reference_names_every_key(self):
         doc = (Path(HERE).parent / "docs" / "reference.md").read_text(encoding="utf-8")

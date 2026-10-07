@@ -85,7 +85,9 @@ class RestartPhasesScript(unittest.TestCase):
     def test_the_reader_takes_the_exit_phases_from_the_done_row(self):
         """The kernel's exit path (2026-10-05) writes the cut row at the exit's start and a done row after the drain, joined on
         the pid and cutT: the exit's ckptS, drainS and stopped come from the done row, exitDone says whether the exit
-        completed, and an older kernel's cut row is read for its own phases."""
+        completed, and an older kernel's cut row is read for its own phases. A drain that raised leaves its done row without
+        `stopped` (it returned nothing): the cut row's session count stands, as the restart-metrics reader keeps it (the
+        review of 2026-10-06: the script read null)."""
         import subprocess, sys as _sys
         d = tempfile.mkdtemp()
         rows = [{"t": 1000, "pid": 1, "cutTurns": [], "stopped": 3, "rssKb": 4096000, "expectsDone": True},
@@ -95,17 +97,22 @@ class RestartPhasesScript(unittest.TestCase):
                 {"t": 2000, "pid": 2, "cutTurns": [], "stopped": 5, "rssKb": 2048000, "expectsDone": True},     # killed after its row
                 {"t": 3000, "pid": 3, "cutTurns": [], "stopped": 2, "rssKb": 1024000, "ckptS": 0.4, "drainS": 0.1},   # an older kernel
                 {"t": 4000, "pid": 4, "cutTurns": [], "stopped": 1, "rssKb": 1024000, "ckptS": 0.6, "drainS": 0.2,
-                 "exitDone": True, "phases": {"ckptS": 0.6, "drainS": 0.2}}]   # an exit's late full row: complete, no done row
+                 "exitDone": True, "phases": {"ckptS": 0.6, "drainS": 0.2}},   # an exit's late full row: complete, no done row
+                {"t": 5000, "pid": 5, "cutTurns": [{"sid": "s", "name": "web"}], "stopped": 2, "rssKb": 1024000, "expectsDone": True},
+                {"t": 5002, "pid": 5, "exitDone": True, "cutT": 5000, "drainError": "RuntimeError: synthetic drain fault",
+                 "phases": {"rowS": 0.0, "ckptS": 0.5, "drainS": 0.2}}]       # a drain that raised: no stopped, no turn list
         with open(os.path.join(d, "restart-cuts.jsonl"), "w") as f:
             for r in rows: f.write(json.dumps(r) + "\n")
         script = os.path.join(os.path.dirname(HERE), "scripts", "perf", "restart-phases.py")
         out = subprocess.run([_sys.executable, script, "--state", d, "--json"], capture_output=True, text=True, timeout=30)
         self.assertEqual(out.returncode, 0, out.stderr)
         cyc = json.loads(out.stdout)["cycles"]
-        self.assertEqual([c["cutT"] for c in cyc], [1000, 2000, 3000, 4000], "a done row is no cycle of its own")
+        self.assertEqual([c["cutT"] for c in cyc], [1000, 2000, 3000, 4000, 5000], "a done row is no cycle of its own")
         self.assertEqual([(c["ckptS"], c["drainS"], c.get("exitDone"), c["stopped"], c["cutTurns"]) for c in cyc],
-                         [(0.7, 0.3, True, 4, 1), (None, None, False, 5, 0), (0.4, 0.1, None, 2, 0), (0.6, 0.2, True, 1, 0)],
-                         "the late full row reads as an exit that completed, not an older kernel's")
+                         [(0.7, 0.3, True, 4, 1), (None, None, False, 5, 0), (0.4, 0.1, None, 2, 0), (0.6, 0.2, True, 1, 0),
+                          (0.5, 0.2, True, 2, 1)],
+                         "the late full row reads as an exit that completed, not an older kernel's; a raising drain's done row "
+                         "leaves the cut row's session count and prediction standing")
         self.assertEqual(cyc[0]["outageS"], 5.0)
 
 

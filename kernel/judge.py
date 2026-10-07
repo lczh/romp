@@ -1526,6 +1526,9 @@ _active_seq = [0]
 _active_change = [0]      # bumped on EVERY begin and end — the exact "the set of in-flight judge calls
 #                            changed" event the kernel's view signature keys on (2026-09-03), so a
 #                            judging swirl lights and clears on the call itself, not on a pass cadence
+_active_change_by = {}    # the same changes by the session each call is for (None for a call naming none), counted with
+#                            _active_change under _active_lock: the kernel's jobs gate reads a memo's race on its own
+#                            session's calls alone, so a call for another session ending is not why that memo moved
 
 
 def active_change():
@@ -1533,11 +1536,25 @@ def active_change():
     return _active_change[0]
 
 
+def active_change_by():
+    """(active_change(), {session id or None: that session's begins and ends}), read together under the lock, so the
+    split always adds up to the count beside it."""
+    with _active_lock:
+        return _active_change[0], dict(_active_change_by)
+
+
+def _active_count(fsid):
+    """One change to the in-flight set, for session `fsid` (the caller holds _active_lock)."""
+    _active_change[0] += 1
+    k = None if fsid is None else str(fsid)
+    _active_change_by[k] = _active_change_by.get(k, 0) + 1
+
+
 def _active_begin(judge, fsid, sent):
     """Mark a judge call as running; returns a run id to pass to _active_end on completion."""
     with _active_lock:
         _active_seq[0] += 1
-        _active_change[0] += 1
+        _active_count(fsid)
         rid = _active_seq[0]
         _active[rid] = {"judge": judge, "fsid": fsid, "sent": sent}
         return rid
@@ -1545,8 +1562,9 @@ def _active_begin(judge, fsid, sent):
 
 def _active_end(rid):
     with _active_lock:
-        if _active.pop(rid, None) is not None:
-            _active_change[0] += 1
+        rec = _active.pop(rid, None)
+        if rec is not None:
+            _active_count(rec.get("fsid"))
 
 
 def active_runs():

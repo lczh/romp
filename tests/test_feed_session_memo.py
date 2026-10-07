@@ -919,7 +919,8 @@ class TheBoundAndTheDepartures(_Board):
                                              "coldLive", "coldFlip",  # the cache-only parse misses and the in-place re-reads (2026-09-18)
                                              # the card anchor walk's held aggregates (2026-10-06): its counters and gauges
                                              "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised",
-                                             "segEvict", "segEntries", "segBytes", "segBound"})
+                                             "segEvict", "segEntries", "segBytes", "segBound",
+                                             "segOverBound"})   # an aggregate over the bound by itself, never held (the review after the merge)
         self.assertEqual(feed["memo"]["segBound"], km.FEED_SEG_HELD_BYTES)
         self.assertEqual((feed["memo"]["failed"], feed["memo"]["failing"]), (0, 0))
         self.assertEqual(set(feed["memo"]["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
@@ -1812,9 +1813,11 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
     g3 a done child (two "continue" segments: the text-atom landing), g4 completed (its anchor is turn 13's reply, the
     segment a seam splits). Pinned: a streaming append and a republish with the same seams fold the open turn alone
     (every turn before the hold); after every step of a road and of a seeded random walk the board equals a derivation
-    from cleared memos over the same inputs, byte for byte (_dump); a rewind that takes the latest plain prompt drops the
-    re-check, and a plain prompt in the open turn after a re-examined block raises it; a departed session's held
-    aggregate leaves with it. tests/test_feed_seg_held.py pins the walk itself against the one-pass loop."""
+    from cleared memos over the same inputs, byte for byte (_dump), the road's steps including web's leaf replaced by
+    rename under standing turn keys (the inode in the head, the review after the merge); a rewind that takes the latest
+    plain prompt drops the re-check, and a plain prompt in the open turn after a re-examined block raises it; each board
+    build is one build number, which marks the entry a derivation used; a departed session's held aggregate leaves with
+    it. tests/test_feed_seg_held.py pins the walk itself against the one-pass loop."""
 
     BLOCK_T = T0 + 2850                    # g2's block: after turn 28's plain prompt, before turn 29's
 
@@ -1920,13 +1923,37 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         _fresh_parse_state()
         self._stream(k)
 
+    def _replace_leaf(self, old, new):
+        """Web's transcript replaced by rename (a new inode at the same path), the record `old` re-recorded under `new`:
+        an in-turn uuid (turn 3's first segment's work anchor), so every closed turn's key stands and only the leaf's
+        inode, which the key stats before the parse (ctx leaf_head), tells the held aggregate it no longer stands."""
+        held = getattr(km, "_FEED_SEG_HELD", {})
+        keys = held[WEB][2] if WEB in held else None
+        recs = [json.loads(x) for x in self.tpath[WEB].read_text().splitlines() if x.strip()]
+        for r in recs:
+            if r.get("uuid") == old:
+                r["uuid"] = new
+            if r.get("parentUuid") == old:
+                r["parentUuid"] = new
+        ino = self.tpath[WEB].stat().st_ino
+        tmp = self.tpath[WEB].with_name(self.tpath[WEB].name + ".new")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        os.replace(tmp, self.tpath[WEB])
+        self.web_last = recs[-1]["uuid"]
+        self.assertNotEqual(self.tpath[WEB].stat().st_ino, ino, "the premise: a new file under the path")
+        if keys is not None:
+            turns = km._parse(str(self.tpath[WEB]), WEB, NOW)["turns"]
+            self.assertEqual(tuple(km._turn_hold_key(x) for x in turns[:len(keys)]), keys,
+                             "the premise: every held turn key stands")
+
     def _seam13(self):
         """A seam that splits turn 13's segment between its two checks (t + 30): its reply moves into the tail."""
         return {"segs": [jd._seg_key(self.seg[(13, 0)])], "t": T0 + 1330, "top": WEB + ":g4", "text": "Paged the results"}
 
-    def _publish_web(self, check_t=None, mt_bump=0):
+    def _publish_web(self, check_t=None, mt_bump=0, seams=None):
         """Web's goal store, in the judge's file shape, its goals' trails and log rows naming segments across the
-        history (the ids of the first parse, which a seam's head keeps)."""
+        history (the ids of the first parse, which a seam's head keeps); `seams`, when given, is the field as written,
+        whatever its type."""
         g = lambda n: WEB + ":g%d" % n
         s = lambda ti, si=0: self.seg.get((ti, si)) or self.seg[(ti, 0)]
         trail1 = [s(0), s(3), s(7), s(9, 1), s(13), s(15, 1), s(19), s(21)]
@@ -1952,7 +1979,7 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         }
         store = {"rompUuid": WEB, "seq": self.rev, "rev": self.rev, "placementsV": jd.PLACEMENTS_V, "placements": {},
                  "nodes": nodes, "status": {g(1): "working", g(2): "blocked", g(4): "completed"}, "lastNode": g(1),
-                 "seams": list(self.seams)}
+                 "seams": list(self.seams) if seams is None else seams}
         p = jd.GOALDIR / (WEB + ".json")
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(store))
@@ -2058,6 +2085,10 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self._publish_web()
         f = self._warm_cold("the seam removed")
         self.assertEqual(self._tree_row(f, WEB + ":g4")["anchorUuid"], "w-a13")
+        self._replace_leaf("w-c03", "w-x03")
+        f = self._warm_cold("the leaf replaced by rename, every turn key standing")
+        log1 = [r["anchorUuid"] for r in self._tree_row(f, WEB + ":g1")["log"]]
+        self.assertIn("w-x03", log1, "the premise: the replaced file moved a log row's work anchor: %r" % log1)
         self._compact()
         self._warm_cold("an auto compaction")
         self._restore(3)
@@ -2088,6 +2119,23 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self.assertTrue(self._cards(f)[WEB + ":g2"]["rejudging"],
                         "the open turn's plain prompt (T0+3000) came after the re-examination")
 
+    def test_each_board_build_is_one_build_number_and_a_derivation_marks_the_entry_it_used(self):
+        """Past the byte bound a store sheds only entries no derivation of the current build used (the review after the
+        merge; tests/test_feed_seg_held.py pins the shed): build_feed raises the build number once per build, never by a
+        clock, and the derivation that uses or stores web's aggregate marks it with that number. A kernel without the
+        number (the base commit this change's red-first run pins against) reads 0 here and runs red on the assertions."""
+        num = lambda: getattr(km, "_FEED_SEG_BUILD", [0])[0]
+        b0 = num()
+        self._build()
+        self._build()
+        self.assertEqual(num() - b0, 2, "one build number per build_feed")
+        self._stream(1)
+        self._settle()
+        self._build()                                    # web derives: its held entry is reused and marked
+        held = getattr(km, "_FEED_SEG_HELD", {})
+        self.assertIn(WEB, held, "the premise: web's closed turns are held")
+        self.assertEqual(held[WEB][6:], (num(),), "the entry carries the number of the build that used it")
+
     def test_a_departed_sessions_held_aggregate_leaves_with_it(self):
         held = getattr(km, "_FEED_SEG_HELD", None)
         self.assertIsNotNone(held, "the kernel holds the card anchor walk's closed turns")
@@ -2099,6 +2147,33 @@ class TheCardAnchorWalkHoldsItsClosedTurns(_Board):
         self.assertNotIn(WEB + ":g1", self._cards(f))
         self.assertNotIn(WEB, held, "the departed session's aggregate left with it")
         self.assertEqual(km._feed_memo_report()["segEntries"], len(held))
+
+    def test_a_goal_store_whose_seams_is_a_truthy_scalar_keeps_its_cards_on_a_cold_build(self):
+        """Web's store with its seams field a truthy scalar where a list belongs (1, True, 1.5), each on a cold kernel
+        (no earlier entry to serve in a failure's place). The held walk read the seams' fingerprint before the fold's
+        try, so the raise left web's derivation: build_feed's guard said so, and with nothing memoized web's cards left
+        the board. The one-pass loop it replaced met such seams inside its try and cost only the anchors. Now no
+        derivation raises, web keeps its cards, and nothing is held for it. tests/test_feed_seg_held.py pins the walk."""
+        bells = []                                       # the rows the build's failure guard rings, nothing on the ring
+        p = mock.patch.object(km, "_sync_notice", lambda text, ok=True, kind="sync":
+                              bells.append(str(text)) if str(text).startswith("feed: the cards for") else None)
+        p.start()
+        self.addCleanup(p.stop)
+        want = {WEB + ":g1", WEB + ":g2", WEB + ":g4"}
+        self.assertLessEqual(want, set(self._cards(self._build())), "the premise: web's cards with its seams a list")
+        for bad in (1, True, 1.5):
+            self.rev += 1
+            self._publish_web(seams=bad)
+            self._settle()
+            _reset_memo()                                # a cold kernel: no earlier entry, no held aggregate
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                f = self._build()
+            self.assertEqual(km._feed_memo_report()["failed"], 0,
+                             "%r: no derivation raised: %s" % (bad, err.getvalue()[-800:]))
+            self.assertLessEqual(want, set(self._cards(f)), "%r: web keeps its cards" % (bad,))
+            self.assertNotIn(WEB, km._FEED_SEG_HELD, "%r: nothing is held under seams the walk cannot read" % (bad,))
+            self.assertEqual(bells, [], "%r: no failure was rung" % (bad,))
 
     def test_a_seeded_random_walk_matches_a_cold_derivation_after_every_step(self):
         rng = random.Random(20261006)

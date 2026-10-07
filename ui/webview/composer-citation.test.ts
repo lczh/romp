@@ -137,10 +137,14 @@ test("⌘-selecting another piece of text ADDS a context below the held ones (th
   // One gesture owns one chip BY INDEX: selectionchange fires dozens of times mid-drag, so the live
   // gesture WRITES THROUGH to the chip it owns; only a new gesture appends (⌘) or replaces (plain).
   // Without the write-through a single ⌘-drag would spray a chip per selectionchange event.
+  // (the rules live in seedGestureChip since 2026-10-07, shared with a comment thread's reply box, seedThreadQuote)
   const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
-  assert.match(seeder, /let idx = quoteSeedIdx != null && quoteSeedIdx < list\.length \? quoteSeedIdx : null;/);
-  assert.match(seeder, /if \(quoteAddHeld && list\.length\) idx = list\.length;/);
-  assert.match(seeder, /else \{ list\.length = 0; idx = 0; \}/);
+  const gesture = RENDER.split("function seedGestureChip(")[1].split("\n}")[0];
+  assert.match(seeder, /seedGestureChip\(list, chip\);/);
+  assert.match(RENDER, /seedGestureChip\(list, mkQuoteCitation\(quote, uuid\)\);/, "the thread's box seeds by the same rules");
+  assert.match(gesture, /let idx = quoteSeedIdx != null && quoteSeedIdx < list\.length \? quoteSeedIdx : null;/);
+  assert.match(gesture, /if \(quoteAddHeld && list\.length\) idx = list\.length;/);
+  assert.match(gesture, /else \{ list\.length = 0; idx = 0; \}/);
   // flavors never mix: any quote seed drops a goal chip (the send routes goal XOR quotes)
   assert.match(seeder, /\.filter\(\(c\) => !c\.itemId\)/);
   // chips wrap in rows and the Stage button rides the end of the LAST row — never alone on its own
@@ -180,8 +184,8 @@ test("one ⌘-drag never lists the same context twice (the user 2026-08-04)", ()
   assert.doesNotMatch(listener, /quoteSeedIdx/, "the selectionchange listener never touches the gesture");
   // (2) …and identical text collapses regardless of the path that re-cited it (a repeated double-click,
   // a drag re-traced after a transcript rebuild killed the selection) — the gesture's own chip survives.
-  const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
-  assert.match(seeder, /if \(i !== idx && list\[i\]\.quote === chip\.quote\) \{\s*\n\s*list\.splice\(i, 1\);\s*\n\s*if \(i < idx\) idx--;/);
+  const gesture = RENDER.split("function seedGestureChip(")[1].split("\n}")[0];
+  assert.match(gesture, /if \(i !== idx && list\[i\]\.quote === chip\.quote\) \{\s*\n\s*list\.splice\(i, 1\);\s*\n\s*if \(i < idx\) idx--;/);
 });
 
 test("Enter with a live transcript selection drops into the message box with the quote as context (the user 2026-08-04)", () => {
@@ -317,7 +321,8 @@ test("an unclaimed printable keystroke drops the cursor into the composer — na
   assert.match(RENDER, /elm\.tagName === "SELECT"/, "SELECT is a typing target");
   assert.match(gates, /if \(activeId && liveAsks\.has\(activeId\)\) return null;/);
   assert.match(gates, /if \(ctxMenuEl \|\| pickerOverlayUp\(\)\) return null;/);
-  assert.match(gates, /romp-fileview[\s\S]*romp-filebrowse[\s\S]*romp-lightbox/);
+  assert.match(gates, /romp-filebrowse[\s\S]*romp-lightbox/);
+  assert.match(gates, /const box = activeInputBox\(\);/, "the file viewer and a comment popover are the active-input rule's (2026-10-07)");
   // NEVER preventDefault: the point is that the native keystroke inserts into the newly focused
   // box, so the composer's own input bookkeeping (draft, slash menu) sees ordinary typing
   assert.doesNotMatch(block, /preventDefault/);

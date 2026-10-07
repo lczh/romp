@@ -16,6 +16,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { activeInput } from "./active-input";
 
 const requireCjs = createRequire(__filename);
 const read = (...p: string[]): string => fs.readFileSync(path.resolve(process.cwd(), "..", ...p), "utf8");
@@ -91,7 +92,7 @@ class FakeDoc {
 }
 
 type Win = { keydown: Listener[]; addEventListener(t: string, f: Listener): void };
-type Hooks = { order: string[]; active: string; switched: Array<[string, boolean]> };
+type Hooks = { order: string[]; active: string; switched: Array<[string, boolean]>; activeInput: typeof activeInput };
 type StateKey = "ctxMenuEl" | "metaMenuEl" | "citePreviewEl" | "openCommentKey" | "pendingCommentAnchor";
 type Button = { label: string; value: string; danger?: boolean };
 type PageApi = {
@@ -113,7 +114,8 @@ function lift(): Lifted {
   // the chat window's bare-arrow handler, to its close; it registers itself on the window stub
   const keydown = ts(slice(RENDER, 'window.addEventListener("keydown", (e) => {\n  if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;',
     "\n});\n", "the bare-arrow handler") + "\n});\n");
-  const typeGate = ts(fn("function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {", "typeFromAnywhereTarget"));
+  const typeGate = ts(fn("function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {", "typeFromAnywhereTarget")
+    + fn("function activeInputBox(): HTMLTextAreaElement | null {", "activeInputBox"));   // the box the gate hands back: the active input (2026-10-07)
   const confirm = ts(slice(RENDER, "let confirmCb: ((v: string | null) => void) | null = null;", "// ---- move session", "showConfirm")
     + fn("function closeConfirm(value: string | null) {", "closeConfirm"));
   // pickerVisible and closePicker, and whatever the page keeps between them
@@ -141,6 +143,7 @@ function lift(): Lifted {
     const liveAsks = new Map();
     const pickFirstVisibleTab = () => false;
     let fileTabOpen = null; const fileStep = () => false;   // no file tab on the walk (2026-09-30): the session walk runs
+    const activeInput = H.activeInput;   // the active-input rule (active-input.ts), executed as the page runs it
     const visibleOrder = () => H.order.slice();
     const neighborOfFolded = () => null;
     const setActive = (id) => { H.switched.push([id, gestureHeld]); activeId = id; };
@@ -196,7 +199,7 @@ function page() {
   for (const id of ["rsettings", "ranalytics-back"]) { const n = doc.createElement("div"); n.id = id; n.hidden = true; doc.body.appendChild(n); }
   const composer = doc.createElement("textarea"); composer.id = "composer-input"; doc.body.appendChild(composer);
   const win: Win = { keydown: [], addEventListener(t, f) { if (t === "keydown") win.keydown.push(f); } };
-  const H: Hooks = { order: [WEB, API, TESTS], active: WEB, switched: [] };
+  const H: Hooks = { order: [WEB, API, TESTS], active: WEB, switched: [], activeInput };
   const api = (LIFTED ??= lift())(H, doc, win);
   const gear = (GEAR_LIFTED ??= liftGear())(doc);
   return { doc, win, H, api, gear, composer };

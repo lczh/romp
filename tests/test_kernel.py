@@ -84,6 +84,18 @@ def apierr_line(t, uuid, parent, text="API Error: 500 Internal server error.", s
     return o
 
 
+def _clear_seg_held():
+    """The card anchor walk's held aggregates emptied under their lock, as tests/test_feed_session_memo.py's _reset_memo
+    empties them (the review after the merge, 2026-10-06). A test that patches a helper the walk reads (the latest prose,
+    the plain-prompt time) and clears the card memo so the body runs must drop the held closed turns too, or a closed
+    turn's part is served from an aggregate an earlier build stored under another patch. The fixture here has one turn,
+    the open one, so for most tests nothing is held; test_feed_plain_reply_moves_block_to_working_while_in_flight writes
+    a closed turn before it, so there the hazard is real and a clear that does nothing turns that test red (the review
+    after the merge, 2026-10-07). Used beside each card memo clear and after each such patch."""
+    with km._FEED_SEG_LOCK:
+        km._FEED_SEG_HELD.clear()
+
+
 class ViewBuilder(unittest.TestCase):
     def setUp(self):
         km._downtime[:] = []          # isolate from the real persisted kernel-downtime.jsonl (loaded at import);
@@ -1557,6 +1569,7 @@ class ViewBuilder(unittest.TestCase):
         saved = km._session_awaiting
         def _feed():
             km._feed_memo.clear()          # T368: a patched helper is no input the per-session memo can see; make the body run
+            _clear_seg_held()              # ...and none the anchor walk's held turns can see either (2026-10-06)
             return km.build_feed(NOW)
         try:
             for n in (1, 3):
@@ -4209,6 +4222,7 @@ class ViewBuilder(unittest.TestCase):
         self.assertTrue(expect, "the fixture segment has a work anchor")
         saved = km._seg_last_text
         km._seg_last_text = lambda atoms: (None, False)   # no prose anywhere → the latest-prose fallback yields nothing
+        _clear_seg_held()                                  # no closed turn's prose held from before the patch
         try:
             nid = SID + ":g47"
             store = {"rompUuid": SID, "seq": 47, "nodes": {
@@ -4983,10 +4997,22 @@ class ViewBuilder(unittest.TestCase):
         # working↔needs-you at EVERY turn boundary of an active session (seven flips in six minutes on the
         # audited card); the watermark is the event the turn-bound was approximating, so the card now
         # returns exactly once, when the judge has actually re-considered and kept the block.
+        # A closed turn before the fixture's (whose one turn is the open one), so the card anchor walk holds the closed
+        # turns' plain-prompt time between builds and the clears below have something to drop (the review after the
+        # merge, 2026-10-07).
+        recs = [uline(T0 - 200, "page the notes-api search", "u0", ps="typed"),
+                aline(T0 - 180, "Paged the notes-api search.", "a0", "u0", stop="end_turn"),
+                uline(T0, "fix the feed flicker", "u1", "a0", ps="typed"),
+                aline(T0 + 20, "Looking at the renderer.", "a1", "u1", tools=("Edit",), stop="tool_use"),
+                trline(T0 + 25, "tu_a1_0", "r1", "a1", content="edited"),
+                aline(T0 + 40, "Fixed the feed flicker.", "a2", "r1", stop="end_turn")]
+        self.tpath.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        self._warm_tpath()
         g = self._blocked_store()
         saved_p, saved_w = km._last_plain_user_turn_t, km._session_working
         try:
             km._last_plain_user_turn_t = lambda turns: NOW - 10      # a plain reply AFTER the block (mt NOW-100)
+            _clear_seg_held()                                        # no closed turn's time held from another patch
             km._session_working = lambda turns: True                 # a turn is in flight
             card = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == g)
             self.assertEqual(card["column"], "working", "the reply moves the block to Working at once")
@@ -5004,6 +5030,8 @@ class ViewBuilder(unittest.TestCase):
             self.assertFalse(card_ruled["rejudging"], "ruled → no spinner (the latch cannot stick past a judge look)")
             g = self._blocked_store()
             km._last_plain_user_turn_t = lambda turns: NOW - 300     # a reply that PRE-dates the block
+            self.assertIn(SID, km._FEED_SEG_HELD, "the premise: the closed turn's aggregate is held, under NOW - 10")
+            _clear_seg_held()                                        # ...not the NOW - 10 an earlier build held
             km._session_working = lambda turns: True
             card_pre = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == g)
             self.assertFalse(card_pre["rejudging"], "no reply since the block → nothing to re-judge")
@@ -5024,6 +5052,7 @@ class ViewBuilder(unittest.TestCase):
         saved_p, saved_w = km._last_plain_user_turn_t, km._session_working
         def _feed():
             km._feed_memo.clear()          # T368: a patched helper is no input the per-session memo can see; make the body run
+            _clear_seg_held()              # ...and none the anchor walk's held turns can see either (2026-10-06)
             return km.build_feed(NOW)
         try:
             # NO plain reply since the block in the parse (the slash-command case: its expanded transcript
@@ -5066,6 +5095,7 @@ class ViewBuilder(unittest.TestCase):
         saved = km._last_plain_user_turn_t
         try:
             km._last_plain_user_turn_t = lambda turns: 0            # NO plain reply
+            _clear_seg_held()                                       # no closed turn's time held from before the patch
             cards = {a["itemId"]: a for a in km.build_feed(NOW)["asks"]}
             self.assertTrue(cards[g1]["recheck"], "targeted followup → that card re-checks")
             self.assertFalse(cards[g2]["recheck"], "sibling without a follow-up stays urgent-blocked")
@@ -5100,6 +5130,7 @@ class ViewBuilder(unittest.TestCase):
         saved_p, saved_w = km._last_plain_user_turn_t, km._session_working
         try:
             km._last_plain_user_turn_t = lambda turns: NOW - 10     # a plain reply AFTER the child's block
+            _clear_seg_held()                                       # no closed turn's time held from before the patch
             km._session_working = lambda turns: False
             card = next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == top)
             self.assertTrue(card["rejudging"], "reply not yet examined → the latch arms off the CHILD's block")
