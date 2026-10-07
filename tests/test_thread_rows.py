@@ -8,8 +8,10 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
+from pathlib import Path
 from romp_load import load_source
 from unittest import mock
 
@@ -93,15 +95,15 @@ class ThreadRowsRoute(unittest.TestCase):
         cls.srv.shutdown()
 
     def setUp(self):
-        self._saved = (km._session_rows, km._thread_rows)
-        if hasattr(km, "_sessions_listing_reset"):
-            km._sessions_listing_reset()                         # the kept listing is process-global: a stubbed builder must not serve an earlier build
-        km._session_rows = lambda: [{"id": PARENT, "name": "web", "state": "working"}]
-        km._thread_rows = lambda: [{"id": TSID, "name": "web-comment-1", "state": "working",
-                                    "thread": True, "parent": PARENT}]
+        self._saved = (km._session_rows_from, km._thread_rows)
+        km._sessions_listing_reset()                             # the kept listing is process-global: a stubbed builder must not serve an earlier build
+        km._session_rows_from = lambda live_map: [{"id": PARENT, "name": "web", "state": "working"}]   # the listing's two builders,
+        km._thread_rows = lambda table=None: [{"id": TSID, "name": "web-comment-1", "state": "working",  # which the route's first
+                                               "thread": True, "parent": PARENT}]                         # build (no cycle yet) runs
 
     def tearDown(self):
-        km._session_rows, km._thread_rows = self._saved
+        km._session_rows_from, km._thread_rows = self._saved
+        km._sessions_listing_reset()
 
     def _get(self, path):
         req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path),
@@ -418,10 +420,9 @@ class SessionByFsidRoute(unittest.TestCase):
         self.sb = load_source("romp_sdk_backend_rows", os.path.join(BIN, "romp_sdk_backend.py"))
         self.root = km.jd.STATE
         self.be = self.sb.SdkBackend(self.root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
-        self.asked = []                                   # the sids whose transcript records the route read
-        real = getattr(self.be, "known_fsids", None)      # absent on a source without the surface: the tests
-        if real is not None:                              # below then fail on the route's ANSWER, not here
-            self.be.known_fsids = lambda sid: (self.asked.append(sid), real(sid))[1]
+        self.asked = []                                   # the sids whose transcript records were read (the cycle's claims)
+        real = self.be.recorded_fsids
+        self.be.recorded_fsids = lambda sid: (self.asked.append(sid), real(sid))[1]
         names = self.names = {WEB: ("web", "/tmp/notes-api", "#112233", "#ffffff"),
                               API: ("api", "/tmp/notes-api", "#445566", "#ffffff")}
         self.live = {WEB: {"state": "idle", "backend": "sdk"}, API: {"state": "working", "backend": "sdk"}}
@@ -437,9 +438,11 @@ class SessionByFsidRoute(unittest.TestCase):
         self.sb.write_reg(self.root, API, {"sid": API, "cwd": "/tmp/notes-api", "alive": True, "lastSid": API})
         km.jd.append_episode(WEB, "head-1", OLD_FSID, 1)
         km.jd.append_episode(WEB, "head-2", NEW_FSID, 2)
+        km._sessions_listing_reset()                      # the route answers from the cycle's kept view, process-global
 
     def tearDown(self):
         km._sdk, km.Sessions.live, km._name_of, km._cwd_of, km._identity_of = self._saved
+        km._sessions_listing_reset()
         for f in (self.root / "sdk" / (WEB + ".json"), self.root / "sdk" / (API + ".json"),
                   self.root / "sdk" / (T_WEB + ".json"), self.root / "sdk" / (FORK + ".json"),
                   self.root / "comments" / (WEB + ".json"),
@@ -453,11 +456,15 @@ class SessionByFsidRoute(unittest.TestCase):
                 f.unlink()
 
     def _module_reads(self):
-        """Count the backend module's known_fsids reads by sid — the ledger parse the memo exists to skip.
-        Returns (the list, restore)."""
-        reads, real = [], self.sb.known_fsids
-        self.sb.known_fsids = lambda state_dir, sid, *a, **k: (reads.append(sid), real(state_dir, sid, *a, **k))[1]
-        return reads, lambda: setattr(self.sb, "known_fsids", real)
+        """Count the backend module's ledger reads by sid — the parse the memo exists to skip, and the only place a record is
+        read. Returns (the list, restore)."""
+        reads, real = [], self.sb.read_fsid_ledger
+        self.sb.read_fsid_ledger = lambda path, pick, start=0: (reads.append(Path(path).stem), real(path, pick, start))[1]
+        return reads, lambda: setattr(self.sb, "read_fsid_ledger", real)
+
+    def _cycle(self):
+        """The pusher's listing job, as it runs after any write: the route serves what the last one built."""
+        km._sessions_listing_refresh(int(time.time()), km.Sessions.live())
 
     def _get(self, path, token=True):
         """(status, body) — the body parsed as JSON when it is JSON, else the text."""
@@ -474,7 +481,10 @@ class SessionByFsidRoute(unittest.TestCase):
                 pass
             return e.code, body
 
-    def _by(self, fsid):
+    def _by(self, fsid, cycle=True):
+        """Ask the route, after the cycle that follows the test's writes (`cycle`)."""
+        if cycle:
+            self._cycle()
         return self._get("/sessions/by-fsid?fsid=" + urllib.parse.quote(fsid, safe=""))
 
     def _fork_web(self, at=OLD_FSID, born=False):
@@ -530,7 +540,7 @@ class SessionByFsidRoute(unittest.TestCase):
     def test_a_malformed_id_is_refused_before_any_record_is_read(self):
         for bad in ("", "../" + OLD_FSID, "." + OLD_FSID, OLD_FSID + "/x", "a" * 129):
             del self.asked[:]
-            code, body = self._by(bad)
+            code, body = self._by(bad, cycle=False)
             self.assertEqual(code, 400, (bad, body))
             self.assertEqual(body.get("ok"), False, (bad, body))
             self.assertEqual(self.asked, [], "no backend record is consulted for %r" % bad)
@@ -614,15 +624,14 @@ class SessionByFsidRoute(unittest.TestCase):
         self.assertEqual(code, 404, body)
         self.assertEqual(self._by(FORK)[1]["id"], FORK, "the fork still answers to its own id")
 
-    def test_an_unchanged_session_costs_no_ledger_read_on_the_next_ask(self):
-        # the bus asks per command and per 30 s heartbeat from every post-/clear session, for the rest of its
-        # CLI's life; the first ask parses every live session's ledgers (web's, whose records hold the id, and
-        # api's, whose sid and lastSid did not match), the next asks parse none, and only a session whose
-        # records CHANGED (a /clear head appended, a resume fork recorded) is read again — that one alone
+    def test_an_unchanged_session_costs_no_ledger_read_and_no_ask_reads_any(self):
+        # the bus asks per command and per 30 s heartbeat from every post-/clear session, for the rest of its CLI's life,
+        # so no ask reads a record: the cycle keeps the claims, and it reads a session's ledgers only when one of them
+        # moved (a /clear head appended, a resume fork recorded), that one alone, from where its last read ended
         reads, restore = self._module_reads()
         try:
             self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB)
-            self.assertEqual(sorted(reads), sorted([WEB, API]), "the first ask reads both sessions' records")
+            self.assertEqual(reads, [WEB], "the first cycle reads the one ledger there is, web's episode log")
             del reads[:]
             for _ in range(3):
                 self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB)
@@ -630,21 +639,23 @@ class SessionByFsidRoute(unittest.TestCase):
             self.assertEqual(self._by(UNKNOWN_FSID)[0], 404)
             self.assertEqual(reads, [], "a miss over the same records reads nothing either")
             km.jd.append_episode(WEB, "head-3", "aaaaaaaa-2222-3333-4444-555555555504", 3)
-            self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB)
+            self.assertEqual(self._by(OLD_FSID, cycle=False)[1]["id"], WEB)
+            self.assertEqual(reads, [], "an ask between the write and the cycle reads nothing")
+            self.assertEqual(self._by("aaaaaaaa-2222-3333-4444-555555555504")[1]["id"], WEB)
             self.assertEqual(reads, [WEB], "web's episode log grew: web alone is re-read")
             del reads[:]
             self.sb.append_resume_fork(self.root, API, UNKNOWN_FSID, FORK_FSID, 4)
             self.assertEqual(self._by(FORK_FSID)[1]["id"], API)
-            self.assertEqual(reads, [API], "api's states ledger grew: api alone is re-read")
+            self.assertEqual(reads, [API], "api's states ledger appeared: api alone is read")
             del reads[:]
             self.assertEqual(self._by(API)[1]["id"], API)
-            self.assertEqual(reads, [], "a session whose sid or lastSid IS the id is never asked for its ledgers")
+            self.assertEqual(reads, [], "nothing moved since: nothing is read")
         finally:
             restore()
 
     def test_a_record_that_would_not_read_is_answered_but_never_latched(self):
         # a ledger that is THERE but cannot be read (a directory where states/<sid>.jsonl goes stands in for
-        # EACCES/EIO/EMFILE: the stat succeeds, the read raises) must not memoize the partial set: the next ask
+        # EACCES/EIO/EMFILE: the stat succeeds, the read raises) must not memoize the partial set: the next cycle
         # re-reads that session, while an unaffected session's memo stands
         (self.root / "states").mkdir(exist_ok=True)
         (self.root / "states" / (API + ".jsonl")).mkdir()
@@ -652,7 +663,7 @@ class SessionByFsidRoute(unittest.TestCase):
         try:
             for _ in range(2):
                 self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB, "the route still answers off the readable records")
-            self.assertEqual(reads.count(API), 2, "the faulted session is re-read on the next ask, not latched")
+            self.assertEqual(reads.count(API), 2, "the faulted ledger is read again by the next cycle, not latched")
             self.assertEqual(reads.count(WEB), 1, "the clean one is memoized")
         finally:
             restore()

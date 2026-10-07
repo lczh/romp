@@ -1308,9 +1308,9 @@ class _PerfStats:
         memos["ghostDropped"] = dict(_GHOST_DROPPED, restamped=dict(_GHOST_DROPPED["restamped"]))   # the spawned-at ghost
         #   floor's drops: bgTasks and agents (cumulative, once per build), and what a RE-STAMP dropped (2026-09-14)
         memos["convergeDeclined"] = _CONVERGE_DECLINED[0]   # converges that asked no restart because this kernel was leaving
-        memos["sessionsListing"] = {"built": _SESSIONS_LISTING["built"], "served": _SESSIONS_LISTING["served"],
-                                    "requestBuilt": _SESSIONS_LISTING["requestBuilt"], "faultBuilt": _SESSIONS_LISTING["faultBuilt"],
-                                    "missBy": dict(_SESSIONS_LISTING["missBy"])}
+        memos["sessionsListing"] = {k: (dict(v) if isinstance(v, dict) else v) for k, v in _SESSIONS_LISTING.items()   # the
+                                    if k in ("built", "threadsBuilt", "claimsBuilt", "served", "byFsidServed", "requestBuilt",   # cycle's
+                                             "refused", "missBy", "threadsMissBy")}   # builds per product, and what requests read
         memos["nudgeWalk"] = dict(_NUDGE_WALK_STATS)   # the walk's parse gate: looks, skipped and paid parses, cold ones, the
         #                                                yield's deferrals, memos refused as unbounded or clock-due (T401 (2))
         memos["cleared"] = dict(_CLEARED_STATS)       # the clear set: parsed once per file state, served while it stands (2026-09-09)
@@ -31901,10 +31901,21 @@ def _supervisor_wait_s(now, rows=None):
     return SUPERVISOR_FAST_PASS_S if fast else SUPERVISOR_PASS_S
 
 
-_SESSIONS_LISTING = {"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "threadsGen": 0, "fault": None,
-                     "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}}   # GET /sessions from the cycle's snapshot
-#                      (plans/sessions-route-from-the-cycle.md): the rows built once per change by the pusher's cycle under an
-#                      exact key, served from memory to every request; `missBy` names the key input that moved
+_SESSIONS_LISTING = {"key": None, "threadsKey": None, "claimsKey": None, "view": None, "attempted": False,
+                     "built": 0, "threadsBuilt": 0, "claimsBuilt": 0, "served": 0, "byFsidServed": 0, "requestBuilt": 0,
+                     "refused": 0, "missBy": {}, "threadsMissBy": {}}
+# GET /sessions and GET /sessions/by-fsid from the cycle's snapshot (plans/sessions-route-from-the-cycle.md): the pusher's cycle
+# builds the rows, the comment-thread rows and the by-fsid claims once per change, each under an exact key, and publishes them
+# together as ONE view (a dict never written after it is published), so a request reads one cycle's world, from memory, and
+# reads no session, thread or record of its own. `key`, `threadsKey`, `claimsKey`: what the view's three products were built
+# under; `attempted`: a build has run (the cycle's, or the one a request makes before the first cycle, _listing_ready);
+# `missBy` and `threadsMissBy` name the key input that moved; `refused` counts the requests answered 503 because a product's
+# build failed since it was built (_listing_refused).
+_LISTING_VIEW_EMPTY = {"json": None, "rows": None, "byId": {}, "fault": None,
+                       "threads": None, "threadRows": None, "threadsById": {}, "threadsFault": None,
+                       "claims": None, "claimsFault": None}
+_LISTING_PRODUCTS = {"rows": ("json", "fault"), "thread rows": ("threads", "threadsFault"),
+                     "transcript claims": ("claims", "claimsFault")}   # each product's slot in the view, and its fault's
 
 
 def _reg_rev():
@@ -31922,8 +31933,9 @@ def _reg_rev():
 def _sessions_listing_reset():
     """The kept listing back to empty (a test's setUp; the listing is process-global, so a module that stubs the row builder
     per test must drop what an earlier build kept)."""
-    _SESSIONS_LISTING.update({"key": None, "rows": None, "json": None, "threads": None, "threadsKey": None, "threadsGen": 0,
-                              "fault": None, "built": 0, "served": 0, "requestBuilt": 0, "faultBuilt": 0, "missBy": {}})
+    _SESSIONS_LISTING.update({"key": None, "threadsKey": None, "claimsKey": None, "view": None, "attempted": False,
+                              "built": 0, "threadsBuilt": 0, "claimsBuilt": 0, "served": 0, "byFsidServed": 0,
+                              "requestBuilt": 0, "refused": 0, "missBy": {}, "threadsMissBy": {}})
 
 
 def _sessions_listing_key(live_map, names):
@@ -31966,8 +31978,9 @@ def _sessions_listing_key(live_map, names):
 
 def _launch_error_scoped(sid):
     """_launch_error through the cycle's memo (2026-09-21): inside a pusher cycle the first read per sid is kept on
-    _live_scope.launch_errors (opened and closed with the cycle's other memos, the _sessions idiom) and served to every
-    reader after it; outside a cycle every read is fresh, as _sessions behaves. The listing's one backend read per
+    _live_scope.launch_errors (opened and closed with the cycle's other memos, the _sessions idiom, and by the listing's
+    one request-side build, _listing_request_scope) and served to every reader after it; outside them every read is
+    fresh, as _sessions behaves. The listing's one backend read per
     session per cycle (the SDK backend's read is a registry file per session) is bounded by the pair memo, not by this
     one (the post-merge review of the listing pairing, 2026-09-22): this reader's only caller is the pair reader
     (_listing_pair_scoped), reached on the pusher thread from the refresh's key and rows alone, with
@@ -31997,14 +32010,14 @@ def _listing_pair_scoped(sid, tm, path):
     """One row's (compacting, launchError) for the /sessions listing, read in that order: the compacting bit
     (_compacting_now over the live meta `tm` and the transcript `path` the caller holds) and then the backend's launch
     error (_launch_error_scoped). Inside a listing refresh the first read per sid is kept on _live_scope.listing_pairs
-    (opened and closed by _sessions_listing_refresh around its key and its build, the _sessions idiom, thread-confined)
+    (opened and closed by _listing_rows_part around its key and its build, the _sessions idiom, thread-confined)
     and served to the row, so the key and the row read one world: the row read the bit fresh while its notice came from
     the key's read, and a loud end (the bit falls, the notice lands) between the two yielded not compacting with no
     notice, a clean end's shape, on any cycle another key input moved in or on the first cycle (the post-merge review of
     the native compaction, 2026-09-21). The order matters on its own: an end landing between the pair's two reads yields (compacting, notice),
     which `romp compact --wait` judges a loud end, where notice then bit would yield the clean end's shape again. Scoped
     to the listing pair alone: the chip, the drive-op gates and the drain read _compacting_now fresh. Outside a refresh
-    (a request's own build, GET /sessions/by-fsid) the pair is read fresh, in the same order."""
+    (a direct _session_rows() call) the pair is read fresh, in the same order."""
     sid = str(sid)
     memo = getattr(_live_scope, "listing_pairs", None)
     if memo is None:
@@ -32024,7 +32037,7 @@ def _listing_pair_key(sid, tm, path):
 def _compact_end_scoped(sid):
     """_compact_end through the cycle's memo (_live_scope.compact_end_records, the _launch_error_scoped idiom,
     2026-09-21): one backend read per session per cycle, shared by the listing's key and its rows; fresh outside a
-    cycle."""
+    cycle and the listing's request-side build (_listing_request_scope), which opens the same memo."""
     sid = str(sid)
     memo = getattr(_live_scope, "compact_end_records", None)
     if memo is None:
@@ -32059,110 +32072,269 @@ def _sessions_listing_miss(prev, cur):
 
 
 def _sessions_listing_refresh(now, live_map):
-    """The pusher's job (rule 1): the /sessions rows rebuilt once when their key moved, from the cycle's own liveness and
-    names snapshots, and kept with their JSON for every request until the next change."""
+    """The pusher's job (rule 1): the listing's three products rebuilt where their keys moved, from the cycle's own liveness
+    and names snapshots, and published as one view for every request until the next change (_listing_refresh). Until a
+    build has run, this takes the boot's one-build lock, which a request that beat the first cycle may hold
+    (_listing_ready): one build at boot, whoever asks first, and the cycle reads that build's keys."""
     names = getattr(_live_scope, "names", None)
+    if _SESSIONS_LISTING["attempted"]:
+        return _listing_refresh(live_map, names)
+    with _SESSIONS_LISTING_FLIGHT:
+        return _listing_refresh(live_map, names)
+
+
+def _listing_refresh(live_map, names):
+    """One build of the listing: the rows, then the comment-thread rows, then the by-fsid claims (which read the two), each
+    kept when its key stands, and ONE publish of the view they make, so a request never reads one product from this build
+    beside another from the last. A part that raises marks its product faulted in the view (the routes then refuse it,
+    loudly, until a build of it lands: _listing_refused) and the parts after it still run; the first raise is re-raised
+    after the publish, so the job's own line names the listing, and each later one is written here."""
+    L = _SESSIONS_LISTING
+    view = dict(L["view"] or _LISTING_VIEW_EMPTY)
+    errs = []
+    for part in (_listing_rows_part, _listing_threads_part, _listing_claims_part):
+        try:
+            part(view, live_map, names)
+        except Exception as e:
+            errs.append(e)
+    L["view"] = view
+    L["attempted"] = True
+    for e in errs[1:]:
+        sys.stderr.write("sessions-listing: %s" % "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+    if errs:
+        raise errs[0]
+
+
+def _listing_fault(e):
+    """A product's fault in the view: when its build failed and why, the refusal's words (_listing_refused)."""
+    return {"t": time.time(), "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _listing_rows_part(view, live_map, names):
+    """The /sessions rows (rule 2's key, _sessions_listing_key), built from the cycle's liveness map when the key moved."""
+    L = _SESSIONS_LISTING
     _live_scope.listing_pairs = {}                        # the pair memo (_listing_pair_scoped, 2026-09-21): the key's reads
     try:                                                  #  below are the rows' reads, one world for both
         key = _sessions_listing_key(live_map, names)
-        if _SESSIONS_LISTING["key"] == key and _SESSIONS_LISTING["json"] is not None:
+        if L["key"] == key and view["json"] is not None:
+            view["fault"] = None                          # the kept rows are this world's: a fault before is over
             return
-        why = _sessions_listing_miss(_SESSIONS_LISTING["key"], key)
-        try:
-            rows = _session_rows_from(live_map)
-            body = json.dumps(rows)
-        except Exception:
-            _SESSIONS_LISTING["fault"] = time.time()      # the kept listing is stale from here: requests build for themselves
-            raise                                         #  (below) until a build lands; the job's own try writes the line
+        why = _sessions_listing_miss(L["key"], key)
+        rows = _session_rows_from(live_map)
+        body = json.dumps(rows)
+    except Exception as e:                                # the key or the build: the kept rows may be stale from here, so
+        view["fault"] = _listing_fault(e)                 #  they are refused until a build lands; the job's line has the
+        raise                                             #  traceback
     finally:
         _live_scope.listing_pairs = None
-    _SESSIONS_LISTING.update({"key": key, "rows": rows, "json": body, "fault": None, "built": _SESSIONS_LISTING["built"] + 1})
-    _SESSIONS_LISTING["missBy"][why] = _SESSIONS_LISTING["missBy"].get(why, 0) + 1   # the thread rows keep their own key (below)
+    view.update({"json": body, "rows": rows, "byId": {r.get("id"): r for r in rows}, "fault": None})
+    L["key"] = key
+    L["built"] += 1
+    L["missBy"][why] = L["missBy"].get(why, 0) + 1
+
+
+def _listing_threads_part(view, live_map, names):
+    """The comment-thread rows (?threads=1, rule 3), from the backend's thread table as this cycle reads it
+    (SdkBackend.thread_sessions: the thread set from the registry's rows table, re-read only when the rows revision moved,
+    and each running thread's state, read alone), under their own exact key (_thread_rows_key), built when it moved."""
+    L = _SESSIONS_LISTING
+    try:
+        be = _sdk()
+        table = be.thread_sessions() if be and hasattr(be, "thread_sessions") else {}
+        key = _thread_rows_key(table)
+        if L["threadsKey"] == key and view["threads"] is not None:
+            view["threadsFault"] = None
+            return
+        why = _thread_rows_miss(L["threadsKey"], key)
+        rows = _thread_rows(table)
+        body = json.dumps(rows)
+    except Exception as e:
+        view["threadsFault"] = _listing_fault(e)
+        raise
+    view.update({"threads": body, "threadRows": rows, "threadsById": {r.get("id"): r for r in rows}, "threadsFault": None})
+    L["threadsKey"] = key
+    L["threadsBuilt"] += 1
+    L["threadsMissBy"][why] = L["threadsMissBy"].get(why, 0) + 1
+
+
+def _listing_claims_part(view, live_map, names):
+    """GET /sessions/by-fsid's claims, kept beside the rows they answer with: transcript id -> the live sessions and comment
+    threads whose records hold it, after the lineage rule (_session_by_fsid says why each piece exists). Each owner is a row
+    of this view: its sid, its lastSid, and for an SDK one the ids its two ledgers record (SdkBackend.recorded_fsids, each
+    ledger read once and then only what was appended); a fork or a thread yields an id its parent's records hold (the
+    parent's sid, its lastSid and its ledgers, whether or not it still runs; the parent from the thread row, or the fork
+    lineage on the registry's rows table, SdkBackend.fork_parents). The key is those sets themselves, read here each
+    cycle (two stats per SDK owner and per parent), so the map is rebuilt exactly when one of them moved."""
+    L = _SESSIONS_LISTING
+    try:
+        be = _sdk()
+        recorded = getattr(be, "recorded_fsids", None) if be else None
+        forks = (be.fork_parents() if be and hasattr(be, "fork_parents") else None) or {}
+        owners = [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), r.get("backend") == "sdk", forks.get(str(r.get("id")), ""))
+                  for r in (view["rows"] or [])]
+        listed = {o[0] for o in owners}
+        owners += [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), True, str(r.get("parent") or ""))
+                   for r in (view["threadRows"] or []) if str(r.get("id")) not in listed]
+
+        def ids(sid, last, sdk):
+            return frozenset((sid, last)) | (recorded(sid) if sdk and recorded else frozenset())
+
+        own = {sid: ids(sid, last, sdk) for sid, last, sdk, _p in owners}
+        sdk_owner = {sid for sid, _l, sdk, _p in owners if sdk}
+        held = {}
+        for sid, _l, _s, parent in owners:
+            if parent and parent != sid and parent not in held:   # a live SDK parent's set is its own; an ended one is read
+                held[parent] = own[parent] if parent in sdk_owner else ids(parent, jd._sdk_last_sid(parent) or parent, True)
+        key = tuple((sid, own[sid], parent, held.get(parent)) for sid, _l, _s, parent in owners)
+        if L["claimsKey"] == key and view["claims"] is not None:
+            view["claimsFault"] = None
+            return
+        claims = {}
+        for sid, _l, _s, parent in owners:
+            lineage = held.get(parent) if parent and parent != sid else None
+            for fsid in own[sid] - (lineage or frozenset()):
+                claims.setdefault(fsid, []).append(sid)
+    except Exception as e:
+        view["claimsFault"] = _listing_fault(e)
+        raise
+    view.update({"claims": claims, "claimsFault": None})
+    L["claimsKey"] = key
+    L["claimsBuilt"] += 1
+
+
+_SESSIONS_LISTING_FLIGHT = threading.Lock()   # rule 1's one build before the first cycle (_listing_ready), taken by the cycle's
+#                                               refresh too until a build has run; never again after (the `attempted` mark)
+
+
+def _listing_ready():
+    """Rule 1's one build before the first cycle: while no build has run, the first request runs one, over a liveness
+    snapshot of its own (_listing_request_scope), and every other asker (the first cycle's refresh included) waits on the
+    lock for it and reads its view under its keys, so the cycle then rebuilds only what moved since. Never taken again once
+    a build has run, a failed one included: a product whose build failed is refused (_listing_refused), never rebuilt for a
+    request, which is the walk per request that hung the kernel (2026-10-07)."""
+    L = _SESSIONS_LISTING
+    if L["attempted"]:
+        return
+    with _SESSIONS_LISTING_FLIGHT:
+        if L["attempted"]:
+            return
+        L["requestBuilt"] += 1
+        try:
+            with _listing_request_scope() as (live_map, names):
+                _listing_refresh(live_map, names)
+        except Exception:
+            sys.stderr.write("sessions-listing (the build a request made before the first cycle): %s\n" % traceback.format_exc())
+        finally:
+            L["attempted"] = True
+
+
+@contextlib.contextmanager
+def _listing_request_scope():
+    """The world the listing's build reads when a request runs it (_listing_ready): one liveness snapshot and the memos the
+    pusher opens around a cycle for the listing's reads (the discover rows, the paths, the names, the launch errors, the
+    compaction ends), on this thread for the build and restored after, so the build reads one world as the cycle's does
+    and keeps the keys the cycle will compare. Yields (the liveness map, the names snapshot)."""
+    slots = ("snapshot", "sessions", "paths", "names", "launch_errors", "compact_end_records")
+    saved = {s: getattr(_live_scope, s, None) for s in slots}
+    try:
+        live_map = Sessions.live()
+        _live_scope.snapshot = live_map
+        _live_scope.sessions, _live_scope.paths = {}, {}
+        _live_scope.launch_errors, _live_scope.compact_end_records = {}, {}
+        _live_scope.names = _names_snapshot()
+        yield live_map, _live_scope.names
+    finally:
+        for s, v in saved.items():
+            setattr(_live_scope, s, v)
+
+
+def _listing_refused(view, wants):
+    """The refusal a request gets when the view cannot vouch for what it asks (None when it can): one of the products
+    `wants` names (_LISTING_PRODUCTS) faulted at its last build, so the kept copy may be stale, or was never built. Answered
+    as a 503 with the time and the error, which the postal bus reads as a kernel that did not answer (it rules no session
+    dead on one): the cycle is the listing's one builder, and a stale listing served as current would read a dead session
+    as live or a new one as absent, quietly (the authoritative-sources rule)."""
+    for name in wants:
+        product, fault = _LISTING_PRODUCTS[name]
+        f = view.get(fault)
+        if f is None and view.get(product) is not None:
+            continue
+        _SESSIONS_LISTING["refused"] += 1
+        why = ("its build failed at %s (%s), so the kept copy may be stale" % (time.strftime("%H:%M:%S", time.localtime(f["t"])), f["error"])
+               if f is not None else "it has not been built")
+        return {"ok": False, "error": "the session listing's %s cannot be served: %s; the kernel log has the traceback" % (name, why)}
+    return None
 
 
 def _sessions_listing_serve(threads=False):
-    """The route's read: the kept JSON (a cycle old at most), or one build when no cycle has run yet (kept under no key, so
-    the first cycle rebuilds it under its own). `threads`: the comment-thread rows appended, kept apart under the registry
-    revision and the parents' comments stores (a thread's editable name lives there)."""
+    """(status, body) for GET /sessions: the cycle's kept rows (a cycle old at most), or the build a request makes when no
+    cycle has run yet (_listing_ready). `threads`: the comment-thread rows appended, as the postal bus asks. A request reads
+    the view alone: no session, thread or record. A 503 when a product it carries faulted at its last build."""
+    _listing_ready()
     L = _SESSIONS_LISTING
-    if L["json"] is None:
-        with _SESSIONS_LISTING_FLIGHT:                             # one build before the first cycle, however many ask (below)
-            if L["json"] is None:
-                rows = _session_rows()
-                L.update({"rows": rows, "json": json.dumps(rows), "requestBuilt": L["requestBuilt"] + 1})
+    v = L["view"] or _LISTING_VIEW_EMPTY
     L["served"] += 1
-    if L["fault"] is not None:                                     # the cycle's build failed since the kept listing: it may be
-        body = json.dumps(_session_rows())                         #  stale, so this request builds for itself, as the base did
-        L["faultBuilt"] += 1
-    else:
-        body = L["json"]
-    if not threads:
-        return body
-    th = _thread_rows_shared()
-    if th == "[]":
-        return body
-    return body[:-1] + ("," if body != "[]" else "") + th[1:]
+    refused = _listing_refused(v, ("rows", "thread rows") if threads else ("rows",))
+    if refused is not None:
+        return 503, json.dumps(refused)
+    body = v["json"]
+    if not threads or v["threads"] == "[]":
+        return 200, body
+    return 200, body[:-1] + ("," if body != "[]" else "") + v["threads"][1:]
 
 
-_SESSIONS_LISTING_FLIGHT = threading.Lock()   # the request-side build before the first cycle (_sessions_listing_serve)
-_THREAD_ROWS_FLIGHT = threading.Lock()        # the thread rows' key read and rebuild (_thread_rows_shared)
-
-
-def _thread_rows_shared():
-    """The thread rows' JSON for GET /sessions?threads=1, computed by ONE request at a time and shared with every request
-    that waited while it ran (single flight, 2026-10-07). Both halves cost a walk of every thread: the key
-    (_thread_rows_key reads each thread's registry row and snapshot) on every request, and a miss's rebuild
-    (_thread_rows, a session-flags read per thread). Every session's and thread's postal service fetches this
-    listing, so with nothing shared the work grew as threads times callers: on a host with ~150 live threads and
-    ~240 postal services the requests ran side by side, each past the callers' 6 s cap, the callers fetched again,
-    and the abandoned handlers kept computing, until ~2,000 handler threads queued on the GIL and the kernel stopped
-    accepting connections (it re-hung within minutes of each restart, when every postal service asked at once).
-    One flight bounds the work to one walk at a time whatever the request count. A request that arrived while a walk
-    was running takes that walk's result when it ends (threadsGen moved): it is one walk old at most, the same order
-    of staleness as the base rows, which are a cycle old at most."""
-    L = _SESSIONS_LISTING
-    arrived = L["threadsGen"]
-    with _THREAD_ROWS_FLIGHT:
-        if L["threadsGen"] != arrived and L["threads"] is not None:
-            return L["threads"]                                    # a walk ended while this request waited: share it
-        tkey = _thread_rows_key()
-        if L["threads"] is None or L["threadsKey"] != tkey:
-            L["threads"], L["threadsKey"] = json.dumps(_thread_rows()), tkey
-        L["threadsGen"] += 1
-        return L["threads"]
-
-
-def _thread_rows_key():
-    """The thread rows' key: the registry revision (a thread's registration, its parent, its life, and the unreadable-reg
-    bit of its mailbox fields), the session-flags store's stat (postalServiceOff and mailOffWhy read it), and the parents'
-    comments stores' stats (its editable name), with the live state of each thread session."""
-    be = _sdk()
+def _thread_rows_key(table):
+    """The thread rows' exact key (rule 2: every field a thread row carries is a function of these inputs), from the cycle's
+    thread table (`table`: SdkBackend.thread_sessions as this cycle read it) and reads of one stat each, never a registry
+    scan. Six components, so a miss names the one that moved (_thread_rows_miss):
+      table     each thread with its parent (the row's id, thread and parent)
+      state     each thread's live state, as the table carries it (state)
+      comments  each parent's comments store by stat (name: a thread's editable name lives there)
+      flags     the session-flags store by stat, with the read-fault bit _flags_unknown_cold keeps (postalServiceOff and
+                mailOffWhy read both); the flags are read first, as the rows read them, so the bit is this read's
+      names     each thread's names entry (dir: a thread has none until a move writes one)
+      reg       each thread's registration as _thread_reg_read answers it: readable or not, its threadOf and its lastSid (the
+                unreadable door of mailOffWhy, the thread rule's threadOf, lastSid). The rows revision covers this process's
+                writes of the last two; this read covers any writer's, and the unreadable bit, which no write moves."""
+    _session_flags()
     try:
         fst = (jd.STATE / "session-flags.json").stat()
         flags = (fst.st_mtime_ns, fst.st_size)
     except OSError:
         flags = None
-    if not be or not hasattr(be, "thread_sessions"):
-        return ("none", _reg_rev(), flags)
-    parts = [_reg_rev(), flags]
-    try:
-        for tsid, meta in sorted(be.thread_sessions().items()):
-            parent = str(meta.get("threadOf") or "")
+    comments, ids, states, names, regs = {}, [], [], [], []
+    for tsid, meta in sorted(table.items()):
+        parent = str(meta.get("threadOf") or "")
+        if parent not in comments:
             try:
                 st = _comments_path(parent).stat()
-                cst = (st.st_mtime_ns, st.st_size)
-            except Exception:
-                cst = None
-            parts.append((tsid, meta.get("state"), parent, cst))
-    except Exception:
-        parts.append(("unreadable", time.time()))
-    return tuple(parts)
+                comments[parent] = (st.st_mtime_ns, st.st_size, st.st_ino)
+            except OSError:
+                comments[parent] = None
+        ids.append((tsid, parent))
+        states.append(meta.get("state"))
+        parts = _names_parts(tsid)
+        names.append(tuple(parts) if parts else None)
+        rstate, reg = _thread_reg_read(tsid)
+        regs.append((rstate, bool(reg.get("threadOf")), reg.get("lastSid")))
+    return (tuple(ids), tuple(states), tuple(sorted(comments.items())), (flags, _flags_unknown_cold()), tuple(names), tuple(regs))
+
+
+def _thread_rows_miss(prev, cur):
+    """Which thread-rows key input moved between two keys, for memos.sessionsListing.threadsMissBy."""
+    if prev is None:
+        return "first"
+    for name, i in (("table", 0), ("state", 1), ("comments", 2), ("flags", 3), ("names", 4), ("reg", 5)):
+        if prev[i] != cur[i]:
+            return name
+    return "other"
 
 
 def _session_rows():
     """Every LIVE romp session (every backend) with the fields external tools need: id (sid), name, claude-state,
-    working dir, identity bg/fg, the set_working ownership note, and which backend drives it. Served at GET
-    /sessions so a plugin (the Obsidian Cmd+M picker / diff chips) AND the postal bus read sessions through the
+    working dir, identity bg/fg, the set_working ownership note, and which backend drives it: the rows GET /sessions
+    serves (from the pusher's kept build of them, _listing_rows_part), so a plugin (the Obsidian Cmd+M picker / diff
+    chips) AND the postal bus read sessions through the
     kernel WITHOUT asking a backend — the kernel owns the backend query: Sessions.live() enumerates every backend
     (the SDK registry for SDK sessions, the Codex registry for Codex ones). Replaced the tmux-only
     _tmux_session_list (the user 2026-06-26: every backend behind one session API). Best-effort [] if no backend
@@ -32186,8 +32358,8 @@ def _session_rows_from(live_map):
 def _session_listing_row(sid, meta, notes, path):
     """ONE live session's GET /sessions row, from the listing's shared reads: `meta` its Sessions.live()
     entry, `notes` the working-notes map, `path` its transcript path (None = no transcript, exactly
-    _path_of's miss). The whole listing (_session_rows) maps this over Sessions.live() with the paths from
-    its ONE sweep; GET /sessions/by-fsid (_session_by_fsid) builds the one row it serves through it, so the
+    _path_of's miss). The whole listing (_session_rows_from) maps this over the liveness map with the paths from
+    its ONE sweep; GET /sessions/by-fsid (_session_by_fsid) serves the listing's own kept row, so the
     two routes cannot drift apart in shape (2026-09-15). Never raises: one row's helper blowing up must not
     hide the session — or the WHOLE listing (absence reads as death downstream: the postal bus refuses sends
     on it), so the failing row is kept minimal. Same per-row contract as the SDK merge's guard (2026-08-31)."""
@@ -32233,9 +32405,9 @@ def _session_by_fsid(fsid):
     """(HTTP status, JSON body) for GET /sessions/by-fsid?fsid=<id>: the ONE live session's /sessions row
     whose transcript ids include `fsid` — the sid itself, its current transcript (the row's lastSid), each
     /clear episode head the boundary tick recorded and both ends of every resume fork
-    (SdkBackend.known_fsids; a Codex session's only transcript id is its sid; the tick walks the
-    discovered, tabbed sessions, so a comment thread's /clear heads leave no row and a thread is on record
-    here through its reg and its resume forks). A session born as a fork also carries its PARENT's
+    (SdkBackend.recorded_fsids; a Codex session's only transcript ids are its sid and its lastSid; the tick
+    walks the discovered, tabbed sessions, so a comment thread's /clear heads leave no row and a thread is on
+    record here through its reg and its resume forks). A session born as a fork also carries its PARENT's
     fork-time transcript in its records, which never makes it an owner (lineage, below). The postal bus
     asks this for a session whose CLAUDE_CODE_SESSION_ID matched
     no /sessions row by id or by lastSid: the session's postal MCP server is a child started with the CLI
@@ -32245,113 +32417,73 @@ def _session_by_fsid(fsid):
     through its tools arrived "from an unidentified session" and its inbox read a mailbox keyed by a
     transcript id nobody delivers to, until its CLI restarted (reproduced 2026-09-15; a send from a fresh
     shell, whose environment carried the current id, was attributed). Comment threads are joined too
-    (SdkBackend.thread_sessions, the rows Sessions.live deliberately hides), because the bus's listing is
+    (the ?threads=1 rows, which Sessions.live deliberately hides), because the bus's listing is
     the ?threads=1 one: a thread whose CLI was resumed onto a fresh head (its resumeFork row records the
     old id; a thread's own /clear leaves no row anywhere and keeps the bus's fallback) would otherwise 404
     here forever, fall back to its stale id, and pass the sender gate as an ORDINARY session (the thread
     rule reads the reg under the resolved id, and no reg sits under a transcript id), mailing out
-    unattributed past the very rule that holds a thread's mail (T356). A thread answers with its ?threads=1 row (_thread_rows: thread:true, the parent,
-    its mail-off fields), so the bus sees exactly what the listing would have shown it. 404 when no live
-    session or thread claims the id; 409 when more than one does (a resumed transcript's two ends can sit
-    on two live sessions): the bus keeps its own fallback on either, and the kernel never guesses an
-    identity. Not the whole listing: /sessions is the hot route (mean 364 ms live) and this is asked per
-    postal command by every post-/clear session (and per heartbeat until its bus confirms it local), so
-    one row is built, from its own
-    transcript-path lookup, and a session whose sid or lastSid IS the id is never asked for its ledgers
-    (the memoized known_fsids answers the rest)."""
-    live = Sessions.live()
-    be = _sdk()
-    threads = {}
-    if be and hasattr(be, "thread_sessions"):
-        try:
-            threads = be.thread_sessions()
-        except Exception:
-            sys.stderr.write("session by-fsid: comment threads unreadable (the sessions still count): %s\n"
-                             % traceback.format_exc())
+    unattributed past the very rule that holds a thread's mail (T356). A thread answers with its ?threads=1 row (thread:true,
+    the parent, its mail-off fields), so the bus sees exactly what the listing would have shown it.
 
-    def claims(sid, is_sdk):
-        # `fsid` is on record for `sid`: its sid or lastSid first (no ledger read when one of them is the
-        # id), else its known_fsids. Reads an ENDED session's records as readily as a live one's: the
-        # lineage check below asks it about a fork's parent whether or not that parent still runs.
-        ids = {sid, jd._sdk_last_sid(sid) or sid}
-        if fsid not in ids and is_sdk and be and hasattr(be, "known_fsids"):
-            try:
-                ids |= set(be.known_fsids(sid))
-            except Exception:
-                sys.stderr.write("session by-fsid: transcript ids of %s unreadable (its sid and lastSid "
-                                 "still count): %s\n" % (sid, traceback.format_exc()))
-        return fsid in ids
+    A session born as a FORK of another carries its PARENT's fork-time transcript in its own records: the seed row
+    _seed_fork_stores writes into episodes/<fork>.jsonl (the conversation root, under the parent's fsid, so the judges never
+    re-judge the copied history), and a reg born with the parent's lastSid until the CLI's init flips it to the fork's own
+    sid (backend.fork) — a deliberate fork, a comment thread and a promoted thread alike. That is lineage, not ownership: the
+    fork's transcripts are pinned to its own sid, and the parent is the one session whose process can carry that id. Read as
+    ownership it made the parent's next /clear after a fork produce TWO claimants of the parent's prior transcript, a 409,
+    and the bus's fallback to its stale id — the defect standing for exactly the sessions with a live fork (review find,
+    2026-09-15). So a claimant whose fork parent's records hold the id yields to the parent: a live parent answers; an ended
+    one leaves the id nobody's (404), never the fork's.
 
-    owners = [sid for sid, is_sdk in ([(sid, meta.get("backend") == "sdk") for sid, meta in live.items()]
-                                      + [(tsid, True) for tsid in threads if tsid not in live])
-              if claims(sid, is_sdk)]
-    if owners:
-        # A session born as a FORK of another carries its PARENT's fork-time transcript in its own records:
-        # the seed row _seed_fork_stores writes into episodes/<fork>.jsonl (the conversation root, under the
-        # parent's fsid, so the judges never re-judge the copied history), and a reg born with the parent's
-        # lastSid until the CLI's init flips it to the fork's own sid (backend.fork) — a deliberate fork, a
-        # comment thread and a promoted thread alike. That is lineage, not ownership: the fork's transcripts
-        # are pinned to its own sid, and the parent is the one session whose process can carry that id.
-        # Read as ownership it made the parent's next /clear after a fork produce TWO claimants of the
-        # parent's prior transcript, a 409, and the bus's fallback to its stale id — the defect standing for
-        # exactly the sessions with a live fork (review find, 2026-09-15). So a claimant whose fork parent's
-        # records hold the id yields to the parent: a live parent answers; an ended one leaves the id
-        # nobody's (404), never the fork's. fork_children is the durable forkedFrom of every deliberate or
-        # promoted fork (a stat-memoized read); a live comment thread names its parent in the listing.
-        parent_of = {tsid: str(t.get("threadOf") or "") for tsid, t in threads.items()}
-        if be and hasattr(be, "fork_children"):
-            try:
-                for psid, kids in be.fork_children().items():
-                    for kid in kids:
-                        parent_of.setdefault(kid.get("sid"), psid)
-            except Exception:
-                sys.stderr.write("session by-fsid: fork lineage unreadable (every claimant counts): %s\n"
-                                 % traceback.format_exc())
-        owners = [sid for sid in owners
-                  if not (parent_of.get(sid) and parent_of[sid] != sid and claims(parent_of[sid], True))]
+    Served from the cycle's view like the listing (plans/sessions-route-from-the-cycle.md): the claims are a product the
+    pusher keeps beside the rows (_listing_claims_part), so an ask reads one map and one row, and no session, thread or
+    record; until 2026-10-07 every ask read every live session's and thread's records and the thread table for itself, from
+    the postal service of every post-/clear session per command and per beat. 404 when no live session or thread claims the
+    id; 409 when more than one does (a resumed transcript's two ends can sit on two live sessions): the bus keeps its own
+    fallback on either, and the kernel never guesses an identity. A 503 when a product it reads faulted at its last build."""
+    _listing_ready()
+    L = _SESSIONS_LISTING
+    v = L["view"] or _LISTING_VIEW_EMPTY
+    L["byFsidServed"] += 1
+    refused = _listing_refused(v, ("rows", "thread rows", "transcript claims"))
+    if refused is not None:
+        return 503, refused
+    owners = v["claims"].get(fsid) or []
     if not owners:
         return 404, {"ok": False, "error": "no live session has transcript %s" % fsid}
     if len(owners) > 1:
         return 409, {"ok": False, "error": "%d live sessions claim transcript %s (%s); refusing to guess which"
                      % (len(owners), fsid, ", ".join(sorted(owners)))}
-    sid = owners[0]
-    if sid in threads:
-        row = next((r for r in _thread_rows() if r.get("id") == sid), None)
-        if row is None:   # the thread ended between the two reads: no row to serve, and nothing to guess
-            return 404, {"ok": False, "error": "no live session has transcript %s (comment thread %s claimed "
-                                               "it but has no listing row now)" % (fsid, sid)}
-        return 200, row
-    try:
-        path = _path_of(sid)
-    except Exception:
-        # the same containment the listing gives its sweep (2026-08-31): a discover raise degrades to a
-        # pathless row (compacting False), never a 500 for a lookup whose answer is the row's id
-        sys.stderr.write("session by-fsid: path lookup for %s failed (row serves pathless): %s\n"
-                         % (sid, traceback.format_exc()))
-        path = None
-    return 200, _session_listing_row(sid, live[sid], _working_notes(), path)
+    row = v["byId"].get(owners[0]) or v["threadsById"].get(owners[0])
+    if row is None:                     # the claims are built from this view's own rows, so this is a broken invariant: said
+        return 500, {"ok": False, "error": "the transcript claims name %s, which has no listing row" % owners[0]}
+    return 200, row
 
 
-def _thread_rows():
+def _thread_rows(table=None):
     """Comment-thread sessions as /sessions rows, served ONLY behind ?threads=1 (the user 2026-08-22:
     a thread is a real forked session and should mail its parent under its own name — but it stays a
     minor player, hidden from every default listing until promotion). The name comes from the parent's
-    comments store, the one place a thread's editable name lives; rows carry thread:true + the parent
-    sid so the bus can mark them and resolve replies."""
-    be = _sdk()
-    if not be or not hasattr(be, "thread_sessions"):
-        return []
+    comments store, the one place a thread's editable name lives, read once per parent; rows carry thread:true + the parent
+    sid so the bus can mark them and resolve replies. `table`: the backend's thread table as the caller read it (the
+    cycle's, _listing_threads_part, whose key reads the same inputs); None reads it here."""
+    if table is None:
+        be = _sdk()
+        if not be or not hasattr(be, "thread_sessions"):
+            return []
+        table = be.thread_sessions()
     out = []
-    for tsid, meta in be.thread_sessions().items():
+    names = {}                                            # parent -> {thread id: its name}: one comments read per parent
+    for tsid, meta in table.items():
         parent = str(meta.get("threadOf") or "")
-        nm = ""
-        try:
-            for t in (_load_comments(parent).get("threads") or []):
-                if t.get("tid") == tsid:
-                    nm = str(t.get("name") or "")
-                    break
-        except Exception:
-            pass
+        if parent not in names:
+            names[parent] = {}
+            try:
+                for t in (_load_comments(parent).get("threads") or []):
+                    names[parent].setdefault(t.get("tid"), str(t.get("name") or ""))
+            except Exception:
+                pass
+        nm = names[parent].get(tsid, "")
         out.append({"id": tsid, "name": nm or tsid[:8], "state": meta.get("state", ""),
                     "dir": _cwd_of(tsid), "thread": True, "parent": parent,
                     "lastSid": jd._sdk_last_sid(tsid) or tsid,
@@ -78386,8 +78518,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(_token_analytics(int(time.time()), w)),
                                   "application/json", cache="no-cache")
             if p == "/sessions":                              # unified romp session list (every backend) for external tools (the Obsidian plugin, the postal bus)
-                body = _sessions_listing_serve(threads=(q.get("threads") or [""])[0] == "1")   # the cycle's kept rows (a cycle old at
-                return self._send(200, body, "application/json", cache="no-cache")           #  most); ?threads=1 appends the thread rows
+                code, body = _sessions_listing_serve(threads=(q.get("threads") or [""])[0] == "1")   # the cycle's kept rows (a cycle
+                return self._send(code, body, "application/json", cache="no-cache")   # old at most); ?threads=1 appends the thread rows
             if p == "/sessions/by-fsid":
                 # ONE live session's (or comment thread's) row by any transcript id it has owned — the postal
                 # bus's self-identity join for a session whose environment still carries a pre-/clear id
