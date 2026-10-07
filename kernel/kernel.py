@@ -47894,8 +47894,8 @@ _FEED_NUDGE_FIELDS = ("count", "failed", "failedAt")  # the fields the card read
 # row miss is attributed to the positions that moved (row_by).
 _FEED_ROW_FIELDS = ("state", "since", "billing", "retry", "agents", "tasks")   # `billing`, not `auth`: miss_by's `auth` is the
 #                                                  machine's key on hand (_auth_key_present), a board-wide input; this is one row's fields
-_FEED_ROW_AUTH_FIELDS = ("authLive", "auth", "authLogin", "authLoginLive", "authLabel")   # the billing position's fields:
-#                                                  _cap_switch_offer (authLive, auth); _login_refusal_label and the body's refused-login
+_FEED_ROW_AUTH_FIELDS = ("authLive", "auth", "authPending", "authLogin", "authLoginLive", "authLabel")   # the billing position's fields:
+#                                                  _cap_switch_offer (authLive, auth, authPending); _login_refusal_label and the body's refused-login
 #                                                  mark (authLogin, authLoginLive, authLabel)
 _FEED_ROW_RETRY_FIELDS = ("max", "status", "networkDown", "rateLimitType")   # the retryInfo fields _session_retrying reads, beside retryCount
 _FEED_ROW_AGENT_FIELDS = ("agentId", "type", "since")                      # the subagents fields _awaiting_live_rows reads
@@ -48224,8 +48224,9 @@ def _feed_row_key(tm):
     whole-row fold keyed an empty row None while `live` read True). The positions:
       state, since: `live`, perm_state, _warm_wanted's state, the blocked placeholder's since; the key builder itself
         also reads state, for the `ask` gate (a row on a permission or picker prompt asks the backend for its ask).
-      billing: authLive and auth (_cap_switch_offer), authLogin, authLoginLive and authLabel (_login_refusal_label and
-        the body's refused-login mark): five named reads, so the census derivation sees each (_FEED_ROW_AUTH_FIELDS
+      billing: authLive, auth and authPending (_cap_switch_offer: a switch already waiting stands the offer down,
+        2026-10-07), authLogin, authLoginLive and authLabel (_login_refusal_label and the body's refused-login mark): six
+        named reads, so the census derivation sees each (_FEED_ROW_AUTH_FIELDS
         documents them and is pinned to these reads). Named for what it is, not `auth`: miss_by's `auth` label is the
         machine's key on hand, a board-wide input, and /perf shows the two maps side by side.
       retry: retryCount and retryInfo's max, status, networkDown and rateLimitType (_session_retrying). Keyed whether
@@ -48252,7 +48253,8 @@ def _feed_row_key(tm):
         return None
     info = tm.get("retryInfo") if isinstance(tm.get("retryInfo"), dict) else {}
     return (tm.get("state"), tm.get("since"),
-            (tm.get("authLive"), tm.get("auth"), tm.get("authLogin"), tm.get("authLoginLive"), tm.get("authLabel")),
+            (tm.get("authLive"), tm.get("auth"), tm.get("authPending"), tm.get("authLogin"), tm.get("authLoginLive"),
+             tm.get("authLabel")),
             (tm.get("retryCount"),) + tuple(info.get(k) for k in _FEED_ROW_RETRY_FIELDS),
             tuple(tuple(a.get(k) for k in _FEED_ROW_AGENT_FIELDS) for a in (tm.get("subagents") or ()) if isinstance(a, dict)),
             ("bgTasks" in tm,
