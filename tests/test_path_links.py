@@ -20,7 +20,10 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 from romp_load import load_source
 from pathlib import Path
 
@@ -36,6 +39,11 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 km = load_source("romp_kernel_pathlinks", os.path.join(BIN, "romp-kernel"))
 
 SID = "11111111-2222-3333-4444-555555555555"
+
+
+def _clear_listings():
+    for c in (km._REPO_SERVED, km._repo_index_cache, km._repo_part_cache):
+        c.clear()
 
 
 class _Repo(unittest.TestCase):
@@ -59,11 +67,18 @@ class _Repo(unittest.TestCase):
         self._saved_cwd_of = km._cwd_of
         km._cwd_of = lambda sid: str(self.cwd) if sid == SID else ""
         km._PATH_LINK_CACHE.clear()
+        # the listing's refresh runs INLINE here, so each resolve reads a listing taken after the files the test just
+        # wrote: the tiers' answers are this module's subject; the off-thread refresh has its own class below
+        self._saved_spawn = km._repo_index_spawn
+        km._repo_index_spawn = km._repo_index_refresh
+        _clear_listings()
         self._n = 0
 
     def tearDown(self):
         km._cwd_of = self._saved_cwd_of
+        km._repo_index_spawn = self._saved_spawn
         km._PATH_LINK_CACHE.clear()
+        _clear_listings()
         self.td.cleanup()
 
     def write(self, rel, text):
@@ -211,15 +226,126 @@ class RepoListEdges(_Repo):
 
     def test_the_index_is_built_at_most_once_per_build_pass(self):
         calls = []
-        saved = km._repo_file_index
+        saved = km._repo_index_served
         try:
-            km._repo_file_index = lambda cwd: calls.append(cwd) or saved(cwd)
+            km._repo_index_served = lambda cwd: calls.append(cwd) or saved(cwd)
             memo = {}
             km._path_links("see render.js", SID, self._uuid(), memo)
             km._path_links("see sub/deep.py", SID, self._uuid(), memo)
-            self.assertEqual(len(calls), 1, "one ls-files serves every message in the pass")
+            self.assertEqual(len(calls), 1, "one listing serves every message in the pass")
         finally:
-            km._repo_file_index = saved
+            km._repo_index_served = saved
+
+
+class _ListingCalls:
+    """subprocess.run seen through a tally of the kernel's `git ls-files` halves ("c" tracked, "o" untracked), optionally
+    parking every listing on `gate` (bounded, so a kernel that lists on the asking thread fails the timing assertion
+    instead of hanging the run). Everything else passes straight through."""
+
+    def __init__(self, gate=None):
+        self.gate, self.calls, self._real = gate, [], km.subprocess.run
+
+    def __call__(self, argv, *a, **kw):
+        if isinstance(argv, (list, tuple)) and list(argv[:2]) == ["git", "ls-files"] and ("-c" in argv or "-o" in argv or "-co" in argv):
+            self.calls.append("o" if ("-o" in argv or "-co" in argv) else "c")
+            if self.gate is not None:
+                self.gate.wait(6)
+        return self._real(argv, *a, **kw)
+
+
+class ListingOffTheAskingThread(_Repo):
+    """The repo listing is never taken on the thread that asks for it (2026-10-07). On a 25k-file research repo on a
+    network filesystem the untracked walk took ten seconds, and the git index moved every two to four seconds (the
+    sessions working there refresh it with every `git status`), so a listing keyed on the raw mtimes never served
+    from its cache: every tab of that cwd listed on the pusher at every signature check, one cycle took 14.5 minutes,
+    a connect push four, and a history page asked behind it waited as long. The hot paths read the last completed
+    listing (_repo_index_served); a moved key starts one refresh per cwd on a thread of its own, whose landing takes a
+    new generation and wakes the pusher; and each half of the listing is re-taken only on its own events."""
+
+    def _wait_served(self, gen_before, deadline=10.0):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < deadline:          # loop-ok: bounded by the deadline
+            ent = km._REPO_SERVED.get(str(self.cwd))
+            if ent is not None and ent[2] != gen_before and str(self.cwd) not in km._REPO_REFRESHING:
+                return ent
+            time.sleep(0.01)
+        self.fail("the refresh never landed")
+
+    def test_a_slow_listing_never_holds_the_asking_thread(self):
+        km._repo_index_spawn = self._saved_spawn                      # the production spawn: a thread of its own
+        gate = threading.Event()
+        calls = _ListingCalls(gate)
+        u = self._uuid()
+        try:
+            with mock.patch.object(km.subprocess, "run", calls):
+                t0 = time.monotonic()
+                first = self.links("the bug is in render.js", u)
+                pre = km._chat_pl_precheck(SID, [(u, "the bug is in render.js")])   # the pusher's signature check, same tab
+                for _ in range(5):                                    # five more tabs of the same cwd asking meanwhile
+                    km._repo_index_served(str(self.cwd))
+                took = time.monotonic() - t0
+                self.assertLess(took, 2.0, "the asking thread waited on git for %.1f s" % took)
+                self.assertEqual(first, {}, "no listing yet: tiers 2/3 stand down for this build, never a wait")
+                self.assertEqual(pre[1], ("listing", 0), "the pre-check names the listing in hand: none yet")
+                t1 = time.monotonic()
+                while not calls.calls and time.monotonic() - t1 < 5:   # loop-ok: the refresh thread reaching git, bounded
+                    time.sleep(0.01)
+                self.assertEqual(calls.calls, ["c"], "one listing per cwd however many tabs ask, parked on the gate")
+                km._pusher_wake.clear()
+                gate.set()
+                ent = self._wait_served(0)
+            self.assertIsNotNone(ent[1], "the refresh published the listing")
+            st = km._repo_index_stats()
+            self.assertGreaterEqual(st["refreshes"], 1, st)
+            self.assertEqual(st["inflight"], 0, "/perf repoIndex shows the refresh done: %r" % st)
+            self.assertTrue(km._pusher_wake.is_set(), "a listing that answers differently wakes the pusher")
+            self.assertEqual(self.links("the bug is in render.js", u), {"render.js": "ui/render.js"},
+                             "the rebuild after the landing resolves the token")
+            self.assertNotEqual(km._chat_pl_precheck(SID, [(u, "the bug is in render.js")])[1], pre[1],
+                                "the new generation re-resolves the tab's tokens")
+        finally:
+            gate.set()
+
+    def test_a_git_index_touch_re_lists_only_the_tracked_half_and_keeps_the_generation(self):
+        cwd = str(self.cwd)
+        u = self._uuid()
+        idx, gen = km._repo_index_served(cwd)
+        self.assertIn("render.js", idx)
+        pre = km._chat_pl_precheck(SID, [(u, "see deep.py")])
+        calls = _ListingCalls()
+        with mock.patch.object(km.subprocess, "run", calls):
+            gi = self.cwd / ".git" / "index"
+            st = gi.stat()
+            os.utime(gi, (st.st_atime, st.st_mtime + 5))              # what a `git status` refreshing stat data does
+            idx2, gen2 = km._repo_index_served(cwd)
+            self.assertEqual(calls.calls, ["c"], "the tracked half alone: the ten-second walk is not re-taken for it")
+            self.assertEqual((idx2, gen2), (idx, gen), "same listing, same generation")
+            self.assertEqual(km._chat_pl_precheck(SID, [(u, "see deep.py")], pre)[1], pre[1],
+                             "the pre-check's key held, so the tab re-resolves nothing")
+            self.write("ui/late.js", "// created in an existing subdir\n")
+            idx3, gen3 = km._repo_index_served(cwd)
+            self.assertEqual(calls.calls, ["c", "o"], "a subdir that moved re-walks the untracked half (the index did not move)")
+            self.assertNotEqual(gen3, gen)
+            self.assertEqual(idx3["late.js"], ["ui/late.js"])
+
+    def test_the_tracked_half_losing_a_path_re_walks_the_untracked_half(self):
+        cwd = str(self.cwd)
+        km._repo_index_served(cwd)
+        calls = _ListingCalls()
+        with mock.patch.object(km.subprocess, "run", calls):
+            subprocess.run(["git", "rm", "-q", "--cached", "ui/render.js"], cwd=self.cwd, check=True)   # untracked now, still on disk
+            idx, _gen = km._repo_index_served(cwd)
+        self.assertEqual(calls.calls[-2:], ["c", "o"], "the one index move that can add to the untracked set re-walks it")
+        self.assertEqual(idx.get("render.js"), ["ui/render.js"], "the file is listed as untracked, not lost between the halves")
+
+    def test_an_unchanged_tree_starts_nothing(self):
+        cwd = str(self.cwd)
+        km._repo_index_served(cwd)
+        calls = _ListingCalls()
+        with mock.patch.object(km.subprocess, "run", calls):
+            for _ in range(3):
+                km._repo_index_served(cwd)
+        self.assertEqual(calls.calls, [], "the key held: no listing")
 
 
 class TokenizerParity(unittest.TestCase):

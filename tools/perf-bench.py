@@ -159,10 +159,12 @@ error, never a silent skip):
     "Every loaded romp module" is the kernel, the judge, the event model, the SDK backend, and every
     sibling kernel/ module one of them loaded (credentials among them); the report's `neutralized` list
     names each one.
-    The kernel caches their answers only for a cwd inside a git checkout (on the index and tree
-    mtimes, and the config file's mtime for the remote); for any other cwd it re-runs `git ls-files`
-    on EVERY build, so the per-build count beside the build_session rows says how much of a sample is
-    spawn time. `--no-git` answers those queries as failures instead, for a strict zero-exec run.
+    The kernel takes the repo listing (`git ls-files`) on a thread of its own and its builds read the
+    last completed one; the harness runs that refresh inline instead (no thread), so a listing is a
+    counted spawn in the sample that asked for it, which is only when the tree's key moved (the index
+    and tree mtimes) or no listing was kept yet. The per-build count beside the build_session rows says
+    how much of a sample is spawn time. `--no-git` answers those queries as failures instead, for a
+    strict zero-exec run.
   * pwd.getpwnam / pwd.getpwuid are wrapped as counters (nss_lookups in the output): the chat build's
     path-link pass calls os.path.expanduser on every path-shaped token, and a `~name/...` token makes
     glibc consult the name service — AF_UNIX connects to nscd and systemd-userdb, local, not network.
@@ -529,6 +531,8 @@ def install_guards(km, sbmod, shadow, rec, no_git=False):
     # that cycle would be timed with its frames dropped and the notification count would come up short.
     stub("_refresh_remote_prices", lambda *a, **k: None)            # network fetch thread
     stub("_warm_fleet_bg", lambda *a, **k: rec["warm_calls"].append(time.time()))   # background parse thread; counted
+    if hasattr(km, "_repo_index_spawn"):            # the repo listing's refresh thread (2026-10-07): run inline, so the
+        stub("_repo_index_spawn", km._repo_index_refresh)   # listing is a counted spawn in the sample that asked for it
     stub("_system_notify", lambda t, b, *a, **k: rec["notifications"].append(("system", t)))
     stub("_push_notify", lambda t, b, *a, **k: rec["notifications"].append(("push", t)))
     stub("_push_forward", lambda evs, *a, **k: rec["notifications"].append(("forward", len(evs))))

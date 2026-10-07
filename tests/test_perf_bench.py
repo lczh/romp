@@ -63,7 +63,8 @@ MANAGER_VARS = ("ROMP_MANAGER_PORT", "ROMP_SERVE_PORT", "ROMP_MANAGER_PID", "ROM
 WEB_TURNS = 400       # a transcript large enough that the cold row's full assembly shows in the counters
 EXPECTED_NEUTRALIZED = {
     "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
-    "km._badge_push", "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
+    "km._badge_push", "km._repo_index_spawn",   # the repo listing's refresh thread, run inline (2026-10-07)
+    "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
     "romp_credentials.subprocess",   # loaded by sdk_backend; its credential helper runs as a subprocess (review find, 2026-09-08)
     "km._atomic_write (shadowed)", "km._read_state_json (shadow overlay)", "km._order_audit_path (shadowed)",
     "em.set_checkpoint_dir (shadowed)",   # the event model's checkpoint directory provider, pointed at the shadow
@@ -230,8 +231,8 @@ def build_synthetic(root, web_turns=WEB_TURNS, age_api_days=0):
     Push key and subscriptions, the remote kernels' tokens) and a placeholder sdkvenv, all of which the
     mirror must leave behind. The web and tests sessions' cwd is a one-commit
     checkout with a GitHub origin, so the kernel's read-only git queries run for real and the tripwire's
-    allow list is exercised; the api session's cwd is a plain directory, where the kernel cannot cache
-    the ls-files answer and re-runs the query on every build. `age_api_days` moves the api transcript's
+    allow list is exercised; the api session's cwd is a plain directory, where `git ls-files` fails and
+    the kernel keeps that failure while the directory's key holds. `age_api_days` moves the api transcript's
     mtime that many days into the past, outside discovery's window."""
     root = Path(root)
     state = root / "romp"
@@ -412,18 +413,18 @@ class PerfBench(unittest.TestCase):
         self.assertEqual(out["spawn_attempts"], [])
         self.assertIn("rev-parse=", self.main.stdout, "the report names each query it counted")
         self.assertIn("ls-files=", self.main.stdout)
-        # Per build, beside the rows: the api session's cwd is a plain directory, where the kernel cannot cache
-        # the ls-files answer on the index and tree mtimes, so every build of it runs the query once; the web
-        # session's cwd is a checkout, whose answers the warm-up cached, so its kept samples run none.
-        # The figures are the kernel's caching policy, not this tool's, so they are asserted as the relation just
-        # described (at least one query per build in the plain directory, fewer in the checkout), never as exact
-        # counts an unrelated kernel change would move (review find, 2026-09-08).
+        # Per build, beside the rows: the kernel's builds read the last completed repo listing and take a new one
+        # only when the tree's key moved (2026-10-07; the harness runs that refresh inline, so it is counted where
+        # it would have been asked for). Neither cwd moves between the kept samples, so neither runs a listing in
+        # them: the checkout's listing was kept at the warm-up, and so was the plain directory's failed one, which
+        # before re-ran `git ls-files` on every build. The figures are the kernel's caching policy, not this tool's,
+        # so they are asserted as that relation (no listing per build in either), never as exact counts of the
+        # other queries an unrelated kernel change would move (review find, 2026-09-08).
         b = out["benchmarks"]
-        for row in ("build_session_cold:22222222", "build_session_emwarm:22222222", "build_session_warm:22222222"):
-            self.assertGreaterEqual(b[row]["git_per_build"].get("ls-files", 0), 1.0, "%s: %s" % (row, b[row]["git_per_build"]))
+        for row in ("build_session_cold:11111111", "build_session_cold:22222222", "build_session_emwarm:22222222",
+                    "build_session_warm:22222222"):
+            self.assertEqual(b[row]["git_per_build"].get("ls-files", 0), 0, "%s: %s" % (row, b[row]["git_per_build"]))
             self.assertEqual(set(b[row]["git_per_build"]) - {"rev-parse", "ls-files"}, set(), "only admitted queries ran")
-        checkout, plain = b["build_session_cold:11111111"]["git_per_build"], b["build_session_cold:22222222"]["git_per_build"]
-        self.assertLess(sum(checkout.values()), sum(plain.values()), "the checkout's answers are cached across the kept samples: %s vs %s" % (checkout, plain))
 
     def test_the_fixture_repos_forbid_background_git_work(self):
         # the kernel's own git queries (rev-parse, ls-files, through the tool's tripwire, not this file's
@@ -994,7 +995,8 @@ class Recorders(unittest.TestCase):
                                _read_state_json=lambda path, st=None, expect=None: None,
                                _order_audit_path=lambda: Path(self.state) / "order-audit.jsonl",
                                _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
-                               _push_notify=None, _push_forward=None, _badge_push=None)
+                               _push_notify=None, _push_forward=None, _badge_push=None,
+                               _repo_index_spawn=None, _repo_index_refresh=lambda cwd: None)
 
     def _guards(self, km):
         """install_guards the way run() calls it: a recorder and a shadow made before the kernel loads, so
@@ -1156,7 +1158,8 @@ class CheckpointShadow(unittest.TestCase):
                                _read_state_json=lambda path, st=None, expect=None: None,
                                _order_audit_path=lambda: Path(self.state) / "order-audit.jsonl",
                                _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
-                               _push_notify=None, _push_forward=None, _badge_push=None)
+                               _push_notify=None, _push_forward=None, _badge_push=None,
+                               _repo_index_spawn=None, _repo_index_refresh=lambda cwd: None)
 
     def _read_log(self, kinds=None):
         """The states log read resumably under the name benchStates, the way the kernel's states overlay reads it."""
