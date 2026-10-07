@@ -142,6 +142,8 @@ import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAn
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
+import { threadTakesReplies, stageThreadReply, threadReply } from "./comments";   // a thread's reply box: its quote chips, its staged stack, its release (2026-10-07)
+import { activeInput } from "./active-input";   // the one box typing, pasting and dictation from outside any box go to (2026-10-07)
 import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
 import { resolveTabDrop, moveToTag, writesTag, leaveWords, dropLocalOps, dropRemoteEdits, type TabDrop, type LeaveWords, type DropZone } from "./drag-join";
@@ -8638,6 +8640,17 @@ window.addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (isTypingTarget(e.target)) return;
   if (pickerOverlayUp()) return;   // #picker / #confirm up (shown: the picker hides in place)
+  // Enter from the bare area drops into the ACTIVE INPUT (activeInputBox, 2026-10-07): a comment popover's reply box or a
+  // file viewer's bar when one is the topmost surface, the box typing, pasting and dictation go to. Before, it focused the
+  // message box under a viewer modal, out of sight, and the next words landed there. A surface that takes no input (a
+  // viewer with no bar) swallows nothing and focuses nothing; the message box keeps its own branch below.
+  if (e.key === "Enter" && (!document.activeElement || document.activeElement === document.body)) {
+    const box = activeInputBox();
+    if (box !== document.getElementById("composer-input")) {
+      if (box) { e.preventDefault(); box.focus({ preventScroll: true }); }
+      if (box || document.getElementById("romp-fileview")) return;
+    }
+  }
   if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && fileStep(e.key === "ArrowRight" ? 1 : -1)) { e.preventDefault(); return; }   // from or onto a file tab (2026-09-30)
   if (fileTabOpen) {   // a file tab up: the keys scroll the file, and there is no box to drop into (2026-09-30)
     const fb = document.querySelector("#filetab-host .fileview-body") as HTMLElement | null;
@@ -8692,20 +8705,40 @@ window.addEventListener("keydown", (e) => {
     if (focusComposerOrAsk()) e.preventDefault();   // the picker card if one's up, else the message box
   }
 });
-// The gates the two "from anywhere" defaults share — the printable keystroke below and the paste after
-// it. Returns the box to drop into, or null while something else owns the input. ONE list, so the two
-// can never disagree about what counts as "nobody claimed this": a surface that must keep its keys keeps
-// its pastes too.
-function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
+// THE ACTIVE INPUT (the user 2026-10-07, who wanted the message box's behaviours in the comment threads and the file
+// viewer): the box that typing, pasting and dictation from outside any box go to, the topmost open surface's. The rule
+// is active-input.ts (pure, executed by its test); this reads the page into it. A box "takes typing" when it is enabled,
+// writable and not inside a hidden host (the viewer's bar stands down while the file is edited; a sent comment's box is
+// read-only until its thread opens).
+function activeInputBox(): HTMLTextAreaElement | null {
+  const takes = (b: Element | null | undefined): b is HTMLTextAreaElement =>
+    !!b && !(b as HTMLTextAreaElement).disabled && !(b as HTMLTextAreaElement).readOnly && !b.closest("[hidden]");
+  const modal = document.getElementById("romp-fileview");
+  const modalBar = modal ? modal.querySelector(".fv-compose-input") : null;
+  const pop = document.getElementById("cmt-pop");
+  const cmtBox = pop ? pop.querySelector(".cmt-input") : null;
+  const tabBar = fileTabOpen ? document.getElementById("filetab-host")?.querySelector(".fv-compose-input") : null;
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box (covers key repeat; a paste there is native)
-  if (fileTabOpen) return null;   // a file tab up: the box is not on screen (2026-09-30)
-  if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return null;
-  if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
+  const at = activeInput({ viewerModal: !modal ? null : takes(modalBar) ? "bar" : "none", comment: takes(cmtBox),
+                           fileTab: !fileTabOpen ? null : takes(tabBar) ? "bar" : "none", composer: !!ta });
+  return at === "viewerModal" ? modalBar as HTMLTextAreaElement : at === "comment" ? cmtBox as HTMLTextAreaElement
+    : at === "fileTab" ? tabBar as HTMLTextAreaElement : at === "composer" ? ta : null;
+}
+// The gates the three "from anywhere" defaults share — the printable keystroke below, the paste and the dictated text
+// after it. Returns the box to drop into (the ACTIVE INPUT above), or null while something else owns the input. ONE list,
+// so the three can never disagree about what counts as "nobody claimed this": a surface that must keep its keys keeps
+// its pastes and its dictation too.
+function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
+  if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return null;   // already in a box, any box (covers key repeat; a paste there is native): never a focus steal
   if (ctxMenuEl || pickerOverlayUp()) return null;   // an open menu / a shown #picker / #confirm owns the keys
-  if (document.getElementById("romp-fileview") || document.getElementById("romp-filebrowse")
-      || document.getElementById("romp-lightbox")) return null;   // full-pane surfaces own their keys
+  if (document.getElementById("romp-filebrowse") || document.getElementById("romp-lightbox")) return null;   // full-pane surfaces own their keys (the viewer's own is the rule's: its bar, or nothing)
   if (document.querySelector("#rsettings:not([hidden]), #ranalytics-back:not([hidden]), #rkeys-back, .meta-menu")) return null;   // the pane's own modals (settings, its Token usage panel) + meta menus own their keys (a letter typed there must never land in the draft)
+  const box = activeInputBox();
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  if (box !== ta) return box;   // a comment popover's reply box or a viewer's bar; null while the topmost surface takes no input
+  // the message box's own gates
+  if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box
+  if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
   if (composerNoteHolds()) return null;   // the box just changed hands under the user — no focus steal, the note flashes; a click re-binds (T236). Nothing to cancel either: a key on the bare body has nothing to insert into.
   return ta;
 }
@@ -8713,7 +8746,9 @@ function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
 // (selectionchange), so the natural next act is just TYPING — the first printable keystroke drops
 // the cursor into the message box with the chip attached, no mouse round-trip, and ⌘⏎ stages as
 // ever. (Not selection-gated: a printable keystroke nobody claimed means "type" from anywhere —
-// the same two-state default as bare-area Enter above.) Bubble phase on window = every capture
+// the same two-state default as bare-area Enter above.) "The box" is the ACTIVE INPUT since
+// 2026-10-07 (activeInputBox): over a comment popover its reply box, over a file viewer its bar,
+// each holding the chip its own selection seeded. Bubble phase on window = every capture
 // handler (shell chords, overlays) and element handler (live-ask card, focused tab, slash menu)
 // has already spoken; we take only keystrokes nobody claimed. NEVER preventDefault: focusing
 // during keydown lets the NATIVE keystroke insert into the newly focused box, so the composer's
@@ -8750,6 +8785,25 @@ window.addEventListener("paste", (e) => {
   if (!dt || dt.files.length) return;
   const text = dt.getData("text/plain");
   if (!text) return;
+  e.preventDefault();
+  ta.focus({ preventScroll: true });
+  insertAtCaret(ta, text);
+});
+// SELECT → DICTATE → ⌘⏎ (the user 2026-10-07, whose dictated words landed in the chat's message box while a file
+// viewer was open): the operating system's own dictation, like an IME's commit or an emoji picker's insert, is
+// neither keystrokes nor a paste. With nothing editable focused, as after selecting a passage, the browser dispatches
+// ONE event for it: a `textInput` (the TextEvent Chromium and WebKit fire for a text insertion, the words in `data`) at
+// the focused element or the body, and no beforeinput, input or keydown (verified in Chromium through CDP's
+// Input.insertText, the insertion path dictation takes). Nothing listened for it, so the words went nowhere. Same gates
+// as the keystroke and the paste above, the same bubble-phase-on-window stance, and the paste's mechanics: the event has
+// already dispatched at a target that cannot take text, so this cancels it and inserts the words itself. Dictation
+// into a FOCUSED box is that box's own (typeFromAnywhereTarget stands down for a typing target).
+window.addEventListener("textInput", (e) => {
+  if (e.defaultPrevented) return;   // an element handler already acted
+  const text = (e as Event & { data?: unknown }).data;
+  if (typeof text !== "string" || !text) return;
+  const ta = typeFromAnywhereTarget(e);
+  if (!ta) return;
   e.preventDefault();
   ta.focus({ preventScroll: true });
   insertAtCaret(ta, text);
@@ -11333,10 +11387,11 @@ function commentPopTitle(create: boolean, th: CommentThread | null | undefined):
 function commentSendFromPop(pop: HTMLElement): void {
   const box = pop.querySelector(".cmt-input") as HTMLTextAreaElement | null;
   const send = pop.querySelector('[data-act="cmtsend"]') as HTMLButtonElement | null;
-  const text = box?.value.trim();
-  if (!box || !text || !vscodeApi) return;
+  const text = box?.value.trim() || "";
+  if (!box || !vscodeApi) return;
   const create = pendingCommentAnchor;
   if (create) {
+    if (!text) return;   // a comment is its words
     // ONE send per gesture (2026-10-01): a box that has sent shows that send and has nothing left to send. A second Enter
     // here, or Enter then a click, minted a second create id for the same words, and the kernel rightly made two threads
     if (create.sent) return;
@@ -11377,7 +11432,22 @@ function commentSendFromPop(pop: HTMLElement): void {
   }
   const cur = openCommentThread();
   if (!cur) return;
-  vscodeApi.postMessage({ type: "commentReply", id: cur.sid, tid: cur.th.tid, text });
+  // ONE reply for the run (2026-10-07): the thread's staged items in stage order, then the typed words with the box's quote
+  // chips, composed by the chat's own staged-run body (comments.ts threadReply). An empty Enter with a stack sends the
+  // stack; with nothing staged and no chip it is the plain reply it always was.
+  const cites = cmtStageable(cur.th) ? (cmtCites.get(cur.th.tid) || []) : [];
+  const frame = threadReply(cmtStaged, cur.sid, cur.th.tid, text || cites.length ? { text, cites } : null);
+  if (frame) postThreadReply(pop, cur, frame, true);
+}
+
+/** Post a thread's reply frame (threadReply's) and acknowledge it before the round-trip: the pulse latches, the words show
+ *  as the pending bubble, and the staged strip empties. `typed`: the frame carries what the box held, so the box, its
+ *  draft and its chips clear too; the strip's Send now releases the stack alone and leaves the box as it is. */
+function postThreadReply(pop: HTMLElement, cur: { sid: string; th: CommentThread },
+                         frame: { type: "commentReply"; id: string; tid: string; text: string }, typed: boolean): void {
+  if (!vscodeApi) return;
+  const text = frame.text;
+  vscodeApi.postMessage(frame);
   cmtAwaitBase.set(cur.th.tid, cmtLatchOf(cur.th));   // a follow-up RE-LATCHES at its own send — until a frame carries that send; then the kernel's replyOwed owns it (T102 → T237)
   cmtInterrupted.delete(cur.th.tid);                  // a fresh send re-owes a reply — the stop tombstone retires (T138)
   cur.th.state = "working";                     // optimistic: the pulse rides the SEND, not the
@@ -11385,12 +11455,92 @@ function commentSendFromPop(pop: HTMLElement): void {
   const pl = commentPending.get(cur.th.tid) || [];
   pl.push({ text, t: Date.now() / 1000,
             imgPaths: cmtShippedImgs.filter((p2) => text.includes(p2)) });   // only paths still in the sent text
-  cmtShippedImgs = [];
   commentPending.set(cur.th.tid, pl);
-  commentDrafts.delete(cur.th.tid);
-  box.value = "";
+  if (typed) {
+    cmtShippedImgs = [];
+    commentDrafts.delete(cur.th.tid);
+    cmtCites.delete(cur.th.tid);
+    const box = pop.querySelector(".cmt-input") as HTMLTextAreaElement | null;
+    if (box) box.value = "";
+    paintCmtChips();
+  }
+  persistDrafts();                              // the stack the frame released
+  paintCmtStaged();
   const list = pop.querySelector(".cmt-msgs") as HTMLElement | null;
   if (list) fillCommentMsgs(list, cur.th, cur.sid);      // the pending bubble IS the acknowledgement
+}
+
+// ── a thread's reply box: quote chips, a staged strip, one reply for the run (the user 2026-10-07, who wanted the message
+// box's select-quote-stage in comment threads) ──────────────────────────────────────────────────────────────────────────
+// In a thread that takes replies (open or relayed: threadTakesReplies; a resolved thread keeps its plain reply), a passage
+// selected in the thread's own messages becomes a quote chip in the reply box (seedThreadQuote: one chip per selection
+// gesture, a Cmd/Ctrl gesture adds one, identical text never twice, the message box's own rules); Cmd/Ctrl+Enter stages
+// the words with their chips onto the thread's own stack (cmtStaged), shown in a staged strip in the popover, the chat's
+// own component (paintStagedStrip); Enter sends the run as ONE reply through the comment reply door (commentSendFromPop).
+// A quote is part of the thread's own conversation, so it wears the conversation's lead-in, the one the chat's quotes do.
+// The chips live per thread for the page's life, like the viewer bar's; they are painted from state by the popover's full
+// build and after that only by their own events (a selection, a ✕, a stage, a send), never by a comments frame.
+const cmtCites = new Map<string, Citation[]>();   // thread tid → the quote chips its reply box holds
+
+function cmtStageable(th: CommentThread | null | undefined): boolean { return !!th && threadTakesReplies(th.status); }
+
+function seedThreadQuote(quote: string, uuid: string | null): void {
+  const cur = openCommentThread();
+  const box = document.querySelector("#cmt-pop .cmt-input") as HTMLTextAreaElement | null;
+  if (!cur || !box || box.readOnly || !cmtStageable(cur.th)) return;
+  const list = (cmtCites.get(cur.th.tid) || []).slice();
+  seedGestureChip(list, mkQuoteCitation(quote, uuid));
+  cmtCites.set(cur.th.tid, list);
+  paintCmtChips();
+}
+
+function paintCmtChips(): void {
+  const strip = document.querySelector("#cmt-pop .cmt-chips") as HTMLElement | null;
+  const cur = openCommentThread();
+  if (!strip || !cur) return;
+  const tid = cur.th.tid;
+  paintQuoteChips(strip, cmtCites.get(tid) || [], "replying to this part of the thread · ✕ to remove", (i) => {
+    const l = cmtCites.get(tid) || [];
+    l.splice(i, 1);
+    if (!l.length) cmtCites.delete(tid);
+    paintCmtChips();
+    (document.querySelector("#cmt-pop .cmt-input") as HTMLTextAreaElement | null)?.focus();   // typing goes on, as after the message box's ✕
+  });
+}
+
+function paintCmtStaged(opts?: { reveal?: "last" }): void {
+  const strip = document.querySelector("#cmt-pop .cmt-staged") as HTMLElement | null;
+  if (!strip) return;
+  const cur = openCommentThread();
+  paintStagedStrip(strip, cur ? cur.th.tid : null, {
+    stack: cmtStaged,
+    label: (_tid, n) => stagedLabel(n, false),
+    title: "⌘⏎ (or Ctrl+⏎) stages what you've typed, quote chips and all, without sending. "
+      + "A plain send releases them as one reply, in order, with your new message last. Send now releases them alone.",
+    release: () => {
+      const pop = document.getElementById("cmt-pop");
+      const now = openCommentThread();
+      const frame = now ? threadReply(cmtStaged, now.sid, now.th.tid, null) : null;
+      if (pop && now && frame) postThreadReply(pop, now, frame, false);
+    },
+    repaint: (_tid, o) => paintCmtStaged(o),
+  }, opts);
+}
+
+/** Cmd/Ctrl+Enter in a thread's reply box: the words and the box's quote chips onto the thread's staged stack, the box
+ *  cleared and the caret kept in it for the next passage. A quote alone stages; nothing at all stages nothing. */
+function stageFromPop(pop: HTMLElement): void {
+  const cur = openCommentThread();
+  const box = pop.querySelector(".cmt-input") as HTMLTextAreaElement | null;
+  if (!cur || !box || box.readOnly || !cmtStageable(cur.th)) return;
+  const tid = cur.th.tid;
+  if (!stageThreadReply(cmtStaged, tid, box.value.trim(), cmtCites.get(tid) || [])) return;
+  cmtCites.delete(tid);
+  commentDrafts.delete(tid);
+  box.value = "";
+  persistDrafts();
+  paintCmtChips();
+  paintCmtStaged({ reveal: "last" });   // the new item is the one event that moves the list: show it
 }
 
 /** The popover — ONE pane-local card (no backdrop: the conversation stays readable beside it).
@@ -11490,7 +11640,7 @@ function renderCommentPopover(): void {
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
     const t = ev.target as HTMLElement;
-    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, button, input, textarea, .meta-btn, .meta-menu")) return;
+    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07)
     const pr = pop.getBoundingClientRect();
     if (ev.clientX > pr.right - 18 && ev.clientY > pr.bottom - 18) return;   // the resize handle's corner
     ev.preventDefault();
@@ -11687,14 +11837,25 @@ function renderCommentPopover(): void {
     box.placeholder = sent ? "You can reply once the thread opens"
       : create ? "Comment on this passage…"
       : th!.status === "merged" ? "Reply to continue — the discussion so far was relayed to the session…"
-      : th!.status === "resolved" ? "Reply to reopen…" : "Reply…";
+      : th!.status === "resolved" ? "Reply to reopen…" : "Reply…  (⏎ send · ⇧⏎ newline · ⌘⏎ stage)";
     // the sent view keeps the composer row where the thread's will be, read-only: the words are the bubble above
     box.readOnly = !!sent;
     box.value = sent ? "" : (commentDrafts.get(dk) || "");
     box.addEventListener("input", () => { if (!sent) commentDrafts.set(dk, box.value); });
+    const stageable = cmtStageable(th);
     box.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); commentSendFromPop(pop); }
-      else if (ev.key === "Escape") { ev.stopPropagation(); closeCommentPop(); }
+      if (ev.key === "Enter" && (ev.isComposing || ev.keyCode === 229)) return;   // an IME's commit Enter is the composition's, never a send
+      // Cmd/Ctrl+Enter stages and Enter sends, as in the message box (2026-10-07); a box with nothing to stage onto (the
+      // new-comment box, a resolved thread's) sends on either, as before
+      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey) && !ev.shiftKey && stageable) { ev.preventDefault(); stageFromPop(pop); }
+      else if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); commentSendFromPop(pop); }
+      else if (ev.key === "Escape") {
+        ev.stopPropagation();
+        // Escape as in the message box: first it drops the quote chips the box holds, then it leaves (the popover closes,
+        // as before; the words stay in the draft and the staged replies on the thread's stack)
+        if (stageable && cmtCites.has(th!.tid)) { ev.preventDefault(); cmtCites.delete(th!.tid); paintCmtChips(); return; }
+        closeCommentPop();
+      }
     });
     const crow = el("div", "cmt-composer");   // the chat composer's shape: clip left, ➤ right
     const attach = el("button", "cmt-attach") as HTMLButtonElement;
@@ -11713,6 +11874,15 @@ function renderCommentPopover(): void {
     send.dataset.act = "cmtsend";
     if (sent) { send.disabled = true; send.classList.add("busy"); attach.disabled = true; }   // nothing to send or attach yet
     crow.append(attach, box, send);
+    if (stageable) {
+      // the thread's staged strip and quote chips sit above its box, as the message box's do (2026-10-07): painted from
+      // state once the popover is in the page, then only by their own events, so an in-place refresh never touches them
+      const stg = el("div", "cmt-staged");
+      stg.style.display = "none";
+      const chipRow = el("div", "cmt-chips");
+      chipRow.hidden = true;
+      pop.append(stg, chipRow);
+    }
     pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
     if (th && th.mailOff && (th.heldMail || 0) > 0) {
@@ -11812,6 +11982,7 @@ function renderCommentPopover(): void {
     pop.appendChild(row);
   }
   document.body.appendChild(pop);
+  if (cmtStageable(th)) { paintCmtStaged(); paintCmtChips(); }   // the thread's stack and chips, from state (2026-10-07)
   if (typeof ResizeObserver === "function") {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
@@ -18631,6 +18802,7 @@ function persistDrafts(): void {
                             citations: Object.fromEntries(composerCitations),
                             files: Object.fromEntries(composerFiles),
                             staged: stagedMsgs.entries(),
+                            cmtStaged: cmtStaged.entries(),   // the comment threads' own stacks (2026-10-07)
                             // NAMES of ships still awaiting their ack — never the bytes. A reload
                             // cannot resurrect the upload (the payload dies with the page), so the
                             // next load reads these to say LOUDLY what was lost (T215; the VS Code
@@ -18715,6 +18887,12 @@ const stagedCollapsed = new Set<string>();
 // entering tab's list on a switch and hide that tab's first items.
 const stagedScroll = new Map<string, number>();
 try { stagedMsgs.restore(((vscodeApi?.getState?.() || {}) as any).staged); } catch { /* ignore */ }
+// A comment thread's staged replies (the user 2026-10-07: the message box's select-quote-stage, in the thread): a stack of
+// their own keyed by the thread's id (comments.ts stageThreadReply / threadReply), never the chat's, so the chat's strip,
+// its release and the split's state hand-over (orphanStateSids) never take a thread for a tab. Persisted with the drafts:
+// a reload or a closed popover drops nothing; a deleted thread takes its stack with it.
+const cmtStaged = new StagedStack();
+try { cmtStaged.restore(((vscodeApi?.getState?.() || {}) as any).cmtStaged); } catch { /* ignore */ }
 
 // One routing owner for a user message (deliver speaks it through flushStaged, once per post of the
 // release): a goal chip rides askFollowUp, quote chips wrap client-side, a bare message is a plain send
@@ -18800,6 +18978,29 @@ function syncStagedLabel(): void {
   paintViewerStaged();   // every viewer message bar's staged line follows the stack too (2026-09-30)
   const strip = document.getElementById("composer-staged");
   if (!strip) return;
+  paintStagedStrip(strip, id, {
+    stack: stagedMsgs,
+    label: (sid, n) => stagedLabel(n, liveAsks.has(sid)),
+    title: "⌘⏎ (or Ctrl+⏎) stages what you've typed, quote chips and all, without sending. "
+      + "A plain send releases them as one message, in order, with your new message last; a card follow-up or a slash command goes on its own, in its place. "
+      + "While a question is waiting on you, they're held until you answer it. "
+      + "Send now releases them alone.",
+    release: (sid) => {
+      if (hostIsDown(sid) || isProvisionalId(sid)) {
+        ephemeralWarnToast("Can't send yet — the session isn't reachable. They stay staged.");
+        return;
+      }
+      flushStaged(sid);
+    },
+    repaint: renderStagedStrip,
+  }, opts);
+  }
+  // ONE staged strip, two homes (2026-10-07): the chat composer's (#composer-staged, the session's stack) and a comment
+  // thread's (the popover's .cmt-staged, the thread's own stack, paintCmtStaged). The strip is the same component in both;
+  // what differs is the stack it shows, its count line and hover, what Send now releases, and how it repaints itself.
+  type StagedStripCfg = { stack: StagedStack; label: (id: string, n: number) => string; title: string;
+                          release: (id: string) => void; repaint: (id: string, opts?: { reveal?: "last" }) => void };
+  function paintStagedStrip(strip: HTMLElement, id: string | null, cfg: StagedStripCfg, opts?: { reveal?: "last" }): void {
   // the list's scroll position survives the rebuild: expanding or discarding an item re-renders the
   // strip, and a fresh list would start at the top, away from the item just clicked. The offset is kept
   // under the tab that built the list it is read from (stagedScroll), so a switch never carries one tab's
@@ -18809,7 +19010,7 @@ function syncStagedLabel(): void {
   const prev = strip.querySelector(".staged-list");
   if (prev && strip.dataset.sid) stagedScroll.set(strip.dataset.sid, prev.scrollTop);
   strip.replaceChildren();
-  const items = id ? stagedMsgs.list(id) : [];
+  const items = id ? cfg.stack.list(id) : [];
   if (!id || !items.length) { if (id) { stagedScroll.delete(id); stagedCollapsed.delete(id); } delete strip.dataset.sid; strip.style.display = "none"; return; }
   strip.dataset.sid = id;
   strip.style.display = "flex";
@@ -18822,32 +19023,22 @@ function syncStagedLabel(): void {
   caret.setAttribute("aria-expanded", collapsed ? "false" : "true");
   caret.setAttribute("aria-label", collapsed ? "Show the staged messages" : "Hide the staged messages");
   const lbl = el("span", "staged-lbl");
-  lbl.textContent = stagedLabel(items.length, liveAsks.has(id));
-  lbl.title = "⌘⏎ (or Ctrl+⏎) stages what you've typed, quote chips and all, without sending. "
-    + "A plain send releases them as one message, in order, with your new message last; a card follow-up or a slash command goes on its own, in its place. "
-    + "While a question is waiting on you, they're held until you answer it. "
-    + "Send now releases them alone.";
+  lbl.textContent = cfg.label(id, items.length);
+  lbl.title = cfg.title;
   const toggleCollapse = (ev: Event) => {
     ev.stopPropagation();
     if (stagedCollapsed.has(id)) stagedCollapsed.delete(id); else stagedCollapsed.add(id);
     // the rebuild destroys the caret that had focus, so the keyboard user stays on the new one (dropped
     // to body, the next Enter would be the bare-area Enter that focuses the composer)
     const had = document.activeElement === caret;
-    renderStagedStrip(id);
+    cfg.repaint(id);
     if (had) (strip.querySelector(".staged-caret") as HTMLElement | null)?.focus();
   };
   caret.addEventListener("click", toggleCollapse);
   lbl.addEventListener("click", toggleCollapse);
   const go = el("button", "staged-go");
   go.textContent = "Send now";
-  go.addEventListener("click", () => {
-    if (!id) return;
-    if (hostIsDown(id) || isProvisionalId(id)) {
-      ephemeralWarnToast("Can't send yet — the session isn't reachable. They stay staged.");
-      return;
-    }
-    flushStaged(id);
-  });
+  go.addEventListener("click", () => { if (id) cfg.release(id); });
   head.append(caret, lbl, go);
   strip.appendChild(head);
   if (collapsed) return;
@@ -18875,7 +19066,7 @@ function syncStagedLabel(): void {
       cite.addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (stagedOpen.has(ck)) stagedOpen.delete(ck); else stagedOpen.add(ck);
-        renderStagedStrip(id);
+        cfg.repaint(id);
       });
       chip.appendChild(cite);
     }
@@ -18894,13 +19085,13 @@ function syncStagedLabel(): void {
     const toggle = () => {
       const k = id + ":" + i;
       if (stagedOpen.has(k)) stagedOpen.delete(k); else stagedOpen.add(k);
-      renderStagedStrip(id);
+      cfg.repaint(id);
     };
     chip.addEventListener("click", toggle);
     const x = el("button", "composer-chip-x");
     x.setAttribute("aria-label", "Discard staged message");
     x.textContent = "✕";
-    x.addEventListener("click", (ev) => { ev.stopPropagation(); stagedMsgs.removeAt(id, i); persistDrafts(); renderStagedStrip(id); });
+    x.addEventListener("click", (ev) => { ev.stopPropagation(); cfg.stack.removeAt(id, i); persistDrafts(); cfg.repaint(id); });
     row.append(mark, label, hint, x);
     chip.appendChild(row);
     list.appendChild(chip);
@@ -18929,6 +19120,23 @@ function mkFileQuoteCitation(quote: string, path: string, lines: [number, number
   const src = path + (lines ? ":" + lines[0] + (lines[1] > lines[0] ? "-" + lines[1] : "") : "");
   return { ...mkQuoteCitation(quote, null, src), kind: "file", path, lines };
 }
+/** A box's quote chips, painted into their strip: the message box's own pill (the “ mark, the passage's label, a ✕ that
+ *  removes that chip), the strip hidden while there are none. The viewer's bar and a comment thread's reply box share it
+ *  (2026-10-07), so a quote looks the same wherever it was selected. */
+function paintQuoteChips(strip: HTMLElement, cites: readonly Citation[], title: string, onRemove: (i: number) => void): void {
+  strip.replaceChildren();
+  strip.hidden = !cites.length;
+  cites.forEach((c, i) => {
+    const chip = el("div", "composer-chip");
+    chip.title = title;
+    const mark = el("span", "composer-chip-mark"); mark.textContent = "“";
+    const label = el("span", "composer-chip-label"); label.textContent = c.title;
+    const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Remove quote"); x.textContent = "✕";
+    x.addEventListener("click", (e) => { e.stopPropagation(); onRemove(i); });
+    chip.append(mark, label, x);
+    strip.appendChild(chip);
+  });
+}
 function mountViewerBar(host: HTMLElement, sid: string, path: string): FileViewComposeBar {
   const key = sid + "\u0000" + path;
   const d: ViewerDraft = viewerDrafts.get(key) || { text: "", cites: [] };
@@ -18953,20 +19161,7 @@ function mountViewerBar(host: HTMLElement, sid: string, path: string): FileViewC
   const grow = () => { inp.style.height = "auto"; inp.style.height = Math.min(inp.scrollHeight + 2, 160) + "px"; };
   // the bar is built once per open and never rebuilt by a push (the viewer is a static overlay), so its own listeners are
   // click-safe; a chip's ✕ repaints the chips alone
-  const paintChips = () => {
-    chips.replaceChildren();
-    chips.hidden = !d.cites.length;
-    d.cites.forEach((c, i) => {
-      const chip = el("div", "composer-chip");
-      chip.title = "replying to this part of the file · ✕ to remove";
-      const mark = el("span", "composer-chip-mark"); mark.textContent = "“";
-      const label = el("span", "composer-chip-label"); label.textContent = c.title;
-      const x = el("button", "composer-chip-x"); x.setAttribute("aria-label", "Remove quote"); x.textContent = "✕";
-      x.addEventListener("click", (e) => { e.stopPropagation(); d.cites.splice(i, 1); paintChips(); });
-      chip.append(mark, label, x);
-      chips.appendChild(chip);
-    });
-  };
+  const paintChips = () => paintQuoteChips(chips, d.cites, "replying to this part of the file · ✕ to remove", (i) => { d.cites.splice(i, 1); paintChips(); });
   let said = "";   // a one-off acknowledgement ("Sent to web."), until the next paint of the line
   let placed = false;   // the viewer puts the host in the page after this returns; a host that has LEFT it is a closed viewer
   const paintStaged = () => {
@@ -19008,6 +19203,14 @@ function mountViewerBar(host: HTMLElement, sid: string, path: string): FileViewC
   };
   inp.addEventListener("input", () => { d.text = inp.value; grow(); });
   inp.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      // Escape as in the message box (2026-10-07): first it drops the quote chips the bar holds, then it leaves the bar. A
+      // file tab's bar hands the keys back to the file (the arrows scroll it again); in the modal the Escape goes on to
+      // the viewer, which closes as before. The words stay in the draft either way.
+      if (d.cites.length) { e.preventDefault(); e.stopPropagation(); d.cites = []; paintChips(); return; }
+      if (host.closest("#filetab-host")) { e.preventDefault(); inp.blur(); }
+      return;
+    }
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
     e.preventDefault(); e.stopPropagation();
     if (e.metaKey || e.ctrlKey) stage(); else sendIt();
@@ -19376,6 +19579,15 @@ function seedTranscriptQuote(id: string, quote: string, uuid: string | null): vo
   const chip = mkQuoteCitation(quote, uuid);
   // a quote seed drops a goal chip (flavors never mix — the send routes goal XOR quotes)
   const list = (composerCitations.get(id) || []).filter((c) => !c.itemId);
+  seedGestureChip(list, chip);
+  composerCitations.set(id, list);
+  persistDrafts();
+  if (id === activeId) renderComposerChips(id);
+}
+// The gesture rules every selection-seeded chip list follows, in place: the live gesture writes through to the chip it
+// owns, a new gesture replaces the list or (Cmd/Ctrl held at its mousedown) adds below it, and identical text never lists
+// twice. One implementation for the message box's chips and a comment thread's reply box (seedThreadQuote, 2026-10-07).
+function seedGestureChip(list: Citation[], chip: Citation): void {
   let idx = quoteSeedIdx != null && quoteSeedIdx < list.length ? quoteSeedIdx : null;   // the live gesture's chip
   if (idx == null) {
     if (quoteAddHeld && list.length) idx = list.length;   // ⌘-select: add a context below the held ones
@@ -19392,9 +19604,6 @@ function seedTranscriptQuote(id: string, quote: string, uuid: string | null): vo
     }
   }
   quoteSeedIdx = idx;
-  composerCitations.set(id, list);
-  persistDrafts();
-  if (id === activeId) renderComposerChips(id);
 }
 
 // The EDITOR's highlight owns ONE chip — update it in place, append below if absent. A cursor move in the
@@ -19445,6 +19654,30 @@ document.addEventListener("selectionchange", () => {
   if (!q) return;
   seedTranscriptQuote(activeId, q.text, q.uuid);
 });
+// …and a selection in an open comment thread's own messages seeds a quote chip in THAT thread's reply box (the user
+// 2026-10-07: the message box's select-quote-stage, in the thread). transcriptSelection never counts the popover (T241),
+// so the two never seed each other's box. The same gesture rules (seedGestureChip), the same collapse rule: only a new
+// selection moves the chips, a collapse (the click into the box to type) leaves them.
+document.addEventListener("selectionchange", () => {
+  const q = threadSelection();
+  if (q) seedThreadQuote(q.text, q.uuid);
+});
+
+// The live selection when (and only when) it lies in the open comment popover's messages: the ACTIVE range (the newest,
+// transcriptSelection's rule), both its endpoints inside the popover's list, non-collapsed, non-empty. The turn it starts
+// in names the chip's uuid, as a transcript quote's does.
+function threadSelection(): { text: string; uuid: string | null } | null {
+  const list = document.getElementById("cmt-pop")?.querySelector(".cmt-msgs");
+  if (!list) return null;
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  const r = sel.getRangeAt(sel.rangeCount - 1);
+  if (r.collapsed || !list.contains(r.startContainer) || !list.contains(r.endContainer)) return null;
+  const text = r.toString().trim();
+  if (!text) return null;
+  const start = r.startContainer instanceof Element ? r.startContainer : r.startContainer.parentElement;
+  return { text, uuid: start?.closest(".turn")?.getAttribute("data-uuid") || null };
+}
 
 // Dismiss a citation — via its chip's ✕ (that exact chip, by index) or Backspace at the very start of an
 // empty composer (no index → the NEWEST chip goes first, so repeated presses eat the stack bottom-up,
@@ -23650,6 +23883,8 @@ setupSettings();
       if (!cur) return;
       if (!elx.classList.contains("armed")) { elx.classList.add("armed"); elx.textContent = "Really delete?"; return; }
       vscodeApi?.postMessage({ type: "commentDelete", id: cur.sid, tid: cur.th.tid });
+      cmtCites.delete(cur.th.tid);                  // the thread's quote chips and staged replies go with it (2026-10-07)
+      if (cmtStaged.takeAll(cur.th.tid).length) persistDrafts();
       // optimistic removal (the user 2026-08-17: the highlight must go NOW, mid-animation included);
       // the kernel's next frame confirms, and kernel-side the delete also interrupts the in-flight
       // reply so the work stops with its cue

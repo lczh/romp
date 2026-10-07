@@ -6082,6 +6082,32 @@ On a touch screen each control in the chip row and the staged strip (Comment, St
 Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
 pixels each way, with none of them touching, while keeping its compact look.
 
+### Quoting and staging in a comment thread
+
+In a comment thread that takes replies (open, or relayed back to the session), a passage selected
+in the thread's own messages becomes a quote chip above the thread's reply box, by the message
+box's rules: selecting again replaces the chip, holding ⌘ (Ctrl elsewhere) while you select adds
+one, and the same text never lists twice. **⌘⏎** stages what is typed, with its chips, in a staged
+strip inside the thread's box (the message box's own strip, over the thread's own list); **⏎** sends
+everything staged and then what is in the box as one reply to the thread, each quote under
+`Replying to this part of the conversation:`. **⏎** on an empty box sends what is staged, and the
+strip's **Send now** sends it alone. **Esc** first drops the chips, then closes the box. The staged
+replies are kept per thread through a reload, and deleting the thread drops them. A resolved
+thread keeps its plain reply, and the new-comment box sends its comment on either key.
+
+### Where typing, pasting and dictation go
+
+With no box holding the caret, as after selecting a passage, what you type, paste or dictate goes
+to the box of the topmost surface that is open: the file viewer's message bar while the viewer is
+open over the chat, an open comment thread's reply box, the message bar of a file tab while it is
+shown, and otherwise the message box. The viewer sits over a comment thread's box when both are
+open. A viewer or file tab with no bar takes nothing, and a box you are already typing in keeps
+what you type. **⏎** from the bare chat area puts the caret in that same box; with the viewer open
+over the chat it never reaches the message box hidden underneath. A quote chip made by the
+selection stays where it was made when the caret moves in. Space typed first stays a scroll key.
+Dictation by the operating system reaches the page as one text insertion, neither keys nor a paste,
+and is taken the same way.
+
 ### Stepping through your messages and comments
 
 The arrows in the chat's bottom-left corner form one narrow column above the go-to-bottom chip, which
