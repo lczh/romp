@@ -1483,20 +1483,32 @@ def _jobs_gate_run():
     return getattr(_JOBS_GATE_TL, "run", None)
 
 
-def _jobs_gate_note(evidence, sid=None):
+def _jobs_gate_note(evidence, sid=None, whole=()):
     """The running job ACTED (views, mark, push, send, problem, spendRow, write) or its own memo said an input moved (miss,
-    neverSeen, clockParse, load): the detector's evidence. A memo that is one session's names it (`sid`), so the raced test reads
-    that session's inputs alone; a memo note with no session reads every session's. A job the gate called closed that notes an
-    act is a wrongQuiet (a missing signal); one whose only evidence is a moved memo is a wrongQuiet too, unless a declared input
-    of that memo's session moved after the gate observed it with a signal the next pass's gate will see (raced, _jobs_gate_raced)."""
+    neverSeen, clockParse, load): the detector's evidence. A memo names the sessions whose inputs its key carries (`sid`: one
+    session id, or several as a tuple, as the walk's look names its debtor and the askers whose registry rows its key holds),
+    so the raced test reads those sessions' parts of each input alone; a memo note with no session reads every session's.
+    `whole` names the shared inputs the memo's own key found moved (the nudge ledger's stat, which the ten-file key carries
+    whole), read whole for it. A job the gate called closed that notes an act is a wrongQuiet (a missing signal); one whose only
+    evidence is a moved memo is a wrongQuiet too, unless a declared input of that memo's sessions moved after the gate observed
+    it with a signal the next pass's gate will see (raced, _jobs_gate_raced)."""
     run = _jobs_gate_run()
     if run is not None:
         try:
             run["acts"][evidence] = run["acts"].get(evidence, 0) + 1
             if evidence not in _JOBS_GATE_ACTS:
-                run["memo"].add(None if sid is None else str(sid))   # None: no session named, every session's inputs
+                run["memo"].add((_jg_memo_scope(sid), frozenset(whole or ())))   # a None scope: every session's inputs
         except Exception:
             pass
+
+
+def _jg_memo_scope(sid):
+    """A memo note's sessions: None when it names none, else the frozenset of the session ids it names."""
+    if sid is None:
+        return None
+    if isinstance(sid, (tuple, list, set, frozenset)):
+        return frozenset(str(x) for x in sid)
+    return frozenset((str(sid),))
 
 
 def _jobs_gate_owe(reason):
@@ -1553,6 +1565,34 @@ def _jobs_gate_key(sid, done):
                 run["pending"].add(str(sid))
         except Exception:
             pass
+
+
+def _jobs_gate_ckpt_due(sid, leaf, key=None, leaf_stat=None):
+    """The checkpoint settle write found work for `sid`: its settle evidence `key` moved since its last write (key None: no
+    settle due), or its leaf, statted as `leaf_stat`, moved past its period (leaf_stat None: no period due). The work is an act,
+    a write, unless every trigger is a read that moved AFTER the gate's own read of it: the settle evidence against what the gate
+    observed for the session (mem:ckptSettle), the leaf against the stat the period predicate took (_jg_owed_ckpt_persist, kept
+    on the run). Then it is the session's memo evidence, a miss, which the raced test checks against those inputs observed again.
+    Records only: the write decides its work from its own tables, never from what the gate recorded. A no-op outside an observed
+    run; never raises."""
+    run = _jobs_gate_run()
+    if run is None:
+        return
+    try:
+        sid = str(sid)
+        moved = True
+        if key is not None:
+            seen = ((run.get("v") or {}).get("mem:ckptSettle") or {}).get(sid, _JOBS_GATE_UNSEEN)
+            moved = seen != (str(leaf), key)
+        if moved and leaf_stat is not None:
+            took = (run.get("pred") or {}).get(sid)
+            moved = took is not None and took[1] != leaf_stat
+        _jobs_gate_note("miss" if moved else "write", sid)
+    except Exception:
+        pass
+
+
+_JOBS_GATE_UNSEEN = ("unseen",)         # a session the gate's observation did not list: never equal to a listed entry
 
 
 def _jobs_gate_tree(leaf):
@@ -13261,9 +13301,9 @@ def _tick_key_miss_by(job, st, prev, sid=None):
     the key: ten for the tick's ten-file key, eighteen for the walk's, which adds the asker rows; nothing else). A key of
     another length than the recorded one counts once under `shape`, as does a previous entry that is not a sequence (an
     observation counter is never the raising path); a differing element past the ten files is `askerRow`. `sid`: the session
-    whose key it is, for the jobs pass's gate."""
-    _jobs_gate_note("miss", sid)               # the jobs pass's gate (shadow): the job's own key for that session moved
-    with _TICK_SEEN_LOCK:
+    whose key it is, for the jobs pass's gate (the sessions, as a tuple, when the key carries other sessions' rows)."""
+    _jobs_gate_note("miss", sid, whole=_tick_key_whole(st, prev))   # the jobs pass's gate (shadow): the job's own key for that
+    with _TICK_SEEN_LOCK:                                           #  session moved, and the shared input it carries whole, if moved
         j = _TICK_SEEN_STATS.setdefault(job, {"hits": 0, "misses": 0, "neverSeen": 0, "noTranscript": 0, "clockParse": 0, "missBy": {}})
         j["misses"] += 1
         by = j["missBy"]
@@ -13277,6 +13317,23 @@ def _tick_key_miss_by(job, st, prev, sid=None):
             if st[i] != prev[i] or st[i + 1] != prev[i + 1]:
                 name = _TICK_KEY_FILES[i // 2] if i // 2 < len(_TICK_KEY_FILES) else "askerRow"
                 by[name] = by.get(name, 0) + 1
+
+
+_TICK_KEY_LEDGER_AT = 2 * _TICK_KEY_FILES.index("ledger")   # the nudge ledger's (mtime, size) in a ten-file key
+
+
+def _tick_key_whole(st, prev):
+    """The shared inputs a key that moved carried whole and found moved, for the jobs pass's gate: the nudge ledger's stat (the
+    tenth file of the ten-file key, the whole file for the walk and the working-notes check), so a memo whose key moved there is
+    raced by any ledger write, not by its own session's records alone. The interrupt tick's key carries its own ledger row there
+    and declares only that row, which the gate reads by session anyway. Empty for a key of another shape."""
+    try:
+        i = _TICK_KEY_LEDGER_AT
+        if tuple(st[i:i + 2]) != tuple(prev[i:i + 2]):
+            return ("box:ledger",)
+    except Exception:
+        pass
+    return ()
 
 
 def _tick_seen_report():
@@ -13573,29 +13630,32 @@ def _nudge_look_check(s, now):
         st, keyed, over = _nudge_look_stat(s)
         _NUDGE_LOOK_ASKERS[sid] = (keyed, over)
     st = tuple(st)
+    keyed = (_NUDGE_LOOK_ASKERS.get(sid) or ((), ()))[0]
+    scope = (sid,) + tuple(str(a) for a in keyed) if keyed else sid   # the jobs pass's gate (shadow): the key carries the debtor's
+    #                                                                   files and its keyed askers' registry rows, one scope for both
     if not st[0]:                                                #  a caller handing snapshots of its own stats first
         _tick_seen_bump("auto-nudge", "noTranscript")
         return False, st, None
     with _TICK_SEEN_LOCK:
         prev = _TICK_SEEN.get(("auto-nudge", str(s.get("sid") or "")))
     if prev is None:
-        _tick_seen_bump("auto-nudge", "neverSeen", sid=sid)
+        _tick_seen_bump("auto-nudge", "neverSeen", sid=scope)
         return False, st, None
     if not isinstance(prev, (list, tuple)) or len(prev) != len(st) + 2 or tuple(prev[:len(st)]) != tuple(st):
-        _tick_key_miss_by("auto-nudge", tuple(st), tuple(prev[:-2]) if isinstance(prev, (list, tuple)) else prev, sid=sid)   # the
+        _tick_key_miss_by("auto-nudge", tuple(st), tuple(prev[:-2]) if isinstance(prev, (list, tuple)) else prev, sid=scope)   # the
         return False, st, None                                                         #  walk's key beside the tick jobs' (memos.tickSeen)
     flip, verdict = prev[len(st)], prev[len(st) + 1]
     if verdict == "closer-unsettled" and not jd.CLOSER_ON:
-        _tick_seen_bump("auto-nudge", "clockParse", sid=sid)   # a matched key the clock legs refuse to serve: a parse, not a hit
+        _tick_seen_bump("auto-nudge", "clockParse", sid=scope)   # a matched key the clock legs refuse to serve: a parse, not a hit
         return False, st, None                        # (round two); recorded under the closer toggle, read with it off (an
     #                                                   import-time toggle, not a file): evaluate (round five, low c)
     if flip is None:
         _NUDGE_WALK_STATS["unbounded"] += 1
-        _tick_seen_bump("auto-nudge", "clockParse", sid=sid)
+        _tick_seen_bump("auto-nudge", "clockParse", sid=scope)   # (an unbounded memo)
         return False, st, None
     if flip >= 0 and now >= flip:
         _NUDGE_WALK_STATS["clockDue"] += 1
-        _tick_seen_bump("auto-nudge", "clockParse", sid=sid)
+        _tick_seen_bump("auto-nudge", "clockParse", sid=scope)   # (a flip come due)
         return False, st, None
     _tick_seen_bump("auto-nudge", "hits")             # counted on the one return that skips
     if flip >= 0:
@@ -14118,7 +14178,9 @@ def _persist_checkpoints(now):
             periodic_due = last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S
         if not settle_due and not periodic_due:
             continue
-        _jobs_gate_note("write")              # (the jobs pass's gate, shadow: a settle or periodic write, the job's work)
+        _jobs_gate_ckpt_due(sid, leaf, key if settle_due else None, leaf_stat if periodic_due else None)   # (the jobs pass's
+        #                                       gate, shadow: a settle or periodic write is the job's work, unless what it read
+        #                                       moved after the gate read it, then the session's memo; it records, never decides)
         _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
         _heal_cold_folds(leaf)                # the settle heals a tail-only fold (T359); the exit drain does not
         _prime_leaf_folds(leaf)
@@ -68967,7 +69029,10 @@ def _jobs_gate_next():
 def _jg_scoped(ch, val, scope):
     """A re-observed channel's value as the raced test compares it for the sessions in `scope` (None: every session): a registry
     row by those sessions' entries, the judge's write counts by those sessions (its shared total kept whole), the compaction
-    clicks by those sessions. A box-wide file and any other in-memory value is every session's input and stays whole."""
+    clicks and the settle write's evidence by those sessions. The shared inputs a session owns parts of (_JG_SLICERS: the nudge
+    ledger and its interrupt-block rows, the session flags, the relay queue, the working notes, the judge calls in flight) stay
+    whole here and are read by those parts when they moved (_jg_apart); every other box-wide file and in-memory value is every
+    session's input and stays whole."""
     if scope is None:
         return val
     if ch == "regs" and isinstance(val, dict):
@@ -68976,7 +69041,158 @@ def _jg_scoped(ch, val, scope):
         return (val[0], tuple(p for p in val[1] if str(p[0]) in scope))
     if ch == "mem:compactClicked" and isinstance(val, tuple):
         return tuple(p for p in val if p[0] in scope)
+    if ch == "mem:ckptSettle" and isinstance(val, dict):
+        return {k: x for k, x in val.items() if k in scope}
     return val
+
+
+# A shared input whose parts belong to sessions, read by those parts for a memo's race: each piece is filed under every session
+# id its keys name (a ledger record's goal id or ask key, a flags entry's key, a queue entry's or a note's file name), a piece
+# naming none (a switch every session reads) under None, which every memo's test reads. Read for the version the gate observed
+# (the stat, or the count, it took) and memoized on it, so a version is read once whatever the passes; a read that finds another
+# version (a write between the stat and the read) is no reading (None), and the input is then compared whole, as before.
+_JG_SID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_JG_SLICE_MEMO = {}                     # channel -> (the version observed, its parts)
+
+
+def _jg_owners(*parts):
+    """The session ids a piece's keys name (lower case), the empty set when they name none."""
+    out = set()
+    for p in parts:
+        if isinstance(p, str):
+            out.update(m.lower() for m in _JG_SID_RE.findall(p))
+    return out
+
+
+def _jg_digest(pieces):
+    """{session id or None: (crc, count) of the pieces filed under it}: each (owners, text) piece under each owner, or None."""
+    acc = {}
+    for owners, text in pieces:
+        for o in (sorted(owners) or [None]):
+            acc.setdefault(o, []).append(text)
+    return {o: (zlib.crc32("\n".join(sorted(xs)).encode("utf-8")), len(xs)) for o, xs in acc.items()}
+
+
+def _jg_json_pieces(d):
+    """A JSON object's pieces: each entry of a top-level object (its owners from both keys and a record's own `sid`), and each
+    other top-level entry; a value that is not an object is one piece naming no session."""
+    if not isinstance(d, dict):
+        return [(set(), json.dumps(d, sort_keys=True, default=str))]
+    pieces = []
+    for k, x in d.items():
+        if isinstance(x, dict):
+            for ik, y in x.items():
+                own = _jg_owners(k, ik) | (_jg_owners(y.get("sid")) if isinstance(y, dict) else set())
+                pieces.append((own, json.dumps([k, ik, y], sort_keys=True, default=str)))
+        else:
+            pieces.append((_jg_owners(k), json.dumps([k, x], sort_keys=True, default=str)))
+    return pieces
+
+
+def _jg_slice_file(path):
+    """A small JSON object file by session, for its stat `val` (the nudge ledger, the session flags)."""
+    def read(val):
+        p = path()
+        if val is None:
+            return {}                                # absent: no parts
+        try:
+            raw = p.read_bytes()
+            if _jobs_gate_stat(p) != val:
+                return None                          # another version than the one observed
+            return _jg_digest(_jg_json_pieces(json.loads(raw.decode("utf-8"))))
+        except Exception:
+            return None
+    return read
+
+
+def _jg_slice_dir(path):
+    """A directory by session, for its stat `val` (the relay queue, the working notes): each entry by its name, mtime and size."""
+    def read(val):
+        p = path()
+        if val is None:
+            return {}
+        try:
+            pieces = []
+            with os.scandir(p) as it:
+                for e in it:
+                    st = e.stat(follow_symlinks=False)
+                    pieces.append((_jg_owners(e.name), "%s %d %d" % (e.name, st.st_mtime_ns, st.st_size)))
+            if _jobs_gate_stat(p) != val:
+                return None
+            return _jg_digest(pieces)
+        except Exception:
+            return None
+    return read
+
+
+def _jg_slice_part(key):
+    """One part of the nudge ledger by session, for its value `val` (_jg_ledger_part's): each entry by its key."""
+    def read(val):
+        try:
+            d = _auto_nudge_data()
+            part = d.get(key)
+            raw = json.dumps(part, sort_keys=True, default=str) if part else ""
+            if (zlib.crc32(raw.encode("utf-8")), len(raw), bool(d.get(UNPROVED))) != val:
+                return None
+            if part and not isinstance(part, dict):
+                return _jg_digest([(set(), raw)])
+            return _jg_digest(_jg_json_pieces({key: part or {}}) + [(set(), "unproved %s" % bool(d.get(UNPROVED)))])
+        except Exception:
+            return None
+    return read
+
+
+def _jg_slice_judges(val):
+    """The judge calls in flight by session, for the count `val` (jd.active_change): each session's begins and ends, and under
+    None the calls naming none with any change the split does not carry."""
+    try:
+        n, by = jd.active_change_by()
+    except Exception:
+        return None
+    if n != val:
+        return None
+    out = {str(k).lower(): c for k, c in by.items() if k is not None}
+    out[None] = n - sum(c for k, c in by.items() if k is not None)
+    return out
+
+
+_JG_SLICERS = {
+    "box:ledger": _jg_slice_file(lambda: jd.STATE / "auto-nudge.json"),
+    "box:sessionFlags": _jg_slice_file(lambda: jd.STATE / "session-flags.json"),
+    "box:relayQueue": _jg_slice_dir(lambda: jd._relay_queue_dir()),
+    "box:workingNotes": _jg_slice_dir(lambda: WORKING_DIR),
+    "mem:intrBlocked": _jg_slice_part("intrBlocked"),
+    "mem:judgeActive": _jg_slice_judges,
+}
+
+
+def _jg_slices(ch, val):
+    """The channel's parts by session for the version `val` observed (_JG_SLICERS), memoized on it; None when unread."""
+    hit = _JG_SLICE_MEMO.get(ch)
+    if hit is not None and hit[0] == val:
+        return hit[1]
+    try:
+        out = _JG_SLICERS[ch](val)
+    except Exception:
+        out = None
+    if out is not None:
+        _JG_SLICE_MEMO[ch] = (val, out)
+    return out
+
+
+def _jg_apart(run, ch, cur, scope, whole):
+    """Whether a shared input sessions own parts of (_JG_SLICERS), whose whole value moved from what the gate observed to
+    `cur`, moved in other sessions' parts alone: the parts of the sessions in `scope` and the part naming no session read the
+    same before and after. Never for a memo naming no session, for an input the memo's own key carried whole (`whole`), or when
+    either reading failed: then the input counts whole."""
+    if scope is None or ch not in _JG_SLICERS or ch in whole:
+        return False
+    before = (run.get("slices") or {}).get(ch)
+    after = _jg_slices(ch, cur) if before is not None else None
+    if before is None or after is None:
+        return False
+    keys = {str(s).lower() for s in scope} | {None}
+    return all(before.get(k) == after.get(k) for k in keys)
 
 
 def _jobs_gate_raced(run, tick):
@@ -68988,21 +69204,26 @@ def _jobs_gate_raced(run, tick):
     shared judge write) while a re-stat of a view this pass took finds its positions moved. A write no such signal covers is a
     miss even when something else brings the job back next pass (the floor's re-stat, a later reader's stat refreshing the
     standing entry, an all-sessions mark over a standing view): a standing view is never re-statted, since it cannot tell a
-    write during the run from one before the pass. A memo that names its session (the run's `memo`, _jobs_gate_note) is tested
-    on that session's inputs alone (_jg_scoped): another session's input moving is not why it moved. A run whose memos name
-    several sessions is raced only when each session's memo is. The live rows and the membership are the pass's snapshot,
-    which no job moves. A run's own writes never reach this test: each is an act (a mark, a write, a send), and an act is never
-    raced."""
+    write during the run from one before the pass. A memo names the sessions whose inputs its key carries (the run's `memo`,
+    _jobs_gate_note) and is tested on those sessions' inputs alone: their entries of a registry row, the judge's write counts,
+    the compaction clicks and the settle write's evidence (_jg_scoped), and their parts of the shared inputs sessions own parts
+    of (_jg_apart: the nudge ledger and its interrupt-block rows, the session flags, the relay queue, the working notes and the
+    judge calls in flight, each with its part that names no session), so another session's input moving is not why it moved;
+    an input the memo's own key carried whole (the ledger's stat in the ten-file key) counts whole. A run whose memos name
+    several sessions is raced only when each memo is. The settle write's leaves are tested against the stats its period
+    predicate took (the run's `pred`). The live rows and the membership are the pass's snapshot, which no job moves. A run's
+    own writes never reach this test: each is an act (a mark, a write, a send), and an act is never raced."""
     v = run.get("v") or {}
-    memo = run.get("memo") or {None}
-    if None not in memo and len(memo) > 1:           # memos of several sessions: each needs a race of its own
-        return all(_jobs_gate_raced(dict(run, memo={sid}), tick) for sid in sorted(memo))
-    scope = None if None in memo else memo           # None: a memo note named no session, so every session's inputs count
-    nxt = None
+    memo = run.get("memo") or {(None, frozenset())}
+    if len(memo) > 1 and all(m[0] is not None for m in memo):   # memos naming sessions: each needs a race of its own
+        return all(_jobs_gate_raced(dict(run, memo={m}), tick) for m in sorted(memo, key=lambda m: (sorted(m[0]), sorted(m[1]))))
+    scope, whole = (None, frozenset()) if any(m[0] is None for m in memo) else next(iter(memo))   # None: a memo note named no
+    nxt = None                                                                                     #  session, so every session's inputs count
     for ch, val in v.items():
         kind, _, arg = ch.partition(":")
         if kind in ("box", "mem", "regs"):
-            if _jg_scoped(ch, _jobs_gate_observe({"inputs": (ch,)}, tick).get(ch), scope) != _jg_scoped(ch, val, scope):
+            cur = _jobs_gate_observe({"inputs": (ch,)}, tick).get(ch)
+            if _jg_scoped(ch, cur, scope) != _jg_scoped(ch, val, scope) and not _jg_apart(run, ch, cur, scope, whole):
                 return True
         elif kind == "files":
             if nxt is None:
@@ -69019,6 +69240,9 @@ def _jobs_gate_raced(run, tick):
                     six = _jobs_gate_six(s)
                     if tuple(six[2 * i + j] for i in idx for j in (0, 1)) != tuple(val[sid][:-1]):
                         return True
+    for sid, (leaf, st) in sorted((run.get("pred") or {}).items()):   # the leaves the settle write's period predicate statted
+        if (scope is None or sid in scope) and _stat_key(leaf) != st:
+            return True
     return False
 
 
@@ -69149,15 +69373,23 @@ def _jg_owed_ckpt_persist(tick):
     pass's first sight faulted), a leaf moved since its last periodic write once CKPT_PERIOD_S has passed since that write or
     passes within JOBS_GATE_CKPT_EARLY_S (`period`; the leaf statted as the write stats it, _stat_key, and only once the period
     is that close), and a table over its 4096 bound, which the write clears (`prune`). A dirty checkpoint alone is no work: the
-    write takes a session only on new settle evidence or a due period, and leaves the rest to the converge pass and the exit."""
+    write takes a session only on new settle evidence or a due period, and leaves the rest to the converge pass and the exit.
+    Each leaf stat it takes is kept on the run (`pred`, by session), so a leaf that grows after this read and before the write's
+    own stat is told from one the gate saw (_jobs_gate_ckpt_due, _jobs_gate_raced)."""
     rows = _jg_ckpt_rows(tick)
     for sid, _leaf in rows:
         if sid not in _CKPT_SETTLE_SEEN or sid not in _CKPT_PERIODIC_SEEN:
             return "unseen"
     mono = time.monotonic()
-    for sid, leaf in rows:
+    took = tick.get("pred") if isinstance(tick, dict) else None   # each leaf stat taken, kept on the run: the write's hook and
+    for sid, leaf in rows:                                          #  the raced test compare against it (_jobs_gate_ckpt_due)
         last = _CKPT_PERIODIC_SEEN.get(sid)
-        if last is not None and mono - last[1] >= CKPT_PERIOD_S - JOBS_GATE_CKPT_EARLY_S and last[0] != _stat_key(leaf):
+        if last is None or mono - last[1] < CKPT_PERIOD_S - JOBS_GATE_CKPT_EARLY_S:
+            continue
+        st = _stat_key(leaf)
+        if took is not None:
+            took[str(sid)] = (str(leaf), st)
+        if last[0] != st:
             return "period"
     if len(_CKPT_SETTLE_SEEN) > 4096 or len(_CKPT_PERIODIC_SEEN) > 4096:
         return "prune"
@@ -69212,6 +69444,7 @@ def _jobs_gate_reset():
     """Forget every record (the knob's flip; a test's fresh world): each job's next observed pass is owed, as `first`."""
     for k in ("rec", "lost", "gen", "floorSeen", "tree", "last"):
         _JOBS_GATE[k].clear()
+    _JG_SLICE_MEMO.clear()
 
 
 def _jobs_gate_mode():
@@ -69268,12 +69501,14 @@ def _jobs_gate_predict(name, tick):
     a due it noted has come, consumed by a run at or after it), owed (it has no record, it left work owing, its own predicate says
     so, or it is undeclared) or closed. The inputs are observed here, BEFORE the job reads them, and are what its record keeps."""
     run = {"job": name, "acts": {}, "owed": set(), "dues": [], "flips": [], "pending": set(), "tree": set(), "spec": None,
-           "v": None, "verdict": "owed", "reason": "undeclared", "fresh": set(), "memo": set()}
+           "v": None, "verdict": "owed", "reason": "undeclared", "fresh": set(), "memo": set(), "slices": {}, "pred": {}}
     spec = _JOBS_INPUTS.get(name)
     if spec is None:
         return run
     run["spec"] = spec
     v = run["v"] = _jobs_gate_observe(spec, tick, run["fresh"])
+    run["slices"] = {ch: _jg_slices(ch, val) for ch, val in v.items() if ch in _JG_SLICERS}   # the shared inputs by session, as
+    #                                               observed: the raced test reads a memo's own sessions' parts of them (_jg_apart)
     if tick["aliveFault"] and any(ch.partition(":")[0] in ("files", "rows", "members", "regs") for ch in spec.get("inputs", ())):
         run["reason"] = "gateFault"                  # the sessions could not be listed: no closed verdict on that
         return run
@@ -69296,7 +69531,11 @@ def _jobs_gate_predict(name, tick):
     if rec["owed"]:
         run["reason"] = sorted(rec["owed"])[0]
         return run
-    why = spec["owed"](tick) if spec.get("owed") is not None else None
+    tick["pred"] = run["pred"]                       # what the predicate statted, kept on the run (the settle write's leaves)
+    try:
+        why = spec["owed"](tick) if spec.get("owed") is not None else None
+    finally:
+        tick.pop("pred", None)
     if why:
         run["reason"] = str(why)
         return run
@@ -69375,7 +69614,7 @@ def _jobs_gate_close(run, wall, cpu, raised):
 
 def _jobs_gate_settle(run, tick, wall, cpu, raised):
     """The run's outcome against its verdict. A job called closed that ACTED (a write, a mark, a send, a row, a raise) is a
-    wrongQuiet with its evidence. One whose only evidence is a moved memo is `raced` when an input of the memo's session moved
+    wrongQuiet with its evidence. One whose only evidence is a moved memo is `raced` when an input of the memo's sessions moved
     after the gate observed it with a signal the next pass's gate will see (an input observed again that moved, a prelude
     signal naming the session, or one naming every session over a view this pass took that a re-stat finds moved: that gate
     opens it, later, not lost; _jobs_gate_raced), and a wrongQuiet otherwise: a write no signal covers is a miss even when the
