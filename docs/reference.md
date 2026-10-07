@@ -4128,12 +4128,23 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   walks only the turns from the first that moved, the open one always, and
   joins the captions fresh. `scans` (scans whose walk finished),
   `heldTurns` and `walkedTurns` (closed turns served from the hold, and turns
-  walked), `partial` (a held entry whose turns diverged before its end: a
-  rewind, a compaction, a late record), `reset` (an entry discarded whole
-  because the leaf or the seams moved), `raised` (a walk that raised, which
-  stores nothing), `evict` (entries the byte bound shed), and the gauges
-  `entries`, `bytes` (estimated) and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`,
-  else a 256th of the machine's memory).
+  walked), `partial` (a finished scan whose held entry was not served whole:
+  a held turn moved, as an in-place rewrite or a late record moves one, or
+  the session has fewer closed turns than the entry held, as a rewind cut or
+  a past prompt edited leaves it; an append, a compaction's included, and a
+  cut's release that restores whole turns move neither this nor `reset`),
+  `reset` (an entry discarded whole because the leaf or the seams moved,
+  counted when it is discarded, before the walk),
+  `raised` (a walk that raised, which stores nothing), `faulted` (every scan
+  that raised, the walk's included, so `faulted` above `raised` means scans
+  are failing before their walk: the captions read, the parse, or the goal
+  store's read or its seams; the session serves its last-known captions, is
+  scanned again each build, and the kernel's log says so once until a scan
+  of it comes back clean), `evict` (entries the byte bound shed), `overBound`
+  (scans whose own entry was over the bound by itself: served, not held, and
+  shedding no other session), and the gauges `entries`, `bytes` (estimated)
+  and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`, else a 256th of the machine's
+  memory).
   `judgingBand` is the timeline's judging band memo: a completed judge run's
   entry is held under its usage row while the row and the gloss it borrowed
   stand, so an unchanged entry is the same object build after build and the
