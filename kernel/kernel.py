@@ -1359,7 +1359,8 @@ class _PerfStats:
                 # restored, noCut, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
                 "asmIndex": em.asm_index_stats(),          # the lazy index (T323 stage 4c): atoms built, by caller, resident
-                "chatPages": dict(_PAGE_STATS)}   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
+                "chatPages": dict(_PAGE_STATS),   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
+                "repoIndex": _repo_index_stats()}   # the path links' repo listing, taken off the pusher (2026-10-07): refreshes, forks, time
 
 
 _PERF_STATS = _PerfStats()
@@ -38657,29 +38658,30 @@ def _chat_build_deps(sid, payload):
 def _chat_pl_precheck(sid, pending, prev=None):
     """What a tab's pending path tokens (`pending`: the (uuid, md) pairs _chat_build_deps recorded) could
     resolve into, as a key over exactly the filesystem state _resolve_path_token reads: the session's cwd
-    (a token resolves relative to it), the repo-index key (tiers 2 and 3 answer from _repo_file_index,
-    memoized on that key, so the same key is the same index and the same candidates), each message's
+    (a token resolves relative to it), the served repo listing's generation (tiers 2 and 3 answer from
+    _repo_index_served, so the same generation is the same index and the same candidates), each message's
     candidate directories (tier 1's `cwd/token` and the one tier-2/3 candidate's directory, where a file
     appearing moves the directory's mtime, and a directory that does not exist yet reads None until it
     does) and the identity of every such directory. Outside a git tree the repo key is a constant (tiers
     2 and 3 cannot answer there, and asking would fork git per call), so only the tier-1 directories
     decide. Returns (cwd, k, per_msg, idents): per_msg maps a message's uuid to its sorted candidate
     directories, idents each directory to its _chat_ident. `prev` is the record's last key: while the cwd
-    and the repo key hold, the candidate directories are the same strings and are reused, so a cycle
-    costs one tree scandir and one stat per distinct directory. None when it cannot vouch (a tree that
-    cannot be scanned): the caller re-resolves everything, as every build did before. Per DIRECTORY,
+    and the generation hold, the candidate directories are the same strings and are reused, so a cycle
+    costs one tree scandir and one stat per distinct directory (a tree that cannot be scanned keeps the
+    listing it has, which is what the resolve reads too). Per DIRECTORY,
     because a transcript's mentions name busy places too (a state directory, a log directory): with one
     key over all of them, one churning directory re-resolved every token of the tab each cycle."""
     cwd = _cwd_of(sid)
     in_tree = bool(cwd) and bool(_tree_of(cwd)[0])       # outside a git tree `git ls-files` fails: tiers 2/3 stand down
-    k = _repo_index_key(cwd) if in_tree else ("notree",)
-    if k is None:
-        return None
+    # the listing the resolve reads (_repo_index_served: the last completed one, never git on this thread), named by its
+    # generation: the same generation is the same index and the same candidates, and a git index that moves without
+    # changing the listing (a `git status` refreshing its stat data) moves nothing here (2026-10-07: keyed on the raw
+    # mtimes, every tab of a busy repo re-listed and re-resolved every cycle)
+    idx, gen = _repo_index_served(cwd) if in_tree else (None, None)
+    k = ("listing", gen) if in_tree else ("notree",)
     if prev is not None and prev[0] == cwd and prev[1] == k:
         per_msg = prev[2]
     else:
-        hit = _repo_index_cache.get(cwd) if in_tree else None
-        idx = (hit[1] if hit is not None and hit[0] == k else _repo_file_index(cwd)) if in_tree else None
         per_msg = {}
         for u, md in pending:
             ent = _PATH_LINK_CACHE.get((sid, u))
@@ -62539,9 +62541,12 @@ def _path_pins(sid, uuid):
 #   3. basename — the token has no slash and exactly ONE repo file bears that name.
 # Zero matches or several → the token stays OUT of the map, and the client leaves it prose: a
 # silently-wrong link is worse than no link, so ambiguity is never guessed at.
-# The repo list is `git ls-files -co --exclude-standard` in the SESSION's cwd (each session may be a
-# different repo), re-run per build pass — ~6ms here, and any mtime-keyed cache would miss the
-# untracked files agents create constantly. Ignored files are deliberately invisible to tiers 2/3.
+# The repo list is `git ls-files` in the SESSION's cwd (each session may be a different repo): the tracked files
+# (`-c`, the git index) and the untracked-unignored ones (`-o --exclude-standard`, a walk of the worktree), any
+# mtime-keyed cache missing the untracked files agents create constantly being the reason it is re-taken at all.
+# Ignored files are deliberately invisible to tiers 2/3. The listing is never taken on the caller's thread: the
+# pusher's chat builds and signatures, a connect push and a history page read the last COMPLETED listing
+# (_repo_index_served), and a listing whose key moved is re-taken on a thread of its own (2026-10-07, below).
 _PATH_TOKEN_RE = re.compile(          # Python port of render.ts CLICKABLE_PATH_RE — parity pinned in
     r"file:///?[^\s<>\"'`)]+"         #   tests/test_path_links.py + chat-path-links.test.ts over the
     r"|[~.\w\-]*/[~.\w\-/]*[\w\-]"    #   shared tests/fixtures/path_token_parity.json
@@ -62549,18 +62554,34 @@ _PATH_TOKEN_RE = re.compile(          # Python port of render.ts CLICKABLE_PATH_
     re.IGNORECASE)
 _PATH_TRAIL_RE = re.compile(r"[.,;:!?)\]}>\"'`]+$")   # the client's trailing-punctuation strip, mirrored
 _REPO_LIST_MAX = 200_000              # a runaway listing skips tiers 2/3 rather than indexing forever
+_REPO_LIST_TIMEOUT_S = 120            # one listing's bound: it runs on its own thread, so the filesystem may take its time
 _PATH_LINK_CACHE = {}                 # (sid, uuid) -> (links dict, misses tuple) — see _path_links
 
 
-_repo_index_cache = {}   # cwd -> (key, index) — key = (git-index mtime, toplevel-dir mtime), see below
+_repo_index_cache = {}   # cwd -> (key, index) — key = (git-index mtime, toplevel-dir mtime, subdir mtimes), see below
+_repo_part_cache = {}    # (cwd, "c" | "o") -> (the half's key, its set of paths): the two halves of the listing, keyed apart
+_REPO_SERVED = {}        # cwd -> (key, index or None, generation): the listing the refresh last completed, what the hot paths read
+_REPO_REFRESHING = set() # the cwds whose refresh thread is running: one listing per cwd at a time
+_REPO_GEN = [0]          # the generation counter: a completed listing that answers differently from the served one takes the next
+_repo_served_lock = threading.Lock()
+_REPO_INDEX_STATS = {"refreshes": 0, "changed": 0, "ms": 0.0, "msMax": 0.0, "msLast": 0.0, "forks": {"c": 0, "o": 0}, "failed": 0}
+
+
+def _repo_index_stats():
+    """The repo listing's refresh for /perf (repoIndex): refreshes run and how many changed the served listing, their wall time
+    (sum, max, last; a refresh is both halves or the one whose key moved), the git forks per half ("c" tracked, "o" the
+    untracked walk), the listings that gave no list, and, at the read, the cwds served and the refreshes in flight. The
+    listing never runs on the pusher, so its time shows here and not in any pusher stage."""
+    with _repo_served_lock:
+        return dict(_REPO_INDEX_STATS, forks=dict(_REPO_INDEX_STATS["forks"]), served=len(_REPO_SERVED),
+                    inflight=len(_REPO_REFRESHING))
 
 
 def _repo_index_key(cwd):
     """The events that change _repo_file_index's answer for `cwd`, as one key: the git INDEX file's mtime,
     the repo top dir's mtime and the mtimes of the top's immediate subdirs (see _repo_file_index). None when
     the tree cannot be scanned (the same backstop as _git_branch: no key means an uncached listing, never a
-    raise). Shared with the chat-build signature's pathlink pre-check, which vouches for a message's
-    unresolved tokens only while this key and the message's candidate directories hold."""
+    raise). The first member keys the tracked half, the rest the untracked half (_repo_list)."""
     tree = _tree_of(cwd)[0] or cwd                   # _tree_of returns (toplevel, branch)
     try:
         gi = _git_head_file(tree)                    # <gitdir>/HEAD: the index sits beside it
@@ -62595,27 +62616,19 @@ def _repo_index_stood_down(cwd, why):
     sys.stderr.write("path links: the repo index for %s stood down (%s); bare filenames in this session's messages stay plain text\n" % (_tilde(cwd), why))
 
 
-def _repo_file_index(cwd):
-    """basename -> [repo-relative paths] for every tracked or untracked-unignored file under `cwd`,
-    or None when there is no list to be had (not a git repo, git absent/failing, or a listing past
-    _REPO_LIST_MAX). None means tiers 2/3 stand down for this build; tier 1 needs no list.
-
-    Cached per cwd on the events that change the answer: the git INDEX file's mtime (every
-    add/rm/commit/checkout touches it), the repo top dir's mtime (a new untracked file at the top,
-    the common drop shape), and the mtimes of the top's immediate SUBDIRS (a file created in one —
-    the agent-writes-the-file-it-just-mentioned flow — moves its parent's mtime; one scandir of
-    stats, no fork). Without this, one unresolved path-shaped token in a transcript — the
-    near-universal case — re-forked `git ls-files` on EVERY chat rebuild of that session, one of the
-    fork multipliers behind the Mac 66% CPU burn (2026-08-16). A creation the key can't see (depth
-    two or deeper, untracked) only delays that file's tier-2/3 path LINK until the next observable
-    touch — a rendering nicety, never data; a click's own resolution is unaffected."""
-    key = _repo_index_key(cwd)
-    hit = _repo_index_cache.get(cwd)
-    if hit is not None and key is not None and hit[0] == key:
+def _repo_list_part(cwd, part, pkey, force=False):
+    """One half of the repo listing as a set of repo-relative paths, or None when git gives no list (said once, as the
+    whole listing's stand-down): "c" the tracked files, read from the git index (a tenth of a second on a 25k-file repo);
+    "o" the untracked-unignored files, a walk of the worktree (ten seconds on the same repo on a network filesystem,
+    measured 2026-10-07). Cached on the half's own key (`pkey`); `force` re-takes it under an unchanged key."""
+    hit = _repo_part_cache.get((cwd, part))
+    if hit is not None and pkey is not None and hit[0] == pkey and not force:
         return hit[1]
+    argv = ["git", "ls-files", "-c"] if part == "c" else ["git", "ls-files", "-o", "--exclude-standard"]
+    with _repo_served_lock:
+        _REPO_INDEX_STATS["forks"][part] += 1
     try:
-        out = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"],
-                             cwd=cwd, capture_output=True, text=True, timeout=10)
+        out = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=_REPO_LIST_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as e:
         _repo_index_stood_down(cwd, "git did not run: %s" % (e,))
         return None
@@ -62623,25 +62636,147 @@ def _repo_file_index(cwd):
         _repo_index_stood_down(cwd, "git ls-files exited %d: %s" % (out.returncode, (out.stderr or "").strip()[:200]))
         return None
     names = set(out.stdout.splitlines())   # a set: an index/worktree duplicate must not fake ambiguity
+    if pkey is not None:
+        if len(_repo_part_cache) > 128:              # bounded; a listing is sizable
+            _repo_part_cache.clear()
+        _repo_part_cache[(cwd, part)] = (pkey, names)
+    return names
+
+
+def _repo_list(cwd, key):
+    """The tracked and the untracked halves of the repo listing under `key` (_repo_index_key's), merged into
+    basename -> [repo-relative paths], or None (_repo_file_index). Each half is re-taken only on its own events: the
+    tracked half when the git index moves (every add, rm, commit, checkout, and every `git status` that refreshes the
+    index's stat data, which on a repo several sessions work in is every few seconds), the untracked half when the top
+    dir or one of its immediate subdirs moves (a file created there), or when the tracked half LOST a path (a
+    `git rm --cached`, a checkout), the one index move that can add to the untracked set. A path that moved from
+    untracked to tracked is in both halves until the walk is re-taken, and the union counts it once."""
+    prev = _repo_part_cache.get((cwd, "c"))
+    tracked = _repo_list_part(cwd, "c", None if key is None else key[0])
+    if tracked is None:
+        return None
+    lost = prev is not None and prev[1] is not tracked and not prev[1] <= tracked
+    others = _repo_list_part(cwd, "o", None if key is None else key[1:], force=lost)
+    if others is None:
+        return None
+    names = tracked | others
     if len(names) > _REPO_LIST_MAX:
         _repo_index_stood_down(cwd, "%d files, past the %d-file ceiling" % (len(names), _REPO_LIST_MAX))
         return None
     idx = {}
-    for p in names:
+    for p in sorted(names):                      # sorted: two listings of the same files are equal indexes (the generation's test)
         idx.setdefault(p.rsplit("/", 1)[-1], []).append(p)
-    if key is not None:
+    return idx
+
+
+def _repo_file_index(cwd):
+    """basename -> [repo-relative paths] for every tracked or untracked-unignored file under `cwd`,
+    or None when there is no list to be had (not a git repo, git absent/failing, or a listing past
+    _REPO_LIST_MAX). None means tiers 2/3 stand down for this build; tier 1 needs no list. This is the
+    listing itself, taken on the calling thread: the hot paths never call it, they read _repo_index_served,
+    whose refresh thread does.
+
+    Cached per cwd on the events that change the answer: the git INDEX file's mtime (every
+    add/rm/commit/checkout touches it), the repo top dir's mtime (a new untracked file at the top,
+    the common drop shape), and the mtimes of the top's immediate SUBDIRS (a file created in one —
+    the agent-writes-the-file-it-just-mentioned flow — moves its parent's mtime; one scandir of
+    stats, no fork), each half of the listing on its own share of the key (_repo_list). Without this,
+    one unresolved path-shaped token in a transcript — the near-universal case — re-forked `git ls-files`
+    on EVERY chat rebuild of that session, one of the fork multipliers behind the Mac 66% CPU burn
+    (2026-08-16). A creation the key can't see (depth two or deeper, untracked) only delays that file's
+    tier-2/3 path LINK until the next observable touch — a rendering nicety, never data; a click's own
+    resolution is unaffected."""
+    key = _repo_index_key(cwd)
+    hit = _repo_index_cache.get(cwd)
+    if hit is not None and key is not None and hit[0] == key:
+        return hit[1]
+    idx = _repo_list(cwd, key)
+    if idx is not None and key is not None:
         if len(_repo_index_cache) > 64:              # bounded; an index is sizable
             _repo_index_cache.clear()
         _repo_index_cache[cwd] = (key, idx)
     return idx
 
 
+def _repo_index_refresh(cwd):
+    """Take `cwd`'s listing (_repo_file_index) and publish it to the hot paths (_REPO_SERVED) under the key read BEFORE it
+    was taken, so a tree that moved while git walked it is re-listed at the next ask. A listing that answers differently
+    from the one served takes the next generation and wakes the pusher: each tab's path-link pre-check reads the
+    generation (_chat_pl_precheck), so the tabs whose tokens the new listing resolves re-resolve and rebuild on that
+    cycle, and the tabs whose answers held do not. One refresh per cwd runs at a time (_REPO_REFRESHING, claimed by the
+    asker); this releases the claim, a raise included."""
+    try:
+        key = _repo_index_key(cwd)
+        t0 = time.monotonic()
+        try:
+            idx = _repo_file_index(cwd)
+        except Exception:
+            sys.stderr.write("path links: the repo listing for %s raised: %s\n" % (_tilde(cwd), traceback.format_exc()))
+            idx = None
+        ms = (time.monotonic() - t0) * 1000.0
+        with _repo_served_lock:
+            cur = _REPO_SERVED.get(cwd)
+            changed = cur is None or cur[1] != idx
+            if changed:
+                _REPO_GEN[0] += 1
+            st = _REPO_INDEX_STATS
+            st["refreshes"] += 1; st["changed"] += int(changed); st["failed"] += int(idx is None)
+            st["ms"] += ms; st["msLast"] = ms; st["msMax"] = max(st["msMax"], ms)
+            if cwd not in _REPO_SERVED and len(_REPO_SERVED) > 64:
+                for _c in [c for c in _REPO_SERVED if c not in _REPO_REFRESHING][:len(_REPO_SERVED) // 2]:
+                    _REPO_SERVED.pop(_c, None)      # bounded by the sessions' distinct cwds; a dropped one is re-listed when asked
+            _REPO_SERVED[cwd] = (key, idx, _REPO_GEN[0] if changed else cur[2])
+        if changed:
+            _pusher_wake.set()
+    finally:
+        with _repo_served_lock:
+            _REPO_REFRESHING.discard(cwd)
+
+
+def _repo_index_spawn(cwd):
+    """Run `cwd`'s refresh on a thread of its own (tests swap in the refresh itself, to take the listing inline)."""
+    threading.Thread(target=_repo_index_refresh, args=(cwd,), name="repo-index", daemon=True).start()
+
+
+def _repo_index_served(cwd):
+    """(index, generation) of `cwd`'s last COMPLETED listing, for the threads that must not wait on git: the pusher's chat
+    builds and their signatures' path-link pre-check, a connect push, a history page. Never forks and never waits: when
+    the tree's key has moved since that listing (or there is none yet), a refresh is started on a thread of its own, one
+    per cwd however many tabs ask, and this call answers from the listing in hand (None, generation 0, before the first
+    one lands). The refresh's landing is the event that brings the new listing in (_repo_index_refresh wakes the pusher).
+
+    Why (2026-10-07): the listing ran on the asking thread, under the key, per tab. On a 25k-file research repo on a
+    network filesystem the untracked walk took ten seconds, and the git index moved every two to four seconds (the
+    sessions working in the repo refresh it with every `git status`), so the key had always moved by the time a listing
+    finished, the cache never served, and every tab of that cwd paid a listing at every signature check: three listings
+    ran at once, back to back, one pusher cycle took 14.5 minutes (about a hundred tabs times nine seconds),
+    a connect push four minutes, and a history page asked behind that connect push waited as long. An unchanged key
+    with no completed listing (a tree that cannot be scanned reads the key None both times) starts nothing more."""
+    key = _repo_index_key(cwd)
+    with _repo_served_lock:
+        cur = _REPO_SERVED.get(cwd)
+        start = (cur is None or cur[0] != key) and cwd not in _REPO_REFRESHING
+        if start:
+            _REPO_REFRESHING.add(cwd)
+    if start:
+        try:
+            _repo_index_spawn(cwd)
+        except Exception:                            # no thread to be had: the claim goes, the next ask retries
+            with _repo_served_lock:
+                _REPO_REFRESHING.discard(cwd)
+            sys.stderr.write("path links: the repo listing for %s could not start: %s\n" % (_tilde(cwd), traceback.format_exc()))
+        with _repo_served_lock:
+            cur = _REPO_SERVED.get(cwd)              # an inline refresh (the tests' spawn) has landed by now
+    return (cur[1], cur[2]) if cur is not None else (None, 0)
+
+
 def _resolve_path_token(tok, sid, memo):
     """One shape-matched token → the file it names (the open target), or None. Tier 1 keeps the token
     as its own target (a click already resolves it against the session's cwd); tiers 2/3 return the
     repo-relative path from the file list, which the same click-time resolution reaches. `memo` is the
-    per-build cache — the file index is built at most once per build pass, and only when some token
-    actually misses tier 1."""
+    per-build cache — the file index is read at most once per build pass, and only when some token
+    actually misses tier 1: the last completed listing (_repo_index_served), so a file the refresh has
+    not listed yet links on the rebuild the refresh's landing triggers."""
     cwd = memo.get("cwd")
     if cwd is None:                                       # once per build, not once per token: off the
         cwd = memo["cwd"] = _cwd_of(sid)                  # pusher's names snapshot this was a registry
@@ -62655,7 +62790,7 @@ def _resolve_path_token(tok, sid, memo):
     if not cwd:
         return None                                       # nowhere to resolve a repo-relative fix
     if "idx" not in memo:
-        memo["idx"] = _repo_file_index(cwd)
+        memo["idx"] = _repo_index_served(cwd)[0]         # the last completed listing: never git on this thread (2026-10-07)
     idx = memo["idx"]
     if idx is None:
         return None
