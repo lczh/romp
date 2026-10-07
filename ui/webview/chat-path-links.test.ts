@@ -2,9 +2,9 @@
 // The linkifier matched path-shaped tokens by SHAPE alone, so a bare `render.js` became a blue link
 // that 404'd on click — it resolved against the session's cwd, where no such file lives. The KERNEL
 // now resolves every shape-matched token at message-build time (build_session's _path_links: tier 1
-// exact stat, tiers 2/3 a UNIQUE match in `git ls-files -co --exclude-standard` run in the session's
-// cwd) and ships {token: open target} as `pathLinks` on user + assistant events. The client keeps
-// every shape gate it had and merely requires map membership; the map's value is what a click opens,
+// exact stat, tiers 2/3 a UNIQUE match in the repo's tracked and untracked-unignored files, `git ls-files -c`
+// and `-o --exclude-standard` in the session's cwd) and ships {token: open target} as `pathLinks` on
+// user + assistant events. The client keeps every shape gate it had and merely requires map membership; the map's value is what a click opens,
 // so a unique `sub/deep.py` mention opens the real kernel/sub/deep.py and hover shows that target.
 // Zero or several candidates → absent from the map → prose (a silently-wrong link is worse than no
 // link). The matcher lives in path-links.ts (lifted out of render.ts, which binds the click per span); neither
@@ -57,7 +57,10 @@ test("file:// URIs are explicit absolute paths — never gated on the map", () =
 test("the kernel resolves in three tiers over the session repo's real file list", () => {
   assert.ok(KERNEL.includes("def _path_links(md, sid, uuid, memo):"));
   assert.ok(KERNEL.includes("def _resolve_path_token(tok, sid, memo):"));
-  assert.ok(KERNEL.includes('["git", "ls-files", "-co", "--exclude-standard"]'),
+  // the listing's two halves, each re-taken on its own events and never on the asking thread (2026-10-07):
+  // the tracked files and the untracked-unignored ones, so untracked files count and ignored ones never do
+  assert.ok(KERNEL.includes('["git", "ls-files", "-c"]'), "tracked files count");
+  assert.ok(KERNEL.includes('["git", "ls-files", "-o", "--exclude-standard"]'),
     "untracked files count, ignored files never do");
   // the asymmetric per-message cache: hits latch (no flapping), misses retry every build — a file
   // mentioned before the Write that creates it links on the very rebuild that Write triggers
