@@ -593,3 +593,98 @@ class OneListingPerChange(_Listing):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThreadRowsSingleFlight(_Listing):
+    """GET /sessions?threads=1 walks every thread twice over (the key, then a miss's rebuild), and every session's and
+    thread's postal service asks for it. With nothing shared, concurrent requests each ran their own walk: on a host with
+    ~150 live threads and ~240 postal services every request outran the callers' 6 s cap, the callers asked again, the
+    abandoned handlers kept walking, and the kernel stopped accepting connections (2026-10-07). One walk at a time,
+    shared with every request that waited on it."""
+
+    N = 20
+
+    def _run_concurrently(self, target, walks, key_name, real_key):
+        """Run N requests at once while the key walk is held until every request has read its arrival mark, so the
+        shared result is the only one a waiter can take (no timing in the assertion)."""
+        L = km._SESSIONS_LISTING
+        readers = set()
+        all_arrived = threading.Event()
+
+        class Watched(dict):
+            def __getitem__(self, k):
+                if k == "threadsGen":
+                    readers.add(threading.get_ident())
+                    if len(readers) >= ThreadRowsSingleFlight.N:
+                        all_arrived.set()
+                return dict.__getitem__(self, k)
+
+        watched = Watched(L)
+
+        def held_key():
+            walks.append(1)
+            all_arrived.wait(10)
+            return real_key()
+
+        out, errs = [], []
+
+        def one():
+            try:
+                out.append(target())
+            except Exception as e:                                   # surfaced by the assertion below
+                errs.append(e)
+
+        with mock.patch.object(km, "_SESSIONS_LISTING", watched), mock.patch.object(km, key_name, held_key):
+            ts = [threading.Thread(target=one) for _ in range(self.N)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(15)
+        self.assertEqual(errs, [])
+        return out
+
+    def test_concurrent_thread_listing_requests_share_one_walk(self):
+        self._cycle()
+        walks = []
+        out = self._run_concurrently(lambda: km._sessions_listing_serve(threads=True), walks,
+                                     "_thread_rows_key", km._thread_rows_key)
+        self.assertEqual(len(out), self.N, "every request answered")
+        self.assertEqual(len(set(out)), 1, "every request got the same body")
+        self.assertEqual(len(walks), 1, "one walk of the threads for %d concurrent requests (each walked its own before)" % self.N)
+
+    def test_a_request_after_a_walk_ended_walks_again_and_sees_a_change(self):
+        """Sharing never serves a walk that ended before the request arrived: a later request walks for itself."""
+        self._cycle()
+        first = km._sessions_listing_serve(threads=True)
+        walks = []
+        real = km._thread_rows_key
+        with mock.patch.object(km, "_thread_rows_key", lambda: (walks.append(1), real())[1]):
+            second = km._sessions_listing_serve(threads=True)
+        self.assertEqual(len(walks), 1, "a request with no walk in flight walks for itself")
+        self.assertEqual(first, second)
+
+    def test_requests_before_the_first_cycle_build_the_base_rows_once(self):
+        builds = []
+        name, real = self._count_builds(builds)
+        try:
+            gate = threading.Event()
+            started = []
+
+            def slow(*a):
+                started.append(1)
+                gate.wait(10)
+                return real(*a)
+
+            setattr(km, name, slow)
+            out = []
+            ts = [threading.Thread(target=lambda: out.append(km._sessions_listing_serve())) for _ in range(self.N)]
+            for t in ts:
+                t.start()
+            gate.set()
+            for t in ts:
+                t.join(15)
+        finally:
+            setattr(km, name, real)
+        self.assertEqual(len(out), self.N)
+        self.assertEqual(len(set(out)), 1)
+        self.assertEqual(len(started), 1, "one request-side build before the first cycle, however many requests")
