@@ -5308,6 +5308,16 @@ signal, from two things the kernel owns directly:
   rules on one signal per cycle, and the spend engage runs before the lift in
   the pusher's order, so it sees a paused file and rules on the record the
   next cycle.
+- What the same file holds back. While a spend pause holds, input typed into
+  a session on the billing it recorded waits in that session's queue, and a
+  session on the other billing is served. A session whose own newest record
+  is a spend-limit error waits as well, until that record is older than
+  `liftedAt` or older than the moment the session's CLI came up on a new
+  billing (`authSwitchedAt` on its registry row, stamped when a billing
+  switch lands, or at the pick for a session with no CLI running); a
+  spend-limit error after either holds again, and the spend engage reads
+  records by the same rule. Until a switch lands, a session counts as being
+  on the billing its running CLI reported.
 
 The kernel pushes the cell's frame to shell clients only when it changed, and
 again to a shell that sends `ready`:

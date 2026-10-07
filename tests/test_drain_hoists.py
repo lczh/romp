@@ -94,13 +94,13 @@ class DrainHoists(unittest.TestCase):
         for capped in (False, True):
             self.capped = capped
             fresh = km._limit_hold(SIDS[0])
-            km._live_scope.usage = km._usage(); km._live_scope.spend_pause = False
+            km._live_scope.usage = km._usage(); km._live_scope.spend_pause = (False, "", 0.0)
             try:
                 hoisted = km._limit_hold(SIDS[0])
             finally:
                 km._live_scope.usage = km._UNSET; km._live_scope.spend_pause = None
             self.assertEqual(fresh, hoisted, "capped=%s" % capped)
-        km._live_scope.usage = {"limited": None}; km._live_scope.spend_pause = True
+        km._live_scope.usage = {"limited": None}; km._live_scope.spend_pause = (True, "", 0.0)
         try:
             self.assertEqual(km._limit_hold(SIDS[0])["reason"], "spend")
         finally:
@@ -112,7 +112,7 @@ class DrainHoists(unittest.TestCase):
         km._usage = boom
         km._retry_paused_on = lambda: True; km._retry_pause_reason = lambda: "spend"
         self.assertIsNone(km._limit_hold(SIDS[0]), "fresh: unreadable usage is no hold, whatever the pause says")
-        km._live_scope.usage = km._UNREADABLE; km._live_scope.spend_pause = True
+        km._live_scope.usage = km._UNREADABLE; km._live_scope.spend_pause = (True, "", 0.0)
         try:
             self.assertIsNone(km._limit_hold(SIDS[0]), "hoisted: the same verdict")
         finally:

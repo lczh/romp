@@ -12356,17 +12356,27 @@ def _spend_capped_session(now, live_map, after=0):
     CYCLE's clock would read a second capped session's record from the second before that cycle as stale
     though it postdated the lift's evidence. A record with no readable time (t 0) is not proof of staleness
     and counts."""
-    floor = float(after or 0)
+    live = live_map if isinstance(live_map, dict) else {}
     for s in _alive_sessions(now, live_map):
         p = s.get("path")
         if p:
             e = _api_error(p)
-            if e and e.get("spendLimit"):
-                t = float(e.get("t") or 0)
-                if floor and 0 < t < floor:
-                    continue                             # already ruled on: the lift's evidence is newer
+            if e and e.get("spendLimit") and _spend_record_stands(e, live.get(str(s.get("sid") or "")), after):
                 return s
     return None
+
+
+def _spend_record_stands(e, tm, lifted_at=0):
+    """Whether a session's spendLimit record `e` is still news, the ONE rule the engage (_spend_capped_session) and the
+    hold (_limit_hold) read (2026-10-07): not older than the global pause's last lift (`lifted_at`, _retry_pause_lifted_at:
+    the evidence that outranked it) nor than the moment the session's CLI came up on a new billing (its live row's
+    authSwitchedAt, stamped by the backend at the connect that carried a switch, or at a pick on a session with no CLI
+    running: the record describes an account the session no longer runs on). A cap error the new account answers with
+    is a newer record and stands again. Compared as they are, as the engage always did: a record with no readable time
+    (t 0) is not proof of staleness and stands."""
+    t = float(e.get("t") or 0)
+    floor = max(float(lifted_at or 0), float((tm or {}).get("authSwitchedAt") or 0))
+    return not (floor and 0 < t < floor)
 
 
 def _auto_pause_on_spend_limit(now, live_map):
@@ -12397,7 +12407,7 @@ def _auto_pause_on_spend_limit(now, live_map):
         # re-engage it here the next cycle (the pause file flapped every cycle in a login-plus-key install
         # while one session streamed past the other's cap)
         live = live_map if isinstance(live_map, dict) else {}
-        bills = "login" if _bills_login(live.get(str(capped.get("sid") or ""))) else "key"
+        bills = _bills_side(live.get(str(capped.get("sid") or "")))
         if not _set_retry_paused(True, reason="spend", bills=bills):
             return                                       # refused (the pause file could not be read): the writer said so
         sys.stderr.write("retry-pause: auto-engaged: monthly spend limit reached (%s billing); auto-retry + judges "
@@ -12417,6 +12427,22 @@ def _bills_login(tm):
     if a:
         return a == "login"
     return not _auth_key_present()
+
+
+def _bills_side(tm):
+    """_bills_login as the side word the spend pause records under `bills`: "login" or "key"."""
+    return "login" if _bills_login(tm) else "key"
+
+
+def _on_paused_billing(tm, bills):
+    """Whether a live-map row's session is on the billing a SPEND pause recorded (`bills`, _retry_pause_bills): the ONE
+    rule both of the pause's readers apply (2026-10-07). The lift (_auto_resume_retry) takes fresh output only from such a
+    session, and the hold (_limit_hold) holds only such a session's input: a cap is on one account, and a session on the
+    other one is servable, its input held by nothing but its own record (_spend_record_stands). A pause that records no
+    billing (written before it was recorded) covers every session, as it always did. The side is the CLI's own report
+    first (authLive), which the backend keeps until a switch lands, so a session whose new pick still waits for its
+    relaunch reads as the account its running CLI serves it on."""
+    return not bills or _bills_side(tm) == bills
 
 
 def _auto_resume_retry(now, live_map):
@@ -12490,7 +12516,7 @@ def _auto_resume_retry(now, live_map):
             continue
         evidence = None
         if reason == "spend":
-            if bills and ("login" if _bills_login(live.get(str(s.get("sid") or ""))) else "key") != bills:
+            if not _on_paused_billing(live.get(str(s.get("sid") or "")), bills):
                 continue                                 # the other account: says nothing about this cap
             out_t = _api_last_output_t(path)
             fresh = out_t > floor                        # the API's own answer, after the pause
@@ -22280,6 +22306,8 @@ def _cap_switch_offer(sid, aerr, now=None):
     tm = (_live_map() or {}).get(str(sid)) or {}
     if str(tm.get("authLive") or tm.get("auth") or "") != "login" or not _auth_key_present():
         return None
+    if tm.get("authPending"):
+        return None                  # a switch is already on its way (the CLI's report stands until it lands, 2026-10-07)
     return _usage_cap_open(now)
 
 
@@ -24231,6 +24259,9 @@ class Sessions:
                                 # fell to the other side, the Billing menu says so (2026-09-08)
                                 "authPickUnavailable": st.get("authPickUnavailable", ""),
                                 "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
+                                # when the session's CLI came up on a new billing (0 = never on record): a spend-cap
+                                # record older than it describes an account the session left (_spend_record_stands)
+                                "authSwitchedAt": st.get("authSwitchedAt") or 0,
                                 "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
                                 "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
                                 "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
@@ -40232,7 +40263,9 @@ def _limit_hold(sid):
       (its 0.5 s backstop) of the reset;
       - a spend cap has no readable reset (it lifts when the user raises it), so the hold rides the
         retry-pause _auto_pause_on_spend_limit engaged and lifts when that lifts: the user resumes it, or
-        _auto_resume_retry sees a session serve a request again.
+        _auto_resume_retry sees a session on the capped billing serve a request again. The pause holds only
+        the sessions on the billing it recorded; a session's own cap record holds until that lift or until
+        the session's CLI comes up on a new billing, whichever is first (_spend_record_stands).
     fable is excluded exactly as _auto_pause_on_limit excludes it — that window is model-scoped, so a
     session on any other model is still servable.
 
@@ -40270,16 +40303,34 @@ def _limit_hold(sid):
                 # epoch) → nothing to count down to, so promise no clock rather than a wrong one.
                 "resetsAt": max(known) if len(known) == len(resets) else None,
                 "what": "waiting for your usage limit to reset"}
-    spend_pause = getattr(_live_scope, "spend_pause", None)
-    spend = (_retry_paused_on() and _retry_pause_reason() == "spend") if spend_pause is None else spend_pause
-    if not spend:
-        path = _path_of(sid)                          # the pause is account-wide, but the transcript is the
-        e = _api_error(path) if path else None        # first place the cap shows — hold from that edge too
-        spend = bool(e and e.get("spendLimit"))
-    if spend:
-        return {"reason": "spend", "resetsAt": None,
-                "what": "waiting for your monthly spend limit to be raised"}
+    # The two spend arms, each released by its own event (2026-10-07: a session held behind a cap stayed held
+    # after the global pause lifted, and whatever account it had moved to, since its own record's one release, a
+    # new prompt, is what the hold withholds). The global pause holds only the sessions on the billing it recorded
+    # (_on_paused_billing, the rule its lift reads); a session's own cap record holds only while it is news
+    # (_spend_record_stands, the rule its engage reads): newer than the pause's last lift and than the session's
+    # landing on a new billing.
+    on, bills, lifted = _spend_pause_reading() if getattr(_live_scope, "spend_pause", None) is None \
+        else _live_scope.spend_pause
+    # the live row is read only where a verdict needs it (a pause that recorded a billing, a cap record): the cycle's
+    # snapshot inside a drain, a liveness read on a handler thread
+    if on and (not bills or _on_paused_billing((_live_map() or {}).get(str(sid)), bills)):
+        return dict(_SPEND_HOLD)
+    path = _path_of(sid)                              # the pause is account-wide, but the transcript is the
+    e = _api_error(path) if path else None            # first place the cap shows — hold from that edge too
+    if e and e.get("spendLimit") and _spend_record_stands(e, (_live_map() or {}).get(str(sid)), lifted):
+        return dict(_SPEND_HOLD)
     return None
+
+
+_SPEND_HOLD = {"reason": "spend", "resetsAt": None, "what": "waiting for your monthly spend limit to be raised"}
+
+
+def _spend_pause_reading():
+    """(on, bills, liftedAt): whether the global retry pause holds for a monthly SPEND cap, the billing it recorded
+    ("" when none, or when no spend pause holds), and the last spend lift's instant (the stand-down floor every
+    spendLimit record is read against). _limit_hold's reading, taken once per drain into the cycle's scope."""
+    on = bool(_retry_paused_on() and _retry_pause_reason() == "spend")
+    return on, (_retry_pause_bills() if on else ""), _retry_pause_lifted_at()
 
 
 def _ops_gate(sid):
@@ -42291,7 +42342,7 @@ def _apply_pending_ops(now=None):
             _live_scope.usage = _usage()
         except Exception:
             _live_scope.usage = _UNREADABLE
-        _live_scope.spend_pause = _retry_paused_on() and _retry_pause_reason() == "spend"
+        _live_scope.spend_pause = _spend_pause_reading()
         for sid in sids:
             with _pending_ops_lock:
                 if not _pending_ops.get(sid):
@@ -68921,7 +68972,7 @@ _JOBS_GATE_ACTS = ("views", "mark", "push", "send", "problem", "spendRow", "writ
 #                                             checkpoint settle write's own work: a first sight recorded, a session's documents
 #                                             written, a table cleared at its bound); the rest says a memo moved (miss, neverSeen,
 #                                             clockParse, load)
-_JOBS_GATE_ROW_FIELDS = ("state", "since", "ctxTokens", "auth", "authLive", "connected", "spawning", "retryCount")   # the live
+_JOBS_GATE_ROW_FIELDS = ("state", "since", "ctxTokens", "auth", "authLive", "authSwitchedAt", "connected", "spawning", "retryCount")   # the live
 #                                             row's fields the jobs read (never the whole row: its model-fallback retry countdown
 #                                             moves every second, which would make every row reader's input a clock)
 _JOBS_UNDECLARED = ("convergeCheckpoints",)   # owed every pass wherever it runs: a dirty set and a byte budget, no input the gate
