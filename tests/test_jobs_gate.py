@@ -1547,6 +1547,8 @@ class MemoScope(_GateLab):
                          ({"miss": 1}, {}))
 
     def test_another_sessions_registry_row_is_not_apis_race(self):
+        """The stub's memo names api alone, as a look whose key carries no asker's row does. A look whose real key carries web's
+        row, because web asked api something, names both, and that row is its race (TheLookScope)."""
         self._two()
         armed = self._walk_memo()
         self.quiet()
