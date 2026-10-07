@@ -125,6 +125,9 @@ def other_attline(t, uuid, parent, **attachment):
 
 
 CORRECTION = "Keep the jitter under five percent, please."
+# how the relay opens each message (kernel _merge_body: the record is tagged, the user 2026-10-06), and closes one
+ME, THEM, END = '<message from="me">\n', '<message from="the other assistant">\n', "\n</message>"
+WHOLE_START = "<discussion>\n<message"   # a relay missing nothing opens its discussion on the first message
 
 
 def spliced_records(t, prompt=CORRECTION, **fields):
@@ -1784,8 +1787,8 @@ class ThreadProjection(CommentBase):
                     self.assertIsNone(km._comment_merge(PARENT, THREAD))
                     self.assertEqual([sid for sid, _ in be.sent], [PARENT], "one handoff, to the parent")
                     body = be.sent[0][1]
-                    self.assertIn("Me: " + comment, body, "the person's turn starts at the comment's quote line")
-                    self.assertIn("Them: Twenty stretches the waits.", body)
+                    self.assertIn(ME + comment, body, "the person's turn starts at the comment's quote line")
+                    self.assertIn(THEM + "Twenty stretches the waits." + END, body)
 
     def _seed_passage_thread(self, exact, comment, precompact=False):
         """A thread on `exact` whose row keeps what romp sent: an ordinary one cut at the passage, or with `precompact`
@@ -1877,8 +1880,8 @@ class ThreadProjection(CommentBase):
                     else:
                         self.assertEqual(users[0]["md"], comment, "the events view shows the comment whole")
                     body = self._relay_body()
-                    self.assertIn("Me: " + comment, body, "the relay hands the parent the comment whole")
-                    self.assertIn("Them: Twenty stretches the waits.", body)
+                    self.assertIn(ME + comment + END, body, "the relay hands the parent the comment whole")
+                    self.assertIn(THEM + "Twenty stretches the waits." + END, body)
 
     def test_a_closed_tag_line_in_the_passage(self):
         # A passage line that is a whole <system-reminder> or <task-notification> block. _split_reminders, which the chat
@@ -3479,9 +3482,9 @@ class RelayWholeDiscussion(CommentBase):
                 uline(t + 400, "Then write it into the README.", "cu3", parent="cs1"),
                 aline(t + 410, "Done: the README documents five percent jitter.", "ca3", parent="cu3")]
 
-    WHOLE = ["Me: Why jitter at all?", "Them: Jitter keeps the clients from retrying in lockstep.",
-             "Me: Would five percent be enough?", "Them: Five percent is enough at this scale.",
-             "Me: Then write it into the README.", "Them: Done: the README documents five percent jitter."]
+    WHOLE = [ME + "Why jitter at all?" + END, THEM + "Jitter keeps the clients from retrying in lockstep." + END,
+             ME + "Would five percent be enough?" + END, THEM + "Five percent is enough at this scale." + END,
+             ME + "Then write it into the README." + END, THEM + "Done: the README documents five percent jitter." + END]
 
     def _seed(self, records, cut="a1", status="open", relayed=0):
         self._write(THREAD, records)
@@ -3518,7 +3521,8 @@ class RelayWholeDiscussion(CommentBase):
         self._assert_in_order(body, self.WHOLE)
         self.assertNotIn("being continued from a previous conversation", body, "the summary is nobody's message")
         self.assertNotIn("How should the notes-api sync loop back off?", body, "the copied history is the parent's")
-        self.assertIn("Here is how it went:", body, "nothing is missing, so nothing says so")
+        self.assertIn(WHOLE_START, body, "nothing is missing, so nothing says so")
+        self.assertNotIn(km.MERGE_GAP_NOTE, body)
         self.assertEqual(km._comment_thread(PARENT, THREAD)["relayedT"], self.t0 + 410)
 
     def test_the_frames_messages_include_those_from_before_a_compaction(self):
@@ -3551,7 +3555,7 @@ class RelayWholeDiscussion(CommentBase):
         self._assert_in_order(body, self.WHOLE[2:])
         self.assertNotIn("Why jitter at all?", body, "the first relay's part is not sent again")
         self.assertNotIn("retrying in lockstep", body)
-        self.assertIn("Here is how it went:", body)
+        self.assertIn(WHOLE_START, body)
         # …and with nothing past the floor, nothing goes
         err, body = self._relay()
         self.assertIn("already relayed", err or "")
@@ -3562,13 +3566,14 @@ class RelayWholeDiscussion(CommentBase):
         self._seed(self._copied() + before)
         err, body = self._relay()
         self.assertIsNone(err)
-        self.assertIn(km.MERGE_GAP_LEAD, body)
+        self.assertIn("<discussion>\n" + km.MERGE_GAP_NOTE + "\n<message", body)
         self._seed(self._copied() + before + self._after(), status="open", relayed=self.t0 + 210)
         notes = []
         err, body = self._relay(notes)
         self.assertIsNone(err)
         self._assert_in_order(body, self.WHOLE[4:])
-        self.assertNotIn(km.MERGE_GAP_LEAD, body, "the unreadable part was before the first relay's floor")
+        self.assertNotIn(km.MERGE_GAP_NOTE, body, "the unreadable part was before the first relay's floor")
+        self.assertIn(WHOLE_START, body)
         self.assertEqual(notes, [])
 
     def test_the_first_message_survives_the_length_cap(self):
@@ -3586,11 +3591,12 @@ class RelayWholeDiscussion(CommentBase):
         self.assertIsNone(err)
         self.assertEqual(len(notes), 1, "the person is told the relay was cut")
         self.assertIn("part of the middle cut", notes[0])
-        self.assertIn("Me: Why jitter at all?", body, "the question the discussion is about always goes")
+        self.assertIn(ME + "Why jitter at all?" + END, body, "the question the discussion is about always goes")
         self.assertIn(km.MERGE_TRIM_NOTE, body, "the cut says where it is")
-        self.assertIn("Them: Case 29: " + "the backoff holds. " * 129 + "the backoff holds.", body,
+        self.assertIn(THEM + "Case 29: " + "the backoff holds. " * 129 + "the backoff holds." + END, body,
                       "the newest reply goes whole")
-        self.assertLess(body.index("Me: Why jitter at all?"), body.index(km.MERGE_TRIM_NOTE))
+        self.assertIn(END + "\n" + km.MERGE_TRIM_NOTE + "\n<message from=", body, "the note stands between two messages")
+        self.assertLess(body.index(ME + "Why jitter at all?"), body.index(km.MERGE_TRIM_NOTE))
         self.assertLess(body.index(km.MERGE_TRIM_NOTE), body.index("Case 29: "))
         self.assertNotIn("Case 0: ", body, "the middle is what is cut")
         self.assertLess(len(body), km.MERGE_BODY_CAP + 2000)
@@ -3602,7 +3608,7 @@ class RelayWholeDiscussion(CommentBase):
         self._seed(recs)
         err, body = self._relay()
         self.assertIsNone(err)
-        self.assertIn("Them: " + long.strip(), body)
+        self.assertIn(THEM + long.strip() + END, body)
         # the frame's copy stays capped: it rides every push
         self.assertEqual(len(km._thread_messages(THREAD, "a1")[1]["text"]), km._THREAD_MSG_CAP)
 
@@ -3616,8 +3622,8 @@ class RelayWholeDiscussion(CommentBase):
         self._seed(recs)
         err, body = self._relay()
         self.assertIsNone(err)
-        self._assert_in_order(body, ["Me: Why jitter at all?", "Them: Jitter keeps the clients",
-                                     "Me: " + CORRECTION, "Them: Understood: under five percent."])
+        self._assert_in_order(body, [ME + "Why jitter at all?", THEM + "Jitter keeps the clients",
+                                     ME + CORRECTION + END, THEM + "Understood: under five percent." + END])
 
     def test_a_task_notification_spliced_mid_turn_is_not_the_persons(self):
         t = self.t0
@@ -3641,7 +3647,7 @@ class RelayWholeDiscussion(CommentBase):
         self._seed(self._copied() + self._before() + after[:2] + [replay] + after[2:])
         err, body = self._relay()
         self.assertIsNone(err)
-        self.assertEqual(body.count("Me: Would five percent be enough?"), 1)
+        self.assertEqual(body.count(ME + "Would five percent be enough?" + END), 1)
         self._assert_in_order(body, self.WHOLE)
 
     def test_a_compaction_link_to_a_record_never_written_is_repaired_from_its_preserved_segment(self):
@@ -3650,7 +3656,7 @@ class RelayWholeDiscussion(CommentBase):
         err, body = self._relay()
         self.assertIsNone(err)
         self._assert_in_order(body, self.WHOLE)
-        self.assertIn("Here is how it went:", body)
+        self.assertIn(WHOLE_START, body)
 
     def test_a_break_in_the_record_is_said_in_the_relay_and_to_the_person(self):
         for name, recs in (
@@ -3664,10 +3670,10 @@ class RelayWholeDiscussion(CommentBase):
                 notes = []
                 err, body = self._relay(notes)
                 self.assertIsNone(err)
-                self.assertIn(km.MERGE_GAP_LEAD, body, "the relay says its beginning is missing")
-                self.assertNotIn("Here is how it went:", body)
+                self.assertIn("<discussion>\n" + km.MERGE_GAP_NOTE + "\n" + ME, body,
+                              "the relay says its beginning is missing, before its first message")
                 self.assertNotIn("Why jitter at all?", body, "premise: the opener is past the break")
-                self.assertIn("Me: Then write it into the README.", body, "what could be read still goes")
+                self.assertIn(ME + "Then write it into the README." + END, body, "what could be read still goes")
                 self.assertEqual(len(notes), 1, "the person is told too")
                 self.assertIn("without the start of the discussion", notes[0])
                 self.assertIn("breaks off before its first message", notes[0])
@@ -3691,7 +3697,7 @@ class RelayWholeDiscussion(CommentBase):
         err, body = self._relay()
         self.assertIsNone(err)
         self._assert_in_order(body, self.WHOLE)
-        self.assertIn("Here is how it went:", body)
+        self.assertIn(WHOLE_START, body)
 
     def test_a_thread_whose_start_is_not_in_its_transcript_is_refused_loudly(self):
         self._seed(self._before()[1:] + self._after())                # no cut record a1 (and no opener)
@@ -3719,17 +3725,17 @@ class RelayWholeDiscussion(CommentBase):
                {"who": "agent", "text": "y" * 20000}]
         last = {"who": "agent", "text": "z" * 10000}
         body = km._merge_body("q", [first] + mid + [last])
-        self.assertIn("Me: Why jitter at all?\n\n" + km.MERGE_TRIM_NOTE, body)
-        self.assertIn("Them: " + "z" * 10000, body)
+        self.assertIn(ME + "Why jitter at all?" + END + "\n" + km.MERGE_TRIM_NOTE + "\n" + ME + "and then?" + END, body)
+        self.assertIn(THEM + "z" * 10000 + END + "\n</discussion>", body)
         self.assertNotIn("x" * 100, body)
         # a newest reply too long to fit whole keeps its end
         body = km._merge_body("q", [first, {"who": "agent", "text": "w" * 30000 + "the end"},
                                     {"who": "agent", "text": "v" * 60000 + "the very end"}])
-        self.assertIn("Me: Why jitter at all?", body)
-        self.assertIn(km.MERGE_TRIM_NOTE + "\n\nThem: …", body)
+        self.assertIn(ME + "Why jitter at all?" + END, body)
+        self.assertIn(km.MERGE_TRIM_NOTE + "\n" + THEM + "…", body)
         self.assertTrue(body.split("<!--")[0].rstrip().endswith("account for it in everything you do on this from here "
                                                                 "on."))
-        self.assertIn("the very end", body)
+        self.assertIn("the very end" + END + "\n</discussion>", body, "the cut message still closes")
         self.assertLess(len(body), km.MERGE_BODY_CAP + 1000)
         # under the cap nothing is cut
         self.assertNotIn(km.MERGE_TRIM_NOTE, km._merge_body("q", [first] + mid[:2]))
@@ -3841,11 +3847,11 @@ class ThreadReadsWhereTheCliWrites(CommentBase):
             del self.be.sent[:]
             self.assertIsNone(km._comment_merge(PARENT, THREAD))
             body = [text for sid, text in self.be.sent if sid == PARENT][0]
-            lines = [("Me: " if w == "you" else "Them: ") + s for w, s in zip(self.WHO, self.SAID)]
+            lines = [(ME if w == "you" else THEM) + s + END for w, s in zip(self.WHO, self.SAID)]
             at = [body.find(ln) for ln in lines]
             self.assertNotIn(-1, at, "cut %r: every message goes" % cut)
             self.assertEqual(at, sorted(at))
-            self.assertIn("Here is how it went:", body, "nothing is missing")
+            self.assertIn(WHOLE_START, body, "nothing is missing")
 
     def test_a_thread_with_nothing_recorded_still_reads_from_its_cwd(self):
         # before its first turn ends the CLI has said nothing about where it writes: the cwd derivation stands

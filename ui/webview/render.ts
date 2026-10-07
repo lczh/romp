@@ -142,6 +142,7 @@ import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAn
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
+import { isRelay, parseRelay, relayHtml, relayPlain } from "./relay-view";   // a relayed thread's expanded bubble: a small transcript (2026-10-06)
 import { threadTakesReplies, stageThreadReply, threadReply } from "./comments";   // a thread's reply box: its quote chips, its staged stack, its release (2026-10-07)
 import { activeInput } from "./active-input";   // the one box typing, pasting and dictation from outside any box go to (2026-10-07)
 import { dragSlotIndex } from "./dragslot";
@@ -1577,6 +1578,18 @@ function userMd(src: string, repo: string | null = prRepoFor()): string {
     mdImgPostPass(clean);   // a markdown image whose URL failed this page life is parked before the browser fetches it (T291c)
     return clean.innerHTML;
   } catch { const d = document.createElement("div"); d.textContent = src; return d.innerHTML; }
+}
+
+// A romp bubble's unfolded text (landed and queued alike). A comment-thread RELAY (its <!-- romp-tag: relay --> marker)
+// carries a tagged record (kernel _merge_body), shown as a small transcript: the passage quoted, each message its own
+// block labelled You or Thread, the notes about what was left out as dim lines (the user 2026-10-06, who found the old
+// Me:/Them: lines hard to read among the messages' own formatting). A relay whose record does not parse renders as
+// plain markdown with its tag lines lifted out, never raw tags; a relay from before the tags renders as it always did.
+// `src` is the message as recorded (markers included), `raw` the text shown (markers stripped).
+function rompFullHtml(src: string, raw: string): string {
+  if (!isRelay(src)) return md(raw);
+  const r = parseRelay(raw);
+  return r ? relayHtml(r, (s) => md(s)) : md(relayPlain(raw));
 }
 
 // The GitHub repository (owner/repo, or null) whose pull requests a `#123` in the text being rendered
@@ -3944,7 +3957,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         bubble.appendChild(gistEl);
         if (more) {
           const full = el("div", "nudge-full md");
-          full.innerHTML = md(raw);
+          full.innerHTML = rompFullHtml(ev.md, raw);   // a relay unfolds as its small transcript (relay-view.ts)
           linkifyFileUris(full, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview, ev.pathPreviewWhy);
           linkTerms(full);
           bubble.appendChild(full);
@@ -5043,7 +5056,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
       rb.appendChild(gistEl);
       if (more) {
         const full = el("div", "nudge-full md");
-        full.innerHTML = md(raw);
+        full.innerHTML = rompFullHtml(t.md, raw);   // a queued relay unfolds as the landed one does
         rb.appendChild(full);
         rb.classList.add("nudge-collapsible");
         rb.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener
