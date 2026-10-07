@@ -50632,6 +50632,14 @@ def _reg_login(d):
     return v if isinstance(v, str) and lg.ID_RE.match(v) else ""
 
 
+def _reg_launched_login(d):
+    """The stored login a reg's last launch carried (`launchedLogin`, the login the recorder files the session's byLogin
+    dollars under), "" when the launch carried none, when it is junk, or when the CLI did not use the token (the backend
+    clears the field then, while the pick under `authLogin` stays)."""
+    v = (d or {}).get("launchedLogin") if isinstance(d, dict) else None
+    return v if isinstance(v, str) and lg.ID_RE.match(v) else ""
+
+
 def _login_choices(login_ok, managed, now=None):
     """Every login a session on this machine can be billed to (T346), the machine's own first: [{id, value, label,
     machine, available, why?, expiresSoon?}]. The picker's Billing row and the tab menu's Billing submenu render
@@ -52214,17 +52222,28 @@ def _same_account(a, b):
     return same_org and a["kind"] == b["kind"]
 
 
+def _signins_now_words(hosts):
+    """The hover sentence for an account reached through machines' own sign-ins (hosts, in order): each is named by the
+    account signed in now, so its earlier sign-in spend counts here even when it was made under another account."""
+    if len(hosts) == 1:
+        return ("%s is signed in to this account now, so all spend from its sign-in counts here, including any from "
+                "before a switch of account." % hosts[0])
+    return ("%s and %s are signed in to this account now, so all spend from their sign-ins counts here, including any "
+            "from before a switch of account." % (", ".join(hosts[:-1]), hosts[-1]))
+
+
 def _spend_accounts(per_host):
     """The modal's By account summary from every host's billing routes ([(host, _spend_billing list)], local first):
     [{kind: "seat" | "key" | "unknown", name, title?, note?, routes: [{host, route, via, estimate}]}]. Seat routes that
     _same_account calls one account fold into ONE entry named by its kind ("Enterprise seat", "Personal plan"; the
     organisation added only when two entries would share a name), its routes the "via" words ("laptop sign-in",
-    "token on server") and its emails and organisation the hover. A stored login whose record names no account is
-    its own entry under the user's label, noted "account not recorded"; a stored login the user linked to a machine's
-    sign-in is that account like any other, its hover saying the link is theirs; a machine's sign-in that is signed out or
-    unreadable, and spend from before billing was tracked, are the Unknown entry. Every seat route's dollars are an
-    estimate at API prices (Claude Code's cost, not a bill); the key's are what the key was billed. The dollars
-    themselves are summed client-side over the chart's range from the series' `routes`."""
+    "token on server") and its emails and organisation the hover, which, where a machine's sign-in is among the entry's
+    routes, also says that sign-in is named by the account signed in now (_signins_now_words). A stored login whose
+    record names no account is its own entry under the user's label, noted "account not recorded"; a stored login the
+    user linked to a machine's sign-in is that account like any other, its hover saying the link is theirs; a machine's
+    sign-in that is signed out or unreadable, and spend from before billing was tracked, are the Unknown entry. Every
+    seat route's dollars are an estimate at API prices (Claude Code's cost, not a bill); the key's are what the key was
+    billed. The dollars themselves are summed client-side over the chart's range from the series' `routes`."""
     seats, unrec, keys, unknown = [], [], [], []
     for host, billing in per_host:
         for m in billing or []:
@@ -52253,10 +52272,12 @@ def _spend_accounts(per_host):
                 home = g
                 break
         if home is None:
-            home = {"ids": [], "routes": [], "links": []}
+            home = {"ids": [], "routes": [], "links": [], "signins": []}
             groups.append(home)
         home["ids"].append(m)
         home["routes"].append({"host": host, "route": r, "via": via, "estimate": True})
+        if r == "machine" and host not in home["signins"]:
+            home["signins"].append(host)
         if m.get("linked"):   # the user's statement, never shown as verified: the hover says whose link it is
             home["links"].append("%s%s linked by you to %s's sign-in." % (via[:1].upper(), via[1:], m["linked"]))
     out = []
@@ -52269,8 +52290,13 @@ def _spend_accounts(per_host):
             if x.get("email") and x["email"] not in emails:
                 emails.append(x["email"])
         title = " · ".join(emails + [p for p in (org, kind) if p])
-        if g["links"]:
-            title = (title + ". " if title else "") + " ".join(g["links"])
+        # a machine's sign-in is named by the account it is signed in to NOW (_machine_identity: the ledger stamps no
+        # account per turn), so a switch of account on that machine moves its earlier sign-in spend to this row; the hover
+        # says so, as the Unknown row's "signed out now" already does for a sign-out (the #74 review's account-switch
+        # finding)
+        said = [_signins_now_words(g["signins"])] if g["signins"] else []
+        if said or g["links"]:
+            title = (title + ". " if title else "") + " ".join(said + g["links"])
         out.append({"kind": "seat", "name": _SEAT_NAMES.get(kind) or label or "Claude account", "org": org,
                     "title": title, "routes": g["routes"]})
     # two accounts that would share a name: told apart by their organisations when those differ, else by where each is
@@ -52404,9 +52430,14 @@ def _spend_detail_local(now=None):
         bg, fg = _identity_of(sid)
         row = {"sid": sid, "name": _name_of(sid) or "", "bg": bg, "fg": fg, "live": sid in live,
                "usd": round(u, 4), "tok": t, "turns": n}
-        _lid = sbm.SdkBackend.reg_login(sbm.read_reg(jd.STATE, sid)) if sbm else ""
+        # the login the session's last launch carried, the one the recorder files its byLogin dollars under, never the
+        # pick: a refused token leaves the pick set while the key or the machine's sign-in billed, and a session with no
+        # pick of its own that launched on the machine's default stored login has no pick to read. Only the LAST launch:
+        # a session that changed logins within the range has its earlier dollars named by the later launch's login, or by
+        # none when that launch carried none, since the ledger keeps no per-login split per session
+        _lid = _reg_launched_login(sbm.read_reg(jd.STATE, sid)) if sbm else ""
         if _lid and be:
-            row["login"] = be.login_display(_lid)     # the stored login this session bills now (T346)
+            row["login"] = be.login_display(_lid)     # the stored login this session's last launch billed (T346)
             row["loginId"] = _lid                     # …its record id, which names its account in the modal's By account,
             row["loginLabel"] = str((lg.read_record(jd.STATE, _lid) or {}).get("label") or "")   # …and its label alone
         if sid in keyt:
@@ -73077,7 +73108,9 @@ pullFleet().then(done,function(){if(ROWS.length)renderRows(ROWS,SELF);done();});
 // kernel-side, the ledger's bySid series — fetched on open behind the romp loader, never scraped from
 // the hover's HTML. The click still kicks the hover's own refresh (pull), so both levels are fresh.
 var spBack=document.getElementById('rsp-back'),spPanel=document.getElementById('rsp-panel'),spTip=null;
-var SP={data:null,err:'',range:'hours',measure:'usd',order:'spend',merge:false,open:false};
+// acctsOpen: the narrow card's By account fold, opened by the user (spPaintAccts). Kept for the page's life, as a keyed
+// expand is: closing and reopening the modal keeps it open, and a reload starts it closed (it is not a saved pref)
+var SP={data:null,err:'',range:'hours',measure:'usd',order:'spend',merge:false,open:false,acctsOpen:false};
 // the toggles persist across opens and reloads (T247f): range, measure, and the list's order
 var SP_PREFS_KEY='romp:spendModal';
 function spLoadPrefs(){try{var p=JSON.parse(localStorage.getItem(SP_PREFS_KEY)||'{}')||{};if(p.range==='days'||p.range==='day')SP.range=p.range;if(p.measure==='tok')SP.measure='tok';if(p.order==='yours')SP.order='yours';if(p.merge===true)SP.merge=true;}catch(e){}}
@@ -73163,15 +73196,41 @@ if(usd>=SP_GRAIN||turns>0)out.push({name:a.name,kind:a.kind,note:a.note||'',titl
 out.sort(function(x,y){return ((x.kind==='unknown')-(y.kind==='unknown'))||(y.usd-x.usd);});return out;}
 // the account a session's stored login belongs to, by name ("" when that login has no spend in the ledger's reach)
 function spAcctName(d,s){var want=String(s.host||d.host)+'|login:'+s.loginId,hit='';(d.accounts||[]).forEach(function(a){(a.routes||[]).forEach(function(r){if(String(r.host)+'|'+r.route===want)hit=a.name;});});return hit;}
-function accountsHTML(d){var rows=spAccountRows(d),miss=d.accountsMissing||[],anyEst=false;if(!rows.length&&!miss.length)return '';
-var h='<div class=ru-tip-name><span>By account</span><span class=ru-tip-reset>'+spRangeWords(spSeries(d))+'</span></div><table class=rsp-acct><tbody>';
+// the hosts whose chart, list and Totals count key-billed turns only while the summary counts every route (the #74
+// review's keyed-host finding): a keyed host with spend in this range on any route but the key (its seat turns, a
+// signed-out or unreadable sign-in's, or spend from before billing was tracked). Decided per host, as spSeatPart
+// decides, since a keyed and a total host can feed one seat row
+function spKeyedHosts(d){var ser=spSeries(d),out=[];((ser&&ser.routes)||[]).forEach(function(r){var h=String(r.host||d.host);
+if(r.route==='key'||out.indexOf(h)>=0||spHostScope(d,h)!=='keyed')return;if(spSumArr(r.usd)>=SP_GRAIN||spSumArr(r.turns)>0)out.push(h);});return out;}
+// the summary beside Totals (mode ''), or, on a card too narrow for that, where it stacked above the session list and
+// pushed the list down, at 390x844 wholly off the card (the #74 review's narrow-card finding), a fold: 'closed' is ONE
+// line, the head and each account's dollars, and a click opens it; 'open' is the full summary under the same head.
+// spPaintAccts picks the mode.
+// The closed line's marks carry no hover words: the line is the fold's button, and a tap on a touch screen hovers as well
+// as clicks, so the estimate's words would be left up over the rows the tap opens. The open rows and the estimate line
+// under them keep the words
+function accountsHTML(d,mode){var rows=spAccountRows(d),miss=d.accountsMissing||[],anyEst=false;if(!rows.length&&!miss.length)return '';
+var fold=mode==='closed'||mode==='open';
+var h=fold?'<button class="ru-tip-name rsp-afold" data-act=accts:toggle aria-expanded='+(mode==='open'?'true':'false')+'><span><i class=rsp-acaret aria-hidden=true>\u25b8</i>By account</span>':'<div class=ru-tip-name><span>By account</span>';
+if(mode==='closed')return h+'<span class=ru-tip-reset>'+(rows.length?rows.map(function(r){return esc(r.name)+' '+(r.est?SP_APPROX:'')+fmtUsd(r.usd);}).join(', '):miss.map(esc).join(', ')+': older build')+'</span></button>';
+h+='<span class=ru-tip-reset>'+spRangeWords(spSeries(d))+'</span>'+(fold?'</button>':'</div>')+'<table class=rsp-acct><tbody>';
 rows.forEach(function(r){if(r.est)anyEst=true;h+='<tr data-acct="'+esc(r.kind)+'"><td class=rsp-name'+(r.title?' data-tip="'+esc(r.title)+'"':'')+'>'+esc(r.name)
 +'<span class=ru-tip-reset> '+SP_DOT+' '+esc(r.via.join(', '))+(r.note?' '+SP_DOT+' '+esc(r.note):'')+'</span></td>'
 +'<td class=n>'+spUsd(r.usd,r.est)+'</td><td class=n>'+r.turns+' turn'+(r.turns===1?'':'s')+'</td></tr>';});
 h+='</tbody></table>';
 if(miss.length)h+='<div class=rsp-note>'+miss.map(esc).join(', ')+': older build, not in this breakdown</div>';
+var kh=spKeyedHosts(d),their=kh.length===1?'its':'their';
+if(kh.length)h+='<div class=rsp-note>'+kh.map(esc).join(', ')+': all '+their+' turns count here; the chart, the list and Totals count only '+their+' key-billed turns</div>';
 if(anyEst)h+='<div class=rsp-note>'+SP_APPROX+' '+esc(SP_EST_TIP)+'.</div>';
 return h;}
+// paint the summary in the mode its place allows: beside Totals, the full summary; stacked under them (a narrow card,
+// where the row wrapped, which the sections' 300px basis decides from the card's width alone, whatever they hold) one
+// line unless the user opened it (SP.acctsOpen, kept across re-renders and resizes). A paint that would change nothing
+// is skipped, so a resize keeps the fold's focus
+function spPaintAccts(){var ac=document.getElementById('rsp-accts'),tt=document.getElementById('rsp-totals');if(!ac||!SP.data)return;
+var ah=accountsHTML(SP.data,'');if(!ah){ac.innerHTML='';ac.hidden=true;ac.__rspH='';return;}
+ac.hidden=false;if(tt&&ac.getBoundingClientRect().top>tt.getBoundingClientRect().top+1)ah=accountsHTML(SP.data,SP.acctsOpen?'open':'closed');
+if(ac.__rspH!==ah){ac.innerHTML=ah;ac.__rspH=ah;}}
 function spRangeView(d){var ser=spSeries(d);if(!ser||!ser.stacks)return d;var meta={};(d.sessions||[]).forEach(function(s){meta[spKey(d,s)]=s;});
 var sessions=[],un={usd:0,tok:0,turns:0},other=null;
 ser.stacks.forEach(function(st){var usd=spSumArr(st.usd),tok=spSumArr(st.tok),turns=st.turns?spSumArr(st.turns):null;   // null: an older peer's stack carries no turns (a dash, never a zero)
@@ -73257,13 +73316,16 @@ if(a==='close'){closeSpend();return;}
 if(a==='retry'){openSpend();return;}
 if(a==='merge:toggle'){SP.merge=!SP.merge;spSavePrefs();if(SP.merge)b.classList.add('on');else b.classList.remove('on');
 var tb2=document.getElementById('rsp-table');if(tb2){tb2.innerHTML=sessionTable(spRangeView(SP.data));tb2.scrollTop=0;}renderChart();return;}
+// the narrow card's By account fold: opened or closed at once, the session pane refitted to the room it leaves, and the
+// keyboard's place kept on the rebuilt button
+if(a==='accts:toggle'){SP.acctsOpen=!SP.acctsOpen;spPaintAccts();spSizePane();var fb=document.querySelector('#rsp-accts [data-act="accts:toggle"]');if(fb)fb.focus();return;}
 var m=/^(range|measure|order):(\\w+)$/.exec(a);if(!m)return;
 SP[m[1]]=m[2];spSavePrefs();
 // the list follows the chart (T353): a new RANGE re-sums the rows over the buckets the chart now draws, and the head
 // names the range; a new order's head rows, not a mid-list slice (review find)
 if(m[1]==='order'||m[1]==='range'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}
 var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));
-var ac=document.getElementById('rsp-accts');if(ac){var ah=accountsHTML(SP.data);ac.innerHTML=ah;ac.hidden=!ah;}}
+spPaintAccts();}
 var sib=b.parentNode.querySelectorAll('[data-act^="'+m[1]+':"]');
 for(var i=0;i<sib.length;i++){if(sib[i]===b)sib[i].classList.add('on');else sib[i].classList.remove('on');}
 renderChart();});
@@ -73314,7 +73376,9 @@ if(!d){h+='<div class=rsp-err>Couldn\u2019t load the spend detail'+(SP.err?': '+
 +'<button class=rsp-btn data-act=retry>Try again</button></div>';spPanel.innerHTML=h;return;}
 var computed=d.scope==='computed';
 // 1b. By account (2026-10-01) BESIDE the totals, the summary level side by side, wrapping into a stack on a narrow card:
-// below the chart it took the room the session pane needs and the card itself scrolled
+// below the chart it took the room the session pane needs and the card itself scrolled. Stacked, it folds to one line
+// (spPaintAccts, run once the card's HTML is in place, before the chart is drawn and the pane sized), since its rows
+// above the list pushed the session rows down, at 390x844 every one of them off the card
 var ah=accountsHTML(d);
 h+='<div class=rsp-sum><div class=rsp-sec id=rsp-totals>'+totalsHTML(d)+'</div><div class=rsp-sec id=rsp-accts'+(ah?'':' hidden')+'>'+ah+'</div></div>';
 // 2. the histogram FIRST (T247e, the user 2026-09-08): the two ranges the ledger itself holds; dollars
@@ -73344,7 +73408,7 @@ h+='<div class=rsp-sec><div class=ru-tip-name><span>By session'+(many?' \u00b7 '
 ((d.hosts)||[]).forEach(function(x){if(x.status==='ok')return;
 h+='<div class=rsp-note>'+esc(x.host)+': '+(x.status==='older'?'older build, no per-session data':'not reachable')+(x.detail?' \u2014 '+esc(x.detail):'')+'</div>';});
 h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';   // the list over the chart's own range (T353)
-spPanel.innerHTML=h;renderChart();spSizePane();}
+spPanel.innerHTML=h;spPaintAccts();renderChart();spSizePane();}
 // the list pane takes exactly the room left under the chart (review find: a fixed 38vh cap left the card
 // itself scrolling at common viewport heights, a scroll region inside a scroll region); a floor keeps a
 // few rows visible on a very short screen, where the card then scrolls as the last resort
@@ -73467,7 +73531,7 @@ spBucketTipShow(e.clientX,e.clientY,ofmt(ot)+' \u00b7 '+st,fmt(top.total),top,st
 svgEl.onpointerleave=xhHide;}
 var spResizeRaf=0;
 window.addEventListener('resize',function(){if(!(SP.open&&SP.data)||spResizeRaf)return;
-spResizeRaf=requestAnimationFrame(function(){spResizeRaf=0;if(SP.open&&SP.data){renderChart();spSizePane();}});});
+spResizeRaf=requestAnimationFrame(function(){spResizeRaf=0;if(SP.open&&SP.data){spPaintAccts();renderChart();spSizePane();}});});   // a resize across the narrow card's width folds or unfolds By account
 el.addEventListener('click',function(){pull(true);openSpend();});
 setInterval(function(){pull(false);},60000);     // backup auto-refresh: re-read usage.json every 60s
 pull(false);                                     // fill on load, independent of the timeline-forward path
@@ -76787,6 +76851,9 @@ def _landing():
             "#rsp-panel{width:min(880px,94%);max-height:92vh;overflow:auto;background:#252526;border:1px solid #3a3a3a;"
             "border-radius:10px;box-shadow:0 12px 36px #000000aa;padding:16px 20px;color:#cfd6dd;"
             "font:500 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;line-height:1.4}"
+            # where the card's width follows the viewport, it keeps its scrollbar's room whether it scrolls or not, so that
+            # a scrollbar appearing does not change the content width after spPaintAccts has decided By account's fold
+            "@media (max-width:936px){#rsp-panel{scrollbar-gutter:stable}}"
             ".rsp-top{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:#e8eaed;"
             "margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid #34343a}.rsp-top span{flex:1 1 auto}"
             ".rsp-x{background:none;border:none;color:#9aa0a6;font-size:16px;line-height:1;cursor:pointer;padding:0 2px}"
@@ -76823,6 +76890,14 @@ def _landing():
             ".rsp-acct{width:100%;border-collapse:collapse;margin-top:2px}"
             ".rsp-acct td{padding:3px 6px 3px 0;border-bottom:1px solid rgba(255,255,255,0.05)}"
             ".rsp-acct td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.rsp-acct td.rsp-name{width:100%}"
+            # the narrow card's fold (spPaintAccts): the section head as a button, its bold and colour from .ru-tip-name (a
+            # later rule), the closed line clipped to one line, a caret turned when open, the accent ring for the keyboard
+            ".rsp-afold{width:100%;background:none;border:none;margin:0;padding:0;font:inherit;text-align:left;cursor:pointer;align-items:baseline}"
+            ".rsp-afold>span:first-child{flex:none;white-space:nowrap}"
+            ".rsp-afold>.ru-tip-reset{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
+            ".rsp-afold:focus-visible{outline:1px solid var(--accent,#9cd2ff);outline-offset:2px}"
+            ".rsp-acaret{display:inline-block;width:.9em;font-style:normal;transition:transform .12s ease}"
+            ".rsp-afold[aria-expanded=true] .rsp-acaret{transform:rotate(90deg)}"
             ".rsp-est{cursor:help}"
             ".rsp-sw{display:inline-block;width:10px;height:10px;border-radius:3px;vertical-align:-1px;background:#6b7a8c}"
             # unattributed spend wears a TEXTURE, not a hue: it is not a session, and texture is the

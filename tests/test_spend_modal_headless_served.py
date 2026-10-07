@@ -349,6 +349,104 @@ class SpendModalServed(unittest.TestCase):
         api = next(r for r in rows if r.startswith("TESTHOST:api"))
         self.assertIn("\u2248$", web, "web's turns are the seat's: marked")
         self.assertNotIn("\u2248", api, "api billed the key: plain")
+        self.assertIn("TESTHOST is signed in to this account now", ac["seatTip"], "the hover says the sign-in is named by the account signed in now")
+        self.assertFalse(ac["fold"], "on the desktop card the summary sits beside Totals, open")
+        # the narrow card (the phone step), where the summary stacked under Totals and its rows pushed every session row
+        # off the card (the #74 review's narrow-card finding): one closed line, the list starting lower than with no
+        # summary at all by less than two lines and the sections' 12px row gap, a click opening it, a range switch keeping
+        # it open, a resize across the narrow width unfolding and folding it, the pane refitted when it opens
+        ph = o["mobile"]["accts"]
+        fo, no = ph["folded"], ph["none"]
+        self.assertEqual((fo["expanded"], fo["acctRows"]), ("false", 0), "one closed line: " + json.dumps(ph))
+        self.assertIn("Enterprise seat \u2248$", fo["line"], "each account's dollars on the closed line, the seat's marked")
+        self.assertLess(fo["acctH"], 2 * fo["lineH"], "one line tall: " + json.dumps(fo))
+        self.assertLess(fo["top"] - no["top"], 2 * fo["lineH"] + 12 + 1, "the list moves down by less than two lines and the gap: " + json.dumps(ph))
+        self.assertGreaterEqual(fo["rows"], max(1, no["rows"] - 1), "session rows still show: " + json.dumps(ph))
+        # the fold button looks like the section head it stands for, with none of a browser's button chrome
+        lk = ph["look"]
+        self.assertIsNotNone(lk, json.dumps(ph))
+        self.assertEqual(lk["font"], lk["headFont"], "a section head's font and colour: " + json.dumps(lk))
+        self.assertEqual({k: lk[k] for k in ("bg", "border", "pad", "cursor")},
+                         {"bg": "rgba(0, 0, 0, 0)", "border": "none none none none", "pad": "0px 0px 0px 0px", "cursor": "pointer"},
+                         "no face, border or padding, and a control's pointer: " + json.dumps(lk))
+        self.assertEqual((ph["opened"]["expanded"], ph["opened"]["acctRows"]), ("true", 3), json.dumps(ph["opened"]))
+        self.assertEqual(ph["focus"], "accts:toggle", "the keyboard's place stays on the rebuilt button")
+        # the caret: unturned on the closed line, turned a quarter when open (the sighted cue beside aria-expanded)
+        self.assertEqual(fo["caret"], "none", json.dumps(fo))
+        m = re.match(r"^matrix\(([-\d.e]+), ([-\d.e]+), ([-\d.e]+), ([-\d.e]+), 0, 0\)$", ph["opened"]["caret"] or "")
+        self.assertTrue(m and abs(float(m.group(1))) < 1e-6 and abs(float(m.group(2)) - 1) < 1e-6, "turned 90 degrees when open: " + json.dumps(ph["opened"]))
+        # …and its box turns with it (width and height swap): a transform applies only to a box that is not inline, and an
+        # inline caret reports the quarter turn while it still draws unturned
+        cb, ob = fo["caretBox"], ph["opened"]["caretBox"]
+        self.assertTrue(cb and ob and abs(cb[1] - cb[0]) > 1 and abs(ob[0] - cb[1]) < 0.6 and abs(ob[1] - cb[0]) < 0.6,
+                        "the caret's box turned a quarter when open: " + json.dumps([cb, ob]))
+        # …in a box of its own width, upright
+        cr = lk["caret"]
+        self.assertIsNotNone(cr, json.dumps(lk))
+        self.assertLess(abs(cr["w"] - 0.9 * cr["em"]), 0.2, "the caret's box is 0.9em wide: " + json.dumps(cr))
+        self.assertEqual((cr["fontStyle"], cr["transition"]), ("normal", "transform 0.12s"), "the caret's font style and transition: " + json.dumps(cr))
+        # the closed line's text sits on the head's baseline
+        bh, bl = lk["baselines"]
+        self.assertTrue(bh is not None and bl is not None and abs(bh - bl) < 0.5, "the closed line on the head's baseline: " + json.dumps(lk))
+        # the keyboard: Enter toggles the focused fold, the rebuilt button keeps the focus and shows the fold's own ring
+        # (the browser's default ring is outline-style auto), set off from the button
+        self.assertEqual(ph["kbdClosed"], {"expanded": "false", "focused": True, "ring": "solid 1px 2px"}, json.dumps(ph["kbdClosed"]))
+        self.assertEqual((ph["kbdOpened"]["expanded"], ph["kbdOpened"]["acctRows"]), ("true", 3), json.dumps(ph["kbdOpened"]))
+        self.assertEqual((ph["afterRange"]["expanded"], ph["afterRange"]["acctRows"]), ("true", 3), "a range switch keeps the user's open fold")
+        # …and repaints it: the open fold's head names the range it now sums
+        self.assertIn("last 7 days", ph["opened"]["line"], json.dumps(ph["opened"]))
+        self.assertIn("last 24 hours", ph["afterRange"]["line"], "the range switch repainted the summary: " + json.dumps(ph["afterRange"]))
+        self.assertEqual((ph["closed"]["expanded"], ph["closed"]["top"]), ("false", fo["top"]), json.dumps(ph["closed"]))
+        self.assertEqual((ph["widened"]["expanded"], ph["widened"]["acctRows"]), (None, 3),
+                         "widened past the narrow width, the summary sits beside Totals in full: " + json.dumps(ph["widened"]))
+        self.assertEqual((ph["narrowed"]["expanded"], ph["narrowed"]["acctRows"]), ("false", 0),
+                         "narrowed again, it folds: " + json.dumps(ph["narrowed"]))
+        tall = ph["tall"]
+        self.assertEqual(tall["folded"]["expanded"], "false", "folded on a tall narrow card: " + json.dumps(tall))
+        self.assertLess(tall.get("openedMax", tall["foldedMax"]), tall["foldedMax"], "opening the fold refits the pane: " + json.dumps(tall))
+        self.assertEqual(tall.get("closedMax"), tall["foldedMax"], "closing it gives the room back: " + json.dumps(tall))
+        # the fold repainted BEFORE the pane is sized, in the resize handler and in the first paint: a resize from the wide
+        # card to the tall narrow one, and the modal reopened there, each fit the pane to the folded summary at once
+        wt, ro = ph["wideTall"], ph["reopened"]
+        self.assertEqual((wt["wide"]["expanded"], wt["wide"]["acctRows"]), (None, 3), "beside Totals in full before the resize: " + json.dumps(wt))
+        self.assertEqual((wt["geo"]["expanded"], ro["geo"]["expanded"]), ("false", "false"), "folded after the resize and on the reopen: " + json.dumps(ph))
+        self.assertEqual((wt["max"], wt["again"]), (tall["foldedMax"], tall["foldedMax"]),
+                         "the resize that folded the summary refitted the pane in the same pass: " + json.dumps(wt))
+        self.assertEqual((ro["max"], ro["again"]), (tall["foldedMax"], tall["foldedMax"]),
+                         "the first paint sized the pane after folding the summary: " + json.dumps(ro))
+        clip = ph["clip"]
+        self.assertEqual(clip["expanded"], "false", json.dumps(clip))
+        self.assertLess(clip["acctH"], 2 * clip["lineH"], "clipped to one line, never wrapped: " + json.dumps(clip))
+        self.assertTrue(clip["overflows"], "the closed line holds more than fits at 320px, so the clip is what keeps it one line: " + json.dumps(clip))
+        self.assertLessEqual(clip["spill"], 0, "cut short inside the card, which does not scroll sideways: " + json.dumps(clip))
+        self.assertEqual(clip["cut"], "ellipsis", "the cut wears an ellipsis: " + json.dumps(clip))
+        # the open fold lives as long as the page: kept when the modal is closed and opened again, closed after a reload
+        self.assertEqual(ph["kept"], {"closed": "false", "opened": "true", "reopened": "true", "reloaded": "false"}, json.dumps(ph["kept"]))
+        # a tap on the closed line's estimate-marked dollars (a touch screen hovers as well as clicks) opens the fold and
+        # leaves no hover words up over the rows it opened
+        tap = o["mobile"]["tap"]
+        self.assertTrue(tap["at"] and tap["at"]["expanded"] == "false" and tap["at"]["onLine"], "the tap lands on the closed line: " + json.dumps(tap))
+        self.assertEqual(tap.get("after"), {"expanded": "true", "tip": ""}, "opened, no hover words up: " + json.dumps(tap))
+        # scrollbars that take room: at 676x728 the card's scrollbar alone decides whether the sections wrap; the card keeps
+        # its room whether it scrolls or not, so the fold decided at open holds
+        cl = o["classic"]
+        self.assertGreaterEqual(cl["open"]["room"], 10, "this browser's scrollbars take room (launched without --hide-scrollbars): " + json.dumps(cl))
+        self.assertTrue(cl["open"]["stacked"], "the sections wrap at this width: " + json.dumps(cl))
+        self.assertEqual((cl["open"]["expanded"], cl["open"]["acctRows"]), ("false", 0), "folded the moment the modal opens: " + json.dumps(cl))
+        self.assertEqual(cl["settled"], cl["open"], "and so after the layout settles and a resize event runs: " + json.dumps(cl))
+        # at 940x820 the card does not scroll and keeps no room for a scrollbar
+        self.assertFalse(cl["wide"]["scrolls"], "the card does not scroll at 940x820: " + json.dumps(cl))
+        self.assertEqual(cl["wide"]["room"], 0, "no room kept for a scrollbar the card does not show: " + json.dumps(cl))
+        # at 600x880 opening the fold makes the card scroll, and the content width and the chart stay as they were
+        nw = cl["narrow"]
+        self.assertEqual((nw["closed"]["scrolls"], (nw.get("opened") or {}).get("scrolls")), (False, True),
+                         "opening the fold makes the card scroll here: " + json.dumps(nw))
+        self.assertEqual((nw["opened"]["contentW"], nw["opened"]["chartW"]), (nw["closed"]["contentW"], nw["closed"]["chartW"]),
+                         "the content width and the chart stay as they were: " + json.dumps(nw))
+        # the room the unscrolled card keeps there is one scrollbar's width; its overflow is auto, so the card shows a
+        # scrollbar only when it scrolls
+        self.assertEqual(nw["closed"]["room"], cl["scrollbarW"], "one scrollbar's room: " + json.dumps(cl))
+        self.assertEqual(nw["closed"]["overflowY"], "auto", "a scrollbar only when the card scrolls: " + json.dumps(nw))
         own = [e for e in o["errs"] if "rsp" in e or "Spend" in e or "spend" in e]
         self.assertEqual(own, [], "no page errors from the modal's own code")
 

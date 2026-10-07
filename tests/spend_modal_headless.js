@@ -5,7 +5,10 @@
 const { chromium } = require('playwright');
 (async () => {
   const url = process.argv[2], shots = process.argv[3] || '';
-  const b = await chromium.launch();
+  // overlay scrollbars, which take no room, as on a phone. Playwright's default hides the scrollbars instead: a hidden
+  // scrollbar takes no room either, but Chromium still reserves the card's stable scrollbar gutter for it, so the phone
+  // step's card would be narrower than a phone's. Scrollbars that take room are the last step's
+  const b = await chromium.launch({ args: ['--enable-features=OverlayScrollbar'] });
   const pg = await b.newPage({ viewport: { width: 1280, height: 820 } });
   const errs = [];
   pg.on('pageerror', (e) => errs.push(String(e)));
@@ -57,6 +60,7 @@ const { chromium } = require('playwright');
   if (shots) { await pg.screenshot({ path: shots + '-accounts-tip-dark.png' }); }
   await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
   Object.assign(accts, await pg.evaluate(() => ({ notes: Array.from(document.querySelectorAll('#rsp-accts .rsp-note')).map((e) => e.textContent),
+    fold: !!document.querySelector('#rsp-accts [data-act="accts:toggle"]'),
     top: document.getElementById('rsp-accts').getBoundingClientRect().top, listTop: document.getElementById('rsp-table').getBoundingClientRect().top })));
   if (shots) {
     const panel = await pg.$('#rsp-panel'); await panel.screenshot({ path: shots + '-accounts-dark.png' });
@@ -281,8 +285,201 @@ const { chromium } = require('playwright');
   const panelHint = await pg.evaluate(() => document.getElementById('ru-tip').textContent.includes('Click for the full breakdown'));
   const persisted = await pg.evaluate(() => ({ pressed: document.querySelector('#rsp-panel [data-act="order:yours"]').classList.contains('on'),
     first: (document.querySelector('#rsp-panel .rsp-tbl tbody tr') || {}).textContent || '' }));
+  // the #74 review's narrow-card finding: stacked under Totals here, the By account rows pushed every session row off
+  // the card. The summary is one line: the list starts less than two lines and the row gap lower than with no summary at
+  // all (the page's own resize path refitting the pane each time), and a click opens it, a range switch keeping it open
+  const phoneGeo = () => pg.evaluate(() => {
+    const p = document.getElementById('rsp-table'), panel = document.getElementById('rsp-panel'), pr = p.getBoundingClientRect();
+    const ac = document.getElementById('rsp-accts'), fb = ac.querySelector('[data-act="accts:toggle"]'), car = fb && fb.querySelector('.rsp-acaret');
+    return { top: Math.round(pr.top - panel.getBoundingClientRect().top + panel.scrollTop),
+      rows: Array.from(p.querySelectorAll('.rsp-tbl tbody tr')).filter((tr) => { const r = tr.getBoundingClientRect(); return r.top >= pr.top && r.bottom <= pr.bottom + 1 && r.bottom <= window.innerHeight; }).length,
+      acctH: ac.style.display === 'none' ? 0 : Math.round(ac.getBoundingClientRect().height), lineH: parseFloat(getComputedStyle(ac).lineHeight),
+      expanded: fb ? fb.getAttribute('aria-expanded') : null, acctRows: ac.querySelectorAll('.rsp-acct tr').length, line: fb ? fb.textContent : '',
+      caret: car ? getComputedStyle(car).transform : null,
+      caretBox: car ? (() => { const q = car.getBoundingClientRect(); return [Math.round(q.width * 10) / 10, Math.round(q.height * 10) / 10]; })() : null };
+  });
+  const settle = () => pg.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const phone = { folded: await phoneGeo() };
+  // the fold button's own look: the font and colour of a section head (By session's), and none of a browser's button
+  // chrome (a grey face, a border, padding, its own font), with the pointer a control wears; the closed line's text on the
+  // head's baseline; and the caret's own box, upright
+  phone.look = await pg.evaluate(() => {
+    const fb = document.querySelector('#rsp-accts [data-act="accts:toggle"]');
+    const hd = Array.from(document.querySelectorAll('#rsp-panel div.ru-tip-name')).find((e) => /^By session/.test(e.textContent));
+    if (!fb || !hd) return null;
+    const a = getComputedStyle(fb), font = (c) => [c.fontSize, c.fontFamily, c.fontWeight, c.color].join(' | ');
+    // a span's baseline, where a zero-height inline box placed in it sits (removed at once)
+    const base = (e) => { if (!e) return null; const z = document.createElement('span'); z.style.cssText = 'display:inline-block;width:0;height:0';
+      e.appendChild(z); const y = z.getBoundingClientRect().bottom; z.remove(); return Math.round(y * 10) / 10; };
+    const car = fb.querySelector('.rsp-acaret'), cc = car && getComputedStyle(car);
+    return { font: font(a), headFont: font(getComputedStyle(hd)), bg: a.backgroundColor,
+      border: [a.borderTopStyle, a.borderRightStyle, a.borderBottomStyle, a.borderLeftStyle].join(' '),
+      pad: [a.paddingTop, a.paddingRight, a.paddingBottom, a.paddingLeft].join(' '), cursor: a.cursor,
+      baselines: [base(fb.querySelector('span')), base(fb.querySelector('.ru-tip-reset'))],
+      caret: cc ? { w: Math.round(car.getBoundingClientRect().width * 100) / 100, em: parseFloat(cc.fontSize), fontStyle: cc.fontStyle,
+        transition: cc.transitionProperty + ' ' + cc.transitionDuration } : null };
+  });
+  await pg.evaluate(() => { document.getElementById('rsp-accts').style.display = 'none'; window.dispatchEvent(new Event('resize')); }); await settle();
+  phone.none = await phoneGeo();
+  await pg.evaluate(() => { document.getElementById('rsp-accts').style.display = ''; window.dispatchEvent(new Event('resize')); }); await settle();
+  phone.refolded = await phoneGeo();
+  if (phone.refolded.expanded) {
+    await pg.click('#rsp-accts [data-act="accts:toggle"]');
+    phone.opened = await phoneGeo();
+    phone.focus = await pg.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-act'));
+    if (shots) await pg.screenshot({ path: shots + '-phone-accounts-open.png' });
+    // the keyboard: Enter on the focused fold closes it, the rebuilt button keeps the focus and shows the ring a keyboard
+    // focus wears, and Enter opens it again
+    await pg.keyboard.press('Enter'); await settle();
+    phone.kbdClosed = await pg.evaluate(() => { const fb = document.querySelector('#rsp-accts [data-act="accts:toggle"]'), cs = fb && getComputedStyle(fb);
+      return { expanded: fb ? fb.getAttribute('aria-expanded') : null, focused: !!fb && document.activeElement === fb, ring: cs ? cs.outlineStyle + ' ' + cs.outlineWidth + ' ' + cs.outlineOffset : '' }; });
+    await pg.keyboard.press('Enter'); await settle();
+    phone.kbdOpened = await phoneGeo();
+    await pg.click('#rsp-panel [data-act="range:day"]');
+    await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:day"]').classList.contains('on'), null, { timeout: 5000 });
+    phone.afterRange = await phoneGeo();
+    // a range switch that dropped the fold leaves no toggle to click: go on, so the range assertion names the defect
+    if (phone.afterRange.expanded) { await pg.click('#rsp-accts [data-act="accts:toggle"]'); phone.closed = await phoneGeo(); }
+    await pg.click('#rsp-panel [data-act="range:hours"]');
+  }
+  // a real viewport resize across widths, which the steps above (synthetic resize events at one width) never make:
+  // resize, then wait for the resize event and two animation frames (the handler repaints in the first)
+  const resizeTo = async (width, height) => {
+    await pg.evaluate(() => { window.__spResized = new Promise((r) => window.addEventListener('resize', () => requestAnimationFrame(() => requestAnimationFrame(r)), { once: true })); });
+    await pg.setViewportSize({ width, height });
+    await pg.evaluate(() => Promise.race([window.__spResized, new Promise((r) => setTimeout(r, 3000))]));
+  };
+  // across the narrow width: widened, the summary sits beside Totals in full; narrowed again, it folds
+  await resizeTo(1280, 820); phone.widened = await phoneGeo();
+  await resizeTo(390, 844); phone.narrowed = await phoneGeo();
+  // a tall narrow card, where the session pane sits above its 120px floor (at 390x844 it is at the floor either way):
+  // opening the fold refits the pane to the room the rows leave, and closing it gives that room back
+  const paneMax = () => pg.evaluate(() => parseFloat(document.getElementById('rsp-table').style.maxHeight));
+  await resizeTo(600, 1400);
+  phone.tall = { folded: await phoneGeo(), foldedMax: await paneMax() };
+  if (phone.tall.folded.expanded) {
+    await pg.click('#rsp-accts [data-act="accts:toggle"]'); await settle(); phone.tall.openedMax = await paneMax();
+    await pg.click('#rsp-accts [data-act="accts:toggle"]'); await settle(); phone.tall.closedMax = await paneMax();
+  }
+  // the order inside the resize handler and inside the first paint, each of which sizes the pane from what sits above it:
+  // a resize from the wide card straight to the tall narrow one folds the summary, and the modal reopened there opens it
+  // folded; either way the pane fits the folded summary at once, so a further resize event leaves it as it was
+  const refit = async () => { const geo = await phoneGeo(), max = await paneMax();
+    await pg.evaluate(() => window.dispatchEvent(new Event('resize'))); await settle(); return { geo, max, again: await paneMax() }; };
+  await resizeTo(1280, 1400);
+  phone.wideTall = { wide: await phoneGeo() };
+  await resizeTo(600, 1400); Object.assign(phone.wideTall, await refit());
+  await pg.keyboard.press('Escape');
+  await pg.evaluate(() => window.__rompOpenSpend());
+  await pg.waitForSelector('#rsp-panel .rsp-tbl', { timeout: 10000 });
+  phone.reopened = await refit();
+  // the narrowest phones, where the closed line holds more than fits: clipped to one line, never wrapped
+  await resizeTo(320, 740);
+  phone.clip = await pg.evaluate(() => { const ac = document.getElementById('rsp-accts'), fb = ac.querySelector('[data-act="accts:toggle"]'), sp = fb && fb.querySelector('.ru-tip-reset');
+    const panel = document.getElementById('rsp-panel');
+    return { expanded: fb ? fb.getAttribute('aria-expanded') : null, acctH: Math.round(ac.getBoundingClientRect().height), lineH: parseFloat(getComputedStyle(ac).lineHeight),
+      overflows: !!sp && sp.scrollWidth > sp.clientWidth + 1, spill: panel.scrollWidth - panel.clientWidth, cut: sp ? getComputedStyle(sp).textOverflow : null }; });
+  if (shots) await pg.screenshot({ path: shots + '-phone-accounts-clip.png' });
+  await resizeTo(390, 844);
+  // the user's open fold lives as long as the page, as a keyed expand does: closing the modal and opening it again keeps
+  // it open, and a reload starts it closed (it is not one of the saved toggles)
+  const reopenSpend = async () => {
+    await pg.waitForFunction(() => typeof window.__rompOpenSpend === 'function', null, { timeout: 20000 });
+    await pg.evaluate(() => { const bt = document.getElementById('romp-boot'); if (bt) bt.remove(); window.__rompOpenSpend(); });
+    await pg.waitForSelector('#rsp-panel .rsp-tbl', { timeout: 10000 }); await settle();
+  };
+  phone.kept = { closed: (await phoneGeo()).expanded };
+  if (phone.kept.closed === 'false') {
+    await pg.click('#rsp-accts [data-act="accts:toggle"]'); phone.kept.opened = (await phoneGeo()).expanded;
+    await pg.keyboard.press('Escape'); await reopenSpend(); phone.kept.reopened = (await phoneGeo()).expanded;
+    await pg.reload(); await reopenSpend(); phone.kept.reloaded = (await phoneGeo()).expanded;
+  }
   await pg.click('#rsp-panel [data-act="order:spend"]');   // restore the default for whoever runs next
-  const mobile = { railHidden, panelOpened: true, modalOpened: true, btn, panelHint , persisted };
-  console.log(JSON.stringify({ accts, merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
+  const mobile = { railHidden, panelOpened: true, modalOpened: true, btn, panelHint , persisted, accts: phone };
+  // a tap on a touch screen hovers as well as clicks: a tap on the closed line's estimate-marked dollars opens the fold and
+  // leaves no hover words up over the rows it opened
+  const tc = await b.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  try {
+    const tp = await tc.newPage();
+    tp.on('pageerror', (e) => errs.push(String(e)));
+    await tp.goto(url);
+    await tp.waitForFunction(() => typeof window.__rompOpenSpend === 'function', null, { timeout: 20000 });
+    await tp.evaluate(() => { const bt = document.getElementById('romp-boot'); if (bt) bt.remove(); window.__rompOpenSpend(); });
+    await tp.waitForSelector('#rsp-panel .rsp-tbl', { timeout: 15000 });
+    await tp.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    // the middle of the closed line's first estimate-marked amount, found by its mark in the text, wherever it is wrapped
+    const at = await tp.evaluate(() => {
+      const fb = document.querySelector('#rsp-accts [data-act="accts:toggle"]'), sp = fb && fb.querySelector('.ru-tip-reset');
+      if (!sp) return null;
+      const w = document.createTreeWalker(sp, NodeFilter.SHOW_TEXT);
+      for (let n = w.nextNode(); n; n = w.nextNode()) {
+        const i = n.data.indexOf('\u2248'); if (i < 0) continue;
+        const rg = document.createRange(); rg.setStart(n, i); rg.setEnd(n, Math.min(n.data.length, i + 4));
+        const q = rg.getBoundingClientRect(), x = q.left + q.width / 2, y = q.top + q.height / 2, hit = document.elementFromPoint(x, y);
+        return { x, y, expanded: fb.getAttribute('aria-expanded'), onLine: !!hit && sp.contains(hit) };
+      }
+      return null;
+    });
+    mobile.tap = { at };
+    if (at) {
+      await tp.touchscreen.tap(at.x, at.y);
+      await tp.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 100)))));
+      mobile.tap.after = await tp.evaluate(() => { const fb = document.querySelector('#rsp-accts [data-act="accts:toggle"]'), t = document.getElementById('rsp-tip');
+        return { expanded: fb ? fb.getAttribute('aria-expanded') : null, tip: t && t.style.display === 'block' ? t.textContent : '' }; });
+      if (shots) await tp.screenshot({ path: shots + '-phone-accounts-tap.png' });
+    }
+  } finally { await tc.close(); }
   await b.close();
+  // a desktop browser whose scrollbars take room (the browser above uses overlay scrollbars, which take none): at a width
+  // where the card's scrollbar alone decides whether the sections wrap, By account is folded the moment the modal opens
+  // and stays so once the chart and the pane are laid out
+  const b2 = await chromium.launch({ ignoreDefaultArgs: ['--hide-scrollbars'] });
+  let classic = null;
+  try {
+    const p2 = await b2.newPage({ viewport: { width: 676, height: 728 } });
+    p2.on('pageerror', (e) => errs.push(String(e)));
+    await p2.goto(url);
+    await p2.waitForFunction(() => typeof window.__rompOpenSpend === 'function', null, { timeout: 20000 });
+    await p2.evaluate(() => { const bt = document.getElementById('romp-boot'); if (bt) bt.remove(); window.__rompOpenSpend(); });
+    await p2.waitForSelector('#rsp-panel .rsp-tbl', { timeout: 15000 });
+    const at = () => p2.evaluate(() => {
+      const panel = document.getElementById('rsp-panel'), cs = getComputedStyle(panel), ac = document.getElementById('rsp-accts'), tt = document.getElementById('rsp-totals');
+      const fb = ac.querySelector('[data-act="accts:toggle"]');
+      return { room: Math.round(panel.offsetWidth - panel.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth)),
+        stacked: ac.getBoundingClientRect().top > tt.getBoundingClientRect().top + 1, expanded: fb ? fb.getAttribute('aria-expanded') : null,
+        acctRows: ac.querySelectorAll('.rsp-acct tr').length };
+    });
+    classic = { open: await at() };
+    await p2.evaluate(() => new Promise((r) => { window.dispatchEvent(new Event('resize')); requestAnimationFrame(() => requestAnimationFrame(r)); }));
+    classic.settled = await at();
+    if (shots) await p2.screenshot({ path: shots + '-classic-scrollbars.png' });
+    // the card's scrollbar room, its overflow, whether it scrolls, its content width and the chart's, after a real viewport resize
+    const box = () => p2.evaluate(() => {
+      const panel = document.getElementById('rsp-panel'), cs = getComputedStyle(panel), svg = document.querySelector('#rsp-chart svg');
+      const fb = document.querySelector('#rsp-accts [data-act="accts:toggle"]');
+      return { room: Math.round(panel.offsetWidth - panel.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth)),
+        overflowY: cs.overflowY, scrolls: panel.scrollHeight > panel.clientHeight + 1, contentW: panel.clientWidth,
+        chartW: svg ? Math.round(svg.getBoundingClientRect().width * 10) / 10 : null, expanded: fb ? fb.getAttribute('aria-expanded') : null };
+    });
+    const settle2 = () => p2.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+    const resize2 = async (width, height) => {
+      await p2.evaluate(() => { window.__spResized = new Promise((r) => window.addEventListener('resize', () => requestAnimationFrame(() => requestAnimationFrame(r)), { once: true })); });
+      await p2.setViewportSize({ width, height });
+      await p2.evaluate(() => Promise.race([window.__spResized, new Promise((r) => setTimeout(r, 3000))]));
+    };
+    // where the card no longer follows the viewport, it keeps no room for a scrollbar it does not show
+    await resize2(940, 820); classic.wide = await box();
+    // on a narrow card whose opened fold makes it scroll, the content width and the chart stay as they were
+    await resize2(600, 880); classic.narrow = { closed: await box() };
+    if (classic.narrow.closed.expanded === 'false') {
+      await p2.click('#rsp-accts [data-act="accts:toggle"]'); await settle2(); classic.narrow.opened = await box();
+    }
+    // one scrollbar's width in this browser, from a throwaway scrolling box
+    classic.scrollbarW = await p2.evaluate(() => {
+      const d = document.createElement('div');
+      d.style.cssText = 'position:absolute;left:-9999px;top:0;width:100px;height:100px;overflow:scroll';
+      document.body.appendChild(d); const w = d.offsetWidth - d.clientWidth; d.remove(); return w;
+    });
+  } finally { await b2.close(); }
+  console.log(JSON.stringify({ accts, merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, classic, errs }));
 })().catch((e) => { console.error(e); process.exit(1); });

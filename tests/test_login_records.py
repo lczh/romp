@@ -1322,7 +1322,9 @@ class SpendDetailByLogin(unittest.TestCase):
                                                                        "bySid": {SID: {"usd": 0.05, "turns": 2, "tok": 155}},
                                                                        "byLogin": {rec["id"]: {"usd": 0.02, "turns": 1, "tok": 140}}}},
                                                              "hours": {}}))
-            sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "cwd": "/tmp", "auth": "login", "authLogin": rec["id"], "alive": True})
+            # the row names the login the session's launch carried (launchedLogin), the one its byLogin dollars are filed under
+            sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "cwd": "/tmp", "auth": "login", "authLogin": rec["id"],
+                                        "launchedLogin": rec["id"], "alive": True})
             p = km._spend_detail_local(now=time.time())
             self.assertEqual(p["byLogin"], [{"id": rec["id"], "label": "Work · Acme", "usd": 0.02, "tok": 140, "turns": 1}])
             self.assertEqual(p["sessions"][0]["login"], "Work · Acme")
