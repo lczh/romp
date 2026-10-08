@@ -17137,7 +17137,7 @@ class SdkBackend:
         """A kernel cycle began (the pusher calls this at each cycle's start, _pusher_cycle): a registry scan that met an
         unreadable registration, served since the cycle that took it, is taken again by this cycle's first read
         (_rows_table). The cycle is the event: nothing on disk moves when such a read heals."""
-        self._rows_cycle = getattr(self, "_rows_cycle", 0) + 1
+        self._rows_cycle = (getattr(self, "_rows_cycle", None) or 0) + 1
 
     def session_state(self, sid: str) -> str:
         """Live state ('working'/'waiting'/…) for ONE sid, comment threads included — live_sessions
