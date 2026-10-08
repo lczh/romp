@@ -44,6 +44,14 @@ const { chromium } = require('playwright');
     notes: Array.from(document.querySelectorAll('#rsp-panel .rsp-note')).map((e) => e.textContent),
     xlabels: Array.from(document.querySelectorAll('#rsp-chart-seat .ru-tip-gx span')).map((e) => e.textContent),
     ylabels: Array.from(document.querySelectorAll('#rsp-chart-seat .ru-tip-gy')).map((e) => e.textContent),
+    // the y labels' gutter (2026-10-08 review): in both charts every bar starts right of the plot's left edge, and every
+    // label ends left of it, so no bar is ever drawn beneath a label
+    gutter: Array.from(document.querySelectorAll('#rsp-panel .rsp-chart')).map((c) => { const s = c.querySelector('svg'); if (!s) return null;
+      const b = s.getBoundingClientRect(), k = b.width / parseFloat(s.getAttribute('width')), left = b.left + parseFloat(s.getAttribute('data-x0') || '0') * k;
+      const segL = Math.min(...Array.from(c.querySelectorAll('.rsp-seg')).map((p) => p.getBoundingClientRect().left));
+      const gyR = Math.max(...Array.from(c.querySelectorAll('.ru-tip-gy')).map((g) => g.getBoundingClientRect().right));
+      return { plotLeft: Math.round(left * 10) / 10, segLeft: Math.round(segL * 10) / 10, labelRight: Math.round(gyR * 10) / 10, labels: c.querySelectorAll('.ru-tip-gy').length }; }),
+    keyXlabels: Array.from(document.querySelectorAll('#rsp-chart-key .ru-tip-gx span')).map((e) => e.textContent),
     railOpacity: getComputedStyle(document.getElementById('rail-usage')).opacity,
   }));
   if (shots) { await pg.screenshot({ path: shots + '-dark.png' }); const ch = await pg.$('#rsp-chart-seat'); if (ch) await ch.screenshot({ path: shots + '-chart.png' }); }
@@ -80,8 +88,8 @@ const { chromium } = require('playwright');
   const hBefore = await pg.evaluate(() => document.getElementById('rsp-chart-seat').getBoundingClientRect().height);
   const week = await pg.evaluate(() => ({ label: document.querySelector('#rsp-panel [data-act="range:hours"]').textContent }));
   const xhProbe = async (fx, fy, scroll) => {
-    const r = await pg.evaluate((scroll) => { const s = document.querySelector('#rsp-chart-seat svg'); if (scroll === 'top') document.getElementById('rsp-panel').scrollTop = 0; else s.scrollIntoView({ block: 'center' }); const b = s.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height }; }, scroll || 'center');
-    await pg.mouse.move(r.x + r.w * fx, r.y + r.h * fy);
+    const r = await pg.evaluate((scroll) => { const s = document.querySelector('#rsp-chart-seat svg'); if (scroll === 'top') document.getElementById('rsp-panel').scrollTop = 0; else s.scrollIntoView({ block: 'center' }); const b = s.getBoundingClientRect(), k = b.width / parseFloat(s.getAttribute('width')), x0 = parseFloat(s.getAttribute('data-x0') || '0') * k; return { x: b.x + x0, y: b.y, w: b.width - x0, h: b.height }; }, scroll || 'center');
+    await pg.mouse.move(r.x + r.w * fx, r.y + r.h * fy);   // fx: a fraction of the PLOT, right of the y labels' gutter
     await pg.waitForTimeout(60);
     return pg.evaluate(() => {
       const line = document.querySelector('#rsp-chart-seat .rsp-xh'), st = document.querySelector('#rsp-chart-seat .rsp-xh-stamp'), t = document.getElementById('rsp-tip');

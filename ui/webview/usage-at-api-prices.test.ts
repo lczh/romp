@@ -205,3 +205,34 @@ test("the API-health dot lives apart from the spend figures, named, at the head 
   // in the light theme a healthy API is blue, never the accent orange that sits beside the error red on a 7 px dot
   assert.ok(KERNEL.includes("body.theme-light #rail-api[data-dot=fine] .ah-dot,body.theme-light .ah-dot[data-dot=fine]{background:#356890}"));
 });
+
+// ── the charts' x axes (2026-10-08 review: single weekday initials read "F S S M T W T") ─────────────────────────────
+test("every range's x labels are unambiguous: the week's days by weekday and date, the day's hours, the 90 days' dates", () => {
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const { spXTicks } = new Function(["var SP_DOW=", "function spDayOf(k){", "function spXTicks(keys,range){"].map(fn).join("\n") + "\n; return {spXTicks};")();
+  const pad = (v: number) => String(v).padStart(2, "0");
+  // 168 hourly keys ending Thu 2026-10-08 15:00: from Thu Oct 1 16:00
+  const hours: string[] = [];
+  for (let i = 0; i < 168; i++) { const t = new Date(2026, 9, 1, 16 + i); hours.push(`${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}T${pad(t.getHours())}`); }
+  const week = spXTicks(hours, "hours");
+  assert.deepEqual(week.map((t: any) => t.label), ["Thu 1", "Fri 2", "Sat 3", "Sun 4", "Mon 5", "Tue 6", "Wed 7", "Thu 8"],
+    "eight calendar days, no label repeated: a weekday alone would say Thu twice");
+  assert.equal(week[0].at, 4, "centred under the first day's eight hours");
+  assert.equal(week[1].at, 8 + 12, "a whole day: under its noon");
+  // an edge day with under six hours in range is too narrow to name
+  assert.deepEqual(spXTicks(hours.slice(4), "hours").map((t: any) => t.label)[0], "Fri 2", "four hours of Thu 1 left: unnamed");
+  const day = spXTicks(hours.slice(-24), "day");
+  assert.deepEqual(day.map((t: any) => t.label), ["18:00", "Thu 8", "06:00", "12:00"], "the hours, and the new day named at its midnight");
+  const days: string[] = [];
+  for (let i = 0; i < 90; i++) { const t = new Date(2026, 6, 11 + i); days.push(`${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`); }
+  assert.deepEqual(spXTicks(days, "days").map((t: any) => t.label), ["Jul 15", "Aug 1", "Aug 15", "Sep 1", "Sep 15", "Oct 1"],
+    "the 1st and 15th with the month's name, never a 10/1 that reads two ways");
+});
+
+test("both charts keep a gutter for their y labels: bars start right of it, labels end inside it", () => {
+  assert.ok(USAGE_JS.includes("var GUT=SP_GUT,top=niceTop(mx),slot=(W-GUT)/n,"), "the plot's buckets share the width right of the gutter");
+  assert.ok(USAGE_JS.includes("for(var i=0;i<n;i++){if(!(tots[i]>0))continue;var x=GUT+i*slot+gap/2,segs=[];"), "every bar starts past it");
+  assert.ok(USAGE_JS.includes("ylab+='<span class=ru-tip-gy style=\"top:'+(gy-4).toFixed(0)+'px;width:'+(GUT-5)+'px\">'+al+'</span>'"), "each label is sized to end inside it");
+  assert.ok(USAGE_JS.includes("i=spBucketAt(e.clientX-r.left-GUT*k,r.width-GUT*k,n)"), "the crosshair reads buckets from the plot's own edge");
+  assert.ok(KERNEL.includes(".rsp-chart .ru-tip-gy{left:0;text-align:right;transform:none}"), "the labels right-aligned against the plot");
+});

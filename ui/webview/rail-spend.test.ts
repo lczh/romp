@@ -178,7 +178,8 @@ test("a multi-account breakdown lays ACCOUNTS side by side, one block each, the 
   assert.ok(usageJS.includes("'<div class=ru-tip-cols>'+blocks.map(function(b){return '<div class=ru-tip-col>'+b+'</div>';}).join('')+'</div>'"));
   assert.ok(usageJS.includes("function acctBlocksHTML(sets,manyMachines)"));
   assert.ok(usageJS.includes("var a=e.acct||('host:'+e.host);var g=by[a];if(!g){g={members:[]};by[a]=g;groups.push(g);}g.members.push(e);"), "grouped by the account digest, in the panel's order");
-  assert.ok(usageJS.includes("if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){return machineHTML(e.host)"), "the machines line, only when the mesh has more than one machine");
+  assert.ok(usageJS.includes("if(manyMachines)h+='<div class=ru-tip-machines>signed in on '+g.members.map(function(e){return machineHTML(e.host)"),
+    "the machines line, only when the mesh has more than one machine, saying what the names are (2026-10-08 review)");
   assert.ok(usageJS.includes("+(e.lag?'<span class=ru-tip-lag> lagging'+(e.ownT?', updated '+fmtAgo(e.ownT):'')+'</span>':'');}).join(', ')+'</div>';"), "a lagging machine named beside its name with its own report's age");
   assert.ok(usageJS.includes("if(ts.length&&wh)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';"),
     "updated-ago once per block: the oldest report of the group (none on a block with no windows: nothing is read)");
