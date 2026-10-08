@@ -12,7 +12,12 @@ told on the socket with the kept value, and an applied flip is echoed to it (the
 click); the switch is a mesh-adopted setting with its stamp in every table; the debt reminders ride the nudge toggle alone
 and go out while tracking is off; the census resolves a judge name bound in the function and flags one it cannot, and the
 entry point refuses an undeclared judge; the push attaches no ledgers while off and the chat's dots are derived outside
-the feed build; the clear-all op builds no feed while off. Synthetic everything: hermetic XDG state, no network, no browser.
+the feed build; the clear-all op builds no feed while off. Round three (2026-10-08, the switch turned off on both machines
+for the kernel's time): a pass in flight ends at its next stage, in the kernel and in the judges' own process, which reads
+the switch's file under the kernel's one rule; the producer takes no goals snapshot while off; the nudge walk reaches the
+debt reminder past the gates that wait on the judges (which held every session with a new turn); the interrupt block and
+the awaiting lift stand down; the off frame's chat dots are served while the view signature stands. Synthetic everything:
+hermetic XDG state, no network, no browser.
 """
 import ast
 import json
@@ -553,7 +558,7 @@ class ThePushWhileOff(_Base):
     def test_the_ledgers_attach_and_the_archived_tops_are_gated_and_the_chat_dots_are_derived_outside_the_build(self):
         ksrc = Path(ROOT, "kernel", "kernel.py").read_text()
         self.assertIn('if (chat_sessions or want_fleet) and not feed.get("off"):', ksrc)
-        self.assertIn("_dots_w, _dots_a = _chat_dots_off(now, live_map)", ksrc)
+        self.assertIn("_dots_w, _dots_a = _chat_dots_off_cached(now, live_map, fsig)", ksrc)
         self.assertIn('_send_client(c, ("working",), {"type": "working", "names": _dots_w, "awaiting": _dots_a})', ksrc)
         self.assertNotIn('"names": feed["working"]', ksrc, "the chat's dots no longer read the frame's list directly")
 
@@ -635,6 +640,19 @@ class TheNudgePass(_Base):
         km._auto_nudge_pass(int(time.time()), {}, True)
         self.assertIn(("session", True, False), self.calls, self.calls)
 
+    def test_the_looks_see_the_pass_read_of_the_switch_and_nothing_after_it(self):
+        # the pass reads the switch once and hands it to every look through the walking thread's collector, cleared after the
+        # loop, so a look outside a pass (a test, a handler's own call) reads on
+        seen = []
+        km._auto_nudge_session = lambda s, *a, **k: seen.append(getattr(km._NUDGE_HORIZON, "tracking", "unset"))
+        km._set_task_tracking(False, gt=1)
+        km._auto_nudge_pass(int(time.time()), {}, True)
+        self.assertEqual(seen, [False], "the look saw the pass's read: off")
+        self.assertIsNone(getattr(km._NUDGE_HORIZON, "tracking", None), "cleared after the loop")
+        km._set_task_tracking(True, gt=2)
+        km._auto_nudge_pass(int(time.time()), {}, True)
+        self.assertEqual(seen, [False, True])
+
     def test_on_walks_the_goals(self):
         km._auto_nudge_pass(int(time.time()), {}, True)
         self.assertIn(("session", False, True), self.calls, self.calls)
@@ -665,6 +683,261 @@ class TheDebtLeg(_Base):
         self.assertIn("wake_only=not on or not tracking, cleared=cleared,", passsrc)
         self.assertIn("reminders=on)", passsrc, "the pass hands the toggle down beside the walk's own gate")
         self.assertIn("r = fn(s, now, live_map, nudged, waitfor, alive_ids, wake_only, cleared, reminders)", ksrc, "the look decorator forwards it")
+
+
+class TheUntrackedLook(_Base):
+    """With tracking off the closer never settles a turn that ended after the flip and the planner never places it, so the
+    look's closer and placement gates held every such session forever and the debt reminder at the end of the look, which
+    needs no judge, never went out (red before: the look returned closer-unsettled). Off, the look goes from the session
+    gates straight to the reminder; on, the gates stand as before."""
+    SID = "71717171-2222-3333-4444-555555555555"
+
+    def setUp(self):
+        super().setUp()
+        names = ("_session_flag", "_compacting_now", "_api_error", "_backend_rewind_pending", "_session_working", "_interrupt_suppresses_nudge",
+                 "_backend_queued", "_last_state", "_session_awaiting", "_debt_reminder_outcomes", "_fire_debt_reminder", "_nudge_placement_gate")
+        self._saved = {k: getattr(km, k) for k in names}
+        self._saved_jd = {k: getattr(km.jd, k) for k in ("parsed_session", "_parse_entry", "load_goals_shared_or_fault")}
+        self.calls = []
+        km._session_flag = lambda sid, flag: False
+        km._compacting_now = lambda sid: False
+        km._api_error = lambda path: False
+        km._backend_rewind_pending = lambda sid: False
+        km._session_working = lambda turns: False
+        km._interrupt_suppresses_nudge = lambda turns, sid="", family=None, path=None: False
+        km._backend_queued = lambda sid: False
+        km._last_state = lambda sid: ("waiting", 0)
+        km._session_awaiting = lambda sid, path, idle, stamp=False: None
+        km._debt_reminder_outcomes = lambda sid, lt, now: self.calls.append("outcomes")
+        km._fire_debt_reminder = lambda sid, now, alive_ids: self.calls.append("reminder") or True
+        km._nudge_placement_gate = lambda sid, turns, store: self.calls.append("placement") or []
+        turn = {"id": "t-after-the-flip", "t": 100, "end": 160, "ended": True, "atoms": [{"k": "user"}, {"k": "assistant"}]}
+        km.jd.parsed_session = lambda sid, files, now, **kw: {"turns": [turn]}
+        km.jd._parse_entry = lambda sid, session=None, turns=None: object()
+        # the store the judges last wrote, before the flip: the closer never saw this turn
+        km.jd.load_goals_shared_or_fault = lambda sid: ({"rompUuid": sid, "nodes": {}, "status": {}, "closedTurns": [], "placements": {}}, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(km, k, v)
+        for k, v in self._saved_jd.items():
+            setattr(km.jd, k, v)
+        km._NUDGE_HORIZON.tracking = None
+        super().tearDown()
+
+    def _look(self, tracking):
+        km._NUDGE_HORIZON.tracking = tracking
+        s = {"sid": self.SID, "path": os.path.join(self._td, "t.jsonl"), "name": "web"}
+        return km._auto_nudge_session(s, 200, {self.SID: {"state": "waiting"}}, {}, {}, {self.SID}, True, set(), True)
+
+    def test_off_the_look_reaches_the_reminder_past_the_judges_gates(self):
+        r = self._look(False)
+        self.assertEqual(self.calls, ["outcomes", "reminder"], "the reminder leg ran, and no judge gate was asked: %r" % (r,))
+        self.assertIs(r, True, "the reminder fired")
+
+    def test_on_the_closer_gate_still_holds_the_look(self):
+        r = self._look(True)
+        self.assertEqual(r, "closer-unsettled", "on, the look still waits for the judges' verdict")
+        self.assertEqual(self.calls, [], "nothing past the gate ran")
+
+    def test_off_with_the_reminders_off_the_look_does_nothing(self):
+        km._NUDGE_HORIZON.tracking = False
+        s = {"sid": self.SID, "path": os.path.join(self._td, "t.jsonl"), "name": "web"}
+        r = km._auto_nudge_session(s, 200, {self.SID: {"state": "waiting"}}, {}, {}, {self.SID}, True, set(), False)
+        self.assertEqual(self.calls, [], "the nudge toggle off: no reminder either")
+        self.assertIs(r, False)
+
+
+class TheGoalCardRules(_Base):
+    """The interrupt → Needs you flip and the awaiting-stamp lift move goal cards the feed alone shows, from the judges'
+    stamps: off, both stand down whole (no session is even listed); on, they walk the sessions as before (red before: both
+    walked while off)."""
+    def setUp(self):
+        super().setUp()
+        self._saved = km._alive_sessions
+        self.listed = []
+        km._alive_sessions = lambda now, live_map: self.listed.append(now) or []
+
+    def tearDown(self):
+        km._alive_sessions = self._saved
+        super().tearDown()
+
+    def test_off_both_rules_stand_down(self):
+        km._set_task_tracking(False, gt=1)
+        km._interrupt_block_tick(1, {})
+        km._lift_spent_awaiting(2, {})
+        self.assertEqual(self.listed, [], "neither rule listed a session while off")
+
+    def test_on_both_rules_walk(self):
+        km._interrupt_block_tick(1, {})
+        km._lift_spent_awaiting(2, {})
+        self.assertEqual(self.listed, [1, 2])
+
+
+class TheChatDotsWhileOff(_Base):
+    """The off frame's chat dots were derived on every push (a parse lookup, the live merge and the awaiting sources for
+    every alive session), where the feed build they stand in for was served from its cache between rebuilds: the derivation
+    is served while the view signature stands, the feed cache's own key."""
+    def test_the_dots_are_served_while_the_signature_stands(self):
+        saved = km._chat_dots_off
+        n = []
+        km._chat_dots_off = lambda now, live_map: n.append(now) or (["web"], [])
+        try:
+            km._dots_off_memo[:] = [None, None]
+            self.assertEqual(km._chat_dots_off_cached(1, {}, ("sig", 1)), (["web"], []))
+            self.assertEqual(km._chat_dots_off_cached(2, {}, ("sig", 1)), (["web"], []))
+            self.assertEqual(n, [1], "an unchanged signature serves the last derivation")
+            km._chat_dots_off_cached(3, {}, ("sig", 2))
+            self.assertEqual(n, [1, 3], "a moved signature derives again")
+            km._chat_dots_off_cached(4, {}, None); km._chat_dots_off_cached(5, {}, None)
+            self.assertEqual(n, [1, 3, 4, 5], "no signature (no feed audience): derived every time")
+        finally:
+            km._chat_dots_off = saved
+            km._dots_off_memo[:] = [None, None]
+
+
+class TheProducerWhileOff(_Base):
+    """Off, no judge pass writes a goal store and no feed is built, so the producer takes no pre-pass goals snapshot (it read
+    every goal store's bytes on every pass); on, it does (red before: the snapshot was taken whatever the switch said)."""
+    def setUp(self):
+        super().setUp()
+        names = ("_wait_boot_attached", "_live_map", "_retry_paused_on", "_sdk", "_begin_goals_pass", "_episode_boundary_tick",
+                 "_compact_notices", "_compact_goal_stores", "_judges_in_child", "_judge_child_idle")
+        self._saved = {k: getattr(km, k) for k in names}
+        self._saved_run_pass = km.jd.run_pass
+        self.snaps = []
+        self.passes = []
+        km._wait_boot_attached = lambda: True
+        km._live_map = lambda: {"11111111-2222-3333-4444-555555555555": {"state": "waiting"}}
+        km._retry_paused_on = lambda: False
+        km._sdk = lambda: None
+        km._begin_goals_pass = lambda: self.snaps.append(1)
+        km._episode_boundary_tick = lambda now: None
+        km._compact_notices = lambda: 0
+        km._compact_goal_stores = lambda: 0
+        km._judges_in_child = lambda: False
+        km._judge_child_idle = lambda in_child: None
+        km.jd.run_pass = lambda may_start, now=None, before_tier=None: self.passes.append(may_start) or {"tierStarts": 0, "tierCpuS": 0.0, "failures": [], "wallS": 0.0}
+        km._PRODUCER_ONE_PASS[0] = True
+
+    def tearDown(self):
+        km._PRODUCER_ONE_PASS[0] = False
+        for k, v in self._saved.items():
+            setattr(km, k, v)
+        km.jd.run_pass = self._saved_run_pass
+        super().tearDown()
+
+    def test_off_takes_no_goals_snapshot_and_starts_no_tier(self):
+        km._set_task_tracking(False, gt=1)
+        km._producer()
+        self.assertEqual((self.snaps, self.passes), ([], [False]), "no snapshot; the pass body ran with may_start False")
+
+    def test_on_takes_the_snapshot_and_starts_the_tiers(self):
+        km._producer()
+        self.assertEqual((self.snaps, self.passes), ([1], [True]))
+
+
+class TheInFlightPass(_Base):
+    """A pass in flight when the switch goes off ends at its next stage boundary: the triage tier's later stages and the index
+    tier's archiver do not run (their model calls were already refused one by one at the call gate, but every session still
+    walked through every stage left). Red before: the stages ran on. Turning the switch back on runs them all again."""
+    STAGES = ("run_rewound_reconcile", "run_plan", "run_close", "run_unblock", "run_courier", "run_propagate", "run_group", "run_consolidate", "run_distill")
+
+    def setUp(self):
+        super().setUp()
+        jd = km.jd
+        self._saved = {k: getattr(jd, k) for k in self.STAGES + ("CLOSER_ON", "UNBLOCK_ON", "GROUPER_ON", "CONSOLIDATE_ON", "DISTILLER_ON",
+                                                                 "discover", "by_recency", "captioned_ids", "_live_natoms", "tasks_for", "session_turn_captions")}
+        self.ran = []
+        self.flip_after = None
+        for name in self.STAGES:
+            def stage(*a, _n=name, **k):
+                self.ran.append(_n)
+                if _n == self.flip_after:
+                    jd.TASK_TRACKING_ON = lambda: False          # the user turns task tracking off while this stage runs
+                return 0
+            setattr(jd, name, stage)
+        for flag in ("CLOSER_ON", "UNBLOCK_ON", "GROUPER_ON", "CONSOLIDATE_ON", "DISTILLER_ON"):
+            setattr(jd, flag, True)
+        jd.TASK_TRACKING_ON = lambda: True
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(km.jd, k, v)
+        super().tearDown()
+
+    def test_the_triage_tier_ends_at_the_next_stage_after_the_switch_goes_off(self):
+        self.flip_after = "run_plan"
+        km.jd.run_triage(now=1)
+        self.assertEqual(self.ran, ["run_rewound_reconcile", "run_plan"], "nothing after the stage the flip landed in")
+
+    def test_a_flip_later_in_the_pass_ends_it_there(self):
+        self.flip_after = "run_courier"
+        km.jd.run_triage(now=1)
+        self.assertEqual(self.ran, ["run_rewound_reconcile", "run_plan", "run_close", "run_unblock", "run_courier"])
+
+    def test_on_every_stage_runs_in_order(self):
+        km.jd.run_triage(now=1)
+        self.assertEqual(self.ran, list(self.STAGES), "on again, the whole sequence runs: the pass resumes from the stores")
+
+    def test_a_stage_turned_off_by_its_own_flag_is_skipped_as_before(self):
+        km.jd.GROUPER_ON = False
+        km.jd.run_triage(now=1)
+        self.assertNotIn("run_group", self.ran)
+        self.assertEqual(self.ran[-1], "run_distill")
+
+    def test_the_index_tier_skips_the_archiver_once_the_switch_is_off(self):
+        jd = km.jd
+        asked = []
+        jd.discover = lambda now, window=None, forks=True: ["x"]
+        jd.by_recency = lambda sessions: [("11111111-2222-3333-4444-555555555555", Path(self._td, "t.jsonl"), "a", "web")]
+        jd.captioned_ids = lambda fsid: set()
+        jd._live_natoms = lambda fsid: {}
+        def tasks(*a, **k):
+            jd.TASK_TRACKING_ON = lambda: False                  # off while the captioner reads the sessions
+            return []
+        jd.tasks_for = tasks
+        jd.session_turn_captions = lambda fsid: asked.append(fsid) or []
+        res = jd._run_index(now=1)
+        self.assertEqual(asked, [], "the archiver did not walk the sessions")
+        self.assertEqual(res, {"captions": 0, "archives": 0})
+        jd.tasks_for = lambda *a, **k: []
+        jd.TASK_TRACKING_ON = lambda: True
+        jd._run_index(now=1)
+        self.assertEqual(len(asked), 1, "on, the archiver walks them again")
+
+
+class TheJudgesOwnProcess(_Base):
+    """The judges' own process (`romp-judge --serve`) loads judge.py alone, where the switch read defaulted to on: a pass in
+    flight there kept making every model call it had left after the user turned task tracking off. The child now reads the
+    switch's file under the kernel's one rule, and serve() installs that read."""
+    def test_the_file_read_follows_the_one_rule(self):
+        jd = km.jd
+        self.assertTrue(jd.tracking_file_on(), "absent reads on")
+        for raw, want in (('{"enabled": false, "gt": 1}', False), ('{"enabled": true}', True), ('{"gt": 3}', True),
+                          ('{"enabled": "false"}', True), ('[]', True), ('{not json', True)):
+            self._file().write_text(raw)
+            self.assertEqual(jd.tracking_file_on(), want, raw)
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                d = None
+            if d is not None:
+                self.assertEqual(jd.tracking_value(d), km._tracking_value(d), raw + ": the kernel's reader is the same rule")
+        self._file().unlink(); self._file().mkdir()
+        self.assertTrue(jd.tracking_file_on(), "an unreadable path reads on")
+
+    def test_serve_installs_the_file_read_and_the_kernel_names_the_same_file(self):
+        import inspect
+        self.assertIn("TASK_TRACKING_ON = tracking_file_on", inspect.getsource(km.jd.serve))
+        self.assertEqual(km.TASK_TRACKING_FILE, km.jd.TASK_TRACKING_FILE)
+
+    def test_the_call_gate_reads_the_installed_read(self):
+        jd = km.jd
+        jd.TASK_TRACKING_ON = jd.tracking_file_on
+        self.assertTrue(jd._model_call_allowed("planner"))
+        self._file().write_text('{"enabled": false, "gt": 1}')
+        self.assertFalse(jd._model_call_allowed("planner"), "the child's next call stands down on the file alone")
 
 
 if __name__ == "__main__":

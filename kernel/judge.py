@@ -2221,9 +2221,42 @@ _KILL_RC = -signal.SIGALRM               # the other kill shape: the perl `alarm
 # two, low 3: letting it out defeated the switch for any caller that forgot the table), and
 # tests/test_task_tracking_switch.py holds this table to an ast census of _judge_run's call sites, so a new
 # caller cannot ship undeclared; a call that names no judge at all (a harness, a direct probe) is not gated.
-# The kernel installs its _task_tracking_on as TASK_TRACKING_ON at boot; the romp-judge CLI runs with the
-# default (on): a pass the user starts by hand is the user's.
+# The kernel installs its _task_tracking_on as TASK_TRACKING_ON at boot; the serve child (`romp-judge --serve`, the
+# judges' own process) installs tracking_file_on, the same file under the same rule, so a pass in flight there stands
+# down at its next call and its next stage when the switch flips, as the kernel's own pass does; the hand-run romp-judge
+# CLI runs with the default (on): a pass the user starts by hand is the user's.
 TASK_TRACKING_ON = lambda: True
+TASK_TRACKING_FILE = "task-tracking.json"   # STATE/task-tracking.json, the kernel's TASK_TRACKING_FILE
+
+
+def tracking_value(d):
+    """THE ONE RULE for the switch's stored value (the kernel's _tracking_value delegates here, so the kernel's three readers
+    and the serve child's cannot drift): (on, proved). A dict whose `enabled` is a real boolean is proved and reads as it says;
+    a dict without the key is the readable default (on, proved); anything else, a non-dict or a non-boolean value, reads on
+    and UNPROVED, which the kernel's display read says once per episode and its setter treats as no prior value."""
+    if isinstance(d, dict):
+        v = d.get("enabled", True)
+        if isinstance(v, bool):
+            return v, True
+    return True, False
+
+
+def tracking_file_on():
+    """The switch read from its file under tracking_value's rule: the serve child's TASK_TRACKING_ON. Absent, unreadable or
+    malformed reads on, as the kernel's read does; the kernel is the one that SAYS a fault (once per episode), the child
+    only obeys the value."""
+    try:
+        return tracking_value(json.loads((STATE / TASK_TRACKING_FILE).read_text()))[0]
+    except (OSError, ValueError):
+        return True
+
+
+def _tracking_stood_down():
+    """Whether the switch went off since this pass started: the tiers' stage boundaries ask it, so a pass in flight when the
+    user turns task tracking off ends at its next stage instead of walking every session through the stages left (each of
+    their model calls is already refused at _judge_run_impl's gate). What a stage left undone stays owed: a refused call
+    marks its stage incomplete (_judge_run), so the evidence gate re-admits that session when tracking is on again."""
+    return not TASK_TRACKING_ON()
 MODEL_CALLERS = {
     "captioner": "tracking", "archiver": "tracking", "gister": "tracking", "titler": "tracking",   # the index tier and its title work
     "planner": "tracking", "opener": "tracking", "placer": "tracking", "grouper": "tracking", "consolidator": "tracking",
@@ -9945,6 +9978,8 @@ def _run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, ver
         _log_judge_error("captioner", _fsid, "give-up",
                          note="%d unit(s) tombstoned after %d empty captures each; a re-parse minting "
                               "new unit ids re-arms" % (_n, CAPTION_FAIL_CAP))
+    if _tracking_stood_down():                            # the Task tracking switch went off mid-pass: the index tier ends at
+        return {"captions": captions, "archives": 0}      #  this boundary (the archiver is owed: its turn counts still differ)
     # ── archiver: refresh a session's record when its turn-caption count grew (runs AFTER
     #    captioning, so this pass's new turn captions are included) ──
     arch_tasks = []
@@ -18583,20 +18618,21 @@ def run_triage(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=F
         # (fileset + abandoned-set change), so an idle pass costs stats, not adapter walks.
         run_rewound_reconcile(now=now, sessions_cap=sessions_cap, verbose=verbose)
         placed = run_plan(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
-        if CLOSER_ON:
-            run_close(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
-        if UNBLOCK_ON:
-            # after the closer (a just-completed top's blocks are already moot) and before the distiller
-            # (a lifted block's card re-rolls to working in this same pass)
-            run_unblock(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
-        run_courier(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
-        run_propagate(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)   # delegated goal done on B → check off the sender's tracking node
-        if GROUPER_ON:
-            run_group(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
-        if CONSOLIDATE_ON:
-            run_consolidate(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
-        if DISTILLER_ON:
-            run_distill(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
+        # Every later stage first asks whether the Task tracking switch went off mid-pass (_tracking_stood_down): off, the
+        # pass ends at that boundary, and what it left is owed to the next pass the switch lets start.
+        for on, stage in ((CLOSER_ON, run_close),
+                          # the unblocker after the closer (a just-completed top's blocks are already moot) and before the
+                          # distiller (a lifted block's card re-rolls to working in this same pass)
+                          (UNBLOCK_ON, run_unblock),
+                          (True, run_courier),
+                          (True, run_propagate),          # delegated goal done on B → check off the sender's tracking node
+                          (GROUPER_ON, run_group),
+                          (CONSOLIDATE_ON, run_consolidate),
+                          (DISTILLER_ON, run_distill)):
+            if _tracking_stood_down():
+                break
+            if on:
+                stage(now=now, sessions_cap=sessions_cap, concurrency=concurrency, verbose=verbose)
         return placed
     finally:
         end_pass_frame(own)
@@ -20632,6 +20668,9 @@ def serve(inp=None, out=None):
     sys.stdout = sys.stderr                       # and a Python-level print carries the prefix
     em.set_stage_provider(_serve_set_stage)       # the child's marks: judge.<tier> on the tier threads and their pool workers
     em.set_read_stage_provider(_read_stage)
+    global TASK_TRACKING_ON
+    TASK_TRACKING_ON = tracking_file_on           # the switch, read from its file: the kernel gates a pass's START (mayStart), and
+    #                                               this read stands a pass already in flight down at its next call and stage
     fault, why = _serve_fault_parse(os.environ.get("ROMP_JUDGE_SERVE_FAULT") or "")
     if why:
         sys.stderr.write("serve: ROMP_JUDGE_SERVE_FAULT ignored: %s\n" % why)   # a malformed knob is no fault, said once

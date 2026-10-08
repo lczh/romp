@@ -1122,6 +1122,16 @@ body { color-scheme: var(--color-scheme); }
      bar itself must sit on the same dark): the border-top hairline is the separator now. The old
      editorWidget token resolved to #252526 under the kernel's THEME_CSS. */
   background: var(--bg); }
+/* The Task tracking switch off (T404): the kernel's notice (#tt-off) stands in for the list. Its button wears the one
+   button dress (styles.css .notice-act, a sheet this page does not load: the button drew as the browser's own), and the
+   foot's controls, which act on cards there are none of, go with the list, so the pane is the notice alone. */
+#tt-off .notice-act { font-family: var(--sans); font-size: var(--btn-fs-sm); line-height: 1.4; padding: var(--btn-pad-sm);
+  border-radius: var(--radius-card); cursor: pointer; white-space: nowrap;
+  color: var(--dim); background: transparent; border: 1px solid var(--card-border);
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease, transform 0.08s ease; }
+#tt-off .notice-act:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-wash); }
+#tt-off .notice-act:active { transform: scale(0.96); }
+body:has(#tt-off:not([hidden])) #feed-foot { display: none; }
 #feed-clearall { order: 10; margin-left: auto; }   /* accent hover like every action button */
 #feed-undoclear { order: 11; }                     /* restorative — far right */
 #feed-foot .fdismiss { font-size: 10.5px; padding: 1px 9px; opacity: 0.95; }
