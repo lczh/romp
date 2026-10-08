@@ -175,7 +175,8 @@ CENSUS = {
     "_stamp_agents": ("sig", "taskout", "the sidecar directory and each agent transcript it reads are taskout deps (stat'd before the read, re-stat'd per cycle); the task scan is over the transcript, the liveness gate over the row and the spawn epoch (row, reg, gone)"),
     "_stamp_interrupt_causes": ("pure", "over the events"),
     "_thought_tokens": ("pure", "over one record's message (its id and usage) and the build's own set of credited ids"),
-    "_stamp_running_tools": ("pure", "over the tail events, the last turn's index and whether the row reads working (the parse and the row, both components)"),
+    "_stamp_running_tools": ("pure", "over the tail events, the last stop's time and whether the turn is open (_session_working over the parse)"),
+    "_last_stop_iso": ("pure", "over the parse's turns (their end_turn and their stop records)"),
     "_stat_key": ("sig", "cleared", "cleared.jsonl's identity, the ledger memo's key beside the set _cleared_ids reads"),
     "_strip_hook_notices": ("pure", "over a text"),
     "_strip_fork_opener": ("pure", "over a text"),
@@ -397,9 +398,9 @@ def _unkeyed_field_permits():
     ctx = (key, span(km._compact_suggest_tick), span(km.Sessions.live)) + ((gate,) if gate else ())
     # the live-status fields (2026-10-08): read by the liveStatus frame's builder, which is no chat build (the page paints
     # it without one), and thinkingLive written by the merge
-    live = span(km._live_status_frame)
-    return text, {"lastTool": (key, live), "ctxTokens": ctx, "thinkingLive": (key, live, span(km.Sessions.live)),
-                  "agentProgress": (key, live)}
+    live = (span(km._live_status_frame), span(km._live_status_frames))   # the frame and the push's once-built set of them
+    return text, {"lastTool": (key,) + live, "ctxTokens": ctx, "thinkingLive": (key, span(km.Sessions.live)) + live,
+                  "agentProgress": (key,) + live}
 
 
 class Census(unittest.TestCase):

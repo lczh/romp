@@ -6703,20 +6703,23 @@ before, and a click that lands while text is selected inside a link opens nothin
 What a session is doing at this moment, each piece read from an event Claude Code sends and nothing else:
 
 - **Thinking.** The first of Claude Code's thinking-progress updates in a stretch starts the label: "Thinking · 14s"
-  at the foot of the chat, where the reply will appear, the same words on the session's chip in the Sessions pane,
-  and a ring on the working dot of its tab (its tooltip carries the words). The seconds count from that first update.
+  at the foot of the chat, where the reply will appear, a ring on the working dot of its tab (its tooltip carries the
+  words), and "Thinking" on the session's chip in the Sessions pane, with the subagent count it already showed. The
+  chip carries no seconds: it keeps one width whether or not the session thinks, so nothing in the pane moves. The
+  label shows only while the session is working; a stretch whose end notice was lost (a remote kernel restarting under
+  a linked machine's connection) cannot count on over an idle session. The seconds count from that first update.
   With summarized thinking it arrives only when the summary starts streaming, which can be well after the model began
   (fifteen seconds into a long thought in testing), so the count can read less than the turn's own clock, and a short
   thought may show for only an instant. The next reply block, the end of the turn, an API retry, a stop or the session's process ending clears it.
   When no update has come for ten seconds the label says so ("quiet for 15s") and the dots stop, rather than
-  counting on as if it were still streaming. The update's own token estimate is not shown: with summarized thinking it
+  counting on as if it were still streaming; the Sessions pane's chip goes back to Working. The update's own token estimate is not shown: with summarized thinking it
   can be off by half.
 - **Thought tokens.** A finished thinking row reads "Thought · 2.5k tokens", the exact figure Claude Code recorded for
   that reply (counted once when one reply thought in two blocks), and a finished prompt's "worked" line adds the total
   for the turn. With compact view on, thinking rows are hidden and the turn's total is what shows.
 - **Running tools.** A tool still waiting for its result wears the working dot and counts its seconds from the call
-  until the result arrives. A tool whose result can no longer come, because the session's process ended or the turn was
-  cut, wears a plain dot and says "no result", never the tick of one that finished.
+  until the result arrives, including while a permission prompt for it is open. A tool whose turn has ended (a result,
+  a stop) without its result wears a plain dot and says "no result", never the tick of one that finished.
 - **Subagents.** A running subagent's row shows its last tool, its tool calls and its tokens as Claude Code reports
   them; a row that already lists the agent's steps shows the tokens alone.
 - **Background tasks.** The background box follows Claude Code's own list of what is running, sent whole on every

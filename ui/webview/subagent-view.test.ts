@@ -122,7 +122,7 @@ test("both icons wear the house line-icon style: 16-unit viewBox, currentColor, 
 test("the arrow rides the Agent/Task head whenever the event carries an agentId — running OR finished; the preview only with the clock AND a closed fold", () => {
   // the arrow: gated on agentId alone — a FINISHED agent (output landed, no clock) still carries it, so
   // its whole transcript stays one click away after the fact (the user asked, 2026-09-05)
-  const block = (RENDER.match(/if \(\(ev\.name === "Task" \|\| ev\.name === "Agent"\) && ev\.agentId\) \{[\s\S]*?\n  \}\n  return turn;/) || [""])[0];
+  const block = (RENDER.match(/if \(\(ev\.name === "Task" \|\| ev\.name === "Agent"\) && ev\.agentId\) \{[\s\S]*?\n  \}\n(?:  for \(const b of liveBits\) head\.appendChild\(b\);[^\n]*\n)?  return turn;/) || [""])[0];
   assert.ok(block.length > 200, "found the arrow/preview block");
   assert.match(block, /head\.appendChild\(agentOpenButton\(ev\.agentId, ev\.uuid \|\| null, renderingOwnerSid \|\| renderingSid \|\| null\)\);/);
   assert.doesNotMatch(block.split("agentOpenButton")[0], /agentGist|agentRunning|ev\.output/, "nothing about run-state gates the arrow");

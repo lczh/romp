@@ -36370,29 +36370,54 @@ def _thought_tokens(msg, seen):
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
 
-def _stamp_running_tools(tail, last_turn, turn_live):
+def _last_stop_iso(turns):
+    """When the session last STOPPED, as iso() writes it ("" for never): the latest of a turn's own end (its last assistant
+    message's end_turn, the turn's `ended`) and a stop record's start (an idle span: a result's "waiting", an interrupt's
+    "idle"). Scanned from the newest turn back to the first that holds one, so a long transcript costs its last turns."""
+    for t in reversed(turns or ()):
+        best = 0
+        atoms = t.get("atoms") or ()
+        for a in atoms:
+            if a.get("type") == "idle":
+                best = max(best, a.get("t") or 0)
+        if t.get("ended"):
+            best = max(best, max((a.get("t") or 0 for a in atoms if a.get("type") != "idle"), default=0))
+        if best:
+            return iso(best)
+    return ""
+
+
+def _stamp_running_tools(tail, stop_iso, turn_open):
     """Post-pass over one build's TAIL events (2026-10-08): every tool event still waiting for its result (no
     tool_result paired, no error, not a background agent the bg pass already called running) is stamped `running`:
-    True when it sits in the session's last turn while that turn is live (the backend's row reads working: the CLI is
-    in the turn now), False otherwise: a tool whose result can no longer come (its CLI died, the kernel cut the turn) or
-    whose turn is parked on the person (a permission prompt) is not running, whatever it waits for. The client draws a
-    running tool with the working dot and its elapsed time from the tool call's own stamp, and only then; an unstamped
-    event (an older kernel) keeps the old look. Its inputs are the parse (a result landing is a transcript or live-tail
-    change) and the row's state, both already chat-build key components, so the flag moves only with a build that runs
-    anyway. The sealed prefix is never written: an ended turn is never the last one, so a sealed tool was stamped False
-    the build it sealed in."""
+    True when the session's turn is OPEN now and the call came after the session last stopped, False otherwise.
+    "Open" is the event model's own answer (_session_working over the parse, the signal every working dot reads), and
+    "stopped" its stop records (_last_stop_iso: a turn's end_turn, a result's "waiting", an interrupt's "idle"), never
+    the backend row's state: a session parked on a permission prompt reports the prompt as its state while its turn,
+    and the call's pending result, go on, and a dormant row reads "waiting" for a few seconds after a kernel restart
+    until the session re-attaches to the CLI still running the call (the second review of #171, 2026-10-08). A message
+    that lands mid-turn opens a new turn in the parse without stopping the CLI, so the turn a call sits in is not the
+    test: a stop after it is. A call the session stopped after can no longer get a result and reads False. The client
+    draws a running tool with the working dot and its elapsed time from the call's own stamp, and only then; an
+    unstamped event (an older kernel) keeps the old look. Its inputs are the parse (a result or a state record landing
+    is a transcript, live-tail or states change), every one a chat-build key component, so the flag moves only with a
+    build that runs anyway; iso()'s fixed format compares in time order. The sealed prefix is never written, and never
+    holds a running tool: the fold keeps a running call's turn in the tail (_chat_agent_open_at) until it settles."""
     for ev in tail:
         if ev.get("kind") != "tool" or ev.get("resultUuid") or ev.get("isError") or ev.get("agentRunning"):
             continue
-        ev["running"] = bool(turn_live and last_turn >= 0 and ev.get("turn") == last_turn)
+        ev["running"] = bool(turn_open and (ev.get("ts") or "") > stop_iso)
 
 
 def _chat_agent_open_at(events, lo):
     """Index of the first RUNNING Agent card at/after `lo` — a launch turn the chat fold must not seal
     while the agent runs (its preview and eventual report are rebuilt live in the tail). None when every
-    agent in range has settled. The undecided-seam rule's twin (see _chat_seam_open_at)."""
+    agent in range has settled. The undecided-seam rule's twin (see _chat_seam_open_at). …and the first tool
+    still RUNNING (`running`, _stamp_running_tools; 2026-10-08): a call a message landed during sits in a turn
+    the parse closed for that message while the CLI still runs it, and a sealed copy would keep its working dot
+    after the session stopped; held in the tail, the stamp is re-read every build until the call settles."""
     for i in range(lo, len(events)):
-        if events[i].get("kind") == "tool" and events[i].get("agentRunning"):
+        if events[i].get("kind") == "tool" and (events[i].get("agentRunning") or events[i].get("running")):
             return i
     return None
 
@@ -45777,8 +45802,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # the lossy output-string scrape is all there is. The attach loop's authoritative fill
             # (askAnswerFilled) already handled every record that has one — never run both.
             _ask_fill_chosen(ev["askAnswer"], ev.get("output") or "")
-    _stamp_running_tools(events, (_parse_ix[-1] if _parse_ix else len(_turns) - 1) if _turns else -1,
-                         (tm0 or {}).get("state") == "working")
+    _real_turns = [_t for _t in (_turns or ()) if not _t.get("echoTurn")]   # a placed stale echo is no turn the CLI runs (_place_stale_echoes)
+    _stamp_running_tools(events, _last_stop_iso(_real_turns), _session_working(_real_turns))
     events = _prefix + events                           # the sealed prefix (same dicts) + this build's tail
     _pref_ids = {id(_e) for _e in _prefix}              # the sealed dicts: read by the uuid pass below, never written
     # STREAMED events (2026-09-23): an event built from a stream atom the transcript has not recorded yet (the live tail's
@@ -59172,6 +59197,7 @@ def _client_reset_chat_base(client):
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set;
         # and the asked-whole marks (2026-09-19): it asked nothing either, and the connect push below serves the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None); client.pop("askedFull", None); client.pop("heldTailFirst", None); client.pop("fullRefused", None)
+        client.pop("liveShown", None)   # …and the live statuses it was shown: it shows none (the ("liveStatus", sid) slots go below)
         # A SKELETON client (a later chat column, ?skeleton=1 at its handshake, 2026-09-11): the pop above took the
         # `reconnect` the handshake armed, with the set a pre-ready pusher cycle may have built into a document that
         # could not hear it. Re-armed HERE, from the survivor, so the ready arm's connect push serves the page the same
@@ -59571,30 +59597,47 @@ def _live_status_frame(sid, tm):
     return {"type": "liveStatus", "id": sid, "thinking": dict(th) if isinstance(th, dict) else None, "tasks": tasks}
 
 
-def _send_live_status(c, sids, live_map):
-    """The liveStatus frame of each of `sids` to one client, each on its own ("liveStatus", sid) slot, deduped like every
-    slot, so an unchanged status costs a comparison and a moving one costs ~100 bytes and no build. A session with nothing
-    live is sent only to a client that was shown something for it (the frame that clears it); one never shown anything is
-    sent nothing, so a board of idle sessions puts no frame on the wire."""
-    held = []
-    for _ in range(3):     # read WITHOUT the client's slot lock (an idle board must never wait on a pane's lock for nothing):
-        try:               # a key the handler thread inserts mid-read raises, and a re-read settles it
-            held = [k[1] for k in list((c.get("sent") or {}).keys())
-                    if isinstance(k, tuple) and len(k) == 2 and k[0] == "liveStatus"]
-            break
-        except RuntimeError:
-            held = []
-    shown = set(held)
-    for sid in dict.fromkeys(list(sids) + held):   # …and every session this client was shown something for, so a session
-        #                                             that left the map (its CLI gone) still gets the frame that clears it
-        f = _live_status_frame(sid, live_map.get(sid))
+def _live_status_frames(live_map):
+    """One push's liveStatus frames, built and serialized ONCE for every client (the second review of #171, 2026-10-08:
+    building each session's frame per client cost ~5.6 ms a push at 130 sessions and 7 clients) → (chat, sessions_pane):
+    {sid: (frame, wire)} for every session with something live, and the Sessions pane's thinking-only twin for every
+    session thinking now (the pane draws the thinking label and nothing of a subagent's progress, so a progress frame
+    is never sent to it). A session with nothing live is in neither."""
+    chat, pane = {}, {}
+    for sid, tm in (live_map or {}).items():
+        if not isinstance(tm, dict):
+            continue
+        if not tm.get("thinkingLive") and not any(isinstance(t, dict) and (t.get("agentProgress") or t.get("lastTool"))
+                                                   for t in (tm.get("bgTasks") or ())):
+            continue
+        f = _live_status_frame(sid, tm)
         if f["thinking"] is not None or f["tasks"]:
-            _send_client(c, ("liveStatus", sid), f)
-        elif sid in shown:
-            _send_client(c, ("liveStatus", sid), f)        # the frame that clears what the page shows…
-            with _client_lock(c):
-                c.get("sent", {}).pop(("liveStatus", sid), None)   # …and then nothing more until there is something
-            #                                                         (the lock only where a frame just went: a slot was held)
+            chat[sid] = (f, json.dumps(f))
+        if f["thinking"] is not None:
+            g = dict(f, tasks={})
+            pane[sid] = (g, json.dumps(g))
+    return chat, pane
+
+
+def _send_live_status(c, frames, allowed=None):
+    """This push's liveStatus frames (_live_status_frames, built once) to one client, each on its own ("liveStatus", sid)
+    slot, deduped like every slot, so an unchanged status costs a comparison and a moving one ~100 bytes and no build.
+    `allowed`: the sids this client may be sent (a chat page's tab strip), None for all. The client's `liveShown` set names
+    the sessions it was shown something for; one that has nothing live now (or left the strip) is sent the frame that
+    clears it, once, and leaves the set. A board of idle sessions puts no frame on the wire and costs no scan."""
+    shown = c.setdefault("liveShown", set())
+    for sid, (f, wire) in frames.items():
+        if allowed is not None and sid not in allowed:
+            continue
+        _send_client(c, ("liveStatus", sid), f, pre=wire)
+        shown.add(sid)
+    for sid in list(shown):
+        if sid in frames and (allowed is None or sid in allowed):
+            continue
+        _send_client(c, ("liveStatus", sid), {"type": "liveStatus", "id": sid, "thinking": None, "tasks": {}})
+        shown.discard(sid)
+        with _client_lock(c):
+            c.get("sent", {}).pop(("liveStatus", sid), None)   # nothing more until there is something
 
 
 def _note_needfull_status(c, sid):
@@ -64600,6 +64643,7 @@ def _push(targets, connect=False, live_map=None):
         except Exception:
             sys.stderr.write("push feed-first: %s\n" % traceback.format_exc())
             _board_first_sent()                       # a feed that cannot build never holds the cold timeline build
+    ls_frames = _live_status_frames(live_map) if (want_chat or want_tl) else ({}, {})   # every client's liveStatus frames, built once
     try:
         chat_list = _chat_tab_sessions(now, live_map)   # live + explicitly kept-open (read-only reopened dead) — nothing else
         tab_order = [s["sid"] for s in chat_list]
@@ -64623,13 +64667,14 @@ def _push(targets, connect=False, live_map=None):
             # as placeholders up front (no tab popping in one-by-one as each build_session lands). The full
             # session fills the placeholder in when it arrives below.
             tab_meta = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in chat_list]
+            tab_set = set(tab_order)
             for c in chat_clients:                       # tab strip first → the shell paints before any build
                 _send_client(c, ("globalRetryPaused",), {"type": "globalRetryPaused", "value": _retry_paused_on(),
                                                          "resumeAt": _retry_resume_at(),   # limit reset epoch → the card counts down to the real retry
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
                 redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
                 _send_tab_order(c, tab_order, tab_meta, live_map)
-                _send_live_status(c, tab_order, live_map)   # what each tab is doing this second (thinking, its subagents' progress): no build
+                _send_live_status(c, ls_frames[0], tab_set)   # what each tab is doing this second (thinking, its subagents' progress): no build
                 if redialed:                             # the redial's first strip stands in for the ready it never posts:
                     _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
             active = {c.get("active") for c in chat_clients if c.get("active")}
@@ -65314,7 +65359,7 @@ def _push(targets, connect=False, live_map=None):
             # each lane's live status (a thinking stretch → its chip's "Thinking · 14s"): no build, and AFTER the lanes and
             # the bars, so its sends never take a pane's slot lock ahead of the cold-frame guard above
             for c in tl_clients:
-                _send_live_status(c, live_map, live_map)
+                _send_live_status(c, ls_frames[1])   # the thinking-only twins: the pane draws nothing of a subagent's progress
         _PERF_STATS.stage("push.timeline", time.monotonic() - _t_stage)
     except Exception:
         sys.stderr.write("push build: %s\n" % traceback.format_exc())
@@ -73604,6 +73649,9 @@ window.addEventListener("message",function(e){if(!heardSender(e)){noteForeign("t
 // onFrame/emit; the pane bundles register through frame-listener.ts) — without the registry the window dispatch carries them.
 // Only federation.js calls that path, with a MessageEvent it built itself, so the registry holds the listener as it is
 if(window.__rompFed&&window.__rompFed.onFrame)window.__rompFed.onFrame(frameListener);
+// a remote host's relay reopening (a remote kernel's restart: it fires neither wsup nor hostUp, and the new kernel sends no
+// frame clearing what the old one showed) drops that host's live statuses (the second review of #171, 2026-10-08)
+window.addEventListener("romp:hostRelayUp",function(e){var h=e&&e.detail&&e.detail.host;if(h&&panel&&panel.liveStatusReset)panel.liveStatusReset([String(h)]);});
 window.__rompTimelineOpenExternal=function(url){try{var u=new URL(url);if(u.protocol==="vscode:"){var q=u.searchParams;
 post({type:"deepLink",session:q.get("session"),anchor:q.get("anchor")||undefined,anchorT:Number(q.get("anchorT"))||undefined,anchorKind:q.get("anchorKind")||undefined,compose:q.get("compose")==="1"});
 if(window.parent!==window)window.parent.postMessage({romp:"reveal",pane:"chat"},"*");return;}}catch(e){}window.open(url,"_blank","noopener,noreferrer");};

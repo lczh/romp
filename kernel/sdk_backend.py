@@ -12499,8 +12499,13 @@ class SdkSession:
         for an Agent task that IS the agent id (see _on_task_event), which is how the kernel joins this row
         to the SubagentStart hook's: without it the same agent listed twice in the Awaiting box, once by
         type and once as "Running <description>" (2026-09-06)."""
+        fg = getattr(self, "_bg_foreground", None) or ()   # getattr: __new__-built test doubles
         with self._sub_lock:
-            return sorted(({**v, "taskId": k} for k, v in self._bg_tasks.items()), key=lambda d: d.get("since") or 0)
+            # `fg`: a task registered in the FOREGROUND (_bg_foreground), carried on the row so the registry mirror keeps it
+            # across a kernel restart: the attach's seed (_seed_surviving_work) restores it, and the CLI's first background
+            # level, which never lists a foreground task, does not end it (the second review of #171, 2026-10-08)
+            return sorted(({**v, "taskId": k, **({"fg": True} if k in fg else {})} for k, v in self._bg_tasks.items()),
+                          key=lambda d: d.get("since") or 0)
 
     # ---- snapshot for live_sessions() ----
 
@@ -14096,6 +14101,8 @@ class SdkBackend:
                                                         "since": int(t.get("since") or 0) or int(time.time()),
                                                         "toolUseId": str(t.get("toolUseId") or ""),
                                                         "lastTool": str(t.get("lastTool") or "")}
+                    if t.get("fg") and getattr(sess, "_bg_foreground", None) is not None:
+                        sess._bg_foreground.add(str(t["taskId"]))   # a foreground task stays its bookends' (_on_bg_level)
                     seeded += 1
             if seeded:
                 self._log("host (%s): %d background task%s the surviving CLI runs, from the mirror"

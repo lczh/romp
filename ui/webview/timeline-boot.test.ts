@@ -94,6 +94,9 @@ test("dispatchFrame routes a liveStatus frame to the panel, and both boots carry
   assert.equal(models.length, 1, "the reconnect frame still re-reads the model list");
   assert.match(boot, /if\(\(m\.type==="wsup"\|\|m\.type==="hostUp"\)&&panel\.liveStatusReset\)panel\.liveStatusReset\(m\.type==="hostUp"\?\(m\.hosts\|\|\[\]\):null\);\nif\(m\.type==="data"\)/,
     "the browser's inline twin, ahead of its chain");
+  // …and a remote host's relay reopening (a remote kernel's restart fires neither wsup nor hostUp) drops that host's
+  // (the second review of #171): the browser page's federation dispatches romp:hostRelayUp on its window
+  assert.match(boot, /window\.addEventListener\("romp:hostRelayUp",function\(e\)\{var h=e&&e\.detail&&e\.detail\.host;if\(h&&panel&&panel\.liveStatusReset\)panel\.liveStatusReset\(\[String\(h\)\]\);\}\);/);
 });
 
 test("dispatchFrame tolerates a panel without the optional methods", () => {

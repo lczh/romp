@@ -57,7 +57,7 @@ const PRELUDE = `
 const el = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
 const prettyMode = (m) => m; const backendLabel = (b) => b; const authFellTo = () => ""; const ctxBar = () => el("div"); const setCtxBar = () => {};
 const ledgers = new Map(); let draggedId = null; let tabTipEl = null; const sessions = new Map();
-const liveStatus = new Map(); const thinkingText = () => "";   // the live status (live-status.ts): no session is thinking here
+const liveStatus = new Map(); const thinkingText = () => ""; const thinkingShown = () => null;   // the live status (live-status.ts): no session is thinking here
 const setTip = (a: any, text: string) => { a._tipText = text; }; const toggleMetaMenu = () => {}; const modeIconSvg = () => ""; const riskyMode = () => false;
 const prettyFast = (f) => f; const metaCurrent = (kind, st) => kind === "model" ? st.model : effortBadgeText(st); const fastAvailable = () => false;   // effortBadgeText is lifted from the module below (2026-09-16)
 const metaDots = () => el("span", "meta-dots"); const isMetaPending = () => false;

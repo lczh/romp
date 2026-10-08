@@ -1,92 +1,112 @@
-// The Sessions pane's live thinking label (2026-10-08): a lane's working chip reads "Thinking · 14s" while the kernel's
-// liveStatus frame names a stretch, counted by the view (romp-timeline-view.js liveStatus / _tickThinking). The view loads
-// standalone (Obsidian, VS Code, the browser page), so its duration format is a twin of the chat's durLabel: pinned equal
-// here, value for value. Synthetic data only.
+// The Sessions pane's live thinking label (2026-10-08): a lane's working chip reads "Thinking", with the subagent count it
+// already wore, while the kernel's liveStatus frame names a stretch whose frames flow, and Working again once they go quiet
+// (romp-timeline-view.js liveStatus / _paintThinking). The chip is laid out for the wider of its two labels, so a stretch
+// starting, going quiet or ending rewrites its text in place: no column, battery or plot edge moves, and no draw runs
+// (the second review of #171: the counting label widened the shared chip column and slid the plot sideways, and every
+// stretch edge ran a full draw). The seconds are the chat's: its foot line and the tab's tooltip count them. Synthetic data.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { durLabel } from "./webview/duration";
-import { thinkingShort } from "./webview/live-status";
+
+// ── the render harness (ui/timeline-render.test.ts's DOM shim: 6 px per character) ──
+function makeNode(tag: string): any {
+  const n: any = {
+    tag, _attrs: {}, children: [] as any[], style: {}, dataset: {}, textContent: "", parentNode: null,
+    classList: { _s: new Set<string>(), add(...a: string[]) { a.forEach((c) => this._s.add(c)); },
+      remove(...a: string[]) { a.forEach((c) => this._s.delete(c)); },
+      toggle(c: string, f?: boolean) { f ? this._s.add(c) : this._s.delete(c); }, contains(c: string) { return this._s.has(c); } },
+    setAttribute(k: string, v: any) { this._attrs[k] = v; }, getAttribute(k: string) { return this._attrs[k]; },
+    setAttributeNS(_n: any, k: string, v: any) { this._attrs[k] = v; }, removeAttribute(k: string) { delete this._attrs[k]; },
+    appendChild(c: any) { c.parentNode = n; this.children.push(c); return c; },
+    insertBefore(c: any, ref: any) { c.parentNode = n; const i = this.children.indexOf(ref); i < 0 ? this.children.push(c) : this.children.splice(i, 0, c); return c; },
+    removeChild(c: any) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; },
+    remove() { if (n.parentNode) n.parentNode.removeChild(n); },
+    get firstChild() { return this.children[0] || null; },
+    addEventListener() {}, removeEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; },
+    getBoundingClientRect() { return { width: 1400, height: 420, left: 0, top: 0, right: 1400, bottom: 420 }; },
+    closest() { return null; }, focus() {},
+    createEl(t: string, o: any) { const e = makeNode(t); if (o && o.cls) e.classList.add(o.cls); if (o && o.text) e.textContent = o.text; this.appendChild(e); return e; },
+    createDiv(o: any) { return this.createEl("div", o); }, createSpan(o: any) { return this.createEl("span", o); },
+  };
+  return n;
+}
+const g: any = global;
+g.document = g.document || {
+  createElement(t: string) { return t === "canvas" ? { getContext() { return { font: "", measureText(s: string) { return { width: (s ? s.length : 0) * 6 }; } }; } } : makeNode(t); },
+  createElementNS(_n: any, t: string) { return makeNode(t); },
+  body: makeNode("body"), documentElement: makeNode("html"), head: makeNode("head"),
+  getElementById() { return null; }, addEventListener() {}, removeEventListener() {},
+};
+g.localStorage = g.localStorage || { getItem() { return null; }, setItem() {}, removeItem() {} };
+g.getComputedStyle = g.getComputedStyle || (() => ({ backgroundColor: "rgb(30,30,30)" }));
+g.requestAnimationFrame = g.requestAnimationFrame || (() => 0);
+g.addEventListener = g.addEventListener || (() => {}); g.removeEventListener = g.removeEventListener || (() => {});
+g.matchMedia = g.matchMedia || (() => ({ matches: false, addEventListener() {}, addListener() {} }));
+g.window = g.window || g;
+g.innerWidth = 1400; g.innerHeight = 800;
 
 const viewPath = path.resolve(process.cwd(), "..", "ui", "romp-timeline-view.js");
 const VIEW = fs.readFileSync(viewPath, "utf8");
 const tl = createRequire(__filename)(viewPath);
 
-test("tlDur is the chat's durLabel, value for value", () => {
-  for (const s of [0, 1, 9, 10, 59, 60, 61, 119, 3599, 3600, 3661, 86399, 86400, 90061, -5, 12.7]) {
-    assert.equal(tl.tlDur(s), durLabel(s), "at " + s + "s");
-  }
+function board() {
+  const now = Math.floor(Date.now() / 1000);
+  const sess = (id: string, name: string, extra: any = {}) => ({
+    id, name, color: "#7aa2f7", state: "working", live: true, model: "Opus 4.8", effort: "xhigh",
+    context: 40, since: now - 60, awaiting: [], compacting: [], pendingMail: 0, compactions: [], faded: false, stale: false, ...extra,
+  });
+  return { now, sessions: [sess("api", "api", { subagents: [{ type: "general-purpose", agentId: "a0000000000000001" }] }), sess("web", "web")],
+           turns: { api: [], web: [] }, messages: [], activeChat: null, focus: null, hover: null, usage: null };
+}
+
+test("the chip reads Thinking while the frames flow, keeps the subagent count, and says nothing once quiet", () => {
+  assert.equal(tl.tlThinkingLabel({ t: 1000 }, 0), "Thinking");
+  assert.equal(tl.tlThinkingLabel({ t: 1000 }, 2), "Thinking · 2 subagents", "the count the working chip wore stays");
+  assert.equal(tl.tlThinkingLabel({ t: 1000 }, 1), "Thinking · 1 subagent");
+  assert.equal(tl.tlThinkingLabel({ t: 1000, quiet: 1065 }, 1), null, "a silent stream: the lane's own working label again");
+  assert.equal(tl.tlThinkingLabel(null, 1), null);
+  assert.deepEqual(tl.tlChipCandidates("Working · 1 subagent", 1), ["Working · 1 subagent", "Thinking · 1 subagent"]);
 });
 
-test("tlThinkingLabel is live-status.ts thinkingShort's twin", () => {
-  for (const [th, now] of [[{ t: 1000 }, 1014], [{ t: 1000 }, 1100], [{ t: 1000, quiet: 1065 }, 1080], [{ t: 1000 }, 4700]] as const) {
-    assert.equal(tl.tlThinkingLabel(th, now), thinkingShort(th as any, now));
-  }
+test("a stretch starting, going quiet and ending moves no column and runs no draw", () => {
+  const panel = new tl.TimelinePanel(makeNode("div"));
+  panel.data = board();
+  panel.draw();
+  const left0 = panel.M.left;
+  const lab = panel._workLabels.get("api");
+  assert.ok(lab, "the working chip's overlay label exists");
+  assert.equal(lab.textContent, "Working · 1 subagent");
+  let draws = 0;
+  const realDraw = panel.draw.bind(panel);
+  panel.draw = () => { draws++; realDraw(); };
+  panel.liveStatus({ type: "liveStatus", id: "api", thinking: { t: Math.floor(Date.now() / 1000) - 14 }, tasks: {} });
+  assert.equal(lab.textContent, "Thinking · 1 subagent", "the chip's text, in place, the subagent count kept");
+  assert.equal(draws, 0, "no draw on the stretch's start");
+  panel.liveStatus({ type: "liveStatus", id: "api", thinking: { t: 1, quiet: 2 }, tasks: {} });
+  assert.equal(lab.textContent, "Working · 1 subagent", "quiet: the pane stops claiming thinking");
+  panel.liveStatus({ type: "liveStatus", id: "api", thinking: { t: 1 }, tasks: {} });
+  realDraw();   // a draw for any other reason while it thinks: the same layout
+  assert.equal(panel.M.left, left0, "the plot edge did not move with the label");
+  assert.equal(panel._workLabels.get("api").textContent, "Thinking · 1 subagent");
+  panel.draw = () => { draws++; realDraw(); };
+  panel.liveStatus({ type: "liveStatus", id: "api", thinking: null, tasks: {} });
+  assert.equal(panel._workLabels.get("api").textContent, "Working · 1 subagent", "the end puts the working label back");
+  assert.equal(draws, 0, "no draw on the end either");
 });
 
-test("the chip is laid out for a two-digit count, so it is resized once per minute's shape, not every second", () => {
-  assert.equal(tl.tlThinkReserve("Thinking · 9s"), "Thinking · 00s");
-  assert.equal(tl.tlThinkReserve("Thinking · 14s"), "Thinking · 00s", "9s and 14s share one width");
-  assert.equal(tl.tlThinkReserve("Thinking · 1m 5s"), "Thinking · 0m 00s");
-  assert.equal(tl.tlThinkReserve("Thinking · 1m 59s"), "Thinking · 0m 00s");
-  assert.equal(tl.tlThinkReserve("Thinking · quiet 7s"), "Thinking · quiet 00s");
+test("liveStatusReset drops every stretch on a new socket, or one host's on its relay's reopen", () => {
+  const panel = new tl.TimelinePanel(makeNode("div"));
+  for (const id of ["api", "far:web", "far:tests"]) panel.liveStatus({ id, thinking: { t: 1 }, tasks: {} });
+  panel.liveStatusReset(["far"]);
+  assert.deepEqual([...panel._thinking.keys()], ["api"], "a reopened relay drops only its own host's lanes'");
+  panel.liveStatusReset(null);
+  assert.equal(panel._thinking.size, 0, "a new socket drops them all");
 });
 
-test("liveStatus keeps the stretch per lane and lays the lanes out only when a working lane starts or stops thinking", () => {
-  const self: any = {
-    _thinking: new Map(), _thinkTimer: null, _workLabels: new Map(), _thinkReserve: new Map(),
-    data: { sessions: [{ id: "api", state: "working" }, { id: "web", state: "ready" }] },
-    draws: 0, ticks: 0,
-    _liveRelayout() { this.draws++; }, _tickThinking() { this.ticks++; },
-  };
-  const live = tl.TimelinePanel.prototype.liveStatus;
-  const savedSet = (globalThis as any).setInterval, savedClear = (globalThis as any).clearInterval;
-  let armed = 0, cleared = 0;
-  (globalThis as any).setInterval = () => { armed++; return 7; };
-  (globalThis as any).clearInterval = () => { cleared++; };
-  try {
-    live.call(self, { id: "api", thinking: { t: 1000 } });
-    assert.deepEqual(self._thinking.get("api"), { t: 1000, quiet: 0 });
-    assert.equal(self.draws, 1, "a working lane began thinking: one layout for its chip");
-    assert.equal(armed, 1, "the 1 s clock runs while a lane thinks");
-    live.call(self, { id: "api", thinking: { t: 1000, quiet: 1050 } });
-    assert.equal(self.draws, 1, "the quiet stamp is a text change the tick makes in place");
-    assert.equal(self.ticks, 1);
-    live.call(self, { id: "web", thinking: { t: 1000 } });
-    assert.equal(self.draws, 1, "a lane not drawn as working gets no layout for it");
-    live.call(self, { id: "web", thinking: null });
-    live.call(self, { id: "api", thinking: null });
-    assert.equal(self._thinking.size, 0);
-    assert.equal(self.draws, 2, "the working lane stopped thinking: one layout to put Working back");
-    assert.equal(cleared, 1, "no lane thinks: the clock stops");
-  } finally {
-    (globalThis as any).setInterval = savedSet; (globalThis as any).clearInterval = savedClear;
-  }
-});
-
-test("liveStatusReset drops every stretch on a new socket, or one host's on its return", () => {
-  const self: any = { _thinking: new Map([["api", { t: 1 }], ["far:web", { t: 2 }], ["far:tests", { t: 3 }]]), _thinkTimer: 5, draws: 0,
-                      _liveRelayout() { this.draws++; } };
-  const savedClear = (globalThis as any).clearInterval; let cleared = 0;
-  (globalThis as any).clearInterval = () => { cleared++; };
-  try {
-    tl.TimelinePanel.prototype.liveStatusReset.call(self, ["far"]);
-    assert.deepEqual([...self._thinking.keys()], ["api"], "a returning host drops only its own lanes'");
-    assert.equal(self.draws, 1);
-    tl.TimelinePanel.prototype.liveStatusReset.call(self, null);
-    assert.equal(self._thinking.size, 0, "a new socket drops them all");
-    assert.equal(cleared, 1, "no lane thinks: the clock stops");
-    tl.TimelinePanel.prototype.liveStatusReset.call(self, null);
-    assert.equal(self.draws, 2, "nothing dropped, nothing laid out");
-  } finally { (globalThis as any).clearInterval = savedClear; }
-});
-
-test("draw() sizes a thinking lane's chip for its reserve and hands the overlay the live label", () => {
-  assert.match(VIEW, /const label = tlThinkingLabel\(th, Date\.now\(\) \/ 1000\);\s*\n\s*return Object\.assign\(\{\}, b, \{ label, reserve: tlThinkReserve\(label\) \}\);/);
-  assert.match(VIEW, /const maxChip = Math\.max\(0, \.\.\.visB\.map\(\(b\) => \(b \? this\.badgeWidth\(b\.reserve \|\| b\.label\) \+ 12 : 0\)\)\);/);
-  assert.match(VIEW, /w = Math\.ceil\(this\.badgeWidth\(bdg\.reserve \|\| bdg\.label\)\) \+ padX \* 2/);
-  assert.match(VIEW, /if \(lab\.textContent !== text\) \{ lab\.textContent = text; lab\.dataset\.label = text; \}/,
-    "the tick rewrites the persistent overlay div's text (and its teal twin's), never the SVG");
+test("the overlay text is the only thing the clock writes", () => {
+  assert.match(VIEW, /if \(lab\.textContent !== text\) \{ lab\.textContent = text; lab\.dataset\.label = text; \}/);
+  assert.doesNotMatch(VIEW.slice(VIEW.indexOf("  liveStatus(m) {"), VIEW.indexOf("  _positionWorkLabel(")), /this\.draw\(\)/,
+    "the live-status methods never draw");
 });

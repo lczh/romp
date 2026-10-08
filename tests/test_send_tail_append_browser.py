@@ -48,7 +48,7 @@ DRIVER_TIMEOUT_S = 300
 
 
 def _records(t0):
-    """EXCHANGES answered asks, then an open turn: a prompt and a tool call whose result is still out (a send is queued)."""
+    """EXCHANGES answered asks, then an open turn: a prompt and a tool call with its result, and no reply yet (a send is queued)."""
     recs, parent = [], None
     for i in range(EXCHANGES):
         u, a = "u%03d" % i, "a%03d" % i
@@ -64,6 +64,12 @@ def _records(t0):
     recs.append({"type": "assistant", "timestamp": _sb.iso(t + 2), "uuid": "aopen", "parentUuid": "uopen", "sessionId": SID,
                  "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "tool_use",
                              "content": [{"type": "tool_use", "id": "tu_open", "name": "Bash", "input": {"command": "uv run pytest -q"}}]}})
+    # …and its result: the turn stays open (no reply yet, so the send still queues), and the call row is settled. A call left
+    # without a result reads RUNNING while the turn is open and stops reading so the moment the lab's kernel files a stop
+    # (2026-10-08, the running stamp), a real change to a row painted before the send that this file's invariant, about
+    # what the append path rebuilds, is not about.
+    recs.append({"type": "user", "timestamp": _sb.iso(t + 3), "uuid": "ropen", "parentUuid": "aopen", "sessionId": SID,
+                 "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_open", "content": "12 passed"}]}})
     return recs
 
 
@@ -103,7 +109,7 @@ await page.waitForTimeout(800);
 const painted = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
 const settle = async () => { await painted(); await page.waitForTimeout(300); await painted(); };
 const iso = (x) => new Date(x * 1000).toISOString().replace(/\.\d{3}Z$/, ".000Z");
-let parent = "aopen", clock = cfg.t0 + 2000;
+let parent = "ropen", clock = cfg.t0 + 2000;
 const append = (recs) => { for (const r of recs) fs.appendFileSync(cfg.transcript, JSON.stringify(r) + "\n"); };
 const rec = (type, uuid, message, extra) => { clock += 3; const r = { type, timestamp: iso(clock), uuid, parentUuid: parent, sessionId: cfg.sid, message, ...(extra || {}) }; parent = uuid; return r; };
 const asst = (content, stop) => ({ role: "assistant", model: "claude-fable-5-1", stop_reason: stop || "tool_use", content });
