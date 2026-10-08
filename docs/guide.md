@@ -85,6 +85,10 @@ own buttons. A stop the chat shows inline is not listed; the tab says it.
 Drag a tab to the right edge and the chat splits into columns, each a full chat
 with its own tab strip and composer, four at most.
 
+On an Opus 5.5 session in fast mode, the fast badge's menu offers **Subagents at
+standard speed (experimental)**: the main loop stays fast while the subagents it
+starts run at the standard rate.
+
 ### The feed
 
 The feed is Romp's task-management layer: a card for each task. Romp's

@@ -23221,7 +23221,7 @@ def _drive(msg, client):
     t = msg.get("type")
     ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "answerAsk", "toggleAsk", "submitAsk",
               "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "setModel", "setEffort", "setMode", "setFast",
-              "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
+              "setSubagentStandard", "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
               "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
               "commentMerge")
     if t in ID_OPS and msg.get("id"):
@@ -23565,6 +23565,26 @@ def _drive(msg, client):
         if not _set_fast_or_park(be, sid, str(msg["value"]))[0]:
             client["send"](json.dumps({"type": "settingRefused", "gesture": "command", "sid": sid, "flag": "fast",
                                        "text": "Couldn't toggle fast mode — the session isn't connected right now."}))
+        _push_soon()
+    elif t == "setSubagentStandard" and msg.get("value") in ("on", "off"):
+        # the fast menu's "Subagents at standard speed (experimental)" row: the main loop keeps fast mode while every
+        # subagent runs Opus 5.5 at standard speed (SdkBackend.set_subagent_standard; docs/reference.md). A SETTING,
+        # persisted at once and applied at the next relaunch once nothing would be cut; never parked in the queue. LOUD on
+        # refusal with the backend's reason (the model must be exactly claude-opus-5-5 and fast mode on), and by name on a
+        # backend that has no such switch (Codex).
+        _set_ss = getattr(be, "set_subagent_standard", None)
+        if _set_ss is None:
+            client["send"](json.dumps({"type": "warn", "text": "Subagents at standard speed is a Claude Code session setting; this session's backend has none."}))
+        else:
+            try:
+                _took, _oswhy = _set_ss(sid, str(msg["value"])), ""
+            except OSError as e:
+                _took, _oswhy = False, "romp could not write its state (%s)" % _store_fault_copy(e)
+            if not _took:
+                why = _oswhy or str(getattr(be, "last_subagent_standard_refusal", "") or "")
+                client["send"](json.dumps({"type": "warn",
+                                           "text": ("Couldn't turn on Subagents at standard speed: %s." % why) if why
+                                           else "Couldn't change Subagents at standard speed: romp has no such session."}))
         _push_soon()
     elif t == "setMode" and msg.get("value"):
         # LOUD on refusal (fail loudly, never degrade silently): without this the badge just sat on the
@@ -24477,6 +24497,10 @@ class Sessions:
                                 #   compaction-suggestion thresholds key on true tokens (2026-08-30)
                                 "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
                                 "fastPending": bool(st.get("fastPending")),   # a fast opt-in waiting for its relaunch → the badge's dots
+                                # Subagents at standard speed (experimental): the switch, whether the fast menu offers it, its line
+                                "subagentStandard": bool(st.get("subagentStandard")),
+                                "subagentStandardOffered": bool(st.get("subagentStandardOffered")),
+                                "subagentSpeed": st.get("subagentSpeed", ""),
                                 "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
                                 "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
                                 "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
@@ -46160,6 +46184,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
                   "fast": "" if tm.get("fastReason") else tm.get("fast", ""),
                   "fastPending": bool(tm.get("fastPending")),   # the opt-in waits for its relaunch: dots on the fast badge (2026-10-01)
+                  # Subagents at standard speed (experimental, 2026-10-08): the fast menu's row (the switch, where it is
+                  # offered) and its sub-line, the speed check's outcome read off the transcripts' usage.speed
+                  "subagentStandard": bool(tm.get("subagentStandard")),
+                  "subagentStandardOffered": bool(tm.get("subagentStandardOffered")),
+                  "subagentSpeed": tm.get("subagentSpeed", ""),
                   "modelFallback": tm.get("modelFallback"),   # the picker's yellow tick beside the requested model, with why and the retry cadence (2026-09-17)
                   # which account this session bills ('login'|'key') — ALWAYS reported when the backend
                   # knows it (the user 2026-08-09: the tab hover says Billing even on a one-auth
