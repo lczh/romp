@@ -6215,18 +6215,37 @@ kernel-initiated model call, no `judge-usage.jsonl` row), the feed and outline b
 `off` and show a notice in place of their list; the `/feed` and `/fleet` pages render the notice alone, their search bar and
 foot hidden with the list, and its button opens the settings at Task tracking, through the shell when the pane sits in one,
 else by sending a standalone page to the dashboard with `#settings=tasks`), and the goal nudges, which wait, since their
-redundancy read is a judge call. The rest of the goal machinery stands down with them, since it moves cards only the feed
-shows, from stamps no judge keeps current: the nudge walk's goal legs (the plain nudge, the stall ladder, the awaiting
-dead-man's lift), the interrupt rule that moves a stopped session's card to Needs you, the lift that retracts an awaiting
-stamp once its dispatches return, and the producer's pre-pass goals snapshot (it read every goal store each pass to keep the
-feed consistent mid-pass). Each evaluates the then-current world on the first pass the switch is on. The chat's ledger
+redundancy read is a judge call. Most of the rest of the goal machinery stands down with them, since it moves cards only
+the feed shows, from stamps no judge keeps current: the nudge walk's per-session goal legs (the plain nudge, the stall
+ladder, the awaiting dead-man and its lift), the interrupt rule's per-session work (moving a stopped session's card to
+Needs you), the awaiting lift's per-session ruling (retracting a stamp once its dispatches return), and the producer's
+pre-pass goals snapshot (it read every goal store each pass to keep the feed consistent mid-pass). Each evaluates the
+then-current world on the first pass the switch is on. The interrupt rule and the awaiting lift still read the alive set
+and run their clean-up of departed sessions' cached state (the interrupt marks, the states-overlay fold, the subagents
+walk memo, the lift's gate rows and the two placement caches), so a kernel left off does not grow as sessions end.
+
+**Still running while off**, each acting on what the judges filed before the flip (nothing new is filed while off): the
+relay, which sends a block the judges addressed to a delegating peer to that peer as the worker's question, once per block;
+the wake-outcome sweep for check-ins sent before the flip whose sessions the walk cannot reach; the deferral sweep, which
+retires deferral records on their own events; and, while Auto Nudge is on, the reminder-outcome backstop (an unanswered
+reminder past its backstop escalates onto the asker's card, an answered one retires) and the dead-wait sweep (a session
+that dies holding a stamped Working card gets a procedural block on it). A `/clear` still drops the cleared conversation's
+open cards, and the chat asks no confirmation for it while off (the confirmation lists the open cards from the ledger,
+which is empty while off). That is deliberate: the cards belong to the conversation the clear ends and no surface shows
+them, the drop is filed like any clear (the clears log, and the chat's clear card names what it dropped), and skipping it
+would bring them back as stale work when tracking comes back on, because a boundary is settled once, when it is first seen.
+
+The chat's ledger
 carries none of the judges' output while off, as for a muted session: a tab's hover has no Summary and no Recent, and the
 clear and close confirmations list no open cards. A call in flight when the switch flips finishes; the pass it belongs to
 ends at its next stage (the triage tier between its stages, the index tier before the archiver), in the kernel and in the
 judges' own process alike, which reads the switch's file under the kernel's rule (`jd.tracking_file_on`); each model call
 after the flip is refused at the call gate as a stand-down, never a failure, so what the pass left stays owed and runs once
 the switch is on, through the same pools and the same judge concurrency as any pass. The stores stay on disk; on again
-resumes from them.
+resumes from them. With Auto Nudge on, turning tracking back on can show Needs you cards that are no longer true: the
+backstop and the dead-wait sweep above kept filing escalations and blocks onto cards while off, with no judge running to
+retire one the session had since resolved, and they surface with the feed. With Auto Nudge off those two do not run; the
+wake-outcome sweep, which runs either way, can still stamp a check-in sent before the flip that went unanswered.
 
 **Off, these carry on:** the chat and the Sessions pane (its judging band shows no new runs), the sessions' working and
 awaiting dots in the chat (derived from the transcripts outside the feed build, and served while the feed's view signature
