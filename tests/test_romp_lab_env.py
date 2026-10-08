@@ -189,10 +189,67 @@ class TheLabStartsFromAnAllowlist(unittest.TestCase):
         self.assertEqual((env.get("ROMP_POSTAL_PEERS"), env.get("ROMP_POSTAL_CLIENT_ONLY"), env.get("ROMP_POSTAL_HERMETIC")),
                          ("0", "1", "1"), "a postal bus of the lab's own, never started")
         self.assertNotEqual(env.get("ROMP_POSTAL_PORT"), "25302", "never the machine's fixed bus port")
+        self.assertEqual(env.get("ROMP_UPDATE_CHECK"), "off", "no update notice whose click would move the checkout")
 
     def test_session_hosts_are_off_in_the_labs_state_root(self):
         self.assertIsNotNone(self.lab, self._say())
         self.assertEqual((self.lab / "state" / "romp" / "session-hosts").read_text().strip(), "off")
+
+
+FAKE_NODE = r"""#!/bin/sh
+# Stands in for node in the lab's other modes: the bundle build is a no-op, and a phase driver (it gets LAB_DIR) writes
+# down the environment of the lab kernel it was started beside (its sibling under lab.sh) instead of driving a browser.
+case "$1" in *esbuild.js) exit 0 ;; esac
+if [ -n "$LAB_DIR" ]; then
+  k=$(pgrep -P "$PPID" -f bin/romp-kernel | head -1)
+  [ -n "$k" ] && tr '\000' '\n' < "/proc/$k/environ" > "$LAB_DIR/kernel-env-$(basename "$1" .mjs).txt"
+  exit 0
+fi
+[ -n "%(real)s" ] && exec "%(real)s" "$@"
+exit 0
+"""
+
+
+@unittest.skipUnless(Path("/proc/self/environ").exists() and shutil.which("pgrep"), "reads the kernel's environment through /proc")
+class EveryModeRunsWithoutTheUpdateCheck(unittest.TestCase):
+    """The lab kernel's update check offers a one-click update; a click fast-forwards the checkout lab.sh lives in, and
+    on the maintainer's machine that move is pushed to the other kernel's machine, which restarts (the review of #173,
+    2026-10-08). Only --env-only turned the check off. Every mode runs here with node replaced (no build, no browser), and
+    each phase driver reads the real lab kernel's environment."""
+
+    MODES = ("", "--banner-only", "--highlight-only", "--modes-only", "--login-only")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = Path(tempfile.mkdtemp(prefix="romp-lab-modes-"))
+        bindir = cls.scratch / "bin"
+        bindir.mkdir()
+        node = bindir / "node"
+        node.write_text(FAKE_NODE % {"real": shutil.which("node") or ""})
+        node.chmod(0o755)
+        (cls.scratch / "home").mkdir()
+        (cls.scratch / "tmp").mkdir()
+        cls.env = {"PATH": "%s:%s" % (bindir, os.environ["PATH"]), "HOME": str(cls.scratch / "home"),
+                   "TMPDIR": str(cls.scratch / "tmp"), "LANG": "C.UTF-8"}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.scratch, ignore_errors=True)
+
+    def _dumps(self, mode):
+        run = subprocess.run(["bash", str(LAB_SH), "--keep"] + ([mode] if mode else []), env=self.env, cwd=str(ROOT),
+                             capture_output=True, text=True, timeout=240)
+        lab = next((Path(l[len("kept: "):].split(" ", 1)[0]) for l in run.stdout.splitlines() if l.startswith("kept: ")), None)
+        self.assertIsNotNone(lab, "lab %s: exit %s\n%s\n%s" % (mode or "(all)", run.returncode, run.stdout[-3000:], run.stderr[-3000:]))
+        dumps = sorted(lab.glob("kernel-env-*.txt"))
+        self.assertTrue(dumps, "lab %s: no phase read the kernel's environment\n%s" % (mode or "(all)", run.stdout[-3000:]))
+        return {p.name: dict(l.split("=", 1) for l in p.read_text().splitlines() if "=" in l) for p in dumps}
+
+    def test_no_mode_runs_the_update_check(self):
+        for mode in self.MODES:
+            with self.subTest(mode=mode or "(all)"):
+                for name, env in self._dumps(mode).items():
+                    self.assertEqual(env.get("ROMP_UPDATE_CHECK"), "off", "%s %s: the update check stays off" % (mode, name))
 
 
 if __name__ == "__main__":

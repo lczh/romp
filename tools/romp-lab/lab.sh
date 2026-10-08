@@ -92,6 +92,9 @@ PY
 PORT=$(free_port)
 lab_set ROMP_KERNEL_PORT "$PORT"
 lab_set ROMP_SERVE_PORT "$PORT"         # the hooks and the manager read this spelling first; absent means the live default
+# no update check in any mode (the review of #173): its notice offers a one-click update, and the click fast-forwards
+# the checkout this script lives in, which may be the one a live kernel serves (and a machine that mirrors it restarts)
+lab_set ROMP_UPDATE_CHECK off
 # a postal bus of the lab's own, never started: the port is the run's own (HERMETIC), the legacy singleton scheme
 # (PEERS=0) honours CLIENT_ONLY, so the lab's sessions dial a port nothing listens on and never the machine's bus
 lab_set ROMP_POSTAL_PORT "$(free_port)"
@@ -126,8 +129,7 @@ if [ "$MODE" = "env" ]; then
   # the environment phase's CLI is the PROBE: every CLI the kernel starts writes down what it was handed, then exits
   lab_set ROMP_CLAUDE_BIN "$ROOT/tools/romp-lab/env-probe-cli.py"
   lab_set ROMP_LAB_PROBE_DIR "$LAB/probe"
-  lab_set ROMP_MODEL_CATALOG off        # no network in this phase: no model catalog fetch,
-  lab_set ROMP_UPDATE_CHECK off         #   no release-tag probe
+  lab_set ROMP_MODEL_CATALOG off        # no network in this phase: no model catalog fetch
 fi
 "$ROOT/bin/romp-kernel" > "$LAB/kernel.log" 2>&1 &
 KPID=$!
@@ -136,6 +138,11 @@ cleanup() {
   [ -f "$LAB/kernel.pid" ] && KPID="$(cat "$LAB/kernel.pid")"
   kill "$KPID" 2>/dev/null || true
   wait "$KPID" 2>/dev/null || true
+  # a session host outlives its kernel by design, so a --session-hosts lab's hosts (and a CLI mid-turn, spending) would
+  # run on after the lab is gone: end the ones this lab's own state root records, once the kernel can spawn no more
+  if [ -d "$LAB/state/romp/hosts" ] || [ -d "$LAB/state/romp/leases" ]; then
+    python3 "$ROOT/tools/romp-lab/end-hosts.py" "$LAB/state/romp" || echo "romp-lab: ending the lab's hosts failed (see above)" >&2
+  fi
   if [ "$KEEP" = 1 ]; then echo "kept: $LAB (kernel.log, shots/)"; else rm -rf "$LAB"; fi
 }
 trap cleanup EXIT

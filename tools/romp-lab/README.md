@@ -21,11 +21,23 @@ It then exports `XDG_STATE_HOME` into a fresh temp root BEFORE anything loads â€
 the never-load-romp-modules-against-live-state rule: a kernel booted against live
 state reconciles it (resumes turns, spawns writers). Its own `ROMP_SERVE_TOKEN`,
 its own free port, a postal port of its own that nothing serves,
-`ROMP_KERNEL_NO_OPEN=1` (nothing pops up), no per-session systemd scopes, per-session
-hosts off (`--session-hosts` opts in), headless Chromium (the playwright cache
-vscode-extension pins). Live state, live postal, and every visible display stay
-untouched. Session content is SYNTHETIC ONLY: invented prompts, never anything
-from live transcripts.
+`ROMP_KERNEL_NO_OPEN=1` (nothing pops up), no update check in any mode (its notice
+offers a one-click update that would fast-forward this checkout), no per-session
+systemd scopes, per-session hosts off (`--session-hosts` opts in, and the cleanup
+ends the hosts this lab's own state root records, with their CLIs, through
+`end-hosts.py`), headless Chromium (the playwright cache vscode-extension pins).
+Live state, live postal, and every visible display stay untouched. Session
+content is SYNTHETIC ONLY: invented prompts, never anything from live transcripts.
+
+Two things the allowlist does not cover, because the lab's sessions run on the
+machine's own Claude Code configuration (that is how they authenticate):
+
+- the `env` block of `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`'s) is
+  applied by Claude Code itself, so every variable named there reaches the lab's
+  CLIs, whatever the lab's environment says;
+- the lab's transcripts are written where every session's are, under
+  `~/.claude/projects/` (a directory named after the lab's temp project), and they
+  stay there after the lab's temp root is removed.
 
 `tools/romp-lab/lab.sh --env-only` is the instrument for all of this: no build,
 no browser, no model. The kernel's CLI is a probe (`env-probe-cli.py`) that writes
