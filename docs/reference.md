@@ -1790,10 +1790,11 @@ fold (a states log's) is left out of its next checkpoint write and read whole
 once at the next boot. After that the fold is written whole and every later
 boot restores it warm. A fold that never ran in the process that wrote the
 document has no entry there, and the next kernel reads the file whole for it
-at first touch; the converge pass, in the jobs thread's write phase, then
+at first touch; the converge pass, on the document writer's thread, then
 writes that document (and, over the whole entry the read left, every leaf fold
 with it), independent of settle evidence, so the read is paid once even for a
-session that never settles again; it is bounded per jobs pass (`ROMP_CKPT_CONVERGE_MS`,
+session that never settles again; it is bounded per writer cycle, at most one
+per jobs pass (`ROMP_CKPT_CONVERGE_MS`,
 default 150 ms of wall, and `ROMP_CKPT_CONVERGE_MB`, default 8 MB of documents
 written plus leaf bytes read for a heal), heals a legacy bare cursor under the
 same budget, and never rewrites a document that already carries every fold
@@ -1822,14 +1823,16 @@ memory too. An open viewer's parse keeps the entry either way: a parse rebuilt
 since the file's last append holds the very records list, so the pop waits,
 and an older one is a whole assembly entry, which the assembly pin keeps
 (counted `recordCache.pinnedKept`) until the viewer closes. The
-write happens on the kernel's jobs thread, the one thread that writes
-documents while the kernel runs (2026-10-08): a drop met anywhere else (a
-build on the pusher, a request, a judge tier) that needs a write is handed to
-it with the entry held (`converge.dropHandedOff`) and done at its next write
-phase exactly as the thread that met it would have done it, so no frame waits
-on a document. The write is charged to the checkpoint cycle's byte budget,
-which the jobs thread begins at each write phase and the converge pass shares
-after it; over the budget the write and the drop wait with the entry held
+write happens on the kernel's document writer thread, the one thread that
+writes documents while the kernel runs: a drop met anywhere else (a build on
+the pusher, a request, a judge tier, the jobs pass) that needs a write is
+handed to it with the entry held (`converge.dropHandedOff`) and done at its
+next cycle exactly as the thread that met it would have done it, so neither a
+frame nor a decision of the jobs pass waits on a document. A hand-off whose
+write raises is that hand-off's failure alone (`converge.handOffFailed`, said
+once until a hand-off of the same file pays): the rest of the writer's turn is
+done. The write is charged to the checkpoint cycle's byte budget, which the
+writer begins at each of its cycles and the converge pass shares after it; over the budget the write and the drop wait with the entry held
 (`converge.dropDeferred`), the drop then owed and paid at the next cycle's
 start with the room that cycle has, oldest first, or by the next fold over the
 file, whichever comes first; a subagent's quiet pop is never owed and waits for
@@ -1866,12 +1869,20 @@ through the settle's writer, while the reader's whole record entry is still
 resident (the writer takes its record offsets from it), so for a leaf the fold
 half handles the assembly write runs inside the same hold, before the held drop
 pops that entry, and both documents come from the one read; no read of records,
-charged to the same cycle budget. A leaf is idle when its session is running no
-turn by the live map (working, compacting, retrying, or parked mid-turn on a
-permission or a picker, all count as a turn), dormant or gone included; a leaf
-whose session is mid-turn is left to the settle at that turn's end. Until
-2026-10-08 the pass took a leaf as idle once it had gone two minutes
-unchanged, a stand-in for that event. A leaf is looked at once per file state:
+charged to the same cycle budget. A leaf is idle when the process that writes
+it is running no turn on it, read from the backend's own account of that
+writer: a session's own transcript by the session's live row (working,
+compacting, retrying, or parked mid-turn on a permission or a picker, all
+count as a turn), dormant or gone included; a subagent's transcript, which
+the subagent viewer parses under its parent's id, by the subagent itself,
+running while the parent's process lists it live (its start not yet stopped,
+or its lifecycle task); a comment thread's transcript, which has no live row,
+by the thread's own running session. A leaf whose writer is mid-turn is left
+to it. Until 2026-10-08 the pass took a leaf as idle once it had gone two
+minutes unchanged, a stand-in for that event, and until the review of PR 155
+it read the entry's own id for every leaf, so a background agent's file was
+written under the open viewer while the agent appended to it, and a thread's
+whatever its CLI was doing. A leaf is looked at once per file state:
 written, or refused for a property of its cut, it is done; a blip is tried
 twice (a blip inside the fold half's hold gets its second try over the entry
 the paid drop popped, so that leaf waits for the next boot's read); a leaf with
@@ -1913,20 +1924,29 @@ own count; further behind, the fold is left out (it refolds whole once when it
 next runs), so a fold that ran early and stopped cannot drag the document's
 cut, and every later boot's tail read, back to its count. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
-them at exit. The settle write runs on the jobs thread, as the last job of its
-pass (`jobs.persistCheckpoints`), so the pusher no longer runs it. A frame
-can still wait on it two ways: a CPU-bound write shares the interpreter lock
-with every frame built meanwhile, and a build that parses the same leaf waits
-on that leaf's writer lock while its assembly document is written. The
-write's first sight of each session, which writes nothing, opens the pass
-(`jobs.checkpointFirstSight`), so a turn that settles while the pass runs is
-written at its end. The converge pass follows the pass, in the jobs thread's
-write phase (`jobs.beginCheckpointCycle`, then `jobs.convergeCheckpoints`;
-on the pusher's cycle until 2026-10-08, where it wrote an idle session's
-documents inside a frame's cycle), and skips the paths the settle write took
-since it last looked. Once the exit's stand-down is set neither starts a
-write: the settle write stops before its next fold document or assembly
-document, the converge pass before its next candidate or write. Checkpoints
+them at exit. The jobs pass decides the settle write, as its last job
+(`jobs.persistCheckpoints`), and hands each due session's write to the
+document writer, a thread of its own that writes every document while the
+kernel runs (the thread named `doc-writer`). The jobs pass wakes it at
+its end with its live snapshot, and the writer's cycle writes the handed
+sessions' documents (`jobs.settleWrites`), begins the checkpoint cycle
+(`jobs.beginCheckpointCycle`) and runs the converge pass
+(`jobs.convergeCheckpoints`), all on its own split under /perf `writer`. So no
+document holds a jobs pass: an idle 38 MB transcript's assembly document takes
+about 11 s to write and a 225 MB one about a minute, and on the jobs thread
+(2026-10-08) every nudge, spend guard check, interrupt move, death sweep and
+retry waited for it; on the pusher's cycle before that, every frame did. A
+frame can still wait on a write two ways: a CPU-bound write shares the
+interpreter lock with every frame built meanwhile, and a build that parses the
+same leaf waits on that leaf's writer lock while its assembly document is
+written. The settle's first sight of each session, which writes nothing, opens
+the pass (`jobs.checkpointFirstSight`), so a turn that settles while the pass
+runs is handed at its end. The converge pass skips the paths the settle write
+took since it last looked. A writer still busy with one long write when a pass
+ends takes the newest snapshot and everything handed meanwhile at its next
+cycle. Once the exit's stand-down is set no write starts: the settle write
+stops before its next fold document or assembly document, the converge pass
+before its next candidate or write, and what is left stays handed. Checkpoints
 of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
 
@@ -2877,10 +2897,21 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   backstop, the kernel sample, the API health frame) against `_jobs_pass`
   (which opens with `jobs.checkpointFirstSight` and ends with
   `jobs.persistCheckpoints`, the checkpoint settle write's first sight and
-  the write) and the write phase after it, `_jobs_write_phase`
-  (`jobs.beginCheckpointCycle` and `jobs.convergeCheckpoints`, on the
-  pusher's list until 2026-10-08). The block's
-  `gate` is the jobs pass's gate, below.
+  its decision) against the document writer's, `_document_write_phase`
+  (`jobs.settleWrites`, `jobs.beginCheckpointCycle` and
+  `jobs.convergeCheckpoints`: on the pusher's list until 2026-10-08, then in
+  the jobs thread's write phase after its pass until the review of PR 155).
+  The block's `gate` is the jobs pass's gate, below.
+- `writer`: the document writer, the thread that writes every fold and
+  assembly document while the kernel runs, once per jobs pass at most (each
+  pass's end wakes it): `cycles`, `cycle_ms_sum`, `cycle_ms_max`,
+  `cycle_ms_last`, `cycle_cpu_ms_sum`, `cycle_ms_p50`, `cycle_ms_p90`,
+  `cycle_ms_ring_max`, `ring_n`, `cycleFailed` (a cycle that raised out of
+  the loop and was skipped), `splitFailed` and `lastCycle`, the newest
+  cycle's stage split (its `jobs.settleWrites`, `jobs.beginCheckpointCycle`
+  and `jobs.convergeCheckpoints`). A long document write shows here, as a
+  long cycle, and no longer as a long jobs pass; the writer's jobs count
+  their CPU under `jobs.cpuByJob` by their own names.
 - `jobs.gate`: the event-driven jobs pass, stage one, which observes and
   skips nothing. The jobs loop rests half a second after a pass and then
   runs every job again, whether or not anything a job reads changed, so a
@@ -2901,8 +2932,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   called closed and none went unobserved), `quietDeclared` (every declared
   job closed; every job of the jobs pass is declared, the checkpoint settle
   write and its first sight among them, and the two undeclared jobs, the
-  checkpoint cycle and the converge pass, run in the write phase after the
-  pass, where nothing is gated),
+  checkpoint cycle and the converge pass, run on the document writer's
+  thread, where nothing is gated),
   `wouldRunMs` and `wouldRunCpuMs` (what an enforcing pass would still run),
   `closedMs` and `closedCpuMs` (the runs it called closed with nothing to
   show for them: the saving), `tickMs` and `tickCpuMs` (the gate's own
@@ -3132,15 +3163,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   document is refused at its first restore after the change, booked
   `full:refused`, and rewritten from the whole parse that follows the
   refusal (`write:afterRefusal`), so the next restore takes it: then and
-  there when the parse runs on the jobs thread, and otherwise handed to that
-  thread, the one that writes documents (`write:afterRefusalHandedOff`), which
-  writes it at its next write phase from the entry the parse installed; when
-  the writer declines that rewrite (`write:afterRefusalSkipped`) nothing is
-  taken and the document is marked as below, except when its skip says the
-  entry moved on since the parse (its document written meanwhile, the entry
-  evicted, or replaced by a restore: `write:afterRefusalMoot`, no mark, since
-  a mark there would refuse the document just written, and the next parse
-  proves whatever stands then); a document refused for the tail's SHAPE (a
+  there when the parse runs on the document writer's thread, and otherwise
+  handed to that thread, the one that writes documents
+  (`write:afterRefusalHandedOff`), which writes it at its next cycle from the
+  entry the parse installed. The hand-off keeps that entry: when the assembly
+  cache has evicted it by the writer's turn (a box with some 250 sessions and
+  threads plus the judges' parses churns the cache's 256 entries), the document
+  is written from the kept entry all the same (`write:fromHeld`), where before
+  the rewrite was dropped with no mark and every later parse of the leaf paid
+  the proof and the whole parse again; the hand-off table is bounded like the
+  cache, and one let go over the bound (`write:afterRefusalLetGo`) leaves no
+  mark, so the leaf's next parse proves and rewrites again. When the writer
+  declines that rewrite (`write:afterRefusalSkipped`) nothing is taken and the
+  document is marked as below, except when its skip says the entry moved on
+  since the parse (its document written meanwhile, or the entry replaced by a
+  restore: `write:afterRefusalMoot`, no mark, since a mark there would refuse
+  the document just written, and the next parse proves whatever stands then); a document refused for the tail's SHAPE (a
   re-rooted tail, a reused pre-cut uuid), or whose offered rewrite the writer
   declined for any other reason, is marked refused in its sidecar at the
   leaf's stat (under
@@ -3313,7 +3351,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `docReadBytes`, the documents the pass's writes read for their carry,
   `quiescent` for leaves refused as quiescent, `skipped` for candidates held
   off until their file changes, once per hold, `dropHandedOff` for the drops met
-  off the jobs thread and handed to it, `dropWrites` and `dropDeferred`
+  off the document writer's thread and handed to it, `handOffFailed` for the
+  hand-offs whose write raised at the writer's turn (each its own, said once
+  until a hand-off of the same file pays), `dropWrites` and `dropDeferred`
   for the documents written at the reader's quiescence drop (and at the record
   drops of the events that end a file's use) and the drops deferred for the
   shared budget (a cycle, or for a subagent's quiet pop until the next fold

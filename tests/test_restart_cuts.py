@@ -2071,16 +2071,23 @@ class ExitPath(unittest.TestCase):
         # the code's arithmetic and never the runner's scheduling (a real sleep against a 0.2 s margin before); a control
         # whose item ends inside the line has every dirty file written, so the three refusals are the line's and not a
         # writer that never runs
+        # The reserve-at-the-deadline case runs at a clock reading where (t + 1.0) - 1.0 lands one float step past t
+        # (15.219903 does): the line taken as the deadline less the reserve then stood one step past the exit's entry, and every
+        # dirty file was written at the entry (CI, 2026-10-08, at whatever reading the runner's clock had); it is the window's
+        # length, the deadline less the reserve, from the entry, so a zero window is the entry exactly
         sess = self._sessions("web")
         dirty = ["/synthetic/ckpt/%02d.jsonl" % i for i in range(5)]
         clock = _WriteClock()
-        for label, prime_s, deadline, reserve, cap, want in (("a priming item past the line", 0.6, 1.0, 0.6, 5.0, (0, 5)),
-                                                               ("the reserve at the deadline", 0.0, 1.0, 1.0, 5.0, (0, 5)),
-                                                               ("a zero checkpoint cap", 0.0, 2.0, 0.5, 0.0, (0, 5)),
-                                                               ("control: a priming item inside the line", 0.3, 1.0, 0.6, 5.0, (5, 0))):
+        for label, prime_s, deadline, reserve, cap, want, at in (("a priming item past the line", 0.6, 1.0, 0.6, 5.0, (0, 5), None),
+                                                                   ("the reserve at the deadline", 0.0, 1.0, 1.0, 5.0, (0, 5), 15.219903),
+                                                                   ("a zero checkpoint cap", 0.0, 2.0, 0.5, 0.0, (0, 5), None),
+                                                                   ("control: a priming item inside the line", 0.3, 1.0, 0.6, 5.0, (5, 0), None)):
             with self.subTest(label):
                 self._reset()
                 starts = []
+                if at is not None:
+                    clock.now = at
+                    self.assertGreater((at + deadline) - reserve, at, "the premise: this reading rounds the line past the entry")
 
                 def write(p, force=False):
                     starts.append(clock.monotonic())

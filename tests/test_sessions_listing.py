@@ -1239,6 +1239,33 @@ class ThreadStateReadAlone(unittest.TestCase):
         self.assertEqual((be.thread_state(T1), real_snapshot()["state"]), ("working", "working"),
                          "a background subagent outliving the turn: working, both ways")
 
+    def test_session_work_says_what_a_running_thread_is_doing_and_none_without_a_process(self):
+        """SdkBackend.session_work (the review of PR 155): the kernel's document writer asks it whether a comment thread, which
+        has no live_sessions row, is writing its transcripts: the thread's state as thread_state reads it, and its live
+        subagents and background tasks as snapshot() lists them, so a thread's agent's file is judged by the agent; None when
+        no process runs the session."""
+        root = Path(tempfile.mkdtemp())
+        (root / "session-hosts").write_text("off\n")
+        be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        reg = {"sid": T1, "name": "web-comment-1", "cwd": "/tmp/notes-api", "alive": True, "threadOf": SID, "lastSid": T1}
+        sb.write_reg(root, T1, reg)
+        self.assertIsNone(be.session_work(T1), "no process runs it")
+        s = sb.SdkSession(be, reg)
+        s.thread = type("Alive", (), {"is_alive": lambda self: True})()
+        be.sessions[T1] = s
+        s.inflight, s.retrying, s._interrupted = 1, False, False
+        with s._sub_lock:
+            s._subagents["a0123456789abcdef"] = {"type": "general", "since": 7}
+            s._bg_tasks["b77"] = {"desc": "run the suite", "type": "local_bash", "since": 8, "toolUseId": "toolu_9", "lastTool": ""}
+        work = be.session_work(T1)
+        snap = s.snapshot()
+        self.assertEqual(work["state"], "working")
+        self.assertEqual((work["subagents"], work["bgTasks"]), (snap["subagents"], snap["bgTasks"]), "as snapshot() lists them")
+        self.assertEqual([a["agentId"] for a in work["subagents"]], ["a0123456789abcdef"])
+        self.assertEqual([t["taskId"] for t in work["bgTasks"]], ["b77"])
+        s.thread = type("Gone", (), {"is_alive": lambda self: False})()
+        self.assertIsNone(be.session_work(T1), "its process gone: nothing is writing")
+
 
 class ThreadRegMemoBound(unittest.TestCase):
     def test_past_five_hundred_and_twelve_registrations_a_second_pass_reads_no_file(self):

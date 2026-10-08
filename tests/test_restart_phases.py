@@ -177,7 +177,8 @@ class ExitPhases(unittest.TestCase):
         # test_the_exit_writes_no_assembly_document_and_the_drain_follows_the_checkpoint_writes
         import inspect
         src = inspect.getsource(km._drain_and_exit)
-        self.assertIn("_pre_drain = _end - float(EXIT_DRAIN_BUDGET_S)", src, "the drain's reserve is held back from the start")
+        self.assertIn("_pre_drain = t0 + (_deadline_s - float(EXIT_DRAIN_BUDGET_S))", src,
+                      "the drain's reserve is held back from the start (the window's length from the entry, exact when it is zero)")
         self.assertIn("_prime_end = min(_t + float(EXIT_PRIME_BUDGET_S), _pre_drain)", src)
         self.assertIn("_write_end = min(_t + float(EXIT_CKPT_WRITE_BUDGET_S), _pre_drain)", src,
                       "the fold checkpoint writes end by their cap and the pre-drain line (the 1:19 PM exit met the SIGKILL)")

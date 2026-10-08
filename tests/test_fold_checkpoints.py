@@ -17,6 +17,7 @@ import os
 import tempfile
 import threading
 import time
+import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1513,9 +1514,9 @@ class KernelFolds(Base):
             self.assertIsNone(em._JSONL_CACHE.get(self.agent), "the deleted file's entry released by the payment (round two, low 2)")
         self.assertEqual(list(em._DROP_OWED), [], "paid, and the deleted file's path forgotten")
         import inspect
-        src = inspect.getsource(km._jobs_write_phase)
+        src = inspect.getsource(km._document_write_phase)
         self.assertLess(src.index("_begin_checkpoint_cycle()"), src.index("_converge_checkpoints("),
-                        "the cycle's budget begins at the write phase, before the pass that shares it")
+                        "the cycle's budget begins in the document writer's cycle, before the pass that shares it")
         self.assertNotIn("_begin_checkpoint_cycle", inspect.getsource(km._pusher_cycle_jobs), "the pusher's cycle writes no document")
         self.assertNotIn("checkpoint_cycle_begin", inspect.getsource(km._converge_checkpoints), "the pass shares the cycle, it does not begin it")
 
@@ -1608,6 +1609,55 @@ class KernelFolds(Base):
             leaving[0] = False                                        # (a test's undo: a kernel never comes back)
             km._begin_checkpoint_cycle()
         self.assertIn("state", self.doc(self.leaf)["folds"]["bgJudge"])
+
+    def test_one_handed_drop_that_raises_is_its_own_failure_and_the_rest_of_the_hand_offs_are_done(self):
+        """The review of PR 155: the writer's turn emptied both hand-off tables first and paid the drops with no try of their
+        own, so ONE drop whose write raised lost every drop after it and every rewrite the parses had handed over (a lost drop
+        came back only through its file's dirty mark, a lost rewrite only at the next boot's proof and whole parse). Each
+        hand-off's failure is now its own: the leaf's write raising here (its carried document unreadable, say) is said once,
+        and the agent file's drop handed after it is still written and popped, and the rewrite handed after both is still
+        done. The same failure at the next turn is not said again (one episode); after a turn where it pays, a new failure is
+        said again. At the base the raise left the agent's document unwritten and the rewrite undone."""
+        self._converge_world({"bgJudge": "missing", "agentLaunches": "missing"}, quiescent=True)
+        old = time.time() - 600; os.utime(self.agent, (old, old))
+        d = self.doc(self.agent); d["folds"].pop("agentGist", None); d["mtime"] = os.stat(self.agent).st_mtime
+        em._ckpt_file(self.agent).write_text(json.dumps(d))
+        jd._bg_scan(self.leaf)
+        real_write = em.checkpoint_write
+        broken = [True]
+
+        def write(path, *a, **k):
+            if str(path) == self.leaf and broken[0]:
+                raise ValueError("the carried document could not be decoded")
+            return real_write(path, *a, **k)
+        rewrites = []
+        real_rewrite = em._asm_write_after_refusal
+        em._asm_write_after_refusal = lambda *a, **k: rewrites.append(a[0])
+        self.addCleanup(setattr, em, "_asm_write_after_refusal", real_rewrite)
+        err = io.StringIO()
+        with self._writer(), mock.patch.object(em, "checkpoint_write", write), mock.patch.object(sys, "stderr", err):
+            self._off_the_writer(lambda: km._agent_launch_state(self.leaf))   # handed first: the leaf, whose write raises
+            self._off_the_writer(lambda: km._agent_steps(self.agent))         # then the agent file
+            with em._ASM_CKPT_LOCK:                                           # and a parse's rewrite after a refused document
+                em._ASM_REFUSAL_HANDOFF[os.path.realpath(self.leaf)] = (self.leaf, SID, False, None, "unproven", 0, None)
+            self.assertEqual(list(em._DROP_HANDOFF), [self.leaf, self.agent])
+            km._begin_checkpoint_cycle()
+            self.assertIn("state", self.doc(self.agent)["folds"].get("agentGist", {}), "the agent's drop, handed after it, written")
+            with em._JSONL_CACHE_LOCK:
+                self.assertIsNone(em._JSONL_CACHE.get(self.agent), "and popped")
+                self.assertIsNotNone(em._JSONL_CACHE.get(self.leaf), "the leaf's entry stays: its drop raised before any pop")
+            self.assertEqual(rewrites, [self.leaf], "the rewrite handed after them done")
+            said = [ln for ln in err.getvalue().splitlines() if self.leaf in ln and "decoded" in ln]
+            self.assertEqual(len(said), 1, "the raise said once, naming the file and the fault: %r" % err.getvalue())
+            self.assertIn(self.leaf, em.checkpoint_dirty(), "its dirty mark stands, for the converge pass's own road")
+            self._off_the_writer(lambda: km._agent_launch_state(self.leaf))   # handed again, raising again: the same episode
+            km._begin_checkpoint_cycle()
+            self.assertEqual(len([ln for ln in err.getvalue().splitlines() if self.leaf in ln]), 1, "not said again: %r" % err.getvalue())
+            broken[0] = False
+            self._off_the_writer(lambda: km._agent_launch_state(self.leaf))   # it pays: the episode ends
+            km._begin_checkpoint_cycle()
+            self.assertIn("state", self.doc(self.leaf)["folds"].get("bgJudge", {}))
+        self.assertEqual(em._DROP_HANDOFF, {}, "nothing left handed")
 
     def test_the_owed_tables_overflow_pops_the_oldest_owed_entry(self):
         """Round two, low 1: over the bound the table was cleared, leaving those entries neither paid nor popped. The oldest owed

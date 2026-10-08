@@ -71,8 +71,8 @@ class StageSplitUnit(unittest.TestCase):
         self.assertIn("jobs.interruptBlock", fresh["stages_ms"])
         import re
         named = set(re.findall(JOB_NAME_RE, inspect.getsource(km._pusher_cycle_jobs) + inspect.getsource(km._jobs_pass)
-                               + inspect.getsource(km._jobs_write_phase)))   # both threads' lists (the housekeeping split,
-        #                                                                       2026-09-13) and the jobs thread's write phase (2026-10-08)
+                               + inspect.getsource(km._document_write_phase)))   # both threads' lists (the housekeeping split,
+        #                                                                       2026-09-13) and the document writer's (review of PR 155)
         self.assertEqual(re.findall(JOB_NAME_RE, "_job_stage('a', x); _job_stage(\"b\", y)"), ["a", "b"], "both quote styles (low D)")
         self.assertEqual(named, set(km._PerfStats.JOBS), "the JOBS tuple is the census of the wrapped tick jobs: a new job goes red here")
         self.assertEqual(len(km._PerfStats.JOBS), len(set(km._PerfStats.JOBS)), "no name twice")

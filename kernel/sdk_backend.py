@@ -17441,6 +17441,19 @@ class SdkBackend:
             sys.stderr.write("thread_sessions: state of %s failed (kept as waiting): %s\n" % (sid, traceback.format_exc()))
             return "waiting"
 
+    def session_work(self, sid: str):
+        """What the running session `sid` is doing to its transcripts, comment threads included: {"state", "subagents",
+        "bgTasks"}, the three fields of its snapshot() that say so (the state half, live_state, read as thread_state reads it;
+        the live Task subagents and background tasks as snapshot() lists them), or None when no process runs it. A comment
+        thread has no row in live_sessions, so the kernel's document writer reads the thread's own turn and agents here
+        before it writes a document for a file the thread's CLI may be appending to (the review of PR 155, 2026-10-08). A
+        read that raises is the caller's: reading a fault as idle would let a document be written beside a running turn."""
+        s = self.sessions.get(sid)
+        if not (s and s.thread.is_alive()):
+            return None
+        subs = s._live_subagents()
+        return {"state": str(s.live_state(subs)[0] or "waiting"), "subagents": subs, "bgTasks": s._live_bg_tasks()}
+
     def fork_parents(self) -> dict:
         """{sid: the session it was forked from} for every registration carrying a durable forkedFrom, comment threads aside
         (a thread's parent is its threadOf, and thread_sessions carries it): the lineage GET /sessions/by-fsid applies,
