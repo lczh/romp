@@ -8079,7 +8079,7 @@ class SdkSession:
         m = str(getattr(self, "chosen_model", "") or "").lower()
         return m == SUBAGENT_STANDARD_SUBAGENT_MODEL or (m.endswith("[1m]") and m[:-4] in ("opus", SUBAGENT_STANDARD_MODEL))
 
-    def _sub_std_settle(self, msg=None, now=None) -> float:
+    def _sub_std_settle(self, msg=None, now=None, replayed: bool = False, unknown: bool = False) -> float:
         """At a result settle: read what the CLI wrote since the last one, tally each new call's `usage.speed` (the main
         loop's and the subagents', Opus 5.5 calls only), judge the episode, and return the repricing. Zero and nothing
         read when the serving CLI was not launched with the recipe.
@@ -8098,6 +8098,15 @@ class SdkSession:
         first place), and one that outlasts two results is said once per launch and dropped: the turn records Claude
         Code's figure as is, so a CLI that already charges these calls at their real rate (a server-side price, say) is
         never discounted twice. A result without the per-model map corrects nothing, said once.
+
+        The spend fold's verdict on the result decides what its charge may move, exactly as it decides the dollar
+        watermark: a REPLAYED result the ledger already holds (`replayed`, the fold's duplicate outside the unknown
+        window; a host's replay after a kernel restart hands over earlier results, an older one included) moves neither
+        the charge mark nor the pairing, since its charge was paired when it was live (moving the mark down to an older
+        result's charge made the next live result's charge span calls already paired: a false disagreement and a result
+        left at Opus 5 rates, the 2026-10-08 review); the calls read meanwhile wait in the pairing for the next live
+        result. A result under an UNKNOWN baseline (`unknown`, the lifetime the fold records nothing for) moves the mark
+        to its charge and drops the pairing, since nothing was recorded for those calls to correct.
 
         THE VERDICT, said ONCE PER LAUNCH (a relaunch starts a new episode) as a problem row and kept as the session's
         speed line: a subagent call that ran fast ("subagent-fast"), or a main loop that ran no fast call since the launch
@@ -8139,7 +8148,7 @@ class SdkSession:
                 if r is not None and e is not None:
                     real += r
                     expected += e
-        corr = self._sub_std_reconcile(msg, expected, real)
+        corr = self._sub_std_reconcile(msg, expected, real, replayed=replayed, unknown=unknown)
         if not counted and msg is None:
             return 0.0
         c["repricedUsd"] = round(float(c.get("repricedUsd") or 0.0) + corr, 6)
@@ -8172,12 +8181,16 @@ class SdkSession:
                 and bool(getattr(self, "_fast_unlocked", False)) and self.fast_effective()
                 and self.subagent_standard_carried() and not self._sub_std_pending())
 
-    def _sub_std_reconcile(self, msg, expected: float, real: float) -> float:
+    def _sub_std_reconcile(self, msg, expected: float, real: float, replayed: bool = False, unknown: bool = False) -> float:
         """The turn's repricing from Claude Code's own charge under the recipe's key (see _sub_std_settle)."""
         mu = getattr(msg, "model_usage", None) if msg is not None else None
         if msg is None:
             return 0.0
         acc = self._sub_std_acc
+        if replayed:
+            acc[1] += expected   # the mark stays where the live results put it; these calls pair with the next live one
+            acc[2] += real
+            return 0.0
         if not isinstance(mu, dict):
             if expected and "no-map" not in self._sub_std_said:
                 self._sub_std_said.add("no-map")
@@ -8190,7 +8203,7 @@ class SdkSession:
         cum = float(ent.get("costUSD") or 0.0) if isinstance(ent, dict) and isinstance(ent.get("costUSD"), (int, float)) else 0.0
         base = getattr(self, "_sub_std_charged", None)
         self._sub_std_charged = cum
-        if base is None:
+        if base is None or unknown:
             self._sub_std_acc = [0.0, 0.0, 0.0]   # the CLI's charge before this result is not known: nothing to pair
             return 0.0
         charged = cum - base if cum >= base else cum   # below the watermark: a reset this kernel did not see
@@ -11042,7 +11055,9 @@ class SdkSession:
                     # difference applies only to a delta this result folds. What a turn cannot absorb (a call whose cost an
                     # earlier turn recorded, read now) carries to the next. The row keeps the CLI's own figure (cliUsd).
                     try:
-                        corr = self._sub_std_settle(msg)
+                        # the fold's own verdict: a result the ledger already holds (a replay after a restart) moves
+                        # nothing; one under an unknown baseline moves the marks and reprices nothing (the 2026-10-08 review)
+                        corr = self._sub_std_settle(msg, replayed=duplicate and not unknown, unknown=unknown)
                     except Exception as e:
                         corr = 0.0
                         self.backend._log("subagent speed (%s): the speed check failed: %s" % (self.name, e), problem=True)
