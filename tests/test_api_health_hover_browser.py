@@ -1052,9 +1052,9 @@ class ServedHistory(unittest.TestCase):
 
     def test_the_light_theme_colours_the_fine_and_quiet_head_dots_and_the_failure_line(self):
         R = self.R
-        # T301: fine wears the light theme's accent (the clay), quiet the light label gray #5D574E (the base gray #9aa4ad
+        # T301: fine wears blue in the light theme (2026-10-08: the accent clay sat beside the error red), quiet the light label gray #5D574E (the base gray #9aa4ad
         # is about 1.6:1 on the white tip), and the failure line the light error red #B02A1C; the dark line keeps #ef6b6f
-        self.assertEqual((R["lightHealthyDot"]["word"], R["lightHealthyDot"]["color"]), ("30 successful requests", "rgb(194, 65, 12)"))
+        self.assertEqual((R["lightHealthyDot"]["word"], R["lightHealthyDot"]["color"]), ("30 successful requests", "rgb(53, 104, 144)"))
         self.assertEqual((R["lightUnknownDot"]["word"], R["lightUnknownDot"]["color"]), ("no API traffic", "rgb(93, 87, 78)"))
         self.assertEqual(R["lightErr"], "rgb(176, 42, 28)", "the light theme's error-text red")
         self.assertEqual(R["fail503"]["errColor"], "rgb(239, 107, 111)", "the dark tip's status red")

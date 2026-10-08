@@ -674,7 +674,8 @@ class Detail(unittest.TestCase):
 
     def test_actions_are_delegated_on_the_stable_tip_node(self):
         self.assertIn("var el=document.getElementById('rail-api');", self.JS)
-        self.assertIn("el.addEventListener('click',function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(pinned)close();else open();});", self.JS)
+        # (no stopPropagation since 2026-10-08: the cell left the spend readout, whose own click it had to keep off)
+        self.assertIn("el.addEventListener('click',function(){if(pinned)close();else open();});", self.JS)
         self.assertNotIn("el.innerHTML", self.JS, "the frame handler writes the cell's children, never the cell")
         self.assertIn("tip.addEventListener('click',function(ev){", self.JS)
         self.assertEqual(self.JS.count("addEventListener('click'"), 2, "one on #rail-api, one on #ah-tip; none per row")

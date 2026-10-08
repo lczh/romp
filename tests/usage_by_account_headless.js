@@ -1,7 +1,7 @@
 // Drives the served landing page (tests/test_usage_by_account_served.py serves it) with playwright: hover the usage
 // readout and read the panel's shape by ACCOUNT (plans/usage-panel-by-account.md): the blocks, each block's head, its
-// window names, its machines line (names, dress, a lagging note), its updated-ago line, the not-reporting line, and the
-// rail's own aggregate bars. Prints one JSON line of observations; screenshots when asked.
+// window names, its machines line (names, dress, a lagging note), its updated-ago line, the not-reporting line, the
+// usage section's rows by account (2026-10-08), and the rail's own aggregate bars and usage cell. Prints one JSON line of observations; screenshots when asked.
 const { chromium } = require('playwright');
 (async () => {
   const url = process.argv[2], shots = process.argv[3] || '';
@@ -14,10 +14,10 @@ const { chromium } = require('playwright');
   await pg.evaluate(() => { const bt = document.getElementById('romp-boot'); if (bt) bt.remove(); });
   await pg.waitForFunction(() => document.getElementById('rail-usage').children.length > 0, null, { timeout: 20000 });
   const rail = await pg.evaluate(() => ({
-    windows: Array.from(document.querySelectorAll('#rail-usage .ru-w:not(.ru-api) .ru-name-full, #rail-usage .ru-w:not(.ru-api) .ru-name')).map((e) => e.textContent.trim()).filter(Boolean),
-    bars: document.querySelectorAll('#rail-usage .ru-w:not(.ru-api)').length,
-    pcts: Array.from(document.querySelectorAll('#rail-usage .ru-w:not(.ru-api) .ru-pct')).map((e) => e.textContent),
-    api: !!document.querySelector('#rail-usage .ru-api'),
+    windows: Array.from(document.querySelectorAll('#rail-usage .ru-w:not(.ru-cost) .ru-name-full, #rail-usage .ru-w:not(.ru-cost) .ru-name')).map((e) => e.textContent.trim()).filter(Boolean),
+    bars: document.querySelectorAll('#rail-usage .ru-w:not(.ru-cost)').length,
+    pcts: Array.from(document.querySelectorAll('#rail-usage .ru-w:not(.ru-cost) .ru-pct')).map((e) => e.textContent),
+    cost: (document.querySelector('#rail-usage .ru-cost') || {}).textContent || '',
   }));
   await pg.hover('#rail-usage');
   await pg.waitForFunction(() => { const t = document.getElementById('ru-tip'); return t && t.style.display === 'block'; }, null, { timeout: 5000 });
@@ -39,9 +39,9 @@ const { chromium } = require('playwright');
     const cols = t.querySelectorAll('.ru-tip-col').length;
     const noReport = Array.from(t.querySelectorAll('#ru-tip > .ru-tip-machines, #ru-tip .ru-tip-cols ~ .ru-tip-machines')).map((e) => e.textContent);
     return { blocks, cols, noReport, hosts: t.querySelectorAll('.ru-tip-host').length, accts: t.querySelectorAll('.ru-tip-acct').length,
-             spend: !!t.querySelector('.ru-tip-fleetspend'), email: /@/.test(t.textContent),
-             acctLine: (() => { const r = Array.from(t.querySelectorAll('.ru-tip-fleetspend .ru-tip-row')).filter((x) => /^by account/.test(((x.querySelector('.ru-tip-k') || {}).textContent || '')))[0];
-               return r ? r.querySelector('.ru-tip-v').textContent : null; })(), display: getComputedStyle(t).display, colsDisplay: (() => { const c = t.querySelector('.ru-tip-cols'); return c ? getComputedStyle(c).display : null; })() };
+             spend: !!t.querySelector('.ru-tip-cost'), email: /@/.test(t.textContent),
+             costRows: Array.from(t.querySelectorAll('.ru-tip-cost .ru-ctab tbody tr')).map((r) => Array.from(r.children).map((c) => c.textContent).join(' | ')),
+             costNotes: Array.from(t.querySelectorAll('.ru-tip-cost .ru-tip-note')).map((e) => e.textContent), display: getComputedStyle(t).display, colsDisplay: (() => { const c = t.querySelector('.ru-tip-cols'); return c ? getComputedStyle(c).display : null; })() };
   });
   if (shots) { const tipEl = await pg.$('#ru-tip'); if (tipEl) await tipEl.screenshot({ path: shots + '-hover.png' }); }
   console.log(JSON.stringify({ rail, tip, errs }));

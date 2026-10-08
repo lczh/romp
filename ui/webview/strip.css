@@ -32,14 +32,12 @@
 #romp-strip[data-tier="2"] .ru-pct, #romp-strip[data-tier="3"] .ru-pct { display: none; }
 #romp-strip[data-tier="3"] .ru-name { display: none; }
 #romp-strip[data-tier="2"] #strip-usage, #romp-strip[data-tier="3"] #strip-usage { gap: 10px; }
-/* the API spend cell — the rail's apiCellHTML twin (strip.ts apiCell): a constant "API" label, then
-   designator → dollars·tokens pairs, NO bars (the numbers are the information). The dollars wear
-   their own class so the tiers never hide them on a key-billed machine: tier 2 folds the token halves,
-   tier 3 folds the labels like every other row, the value stays at every tier. */
+/* the usage cell — the rail's costCellHTML twin (strip.ts costCell): designator → figure pairs ("today ≈$183"),
+   NO bars (the numbers are the information). The figures wear their own class so the tiers never hide them:
+   tier 3 folds the labels like every other row, the figure stays at every tier. */
 .ru-w.ru-api { gap: 6px; }
 .ru-apiv { font: 600 10px 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #cfe6ff;
   font-variant-numeric: tabular-nums; white-space: nowrap; }
-#romp-strip[data-tier="2"] .ru-apitok, #romp-strip[data-tier="3"] .ru-apitok { display: none; }
 #strip-gear { flex: 0 0 auto; background: transparent; border: 1px solid transparent; border-radius: 5px;
   color: var(--vscode-descriptionForeground, #9aa0a6); font-size: 15px; line-height: 1; cursor: pointer;
   padding: 2px 6px; opacity: .8; }

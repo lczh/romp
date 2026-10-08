@@ -71,7 +71,7 @@ class RailUsage(unittest.TestCase):
         # order within a window: label, then the bars, then % — all inline
         # anchor past the spend chip (it wears ru-name/ru-pct too, with no bars — the user 2026-08-04):
         # the slice must start at a WINDOW row, whose label is built from the WINS table
-        one = self.html[self.html.index("<div class=ru-name>'+w"):]
+        one = self.html[self.html.index("<div class=ru-name>'+w[2]"):]
         self.assertLess(one.index("ru-name"), one.index("ru-bars"))
         self.assertLess(one.index("ru-bars"), one.index("ru-pct"))
         # expanded labels use the 5th WINS field (plenty of horizontal room)
@@ -80,9 +80,8 @@ class RailUsage(unittest.TestCase):
 
     def test_the_usage_tooltip_is_one_shared_panel_reproducing_both_windows_bars(self):
         # a SINGLE tooltip on the whole rail-usage area (mouseenter on el), not a per-window panel
-        # T301: the API-health dot sits inside this cell; the shared tip yields while the pointer is on the dot
-        self.assertIn("el.addEventListener('mouseenter',function(ev){var c=document.getElementById('rail-api');", self.html, "one shared tooltip for the area")
-        self.assertIn("if(at&&(at===c||c.contains(at)))return;}showTip(ev);});", self.html)
+        # (the API-health dot sat inside this cell from T301 to 2026-10-08; it lives in the bar's right-hand cluster now)
+        self.assertIn("el.addEventListener('mouseenter',function(ev){showTip(ev);});", self.html, "one shared tooltip for the area")
         self.assertIn("['fiveHour','sevenDay','fable'].filter", self.html, "the tooltip covers ALL windows at once")
         # it reproduces the used + elapsed bars (the exact set that used to sit under the timeline)
         self.assertIn("ru-tip-track", self.html, "horizontal used/elapsed bars in the tooltip")
@@ -97,12 +96,12 @@ class RailUsage(unittest.TestCase):
         # a dead end). One footnote line in the hover's own footnote style (.ru-tip-age size and
         # opacity, no new font size), on the DESKTOP tip only: the phone panel has its "By session" button.
         js = self.html.split('_LANDING_USAGE_JS')[0] if False else self.html
-        self.assertIn("Click for the full breakdown by session.", js)
-        self.assertIn("tip.classList.remove('ru-modal');tip.innerHTML=h+'<div class=ru-tip-hint>Click for the full breakdown by session.</div>';", js,
+        self.assertIn("Click for the charts and the breakdown by session.", js)
+        self.assertIn("tip.classList.remove('ru-modal');tip.innerHTML=h+'<div class=ru-tip-hint>Click for the charts and the breakdown by session.</div>';", js,
                       "the desktop tip ends in the affordance line")
         self.assertIn("tip.innerHTML=h+'<div class=ru-tip-more><button class=rsp-btn id=ru-bysession>", js,
                       "the phone panel keeps its button and gets no click hint (a tap there opens nothing)")
-        self.assertEqual(js.count("Click for the full breakdown by session."), 1, "one place, the desktop tip")
+        self.assertEqual(js.count("Click for the charts and the breakdown by session."), 1, "one place, the desktop tip")
         self.assertIn(".ru-tip-hint{margin-top:5px;opacity:.55;font-size:10px}", js,
                       "the footnote style: .ru-tip-age's size and opacity, without a second rule line")
 
@@ -117,12 +116,14 @@ class RailUsage(unittest.TestCase):
         #    instead of freezing at a quietly lying "3m ago".
         self.assertNotIn("rate-limit telemetry unavailable", self.html)
         self.assertNotIn("_telemUnavail", self.html)
-        self.assertIn("if(sAt)h+='<div class=ru-tip-age>last charge recorded '+fmtAgo(sAt)+'</div>';", self.html)
-        self.assertIn("if(typeof u.spendAt==='number')det._spendAt=u.spendAt;", self.html)
+        self.assertIn("if(at)h+='<div class=ru-tip-age>last turn recorded '+fmtAgo(at)+'</div>';", self.html,
+                      "the ledger's own last record (2026-10-08: a turn, since a seat's turn is no charge)")
+        self.assertIn("var c=det._cost={at:(typeof sr.at==='number')?sr.at:null,tok:sr.tok||{}};", self.html)
         self.assertIn("pullFleet().then(done,function(){if(ROWS.length)renderRows(ROWS,SELF);done();});", self.html)
         # the kernel side: the payload stamps spend.json's own mtime on both spend-attaching arms
         ksrc = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertEqual(ksrc.count('out["spendAt"] = sa'), 2, "the key-only arm and the mixed-host arm")
+        self.assertEqual(ksrc.count('out["spendAt"] = sa'), 2, "the key-only arm and the mixed-host arm (an older shell's)")
+        self.assertIn('out["at"] = at          # the ledger\'s own last record', ksrc, "…and the routes every arm carries")
 
     def test_the_spend_hover_splits_each_windows_tokens_by_kind(self):
         # the user 2026-09-06 read the day's token count in the API cell and could not see how a handful
@@ -131,15 +132,17 @@ class RailUsage(unittest.TestCase):
         # the input price. So each window's row in the spend hover now carries a sub-line splitting its
         # count by kind — largest first — wearing the sub-annotation grammar (.ru-tip-reset's size and
         # opacity, no new font size). A host whose kernel ships no split leaves the summed row unsplit.
-        self.assertIn("tokCacheR:seg.tokCacheR,tokCacheW:seg.tokCacheW", self.html, "spendDet carries the split through")
-        self.assertIn("if(typeof v.tokCacheR==='number'){t.tokIn+=v.tokIn||0;t.tokOut+=v.tokOut||0;t.tokCacheR+=v.tokCacheR;t.tokCacheW+=v.tokCacheW||0;}else t.split=false;",
-                      self.html, "summed across hosts; one unsplit host unsplits the row rather than half-splitting it")
-        self.assertIn("if(v.split&&(v.tokIn+v.tokOut+v.tokCacheR+v.tokCacheW)>0)row+='<div class=\"ru-tip-row ru-tip-sub\"><span class=ru-tip-k></span>'",
-                      self.html)
-        self.assertIn("fmtTok(v.tokCacheR)+' cache read · '+fmtTok(v.tokCacheW)+' cache write · '+fmtTok(v.tokIn)+' in · '+fmtTok(v.tokOut)+' out</span></div>'",
+        # since 2026-10-08 the usage section's table carries a tokens row per window, and one line under it splits the
+        # month's count by kind, cache reads first, in the 10px annotation size (no new font size)
+        self.assertIn("var m=(c.tok||{}).monthToDate||{};Object.keys(kinds).forEach(function(k){kinds[k]+=m[k]||0;});", self.html,
+                      "summed across every machine's month")
+        self.assertIn("if(tk.monthToDate>0)h+='<div class=ru-tip-note>this month: '+fmtTok(kinds.tokCacheR)+' cache read · '+fmtTok(kinds.tokCacheW)+' cache write · '+fmtTok(kinds.tokIn)+' in · '+fmtTok(kinds.tokOut)+' out</div>';",
                       self.html, "cache read first — it is the number that explains the total (the landing is a "
                                  "cooked Python string: the source's \\u00b7 renders as the character itself)")
-        self.assertIn(".ru-tip-sub{margin-top:0}.ru-tip-sub .ru-tip-v{opacity:.6;font-size:10px}", self.html)
+        self.assertIn(".ru-tip-note{margin-top:5px;opacity:.6;font-size:10px;max-width:360px}", self.html)
+        ksrc = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn('"tok": {"today": toks(today_e), "monthToDate": toks(month_e)}', ksrc, "the kernel ships the kinds per window")
+
 
     def test_the_tooltip_shows_the_snapshots_age(self):
         # "updated ... ago" (the user 2026-07-02): the bars lagged the CLI's own /usage with no cue the reading

@@ -683,11 +683,20 @@ the per-init check above confirms each one.
 
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
-worst reading per window, and an `API` cell beside them carries the
-key-billed dollars (5-hour burn and month-to-date, numbers only). On a
-machine with no sign-in of its own every turn counts as the key's, except a
-turn billed to a stored login: that spent a subscription seat, and its dollars
-are not the key's. Hovering
+worst reading per window, and beside them the **usage at API prices**:
+`today` and `this month` (the local calendar day and month so far), each the
+dollars of every recorded turn on every connected machine at Claude Code's own
+cost (its `total_cost_usd`, the turn's tokens at the API's published prices),
+whatever billed it. A figure that includes any turn a subscription seat billed
+(a machine's sign-in or a stored login) wears `≈`, since a seat is not billed
+per token; a figure that is all API-key turns is what the key was charged and
+stays plain. The cell carries no label and no tokens. Each kernel ships its
+ledger's dollars by billing route for the two windows (`spendRoutes` on the
+usage payload: `today`, `monthToDate`, the rolling `week` an older shell
+reads, the tokens by kind, and the ledger's last-record time), and the cell
+sums the routes, so its figures, its marks and the hover's split are one
+reading. A machine on an older build that sends no such routes is named in the
+hover rather than summed. Hovering
 breaks the windows down by ACCOUNT: one block per distinct login (headed by
 the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
 detail gives it, never its email; the meters written once, since they are the
@@ -696,7 +705,7 @@ in the tab strip's quiet host dress, a machine whose own reading lagged the
 freshest named as lagging beside its name, and one updated-ago line per block
 (the oldest report of the group); two accounts are two blocks side by side; a
 machine attached but not yet reporting is named after the blocks rather than
-given a column; the key spend stays one section for every machine. An account
+given a column; the usage stays one section for every machine. An account
 that answers Claude Code's usage request with no 5-hour or weekly window (an
 enterprise seat metered by a monthly spend limit) is recorded as such and its
 block says `no 5-hour or weekly limits on this account`, with no bars, no age
@@ -708,28 +717,47 @@ bar: the percent used and the date it resets, the first of the next month as
 Claude Code's own `/usage` screen dates it (the answer carries no reset date).
 A reading from before that reset shows no bar, only `reset <date>; no reading
 since`; an answer with no limit to measure against (none, or unlimited) leaves
-the one-line note. Under the spend's per-machine line, a
-`by account · 1 week` line splits the week the way the spend detail's By
-account summary does, one entry per account, a seat's dollars wearing `≈`; it
-shows only when something besides the key billed the week, and a machine whose
-older build sends no billing routes is counted out by name. A click on the
-readout opens the spend detail: a chart of spend over time stacked by session,
-and under it the list of sessions with their dollars, turns and tokens. The
-list follows the chart's range (one day by hour, seven days by hour, ninety
-days by day): its rows are summed from exactly the buckets the chart draws, so
-the list's total is the chart's total for every range, the header names the
-range, and a session with nothing in the range has no row and no stack. An
-attached machine on an older build sends its series without turns or
-key-billed dollars per bucket: its rows show a dash in those columns, never a
-zero that would read as a count, and a note under the list names the machine
-on the ranges where such a row shows. The
-key-billed dollars come from the sessions whose CLI reported a key source at init, judged
-against the declaration; a login turn's computed cost is dollars nobody pays
-and is left out.
+the one-line note. Under the blocks, the **Usage at API prices** section is a
+small table with the cell's two windows as columns and one row per account
+(the kernel folds every host's billing routes into accounts, the rule below,
+and the rows are summed from the same payloads the cell sums, so they add up
+to it): a seat's figures wear `≈`, the API key's row says `charged`, a
+`Total` row appears when there is more than one account, then the tokens per
+window, the month's tokens by kind, one line saying what `≈` means, every
+machine's month when several contribute, and when the ledger last recorded a
+turn. A route no account names yet (spend recorded since the last fold) is
+not dropped: the key's joins the API key row, any other an `other` row. A
+click on the readout opens the spend detail, **Usage at API prices**: the
+range (one day by hour, seven days by hour, ninety days by day) and the
+measure (dollars or tokens) at the top, then two cards side by side, which
+stack on a narrow screen. The first holds every turn the key did not bill:
+named by its account (`Enterprise seat`) when one account billed them all,
+`Subscription logins` with a row per account otherwise, its figure an
+estimate (`≈`) and the line under it saying the seat is not billed per token,
+with the seat's monthly allowance (or a personal plan's 5-hour and weekly
+windows) from the same readings the hover shows. The second, **API key**,
+holds the key-billed turns, charged per token. Each card has its own chart,
+stacked by session; a card whose kind holds nothing in the range is one line
+saying so, and a kind no account in the ledger's reach has is not drawn. When
+both hold spend, one sentence under them gives the total and says it mixes an
+estimate with a charge. Under them is the list of sessions, with one dollar
+column per card (headed by the card's name, the seat's figures marked), turns
+and tokens. The list follows the charts' range: its rows are summed from
+exactly the buckets the charts draw, so the list's columns are the charts'
+totals for every range, the header names the range, and a session with
+nothing in the range has no row and no stack. An attached machine on an older
+build sends its series without turns per bucket: its rows show a dash in that
+column, never a zero that would read as a count, and a note under the list
+names the machine on the ranges where such a row shows. Every machine reads
+every turn: the detail's stacks carry each session's total and, beside it,
+its key-billed part (`keyUsd`, `keyTok`; the payload's `scope` is `all`). The
+key-billed part comes from the sessions whose CLI reported a key source at
+init, judged against the declaration. An older machine that still sends its
+key's turns alone (scope `keyed`) is drawn as key dollars only, and a note
+says so.
 
-Beside the totals, the spend detail's **By account** summary says who billed
-the spend in the chart's range: one row per Claude account, then the API key,
-then whatever romp cannot name. A row names the account by its kind
+The seat card's rows (and the hover's) say who billed the spend in the range:
+one row per Claude account, then whatever romp cannot name. A row names the account by its kind
 (`Enterprise seat`, `Personal plan`) and, in quieter words beside it, the
 routes that reached it: a machine's own sign-in (`laptop sign-in`) or a stored
 login's token (`token on server`), so one seat reached both ways is one row.
@@ -752,33 +780,24 @@ machine's sign-in is named by the account signed in now, since the ledger does
 not stamp which account each turn billed: after a switch of account, that
 machine's earlier sign-in spend shows under the new account, and the hover over
 the account's name says so. A machine signed out now reads as Unknown, as does
-spend from before the ledger tracked billing, and a machine on an older build
-is named under the summary with its dollars left out. The summary counts
-turns whatever billed them, so it can count turns that a machine's chart, list
-and totals leave out: where those three count only the machine's key-billed
-turns, a line under the summary names the machine if it has other spend in
-the range. On a narrow screen, such as a phone, the summary shows as one line
-with each account's dollars, cut short where they do not fit. Click it to see
-the full rows and the lines under them, including the one that names those
-machines.
+spend from before the ledger tracked billing.
 
 Dollars billed to a subscription seat, through a sign-in or a stored login,
 are Claude Code's own cost for those turns at API prices. A seat is not billed
-per token, so these figures are estimates: they wear `≈`, the hover and a line
-under the summary say so, and a session row whose dollars include such turns
-wears the mark too. Key-billed dollars are what the key was billed and stay
-plain. A session whose last launch was billed to a stored login reads
+per token, so these figures are estimates: they wear `≈`, the card's line and
+the hover say so, and a session's seat column wears the mark too. Key-billed
+dollars are what the key was billed and stay plain. A session whose last launch was billed to a stored login reads
 `bills <account>` beside its name, with the login's full label in the hover.
 The name comes from the last launch: if a session changed logins within the
 range, the row names only the latest launch's stored login, or none when that
 launch billed the machine's sign-in or the key.
 
-The token count beside the dollars is every kind together: fresh input,
-output, cache writes, and cache reads. Cache reads are most of it: every API
-call within a turn (one per tool step) re-reads the whole context from the
-cache, so a long session's single turn can read tens of millions of tokens at
-a tenth of the input price. The hover splits each window's count by kind, so
-the size of the number carries its explanation. A result that carries no
+The token count is every kind together: fresh input, output, cache writes, and
+cache reads. Cache reads are most of it: every API call within a turn (one per
+tool step) re-reads the whole context from the cache, so a long session's
+single turn can read tens of millions of tokens at a tenth of the input price.
+The hover splits the month's count by kind, so the size of the number carries
+its explanation. A result that carries no
 per-model usage map is counted from the main loop alone, and the error center
 says so once: once per session when the CLI left the map out, once per kernel
 run when the Agent SDK the kernel imported has no field for it.
@@ -5149,8 +5168,13 @@ own model and are exact.
 
 ### On the dashboard
 
-The shell's rail carries one dot for the signal, placed after the `API` label
-of the spend readout: the accent colour when every connected kernel is fine,
+The shell's rail carries one dot for the signal and its name, **API health**,
+first in the bar's right-hand cluster and apart from the usage figures (the
+signal is about how the API answers, never about money; until 2026-10-08 it
+sat inside the spend readout after an `API` label, where it read as part of
+the spend): the accent colour when every connected kernel is fine (in the light
+theme a blue, `#356890`, since that theme's accent is an orange that sits beside
+the error red),
 red when errors are being met anywhere (a 429 storm, 5xx failures, a machine
 offline, auto-retry paused), and the label gray when no kernel has API traffic
 in the windows. The hover reads the document as counts, never as the state
@@ -5160,7 +5184,9 @@ its own colour only when present (429s in the blocked red, 5xx with 529 in the
 5xx purple, no-connection and other-status failures in the other band's own
 hue: a pale lime in the dark theme, an indigo in the light); no
 traffic reads as "no API traffic"; a machine whose sessions are waiting or
-whose kernel is paused shows that kernel's own words instead. The window the
+whose kernel is paused shows that kernel's own words instead. One plain line
+under the heading says what the signal is: how Anthropic's API is answering
+your sessions, whichever account they bill. The window the
 lines count is named once at the top, this kernel's: the ledger's last 24
 hours (a peer still on an older kernel counts its own longest window, and its
 histogram says so). There is no summary sentence: the lines do the work,
@@ -5346,9 +5372,9 @@ logged, and never keeps the SDK backend from starting.
 
 ### The bottom bar's indicator
 
-The dashboard's bottom bar carries an API cell (one small dot, placed inside
-the spend readout right after its `API` label; see "On the dashboard" above
-for its colours and its reading) whose frame is computed independently of this
+The dashboard's bottom bar carries an API health cell (one small dot and its
+name, first in the bar's right-hand cluster; see "On the dashboard" above for
+its colours and its reading) whose frame is computed independently of this
 signal, from two things the kernel owns directly:
 
 - Each alive session's newest transcript API-error record, latched until the
@@ -6877,12 +6903,13 @@ judges' bar stacks **By judge** or by **Index vs triage**, the measure is
 percentage of the session tokens, with the combined figure. Judge cost is what
 was logged; session cost is tokens priced from a table.
 
-**What the API is costing.** The bottom bar's spend readout opens **API
-spend**, which the palette reaches as **Token usage** too: **Totals** with
-**By account** beside them, **Spend over time** and **By session**, over one
-day by hour, seven days by hour (the default) or ninety days by day, measured
-in dollars or tokens, ordered by spend or in your own order, and optionally
-merged by tag. The panel's choices are kept in this browser.
+**What your usage costs.** The bottom bar's usage figures open **Usage at API
+prices**, which the palette reaches as **Token usage** too: a card for the
+subscription seat (estimated at API prices, `≈`) and one for the **API key**
+(charged), each with its chart, then **By session**, over one day by hour,
+seven days by hour (the default) or ninety days by day, measured in dollars or
+tokens, ordered by spend or in your own order, and optionally merged by tag.
+The panel's choices are kept in this browser.
 
 ## When a session's tab disappears
 

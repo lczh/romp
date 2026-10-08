@@ -244,21 +244,22 @@ class ApiHealthCell(unittest.TestCase):
     def setUp(self):
         self.html = km._landing()
 
-    def test_the_cell_follows_the_usage_cell_inside_the_scroll_group(self):
-        i_usage, i_api, i_acts = (self.html.index(k) for k in ("id=rail-usage", "id=rail-api", "class=rail-acts"))
-        self.assertLess(i_usage, i_api, "right of the usage cell")
-        self.assertLess(i_api, i_acts, "inside .rail-scroll, before the pinned actions")
-        self.assertGreater(i_api, self.html.index("<div class=rail-scroll>"))
+    def test_the_cell_heads_the_pinned_right_hand_cluster_apart_from_the_usage_figures(self):
+        # 2026-10-08 (the user, who could not tell what the dot meant or which figure it belonged to): it reports how
+        # the API answers the sessions, never money, so it left the spend readout for the head of the right-hand cluster
+        i_usage, i_acts, i_api, i_refresh = (self.html.index(k) for k in ("id=rail-usage", "class=rail-acts", "id=rail-api", "id=rail-refresh"))
+        self.assertLess(i_usage, i_acts, "the usage figures scroll on the left")
+        self.assertLess(i_acts, i_api, "the cell is inside the pinned actions")
+        self.assertLess(i_api, i_refresh, "…first among them")
 
-    def test_the_cell_ships_hidden_as_a_dot_alone(self):
-        # T301 (the user 2026-09-10): no second API word and no "ok"; the dot moves into the spend readout's slot
-        # (.ah-slot, right after the readout's own API label) whenever that readout renders
+    def test_the_cell_ships_hidden_as_the_dot_and_its_name(self):
+        # T301 (the user 2026-09-10) had the dot borrow the spend readout's "API" label; with that label gone (the
+        # readout's figures are mostly a seat's) the dot carries its own name, in the bar's label font, and still no "ok"
         tag = ('<div id=rail-api class="ru-w ru-ah" hidden role=button tabindex=0 aria-label="API health" data-dot=fine>'
-               '<i class=ah-dot></i></div>')
-        self.assertTrue(tag in self.html, "the cell's markup: hidden, a keyboard button, a dot and nothing else")
-        self.assertNotIn(".ah-text", self.html, "no word beside the dot")
-        self.assertIn("<div class=ru-name>API</div><span class=ah-slot></span>", self.html, "the readout's slot for the dot")
-        self.assertIn(".ah-slot{display:contents}", self.html)   # no flex item of its own: a hidden dot costs no gap
+               '<i class=ah-dot></i><span class=ru-name>API health</span></div>')
+        self.assertTrue(tag in self.html, "the cell's markup: hidden, a keyboard button, the dot and its name")
+        self.assertNotIn(".ah-text", self.html, "no state word beside the dot")
+        self.assertNotIn("ah-slot", self.html, "the readout no longer adopts the dot")
         tag = re.search(r"<div id=rail-api[^>]*>", self.html).group(0)
         self.assertNotIn("title", tag, "the rail's no-title rule: the detail is the one hover surface")
         self.assertNotIn("data-keycmd", tag, "no palette command yet")
@@ -270,9 +271,10 @@ class ApiHealthCell(unittest.TestCase):
         self.assertTrue(".ru-w{display:flex;" in self.html, "the author display rule the attribute must beat")
         self.assertTrue("#rail-api[hidden]{display:none}" in self.html, "no author [hidden] rule for #rail-api")
 
-    def test_the_cell_adds_no_font_size_and_sits_in_the_readout_s_slot(self):
-        self.assertNotIn(".ah-text", self.html, "T301: no word on the rail, so no font rule for one")
-        self.assertIn("#rail-api{cursor:pointer;margin:0 1px;padding:4px 2px}", self.html, "a 15 px hit target around a 7 px dot")
+    def test_the_cell_adds_no_font_size(self):
+        self.assertNotIn(".ah-text", self.html, "the name wears the bar's own label class, so no font rule of its own")
+        self.assertIn("#rail-api{cursor:pointer;gap:6px;padding:3px 7px;margin-right:6px;border-radius:5px}", self.html)
+        self.assertIn("#rail-api:hover,#rail-api:focus-visible{background:rgba(255,255,255,0.06);outline:none}", self.html, "a flat wash says it opens")
 
     def test_the_dot_wears_the_accent_when_fine_and_the_status_tokens_otherwise(self):
         # T301 (the user 2026-09-10): the fine dot IS the romp accent; errors the blocked red; quiet the label gray;
@@ -289,9 +291,12 @@ class ApiHealthCell(unittest.TestCase):
         # rules (0,2,0), and the card's headline dot would lose its amber and red. The History head shows the signal's
         # quiet states (healthy, unknown) with the same glyph, so the rule names them too (the base gray falls to
         # about 1.6:1 on the white tip)
-        # T301: the quiet dot alone needs the light override (fine and errors read on white as they are)
+        # T301: the quiet dot needs the light override; 2026-10-08: so does the fine one, whose accent in the light theme
+        # is an orange that sits beside the error red on a 7 px dot (a healthy API read as a warning): it takes the dark
+        # accent's hue at the light lightness instead
         self.assertTrue("body.theme-light #rail-api[data-dot=quiet] .ah-dot,body.theme-light .ah-dot[data-dot=quiet]{background:#5D574E}" in self.html,
                         "the light override names the quiet state, on the rail and in the popup alike")
+        self.assertIn("body.theme-light #rail-api[data-dot=fine] .ah-dot,body.theme-light .ah-dot[data-dot=fine]{background:#356890}", self.html)
         self.assertNotIn("body.theme-light .ah-dot{", self.html, "no bare light rule on the dot")
         self.assertNotIn("body.theme-light .ah-dot[data-dot=errors]", self.html, "the state rules are not restated per theme")
 

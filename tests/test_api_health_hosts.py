@@ -385,30 +385,21 @@ class Series(unittest.TestCase):
 class CellCss(unittest.TestCase):
     """The rail cell (T301): a dot alone, three states through tokens, no second API word and no ok text."""
 
-    def test_the_dot_s_three_states_wear_the_tokens_and_the_cell_carries_no_text(self):
+    def test_the_dot_s_three_states_wear_the_tokens_and_the_cell_carries_its_name(self):
         html = km._landing()
         html = html if isinstance(html, str) else html.decode("utf-8")
         self.assertIn("#rail-api[data-dot=fine] .ah-dot,.ah-dot[data-dot=fine]{background:var(--accent,#9cd2ff);opacity:1}", html)
         self.assertIn("#rail-api[data-dot=errors] .ah-dot,.ah-dot[data-dot=errors]{background:var(--st-blocked-bg,#e5484d);opacity:1}", html)
         self.assertIn("#rail-api[data-dot=quiet] .ah-dot,.ah-dot[data-dot=quiet]{background:var(--dim,#9aa4ad);opacity:.55}", html)
-        self.assertNotIn(".ah-text", html, "no word beside the dot")
-        self.assertNotIn('<span class=ru-name>API</span>', html.split("id=rail-api")[1][:200], "no second API label: the readout's own is the label")
-        self.assertIn('<div id=rail-api class="ru-w ru-ah" hidden role=button tabindex=0 aria-label="API health" data-dot=fine><i class=ah-dot></i></div>', html)
-        # the readout's slot the dot moves into, right after its API label
-        self.assertIn("<div class=ru-name>API</div><span class=ah-slot></span>", html)
-        # the dot lives inside #rail-usage while the readout renders, and that cell's innerHTML is rewritten on every
-        # pull: the usage script parks the dot outside before any write and moves it into the fresh slot after
+        self.assertNotIn(".ah-text", html, "no state word beside the dot")
+        # 2026-10-08: the dot left the spend readout (whose "API" label it borrowed, and whose figures it was read as
+        # part of) for the head of the bar's right-hand cluster, carrying its own name
+        self.assertIn('<div id=rail-api class="ru-w ru-ah" hidden role=button tabindex=0 aria-label="API health" data-dot=fine>'
+                      '<i class=ah-dot></i><span class=ru-name>API health</span></div>', html)
         usage = km._LANDING_USAGE_JS
-        self.assertIn("function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();", usage)
-        self.assertIn("function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)moveApiCell(c,function(){RAIL_HOME.insertBefore(c,el.nextSibling);});}", usage)
-        self.assertIn("var slot=el.querySelector('.ah-slot');\nif(slot){moveApiCell(cell,function(){slot.appendChild(cell);});}", usage)
-        # the move keeps focus and tells the dot's script (review find: the minute repaint blurred a focused cell and
-        # hid a focus-shown hover)
-        self.assertIn("function moveApiCell(c,into){var had=document.activeElement===c,mv=window.__rompApiCellMoving;if(mv)mv(true);\ninto();if(had){try{c.focus({preventScroll:true});}catch(e){}}if(mv)mv(false);}", usage)
-        # the readout's tip yields to the dot's and comes back when the pointer slides onto the figures
-        self.assertIn("window.__rompUsageTipHide=function(){tip.style.display='none';};\nwindow.__rompUsageTipShow=function(ev){showTip(ev);};", usage)
-        self.assertIn(".ah-slot{display:contents}", html, "the slot is no flex item: a hidden dot costs the readout no gap")
-        self.assertNotIn(".ah-slot{display:inline-flex", html)
+        for gone in ("ah-slot", "parkApiCell", "moveApiCell", "__rompApiCellMoving", "__rompUsageTipHide", "__rompUsageTipShow"):
+            self.assertNotIn(gone, usage, "the readout no longer adopts, parks or yields to the dot: " + gone)
+        self.assertNotIn("ah-slot", html)
         self.assertIn("body.theme-light #rail-api[data-dot=quiet] .ah-dot,body.theme-light .ah-dot[data-dot=quiet]{background:#5D574E}", html)
         self.assertIn("/dist/api-health-global.js?v=", html)
 

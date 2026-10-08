@@ -10,8 +10,8 @@ named after the blocks with its state, never a column. The rail's own aggregate 
 by the account's kind, the spend detail's name for it, never an email (2026-10-01). A second lab (NoWindowsServed) puts
 this machine on an account that answered it has no usage windows beside a machine still holding a weeks-old reading on
 the same account, with spend split by account: one block, headed by the kind, saying so in one line, no bars, no age, no
-lagging note, and the spend section's by-account line with the seat's dollars marked as an estimate (the user
-2026-10-01). Synthetic only: TESTHOST names and an invented email that must never render. Skips LOUDLY without a playwright (set
+lagging note, and the usage section's rows by account with the seat's dollars marked as an estimate (the user 2026-10-01;
+the rows per calendar window since 2026-10-08). Synthetic only: TESTHOST names and an invented email that must never render. Skips LOUDLY without a playwright (set
 ROMP_PLAYWRIGHT_NODE_PATH to a node_modules holding it) unless ROMP_SERVED_TESTS_REQUIRE=1 makes that a failure."""
 import json
 import os
@@ -181,14 +181,14 @@ class UsageByAccountServed(unittest.TestCase):
         o = self._drive()
         r = o["rail"]
         self.assertEqual(r["bars"], 3, "the rail draws the three windows once, aggregated: %r" % r)
-        self.assertFalse(r["api"], "no key: no API cell")
+        self.assertEqual(r["cost"], "", "no spend recorded: no usage cell")
 
 
 
 class NoWindowsServed(UsageByAccountServed):
     """This machine's account answered that it has no usage windows; TESTHOSTB, signed into the same account on an older
-    build, still holds a reading from weeks ago and ships the login's email; the week's spend splits between the key and
-    the seat, and TESTHOSTC's older build sends no routes (the user 2026-10-01)."""
+    build, still holds a reading from weeks ago and ships the login's email; this machine's usage splits between the key
+    and the seat, and TESTHOSTC's older build sends no routes (the user 2026-10-01; per calendar window 2026-10-08)."""
     test_two_machines_on_one_account_are_one_block_a_third_on_another_a_second_and_the_unreported_one_is_named = None
     test_the_rails_own_meter_is_unchanged_one_aggregate_set_of_bars = None
 
@@ -196,12 +196,17 @@ class NoWindowsServed(UsageByAccountServed):
         def old(pct):
             return {"pct": pct, "resetsAt": now - 25 * 86400, "color": [84, 178, 4]}
         spend = {w: {"usd": 5.0, "tok": 10, "turns": 1} for w in ("hour", "day", "week", "month", "monthToDate")}
-        rows = [{"host": "", "acct": ACCT2, "usage": {"noWindows": True, "t": now - 60, "acct": ACCT2, "acctName": NAME2, "spend": spend}},
+        routes = {"today": {"key": [5.0, 1], "machine": [10.4, 3]}, "monthToDate": {"key": [5.0, 1], "machine": [10.4, 3]},
+                  "week": {"key": [5.0, 1], "machine": [10.4, 3]}, "tok": {"today": {"tok": 2_000_000}, "monthToDate": {"tok": 2_000_000}}}
+        rows = [{"host": "", "acct": ACCT2, "usage": {"noWindows": True, "t": now - 60, "acct": ACCT2, "acctName": NAME2, "spend": spend,
+                                                      "spendRoutes": routes}},
                 {"host": "TESTHOSTB", "acct": ACCT2, "usage": {"fiveHour": old(71), "sevenDay": old(16), "fable": old(27),
                                                                "t": now - 26 * 86400, "acct": ACCT2, "acctLabel": EMAIL}},
                 {"host": "TESTHOSTC", "acct": "", "usage": {"apiKey": True, "acct": "", "spend": spend}}]
-        return rows, {"accounts": [{"name": "API key", "kind": "key", "usd": 15.0, "est": False},
-                                   {"name": NAME2, "kind": "seat", "usd": 10.4, "est": True}],
+        return rows, {"accounts": [{"name": NAME2, "kind": "seat", "usd": 10.4, "est": True,
+                                    "routes": [{"host": "TESTHOSTA", "route": "machine", "est": True}]},
+                                   {"name": "API key", "kind": "key", "usd": 5.0, "est": False,
+                                    "routes": [{"host": "TESTHOSTA", "route": "key", "est": False}]}],
                       "accountsMissing": ["TESTHOSTC"]}
 
     def test_an_account_without_windows_is_said_once_and_the_spend_splits_by_account(self):
@@ -217,8 +222,12 @@ class NoWindowsServed(UsageByAccountServed):
         self.assertEqual(b["lag"], [], "nothing to lag behind")
         self.assertEqual(b["age"], "", "no age: nothing is read")
         self.assertFalse(t["email"], "no email anywhere in the hover")
-        self.assertTrue(t["spend"], "the spend section")
-        self.assertEqual(t["acctLine"], "API key $15 \u00b7 Enterprise seat \u2248$10 \u00b7 TESTHOSTC not counted (older build)")
+        self.assertTrue(t["spend"], "the usage section")
+        self.assertEqual(t["costRows"], ["Enterprise seat | \u2248$10 | \u2248$10", "API key charged | $5 | $5",
+                                         "Total | \u2248$15 | \u2248$15", "tokens | 2.00M | 2.00M"], t["costRows"])
+        self.assertIn("TESTHOSTC: older build, its usage is not in these figures", t["costNotes"], t["costNotes"])
+        self.assertTrue(any(n.startswith("\u2248 marks an estimate") for n in t["costNotes"]), t["costNotes"])
+        self.assertEqual(o["rail"]["cost"], "today\u2248$15this month\u2248$15", "the cell: every route, the seat's estimate marked")
         self.assertEqual((o["rail"]["windows"], o["rail"]["pcts"]), ([], []), "no window bars on the rail: %r" % o["rail"])
 
 

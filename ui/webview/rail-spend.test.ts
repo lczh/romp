@@ -1,13 +1,12 @@
-// API-KEY SPEND on the rail (redesigned 2026-08-08, with per-session auth): spend is NUMBERS, never
-// bars — the old hover graph scaled each window's bar to the largest window, a shape that told the
-// reader nothing, and the budget-fill tracks on the web rail died with it. A host's payload can now
-// carry a login's WINDOWS and its key's SPEND at once (`spend` beside the bars, keyed-only sums), so
-// presence of the spend windows — not the legacy apiKey flag — is what turns the dollars on. The
-// collapsed web rail shows one API cell (constant 'API' label + 5h/month dollars — no key material,
-// not even a last-4 tail, the user 2026-08-08 evening); the hover breaks spend down
-// per window per host. Spend accumulates per ResultMessage (total_cost_usd + usage tokens) into
-// spend.json's day AND hour buckets, each bucket carrying a `key` sub-count for key-billed turns.
-// No jsdom harness → source pins (the repo convention).
+// SPEND on the rail. Redesigned 2026-10-08 (the user, who read "API" on the cell while nearly all of their usage bills an
+// enterprise seat, and wanted the seat's usage in the figure as the dollars it would cost at API prices, marked as an
+// estimate): the cell is USAGE AT API PRICES, every recorded turn at Claude Code's own cost (total_cost_usd, its tokens
+// at the API's published prices) by the route that billed it, for the calendar day and month; the key's dollars are
+// charged, any other route's an estimate, and a figure holding any estimate wears the approx mark. Spend is NUMBERS,
+// never bars (the user 2026-08-08). The recorder accumulates per ResultMessage into spend.json's day AND hour buckets,
+// each carrying a `key` sub-count for key-billed turns and a `byLogin` map for stored logins; the kernel ships each
+// host's dollars by route (spendRoutes, _rail_routes). The behaviour executes in usage-at-api-prices.test.ts; these are
+// the source pins. No jsdom harness → source pins (the repo convention).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -25,10 +24,12 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
   // bucket where a stored login billed turns, which reads its key sub-count (2026-10-01: a seat's turns)
   assert.ok(KERNEL.includes('if o.get("apiKey") or (not _claude_account() and (jd.STATE / "spend.json").exists()):'));
   assert.ok(KERNEL.includes('out = {"apiKey": True, "spend": _spend_windows(login_split=True),'));
-  // the hover's spend rows lead with the rolling hour (the user 2026-08-15); the collapsed cell keeps day+month
-  // …'1 month' is ROLLING 30 days and 'this month' the calendar bill figure beneath it (T235, 2026-09-03)
-  assert.ok(KERNEL.includes("var SPEND_WINS=[['hour','1 hour'],['day','1 day'],['week','1 week'],['month','1 month'],['monthToDate','this month']];"));
+  // the key windows still ride for an older shell (rolling hour/day/week/month and the calendar month, T235)
   assert.ok(KERNEL.includes('"hour": _rolling(1),'));
+  // …and every arm with recorded spend carries the host's dollars by billing route for the rail's calendar windows,
+  // the seat's turns included (2026-10-08): the cell's figure, its approx mark and the hover's split are one read
+  assert.ok(KERNEL.includes('out = {"today": today, "monthToDate": mtd, "week": week,'));
+  assert.equal((KERNEL.match(/return _with_rail_routes\(out\)/g) || []).length, 3, "the key-only arm, the no-windows arm and the windows arm");
   // …and the $/hour series rides beside the windows for the hover graph (the user 2026-08-13)
   assert.ok(KERNEL.includes('out["spendSeries"] = ss'));
   // the bars payload attaches the KEYED split only — a login turn's computed cost there would be
@@ -62,50 +63,34 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
   assert.ok(BACKEND.includes("_fold(hours, hour, 192)"), "8 days of hour buckets feed the rolling windows");
 });
 
-test("VS Code strip: spend is ONE API cell keyed on the windows' PRESENCE — the rail's twin", () => {
-  // the strip mirrors apiCellHTML (the user 2026-08-11: the rail moved to the cell and the strip must
-  // reflect it): constant 'API' label, 5-hour burn + month-to-date as designator → dollars·tokens
-  // pairs, the full breakdown (7 days, turn counts) on the hover title. Spend-as-rows is gone.
-  assert.match(STRIP, /export function apiCell\(usage: any\): ApiCell \| null/);
-  // presence, not the apiKey flag: a mixed host's payload carries bars AND spend at once — and the
-  // 5h window is the whole test, the same hasSpend branch the rail runs
-  assert.ok(STRIP.includes("const sp = usage && usage.spend;"));
-  // day||fiveHour: an older kernel ships no 'day' yet (version skew) — its 5h burn stands in
-  assert.ok(STRIP.includes("if (!sp || !(sp.day || sp.fiveHour)) return null;"));
-  assert.ok(STRIP.includes("const daySeg = sp.day || sp.fiveHour;"));
-  assert.doesNotMatch(STRIP, /usage\.apiKey && usage\.spend/);
-  assert.doesNotMatch(STRIP, /spendWindows/, "spend never renders as window rows any more");
-  // the collapsed cell carries 1 day + 1 month (the user 2026-08-13: pay-per-token has no reset
-  // windows); one display name per window, dollars AND tokens beside each other
-  assert.match(STRIP, /\[\["day", "1 day", "1d", daySeg\],\s*\n\s*\["month", "1 month", "1mo", sp\.month\]\]/);
-  assert.match(STRIP, /tok\.textContent = " · " \+ fmtTok\(s\.tok\) \+ " tok";/);
-  // the old one-off chip is gone, and with it any minted style
+test("VS Code strip: the usage cell is the rail's twin, armed on the calendar routes' presence", () => {
+  assert.match(STRIP, /export function costCell\(usage: any\): CostCell \| null/);
+  assert.ok(STRIP.includes("const sr = usage && usage.spendRoutes;"));
+  assert.ok(STRIP.includes("if (!sr || !(sr.today || sr.monthToDate)) return null;"), "an older kernel's week-only routes arm nothing");
+  assert.ok(STRIP.includes('if (r === "key") keyUsd += v;'), "the key's route is the charged one");
+  assert.ok(STRIP.includes("const est = usd - keyUsd >= COST_GRAIN;"), "anything else is an estimate");
+  assert.doesNotMatch(STRIP, /export function apiCell/, "the API-key cell is gone");
+  assert.doesNotMatch(STRIP, /spendWindows/, "spend never renders as window rows");
   assert.doesNotMatch(STRIP, /spendChip/);
   assert.doesNotMatch(STRIPCSS, /\.ru-spend/);
 });
 
-test("the web rail's API cell is numbers under a constant label — no spend bars anywhere", () => {
+test("the web rail's usage cell: window names left of their figures, no label, no tokens, no spend bars", () => {
   const usageJS = KERNEL.split('_LANDING_USAGE_JS = """')[1].split('"""')[0];
-  // one compact cell: a bare 'API' label (never any key fragment), then per-window pairs in the
-  // window cells' own grammar — the window's ONE display name, name-font, LEFT of its value, with
-  // dollars AND tokens (the user 2026-08-09: no more '$12 5h' second vocabulary trailing the number)
-  assert.ok(usageJS.includes("function apiCellHTML(live)"));
-  // T301: the API-health dot's slot follows the label (the stable #rail-api node moves into it); the label itself is unchanged
-  assert.ok(usageJS.includes("'<div class=ru-name>API</div><span class=ah-slot></span>'"));
+  assert.ok(usageJS.includes("function costCellHTML(live){"));
+  assert.ok(usageJS.includes("return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct>'+costUsd(s[w[0]])+'</div>';}).join('')+'</div>';}"),
+    "each window's ONE display name in the name font, LEFT of its figure (the user 2026-08-09)");
+  assert.ok(!usageJS.includes("<div class=ru-name>API</div>"), "no 'API' label: the figures are mostly a seat's");
+  assert.ok(!usageJS.includes("ah-slot"), "the API-health dot is not in the spend cell");
+  assert.ok(usageJS.includes("function costUsd(v){return (costEst(v)?'\\u2248':'')+fmtUsd(v.usd);}"), "the approx mark on a figure holding an estimate");
+  assert.ok(usageJS.includes("function costEst(v){return (v.usd-v.key)>=COST_GRAIN;}"));
   assert.ok(!usageJS.includes("_tail"), "no tail plumbing survives in the rail JS");
-  // the month segment carries the version-skew caveat (T235b): a legacy host's calendar month is left
-  // out of the rolling segment, and the segment's title says how many machines were not counted
-  assert.ok(usageJS.includes("seg('day','1 day')+seg('month','1 month',monthCav)"));
-  assert.ok(usageJS.includes("var d=sp.day||sp.fiveHour,m=sp.month;   // m: the ROLLING month only (a legacy host has none here)"), "older remote kernels stay visible on the day segment");
-  assert.ok(usageJS.includes("var seg=function(k,lbl,cav){return '<div class=ru-name>'+lbl+(cav?' \\u26a0':'')+'</div>'"),
-    "the caveat is a glyph on the segment — no native title (the rich tip is the ONE hover surface and carries the words)");
-  assert.ok(usageJS.includes("'<div class=ru-pct>'+fmtUsd(sum[k].usd)+' \\u00b7 '+fmtTok(sum[k].tok)+' tok</div>'"));
-  // the graph and the budget fills are gone: no spend track, no spend color ramp, no shared scale
+  // the graph and the budget fills are gone: no spend track, no spend color ramp
   assert.ok(!usageJS.includes("spendColor"), "the budget-fill ramp died with the spend bars");
   assert.ok(!usageJS.includes("spendWinsHTML"), "spend never renders as window rows with tracks");
-  assert.ok(!usageJS.includes("var mx=1;"), "the token auto-scale graph is gone");
-  // presence-keyed, like the strip
-  assert.ok(usageJS.includes("function hasSpend(u){return !!(u&&u.spend&&(u.spend.day||u.spend.fiveHour));}"));
+  assert.ok(usageJS.includes("function hasCost(u){var sr=u&&u.spendRoutes;return !!(sr&&(sr.today||sr.monthToDate));}"), "presence-keyed, like the strip");
+  assert.ok(usageJS.includes("var live=ROWS.filter(function(r){return hasBars(r.usage)||hasCost(r.usage)||hasSpend(r.usage)||!!(r.usage&&r.usage.noWindows);});"),
+    "a host with spend from an older build still joins, to be named in the hover");
 });
 
 test("one display name per window, worn everywhere: bars, hover sections, API cell, notices", () => {
@@ -125,18 +110,17 @@ test("one display name per window, worn everywhere: bars, hover sections, API ce
   assert.ok(usageJS.includes("names.push('7-day')"));
 });
 
-test("dollars are WHOLE everywhere — no cents on any spend surface", () => {
-  // the user 2026-08-09: cents are noise at these magnitudes; the rail, its hover, and the VS Code
-  // strip all round to whole dollars through their one formatter each
+test("dollars are WHOLE everywhere, thousands grouped — no cents on any spend surface", () => {
+  // the user 2026-08-09: cents are noise at these magnitudes; 2026-10-08: a five-figure month reads at a glance ($55,183)
   const usageJS = KERNEL.split('_LANDING_USAGE_JS = """')[1].split('"""')[0];
-  assert.ok(usageJS.includes("function fmtUsd(v){return '$'+String(Math.round(v));}"));
+  assert.ok(usageJS.includes("function fmtUsd(v){return '$'+Math.round(v).toLocaleString('en-US');}"));
   assert.ok(!usageJS.includes("toFixed(2)"), "no cents anywhere in the rail JS");
-  assert.match(STRIP, /export function fmtUsd\(v: number\): string \{ return "\$" \+ String\(Math\.round\(v\)\); \}/,
+  assert.ok(STRIP.includes('export function fmtUsd(v: number): string { return "$" + Math.round(v).toLocaleString("en-US"); }'),
     "the strip rounds through the same one formatter");
   assert.doesNotMatch(STRIP, /usd\.toFixed\(2\)/);
 });
 
-test("the rich tip is the ONE hover surface: no native titles, per-host sections, numbers-only spend", () => {
+test("the rich tip is the ONE hover surface: no native titles, account blocks, one usage section", () => {
   // NO native title attributes anywhere on the rail (the user 2026-08-08, who got the browser's flat
   // yellow box on top of the rich hover): the usage JS may mention titles only in comments
   const usageJS = KERNEL.split('_LANDING_USAGE_JS = """')[1].split('"""')[0];
@@ -144,35 +128,18 @@ test("the rich tip is the ONE hover surface: no native titles, per-host sections
     const code = line.split("//")[0];
     assert.ok(!/\btitle\s*=/.test(code) && !code.includes(".title="), `native title in usage JS: ${line.trim()}`);
   }
-  // host sections carry WINDOWS only now — spend is ONE fleet-level section (the user 2026-08-13:
-  // one shared key reads as one number; each host records only its own turns, so the sum IS the number)
   assert.ok(usageJS.includes("sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;"),
     "a machine with no window block joins no account block (2026-09-19), unless its account answered it has none (2026-10-01)");
-  assert.ok(!usageJS.includes("spendOnly"), "spend renders for ANY host that has it");
-  assert.ok(usageJS.includes("function fleetSpendHTML(sets)"));
-  // the spend section renders even when NO host has window blocks (an all-keyed box, 2026-08-15) —
-  // the appended form replaced `return h+fleetSpendHTML(sets);`, whose empty-blocks short-circuit
-  // left the API cell's hover empty exactly when spend was all there was to show
-  assert.ok(usageJS.includes("h+=fleetSpendHTML(sets);"));
-  // …with the summed $/hour area graph and its peak beside it — labelled PER-HOUR (the user
-  // 2026-08-13 read a bare 'peak $311' and had to ask whether that was one hour)
-  assert.ok(usageJS.includes("moneyGraph(wk,'#9cd2ff',series.h0+st)"));
-  assert.ok(usageJS.includes("'<span class=ru-tip-v>peak '+fmtUsd(mx)+'/h</span>"));
-  // …and every machine in the sum BY NAME, largest first (the user 2026-08-13: the devbox — spend,
-  // no login — vanished from the hover when per-host spend rows collapsed into the fleet section)
-  assert.ok(usageJS.includes("per.push({host:e.host,usd:sp.week.usd})"));
-  assert.ok(usageJS.includes("by machine \\u00b7 1 week"));
-  assert.ok(usageJS.includes("per.sort(function(a,b){return b.usd-a.usd;})"));
-  // numbers only: dollars · tokens · turns per window, under a plain 'API spend' heading
-  assert.ok(usageJS.includes("function spendDet(u,det)"));
-  assert.ok(usageJS.includes("API spend'+(hosts>1?' \\u00b7 '+hosts+' machines':'')"),
-    "one fleet-level section — one shared key, one number (the user 2026-08-13)");
-  assert.ok(usageJS.includes("fmtUsd(v.usd)+' \\u00b7 '+fmtTok(v.tok)+' tok \\u00b7 '+(v.turns||0)+' turns</span>"));
+  // ONE usage section for every machine at once, appended even when no host has window blocks
+  assert.ok(usageJS.includes("h+=costTipHTML(sets);"));
+  assert.ok(usageJS.includes("var h='<div class=\"ru-tip-win ru-tip-cost\"><div class=ru-tip-name><span>Usage at API prices</span></div>';"));
+  // every machine in the figures BY NAME when there is more than one (the user 2026-08-13: a machine missing from the
+  // hover read as a bug)
+  assert.ok(usageJS.includes("h+='<div class=ru-tip-note>by machine this month: '+hosts.map(function(x){return esc(x.host)+' '+costUsd(x.v);}).join(' \\u00b7 ')+'</div>';}}"));
   // the tip anchors ABOVE the rail, centered on the CURSOR — never pinned to the container edge
   assert.ok(usageJS.includes("var x=(ev&&typeof ev.clientX==='number')?ev.clientX:(r.left+r.width/2);"));
   assert.ok(usageJS.includes("x-tip.offsetWidth/2"));
   assert.ok(usageJS.includes("r.top-tip.offsetHeight-8"));
-  // (the footer click hint is gone — refresh is automatic; see the 2026-08-14 chart test below)
 });
 
 test("same-account hosts share the FRESHEST window reading — one truth per login", () => {
@@ -253,43 +220,17 @@ test("token counts carry 3 significant figures, and both fmtTok twins share the 
   assert.ok(!STRIP.includes('toFixed(1).replace'));
 });
 
-test("the $/h graph spans the tip, and the per-window sparks are gone and stay gone (the user 2026-08-14)", () => {
-  // The graph sat 120px wide between its label and the peak with empty space either side; the peak
-  // now rides the label row's right-aligned value slot and the graph gets its own full-width line.
-  assert.match(KERNEL, /peak '\+fmtUsd\(mx\)\+'\/h<\/span><\/div>'\s*\n\+moneyGraph\(wk,'#9cd2ff',series\.h0\+st\);/,
-    "the chart follows the closed label+peak row, full-width, x-aligned to h0");
-  // The faint plate frames the plot area: sparse hours (lone dots — unknown ≠ 0) read as data.
-  assert.ok(KERNEL.includes("height:56px;background:rgba(255,255,255,0.04);"),
-    "the backing plate frames the $/h plot");
-  // The per-window utilization sparklines under each window's bars are REMOVED (the user 2026-08-14:
-  // the one fleet $/h graph is the graph; nothing per window). No payload, renderer, or style
-  // remains; usage-history.json keeps recording so a future graph starts with history.
+test("the hover carries no graph: the charts are the panel's, one click away (2026-10-08); the per-window sparks stay gone", () => {
+  // the hover's $/h line graph (2026-08-13/14) drew the key's dollars alone; the panel draws the seat and the key as
+  // their own charts, so the hover stays the glance: the figures, split by account
+  assert.ok(!KERNEL.includes("function moneyGraph("), "no graph in the hover");
   assert.ok(!KERNEL.includes('out["winSeries"]'), "no per-window series rides the usage payload");
   assert.ok(!KERNEL.includes("_winSeries"), "the client neither captures nor reads a window series");
   assert.ok(!KERNEL.includes("sparkHTML"), "the per-window sparkline renderer is gone");
   assert.ok(!KERNEL.includes("ru-tip-spark"), "no spark markup or styles remain");
   assert.ok(BACKEND.includes("def _record_usage_history"), "the utilization ledger keeps recording");
-});
-
-test("the $/h chart is a real chart, and refresh is automatic with no stale hint (the user 2026-08-14)", () => {
   const usageJS = KERNEL.split('_LANDING_USAGE_JS = """')[1].split('"""')[0];
-  // y-axis scaled to the ceiling of the nearest $50; rules thin to $100/$200/... past four
-  assert.ok(usageJS.includes("var top=50*Math.ceil(mx/50),step=50;"), "y ceiling = nearest $50");
-  // the ceiling's line + its ONE label draw unconditionally, OFF the step loop (the user 2026-08-15:
-  // step-doubling made top=450 miss the $200-step loop and the chart lost its only y label)
-  assert.ok(usageJS.includes("for(var g=step;g<top;g+=step)"), "interior gridlines stop below the ceiling");
-  assert.ok(usageJS.includes("var ty=Y(top);"), "the ceiling edge is computed once");
-  assert.ok(usageJS.includes(`ylab='<span class=ru-tip-gy style="top:'+(ty/H*56).toFixed(0)+'px">$'+top+'</span>';`),
-    "the one y label is the ceiling, always present");
-  assert.ok(usageJS.includes("while(top/step>4)step*=2;"), "at most four horizontal rules");
-  // x-axis: midnight ticks placed in LOCAL time off the series' epoch-hour base, weekday initials under
-  assert.ok(usageJS.includes("if(d.getHours()===0)"), "midnight ticks");
-  assert.ok(usageJS.includes("['S','M','T','W','T','F','S'][d.getDay()]"), "weekday initials");
-  // the stretch to full width fattened every stroke (aspect distortion): strokes pin their screen
-  // width, and a lone reading is a round-capped zero-length stroke, not a distortable <circle>
-  assert.ok(usageJS.includes('stroke-width="1.5" vector-effect="non-scaling-stroke"'));
-  assert.ok(usageJS.includes('stroke-linecap="round" vector-effect="non-scaling-stroke"'));
-  assert.ok(!usageJS.includes("<circle"), "no distortable circles remain");
+  assert.ok(usageJS.includes("tip.innerHTML=h+'<div class=ru-tip-hint>Click for the charts and the breakdown by session.</div>';"), "the hover says where the charts are");
   // "click to refresh" misread on a hover: the hint is gone, the 60s auto-pull stands, and an
   // already-open hover tip re-renders in place when fresh data lands
   assert.ok(!usageJS.includes("click to refresh"), "no refresh hint on a hover surface");

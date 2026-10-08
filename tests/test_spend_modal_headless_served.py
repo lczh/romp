@@ -2,8 +2,9 @@
 """T247, the served-page pins: the landing page is served from a hermetic kernel module (its own
 _landing() HTML, /spend/detail and /usage/fleet answered from a synthetic ledger — placeholder uuids,
 TESTHOST, the notes-api demo sessions), and a real browser clicks the usage readout. Pins the modal's
-open/close contract (click opens over the 0.55 backdrop; Escape and a backdrop tap close), the table
-and the stacked histogram with its unattributed stack, the toggles, and the segment tooltip. Skips
+open/close contract (click opens over the 0.55 backdrop; Escape and a backdrop tap close), its two cards (the
+subscription seat's estimate and the API key's charge, each with its stacked histogram, 2026-10-08), the table, the
+toggles, and the segment tooltip. Skips
 LOUDLY without a playwright: set ROMP_PLAYWRIGHT_NODE_PATH to a node_modules holding it (CI does
 not; this is the maintainer's screenshot harness too — pass ROMP_SHOTS=<path-prefix> for PNGs)."""
 import json
@@ -181,12 +182,12 @@ class SpendModalServed(unittest.TestCase):
         o = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertTrue(o["hiddenBefore"], "closed until the click")
         # T247d: the desktop hover ends in the affordance line, in the footnote style; the phone panel does not carry it
-        self.assertEqual(o["hoverHint"]["text"], "Click for the full breakdown by session.", o["hoverHint"])
+        self.assertEqual(o["hoverHint"]["text"], "Click for the charts and the breakdown by session.", o["hoverHint"])
         self.assertEqual((o["hoverHint"]["cls"], o["hoverHint"]["font"], o["hoverHint"]["opacity"]), ("ru-tip-hint", "10px", "0.55"), o["hoverHint"])
         self.assertIs(o["mobile"]["panelHint"], False, "the phone panel keeps its button and no click hint")
         self.assertTrue(o["loaderSeen"], "the loader (or the content) is up the instant the modal opens")
         self.assertEqual(o["out"]["backdrop"], "rgba(0, 0, 0, 0.55)", "the panel rule's backdrop")
-        self.assertEqual(o["out"]["head"], "API spend · 2 machines", "the header names the machines when several contribute (review find)")
+        self.assertEqual(o["out"]["head"], "Usage at API prices · 2 machines", "the header names what the figures are, and the machines when several contribute (review find)")
         rows = o["out"]["rows"]
         # T247c: two hosts contribute, so every row names its host in the tab strip's host-prefix voice. T353: the
         # list follows the chart's range, seven days by hour at open, and sorts by the spend IN that range: web
@@ -197,9 +198,9 @@ class SpendModalServed(unittest.TestCase):
         self.assertTrue(any("OLDHOST" in n and "older build" in n for n in o["out"]["notes"]), o["out"]["notes"])
         self.assertFalse(any("this machine only" in n for n in o["out"]["notes"]))
         self.assertTrue(any("aligned by clock time" in n for n in o["out"]["notes"]), "hosts in different zones: the timezone rule is stated")
-        # T247e: the chart comes first, has no legend; the list is a scroll pane of EVERY session under a
+        # T247e: the charts come first (in their cards), have no legend; the list is a scroll pane of EVERY session under a
         # sticky header, each row its tab title in its identity color, no swatch, no fold
-        self.assertTrue(o["out"]["chartFirst"], "the chart section precedes the session list")
+        self.assertTrue(o["out"]["chartFirst"], "the cards and their charts precede the session list")
         self.assertEqual(o["out"]["legendNodes"], 0, "no legend")
         self.assertEqual(o["out"]["swatches"], 0, "no swatch in a session row")
         # T353: the seven days shown carry the three hourly-ledger sessions, the peer's worker and the unattributed
@@ -221,7 +222,7 @@ class SpendModalServed(unittest.TestCase):
         self.assertTrue(yo["rows"][0].startswith("TESTHOST:api") and yo["rows"][1].startswith("TESTHOST:web"), yo["rows"][:3])
         self.assertTrue(yo["rows"][2].startswith("PEERHOST:worker"), yo["rows"][:3])
         self.assertTrue(yo["rows"][3].startswith("TESTHOST:tests"), "sessions the order does not know trail, by spend: " + yo["rows"][3])
-        self.assertEqual(yo["bottomFill"], "#54B204", "the chart's bottom stack is the first row (api)")
+        self.assertEqual(yo["bottomFill"], "#1EA1EB", "the seat chart's bottom stack is the first row with seat dollars (web: api billed the key)")
         self.assertTrue(yo["viewRows"][0].startswith("TESTHOST:web"), "the viewer's own arrangement wins over the seed: " + yo["viewRows"][0])
         self.assertEqual(yo["prefs"].get("order"), "yours")
         self.assertTrue(yo["pressed"])
@@ -234,8 +235,11 @@ class SpendModalServed(unittest.TestCase):
         self.assertFalse(any(r.startswith("TESTHOST:web") or r.startswith("TESTHOST:api") or r.startswith("PEERHOST:worker") for r in mg["rows"]), "tagged sessions merge away")
         # the merged rows are read in the 90-day range (the driver left it there), where the fixture's whole ledger
         # lies: the sums over that range are the ledger's totals (T353: the list follows the chart's range)
-        self.assertIn("$1200", mg["rows"][0].replace(",", ""), "team = web 960 + api 240: " + mg["rows"][0])
-        self.assertIn("$540", mg["rows"][1].replace(",", ""), "ops = api 240 + worker 300: " + mg["rows"][1])
+        # (2026-10-08: a row's dollars sit in two columns, the seat's estimate and the key's charge)
+        self.assertIn("\u2248$960", mg["rows"][0].replace(",", ""), "team = web's 960 on the seat: " + mg["rows"][0])
+        self.assertIn("$240", mg["rows"][0].replace(",", ""), "…and api's 240 on the key: " + mg["rows"][0])
+        self.assertIn("\u2248$300", mg["rows"][1].replace(",", ""), "ops = the worker's 300 on the seat: " + mg["rows"][1])
+        self.assertIn("$240", mg["rows"][1].replace(",", ""), "…and api's 240 on the key: " + mg["rows"][1])
         self.assertEqual(mg["tagColor"], "rgb(194, 65, 12)", "the tag row wears the tag store's color")
         self.assertEqual((mg["tagBorder"], mg["tagWeight"]), ("rgb(194, 65, 12)", "400"), "…as the one tag chip: its colour on a thin border, never bold (T321)")
         self.assertTrue(any("1 session carries several tags" in n for n in mg["notes"]), mg["notes"])
@@ -250,8 +254,6 @@ class SpendModalServed(unittest.TestCase):
         self.assertGreater(o["days"]["segs"], 24 * 30, "every session's daily bars, no fold")
         self.assertGreater(o["out"]["segs"], 60)
         self.assertGreaterEqual(o["out"]["hatched"], 1, "the unattributed stack wears the hatch, not a hue")
-        self.assertIn("1 hour", o["out"]["windows"], "the same window rows the hover shows")
-        self.assertIn("1 month", "".join(o["out"]["windows"]))
         self.assertTrue(o["out"]["ylabels"] and o["out"]["ylabels"][0].startswith("$"), o["out"]["ylabels"])
         self.assertTrue(o["out"]["xlabels"], "weekday initials at the ledger's midnights")
         self.assertTrue(o["days"]["segs"] > 0 and not o["days"]["ylabels"][0].startswith("$"), "tokens on the toggle")
@@ -265,8 +267,8 @@ class SpendModalServed(unittest.TestCase):
         self.assertTrue(xh["lineShown"] and xh["stampShown"] and xh["tipShown"], xh)
         self.assertRegex(xh["stamp"], r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} \d{1,2}, \d{1,2} (AM|PM)$")
         self.assertIn(xh["stamp"], xh["head"], "the tooltip's header carries the stamp")
-        self.assertTrue(xh["head"].startswith("$"), "the bucket's total leads: " + xh["head"])
-        self.assertGreaterEqual(len(xh["rows"]), 2, xh["rows"])
+        self.assertTrue(xh["head"].startswith("\u2248$"), "the bucket's total leads, the seat's an estimate: " + xh["head"])
+        self.assertGreaterEqual(len(xh["rows"]), 1, xh["rows"])   # the seat's chart: api billed the key, so an hour may hold web alone
         def _num(s):   # fmtTok's three-significant-figure spelling: 480k, 96.0k, 1.00k, 1.2M
             m = re.match(r"^([\d.]+)([kMB]?)$", s.replace(",", "").strip())
             self.assertIsNotNone(m, s)
@@ -327,126 +329,44 @@ class SpendModalServed(unittest.TestCase):
         self.assertEqual(o["mobile"]["btn"]["font"], "11px", o["mobile"]["btn"])
         self.assertEqual(o["mobile"]["btn"]["opacity"], "1", o["mobile"]["btn"])
         self.assertIs(o["mobile"]["btn"]["inAge"], False)
-        # 2026-10-01: the By account summary — one row per Claude account over the range shown, the seat reached from both
-        # hosts one row with its routes beside its name, the key plain, Unknown last; the email only in the hover words
+        # 2026-10-08: the two cards — the subscription seat's dollars (every turn the key did not bill, an estimate at API
+        # prices) and the API key's (charged), each its own figure and chart, side by side on the desktop card
         ac = o["accts"]
-        self.assertEqual([r["name"] for r in ac["rows"]], ["Enterprise seat", "API key", "Unknown"], ac)
-        seat, key = ac["rows"][0], ac["rows"][1]
-        self.assertIn("TESTHOST sign-in, token on PEERHOST", seat["text"])
-        self.assertTrue(seat["usd"].startswith("\u2248$"), "seat dollars wear the estimate mark: " + seat["usd"])
-        self.assertTrue(key["usd"].startswith("$"), "key dollars stay plain: " + key["usd"])
-        self.assertNotIn("@", " ".join(r["text"] for r in ac["rows"]), "no email on a label")
-        self.assertIn("dev@example.com", seat["tip"], "the email is in the hover words")
-        self.assertIn("dev@example.com", ac["seatTip"], "…which the modal's own tooltip shows on hover")
-        self.assertIn("not billed per token", ac["estTip"], "the mark's reason, in the modal's own tooltip on hover")
-        self.assertTrue(any("not billed per token" in n for n in ac["notes"]), "…and once under the summary")
-        self.assertLess(ac["top"], ac["listTop"], "By account sits above the session list")
-        self.assertEqual(ac["dayRows"][0]["name"], "Enterprise seat", "a range switch re-sums the summary")
-        self.assertNotEqual(ac["dayRows"][0]["usd"], seat["usd"])
+        cards = {c["sec"]: c for c in ac["cards"]}
+        self.assertEqual([c["sec"] for c in ac["cards"]], ["seat", "key"], ac["cards"])
+        seat, key = cards["seat"], cards["key"]
+        # the seat's dollars come from the enterprise seat (this machine's sign-in and the peer's stored login, ONE account)
+        # and from spend recorded before billing was tracked (Unknown): the card names neither alone and lists both
+        self.assertEqual(seat["title"], "Subscription logins", seat)
+        self.assertEqual([(r["kind"], r["name"]) for r in seat["accts"]], [("seat", "Enterprise seat"), ("unknown", "Unknown")], seat["accts"])
+        self.assertIn("TESTHOST sign-in, token on PEERHOST", seat["accts"][0]["text"])
+        self.assertTrue(seat["accts"][0]["usd"].startswith("\u2248$"), "a seat's dollars wear the estimate mark: " + seat["accts"][0]["usd"])
+        self.assertNotIn("@", " ".join(r["text"] for r in seat["accts"]), "no email on a label")
+        self.assertIn("dev@example.com", seat["accts"][0]["tip"], "the email is in the hover words")
+        self.assertIn("dev@example.com", ac["seatTip"], "…which the panel's own tooltip shows on hover")
+        self.assertIn("TESTHOST is signed in to this account now", ac["seatTip"], "the hover says the sign-in is named by the account signed in now")
+        self.assertTrue(seat["value"].startswith("\u2248$"), "the seat card's figure is an estimate: " + seat["value"])
+        self.assertTrue(seat["sub"].startswith("Estimated at API prices; the seat is not billed per token"), seat["sub"])
+        self.assertEqual(key["title"], "API key")
+        self.assertTrue(key["value"].startswith("$"), "the key's figure is plain: " + key["value"])
+        self.assertTrue(key["sub"].startswith("Charged per token"), key["sub"])
+        self.assertTrue(seat["chart"] and key["chart"], "each card its own chart")
+        self.assertEqual(seat["top"], key["top"], "side by side on the desktop card")
+        self.assertTrue(ac["both"].startswith("Together \u2248$") and "estimated for the Subscription logins" in ac["both"]
+                        and "charged to the API key" in ac["both"], "a total that mixes the two says so: " + ac["both"])
+        self.assertEqual(ac["heads"], ["session", "Subscription logins", "API key", "turns", "tokens"], ac["heads"])
+        self.assertLess(ac["top"], ac["listTop"], "the cards sit above the session list")
+        self.assertNotEqual({c["sec"]: c["value"] for c in ac["dayCards"]}, {c["sec"]: c["value"] for c in ac["cards"]}, "a range switch re-sums the cards")
         self.assertTrue(any(r.startswith("PEERHOST:worker") and "bills Enterprise seat" in r for r in rows), "a stored-login row bills its account by name")
-        self.assertFalse(any("By login" in n for n in o["out"]["notes"]))
         web = next(r for r in rows if r.startswith("TESTHOST:web"))
         api = next(r for r in rows if r.startswith("TESTHOST:api"))
         self.assertIn("\u2248$", web, "web's turns are the seat's: marked")
         self.assertNotIn("\u2248", api, "api billed the key: plain")
-        self.assertIn("TESTHOST is signed in to this account now", ac["seatTip"], "the hover says the sign-in is named by the account signed in now")
-        self.assertFalse(ac["fold"], "on the desktop card the summary sits beside Totals, open")
-        # the narrow card (the phone step), where the summary stacked under Totals and its rows pushed every session row
-        # off the card (the #74 review's narrow-card finding): one closed line, the list starting lower than with no
-        # summary at all by less than two lines and the sections' 12px row gap, a click opening it, a range switch keeping
-        # it open, a resize across the narrow width unfolding and folding it, the pane refitted when it opens
-        ph = o["mobile"]["accts"]
-        fo, no = ph["folded"], ph["none"]
-        self.assertEqual((fo["expanded"], fo["acctRows"]), ("false", 0), "one closed line: " + json.dumps(ph))
-        self.assertIn("Enterprise seat \u2248$", fo["line"], "each account's dollars on the closed line, the seat's marked")
-        self.assertLess(fo["acctH"], 2 * fo["lineH"], "one line tall: " + json.dumps(fo))
-        self.assertLess(fo["top"] - no["top"], 2 * fo["lineH"] + 12 + 1, "the list moves down by less than two lines and the gap: " + json.dumps(ph))
-        self.assertGreaterEqual(fo["rows"], max(1, no["rows"] - 1), "session rows still show: " + json.dumps(ph))
-        # the fold button looks like the section head it stands for, with none of a browser's button chrome
-        lk = ph["look"]
-        self.assertIsNotNone(lk, json.dumps(ph))
-        self.assertEqual(lk["font"], lk["headFont"], "a section head's font and colour: " + json.dumps(lk))
-        self.assertEqual({k: lk[k] for k in ("bg", "border", "pad", "cursor")},
-                         {"bg": "rgba(0, 0, 0, 0)", "border": "none none none none", "pad": "0px 0px 0px 0px", "cursor": "pointer"},
-                         "no face, border or padding, and a control's pointer: " + json.dumps(lk))
-        self.assertEqual((ph["opened"]["expanded"], ph["opened"]["acctRows"]), ("true", 3), json.dumps(ph["opened"]))
-        self.assertEqual(ph["focus"], "accts:toggle", "the keyboard's place stays on the rebuilt button")
-        # the caret: unturned on the closed line, turned a quarter when open (the sighted cue beside aria-expanded)
-        self.assertEqual(fo["caret"], "none", json.dumps(fo))
-        m = re.match(r"^matrix\(([-\d.e]+), ([-\d.e]+), ([-\d.e]+), ([-\d.e]+), 0, 0\)$", ph["opened"]["caret"] or "")
-        self.assertTrue(m and abs(float(m.group(1))) < 1e-6 and abs(float(m.group(2)) - 1) < 1e-6, "turned 90 degrees when open: " + json.dumps(ph["opened"]))
-        # …and its box turns with it (width and height swap): a transform applies only to a box that is not inline, and an
-        # inline caret reports the quarter turn while it still draws unturned
-        cb, ob = fo["caretBox"], ph["opened"]["caretBox"]
-        self.assertTrue(cb and ob and abs(cb[1] - cb[0]) > 1 and abs(ob[0] - cb[1]) < 0.6 and abs(ob[1] - cb[0]) < 0.6,
-                        "the caret's box turned a quarter when open: " + json.dumps([cb, ob]))
-        # …in a box of its own width, upright
-        cr = lk["caret"]
-        self.assertIsNotNone(cr, json.dumps(lk))
-        self.assertLess(abs(cr["w"] - 0.9 * cr["em"]), 0.2, "the caret's box is 0.9em wide: " + json.dumps(cr))
-        self.assertEqual((cr["fontStyle"], cr["transition"]), ("normal", "transform 0.12s"), "the caret's font style and transition: " + json.dumps(cr))
-        # the closed line's text sits on the head's baseline
-        bh, bl = lk["baselines"]
-        self.assertTrue(bh is not None and bl is not None and abs(bh - bl) < 0.5, "the closed line on the head's baseline: " + json.dumps(lk))
-        # the keyboard: Enter toggles the focused fold, the rebuilt button keeps the focus and shows the fold's own ring
-        # (the browser's default ring is outline-style auto), set off from the button
-        self.assertEqual(ph["kbdClosed"], {"expanded": "false", "focused": True, "ring": "solid 1px 2px"}, json.dumps(ph["kbdClosed"]))
-        self.assertEqual((ph["kbdOpened"]["expanded"], ph["kbdOpened"]["acctRows"]), ("true", 3), json.dumps(ph["kbdOpened"]))
-        self.assertEqual((ph["afterRange"]["expanded"], ph["afterRange"]["acctRows"]), ("true", 3), "a range switch keeps the user's open fold")
-        # …and repaints it: the open fold's head names the range it now sums
-        self.assertIn("last 7 days", ph["opened"]["line"], json.dumps(ph["opened"]))
-        self.assertIn("last 24 hours", ph["afterRange"]["line"], "the range switch repainted the summary: " + json.dumps(ph["afterRange"]))
-        self.assertEqual((ph["closed"]["expanded"], ph["closed"]["top"]), ("false", fo["top"]), json.dumps(ph["closed"]))
-        self.assertEqual((ph["widened"]["expanded"], ph["widened"]["acctRows"]), (None, 3),
-                         "widened past the narrow width, the summary sits beside Totals in full: " + json.dumps(ph["widened"]))
-        self.assertEqual((ph["narrowed"]["expanded"], ph["narrowed"]["acctRows"]), ("false", 0),
-                         "narrowed again, it folds: " + json.dumps(ph["narrowed"]))
-        tall = ph["tall"]
-        self.assertEqual(tall["folded"]["expanded"], "false", "folded on a tall narrow card: " + json.dumps(tall))
-        self.assertLess(tall.get("openedMax", tall["foldedMax"]), tall["foldedMax"], "opening the fold refits the pane: " + json.dumps(tall))
-        self.assertEqual(tall.get("closedMax"), tall["foldedMax"], "closing it gives the room back: " + json.dumps(tall))
-        # the fold repainted BEFORE the pane is sized, in the resize handler and in the first paint: a resize from the wide
-        # card to the tall narrow one, and the modal reopened there, each fit the pane to the folded summary at once
-        wt, ro = ph["wideTall"], ph["reopened"]
-        self.assertEqual((wt["wide"]["expanded"], wt["wide"]["acctRows"]), (None, 3), "beside Totals in full before the resize: " + json.dumps(wt))
-        self.assertEqual((wt["geo"]["expanded"], ro["geo"]["expanded"]), ("false", "false"), "folded after the resize and on the reopen: " + json.dumps(ph))
-        self.assertEqual((wt["max"], wt["again"]), (tall["foldedMax"], tall["foldedMax"]),
-                         "the resize that folded the summary refitted the pane in the same pass: " + json.dumps(wt))
-        self.assertEqual((ro["max"], ro["again"]), (tall["foldedMax"], tall["foldedMax"]),
-                         "the first paint sized the pane after folding the summary: " + json.dumps(ro))
-        clip = ph["clip"]
-        self.assertEqual(clip["expanded"], "false", json.dumps(clip))
-        self.assertLess(clip["acctH"], 2 * clip["lineH"], "clipped to one line, never wrapped: " + json.dumps(clip))
-        self.assertTrue(clip["overflows"], "the closed line holds more than fits at 320px, so the clip is what keeps it one line: " + json.dumps(clip))
-        self.assertLessEqual(clip["spill"], 0, "cut short inside the card, which does not scroll sideways: " + json.dumps(clip))
-        self.assertEqual(clip["cut"], "ellipsis", "the cut wears an ellipsis: " + json.dumps(clip))
-        # the open fold lives as long as the page: kept when the modal is closed and opened again, closed after a reload
-        self.assertEqual(ph["kept"], {"closed": "false", "opened": "true", "reopened": "true", "reloaded": "false"}, json.dumps(ph["kept"]))
-        # a tap on the closed line's estimate-marked dollars (a touch screen hovers as well as clicks) opens the fold and
-        # leaves no hover words up over the rows it opened
-        tap = o["mobile"]["tap"]
-        self.assertTrue(tap["at"] and tap["at"]["expanded"] == "false" and tap["at"]["onLine"], "the tap lands on the closed line: " + json.dumps(tap))
-        self.assertEqual(tap.get("after"), {"expanded": "true", "tip": ""}, "opened, no hover words up: " + json.dumps(tap))
-        # scrollbars that take room: at 676x728 the card's scrollbar alone decides whether the sections wrap; the card keeps
-        # its room whether it scrolls or not, so the fold decided at open holds
-        cl = o["classic"]
-        self.assertGreaterEqual(cl["open"]["room"], 10, "this browser's scrollbars take room (launched without --hide-scrollbars): " + json.dumps(cl))
-        self.assertTrue(cl["open"]["stacked"], "the sections wrap at this width: " + json.dumps(cl))
-        self.assertEqual((cl["open"]["expanded"], cl["open"]["acctRows"]), ("false", 0), "folded the moment the modal opens: " + json.dumps(cl))
-        self.assertEqual(cl["settled"], cl["open"], "and so after the layout settles and a resize event runs: " + json.dumps(cl))
-        # at 940x820 the card does not scroll and keeps no room for a scrollbar
-        self.assertFalse(cl["wide"]["scrolls"], "the card does not scroll at 940x820: " + json.dumps(cl))
-        self.assertEqual(cl["wide"]["room"], 0, "no room kept for a scrollbar the card does not show: " + json.dumps(cl))
-        # at 600x880 opening the fold makes the card scroll, and the content width and the chart stay as they were
-        nw = cl["narrow"]
-        self.assertEqual((nw["closed"]["scrolls"], (nw.get("opened") or {}).get("scrolls")), (False, True),
-                         "opening the fold makes the card scroll here: " + json.dumps(nw))
-        self.assertEqual((nw["opened"]["contentW"], nw["opened"]["chartW"]), (nw["closed"]["contentW"], nw["closed"]["chartW"]),
-                         "the content width and the chart stay as they were: " + json.dumps(nw))
-        # the room the unscrolled card keeps there is one scrollbar's width; its overflow is auto, so the card shows a
-        # scrollbar only when it scrolls
-        self.assertEqual(nw["closed"]["room"], cl["scrollbarW"], "one scrollbar's room: " + json.dumps(cl))
-        self.assertEqual(nw["closed"]["overflowY"], "auto", "a scrollbar only when the card scrolls: " + json.dumps(nw))
+        # the phone: the cards stack, the seat's above the key's, and the session rows still show
+        ph = o["mobile"]["phone"]
+        self.assertEqual([c["sec"] for c in ph["cards"]], ["seat", "key"], ph)
+        self.assertLess(ph["cards"][0]["top"], ph["cards"][1]["top"], "stacked on a phone: " + json.dumps(ph))
+        self.assertGreater(ph["rows"], 0, json.dumps(ph))
         own = [e for e in o["errs"] if "rsp" in e or "Spend" in e or "spend" in e]
         self.assertEqual(own, [], "no page errors from the modal's own code")
 
