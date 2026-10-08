@@ -891,6 +891,7 @@ class RestoredCostState(unittest.TestCase):
         self.rowu = fresh(SU, "tests", self.tu, 80.0, [10, 25010, 10, 10], 10)
         ordinary = {"t": self.t6 + 60, "sid": O, "name": "web", "resultT": self.t6 + 60, "usd": 2.0, "cumulativeUsd": 900.0,
                     "tokIn": 5, "tokOut": 5, "tokCacheR": 0, "tokCacheW": 0}
+        self.ordinary = ordinary
         self.turns = [self.row2, self.row6, ordinary, self.rowb, self.rowu]
         (self.state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in self.turns))
         tok = lambda r: [r["tokIn"], r["tokOut"], r["tokCacheR"], r["tokCacheW"]]
@@ -1038,10 +1039,10 @@ class RestoredCostState(unittest.TestCase):
         # finds the rows again
         self.setUp()
         real_turns = rp.apply_restored_to_turns
-        def boom_rows(path, rows, write=True):
+        def boom_rows(path, rows, write=True, **kw):
             if write:
                 raise RuntimeError("died before the rows' rewrite")
-            return real_turns(path, rows, write)
+            return real_turns(path, rows, write, **kw)
         rp.apply_restored_to_turns = boom_rows
         try:
             with self.assertRaises(RuntimeError):
@@ -1087,6 +1088,134 @@ class RestoredCostState(unittest.TestCase):
         self.assertAlmostEqual(after["days"][SEP]["usd"], spend["days"][SEP]["usd"] - 40.0, places=6)
         r6 = [r for r in read_turns(self.state) if r["sid"] == T6][0]
         self.assertAlmostEqual(r6["usd"], self.own6 + side, places=6, msg="the side call stays the turn's: only the record goes")
+
+
+    def _keyed(self):
+        """web bills an API key: its thread's restored row and its own ordinary turn sit in the key split of the hour, the
+        day and web's bySid entry, as the kernel folds a keyed turn, and in no stored login's share. The registry's current
+        word says login (web was switched since, as a live session was), so only the buckets can say how the row billed."""
+        spend = json.loads((self.state / "spend.json").read_text())
+        tok = lambda r: [r["tokIn"], r["tokOut"], r["tokCacheR"], r["tokCacheW"]]
+        keyed = [self.row6, self.ordinary]
+        for b in (spend["hours"]["%sT10" % DAY6], spend["days"][DAY6]):
+            b.pop("byLogin", None)
+            b["key"] = {"usd": round(sum(r["usd"] for r in keyed), 6), "turns": 2, "tok": sum(sum(tok(r)) for r in keyed)}
+            for i, k in enumerate(rp.TOKS):
+                b["key"][k] = sum(tok(r)[i] for r in keyed)
+            b["bySid"][O]["key"] = {"usd": b["bySid"][O]["usd"], "turns": 2, "tok": b["bySid"][O]["tok"]}
+        (self.state / "spend.json").write_text(json.dumps(spend))
+        self.spend = spend
+        for sid, name in ((O, "web"), (T6, "web-comment-2")):
+            r = json.loads((self.state / "sdk" / ("%s.json" % sid)).read_text())
+            r["apiKeyAuth"] = False
+            (self.state / "sdk" / ("%s.json" % sid)).write_text(json.dumps(r))
+
+    def assert_key_split_takes_the_record(self, after, before):
+        for where in ("hours", "days"):
+            k = "%sT10" % DAY6 if where == "hours" else DAY6
+            b, b0 = after[where][k], before[where][k]
+            self.assertAlmostEqual(b["key"]["usd"], b0["key"]["usd"] - 100.0, places=6, msg=where)
+            self.assertEqual(b["key"]["tok"], b0["key"]["tok"] - 343000, where)
+            self.assertEqual([b["key"][t] for t in rp.TOKS], [b0["key"][t] - v for t, v in zip(rp.TOKS, (1000, 2000, 300000, 40000))])
+            self.assertAlmostEqual(b["bySid"][O]["key"]["usd"], b0["bySid"][O]["key"]["usd"] - 100.0, places=6)
+            self.assertEqual(b["bySid"][O]["key"]["tok"], b0["bySid"][O]["key"]["tok"] - 343000)
+            self.assertEqual((b["key"]["turns"], b["bySid"][O]["key"]["turns"]), (2, 2), "turn counts stay")
+            self.assertLessEqual(b["key"]["usd"], b["usd"] + 1e-6, "the key split never exceeds the total it is part of")
+            self.assertLessEqual(b["bySid"][O]["key"]["usd"], b["bySid"][O]["usd"] + 1e-6)
+        self.assertNotIn("key", after["days"][SEP], "web-comment-1's day held no key split and gets none")
+
+    def test_a_row_the_key_billed_takes_its_record_out_of_the_key_split_too(self):
+        """The spend audit (2026-10-08): the rule took the record out of the day's total and left the key split, so a day
+        read $282 in all and $2,006 on the key. A row's billing is read off the buckets the kernel folded it into: here
+        only the key's share of web's spend can hold it."""
+        self._keyed()
+        code, out = self.run_main("--apply")
+        self.assertEqual(code, 0, out)
+        self.assertIn("billed to the API key (only the key's share of its buckets holds it)", out)
+        self.assertIn("not the API key (no key split in its buckets)", out)
+        self.assert_key_split_takes_the_record(json.loads((self.state / "spend.json").read_text()), self.spend)
+        rows = {(r["sid"], r["t"]): r for r in read_turns(self.state)}
+        self.assertIs(rows[(T6, self.t6)]["restoredKeyed"], True)
+        self.assertIs(rows[(T2, self.t2)]["restoredKeyed"], False)
+
+    def test_buckets_an_earlier_run_corrected_without_the_key_split_are_caught_up_once(self):
+        """The buckets an earlier run of the rule left inconsistent (the key split above the total) are caught up: each
+        row it corrected and never decided for the key is decided on the buckets as that run found them, its record
+        taken out of the key split when the key billed it, the row stamped. A dry run writes nothing; the apply keeps
+        backups; a second run finds nothing."""
+        self._keyed()
+        p = rp.restored_plan(read_turns(self.state), self.state, self.claude)
+        rp.decide_billing(self.spend, p["rows"])
+        for c in p["rows"]:
+            c.pop("keyed", None)                          # the earlier rule: no key decision, no key fold, no stamp
+        old, _ = rp.fold_restored(self.spend, p["rows"])
+        (self.state / "spend.json").write_text(json.dumps(old))
+        rp.apply_restored_to_turns(self.state / "turns.jsonl", p["rows"])
+        turns = read_turns(self.state)
+        for r in turns:
+            r.pop("restoredKeyed", None)
+        (self.state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in turns))
+        day = old["days"][DAY6]
+        self.assertGreater(day["key"]["usd"], day["usd"], "the fault: the key split above the day's total")
+        before = {f.name: f.read_bytes() for f in self.state.iterdir() if f.is_file()}
+        rp._RECORDS.clear(); rp._CALLS.clear()
+        code, out = self.run_main()
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 row(s) an earlier run corrected without deciding the API-key split", out)
+        self.assertIn("billed to the API key (only the key's share of its buckets holds it)", out)
+        self.assertIn("key split above its total", out, "the dry run names the inconsistent buckets as they stand")
+        self.assertEqual({f.name: f.read_bytes() for f in self.state.iterdir() if f.is_file()}, before, "a dry run writes nothing")
+        code, out = self.run_main("--apply")
+        self.assertEqual(code, 0, out)
+        after = json.loads((self.state / "spend.json").read_text())
+        self.assert_key_split_takes_the_record(after, old)
+        self.assertEqual(after["days"][DAY6]["usd"], old["days"][DAY6]["usd"], "the total was right already: only the split moves")
+        self.assertEqual(after["days"][DAY6]["bySid"][O]["usd"], old["days"][DAY6]["bySid"][O]["usd"])
+        self.assertEqual(json.loads(next(self.state.glob("spend.json.bak-*")).read_text()), old, "the backup is the ledger as it stood")
+        rows = {(r["sid"], r["t"]): r for r in read_turns(self.state)}
+        self.assertIs(rows[(T6, self.t6)]["restoredKeyed"], True)
+        self.assertIs(rows[(T2, self.t2)]["restoredKeyed"], False)
+        spend1, turns1 = (self.state / "spend.json").read_bytes(), (self.state / "turns.jsonl").read_bytes()
+        rp._RECORDS.clear(); rp._CALLS.clear()
+        code, out = self.run_main("--apply", "--no-backup")
+        self.assertEqual(code, 0, out)
+        self.assertIn("nothing to apply", out)
+        self.assertEqual(((self.state / "spend.json").read_bytes(), (self.state / "turns.jsonl").read_bytes()), (spend1, turns1))
+
+
+    def test_the_catch_up_takes_the_key_split_from_the_session_whose_total_the_record_left(self):
+        """Which session an earlier run took a record from is not on record. web-comment-2 was promoted since: the
+        registry names no threadOf now, its own entry holds a later $1 turn, and the earlier run billed the row to web,
+        the only session whose share held the record. The ledger says so: web's key split stands $100 above its total.
+        The first candidate with an entry (the thread itself) would leave web's split above its total and take nothing
+        out of the thread's (2026-10-08, a second host's ledger)."""
+        self._keyed()
+        later = {"usd": 1.0, "turns": 1, "tok": 10}
+        for b in (self.spend["hours"]["%sT10" % DAY6], self.spend["days"][DAY6]):
+            b["usd"] = round(b["usd"] + 1.0, 6)
+            b["bySid"][T6] = dict(later)
+        (self.state / "spend.json").write_text(json.dumps(self.spend))
+        reg(self.state, T6, name="web-comment-2", lastSid=T6, forkedFrom={"sid": O, "name": "web"}, apiKeyAuth=False)
+        p = rp.restored_plan(read_turns(self.state), self.state, self.claude)
+        rp.decide_billing(self.spend, p["rows"])
+        self.assertEqual({c["sid"]: c["owner"] for c in p["rows"]}[T6], O, "the earlier run billed it to web")
+        for c in p["rows"]:
+            c.pop("keyed", None)
+        old, _ = rp.fold_restored(self.spend, p["rows"])
+        (self.state / "spend.json").write_text(json.dumps(old))
+        rp.apply_restored_to_turns(self.state / "turns.jsonl", p["rows"])
+        turns = read_turns(self.state)
+        for r in turns:
+            r.pop("restoredKeyed", None)
+        (self.state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in turns))
+        rp._RECORDS.clear(); rp._CALLS.clear()
+        code, out = self.run_main("--apply", "--no-backup")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("STILL", out)
+        after = json.loads((self.state / "spend.json").read_text())
+        self.assertEqual(rp.key_split_faults(after), [])
+        self.assert_key_split_takes_the_record(after, old)
+        self.assertEqual(after["days"][DAY6]["bySid"][T6], later, "the thread's own entry is untouched")
 
 
 def read_turns(state):

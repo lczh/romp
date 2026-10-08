@@ -668,41 +668,23 @@ TOKS = ("tokIn", "tokOut", "tokCacheR", "tokCacheW")
 _MU_KEYS = ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")
 _USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
-# Claude Code's per-call prices in $ per million tokens (input, output, cache write 5 m, cache write 1 h, cache read),
-# from its model catalog as of 2.1.28x; a call whose usage says speed "fast" takes the model's fast rate where it has
-# one, usage.inference_geo "us" multiplies by 1.1, a web search request is a cent. A model not listed leaves the row
-# unverified, said in the report, never priced by a guess.
-_T_3_15, _T_5_25 = (3, 15, 3.75, 6, 0.3), (5, 25, 6.25, 10, 0.5)
-CLI_PRICES = {
-    "claude-3-5-haiku": (0.8, 4, 1, 1.6, 0.08), "claude-haiku-4-5": (1, 5, 1.25, 2, 0.1),
-    "claude-3-5-sonnet": _T_3_15, "claude-3-7-sonnet": _T_3_15, "claude-sonnet-4-0": _T_3_15,
-    "claude-sonnet-4-5": _T_3_15, "claude-sonnet-4-6": _T_3_15, "claude-sonnet-5": (2, 10, 2.5, 4, 0.2),
-    "claude-opus-4-0": (15, 75, 18.75, 30, 1.5), "claude-opus-4-1": (15, 75, 18.75, 30, 1.5),
-    "claude-opus-4-5": _T_5_25, "claude-opus-4-6": _T_5_25, "claude-opus-4-7": _T_5_25, "claude-opus-4-8": _T_5_25,
-    "claude-opus-5": _T_5_25, "claude-opus-5-5": (4, 20, 5, 8, 0.2),
-    "claude-fable-5": (10, 50, 12.5, 20, 1), "claude-fable-5-1": (10, 50, 12.5, 20, 0.25),
-    "claude-mythos-5": (10, 50, 12.5, 20, 1), "claude-mythos-5-1": (10, 50, 12.5, 20, 0.25),
-}
-CLI_FAST_PRICES = {"claude-opus-5-5": (8, 40, 10, 16, 0.4), "claude-opus-5": (10, 50, 12.5, 20, 1),
-                   "claude-opus-4-8": (10, 50, 12.5, 20, 1), "claude-opus-4-7": (30, 150, 37.5, 60, 3),
-                   "claude-opus-4-6": (30, 150, 37.5, 60, 3)}
-_PRICE_IDS = sorted(CLI_PRICES, key=len, reverse=True)   # the longest id first: claude-opus-5-5 before claude-opus-5
+# Claude Code's per-call prices and arithmetic: the one table romp prices tokens with, shared with the kernel's spend guard
+# and cost view (kernel/cli_prices.py, a stdlib-only table loaded by path; no kernel module is loaded). A model it lacks
+# leaves the row unverified, said in the report, never priced by a guess.
+def _load_cli_prices():
+    import importlib.util
+    name = "romp_cli_prices"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, str(Path(__file__).resolve().parent.parent / "kernel" / "cli_prices.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def call_cost(model, usage):
-    """One API call's cost as Claude Code computes it, or None for a model it has no price for here."""
-    m = str(model or "").replace("[1m]", "").replace("[2m]", "")
-    cid = next((c for c in _PRICE_IDS if m == c or m.startswith(c + "-")), None)
-    if cid is None or not isinstance(usage, dict):
-        return None
-    i, o, w5, w1, r = CLI_FAST_PRICES[cid] if usage.get("speed") == "fast" and cid in CLI_FAST_PRICES else CLI_PRICES[cid]
-    n = lambda k: float(usage.get(k) or 0)
-    w = n("cache_creation_input_tokens")
-    w1h = min(float(((usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens")) or 0), w)
-    usd = (n("input_tokens") * i + n("output_tokens") * o + n("cache_read_input_tokens") * r + w1h * w1 + (w - w1h) * w5) / 1e6
-    if usage.get("inference_geo") == "us":
-        usd *= 1.1
-    return usd + float(((usage.get("server_tool_use") or {}).get("web_search_requests")) or 0) * 0.01
+_cli_prices = _load_cli_prices()
+CLI_PRICES, CLI_FAST_PRICES, call_cost = _cli_prices.CLI_PRICES, _cli_prices.CLI_FAST_PRICES, _cli_prices.call_cost
 
 
 def claude_dir() -> Path:
@@ -882,7 +864,7 @@ def restored_plan(turns: list, state: Path, claude: Path, regs: dict = None) -> 
         name = str(r.get("name") or sid[:8])
         base = {"sid": sid, "owner": str(reg.get("threadOf") or sid), "parent": parent, "name": name, "t": int(r["t"]),
                 "day": local_day(r["t"]), "hour": local_hour(r["t"]), "recorded": round(float(usd), 6),
-                "launchedLogin": str(reg.get("launchedLogin") or "")}
+                "launchedLogin": str(reg.get("launchedLogin") or ""), "apiKeyAuth": bool(reg.get("apiKeyAuth"))}
         unpriced = sorted({c[2] for c in calls.values() if c[1] is None})
         if unpriced:
             unverified.append(dict(base, why="its calls include a model with no price here (%s)" % ", ".join(unpriced)))
@@ -915,13 +897,15 @@ def decide_billing(spend: dict, rows: list) -> list:
     from and the row's own; the one whose bySid share holds the row, the registry's current word when several do.
     Login: a login is the row's when its byLogin share holds the row and the remainder (the machine's own login and the
     key, never a byLogin row) cannot; the remainder alone, when it alone can; between several, the registry's launch
-    login when it is one of them; else none, said."""
+    login when it is one of them; else none, said.
+    Key: decide_keyed, on the same buckets, after the billed session is known."""
     sim = json.loads(json.dumps(spend or {}))
     for c in rows:
         bs = [b for b in ((sim.get("days") or {}).get(c["day"]), (sim.get("hours") or {}).get(c["hour"])) if isinstance(b, dict)]
         need = c["dusd"] - 1e-6
         if not bs or not isinstance((sim.get("days") or {}).get(c["day"]), dict):
             c["login"], c["loginWhy"] = "", "no bucket for its day"
+            c["keyed"], c["keyedWhy"] = False, "no bucket for its day"
             sim, _ = fold_restored(sim, [c])
             continue
         owners = []
@@ -943,14 +927,55 @@ def decide_billing(spend: dict, rows: list) -> list:
             c["login"], c["loginWhy"] = c["launchedLogin"], "several shares hold it; the registry's launch login"
         else:
             c["login"], c["loginWhy"] = "", "several shares hold it and the registry names none of them: byLogin left as recorded"
+        decide_keyed(bs, c)
         sim, _ = fold_restored(sim, [c])
     return rows
 
 
+def _key_shares(b: dict, owner: str) -> tuple:
+    """(the key's share, the rest) of what a row billed to `owner` could sit in within bucket `b`: the owner's bySid entry
+    and its key split where the bucket has the entry (the finest record of how the kernel billed that session's turns),
+    else the bucket's own total and key split."""
+    by = b.get("bySid") if isinstance(b.get("bySid"), dict) else {}
+    src = by[owner] if isinstance(by.get(owner), dict) else b
+    k = src.get("key")
+    ku = float(k.get("usd") or 0) if isinstance(k, dict) else 0.0
+    return ku, float(src.get("usd") or 0) - ku
+
+
+def decide_keyed(bs: list, c: dict) -> dict:
+    """Whether the row billed the API key, read off the buckets `bs` the kernel folded it into (its day's and, where the
+    ledger still keeps it, its hour's), as they stood when it was folded: the kernel adds a keyed turn's whole recorded
+    figure to the bucket's `key` split and to its session's (_record_spend), and a turn row names no auth of its own, so
+    the split is the record of how the row billed. The registry's apiKeyAuth is only the session's CURRENT word, and a
+    session switched since (2026-10-08: a session billed the key when its row was folded and reads login now) would turn
+    the split against its total. Keyed when the key's share holds the row's recorded figure in every bucket and the rest
+    cannot hold it in some bucket; not keyed when the key's share cannot hold it; when both can, the registry's word,
+    said. Sets c["keyed"] and c["keyedWhy"]."""
+    need = float(c.get("recorded") or c["dusd"]) - 1e-6
+    shares = [_key_shares(b, c["owner"]) for b in bs]
+    key_holds = bool(shares) and all(k >= need for k, _ in shares)
+    rest_holds = all(r >= need for _, r in shares)
+    if not shares:
+        c["keyed"], c["keyedWhy"] = False, "no bucket for its day"
+    elif key_holds and not rest_holds:
+        c["keyed"], c["keyedWhy"] = True, "only the key's share of its buckets holds it"
+    elif not key_holds:
+        c["keyed"], c["keyedWhy"] = False, ("no key split in its buckets" if all(k <= 0 for k, _ in shares)
+                                            else "the key's share of its buckets cannot hold it")
+    else:
+        c["keyed"] = bool(c.get("apiKeyAuth"))
+        c["keyedWhy"] = "both the key's share and the rest hold it; the registry's current word"
+    return c
+
+
 def fold_restored(spend: dict, rows: list) -> tuple:
     """spend.json less each row's restored record: the hour and day buckets' usd and four token columns, the bySid entry of
-    the session the row bills and the byLogin entry of its login (usd and tok); the `key` split and turn counts stay.
-    Returns (spend, notes); a figure that would go below zero is held at zero and said."""
+    the session the row bills and the byLogin entry of its login (usd and tok), and for a row that billed the API key
+    (c["keyed"], decide_keyed) the bucket's `key` split (usd, tok and its four token columns) and the session's (usd and
+    tok), where the kernel had folded the whole recorded figure; turn counts stay. A catch-up row (part "key": a row an
+    earlier run corrected before this rule took the record out of the key split) folds the key split alone, the rest
+    folded then. Returns (spend, notes); a figure that would go below zero is held at zero and said."""
     out = json.loads(json.dumps(spend or {}))
     notes = []
     gone = 0
@@ -964,6 +989,7 @@ def fold_restored(spend: dict, rows: list) -> tuple:
 
     for c in rows:
         tok = sum(c["dtok"])
+        key_only = c.get("part") == "key"
         for where, b in (("hour %s" % c["hour"], (out.get("hours") or {}).get(c["hour"])),
                          ("day %s" % c["day"], (out.get("days") or {}).get(c["day"]))):
             if not isinstance(b, dict):
@@ -971,6 +997,22 @@ def fold_restored(spend: dict, rows: list) -> tuple:
                     gone += 1                          # the ledger keeps 800 hours, fewer than its days: said once, below
                 else:
                     notes.append("no bucket for %s (%s)" % (where, c["name"]))
+                continue
+            if c.get("keyed"):
+                k = b.get("key")
+                if isinstance(k, dict):
+                    sub(k, "usd", c["dusd"], where + " key")
+                    sub(k, "tok", tok, where + " key", integer=True)
+                    for kk, v in zip(TOKS, c["dtok"]):
+                        if kk in k:
+                            sub(k, kk, v, where + " key", integer=True)
+                else:
+                    notes.append("%s: no key split to take %s's record out of" % (where, c["name"]))
+                sk = ((b.get("bySid") or {}).get(c["owner"]) or {}).get("key") if isinstance(b.get("bySid"), dict) else None
+                if isinstance(sk, dict):
+                    sub(sk, "usd", c["dusd"], where + " bySid " + c["owner"][:8] + " key")
+                    sub(sk, "tok", tok, where + " bySid " + c["owner"][:8] + " key", integer=True)
+            if key_only:
                 continue
             sub(b, "usd", c["dusd"], where)
             for k, v in zip(TOKS, c["dtok"]):
@@ -994,17 +1036,26 @@ def fold_restored(spend: dict, rows: list) -> tuple:
     return out, notes
 
 
-def apply_restored_to_turns(path: Path, rows: list, write: bool = True) -> list:
+def apply_restored_to_turns(path: Path, rows: list, write: bool = True, catchup: list = ()) -> list:
     """turns.jsonl with each planned row corrected: usd and the four token columns to the corrected figures, the kernel's
-    kept as usdRecorded and tokRecorded, the record taken out as restoredCostUsd, stamped repairRule 6. A row is matched
-    by sid, second and the figure it holds, and only while it is an uncorrected fresh-baseline row."""
+    kept as usdRecorded and tokRecorded, the record taken out as restoredCostUsd, stamped repairRule 6 and restoredKeyed
+    (whether its record came out of the key split too). A row is matched by sid, second and the figure it holds, and only
+    while it is an uncorrected fresh-baseline row. Each `catchup` row (a row rule 6 corrected before it decided the key,
+    key_catchup) is matched while it carries repairRule 6, its corrected figure and no restoredKeyed, and gains that stamp
+    alone."""
     want = {(c["sid"], c["t"], c["recorded"]): c for c in rows}
+    late = {(c["sid"], c["t"], round(float(c["corrected"]), 6)): c for c in catchup}
 
     def stamp(o):
-        if o.get("spendBaseline") != "fresh" or o.get("repairRule") == REPAIR_RULE_RESTORED:
-            return None
         key = (str(o.get("sid") or ""), int(o["t"]) if isinstance(o.get("t"), (int, float)) else None,
                round(float(o["usd"]), 6) if isinstance(o.get("usd"), (int, float)) else None)
+        if o.get("repairRule") == REPAIR_RULE_RESTORED and "restoredKeyed" not in o:
+            c = late.pop(key, None)
+            if c is not None:
+                o["restoredKeyed"] = bool(c.get("keyed"))
+            return c
+        if o.get("spendBaseline") != "fresh" or o.get("repairRule") == REPAIR_RULE_RESTORED:
+            return None
         c = want.pop(key, None)
         if c is not None:
             o["usdRecorded"] = o["usd"]
@@ -1013,6 +1064,7 @@ def apply_restored_to_turns(path: Path, rows: list, write: bool = True) -> list:
             for k, v in zip(TOKS, c["tokCorrected"]):
                 o[k] = int(v)
             o["restoredCostUsd"] = c["dusd"]
+            o["restoredKeyed"] = bool(c.get("keyed"))
             o["repairedT"] = int(time.time())
             o["repairRule"] = REPAIR_RULE_RESTORED
         return c
@@ -1033,7 +1085,8 @@ def restored_recovery(state: Path, spend: dict, turns: list, skip_ref=None) -> t
         for d in o["deltas"]:
             r = held.get((str(d.get("sid") or ""), int(d["t"])))
             if r is not None and r.get("repairRule") == REPAIR_RULE_RESTORED and isinstance(r.get("usd"), (int, float)) \
-                    and abs(float(r["usd"]) - float(d["corrected"])) < 1e-6:
+                    and abs(float(r["usd"]) - float(d["corrected"])) < 1e-6 \
+                    and (d.get("part") != "key" or r.get("restoredKeyed") is bool(d.get("keyed"))):
                 take.append(d)
         spend, got = fold_restored(spend, take)
         notes += got
@@ -1042,7 +1095,114 @@ def restored_recovery(state: Path, spend: dict, turns: list, skip_ref=None) -> t
     return spend, refs, n, notes
 
 
-def restored_report(p: dict, before: dict, after: dict, notes: list) -> str:
+def key_catchup(turns: list, spend: dict, regs: dict, pending: list = ()) -> dict:
+    """The rows rule 6 corrected before it decided the key (2026-10-08, the spend audit: it took each record out of the
+    total and left the `key` split, so a day read $282 in all and $2,006 on the key): every row stamped repairRule 6 with
+    no restoredKeyed. Each is decided by decide_keyed on the buckets as that run found them, its record and every later
+    such row's put back into the usd of its buckets and of the session it billed, and taken out again in time order, the
+    key's share too where it billed the key (decide_billing's order).
+    The session that run took each record from is not on record (its journal is compacted), and it is one of the
+    registry's threadOf, the session the row's was forked from, or its own. The ledger says which where a session's key
+    split stands above its total: the kernel never writes that state (a keyed turn adds the same figure to both), so what
+    is missing from that session's total is records taken out of it, and a row goes to the first candidate with a shortfall
+    in each of the row's buckets that the rows before it have not yet made up (a promoted thread whose own entry holds a few later
+    turns: 2026-10-08, a second host's ledger). Else decide_billing's own rule on the ledger as it stands (the registry's
+    word when its share holds the record, else the first candidate whose share does), else the first candidate the day's
+    bucket has an entry for. A row whose delta an unfinished run journaled is left for the run after that fold lands
+    (`pending`, said). Returns {"rows": [...], "waiting": n}; each row carries part "key", so fold_restored takes the key
+    split alone."""
+    held = {(str(d.get("sid") or ""), int(d["t"])) for o in pending for d in o.get("deltas") or [] if d.get("t") is not None}
+    rows, waiting = [], 0
+    for r in turns:
+        if r.get("repairRule") != REPAIR_RULE_RESTORED or "restoredKeyed" in r or not isinstance(r.get("t"), (int, float)):
+            continue
+        dusd, rec, usd = r.get("restoredCostUsd"), r.get("usdRecorded"), r.get("usd")
+        if not all(isinstance(v, (int, float)) for v in (dusd, rec, usd)):
+            continue
+        sid = str(r.get("sid") or "")
+        if (sid, int(r["t"])) in held:
+            waiting += 1
+            continue
+        reg = regs.get(sid) or {}
+        ff = reg.get("forkedFrom") if isinstance(reg.get("forkedFrom"), dict) else {}
+        tok_rec = r.get("tokRecorded") if isinstance(r.get("tokRecorded"), list) else [int(r.get(k) or 0) for k in TOKS]
+        rows.append({"sid": sid, "owner": str(reg.get("threadOf") or sid), "parent": str(ff.get("sid") or reg.get("threadOf") or ""),
+                     "name": str(r.get("name") or sid[:8]), "t": int(r["t"]), "day": local_day(r["t"]), "hour": local_hour(r["t"]),
+                     "recorded": round(float(rec), 6), "corrected": round(float(usd), 6), "dusd": round(float(dusd), 6),
+                     "dtok": [int(a) - int(r.get(k) or 0) for a, k in zip(tok_rec, TOKS)], "apiKeyAuth": bool(reg.get("apiKeyAuth")),
+                     "part": "key"})
+    rows.sort(key=lambda c: c["t"])
+    sim = json.loads(json.dumps(spend or {}))
+
+    def buckets(c):
+        return [b for b in ((sim.get("days") or {}).get(c["day"]), (sim.get("hours") or {}).get(c["hour"])) if isinstance(b, dict)]
+
+    def entry(b, o):
+        by = b.get("bySid") if isinstance(b.get("bySid"), dict) else {}
+        return by.get(o) if isinstance(by.get(o), dict) else None
+
+    short = {}                                         # (bucket, sid) -> the session's key split above its total, not yet
+
+    def gap(b, o):                                     #  made up by a row assigned to it
+        k = (id(b), o)
+        if k not in short:
+            e = entry(b, o)
+            short[k] = (float(e["key"].get("usd") or 0) - float(e.get("usd") or 0)
+                        if e is not None and isinstance(e.get("key"), dict) else 0.0)
+        return short[k]
+
+    for c in rows:
+        bs = buckets(c)
+        cands = []
+        for o in (c["owner"], c["parent"], c["sid"]):
+            if o and o not in cands:
+                cands.append(o)
+        owner = next((o for o in cands if bs and all(gap(b, o) > 1e-6 for b in bs)), None)
+        if owner is None:
+            fit = [o for o in cands if bs and all(entry(b, o) is not None and float(entry(b, o).get("usd") or 0) >= c["dusd"] - 1e-6
+                                                for b in bs)]
+            day = (sim.get("days") or {}).get(c["day"])
+            owner = c["owner"] if c["owner"] in fit else fit[0] if fit else next(
+                (o for o in cands if isinstance(day, dict) and entry(day, o) is not None), c["owner"])
+        c["owner"] = owner
+        for b in bs:
+            gap(b, owner)
+            short[(id(b), owner)] -= c["dusd"]
+    for c in rows:
+        for b in buckets(c):                           # the record back where that run took it from: the totals, not the key
+            b["usd"] = round(float(b.get("usd") or 0) + c["dusd"], 6)
+            for kk, v in zip(TOKS, c["dtok"]):
+                b[kk] = int(b.get(kk) or 0) + int(v)
+            e = (b.get("bySid") or {}).get(c["owner"]) if isinstance(b.get("bySid"), dict) else None
+            if isinstance(e, dict):
+                e["usd"] = round(float(e.get("usd") or 0) + c["dusd"], 6)
+                e["tok"] = int(e.get("tok") or 0) + sum(c["dtok"])
+    for c in rows:
+        decide_keyed(buckets(c), c)
+        sim, _ = fold_restored(sim, [dict(c, part=None)])   # out again, whole, before the next row is judged
+    return {"rows": rows, "waiting": waiting}
+
+
+def key_split_faults(spend: dict) -> list:
+    """Every bucket whose `key` split exceeds the total it is part of, the bucket's own or a session's: a state no fold
+    of the kernel's can reach, said by the report so a split left inconsistent is never silent."""
+    out = []
+    for field in ("days", "hours"):
+        for k, b in sorted((spend.get(field) or {}).items()) if isinstance(spend.get(field), dict) else []:
+            if not isinstance(b, dict):
+                continue
+            ku = float(b["key"].get("usd") or 0) if isinstance(b.get("key"), dict) else 0.0
+            if ku > float(b.get("usd") or 0) + 0.005:
+                out.append("%s %s: key split above its total (%.2f of %.2f)" % (field[:-1], k, ku, float(b.get("usd") or 0)))
+            for sid, e in sorted((b.get("bySid") or {}).items()) if isinstance(b.get("bySid"), dict) else []:
+                if isinstance(e, dict) and isinstance(e.get("key"), dict) and \
+                        float(e["key"].get("usd") or 0) > float(e.get("usd") or 0) + 0.005:
+                    out.append("%s %s, session %s: key split above its total (%.2f of %.2f)" % (
+                        field[:-1], k, sid[:8], float(e["key"].get("usd") or 0), float(e.get("usd") or 0)))
+    return out
+
+
+def restored_report(p: dict, before: dict, after: dict, notes: list, catchup: dict = None) -> str:
     rows = p["rows"]
     lines = ["spend repair, rule 6: %d row(s) recorded a restored cost-state record that the resume's seed missed" % len(rows)]
     days = {}
@@ -1062,24 +1222,56 @@ def restored_report(p: dict, before: dict, after: dict, notes: list) -> str:
             a = sum(float(v.get("usd") or 0) for k, v in (after.get("days") or {}).items() if k[:7] == m and isinstance(v, dict))
             lines.append("  %s  %12.2f -> %12.2f" % (m, b, a))
     if rows:
-        lines += ["", "rows (session, time, recorded -> corrected, the record restored, billed to, login):"]
+        lines += ["", "rows (session, time, recorded -> corrected, the record restored, billed to, login, key):"]
         for c in rows:
-            lines.append("  %-24s %s %10.2f -> %8.2f  $%.2f in %s; its own %d call(s) $%.2f; billed to %s; login %s (%s)" % (
+            lines.append("  %-24s %s %10.2f -> %8.2f  $%.2f in %s; its own %d call(s) $%.2f; billed to %s; login %s (%s); %s" % (
                 c["name"][:24], datetime.fromtimestamp(c["t"]).strftime("%Y-%m-%d %H:%M:%S"), c["recorded"], c["corrected"],
-                c["dusd"], c["source"], c["calls"], c["ownCalls"], c["owner"][:8], c.get("login") or "-", c.get("loginWhy") or ""))
+                c["dusd"], c["source"], c["calls"], c["ownCalls"], c["owner"][:8], c.get("login") or "-", c.get("loginWhy") or "",
+                _keyed_words(c)))
     if p["unverified"]:
         lines += ["", "fresh-baseline rows a record could explain but the evidence does not confirm (left as recorded):"]
         for c in p["unverified"]:
             lines.append("  %-24s %s %10.2f  %s" % (c["name"][:24], datetime.fromtimestamp(c["t"]).strftime("%Y-%m-%d %H:%M:%S"),
                                                    c["recorded"], c["why"]))
+    k_rows = (catchup or {}).get("rows") or []
+    if k_rows:
+        lines += ["", "%d row(s) an earlier run corrected without deciding the API-key split, decided now on the buckets as "
+                      "that run found them (a row the key billed takes its record out of the key split too):" % len(k_rows)]
+        for c in k_rows:
+            lines.append("  %-24s %s  record $%.2f; billed to %s; %s" % (
+                c["name"][:24], datetime.fromtimestamp(c["t"]).strftime("%Y-%m-%d %H:%M:%S"), c["dusd"], c["owner"][:8], _keyed_words(c)))
+    if (catchup or {}).get("waiting"):
+        lines += ["", "%d corrected row(s) wait on an unfinished run's journaled fold: decided by the run after it lands"
+                  % catchup["waiting"]]
+    if rows or k_rows:
+        moved = sorted({c["day"] for c in rows + k_rows if c.get("keyed")})
+        if moved:
+            lines += ["", "the key split of the days it moves (dollars before -> after):"]
+            for d in moved:
+                kb = ((before.get("days") or {}).get(d) or {}).get("key") or {}
+                ka = ((after.get("days") or {}).get(d) or {}).get("key") or {}
+                lines.append("  %s  %12.2f -> %12.2f   (the day's total %.2f)" % (
+                    d, float(kb.get("usd") or 0), float(ka.get("usd") or 0), float(((after.get("days") or {}).get(d) or {}).get("usd") or 0)))
+    faults_before, faults_after = key_split_faults(before), key_split_faults(after)
+    if faults_before:
+        lines += ["", "buckets as they stand with a key split above its total (%d):" % len(faults_before)]
+        lines.extend("  " + f for f in faults_before)
+    if faults_after:
+        lines += ["", "buckets that would STILL hold a key split above its total after this run (%d):" % len(faults_after)]
+        lines.extend("  " + f for f in faults_after)
     if notes:
         lines.append("")
         lines.extend("note: " + n for n in notes)
     return "\n".join(lines)
 
 
+def _keyed_words(c: dict) -> str:
+    return "%s (%s)" % ("billed to the API key" if c.get("keyed") else "not the API key", c.get("keyedWhy") or "")
+
+
 def restored_main(a, state: Path) -> int:
-    """`romp spend-repair --restored-cost-state [--apply]`: rule 6 over every row of the turn ledger."""
+    """`romp spend-repair --restored-cost-state [--apply]`: rule 6 over every row of the turn ledger, and first the key
+    split of the rows an earlier run corrected without deciding it (key_catchup)."""
     claude = Path(a.claude_dir) if a.claude_dir else claude_dir()
     bad = []
     turns = read_jsonl(state / "turns.jsonl", bad)
@@ -1096,21 +1288,25 @@ def restored_main(a, state: Path) -> int:
                          "is whole\n" % (len(jbad), state / RESTORED_JOURNAL))
         if a.apply:
             return 2
-    p = restored_plan(turns, state, claude)
-    decide_billing(spend, p["rows"])
-    preview, notes = fold_restored(spend, p["rows"])
+    regs = registry_all(state)
+    k = key_catchup(turns, spend, regs, pending)       # the earlier runs' rows first: their records are out of the totals
+    caught, k_notes = fold_restored(spend, k["rows"])   #  already, so the new rows are judged on the ledger with them whole
+    p = restored_plan(turns, state, claude, regs)
+    decide_billing(caught, p["rows"])
+    preview, notes = fold_restored(caught, p["rows"])
+    notes = k_notes + [n for n in notes if n not in k_notes]
     if bad:
         sys.stdout.write("%d unparseable line(s) in %s skipped (a torn append)\n" % (len(bad), ", ".join(sorted(set(bad)))))
     if a.json:
-        sys.stdout.write(json.dumps(p, indent=1, sort_keys=True) + "\n")
+        sys.stdout.write(json.dumps(dict(p, keyCatchup=k), indent=1, sort_keys=True) + "\n")
     else:
-        sys.stdout.write(restored_report(p, spend, preview, notes) + "\n")
+        sys.stdout.write(restored_report(p, spend, preview, notes, k) + "\n")
     if pending:
         sys.stdout.write("%d journaled run(s) did not finish their bucket write: --apply folds them first\n" % len(pending))
     if not a.apply:
         sys.stdout.write("\ndry run: nothing written (pass --apply to write spend.json and turns.jsonl)\n")
         return 0
-    if not p["rows"] and not pending:
+    if not p["rows"] and not k["rows"] and not pending:
         sys.stdout.write("\nnothing to apply\n")
         return 0
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -1122,14 +1318,14 @@ def restored_main(a, state: Path) -> int:
         sys.stdout.write("\nbackups: spend.json.bak-%s, turns.jsonl.bak-%s (beside the files)\n" % (stamp, stamp))
     # the order the staircase rule keeps: the deltas of the rows the rewrite will find are journaled first, the rows are
     # rewritten, then spend.json is read again and the deltas folded on what is there, the completion marked inside it
-    planned = apply_restored_to_turns(state / "turns.jsonl", p["rows"], write=False)
+    planned = apply_restored_to_turns(state / "turns.jsonl", p["rows"], write=False, catchup=k["rows"])
     stamp_t = time.time()
-    keep = ("sid", "owner", "name", "t", "day", "hour", "recorded", "corrected", "dusd", "dtok", "login")   # owner and
-    #                                                                                     login as decided, so a recovery folds the same
+    keep = ("sid", "owner", "name", "t", "day", "hour", "recorded", "corrected", "dusd", "dtok", "login", "keyed", "part")
+    #       owner, login and the key as decided, and whether only the key split folds, so a recovery folds the same
     if planned:
         journal_append(state, {"t": stamp_t, "phase": "rows", "rule": REPAIR_RULE_RESTORED,
-                               "deltas": [{k: c.get(k) for k in keep} for c in planned]}, name=RESTORED_JOURNAL)
-    done = apply_restored_to_turns(state / "turns.jsonl", p["rows"])
+                               "deltas": [{f: c.get(f) for f in keep} for c in planned]}, name=RESTORED_JOURNAL)
+    done = apply_restored_to_turns(state / "turns.jsonl", p["rows"], catchup=k["rows"])
     sp = state / "spend.json"
     fresh_text = read_text(sp)
     try:
@@ -1157,11 +1353,16 @@ def restored_main(a, state: Path) -> int:
     for r in refs:
         journal_append(state, {"t": time.time(), "phase": "buckets", "ref": r}, name=RESTORED_JOURNAL)
     journal_compact(state, new_spend, name=RESTORED_JOURNAL)
-    sys.stdout.write("\napplied: %d turn row(s) corrected (usdRecorded and tokRecorded keep the kernel's figures), then "
-                     "spend.json rewritten for those\n" % len(done))
-    if len(done) < len(p["rows"]):
+    n_k = sum(1 for c in done if c.get("part") == "key")
+    sys.stdout.write("\napplied: %d turn row(s) corrected (usdRecorded and tokRecorded keep the kernel's figures)%s, then "
+                     "spend.json rewritten for those\n" % (len(done) - n_k, ", %d earlier correction(s) given their key split "
+                                                                              "(restoredKeyed stamped)" % n_k if n_k else ""))
+    if len(done) < len(p["rows"]) + len(k["rows"]):
         sys.stdout.write("%d planned row(s) were not in turns.jsonl as planned (the ledger moved): left as they are, judged "
-                         "afresh next run\n" % (len(p["rows"]) - len(done)))
+                         "afresh next run\n" % (len(p["rows"]) + len(k["rows"]) - len(done)))
+    faults = key_split_faults(new_spend)
+    for f in faults:
+        sys.stdout.write("note: still %s\n" % f)
     return 0
 
 

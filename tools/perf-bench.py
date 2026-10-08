@@ -529,7 +529,6 @@ def install_guards(km, sbmod, shadow, rec, no_git=False):
     # and host= keywords the recorder never reads, and a shape mismatch would not fail the run. _push
     # catches every exception in its build, writes `push build: <traceback>` to stderr and returns, so
     # that cycle would be timed with its frames dropped and the notification count would come up short.
-    stub("_refresh_remote_prices", lambda *a, **k: None)            # network fetch thread
     stub("_warm_fleet_bg", lambda *a, **k: rec["warm_calls"].append(time.time()))   # background parse thread; counted
     if hasattr(km, "_repo_index_spawn"):            # the repo listing's refresh thread (2026-10-07): run inline, so the
         stub("_repo_index_spawn", km._repo_index_refresh)   # listing is a counted spawn in the sample that asked for it

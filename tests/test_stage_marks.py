@@ -103,7 +103,6 @@ ALLOW = {
     ("kernel.py", "_dispatch_ws", "_bd"): "a native folder dialog for a field",
     ("kernel.py", "_spend_detail", "_ask"): "one peer's spend call over its tunnel",
     ("kernel.py", "pairs_snapshot", "one"): "one peer's status call over its tunnel",
-    ("kernel.py", "_refresh_remote_prices", "work"): "the model price refresh over HTTP",
     ("kernel.py", "_push_notify", "run"): "web push delivery to subscriptions",
     ("kernel.py", "_push_forward", "run"): "the peer relay POST",
     ("kernel.py", "_refresh_model_catalog", "go"): "the models frame notice",

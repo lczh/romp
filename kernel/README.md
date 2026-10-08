@@ -23,7 +23,9 @@ Session control (how romp drives Claude Code) sits behind one seam:
 | `codex_backend.py` | The Codex backend: drives OpenAI Codex sessions through `codex app-server` and materializes each thread as a transcript the read side already understands. `docs/codex.md`. |
 
 Shared lookup tables: `colormap.py` (recency tints, single source shared with
-the web bundles) and `palette.py` (session-identity colors).
+the web bundles), `palette.py` (session-identity colors) and `cli_prices.py`
+(Claude Code's own per-call prices, the one table the spend guard, the cost view
+and `romp spend-repair` price tokens with).
 
 `credentials.py` is the whole of romp's contact with API credentials, and romp
 holds no key (the user 2026-09-08, who wants romp to hold no key). Sessions and
