@@ -56949,8 +56949,10 @@ def _price_sig(name):
 
 def _model_prices():
     """The merged $/token price map: Claude Code's own table (DEFAULT_MODEL_PRICES) < the user's config override. A config
-    row overrides the keys it names and keeps the rest of the model's row (its fast rates included); no network, so the
-    spend guard reads it on the pusher's path in every kernel."""
+    row overrides the keys it names and keeps the rest of the model's row (its fast rates included); a partial `fast` row
+    fills from Claude Code's fast rates for the model, else from the model's own row; a model the table lacks writes an
+    hour at its 5-minute rate unless the row names one. No network, so the spend guard reads it on the pusher's path in
+    every kernel."""
     prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
     try:
         cfg = json.loads(PRICE_CONFIG.read_text())
@@ -56960,8 +56962,10 @@ def _model_prices():
                 row.update({kk: float(v.get(kk) or 0) for kk in _PRICE_KEYS if kk in v})
                 for kk in ("in", "out", "cache_w", "cache_r"):
                     row.setdefault(kk, 0.0)
+                row.setdefault("cache_w_1h", row["cache_w"])   # a config-only model: its 5-minute rate, as the CLI does
                 if isinstance(v.get("fast"), dict):
-                    row["fast"] = {kk: float(v["fast"].get(kk, row.get(kk, 0)) or 0) for kk in _PRICE_KEYS}
+                    base = row.get("fast") if isinstance(row.get("fast"), dict) else row   # Claude Code's fast rates first
+                    row["fast"] = {kk: float(v["fast"].get(kk, base.get(kk, 0)) or 0) for kk in _PRICE_KEYS}
                 prices[k] = row
     except Exception:
         pass
