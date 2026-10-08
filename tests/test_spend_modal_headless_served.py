@@ -255,9 +255,18 @@ class SpendModalServed(unittest.TestCase):
         self.assertGreater(o["out"]["segs"], 60)
         self.assertGreaterEqual(o["out"]["hatched"], 1, "the unattributed stack wears the hatch, not a hue")
         self.assertTrue(o["out"]["ylabels"] and o["out"]["ylabels"][0].startswith("$"), o["out"]["ylabels"])
-        self.assertTrue(o["out"]["xlabels"], "weekday initials at the ledger's midnights")
+        self.assertTrue(o["out"]["xlabels"], "a label per day on the 7-day range")
+        # the y labels stand in a gutter of their own (2026-10-08 review: the API key chart's ceiling label sat under its
+        # first bars): in both charts every bar starts at or right of the plot's edge and every label ends left of it
+        self.assertTrue(any(g and g["labels"] for g in o["out"]["gutter"]), o["out"]["gutter"])   # (a sub-dollar ceiling has no whole-dollar label)
+        for g in o["out"]["gutter"]:
+            self.assertIsNotNone(g, o["out"]["gutter"])
+            self.assertGreaterEqual(g["segLeft"], g["plotLeft"] - 0.5, "no bar left of the plot's edge: %r" % g)
+            if g["labels"]:
+                self.assertLessEqual(g["labelRight"], g["plotLeft"] + 0.5, "every y label ends left of the plot: %r" % g)
         self.assertTrue(o["days"]["segs"] > 0 and not o["days"]["ylabels"][0].startswith("$"), "tokens on the toggle")
-        self.assertTrue(any("/" in x for x in o["days"]["xlabels"]), "date labels on the daily range")
+        self.assertTrue(o["days"]["xlabels"] and all(re.match(r"^[A-Z][a-z]{2} (1|15)$", x) for x in o["days"]["xlabels"]),
+                        "the daily range names the 1st and 15th with the month's name: %r" % o["days"]["xlabels"])
         self.assertIn("·", o["tip"], "the bucket tooltip's header reads total · other measure · stamp")
         # T293 (the user 2026-09-09): the crosshair. Hovering the chart clear of every bar draws the hairline at the
         # pointer's bucket and a stamp in words; the tooltip lists that bucket's sessions in spend order in their stack
@@ -284,12 +293,17 @@ class SpendModalServed(unittest.TestCase):
         self.assertGreaterEqual(xh["stampLeft"], xh["gyRight"], "the stamp starts past the ceiling label, never over it (review find)")
         self.assertEqual(o["afterResize"], {"tip": "none", "line": "none", "stamp": "none"}, "a rebuild under a still pointer takes all three down (review find)")
         self.assertEqual(o["xhAfter"], {"line": "none", "stamp": "none", "tip": "none"}, "all three leave with the pointer")
-        # the middle range is 7 days: the label, and seven local midnights on the axis (192 hours carried eight). The
-        # fixture's NOW is 15:30 local and the keys are the recorder's local hours, so the 168-hour tail holds seven T00
-        # keys in any zone whose clock change falls at 1-3 AM; a zone that springs forward AT midnight would drop one:
-        # the runner's zone, not the code, is what this pin assumes
+        # the middle range is 7 days. Its axis names each day with six hours or more in the range by its short weekday and
+        # date, centred under the day (2026-10-08 review: "F S S M T W T" repeated letters). The fixture's NOW is 15:30
+        # local, so the 168-hour tail touches eight calendar days: the first from 16:00 (eight hours), six whole, and the
+        # last to 15:00 (sixteen hours), eight labels, none repeated. A zone whose clock changes inside the window could
+        # move an edge day's hours: the runner's zone, not the code, is what this count assumes
         self.assertEqual(o["week"]["label"], "7 days · by hour")
-        self.assertEqual(len(o["out"]["xlabels"]), 7, o["out"]["xlabels"])
+        xl = o["out"]["xlabels"]
+        self.assertEqual(len(xl), 8, xl)
+        self.assertEqual(len(set(xl)), len(xl), "no label repeats: %r" % xl)
+        self.assertTrue(all(re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}$", x) for x in xl), xl)
+        self.assertEqual(o["out"]["keyXlabels"], xl, "the API key chart wears the same days")
         # the 1-day view stamps hours too; the 90-day view stamps dates and folds dozens of sessions into one line
         self.assertRegex(o["xhDay"]["stamp"], r", \d{1,2} (AM|PM)$")
         self.assertTrue(o["xhDay"]["tipShown"], o["xhDay"])

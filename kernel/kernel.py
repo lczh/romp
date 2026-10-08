@@ -73365,7 +73365,7 @@ var wh=winsHTML(d);
 // an account with no windows shows its monthly allowance in their place, or says it has none in one line; neither carries
 // the age line (the allowance dates itself by its reset)
 h+=wh||monthlyHTML(d)||'<div class=ru-tip-nowin>no 5-hour or weekly limits on this account</div>';
-if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){return machineHTML(e.host)
+if(manyMachines)h+='<div class=ru-tip-machines>signed in on '+g.members.map(function(e){return machineHTML(e.host)
 +(e.lag?'<span class=ru-tip-lag> lagging'+(e.ownT?', updated '+fmtAgo(e.ownT):'')+'</span>':'');}).join(', ')+'</div>';
 var ts=g.members.map(function(e){return e.ownT;}).filter(function(t){return typeof t==='number';});
 if(ts.length&&wh)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';
@@ -73833,6 +73833,18 @@ function spTipHide(){if(spTip)spTip.style.display='none';}
 function renderChart(){spTipHide();var d=SP.data;if(!d)return;var ser=spSeries(d);if(!ser||!ser.keys||!ser.keys.length)return;
 var two=!!document.querySelector('#rsp-panel .rsp-cards.rsp-two');
 ['seat','key'].forEach(function(sec){var box=document.getElementById('rsp-chart-'+sec);if(box)spDrawChart(box,d,ser,sec,two?120:150);});}
+var SP_GUT=36;   // the y labels' gutter, px, left of every chart's plot
+// a key's local calendar day ('2026-10-08' of '2026-10-08T15'), the recorder's own spelling
+function spDayOf(k){return String(k).slice(0,10);}
+// the x ticks for a range, as {at: a position in buckets from the plot's left edge, label}: the hourly week, one per day
+// with six hours or more in the range, centred on that day's buckets, as 'Thu 8'; the day by hour, 06:00 / 12:00 / 18:00
+// and the new day ('Thu 8') at its midnight; the 90 days, the 1st and the 15th as 'Oct 1', 'Oct 15'
+function spXTicks(keys,range){var out=[],n=(keys||[]).length,wd=function(k){var y=+k.slice(0,4),mo=+k.slice(5,7),dd=+k.slice(8,10);return SP_DOW[new Date(y,mo-1,dd).getDay()]+' '+dd;};
+if(range==='hours'){var i=0;while(i<n){var j=i;while(j+1<n&&spDayOf(keys[j+1])===spDayOf(keys[i]))j++;
+if(j-i+1>=6)out.push({at:(i+j+1)/2,label:wd(String(keys[i]))});i=j+1;}return out;}
+if(range==='day'){for(var h=0;h<n;h++){var m=/T(\\d\\d)$/.exec(keys[h]);if(!m)continue;var hr=+m[1];
+if(hr===0)out.push({at:h,label:wd(String(keys[h]))});else if(hr%6===0)out.push({at:h+0.5,label:m[1]+':00'});}return out;}
+for(var d=0;d<n;d++){var m2=/^(\\d{4})-(\\d\\d)-(01|15)$/.exec(keys[d]);if(m2)out.push({at:d+0.5,label:SP_MON[+m2[2]-1]+' '+Number(m2[3])});}return out;}
 // one half's chart: the range's buckets, one column each, stacked by session in the list's order, each stack its part
 // of the half (spPart). The axis, the crosshair and the bucket tooltip are T247/T293's
 function spDrawChart(box,d,ser,sec,H){var meas=SP.measure,model=spRows(spRangeView(d));
@@ -73840,7 +73852,9 @@ var stacks=spStacks(d,ser,model).map(function(s){var o={};for(var k in s)o[k]=s[
 var n=ser.keys.length,W=Math.max(240,box.clientWidth||600);
 var tots=[],mx=0;for(var i=0;i<n;i++){var t=0;for(var s=0;s<stacks.length;s++){t+=(stacks[s][meas]&&stacks[s][meas][i])||0;}tots.push(t);if(t>mx)mx=t;}
 if(!(mx>0)){box.innerHTML='<div class=rsp-card-none>Nothing in the '+esc(spRangeWords(ser))+'.</div>';return;}
-var top=niceTop(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(1,slot-gap),PADT=6;
+// the y labels get a GUTTER of their own left of the plot (2026-10-08 review: a label drawn over the plot sat under the
+// first bars), so no bar is ever drawn beneath one; every x below is in plot terms, offset by the gutter
+var GUT=SP_GUT,top=niceTop(mx),slot=(W-GUT)/n,gap=Math.min(2,slot*0.3),bw=Math.max(1,slot-gap),PADT=6;
 var Y=function(v){return H-Math.max(0,Math.min(1,v/top))*(H-PADT);};
 var est=sec==='seat'&&meas==='usd';
 var fmt=function(v){return meas==='usd'?(v>0&&v<0.5?'under $1':(est?SP_APPROX:'')+fmtUsd(v)):fmtTok(Math.round(v));};   // whole dollars, and a sliver says so rather than "$0"
@@ -73852,17 +73866,20 @@ var afmt=function(v){if(meas!=='usd')return fmtTok(Math.round(v));return v===Mat
 // parser, where an unquoted value swallows the closing slash (`class=rsp-grid/>` is a line with the value
 // "rsp-grid/" left OPEN) and every later element became that line's child — an empty chart
 var hid='rsp-hatch-'+sec;
-var svg='<svg class="rsp-svg" viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'">'
+var svg='<svg class="rsp-svg" data-x0="'+GUT+'" viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'">'
 +'<defs><pattern id="'+hid+'" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
 +'<rect width="6" height="6" fill="rgba(138,151,166,0.18)"></rect><line x1="0" y1="0" x2="0" y2="6" stroke="#8a97a6" stroke-width="1.5"></line></pattern></defs>';
 // recessive hairline gridlines at half + the ceiling, labels overlaid in HTML (the hover graph's grammar)
 var ylab='';[top,top/2].forEach(function(g){var gy=Y(g);
-svg+='<line x1="0" y1="'+gy.toFixed(1)+'" x2="'+W+'" y2="'+gy.toFixed(1)+'" class="rsp-grid"></line>';
-var al=afmt(g);if(al)ylab+='<span class=ru-tip-gy style="top:'+(gy+1).toFixed(0)+'px">'+al+'</span>';});
+svg+='<line x1="'+GUT+'" y1="'+gy.toFixed(1)+'" x2="'+W+'" y2="'+gy.toFixed(1)+'" class="rsp-grid"></line>';
+var al=afmt(g);if(al)ylab+='<span class=ru-tip-gy style="top:'+(gy-4).toFixed(0)+'px;width:'+(GUT-5)+'px">'+al+'</span>';});
+// each local midnight inside the range is a faint vertical hairline, so the day the labels name has visible edges
+for(var i=1;i<n;i++){if(spDayOf(ser.keys[i])!==spDayOf(ser.keys[i-1])&&SP.range!=='days'){var mx0=(GUT+i*slot).toFixed(1);
+svg+='<line x1="'+mx0+'" y1="0" x2="'+mx0+'" y2="'+H+'" class="rsp-gridx"></line>';}}
 // one column per bucket, stacked bottom-up in stack order (the session list's order — by dollars, or the viewer's own —
 // then unattributed); a 2px surface gap between touching segments; the topmost segment's top corners rounded (4px
 // data-end, square at the baseline) — the dataviz mark specs
-for(var i=0;i<n;i++){if(!(tots[i]>0))continue;var x=i*slot+gap/2,segs=[];
+for(var i=0;i<n;i++){if(!(tots[i]>0))continue;var x=GUT+i*slot+gap/2,segs=[];
 for(var s=0;s<stacks.length;s++){var v=(stacks[s][meas]&&stacks[s][meas][i])||0;if(v>0)segs.push([s,v]);}
 var acc=0;for(var j=0;j<segs.length;j++){var si=segs[j][0],v=segs[j][1],yb=Y(acc),yt=Y(acc+v);acc+=v;
 var last=(j===segs.length-1),y0=yt+(last?0:1),y1=yb-(j===0?0:1),hgt=y1-y0;if(hgt<0.6){y0=y1-0.6;hgt=0.6;}
@@ -73872,13 +73889,13 @@ if(last&&r>=1.5){dpath='M'+x.toFixed(1)+','+y1.toFixed(1)+' L'+x.toFixed(1)+','+
 else{dpath='M'+x.toFixed(1)+','+y0.toFixed(1)+' h'+bw.toFixed(1)+' v'+hgt.toFixed(1)+' h-'+bw.toFixed(1)+' Z';}
 svg+='<path class="rsp-seg" d="'+dpath+'" fill="'+spFill(stacks[si],hid)+'" data-i="'+i+'" data-s="'+si+'"></path>';}}
 svg+='</svg>';
-// x labels: hourly range → weekday initials at the ledger's local midnights (the hover graph's rule); daily range → the
-// 1st and 15th; the day range every six hours. The keys are the KERNEL's local time — named when the viewer's differs.
-var xlab='';for(var i=0;i<n;i++){var k=ser.keys[i],m;
-if(SP.range==='day'){m=/T(\\d\\d)$/.exec(k);if(m&&(+m[1])%6===0)xlab+='<span style="left:'+(((i+0.5)*slot)/W*100).toFixed(1)+'%">'+m[1]+':00</span>';}
-else if(SP.range==='hours'){m=/^(\\d{4})-(\\d\\d)-(\\d\\d)T00$/.exec(k);if(m){var dd=new Date(+m[1],+m[2]-1,+m[3]);
-xlab+='<span style="left:'+(((i+0.5)*slot)/W*100).toFixed(1)+'%">'+['S','M','T','W','T','F','S'][dd.getDay()]+'</span>';}}
-else{m=/^(\\d{4})-(\\d\\d)-(01|15)$/.exec(k);if(m)xlab+='<span style="left:'+(((i+0.5)*slot)/W*100).toFixed(1)+'%">'+Number(m[2])+'/'+Number(m[3])+'</span>';}}
+// x labels, unambiguous in every range (2026-10-08 review: single weekday initials read F S S M T W T): the hourly week
+// names each day by its short weekday and date ('Thu 8': 168 hours touch eight calendar days, so a weekday alone would
+// repeat), centred under the day's own bars (a day with under six hours in the range is too
+// narrow to name); the day by hour marks 06:00, 12:00 and 18:00 and names the new day at its midnight; the 90 days name
+// the 1st and 15th of each month with the month's name. The keys are the KERNEL's local time, named when the viewer's
+// differs (the zone note below)
+var xlab='';spXTicks(ser.keys,SP.range).forEach(function(t){xlab+='<span style="left:'+((GUT+t.at*slot)/W*100).toFixed(1)+'%">'+esc(t.label)+'</span>';});
 var many=spMany(d);
 // no legend (T247e): the session list under the charts is the legend, each row in its stack's color
 var tzNote='';var mine=-(new Date().getTimezoneOffset());
@@ -73898,10 +73915,10 @@ var xh=document.createElementNS('http://www.w3.org/2000/svg','line');xh.setAttri
 var stamp=document.createElement('div');stamp.className='rsp-xh-stamp';stamp.style.display='none';box.appendChild(stamp);
 var range=SP.range==='day'?'hours':SP.range,other=meas==='usd'?'tok':'usd',ofmt=function(v){return meas==='usd'?fmtTok(Math.round(v))+' tok':(sec==='seat'?SP_APPROX:'')+fmtUsd(v);};
 var xhHide=function(){xh.style.display='none';stamp.style.display='none';spTipHide();};
-svgEl.onpointermove=function(e){var r=svgEl.getBoundingClientRect(),i=spBucketAt(e.clientX-r.left,r.width,n);if(i<0){xhHide();return;}
-var cx=(i+0.5)*slot,pct=cx/W*100;xh.setAttribute('x1',cx.toFixed(1));xh.setAttribute('x2',cx.toFixed(1));xh.style.display='';
-var st=spStamp(ser.keys[i],range);stamp.textContent=st;stamp.className='rsp-xh-stamp';stamp.style.left='max('+pct.toFixed(1)+'%,24px)';stamp.style.display='';
-if(cx/W*r.width+6+stamp.offsetWidth>r.width)stamp.classList.add('flip');   // decided in pixels (the stamp's width is fixed, the chart's is not); the 24px floor keeps it off the ceiling label
+svgEl.onpointermove=function(e){var r=svgEl.getBoundingClientRect(),k=r.width/W,i=spBucketAt(e.clientX-r.left-GUT*k,r.width-GUT*k,n);if(i<0){xhHide();return;}
+var cx=GUT+(i+0.5)*slot,pct=cx/W*100;xh.setAttribute('x1',cx.toFixed(1));xh.setAttribute('x2',cx.toFixed(1));xh.style.display='';
+var st=spStamp(ser.keys[i],range);stamp.textContent=st;stamp.className='rsp-xh-stamp';stamp.style.left=pct.toFixed(1)+'%';stamp.style.display='';
+if(cx/W*r.width+6+stamp.offsetWidth>r.width)stamp.classList.add('flip');   // decided in pixels (the stamp's width is fixed, the chart's is not); the plot starts past the label gutter, so the stamp never meets a label
 var t=e.target,pin=(t&&t.classList&&t.classList.contains('rsp-seg'))?+t.getAttribute('data-s'):-1;
 var top=spBucketTop(stacks,meas,i,SP_TIP_ROWS,pin),ot=0;for(var s=0;s<stacks.length;s++)ot+=(stacks[s][other]&&stacks[s][other][i])||0;
 spBucketTipShow(e.clientX,e.clientY,ofmt(ot)+' \u00b7 '+st,fmt(top.total),top,stacks,many,meas,i,pin,fmt,r);};
@@ -74224,8 +74241,8 @@ hs.forEach(function(host){var d=HIST[host],name=host||SELF();
 if(d&&d.pending){h+=many?'<div class="ru-tip-row ah-mline"><i class=ah-dot data-dot=quiet></i><span class=ah-nm>'+esc(name)+'</span><span class="rl-dots ah-wait"><i></i><i></i><i></i></span></div>':'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div>';return;}
 if(!d||d.error){h+='<div class="ah-line ah-err">Could not read the API history'+(many?' of '+esc(name):'')+': '+esc((d&&d.error)||'no answer')+'</div>';return;}
 if(many)h+='<div class="ru-tip-row ah-gname"><span class=ah-nm>'+esc(name)+'</span></div>';
-var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'',span=(led&&led.older)?'last 15 min (an older kernel)':R.label;
-if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(span)+'</div>';return;}
+var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'',span=(led&&led.older)?'last 15 min (an older kernel)':'last '+R.label;
+if(!bars){h+='<div class="ah-line ru-tip-reset">no API calls in the '+esc(span)+'</div>';return;}   // what the bars count: the calls the sessions made
 h+=bars;if(led.older)h+='<div class="ah-line ru-tip-reset">the last 15 min: an older kernel serves no longer history</div>';});
 if(!pinned)h+=legendHTML(other);   // the hover: the legend under the bars
 var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 '+esc(SELF()):'')+'</span></div>'+tr;
@@ -77268,8 +77285,10 @@ def _landing():
             ".rsp-allow{display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:10px}.rsp-allow b{font-weight:600}"
             ".rsp-card-none{font-size:10px;opacity:.6;padding:2px 0 4px}"
             ".rsp-card .rsp-svg{background:transparent}.rsp-chart{position:relative;margin-top:auto}"   # side by side, the two charts share a baseline
-            # the y labels sit over the bars at the plot's left edge: a chip of the card's own wash keeps them legible
-            ".rsp-chart .ru-tip-gy{padding:0 2px;border-radius:2px;background:rgba(46,46,47,0.85)}"
+            # the y labels stand in their own gutter left of the plot, right-aligned against it, so no bar runs beneath one;
+            # each midnight a faint vertical hairline
+            ".rsp-chart .ru-tip-gy{left:0;text-align:right;transform:none}.rsp-gridx{stroke:rgba(255,255,255,0.06);stroke-width:1}"
+            ".rsp-chart .ru-tip-gx span{white-space:nowrap}"   # a two-word label ('Thu 8') near the plot's right edge stays one line
             ".rsp-both{margin:10px 2px 0;opacity:.8}"
             ".rsp-lhead{align-items:center}.rsp-lhead .rsp-ctl{margin:0;font-weight:400}"
             # the seat's accounts, when its dollars come from more than one (the session list's cell grammar, its own
@@ -77675,7 +77694,7 @@ def _landing():
             "body.theme-light .rsp-acct td{border-bottom-color:rgba(0,0,0,0.06)}"
             # the cards on the white panel: a warm wash of the page's own cream, never a white alpha (it vanishes there)
             "body.theme-light .rsp-card{background:#F7F2EC}body.theme-light .rsp-card .rsp-svg{background:transparent}"
-            "body.theme-light .rsp-chart .ru-tip-gy{background:rgba(247,242,236,0.85)}"
+            "body.theme-light .rsp-gridx{stroke:rgba(0,0,0,0.07)}"
             "body.theme-light .ru-tip-block+.ru-tip-cost,body.theme-light .ru-tip-cols+.ru-tip-cost,body.theme-light .ru-tip-machines+.ru-tip-cost{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .rsp-card-t,body.theme-light .rsp-card-v b{color:#1F1E1D}"
             "body.theme-light .ru-ctot td{border-top-color:rgba(0,0,0,0.10);color:#1F1E1D}"

@@ -211,7 +211,7 @@ class RailRendering(unittest.TestCase):
 
     def test_the_tooltip_names_the_machines_only_when_there_is_more_than_one(self):
         self.assertIn("var manyMachines=(sets.length+NOREPORT.length)>1;", self.js)
-        self.assertIn("if(manyMachines)h+='<div class=ru-tip-machines>'", self.js)
+        self.assertIn("if(manyMachines)h+='<div class=ru-tip-machines>signed in on '", self.js)   # what the names are (2026-10-08 review)
         self.assertIn("if(d._acct)h+='<div class=ru-tip-acct>'+esc(d._acct)+'</div>';", self.js, "the account line heads its block whenever the login is known")
         self.assertIn('"noReport": _usage_no_report()', open(os.path.join(BIN, "romp-kernel")).read(), "the route names the machines up with no report")
         with km._remotes_lock:

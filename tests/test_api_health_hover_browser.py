@@ -356,6 +356,7 @@ await step("empty", async () => {
   // 3. no bucket: the head says so, no rows
   await show("empty"); await waitSel("#ah-tip .ah-hist .ah-legend");
   R.empty = { head: await head(), rows: await rows() };
+  R.emptyLine = await ev(() => { const n = document.querySelector("#ah-tip .ah-hist .ah-line"); return n ? n.textContent : null; });
   await leave();
 });
 await step("two", async () => {
@@ -886,6 +887,8 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(len(h["legend"]), 2, "the legend stands whatever the traffic")
         self.assertEqual(h["graphs"], 0, "no bucket: nothing to draw")
         self.assertFalse(h["unknown"])
+        # what the bars would count, said plainly (2026-10-08 review: "no attempts in the 24 hours" did not read naturally)
+        self.assertEqual(self.R["emptyLine"], "no API calls in the last 24 hours")
 
     def test_two_buckets_of_one_family_read_as_one_machine_and_the_tail_tells_them_apart_by_auth(self):
         # T301: the head counts every bucket of this machine (one kernel's buckets share its clock); the "worst of N
