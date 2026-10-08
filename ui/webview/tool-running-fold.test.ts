@@ -11,7 +11,7 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 
 test("a running (no-output) tool folds its command behind the head instead of showing it expanded", () => {
   // the no-output branch builds a foldable IN box and inlineFolds it — NOT an inline turn.appendChild(io)
-  assert.match(RENDER, /} else if \(!ev\.output\) \{[\s\S]*?const io = el\("div", "tool-io tool-io-fold"\);[\s\S]*?inlineFold\(head, turn, ev\.resultUuid \? "no output" : "running…", io, fkey\)/);
+  assert.match(RENDER, /} else if \(!ev\.output\) \{[\s\S]*?const io = el\("div", "tool-io tool-io-fold"\);[\s\S]*?inlineFold\(head, turn, ev\.resultUuid \? "no output" : noResult \? "no result" : "running…", io, fkey\)/);
   // the old always-expanded inline render is gone
   assert.doesNotMatch(RENDER, /} else if \(!ev\.output\) \{\s*\n\s*const io = el\("div", "tool-io"\); if \(ev\.input\)/);
 });
@@ -19,10 +19,12 @@ test("a running (no-output) tool folds its command behind the head instead of sh
 test("the fold reuses the tool's fkey, so a completed tool inherits any expand and the state persists", () => {
   // same fkey ("tool:"+uuid) as the completed and error branches → open-state survives running→done re-render
   assert.match(RENDER, /const fkey = ev\.uuid \? "tool:" \+ ev\.uuid : undefined;/);
-  assert.match(RENDER, /inlineFold\(head, turn, ev\.resultUuid \? "no output" : "running…", io, fkey\)/);
+  assert.match(RENDER, /inlineFold\(head, turn, ev\.resultUuid \? "no output" : noResult \? "no result" : "running…", io, fkey\)/);
 });
 
 test("resultUuid distinguishes a still-running command from one that finished with no output", () => {
-  // absent resultUuid = running ("running…"); present = done-but-empty ("no output") — never a stuck label
-  assert.match(RENDER, /ev\.resultUuid \? "no output" : "running…"/);
+  // absent resultUuid = running ("running…"); present = done-but-empty ("no output") — never a stuck label; and since
+  // 2026-10-08 a result that can no longer come (the kernel's running: false — the CLI died, the turn was cut) reads
+  // "no result", so a dead turn's command never says it is still running
+  assert.match(RENDER, /ev\.resultUuid \? "no output" : noResult \? "no result" : "running…"/);
 });

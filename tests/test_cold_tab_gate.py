@@ -270,9 +270,11 @@ class ColdTabGate(unittest.TestCase):
         # on the reset's list or carry a stated reason here. A new slot on either road, added without that decision, reds.
         # The scan reads the INLINE _send_client sends in _push and _ask_poll (below); a slot a HELPER sends is named by
         # hand, today only _push_subagents's ("subagent", ...), which cannot fire before ready (a subagent viewer opens
-        # only after the page is up), so it needs no clearing.
+        # only after the page is up), so it needs no clearing. _send_live_status's ("liveStatus", sid) (2026-10-08) is the
+        # other helper: it CAN fire before ready (it rides the strip's loop), so it is on the reset's list.
         import re, inspect
-        RESET = {"chat", "status", "taborder", "activeChat", "comments", "glossary", "working", "globalRetryPaused", "asklive"}
+        RESET = {"chat", "status", "taborder", "activeChat", "comments", "glossary", "working", "globalRetryPaused", "asklive",
+                 "liveStatus"}
         m = re.search(r"k\[0\] in \(([^)]*)\)", inspect.getsource(km._client_reset_chat_base))
         self.assertIsNotNone(m, "the reset's slot-clear tuple is present")
         listed = set(re.findall(r'"([A-Za-z0-9_]+)"', m.group(1)))

@@ -1,0 +1,47 @@
+<!-- SYNTHETIC fixture: the live-status indicators in the chat (2026-10-08), class for class what render.ts emits:
+     the tab strip with a THINKING session (the working dot wears a static ring: applyTabThinking) beside a plain
+     working tab; a finished turn whose thinking row carries the exact per-message figure ("Thought · 2.5k tokens")
+     and whose footer carries the turn's total; then a live turn: a running Bash row (working dot + elapsed time
+     from the call's stamp), a running subagent row with its task_progress line, a tool whose result can no longer
+     come (plain dot, "no result"); and the transcript's foot line, "Thinking · 14s" where the reply will appear
+     (#live-status: fixed height, loader dots), with its quiet twin below. Invented content (notes-api demo domain).
+     Run, dark then Yatharth light:
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/live-status-chat.html \
+           --out /tmp/live-status/chat-dark.png --size 900x760 --extra-css 'body{display:block}'
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/live-status-chat.html \
+           --out /tmp/live-status/chat-light.png --size 900x760 --extra-css 'body{display:block}' \
+           --body-class "theme-light chat-theme-yatharth"
+-->
+<div id="tabbar"><span id="tabs">
+  <div class="tab active colored tab-working" data-id="api" style="--chip-bg:#1EA1EB;--chip-fg:#0c1a2e"><span class="tab-dot thinking" title="Thinking · 14s"></span><span class="tab-label">api</span><span class="tab-ctx" title="context 41% used"><span class="tab-ctx-fill" style="height:41%;background:rgb(84,178,4)"></span></span><span class="tab-close">×</span></div>
+  <div class="tab colored tab-working" data-id="web" style="--chip-bg:#54B204;--chip-fg:#0c1a00"><span class="tab-dot"></span><span class="tab-label">web</span><span class="tab-ctx" title="context 12% used"><span class="tab-ctx-fill" style="height:12%;background:rgb(84,178,4)"></span></span><span class="tab-close">×</span></div>
+  <div class="tab colored" data-id="tests" style="--chip-bg:#DD42FF;--chip-fg:#ffffff"><span class="tab-dot none"></span><span class="tab-label">tests</span><span class="tab-ctx" title="context 63% used"><span class="tab-ctx-fill" style="height:63%;background:rgb(224,176,32)"></span></span><span class="tab-close">×</span></div>
+</span></div>
+<div id="content" style="height:auto;overflow:visible">
+<div class="thread">
+  <div class="turn turn-user"><div class="user-bubble">Add cursor pagination to the notes list endpoint.</div></div>
+  <div class="turn turn-thinking"><span class="dot ring"></span>
+    <div class="think-tokens">Thought · 2.5k tokens</div>
+    <div class="think-clamp" title="click to expand"><div class="thinking">Checking the list handler in api/notes.py before touching the router; the cursor should be the note id, not an offset, so inserts mid-scroll do not repeat rows.</div></div>
+  </div>
+  <div class="turn turn-tool"><span class="dot green"></span>
+    <div class="tool-head"><span class="tool-label">Edited api/notes.py</span><span class="tool-fold-toggle" title="click to expand"><span class="diff-add">+24</span> <span class="diff-del">-6</span></span></div>
+  </div>
+  <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>Pagination is in: <code>GET /notes?cursor=&lt;id&gt;</code> returns 50 rows and the next cursor.</p></div>
+    <div class="turn-elapsed" title="worked 1m 3s on this prompt; 6,120 thinking tokens">1m 3s · thought 6.1k tokens</div>
+  </div>
+  <div class="turn turn-user"><div class="user-bubble">Now run the api tests and have an agent review the diff.</div></div>
+  <div class="turn turn-tool"><span class="dot working"></span>
+    <div class="tool-head"><span class="tool-label tool-label-code">pytest -q tests/test_api.py</span><span class="tool-elapsed">12s</span><span class="tool-fold-toggle" title="click to expand">running…</span></div>
+  </div>
+  <div class="turn turn-tool"><span class="dot working"></span>
+    <div class="tool-head"><span class="tool-label">Agent: review the pagination diff</span><span class="tool-elapsed">41s</span><span class="agent-live">Read · 7 tool calls · 18k tokens</span><span class="tool-fold-toggle" title="click to expand">prompt · 7 tool calls</span></div>
+  </div>
+  <div class="turn turn-tool"><span class="dot ring"></span>
+    <div class="tool-head"><span class="tool-label tool-label-code">npm run lint</span><span class="tool-fold-toggle" title="click to expand">no result</span></div>
+  </div>
+</div>
+<div id="live-status"><div class="live-thinking" title="the model has been thinking for 14s"><span class="meta-dots"><i></i><i></i><i></i></span><span class="live-thinking-text">Thinking · 14s</span></div></div>
+<div class="thread" style="margin-top:14px"><div class="turn turn-user"><div class="user-bubble">(a stretch whose stream went silent)</div></div></div>
+<div id="live-status-quiet" style="max-width:var(--chat-col);margin:0 auto;padding:0 24px 0 56px;height:18px"><div class="live-thinking quiet" title="the model has been thinking for 1m 20s; no thinking update has arrived for 15s"><span class="meta-dots"><i></i><i></i><i></i></span><span class="live-thinking-text">Thinking · 1m 20s · quiet for 15s</span></div></div>
+</div>

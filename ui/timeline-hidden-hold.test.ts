@@ -303,7 +303,9 @@ test("source pins: the hidden branch of _tickLive returns; both hold sites key o
   assert.match(tick, /if \(!this\._isVisible\(\)\) return;/, "hidden: stop the loop");
   assert.doesNotMatch(tick, /_sleep\(2000\)/, "no long sleep re-entering _isVisible()'s forced offsetParent layout every 2 s");
   const hold = "|| this._hiddenForPaint() || this._pointerHeld) { this._dirtyWhileTip = true; return; }";
-  assert.equal(SRC.split(hold).length - 1, 2, "update() and applyBars() share the one hold condition, pointer-held last (click-safe.test.ts pins that tail)");
+  // …and the live-status relayout (_liveRelayout, 2026-10-08: a thinking stretch starting or ending re-lays the lane's chip)
+  // holds on the very same condition, a third site
+  assert.equal(SRC.split(hold).length - 1, 3, "update(), applyBars() and _liveRelayout() share the one hold condition, pointer-held last (click-safe.test.ts pins that tail)");
   assert.match(SRC, /document\.addEventListener\('visibilitychange', this\._onVis\);/);
   assert.match(SRC, /if \(typeof IntersectionObserver !== 'undefined'\) \{[\s\S]*?this\._io\.observe\(this\.wrap\);/, "the observer is guarded — Obsidian / a bare host may lack it");
   assert.match(SRC, /document\.removeEventListener\('visibilitychange', this\._onVis\);/);

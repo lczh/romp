@@ -3356,11 +3356,14 @@ def _has_tool_result(blocks):
 
 def _norm_message(message):
     """The Anthropic message object kept verbatim where it exists (role, content blocks,
-    model, usage, stop_reason). Content is normalized to a block list."""
+    model, usage, stop_reason, id). Content is normalized to a block list. The id is the API
+    message's: the CLI writes one record per content block, every record of one message carrying
+    the same id and the same final usage, so a per-message figure (the chat's thinking tokens) is
+    counted once by it."""
     if not isinstance(message, dict):
         return None
     out = {"role": message.get("role"), "content": _content(message)}
-    for k in ("model", "stop_reason", "usage"):
+    for k in ("model", "stop_reason", "usage", "id"):
         if message.get(k) is not None:
             out[k] = message[k]
     return out

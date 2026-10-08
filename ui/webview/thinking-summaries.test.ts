@@ -24,10 +24,12 @@ const KERNEL = read("bin", "romp-kernel");
 test("a thinking block is opaque only when signed AND textless — a summary renders its text", () => {
   const at = RENDER.indexOf('if (ev.kind === "thinking") {');
   assert.ok(at > 0, "the thinking branch exists");
-  const branch = RENDER.slice(at, at + 1400);
+  const branch = RENDER.slice(at, at + 2000);
   assert.match(branch, /const opaque = ev\.encrypted && !\(ev\.text \|\| ""\)\.trim\(\);/,
     "the renderer re-derives opacity from the text it was handed, never from the flag alone");
-  assert.match(branch, /t\.textContent = opaque \? "Thinking…" : ev\.text;/);
+  // (an opaque row with the message's exact thinking tokens reads "Thought · 2.5k tokens" instead: the thinking is done,
+  // and what it cost is all there is to show — live-status.ts thoughtLabel, 2026-10-08)
+  assert.match(branch, /t\.textContent = opaque \? \(thought \|\| "Thinking…"\) : ev\.text;/);
   assert.match(branch, /if \(opaque\) \{ turn\.appendChild\(t\); return turn; \}/,
     "only the opaque block is the one-liner; a text-bearing block falls through to the clamp");
   assert.ok(!/ev\.encrypted \? "Thinking…"/.test(branch), "the old flag-only rule is gone");

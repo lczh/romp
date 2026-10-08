@@ -36,7 +36,7 @@ import traceback
 import types
 import datetime as _dt
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from pathlib import Path
 
 # #1735: the gc-freeze ended-session note. Rather than GUESS at the pop whether an ended session is cyclic (three
@@ -6060,6 +6060,13 @@ def _sdk_parse_message():
         return None
 
 
+# How long a thinking stretch may go without a system/thinking_tokens frame before the live label stops counting as if
+# the stream were flowing and says how long it has been silent (SdkSession._thinking_row). Not a liveness guess: the
+# label still names only what the frames proved (a stretch began at t, the last frame came at quiet); this decides when
+# the silence is worth a word.
+THINKING_QUIET_S = 10
+
+
 class SdkSession:
     """One long-lived SDK client running in its own thread + asyncio loop."""
 
@@ -6253,8 +6260,20 @@ class SdkSession:
         #   stream (system/task_started..task_updated — see _on_message), terminal statuses clear — so an idle
         #   session waiting on a timer/watcher it launched reads AWAITING instead of plain idle (the user
         #   2026-07-11: nimbus's 20-minute campaign timer). Replaces transcript-scrape liveness for SDK sessions.
+        self._bg_ended = OrderedDict()               # task ids that ENDED (a notification, a terminal patch, or a
+        #   background_tasks_changed level that no longer lists them), newest last, capped: a task_progress for one of
+        #   them arriving after its end is late chatter and must not self-heal it back into the live set as a stale
+        #   "running" row (_on_task_event). Only an explicit start, or a level naming it, brings an id back.
+        self._bg_foreground: set[str] = set()        # live task ids registered in the FOREGROUND (task_started
+        #   is_backgrounded false: a synchronous agent its spawning call blocks on) and not backgrounded since: the
+        #   background level never lists them, so _on_bg_level leaves them to their bookends
         self._sub_lock = threading.Lock()            #   hooks mutate on the loop thread; snapshot() reads from the kernel thread
         #                                                (guards _subagents AND _bg_tasks)
+        self._thinking = None                        # the thinking stretch streaming RIGHT NOW: {"t": its first
+        #   system/thinking_tokens frame, "last": its latest}, or None. Set by the first frame (_on_thinking_frame),
+        #   ended by the next assistant message, the result, an api_retry, an interrupt or the CLI going away
+        #   (_end_thinking); snapshot()'s `thinkingLive` reads it through _thinking_row, which also refuses it outside a
+        #   live turn, so it can never outlive its message or its CLI.
         self._wf_agents: dict[str, set] = {}         # LIVE Workflow runs: task_id -> the agent ids its progress
         #   lists have named (the roster). The CLI fires SubagentStart for every workflow agent but NOT
         #   SubagentStop for every one of them (probe-verified on CLI 2.1.257, 2026-09-02: a workflow agent whose
@@ -7451,6 +7470,7 @@ class SdkSession:
         # never results keeps inflight>0 and PAUSES the queue — honest (kill recovers). A fresh turn clears
         # _interrupted (see inputs()), and the ResultMessage clears it too.
         self._interrupted = True
+        self._thinking = None    # a stopped turn is not thinking, whatever frame the CLI flushes before it acknowledges
         self.backend._poke()
         try:
             await self.client.interrupt()
@@ -9159,6 +9179,7 @@ class SdkSession:
                                 self.backend._log("sdk session %s: the %s ended on %s: %s, at %s"
                                                   % (self.name, role, type(e).__name__, _mask_ids(e), _compact_tb(e)))
                         self.client = None
+                        self._thinking = None   # the CLI is gone, and its thinking with it (the snapshot gates on client too)
                         self._connected.clear()
             except Exception as e:
                 self._release_launch_slot()   # the connect is over, failed: a relaunch's slot never outlives it
@@ -10561,8 +10582,20 @@ class SdkSession:
             # ONE parse, TWO consumers: the same frame feeds the /api-health ring (ApiHealth) — never a
             # second subscription, never the settle-time retriesRecovered ledger (no per-attempt status).
             self._ah_note_retry(d, msg)
+            self._end_thinking()   # the request that was thinking failed; the retry's own frames start a new stretch
             self._mark("retrying")
             self.backend._poke()
+        elif isinstance(msg, SystemMessage) and msg.subtype == "thinking_tokens":
+            # The CLI's live thinking-progress frame (CLI 2.1.2xx: system/thinking_tokens, estimated_tokens and its
+            # delta), sent while the model thinks, partial messages or not. Its token figure is an ESTIMATE (with
+            # summarized thinking it runs up to 2x off the billed count), so only the frame's ARRIVAL is used: the
+            # proof that a thinking stretch is streaming right now. One push wake at its start, never one per frame.
+            self._on_thinking_frame()
+        elif isinstance(msg, SystemMessage) and msg.subtype == "background_tasks_changed":
+            # The CLI's LEVEL signal for background work: every live background task after each membership change,
+            # REPLACE semantics. The edge stream below can lose a bookend (a TaskStop suppressing a notification, a
+            # late progress frame); reconciling from this set is what keeps a task from reading "running" after it ended.
+            self._on_bg_level(msg.data if isinstance(getattr(msg, "data", None), dict) else {})
         elif isinstance(msg, SystemMessage) and msg.subtype in (
                 "task_started", "task_progress", "task_updated", "task_notification"):
             # The CLI's DESIGNED background-task lifecycle (task_started → task_progress* →
@@ -10600,6 +10633,10 @@ class SdkSession:
             # this hook checks parent_tool_use_id itself rather than inheriting the sidechain guard
             # below, which sits AFTER the recovery-marker writes and so never protected them.
             self._ah_note_assistant(msg)
+            if not getattr(msg, "parent_tool_use_id", None):
+                # a main-thread content block landed: the thinking block itself (its stretch is over) or whatever
+                # follows it. A subagent's message says nothing about the main conversation's thinking.
+                self._end_thinking()
             # The CLI's FAILURE settle wears an AssistantMessage too: when a storm exhausts its retries it
             # writes the error itself as the reply text ("API Error: 529 Overloaded…") and stamps the
             # message with `error` (the SDK's designed flag — "server_error", "rate_limit", …; the same
@@ -10863,6 +10900,7 @@ class SdkSession:
                 self.retrying = False
                 self.retry_count = 0                    # turn over → clear the storm count (a turn that errored out without recovering leaves no "recovered" note)
                 self.retry_info = None
+                self._thinking = None                  # the turn is over, so is any thinking in it (the poke below publishes it)
                 self._interrupted = False              # this turn's result settled it (whether it finished or was interrupted)
                 self._intr_level = 0                   # settle ends the escalation episode — the next stop starts polite
                 # A ResultMessage is the AUTHORITATIVE turn-end: the CLI has processed everything we handed it
@@ -11818,6 +11856,8 @@ class SdkSession:
             self._wf_slots.clear()
             died = sorted((dict(v) for v in self._bg_tasks.values()), key=lambda d: d.get("since") or 0)
             self._bg_tasks.clear()
+            if getattr(self, "_bg_foreground", None) is not None:   # getattr: __new__-built test doubles
+                self._bg_foreground.clear()
         if died:
             note = task_death_notice(died, did=CUT_BY.get(cut_by, ""))
             with self._lock:
@@ -11950,9 +11990,89 @@ class SdkSession:
             self.backend._poke()
             self._try_switch_reconnect()
 
+    # ---- live thinking (the CLI's system/thinking_tokens frames) ----
+
+    def _on_thinking_frame(self):
+        """One system/thinking_tokens frame: the model is thinking RIGHT NOW. The stretch's first frame stamps its start
+        and wakes the pusher once; every later frame only moves `last`, with no push of its own (nothing on screen changes
+        per frame; the pusher's cycle reads `last` when _thinking_row decides whether the stretch has gone quiet). A frame
+        outside a live turn (no client, nothing in flight, a stop under way) starts nothing."""
+        now = time.time()
+        th = getattr(self, "_thinking", None)   # getattr: __new__-built test doubles
+        if th is not None:
+            th["last"] = now
+            return
+        if not getattr(self, "client", None) or getattr(self, "inflight", 0) <= 0 or getattr(self, "_interrupted", False):
+            return
+        self._thinking = {"t": now, "last": now}
+        self.backend._wake_push()   # the pusher alone: a stretch starting changes no judge input
+
+    def _end_thinking(self):
+        """The thinking stretch is over (its block landed, its request failed, the turn ended or stopped, the CLI went
+        away): clear it, waking the pusher once and only when one was streaming."""
+        if getattr(self, "_thinking", None) is not None:   # getattr: __new__-built test doubles
+            self._thinking = None
+            self.backend._wake_push()
+
+    def _thinking_row(self, now=None):
+        """snapshot()'s `thinkingLive`: {"t": the stretch's first frame, epoch seconds} while one streams inside a live turn,
+        plus "quiet": the epoch of its latest frame once none has come for THINKING_QUIET_S, so the chat says how long the
+        stream has been silent instead of counting on as if it were not. None otherwise. Gated here as well as cleared at
+        each ending event, so a missed ending cannot leave it standing past its turn, its stop or its CLI; a retry storm
+        and a compaction wear their own live cards, so neither shows it."""
+        th = getattr(self, "_thinking", None)   # getattr: __new__-built test doubles
+        if th is None or not self.client or self.inflight <= 0 or self._interrupted or self.retrying \
+                or getattr(self, "_compacting", False):
+            return None
+        row = {"t": int(th["t"])}
+        last = th["last"]
+        if (time.time() if now is None else now) - last >= THINKING_QUIET_S:
+            row["quiet"] = int(last)
+        return row
+
     # ---- background-task tracking (the CLI's task lifecycle stream) ----
 
     _TERMINAL_TASK = frozenset(("killed", "failed", "stopped", "completed"))
+    _BG_ENDED_CAP = 512   # ended task ids remembered against a late progress frame (_bg_ended)
+
+    def _note_bg_ended(self, tid: str):
+        """Remember an ended task id (caller holds _sub_lock), newest last, capped."""
+        ended = getattr(self, "_bg_ended", None)   # getattr: __new__-built test doubles carry none
+        if ended is None:
+            return
+        ended.pop(tid, None)
+        ended[tid] = True
+        while len(ended) > self._BG_ENDED_CAP:
+            ended.popitem(last=False)
+
+    def _on_bg_level(self, d: dict):
+        """system/background_tasks_changed → the live set reconciled to the CLI's own list of every live background task
+        (REPLACE semantics, per the CLI's schema: a level signal, so a lost bookend cannot leave a stale "running"). A
+        background entry the level no longer names has ENDED, whatever its bookends said or failed to say, and ends here
+        exactly as a task_notification ends it; an id the level names is live, added when unknown (its description and
+        type from the level; the bookend that follows fills the tool-use id). A FOREGROUND task (task_started's
+        is_backgrounded false: a synchronous agent the spawning call blocks on) is no background task and never in the
+        level, so the level does not speak for it until a backgrounding moves it there."""
+        tasks = d.get("tasks")
+        if not isinstance(tasks, list):
+            return
+        level = {str(t["task_id"]): t for t in tasks if isinstance(t, dict) and t.get("task_id")}
+        fg = getattr(self, "_bg_foreground", None)   # getattr: __new__-built test doubles
+        gone = getattr(self, "_bg_ended", None)
+        with self._sub_lock:
+            ended = [tid for tid in self._bg_tasks if tid not in level and not (fg and tid in fg)]
+            added = [tid for tid in level if tid not in self._bg_tasks]
+            for tid in level:
+                if fg is not None:
+                    fg.discard(tid)          # listed as background: the level speaks for it from here
+                if gone is not None:
+                    gone.pop(tid, None)      # live by the CLI's own word (a resumed agent reuses its id)
+        for tid in ended:
+            self._on_task_event("task_notification", {"task_id": tid})
+        for tid in added:
+            t = level[tid]
+            self._on_task_event("task_started", {"task_id": tid, "description": t.get("description") or "",
+                                                 "task_type": t.get("task_type") or ""})
 
     def _on_task_event(self, subtype: str, d: dict):
         """One system/task_* lifecycle message → the live _bg_tasks set. task_started adds; task_progress
@@ -11972,7 +12092,13 @@ class SdkSession:
         ended = False            # this event ENDED the task (a notification, or a terminal patch status)
         wf = False               # the task is a Workflow run — its agents report through its progress list
         sub_changed = False
+        gone_ids = getattr(self, "_bg_ended", None)        # getattr: __new__-built test doubles carry neither
+        fg = getattr(self, "_bg_foreground", None)
         with self._sub_lock:
+            if subtype == "task_progress" and gone_ids and tid in gone_ids and tid not in self._bg_tasks:
+                # progress chatter for a task that already ENDED (its notification, a terminal patch or the level came
+                # first): late, never a reason to list it as running again
+                return
             if subtype in ("task_started", "task_progress"):
                 entry = self._bg_tasks.get(tid)
                 if entry is None:
@@ -11980,10 +12106,33 @@ class SdkSession:
                                                    "since": int(time.time()),
                                                    "toolUseId": d.get("tool_use_id") or "", "lastTool": ""}
                     changed = True
+                    if gone_ids is not None:
+                        gone_ids.pop(tid, None)   # an explicit start brings an id back (a resumed agent reuses its id)
+                    if subtype == "task_started" and d.get("is_backgrounded") is False and fg is not None:
+                        fg.add(tid)               # registered in the foreground: the level will not list it
+                if not entry.get("toolUseId") and d.get("tool_use_id"):
+                    entry["toolUseId"] = str(d.get("tool_use_id"))   # a level-made entry learns it from its bookend…
+                    changed = True                                   # …and mirrors it, once (the box joins on it)
+                if not entry.get("type") and d.get("task_type"):
+                    entry["type"] = str(d.get("task_type"))
                 if d.get("description"):
                     entry["desc"] = str(d.get("description"))
                 if d.get("last_tool_name"):
                     entry["lastTool"] = str(d.get("last_tool_name"))
+                u = d.get("usage")
+                prog = None
+                if isinstance(u, dict):
+                    # the subagent's own running totals (task_progress usage: tool_uses, total_tokens), shown on its row in
+                    # the chat; progress chatter like lastTool, so the chat-build key drops it (_CHAT_TASK_ROW_UNKEYED)
+                    for src, dst in (("tool_uses", "calls"), ("total_tokens", "tokens")):
+                        v = u.get(src)
+                        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                            prog = dict(prog or entry.get("agentProgress") or {}, **{dst: v})
+                if isinstance(d.get("summary"), str) and d.get("summary").strip():
+                    # the CLI's one-line status for the row, when it sends one
+                    prog = dict(prog or entry.get("agentProgress") or {}, summary=d["summary"].strip()[:200])
+                if prog is not None:
+                    entry["agentProgress"] = prog   # a fresh dict per change: a snapshot copy never shares a mutating one
                 if isinstance(d.get("workflow_progress"), list) and not entry.get("type"):
                     # only a Workflow run ships a per-agent list; a self-healed entry (no task_started seen)
                     # learns its type from it, so the run's later events reach _reconcile_workflow_agents
@@ -11997,6 +12146,12 @@ class SdkSession:
                     changed = gone is not None
                     ended = True
                     wf = (gone or {}).get("type") == "local_workflow" or tid in self._wf_agents
+                    self._note_bg_ended(tid)
+                    if fg is not None:
+                        fg.discard(tid)
+                elif subtype == "task_updated" and isinstance(d.get("patch"), dict) \
+                        and d["patch"].get("is_backgrounded") is True and fg is not None:
+                    fg.discard(tid)   # moved to the background: the level speaks for it from here
             if ended and self._subagents.pop(tid, None) is not None:
                 sub_changed = True   # a Task agent's own task ended — with or without its SubagentStop
         if wf and (ended or isinstance(d.get("workflow_progress"), list)):
@@ -12206,6 +12361,8 @@ class SdkSession:
                 #   2026-08-04: Interrupting… fell back to Working, then Ready — the stale snapshot popped
                 #   the click stamp). _interrupting compares this against the click time.
                 "subagents": subs,   # live Task subagents (count + types) → lane affordance; [] when none
+                "thinkingLive": self._thinking_row(),   # a thinking stretch streaming now ({"t", "quiet"?}) → the live
+                #   "Thinking · 14s" label on the chat, the tab and the Sessions pane (_thinking_row); None otherwise
                 "bgTasks": self._live_bg_tasks()}   # live background tasks (task lifecycle stream) → an idle
                 #   session waiting on a timer/watcher reads AWAITING, why = the task's description; [] when none
 

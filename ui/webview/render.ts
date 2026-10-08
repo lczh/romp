@@ -131,6 +131,7 @@ import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from ".
 import { mediaSrc, kernelUrl, swirlOSrc } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
+import { readLiveStatus, thinkingText, thinkingShort, thinkingTip, thoughtLabel, taskProgressText, turnThoughtTokens, tokensShort, type LiveStatus } from "./live-status";   // what a session is doing this second (thinking, its subagents' progress), from the kernel's liveStatus frame (2026-10-08)
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
@@ -198,7 +199,7 @@ type ChatEvent = (
   // marker (2026-09-08) — the body is written to the agent and never doubles as the head
   | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; spendGuard?: boolean; interruptCause?: string; interruptSpend?: SpendFigures; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }
   | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
-  | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string }
+  | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string; thinkTokens?: number }   // thinkTokens: the exact thinking tokens of the API message this row opens (usage.output_tokens_details.thinking_tokens, on its first thinking row only; kernel build_session), the "Thought · 2.5k tokens" label and the turn's total
   | {
       kind: "tool";
       name: string;
@@ -235,6 +236,10 @@ type ChatEvent = (
       agentSteps?: AgentGistRow[];
       stepsTotal?: number;
       agentGist?: AgentGist;
+      // still waiting for its result (kernel _stamp_running_tools, 2026-10-08): true while its turn is live (the row
+      // reads working), false when the result can no longer come (the CLI died, the turn was cut); absent once the
+      // result landed, and from an older kernel (the old look then stands)
+      running?: boolean;
     }
   | {
       kind: "postal-service";
@@ -512,6 +517,9 @@ const order: string[] = [];           // positional tab order (for cycling)
 // 2026-08-09, who watched sends vanish for a beat before appearing); and its successor read only the
 // last 30 events, so an absorbed landing placed above them never ended the bubble (2026-09-06 review).
 const pendingSent = new Map<string, PendingSend[]>();
+// sid → what the session is doing this second (live-status.ts): the kernel's liveStatus frame, one per session, sent
+// only when it changes and never through a chat build. Absent = nothing live (the frame that clears it deletes the entry).
+const liveStatus = new Map<string, LiveStatus>();
 const isOptimistic = (e: ChatEvent): boolean => isOptimisticUuid(e.uuid);
 // The send-landing watch (send-landing.ts): every send registered here, its landing and its losses read at each frame the
 // dispatch applies (landingBefore / landingAfter). Declared beside the pending sends it reads, ahead of every caller.
@@ -2800,7 +2808,7 @@ function injectedSrc(src: InjectedSource): { label: string; glyph: NoticeGlyphKi
   return { label: "system", glyph: "system" };
 }
 
-function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number | null): HTMLElement {
+function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number | null, thought?: number | null): HTMLElement {
   if (ev.kind === "user" && ev.hiddenByPending) {   // the kernel's echo of a send OUR bubble draws (T262h): the unit stays, invisible
     const hid = el("div", "turn turn-user turn-echo-hidden"); hid.style.display = "none"; return hid;
   }
@@ -2844,17 +2852,19 @@ function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number |
   if ((anchorUuid || epoch != null) && !renderingIntoThread) wireTurnHover(turn, railDot, anchorUuid ?? null, epoch ?? 0, ev.tlId ?? null);
   // a finished prompt's last reply carries a small "worked 2m 14s" tick in the rail
   // gutter (left, by the time-markers) — how long the session ran on that prompt.
-  if (worked != null) turn.appendChild(elapsedFooter(worked));
+  if (worked != null) turn.appendChild(elapsedFooter(worked, thought));
   return turn;
 }
 
 // (durLabel — the ONE duration format for the worked footer, the work timer and every notice's meta or
 // countdown — lives in duration.ts since 2026-09-08; strip.ts's fmtReset rides it too.)
 
-function elapsedFooter(secs: number): HTMLElement {
+function elapsedFooter(secs: number, thought?: number | null): HTMLElement {
   const f = el("div", "turn-elapsed");
-  f.textContent = durLabel(secs);
-  f.title = `worked ${durLabel(secs)} on this prompt`;
+  // …and how much of the turn was thinking (2026-10-08): the sum of the exact per-message figures on its thinking rows
+  // (turnThoughtTokens), said only when there is one and the turn's start is among the events held
+  f.textContent = durLabel(secs) + (thought ? ` · thought ${tokensShort(thought)} tokens` : "");
+  f.title = `worked ${durLabel(secs)} on this prompt` + (thought ? `; ${thought.toLocaleString()} thinking tokens` : "");
   return f;
 }
 
@@ -4164,9 +4174,13 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     // text is re-checked here so a bundle fed by an older kernel (flag = signed) still shows what it
     // was handed (2026-09-01 — before this, every summary hid behind the placeholder).
     const opaque = ev.encrypted && !(ev.text || "").trim();
+    // the exact thinking tokens of the API message this row opens (2026-10-08): the label says the thinking is DONE and
+    // what it cost, from the transcript's own usage figure; an opaque row has nothing else to show, so it IS the line
+    const thought = typeof ev.thinkTokens === "number" && ev.thinkTokens > 0 ? thoughtLabel(ev.thinkTokens) : "";
     const t = el("div", "thinking" + (opaque ? " encrypted" : ""));
-    t.textContent = opaque ? "Thinking…" : ev.text;
+    t.textContent = opaque ? (thought || "Thinking…") : ev.text;
     if (opaque) { turn.appendChild(t); return turn; }   // already a one-liner
+    if (thought) { const h = el("div", "think-tokens"); h.textContent = thought; turn.appendChild(h); }
     // condense: clamp to ~2 lines with a fade; click to expand (the user: don't let
     // the interspersed thinking blocks dominate vertically).
     const clamp = el("div", "think-clamp");
@@ -4704,6 +4718,119 @@ function retryingTick(): void {
     const cd = n as HTMLElement;
     const at = Number(cd.dataset.retryAt);
     if (at) cd.textContent = retryingCountdownText(at);
+  }
+}
+
+// ── live status (2026-10-08) ── what a session is doing this second, from the kernel's liveStatus frame (live-status.ts):
+// a thinking stretch, and each running subagent's progress. Every piece is painted IN PLACE (the transcript's foot line,
+// the tab's dot, an agent row's progress span) and ticked by the 1 s timer, so none of it costs a chat build or a strip
+// rebuild; each surface that rebuilds (renderTabs, renderTool) reads the same map when it does.
+function dropLiveStatus(hosts: string[] | null): void {
+  for (const id of Array.from(liveStatus.keys())) {
+    if (hosts && !hosts.some((h) => typeof h === "string" && id.startsWith(h + ":"))) continue;
+    liveStatus.delete(id);
+    paintTabThinking(id);
+    paintTaskProgress(id);
+  }
+  paintLiveThinking();
+}
+
+function applyLiveStatus(m: { id?: unknown; thinking?: unknown; tasks?: unknown }): void {
+  const id = typeof m.id === "string" ? m.id : "";
+  if (!id) return;
+  const ls = readLiveStatus(m);
+  if (!ls.thinking && !Object.keys(ls.tasks).length) liveStatus.delete(id); else liveStatus.set(id, ls);
+  paintTabThinking(id);
+  if (id === activeId) paintLiveThinking();
+  paintTaskProgress(id);
+}
+
+// The transcript's foot line: ONE element under every thread (ensureView inserts threads before it), of a FIXED height
+// whether or not it shows anything, so a thinking stretch starting and ending moves nothing on screen: the line's room is
+// reserved at the foot of the transcript, where the reply will appear, and the follow-mode scroll never sees a box come
+// and go (T262f's tail rule). Made ONCE, by the first stretch shown over a PAINTED transcript, and kept: never at load,
+// since the pane loader lifts at #content's first child other than the picker host (kernel _pane_spin), and a box there
+// before the transcript would lift it over a blank chat. A reader at the bottom when it adds its room stays there.
+function liveStatusEl(): HTMLElement | null {
+  const have = document.getElementById("live-status");
+  if (have) return have;
+  const content = document.getElementById("content");
+  const v = activeId ? views.get(activeId) : null;
+  if (!content || !v || !v.el.children.length) return null;   // no painted transcript yet: the 1 s tick asks again
+  const atEnd = atBottom(content);   // measured before the box adds its room
+  const n = el("div", "");
+  n.id = "live-status";
+  content.insertBefore(n, document.getElementById("live-ask"));
+  if (atEnd) writeScroll(content, content.scrollHeight, "live-status", true);
+  return n;
+}
+
+// The active session's "Thinking · 14s" (and, once the stream has gone silent, "· quiet for 15s"): the loader dots while
+// frames flow, still dots once quiet, never a spinner past what the frames proved.
+function paintLiveThinking(): void {
+  const th = activeId && !fileTabOpen && !snapView && !hostIsDown(activeId) ? liveStatus.get(activeId)?.thinking : null;   // an unreachable host's session: no word on it
+  if (!th) { const have = document.getElementById("live-status"); if (have?.firstChild) have.replaceChildren(); return; }
+  const n = liveStatusEl();
+  if (!n) return;
+  const now = Date.now() / 1000;
+  let line = n.firstElementChild as HTMLElement | null;
+  if (!line) {
+    line = el("div", "live-thinking");
+    line.appendChild(metaDots());
+    line.appendChild(el("span", "live-thinking-text"));
+    n.appendChild(line);
+  }
+  line.classList.toggle("quiet", !!th.quiet);
+  const t = line.querySelector(".live-thinking-text") as HTMLElement;
+  const txt = thinkingText(th, now);
+  if (t.textContent !== txt) t.textContent = txt;
+  line.title = thinkingTip(th, now);
+}
+
+// The tab's cue: the working dot wears a ring while the session thinks (a static shape, never a pulse: the tab dot's
+// oscillation was dropped as distracting, 2026-06-16; and nothing whose width could move the strip), its title the words.
+function applyTabThinking(tab: HTMLElement, id: string): void {
+  const d = tab.querySelector<HTMLElement>(".tab-dot");
+  if (!d) return;
+  const th = hostIsDown(id) ? undefined : liveStatus.get(id)?.thinking;
+  d.classList.toggle("thinking", !!th);
+  if (th) {
+    if (d.dataset.baseTitle == null) d.dataset.baseTitle = d.title;
+    d.title = thinkingShort(th, Date.now() / 1000);
+  } else if (d.dataset.baseTitle != null) {
+    d.title = d.dataset.baseTitle;
+    delete d.dataset.baseTitle;
+  }
+}
+function paintTabThinking(id: string): void {
+  const bar = document.getElementById("tabs");
+  if (!bar) return;
+  for (const tab of Array.from(bar.querySelectorAll<HTMLElement>(".tab[data-id]"))) if (tab.dataset.id === id) applyTabThinking(tab, id);
+}
+
+// A session's running subagent rows: each progress span (renderTool's .agent-live, keyed by the spawning call's id)
+// rewritten from the latest frame, in place.
+function paintTaskProgress(id: string): void {
+  const v = views.get(id);
+  if (!v) return;
+  const tasks = liveStatus.get(id)?.tasks || {};
+  for (const n of Array.from(v.el.querySelectorAll<HTMLElement>(".agent-live[data-tu]"))) {
+    const t = taskProgressText(tasks[n.dataset.tu || ""], n.dataset.brief === "1");
+    if (n.textContent !== t) n.textContent = t;
+  }
+}
+
+// The 1 s clocks: the foot line, the thinking tabs' titles and every running tool's elapsed time, each written only
+// where its text moved.
+function liveStatusTick(): void {
+  paintLiveThinking();
+  for (const [id, ls] of liveStatus) if (ls.thinking) paintTabThinking(id);
+  const now = Date.now() / 1000;
+  for (const n of Array.from(document.querySelectorAll<HTMLElement>(".tool-elapsed[data-since]"))) {
+    const since = Number(n.dataset.since);
+    if (!(since > 0)) continue;
+    const t = durLabel(now - since);
+    if (n.textContent !== t) n.textContent = t;
   }
 }
 
@@ -5407,7 +5534,7 @@ function apiRetryTick(): void {
     }
   }
 }
-setInterval(() => { apiRetryTick(); retryingTick(); }, 1000);   // ONE 1s timer drives both countdowns
+setInterval(() => { apiRetryTick(); retryingTick(); liveStatusTick(); }, 1000);   // ONE 1s timer drives the countdowns and the live-status clocks
 
 function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
   if (ev.name === "AskUserQuestion") { const a = renderAsk(ev); if (a) return a; }
@@ -5416,7 +5543,14 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
   // of the green ✓ — so a dispatched-but-unfinished agent reads as "still going", not done (the user 2026-06-24,
   // mirroring the TUI's clearer running/done split). Other in-flight tools resolve too fast to bother.
   const agentRunning = (ev.name === "Task" || ev.name === "Agent") && !ev.output && !ev.isError;
-  const d = dot(ev.isError ? "ring" : agentRunning ? "working" : "green");
+  // EVERY tool still waiting for its result reads as running while its turn is live (2026-10-08: a tool run is p90 10 s
+  // and p99 over three minutes, long enough to read a green ✓ as done): the kernel stamps `running` from the result's
+  // absence and the backend's working row (_stamp_running_tools), true or false; a tool whose result can no longer come
+  // (its CLI died, the turn was cut) is false and wears the plain dot, never the ✓ of a run that finished. An unstamped
+  // event (an older kernel) keeps the old rule, under which only an agent read as running.
+  const running = ev.running ?? agentRunning;
+  const noResult = ev.running === false && !ev.agentRunning && !ev.output && !ev.isError;
+  const d = dot(ev.isError ? "ring" : (running || ev.agentRunning) ? "working" : noResult ? "ring" : "green");
   if (ev.isError) d.classList.add("err");
   turn.appendChild(d);
 
@@ -5429,6 +5563,23 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
   head.appendChild(name);
   if (lbl.secondary) { const c = el("span", "tool-name tool-secondary"); c.textContent = lbl.secondary; head.appendChild(c); }
   if (ev.file) head.appendChild(fileLink(ev.file));   // EVERY event with a file keeps its link (round two, medium 2); a label that names the path names it as this link, never twice
+  // a running tool's elapsed time, from the tool call's own stamp, ticked by the 1 s timer (liveStatusTick) with no rebuild
+  const since = running && ev.ts ? Date.parse(ev.ts) / 1000 : NaN;
+  if (Number.isFinite(since) && since > 0) {
+    const t = el("span", "tool-elapsed"); t.dataset.since = String(since); t.textContent = durLabel(Date.now() / 1000 - since);
+    setTip(t, "running for this long; the time stops when its result arrives");
+    head.appendChild(t);
+  }
+  // a running subagent's progress (its last tool, its tool calls, its tokens), as the CLI's task_progress reports it: the
+  // kernel's liveStatus frame fills it by the call's id (paintTaskProgress), between pushes and without a rebuild
+  if ((ev.name === "Task" || ev.name === "Agent") && (running || ev.agentRunning) && ev.toolUseId) {
+    const p = el("span", "agent-live"); p.dataset.tu = ev.toolUseId;
+    // a row that lists the agent's steps already counts its calls (the fold label) and names its latest tool (the
+    // preview): the span then carries only the tokens, so no figure is said twice on one row
+    if (ev.agentGist || ev.stepsTotal || ev.agentSteps?.length) p.dataset.brief = "1";
+    p.textContent = taskProgressText(liveStatus.get(renderingOwnerSid || renderingSid || "")?.tasks[ev.toolUseId], p.dataset.brief === "1");
+    head.appendChild(p);
+  }
   // An edit's totals are the diff fold's toggle below (+A -R), printed once per row (round two, medium 1); a FAILED edit's error fold
   // replaces that fold and prints no totals: a failed edit changed nothing (round three, low d). The head carries no totals span.
 
@@ -5530,7 +5681,7 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
       if (ev.input) {
         const io = el("div", "tool-io tool-io-fold");
         io.appendChild(ioRow("IN", toolInputText(ev), false));
-        inlineFold(head, turn, ev.resultUuid ? "no output" : "running…", io, fkey);
+        inlineFold(head, turn, ev.resultUuid ? "no output" : noResult ? "no result" : "running…", io, fkey);
       }
     } else {
       // Bash/Grep/Glob/…: output line-count on the head line (right of the command);
@@ -6270,6 +6421,8 @@ function showTabTip(tab: HTMLElement, s: Session): void {
     // aria-label and the cold tab's title (a value span has no role, so an aria-label on it would be inert).
     rows.push(["Needs you", nc > 0 ? (nc === 1 ? "1 thing" : nc + " things") : ""]);
   }
+  const thl = liveStatus.get(s.id)?.thinking;   // the live thinking stretch, as the foot line words it (live-status.ts)
+  if (thl) rows.push(["Thinking", thinkingText(thl, now).replace(/^Thinking · /, "")]);
   if (s.cwd) rows.push(["📁", s.cwd]);
   if (s.gitBranch) rows.push(["⎇", s.gitBranch]);
   if (s.workTree) rows.push(["Worktree", s.workTree.dir + (s.workTree.branch ? "  ⎇ " + s.workTree.branch : "")]);
@@ -6677,6 +6830,7 @@ function applyTabStatus(tab: HTMLElement, s: { id?: string; status: Partial<Stat
     ci.title = "compacting — compressing the conversation to free up context";
     tab.appendChild(ci);
   }
+  if (s.id) applyTabThinking(tab, s.id);   // a thinking stretch rings the working dot (the liveStatus frame; repainted in place between strips)
   return st;
 }
 
@@ -13213,7 +13367,8 @@ function ensureView(id: string): View {
     // The live-ask picker is the LAST child of #content (it flows at the bottom of the transcript and scrolls
     // with it). Insert new threads BEFORE it so the picker always stays beneath the active thread; insertBefore
     // with a null/absent ref node just appends, so this is safe whether or not the picker node exists yet.
-    content?.insertBefore(elv, document.getElementById("live-ask"));
+    // …and before the live-status line, which sits under every thread at the transcript's foot (paintLiveThinking)
+    content?.insertBefore(elv, document.getElementById("live-status") || document.getElementById("live-ask"));
     v = { el: elv, rendered: 0, scrollTop: 0, stick: true, shown: false, stale: false, winStart: 0, winEnd: 0 };
     // THE event the scrollbar overlays were missing (T245, the user 2026-09-07): a rendered unit CHANGED
     // HEIGHT after the paint — a lazy figure sizing in, a fold toggling. The notch/rail frame feeds on the
@@ -13571,7 +13726,7 @@ function patchWorkedFooters(v: View, s: Session, from: number, working: boolean,
     }
     const have = node.querySelector(":scope > .turn-elapsed") as HTMLElement | null;
     if (secs != null && !have) {
-      const f = elapsedFooter(secs);
+      const f = elapsedFooter(secs, turnThoughtTokens(s.events, ev));
       const spot = node.querySelector(":scope > .fork-spot");
       node.appendChild(f);
       if (spot) f.appendChild(spot);
@@ -13747,7 +13902,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
       // yesterday's rows, and the day label over its 23:58 head went blank.
       walk.pass(eventEpoch(first)); stampWalkDay(head, walk); stamped.add(head);
       it.indices.forEach((i, j) => {
-        const child = renderEvent(s.events[i], prevEpoch, turnWorkedSecs(s.events, i, working));
+        const child = renderEvent(s.events[i], prevEpoch, ...turnFoot(s.events, i, working));
         child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
         host.appendChild(tag(child)); adv(i);
         walk.pass(eventEpoch(s.events[i])); stampWalkDay(child, walk); stamped.add(child);
@@ -13761,14 +13916,14 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     adv(anchor);
     if (open) {
       it.indices.forEach((i, j) => {
-        const child = renderEvent(s.events[i], prevEpoch, turnWorkedSecs(s.events, i, working));
+        const child = renderEvent(s.events[i], prevEpoch, ...turnFoot(s.events, i, working));
         child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
         host.appendChild(tag(child)); adv(i);
       });
       adv(anchor);   // the walk leaves the run on its latest member, whatever order its members came in
     }
   } else {
-    host.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, turnWorkedSecs(s.events, it.index, working))));
+    host.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, ...turnFoot(s.events, it.index, working))));
     adv(it.index);
   }
   walk.pass(unitExit(s, it));   // a no-op for an expanded tool run (every row already passed): one rule with dayWalkBefore
@@ -14152,6 +14307,12 @@ function lastTurnStart(events: ChatEvent[]): number {
 // to the chat's event clock.
 function turnWorkedSecs(events: ChatEvent[], i: number, working: boolean): number | null {
   return workedSecsOf(events, i, working, eventEpoch);
+}
+// The footer's two figures for event i, the elapsed and the turn's thinking tokens, the second read only where the first
+// says a footer goes (each footer walks its own turn back once, never every row)
+function turnFoot(events: ChatEvent[], i: number, working: boolean): [number | null, number | null] {
+  const secs = turnWorkedSecs(events, i, working);
+  return [secs, secs != null ? turnThoughtTokens(events, i) : null];
 }
 
 // Show only the active session's (lazily built) view and set its scroll: a
@@ -14990,6 +15151,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   renderLiveAsk(); // swap in the active session's pending picker (or hide if none)
   renderBgTasks(); // swap in the active session's background-task box (or hide if none)
   renderNotices(); // swap in the active session's approval box (or hide if none)
+  paintLiveThinking();   // the active session's "Thinking · 14s" line at the transcript's foot (or nothing)
   let empty = document.getElementById("empty-state");
   // A SECTION AT A GLANCE: while snapView names a section, the pane shows its sessions instead of any
   // transcript: every view hidden, the composer disabled with a placeholder that says what to do (a message
@@ -21764,6 +21926,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // models frame uses (loadModelChoices, rev-checked: a kernel seeds its rev from the clock at boot, so the restarted
   // kernel's list reads newer than the one this page holds); the gear's cache block takes the frame the same way.
   if (m.type === "wsup") loadModelChoices();
+  // a live status lives exactly as long as the socket that carried it: a new socket's kernel (a restart) re-sends what is
+  // live now and knows nothing to clear of what the old one showed, so the page drops it all; a remote host's return
+  // drops that host's the same way (its kernel re-sends on the new relay)
+  if (m.type === "wsup" || m.type === "hostUp") dropLiveStatus(m.type === "hostUp" ? (Array.isArray(m.hosts) ? m.hosts : []) : null);
   if (m.type === "tabOrder") noteSkeletonTabOrder(m);   // BEFORE the chain's applyTabOrder below: one repaint, final skeleton set (2026-09-07)
   if (m.type === "session") upsert(m);
   else if (m.type === "globalRetryPaused") {
@@ -21782,6 +21948,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "liveStatus") applyLiveStatus(m);   // what a session is doing this second (thinking, its subagents' progress): no chat build behind it
   else if (m.type === "glossary" && typeof m.id === "string") {   // the session's glossary index (T351 stage 2): a new one re-links the view
     glossaries.set(m.id, m as GlossaryIndex);
     relinkTerms(m.id);
