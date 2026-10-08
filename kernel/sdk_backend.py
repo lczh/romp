@@ -5497,6 +5497,8 @@ def subagent_standard_shell_script(state_dir, sid: str, chain: str = "", log=Non
 SUBAGENT_STANDARD_CANARY_STORE = "subagent-standard-canary.json"
 SUBAGENT_STANDARD_CANARY_ENV = "ROMP_SUBAGENT_CANARY"
 SUBAGENT_CANARY_TIMEOUT_S = 420
+SUBAGENT_CANARY_PREFIX = "romp-subagent-canary-"   # the probe's temp directories (state root, and "work-" scratch dirs)
+SUBAGENT_CANARY_PID_FILE = "canary.pid"            # written into each at once: a live pid keeps it from the sweep
 SUBAGENT_CANARY_PROMPT = ('Call the Agent tool exactly once, with subagent_type "general-purpose" and the prompt "Reply '
                           'with the single word OK and nothing else." After it returns, reply with the single word DONE.')
 
@@ -5536,6 +5538,10 @@ def subagent_canary_env(base, auth_env) -> dict:
     env = {k: v for k, v in dict(base).items() if not k.startswith("ROMP_") and k not in drop}
     env.update(auth_env or {})
     env[SUBAGENT_STANDARD_CANARY_ENV] = "1"
+    # the probe's CLI loads the user's settings, romp's own postal and wake hooks among them; they stand down for it as
+    # for the judges' nested calls (judge.py). Without it the Stop drain reached the live mail service, was refused, and
+    # blocked the probe's stop up to the CLI's cap, with extra fast calls and a model told to repair mail
+    env["ROMP_SUMMARIZING"] = "1"
     return env
 
 
@@ -8111,11 +8117,17 @@ class SdkSession:
             self.backend._log("subagent speed (%s): registry write failed: %s" % (self.name, e), problem=True)
 
     def _sub_std_pending(self) -> bool:
-        """The CLI serving this session carries the recipe and a launch now would not, or the reverse: a relaunch is
-        waiting to bring the two together (requested by set_subagent_standard and _sub_std_requalify)."""
+        """The CLI serving this session carries the recipe and the session no longer qualifies for it, or the reverse: a
+        relaunch is waiting to bring the two together (requested by set_subagent_standard and _sub_std_requalify). The
+        version canary is never such a reason (the review of #186): a CLI launched with the recipe keeps it while a newer
+        version is checked (it runs the version it launched on), and one without it waits for the probe, whose pass asks
+        for the relaunch; a relaunch now would carry no recipe, so nothing offers one (fastPending, Apply now)."""
         if self.client is None or getattr(self, "ended", False):
             return False
-        return bool(getattr(self, "_sub_std_launched", False)) != self.subagent_standard_carried()
+        target = bool(getattr(self, "subagent_standard", False)) and not self.subagent_standard_refusal()
+        if bool(getattr(self, "_sub_std_launched", False)) == target:
+            return False
+        return not (target and self.subagent_standard_hold())
 
     def _sub_std_requalify(self) -> None:
         """After a live change that can move the session in or out of the recipe's preconditions (a model pick applied
@@ -8368,6 +8380,17 @@ class SdkSession:
             if hold:
                 return hold
         return subagent_speed_line(on, refusal, getattr(self, "_sub_std_check", None), pending=not active, active=active)
+
+    def subagent_standard_retry(self) -> bool:
+        """Whether the fast menu offers Check again: the switch is on and qualifies, and the version canary failed it or
+        could not finish (the setter's on-while-on re-runs the probe)."""
+        if not getattr(self, "subagent_standard", False) or self.subagent_standard_refusal():
+            return False
+        status = getattr(self.backend, "canary_status", None)
+        if status is None:
+            return False
+        _v, verdict, running = status()
+        return verdict in ("fail", "inconclusive") and not running
 
     def subagent_standard_offered(self) -> bool:
         """Whether the fast menu offers the switch: it is on, or the serving CLI still carries the recipe (so it can be
@@ -11176,6 +11199,8 @@ class SdkSession:
                     # result (a replayed or unknown one too, so its calls are not repriced against a later turn) and the
                     # difference applies only to a delta this result folds. What a turn cannot absorb (a call whose cost an
                     # earlier turn recorded, read now) carries to the next. The row keeps the CLI's own figure (cliUsd).
+                    if getattr(self, "subagent_standard", False):
+                        self.backend._canary_turn_retry(self)   # a session waiting on an unfinished check: probe once more
                     try:
                         # the fold's own verdict: a result the ledger already holds (a replay after a restart) moves
                         # nothing; one under an unknown baseline moves the marks and reprices nothing (the 2026-10-08 review)
@@ -12719,6 +12744,7 @@ class SdkSession:
                 # (the speed check's outcome, what holds it back, or that the running CLI still carries it)
                 "subagentStandard": bool(getattr(self, "subagent_standard", False)),
                 "subagentStandardOffered": self.subagent_standard_offered(),
+                "subagentStandardRetry": self.subagent_standard_retry(),   # the fast menu offers Check again
                 "subagentSpeed": self.subagent_speed_line(),
                 "modelFallback": model_fallback_row(self.chosen_model, getattr(self, "_served_model", "") or self.model, getattr(self, "_fallback_cause", ""),
                                                     getattr(self, "_upgrade_retry", None),
@@ -13234,6 +13260,7 @@ class SdkBackend:
         self._canary_lock = threading.Lock()      # the version canary's bookkeeping (recipe_hold, _start_canary)
         self._canary_running = set()              # versions whose probe is running now
         self._canary_tried = set()                # versions probed this kernel life without a verdict (inconclusive)
+        self._canary_turn_retried = set()         # versions whose inconclusive probe a later turn already retried
         self._canary_said = set()                 # (version, verdict) already said in the error center
         self._canary_runner = None                # test seam: version -> result dict or None (still running)
         self._canary_sync = False                 # test seam: run the probe on the calling thread
@@ -13349,6 +13376,8 @@ class SdkBackend:
         # CLIs, resume cut turns, deliver persisted queues. In a thread: it spawns claude processes
         # and must not block construction (the WS handler constructs this backend lazily).
         if reconcile:
+            # a version-canary probe killed with the last kernel left its temp directories and transcripts behind
+            threading.Thread(target=self._sweep_canary_leftovers, name="canary-sweep", daemon=True).start()
             threading.Thread(target=self._boot_reconcile, args=(regs,),
                              name="sdk-boot-reconcile", daemon=True).start()
         # NOTE: we deliberately do NOT heal a stale in-flight STATE ("working"/…) on restart. A session whose
@@ -16850,6 +16879,7 @@ class SdkBackend:
         # the picks THIS launch carries (launch_values): the reconcile at the connect compares the waiting picks with it, and
         # the host road writes it into the spawn spec, so a later kernel attaching to this CLI reads what it launched with
         sess._launch_record = sess.launch_values()
+        sess._launch_record["subagentStandard"] = bool(overrides)   # what THIS launch decided above, never recomputed
         if self.session_hosts_on():
             # under a host, a hook the kernel cannot answer in time (a restart in progress) is answered by the
             # host itself before the CLI's own 600 s budget cancels it; every matcher carries the bound
@@ -19715,35 +19745,103 @@ class SdkBackend:
         except (OSError, ValueError):
             return {}
 
+    def canary_status(self):
+        """(version, verdict or None, whether its probe is running) for the Claude Code this kernel launches."""
+        v = self.cli_version()
+        rec = self._canary_verdicts().get(v) if v else None
+        verdict = rec.get("verdict") if isinstance(rec, dict) else None
+        with self._canary_lock:
+            running = bool(v) and v in self._canary_running
+        return v, verdict, running
+
     def recipe_hold(self, start: bool = False, retry: bool = False) -> str:
         """What holds Subagents at standard speed back on the Claude Code version this kernel launches ("" when nothing
-        does): the version canary's verdict for it. A version with a pass is clear; a failure holds it off for good; a probe
-        that could not finish holds it off until it is run again (once per kernel life, or when the switch is turned on:
-        `retry`). With `start`, a version with no verdict starts its probe. Inside the probe's own process: clear."""
+        does): the version canary's verdict for it. A pass clears it. A failure, or a probe that could not finish, holds it
+        off until the probe runs again: an inconclusive one by itself once per kernel life at a launch and once more at a
+        later turn (_canary_turn_retry), either one whenever the user asks (`retry`: the switch turned on, or turned on
+        again while on, which is the fast menu's Check again). With `start`, a version with no verdict starts its probe.
+        Inside the probe's own process: clear."""
         if os.environ.get(SUBAGENT_STANDARD_CANARY_ENV):
             return ""
-        v = self.cli_version()
+        v, verdict, running = self.canary_status()
         if not v:
             return "held off: the Claude Code version could not be read, so the workaround cannot be checked on it"
-        rec = self._canary_verdicts().get(v)
-        rec = rec if isinstance(rec, dict) else {}
-        verdict = rec.get("verdict")
         if verdict == "pass":
             return ""
-        if verdict == "fail":
-            return "held off: the workaround failed its check on Claude Code %s (%s)" % (v, rec.get("why") or "no reason")
         with self._canary_lock:
-            running = v in self._canary_running
-            go = start and not running and (verdict != "inconclusive" or retry or v not in self._canary_tried)
+            if verdict == "fail":
+                go = start and retry and not running
+            else:
+                go = start and not running and (verdict != "inconclusive" or retry or v not in self._canary_tried)
         if go:
             self._start_canary(v)
             return self.recipe_hold()   # a synchronous probe has ruled already
         if running:
             return "checking the workaround on Claude Code %s first (one short probe turn)" % v
+        rec = self._canary_verdicts().get(v) or {}
+        if verdict == "fail":
+            return ("held off: the workaround failed its check on Claude Code %s (%s); Check again in the fast menu runs it "
+                    "again" % (v, rec.get("why") or "no reason"))
         if verdict == "inconclusive":
-            return ("held off: the check on Claude Code %s could not finish (%s); turning the switch on runs it again"
+            return ("held off: the check on Claude Code %s could not finish (%s); Check again in the fast menu runs it again"
                     % (v, rec.get("why") or "no reason"))
         return "not yet checked on Claude Code %s" % v
+
+    def _canary_turn_retry(self, sess) -> None:
+        """A turn of a session waiting on the check ended: a version whose probe proved nothing is probed once more (once
+        per kernel life; after that the user's Check again). Called at a paid result's settle."""
+        try:
+            if not getattr(sess, "subagent_standard", False) or getattr(sess, "_sub_std_launched", False):
+                return
+            if sess.subagent_standard_refusal() or os.environ.get(SUBAGENT_STANDARD_CANARY_ENV):
+                return
+            v, verdict, running = self.canary_status()
+            if not v or verdict != "inconclusive" or running:
+                return
+            with self._canary_lock:
+                if v in self._canary_turn_retried:
+                    return
+                self._canary_turn_retried.add(v)
+            self._start_canary(v)
+        except Exception as e:
+            self._log("subagent speed: the check's retry failed: %s" % e, problem=True)
+
+    def _sweep_canary_leftovers(self, tmp_root=None, projects_root=None) -> None:
+        """Remove what a probe killed before its own cleanup left: its temp directories (SUBAGENT_CANARY_PREFIX, whose pid
+        file names no running process) and the project directories its scratch directories' transcripts went to (named
+        for a `work-` scratch directory that no longer exists). The probe's own names only; a running probe's never. At
+        each probe's start and at the kernel's boot."""
+        try:
+            root = Path(tmp_root or tempfile.gettempdir())
+            for d in root.glob(SUBAGENT_CANARY_PREFIX + "*"):
+                if not d.is_dir() or d.is_symlink():
+                    continue
+                pid = None
+                try:
+                    pid = int((d / SUBAGENT_CANARY_PID_FILE).read_text().strip())
+                except (OSError, ValueError):
+                    pid = None
+                if pid is not None:
+                    try:
+                        os.kill(pid, 0)
+                        continue                     # a running probe
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        continue                     # someone else's process: not ours to judge
+                elif time.time() - d.stat().st_mtime < 2 * SUBAGENT_CANARY_TIMEOUT_S:
+                    continue                         # no pid yet: a probe in its first instant
+                shutil.rmtree(d, ignore_errors=True)
+            proj = Path(projects_root) if projects_root else Path(transcript_path("/", "x")).parent.parent
+            slug = lambda p: re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(p)))
+            prefix = slug(root / (SUBAGENT_CANARY_PREFIX + "work-"))
+            alive = {slug(d) for d in root.glob(SUBAGENT_CANARY_PREFIX + "work-*") if d.is_dir()}
+            if proj.is_dir():
+                for d in proj.iterdir():
+                    if d.is_dir() and d.name.startswith(prefix) and d.name not in alive:
+                        shutil.rmtree(d, ignore_errors=True)
+        except Exception as e:
+            self._log("subagent speed: sweeping a dead probe's leftovers failed: %s" % e)
 
     def _start_canary(self, version: str) -> None:
         with self._canary_lock:
@@ -19751,6 +19849,8 @@ class SdkBackend:
                 return
             self._canary_running.add(version)
             self._canary_tried.add(version)
+        if self._canary_runner is None:
+            self._sweep_canary_leftovers()   # a probe killed before its cleanup (production only: tests stub the probe)
         self._log("subagent speed: checking the workaround on Claude Code %s in an isolated probe before any session "
                   "launches with it" % version)
         runner = self._canary_runner or self._run_canary_subprocess
@@ -19869,6 +19969,9 @@ class SdkBackend:
                 return False
         self.last_subagent_standard_refusal = ""
         if bool(reg.get("subagentStandard")) == on:
+            if on:
+                self.recipe_hold(start=True, retry=True)   # on again while on: Check again (a failed or unfinished check)
+                self._wake_push()
             return True
         self._update_reg(sid, subagentStandard=on)
         if s is not None:

@@ -204,6 +204,123 @@ class Gate(unittest.TestCase):
         self.assertEqual(be._canary_calls, [])
 
 
+class Retry(unittest.TestCase):
+    """A verdict that holds the switch off is never a lock: the user can ask for the check again, and a probe that proved
+    nothing is retried once on a later turn of a session waiting on it."""
+
+    def _live(self, be, **fields):
+        s = sb.SdkSession(be, _reg(be, **fields))
+        s.thread = type("T", (), {"is_alive": lambda self: True})()
+        s.client = object()
+        s.asks = []
+        s.request_reconnect = lambda *a, **k: s.asks.append(k.get("why"))
+        be.sessions[SID] = s
+        return s
+
+    def test_turning_it_on_again_rechecks_a_failed_version(self):
+        be = _backend()
+        s = self._live(be)
+        be.recipe_hold(start=True)
+        be._canary_finished("2.1.282", {"verdict": "fail", "why": "a subagent call ran in fast mode"})
+        self.assertTrue(s.snapshot()["subagentStandardRetry"], "the fast menu offers the check again")
+        self.assertTrue(be.set_subagent_standard(SID, "on"), "on, while already on: run the check again")
+        self.assertEqual(be._canary_calls, ["2.1.282", "2.1.282"])
+        self.assertIn("checking", s.subagent_standard_hold())
+
+    def test_an_inconclusive_probe_is_retried_once_on_a_later_turn(self):
+        be = _backend()
+        s = self._live(be)
+        be.recipe_hold(start=True)
+        be._canary_finished("2.1.282", {"verdict": "inconclusive", "why": "the probe's turn did not finish"})
+        be._canary_turn_retry(s)                      # a turn of a session waiting on the check ends
+        self.assertEqual(be._canary_calls, ["2.1.282", "2.1.282"])
+        be._canary_finished("2.1.282", {"verdict": "inconclusive", "why": "the probe's turn did not finish"})
+        be._canary_turn_retry(s)
+        self.assertEqual(be._canary_calls, ["2.1.282", "2.1.282"], "one automatic retry; then the user's gesture")
+        self.assertTrue(be.set_subagent_standard(SID, "on"))
+        self.assertEqual(len(be._canary_calls), 3)
+
+    def test_a_turn_of_a_session_not_waiting_on_it_retries_nothing(self):
+        be = _backend()
+        s = self._live(be, subagentStandard=False)
+        be.recipe_hold(start=True)
+        be._canary_finished("2.1.282", {"verdict": "inconclusive", "why": "x"})
+        be._canary_turn_retry(s)
+        self.assertEqual(be._canary_calls, ["2.1.282"])
+
+
+class HoldAndRelaunch(unittest.TestCase):
+    """A canary hold is a wait for the probe, not a relaunch to make: a CLI launched with the recipe (on an earlier
+    version) keeps it, and nothing invites the user to cut work for a relaunch that would carry no recipe."""
+
+    def _live(self, be, launched):
+        s = sb.SdkSession(be, _reg(be))
+        s.thread = type("T", (), {"is_alive": lambda self: True})()
+        s.client = object()
+        s._sub_std_begin({"subagentStandard": launched}, True)
+        be.sessions[SID] = s
+        return s
+
+    def test_a_cli_carrying_the_recipe_is_not_pending_while_the_new_version_is_checked(self):
+        be = _backend()
+        s = self._live(be, launched=True)
+        self.assertIn("checking", be.recipe_hold(start=True))
+        self.assertFalse(s._sub_std_pending())
+        self.assertFalse(s.snapshot()["fastPending"], "no dots, no Apply now: a relaunch now would drop the recipe")
+
+    def test_a_cli_without_it_waits_for_the_probe_not_for_a_relaunch(self):
+        be = _backend()
+        s = self._live(be, launched=False)
+        be.recipe_hold(start=True)
+        self.assertFalse(s._sub_std_pending())
+        self.assertFalse(s.snapshot()["fastPending"])
+
+    def test_the_launch_record_is_the_launchs_own_decision(self):
+        be = _backend()
+        s = sb.SdkSession(be, _reg(be))
+        answers = iter(["checking the workaround on Claude Code 2.1.282 first (one short probe turn)"])
+        be.recipe_hold = lambda start=False, retry=False: next(answers, "")   # the verdict lands mid-_options
+        got = Gate._options(self, be, s)
+        self.assertNotIn("modelOverrides", got)
+        self.assertIs(s._launch_record["subagentStandard"], False, "the record says what this launch carried")
+
+
+class Leftovers(unittest.TestCase):
+    """A probe killed before its cleanup leaves its temp directories and its transcripts' project directory; the next
+    probe and the kernel's boot sweep them, matching the probe's own names and no other, and never a running probe's."""
+
+    def test_the_sweep_removes_dead_probes_leftovers_only(self):
+        be = _backend()
+        tmp = Path(tempfile.mkdtemp())
+        projects = Path(tempfile.mkdtemp())
+        dead = tmp / "romp-subagent-canary-dead1"
+        dead.mkdir()
+        (dead / sb.SUBAGENT_CANARY_PID_FILE).write_text("999999999")        # a pid no process has
+        dead_work = tmp / "romp-subagent-canary-work-dead2"
+        dead_work.mkdir()
+        (dead_work / sb.SUBAGENT_CANARY_PID_FILE).write_text("999999999")
+        live = tmp / "romp-subagent-canary-live1"
+        live.mkdir()
+        (live / sb.SUBAGENT_CANARY_PID_FILE).write_text(str(os.getpid()))  # a running probe
+        other = tmp / "romp-lab-state-keep"
+        other.mkdir()
+        slug = lambda p: "".join(c if c.isalnum() else "-" for c in os.path.realpath(str(p)))
+        (projects / slug(dead_work)).mkdir()
+        (projects / slug(tmp / "romp-subagent-canary-work-gone3")).mkdir()   # its work dir is already gone
+        keep_proj = projects / slug(tmp / "somewhere-else")
+        keep_proj.mkdir()
+        be._sweep_canary_leftovers(tmp_root=tmp, projects_root=projects)
+        self.assertFalse(dead.exists())
+        self.assertFalse(dead_work.exists())
+        self.assertTrue(live.exists(), "a running probe's directory stays")
+        self.assertTrue(other.exists(), "only the probe's own names")
+        self.assertEqual(sorted(p.name for p in projects.iterdir()), [keep_proj.name])
+
+    def test_the_probe_marks_its_directories_with_its_pid(self):
+        src = Path(os.path.dirname(HERE), "kernel", "subagent_canary.py").read_text()
+        self.assertTrue("SUBAGENT_CANARY_PID_FILE" in src or "canary.pid" in src)
+
+
 class Probe(unittest.TestCase):
     def test_the_verdict_from_the_speed_checks_figures(self):
         v = sb.subagent_canary_verdict
@@ -229,6 +346,9 @@ class Probe(unittest.TestCase):
         self.assertEqual((env["HOME"], env["PATH"], env["FEATURE_FLAG"]), ("/home/x", "/usr/bin", "1"))
         self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "t", "the kernel's own login, which it took out of its environment")
         self.assertEqual(env[sb.SUBAGENT_STANDARD_CANARY_ENV], "1")
+        # the user-level romp hooks the probe's CLI loads stand down for it, as for the judges' nested calls: the Stop
+        # drain would otherwise reach the live mail service, be refused, and block the probe's stop
+        self.assertEqual(env["ROMP_SUMMARIZING"], "1")
 
     def test_the_probe_script_is_isolated(self):
         src = Path(os.path.dirname(HERE), "kernel", "subagent_canary.py").read_text()
@@ -236,6 +356,7 @@ class Probe(unittest.TestCase):
                     "uuid.uuid4()"):
             self.assertTrue(pin in src, "the probe script lacks %s" % pin)
         self.assertNotIn("mcp_config", src, "no peer messaging in the probe")
+        self.assertNotIn("no hooks of the kernel", src, "the probe's CLI loads the user's hooks; the docstring says so")
 
 
 if __name__ == "__main__":

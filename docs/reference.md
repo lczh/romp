@@ -461,16 +461,22 @@ its cumulative, and a turn it corrects keeps its repricing.
 
 **Claude Code updates.** Before the recipe rides any session's launch on a Claude Code version romp has not seen it
 work on, romp probes it there once. The probe (kernel/subagent_canary.py) runs as a subprocess of the kernel with its own
-temporary state, session hosts off, a fresh session in a scratch directory and no peer messaging: one fast turn whose
+temporary state, session hosts off, a fresh session in a scratch directory and no romp MCP servers: one fast turn whose
 main loop starts one subagent, judged by the speed check above, after which it deletes its state, its directory and that
-directory's transcripts. It uses the machine's Claude login the way any session does; a probe has taken about ten
-seconds and cost between ten and thirty cents. The version is the binary's own `claude --version`, and the verdicts are
+directory's transcripts. Its CLI loads the user's Claude Code settings like any session (the login, the user's hooks);
+romp's own postal and wake hooks stand down for it, as they do for the judges' nested calls, so it never reaches the
+live mail service. A probe killed before its cleanup is swept at the next probe's start or the kernel's boot (the
+probe's own directory names only, never a running probe's). It has taken about ten seconds and cost between ten and
+fifty cents. The version is the binary's own `claude --version`, and the verdicts are
 kept per version in the state directory's `subagent-standard-canary.json`. While a version is being checked, sessions
 launch without the recipe and the row says so; a pass relaunches every session waiting with the switch on, once nothing
-would be cut. A failure (a subagent call ran fast, or the main loop could not run fast) holds the switch off on that
-version, said once in the error center and on the row. A probe that proves nothing (it did not finish, its subagent made
-no call, fast mode is unavailable) holds it off too, said once, and runs again when the switch is turned on or the
-kernel restarts. A CLI whose init reports a version the probe has not cleared (the binary changed between the check and
+would be cut. A session whose running CLI was launched with the recipe keeps it while a newer version is checked, and
+nothing offers to relaunch a session for a check in progress (a relaunch then would carry no recipe). A failure (a
+subagent call ran fast, or the main loop could not run fast) holds the switch off on that version, said once in the
+error center and on the row; a probe that proves nothing (it did not finish, its subagent made no call, fast mode is
+unavailable) holds it off too, said once, and runs once more by itself at a later turn of a session waiting on it. Either
+way the fast menu offers **Check again**, which runs the probe again without turning the switch off (the op is
+`setSubagentStandard` "on" on a session already on). A CLI whose init reports a version the probe has not cleared (the binary changed between the check and
 the launch) is probed then, with the session's own speed check as the backstop meanwhile.
 
 **Side effects, and why it is experimental.**
