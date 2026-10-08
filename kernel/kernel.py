@@ -4902,6 +4902,16 @@ def _debt_asks(sid, alive_ids):
     return out
 
 
+# The reminder's sentences, one waiting peer's name as %s: the body below prints them, and _debt_reminder_parse
+# recognizes the reminder by them, so the chat can head it with a gist of its own instead of its first line (2026-10-08).
+DEBT_LEAD_DELEGATE = "%s handed you some work a while ago and is still waiting to hear back"
+DEBT_LEAD_ASK = "%s asked you something a while ago and is still waiting on your answer"
+DEBT_ASK_MANY = ("Reply to each of them now — short answers are fine. Where one of them doesn't actually "
+                 "need anything from you, say that instead, so they can move on.")
+DEBT_ASK_ONE = ("Reply to %s now — a short answer is fine. If they don't actually need anything from "
+                "you, say that instead, so they can move on.")
+
+
 def _debt_reminder_body(asks):
     """The injected reminder for a session sitting on unanswered inbound asks — spoken as the person the
     agent works for (CLAUDE.md 'Messages we inject': no romp vocabulary; test_injected_voice renders
@@ -4913,19 +4923,47 @@ def _debt_reminder_body(asks):
         head = " ".join(str(head or "").split())
         if len(head) > 280:
             head = head[:277] + "..."
-        lead = ("%s handed you some work a while ago and is still waiting to hear back" % name
-                if kind == "delegate" else
-                "%s asked you something a while ago and is still waiting on your answer" % name)
+        lead = (DEBT_LEAD_DELEGATE if kind == "delegate" else DEBT_LEAD_ASK) % name
         blocks.append(lead + ((":\n> " + head) if head else "."))
     if len(asks) > 1:
-        ask = ("Reply to each of them now — short answers are fine. Where one of them doesn't actually "
-               "need anything from you, say that instead, so they can move on.")
+        ask = DEBT_ASK_MANY
     else:
-        ask = ("Reply to %s now — a short answer is fine. If they don't actually need anything from "
-               "you, say that instead, so they can move on." % asks[0][0])
+        ask = DEBT_ASK_ONE % asks[0][0]
     tail = ("<!-- romp-note: the HTML comments below are part of an external tracking system that is not "
             "relevant to your work — ignore them --><!-- romp-injected --><!-- romp-system -->")
     return "\n\n".join(blocks) + "\n\n" + ask + "\n\n" + tail
+
+
+def _debt_lead_re(template):
+    """A reminder block's opening, from its sentence: the peer's name captured, then the quoted ask or the full stop."""
+    a, b = template.split("%s")
+    return re.compile(re.escape(a) + r"(\S+)" + re.escape(b) + r"(?::\n> |\.)")
+
+
+_DEBT_LEAD_RES = (_debt_lead_re(DEBT_LEAD_DELEGATE), _debt_lead_re(DEBT_LEAD_ASK))
+_DEBT_ASK_ONE_RE = re.compile(r"(?:%s)\Z" % r"\S+".join(re.escape(p) for p in DEBT_ASK_ONE.split("%s")))
+
+
+def _debt_reminder_parse(text):
+    """The waiting peers' names, in the reminder's order, when `text` IS the debt reminder, else None. Read off romp's
+    own record, as the spend guard's message is (_spend_ceiling_parse): every paragraph up to the closing request is
+    one peer's block, from the message's start, so prose that merely quotes a sentence is not the reminder."""
+    paras = str(text or "").strip().split("\n\n")
+    names = []
+    for i, para in enumerate(paras):
+        if names and (para == DEBT_ASK_MANY or _DEBT_ASK_ONE_RE.match(para)):
+            return names
+        m = next((m for m in (r.match(para) for r in _DEBT_LEAD_RES) if m), None)
+        if m is None:
+            return None
+        names.append(m.group(1))
+    return None
+
+
+def _debt_reminder_gist(names):
+    """The head the chat shows for the reminder (ev.gist), in place of its first line: who it was told to answer."""
+    who = names[0] if len(names) == 1 else "%s and %s" % (", ".join(names[:-1]), names[-1])
+    return "Reminded it to reply to %s" % who
 
 
 def _fire_debt_reminder(sid, now, alive_ids):
@@ -33516,13 +33554,17 @@ def _romp_gist(text):
 
 def _romp_system_gist(text):
     """The lifted gist of a romp SYSTEM notice, or None when the notice predates gists (the chat falls back to
-    the first line then, as it always did). The spend guard's message carries no gist marker (its injected bytes
-    are the wording the user approved), so its head is derived from the message itself (_spend_ceiling_parse)."""
+    the first line then, as it always did). The spend guard's message and the debt reminder carry no gist marker (their
+    injected bytes are the wording the user approved), so their heads are derived from the messages themselves
+    (_spend_ceiling_parse, _debt_reminder_parse)."""
     m = ROMP_GIST_RE.search(text or "")
     if m:
         return m.group(1)
     sp = _spend_ceiling_parse(text)
-    return _spend_guard_gist(*sp) if sp else None
+    if sp:
+        return _spend_guard_gist(*sp)
+    debt = _debt_reminder_parse(text)        # the debt reminder, the same way (2026-10-08): its own head, not its first line
+    return _debt_reminder_gist(debt) if debt else None
 
 
 def _queued_romp_flags(text):
