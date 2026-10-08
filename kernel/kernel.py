@@ -51458,45 +51458,81 @@ _RAIL_BILLING_KEYS = ("route", "state", "acct", "org", "orgDigest", "kind", "lab
 
 
 def _rail_routes(now=None):
-    """This host's spend over the rail's week (the hour keys _spend_windows' rolling week reads) split by billing route
-    (_bucket_routes), each route's identity (_spend_billing) beside it, stripped to what folding accounts reads:
-    {"week": {route: [usd, turns]}, "billing": [...]}, or None when the week holds no spend. /usage/fleet folds every
-    host's into the usage hover's by-account line (_rail_accounts)."""
+    """This host's spend by billing route (_bucket_routes) over the rail's windows, each route's identity (_spend_billing)
+    beside it, stripped to what folding accounts reads: {"today": {route: [usd, turns]}, "monthToDate": {...}, "week":
+    {...}, "tok": {"today": {tok, tokIn, tokOut, tokCacheR, tokCacheW}, "monthToDate": {...}}, "at": the ledger's last
+    record, "billing": [...]}, or None when the ledger holds nothing at all (no file, no bucket). A ledger whose windows
+    hold nothing ships them empty, so the cell reads an honest $0 (the honest-zero rule _spend_windows keeps) and a host
+    that ships no routes at all can only be an older build, which the hover names.
+    today and monthToDate are the rail's own two figures (the user 2026-10-08, who could not tell why the cell said API
+    when nearly all of their usage bills an enterprise seat): the local calendar day and month so far, from the day
+    ledger, every recorded turn at API prices (Claude Code's own cost of the turn, total_cost_usd, which the recorder
+    files whatever billed it) under the route that billed it. One read gives the cell its total, its approximate mark
+    (any route but the key is an estimate: a subscription seat is not billed per token) and the hover its split by
+    account, so the three cannot disagree. The two calendar windows nest (a day inside its month), so neither can read
+    above the other. week is the rolling week from the hour ledger that an older build's /usage/fleet folds (version
+    skew). /usage/fleet folds every host's routes into accounts (_rail_accounts)."""
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
     except Exception:
         return None
     hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
+    days = d.get("days") if isinstance(d.get("days"), dict) else {}
     now = time.time() if now is None else now
+
+    def fold(entries):
+        acc = {}
+        for e in entries:
+            for r, (u, n) in _bucket_routes(e).items():
+                a = acc.setdefault(r, [0.0, 0])
+                a[0] += u
+                a[1] += n
+        return {r: [round(a[0], 4), a[1]] for r, a in acc.items() if round(a[0], 4) or a[1]}
+
+    def toks(entries):
+        out = {k: 0 for k in ("tokIn", "tokOut", "tokCacheR", "tokCacheW")}
+        for e in entries:
+            for k in out:
+                out[k] += int(e.get(k) or 0)
+        out["tok"] = sum(out.values())
+        return out
     keys = {time.strftime("%Y-%m-%dT%H", time.localtime(now - i * 3600)) for i in range(7 * 24 + 1)}
-    week = {}
-    for k, e in hours.items():
-        if k not in keys or not isinstance(e, dict):
-            continue
-        for r, (u, n) in _bucket_routes(e).items():
-            a = week.setdefault(r, [0.0, 0])
-            a[0] += u
-            a[1] += n
-    week = {r: [round(a[0], 4), a[1]] for r, a in week.items() if round(a[0], 4) or a[1]}
-    if not week:
+    week = fold(e for k, e in hours.items() if k in keys and isinstance(e, dict))
+    day_k = time.strftime("%Y-%m-%d", time.localtime(now))
+    today_e = [days[day_k]] if isinstance(days.get(day_k), dict) else []
+    month_e = [e for k, e in days.items() if isinstance(k, str) and k.startswith(day_k[:7]) and isinstance(e, dict)]
+    today, mtd = fold(today_e), fold(month_e)
+    if not (week or today or mtd or days or hours):
         return None
-    billing = [{k: m[k] for k in _RAIL_BILLING_KEYS if k in m} for m in _spend_billing(week)]
-    return {"week": week, "billing": billing}
+    routes = set(week) | set(today) | set(mtd)
+    billing = [{k: m[k] for k in _RAIL_BILLING_KEYS if k in m} for m in _spend_billing(routes)]
+    out = {"today": today, "monthToDate": mtd, "week": week,
+           "tok": {"today": toks(today_e), "monthToDate": toks(month_e)}, "billing": billing}
+    at = _spend_recorded_at()
+    if at:
+        out["at"] = at          # the ledger's own last record, the hover's freshness line (an event time, not a poll's)
+    return out
 
 
 def _with_rail_routes(out):
-    """`out` with this host's week by billing route (_rail_routes) as `spendRoutes`, when there is any."""
+    """`out` with this host's spend by billing route (_rail_routes) as `spendRoutes`, when there is any."""
     rr = _rail_routes()
     if rr:
         out["spendRoutes"] = rr
     return out
 
 
+_RAIL_WINDOWS = ("today", "monthToDate", "week")
+
+
 def _rail_accounts(rows):
-    """The usage hover's by-account line, from every /usage/fleet row's spendRoutes folded by the spend detail's own rule
-    (_spend_accounts): ([{name, kind, usd, est}], hosts) where usd is the account's week dollars, est says a
-    subscription seat billed them (an estimate at API prices), and hosts are the machines whose spend is on the rail but
-    whose payload carries no routes (an older build), named rather than silently left out."""
+    """The usage hover's accounts, from every /usage/fleet row's spendRoutes folded by the spend detail's own rule
+    (_spend_accounts): ([{name, kind, usd, est, routes: [{host, route, est}]}], hosts). routes name each account's
+    (host, route) pairs, so the shell sums any window from the rows themselves (the same rows its cell sums, so the
+    cell, the split and their total are one reading); est says a route's dollars are an estimate at API prices (a
+    subscription seat billed them). usd and est over the rolling week stay for an older shell's one-line summary. An
+    account is kept while any rail window holds its spend. hosts are the machines whose spend is on the rail but whose
+    payload carries no routes (an older build), named rather than silently left out."""
     per_host, sums, missing = [], {}, []
     for row in rows:
         host = row.get("host") or _self_host()
@@ -51507,19 +51543,23 @@ def _rail_accounts(rows):
                 missing.append(host)
             continue
         per_host.append((host, sr.get("billing") or []))
-        for r, v in (sr.get("week") or {}).items():
-            if isinstance(v, list) and v:
-                sums[(host, r)] = float(v[0] or 0)
+        for w in _RAIL_WINDOWS:
+            for r, v in (sr.get(w) or {}).items():
+                if isinstance(v, list) and v:
+                    sums[(w, host, r)] = float(v[0] or 0)
     out = []
     for a in _spend_accounts(per_host):
-        usd, est = 0.0, False
+        usd, est, live, routes = 0.0, False, False, []
         for rt in a.get("routes") or []:
-            v = sums.get((rt["host"], rt["route"]), 0.0)
+            v = sums.get(("week", rt["host"], rt["route"]), 0.0)
             if v >= _SPEND_GRAIN:
                 usd += v
                 est = est or bool(rt.get("estimate"))
-        if usd >= _SPEND_GRAIN:
-            out.append({"name": a["name"], "kind": a["kind"], "usd": round(usd, 4), "est": est})
+            if any(sums.get((w, rt["host"], rt["route"]), 0.0) >= _SPEND_GRAIN for w in _RAIL_WINDOWS):
+                live = True
+                routes.append({"host": rt["host"], "route": rt["route"], "est": bool(rt.get("estimate"))})
+        if live:
+            out.append({"name": a["name"], "kind": a["kind"], "usd": round(usd, 4), "est": est, "routes": routes})
     return out, missing
 
 
@@ -52482,26 +52522,6 @@ _SPEND_GRAIN = 5e-5      # a bucket's dollars minus its sids' dollars below this
 #                          anything that rounds to 0 at the 4 places the payload carries is zero
 
 
-def _spend_scope():
-    """Which figure the rail shows for THIS host, mirrored for the usage modal so its numbers are the
-    rail's: "total" on a no-login (key-only) machine — every turn there bills the key, and legacy files
-    predate the split; a turn a stored login billed is the exception (its session row wears the estimate
-    mark, and the rail leaves it out since 2026-10-01) — or "keyed" when a login's windows sit beside the key's spend, where only the
-    turns whose session billed the key are dollars anyone pays (_usage's two arms, the user 2026-08-08) —
-    or "computed" for a login with no key at all, where the rail shows no spend and every recorded
-    figure is a computed cost, not a bill."""
-    try:
-        o = json.loads((jd.STATE / "usage.json").read_text())
-    except Exception:
-        o = {}
-    if o.get("apiKey") or not _claude_account():
-        return "total"
-    if _auth_key_present():
-        return "keyed"
-    return "computed"   # a login and no key: the rail shows NO spend for this host (its third arm), and the
-    #                     ledger's figures are computed costs nobody is billed — the modal says so (review find)
-
-
 _PEER_SPEND_TIMEOUT_S = 6.0   # one bounded wait for every attached kernel's /spend/detail, asked in parallel
 
 
@@ -52738,7 +52758,13 @@ def _spend_detail_local(now=None):
     The table's totals and the ranking cover exactly the day keys the daily chart draws — the last 90
     local dates — not every bucket the recorder still holds (it keeps the 90 most RECENT spend days,
     which can reach further back; review find).
-    Bucket keys are the recorder's LOCAL time; tz/tzOffsetMin let a viewer elsewhere label that."""
+    Bucket keys are the recorder's LOCAL time; tz/tzOffsetMin let a viewer elsewhere label that.
+    EVERY turn counts, on every machine (the user 2026-10-08, who wanted the enterprise seat and the API key drawn
+    apart, the one estimated at API prices and the other charged): each bucket, stack and session carries its total
+    (every turn at Claude Code's own cost) and beside it the key-billed sub-count (keyUsd, keyTok; a session's `key`),
+    so the modal draws the seat's part (the total less the key's) and the key's part from one ledger read. The payload
+    says so with scope "all". Before, a machine with a login beside a key read the key's turns alone ("keyed"), and the
+    seat's turns there could not be drawn at all."""
     now = time.time() if now is None else now
     try:
         d = json.loads((jd.STATE / "spend.json").read_text())
@@ -52746,19 +52772,19 @@ def _spend_detail_local(now=None):
         d = {}
     days = d.get("days") if isinstance(d.get("days"), dict) else {}
     hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
-    scope = _spend_scope()
-    keyed = scope == "keyed"
     KINDS = ("tokIn", "tokOut", "tokCacheR", "tokCacheW")
 
     def _tot(e):
-        """(usd, tok, turns) of a bucket under the scope."""
-        if keyed:
-            e = e.get("key") if isinstance(e.get("key"), dict) else {}
-            return float(e.get("usd") or 0), int(e.get("tok") or 0), int(e.get("turns") or 0)
+        """(usd, tok, turns) of a bucket: every turn."""
         return (float(e.get("usd") or 0), sum(int(e.get(k) or 0) for k in KINDS), int(e.get("turns") or 0))
 
+    def _key(e):
+        """(usd, tok) of a bucket's (or a session's) key-billed sub-count; zeros when nothing billed the key."""
+        k = e.get("key") if isinstance(e.get("key"), dict) else {}
+        return float(k.get("usd") or 0), int(k.get("tok") or 0)
+
     def _by(e):
-        """{sid: (usd, tok, turns)} under the scope, or None when the bucket predates attribution."""
+        """{sid: (usd, tok, turns)} of every turn, or None when the bucket predates attribution."""
         by = e.get("bySid") if isinstance(e.get("bySid"), dict) else None
         if by is None:
             return None
@@ -52766,8 +52792,6 @@ def _spend_detail_local(now=None):
         for sid, s in by.items():
             if not isinstance(s, dict):
                 continue
-            if keyed:
-                s = s.get("key") if isinstance(s.get("key"), dict) else {}
             out[str(sid)] = (float(s.get("usd") or 0), int(s.get("tok") or 0), int(s.get("turns") or 0))
         return out
 
@@ -52788,18 +52812,17 @@ def _spend_detail_local(now=None):
             r = totals.setdefault(sid, [0.0, 0, 0])
             r[0] += u; r[1] += t; r[2] += n
             au += u; at += t; an += n
-        if not keyed:
-            # the key-billed sub-count rides beside each session's total: on a mixed host the table
-            # shows the split where the hover would (a login turn's computed cost is dollars nobody pays)
-            for sid, s in e["bySid"].items():
-                k = s.get("key") if isinstance(s, dict) and isinstance(s.get("key"), dict) else None
-                if k:
-                    r = keyt.setdefault(str(sid), [0.0, 0, 0])
-                    r[0] += float(k.get("usd") or 0); r[1] += int(k.get("tok") or 0); r[2] += int(k.get("turns") or 0)
+        # the key-billed sub-count rides beside each session's total: the modal draws the key's part apart from the
+        # seat's (the total less the key's)
+        for sid, s in e["bySid"].items():
+            k = s.get("key") if isinstance(s, dict) and isinstance(s.get("key"), dict) else None
+            if k:
+                r = keyt.setdefault(str(sid), [0.0, 0, 0])
+                r[0] += float(k.get("usd") or 0); r[1] += int(k.get("tok") or 0); r[2] += int(k.get("turns") or 0)
         res = tu - au
         un[0] += res if res >= _SPEND_GRAIN else 0.0; un[1] += max(0, tt - at); un[2] += max(0, tn - an)
-    # a session that contributed nothing under this scope (a login-only session in the keyed scope) is
-    # not a row and not a stack: an all-zero stack with a legend chip says nothing (review find)
+    # a session that contributed nothing is not a row and not a stack: an all-zero stack with a legend chip says
+    # nothing (review find)
     totals = {sid: v for sid, v in totals.items() if v[0] > 0 or v[1] > 0 or v[2] > 0}
     try:
         live = set(_live_names(_live_map()).values())
@@ -52870,21 +52893,23 @@ def _spend_detail_local(now=None):
     def _series(buckets, keys):
         idx = {k: i for i, k in enumerate(keys)}
         n = len(keys)
-        # per stack: usd[], tok[], turns[], keyUsd[] (T353: the list follows the chart's range, so every column the
-        # table shows is summed from the SAME buckets the chart draws; keyUsd is the key-billed sub-count's dollars,
-        # the table's key column, meaningful in the total scope alone)
-        per = {sid: ([0.0] * n, [0] * n, [0] * n, [0.0] * n) for sid in top}
-        other, una, others = ([0.0] * n, [0] * n, [0] * n, [0.0] * n), ([0.0] * n, [0] * n, [0] * n), set()
+        # per stack: usd[], tok[], turns[], keyUsd[], keyTok[] (T353: the list follows the chart's range, so every
+        # column the table shows is summed from the SAME buckets the chart draws; keyUsd / keyTok are the key-billed
+        # sub-count's dollars and tokens, the API key's chart, and the total less them the seat's)
+        per = {sid: ([0.0] * n, [0] * n, [0] * n, [0.0] * n, [0] * n) for sid in top}
+        other, una, others = ([0.0] * n, [0] * n, [0] * n, [0.0] * n, [0] * n), ([0.0] * n, [0] * n, [0] * n, [0.0] * n, [0] * n), set()
         for k, e in buckets.items():
             i = idx.get(k)
             if i is None or not isinstance(e, dict):
                 continue
             tu, tt, tn = _tot(e)
+            bku, bkt = _key(e)
             bs = _by(e)
             if bs is None:
-                una[0][i] += tu; una[1][i] += tt; una[2][i] += tn
+                una[0][i] += tu; una[1][i] += tt; una[2][i] += tn; una[3][i] += bku; una[4][i] += bkt
                 continue
             au = at = an = 0
+            aku = akt = 0
             kb = e.get("bySid") if isinstance(e.get("bySid"), dict) else {}
             for sid, (u, t, _n) in bs.items():
                 au += u; at += t; an += _n
@@ -52893,15 +52918,16 @@ def _spend_detail_local(now=None):
                     dst = other
                     if u > 0 or t > 0:
                         others.add(sid)   # "other (N sessions)" counts contributors only — the table's own fold
-                        #                   (a login-only session in the keyed scope adds (0,0,0); T247b review)
                 dst[0][i] += u; dst[1][i] += t; dst[2][i] += _n
-                if not keyed:
-                    ks = kb.get(sid) if isinstance(kb.get(sid), dict) else None
-                    kk = ks.get("key") if ks and isinstance(ks.get("key"), dict) else None
-                    if kk:
-                        dst[3][i] += float(kk.get("usd") or 0)
+                ks = kb.get(sid) if isinstance(kb.get(sid), dict) else None
+                if ks:
+                    ku, kt = _key(ks)
+                    dst[3][i] += ku; dst[4][i] += kt
+                    aku += ku; akt += kt
             res = tu - au
             una[0][i] += res if res >= _SPEND_GRAIN else 0.0; una[1][i] += max(0, tt - at); una[2][i] += max(0, tn - an)
+            kres = bku - aku   # the bucket's key dollars no session accounts for: the unattributed stack's key part
+            una[3][i] += kres if kres >= _SPEND_GRAIN else 0.0; una[4][i] += max(0, bkt - akt)
         # presence is tested on the ROUNDED values the payload carries: a residue that rounds to nothing
         # must not hang a stack (a hatched "unattributed" chip with no bars, T247b review)
         stacks = []
@@ -52912,14 +52938,15 @@ def _spend_detail_local(now=None):
             s = meta[sid]
             stacks.append({"kind": "sid", "sid": sid, "name": s["name"], "bg": s["bg"], "live": s["live"],
                            "usd": usd, "tok": per[sid][1], "turns": per[sid][2],
-                           "keyUsd": [round(v, 4) for v in per[sid][3]]})
+                           "keyUsd": [round(v, 4) for v in per[sid][3]], "keyTok": per[sid][4]})
         ousd = [round(v, 4) for v in other[0]]
         if any(ousd) or any(other[1]):
             stacks.append({"kind": "other", "name": "other", "count": len(others), "usd": ousd, "tok": other[1],
-                           "turns": other[2]})
+                           "turns": other[2], "keyUsd": [round(v, 4) for v in other[3]], "keyTok": other[4]})
         uusd = [round(v, 4) for v in una[0]]
         if any(uusd) or any(una[1]):
-            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1], "turns": una[2]})
+            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1], "turns": una[2],
+                           "keyUsd": [round(v, 4) for v in una[3]], "keyTok": una[4]})
         # the same buckets by billing ROUTE (_bucket_routes), for the By account summary: the client sums each account's
         # routes over the range the chart draws, as it sums the session rows (T353)
         rts = {}
@@ -52950,7 +52977,7 @@ def _spend_detail_local(now=None):
     hrs = _series(hours, hour_keys)
     hrs["epochs"] = epochs
     dys = _series(days, day_keys)
-    return {"host": me, "scope": scope,
+    return {"host": me, "scope": "all",
             "tz": time.strftime("%Z", lt), "tzOffsetMin": int((getattr(lt, "tm_gmtoff", 0) or 0) // 60),
             "recordedAt": _spend_recorded_at(),
             "sessions": sessions,
@@ -53066,9 +53093,12 @@ def _spend_detail(now=None):
     now = time.time() if now is None else now
     local = _spend_detail_local(now)
     me = local["host"]
+    # the hosts the hover's spend covers: a remote whose usage carries its spend by route (every arm with recorded spend
+    # since 2026-10-08, the seat's estimate included) or, from an older build, the key's spend windows
     with _remotes_lock:
         peers = [dict(r) for r in _remotes.values()
-                 if isinstance((r.get("usage") or {}).get("spend"), dict)]
+                 if isinstance((r.get("usage") or {}).get("spendRoutes"), dict)
+                 or isinstance((r.get("usage") or {}).get("spend"), dict)]
     results = {}
     threads = []
     for r in peers:
@@ -53178,15 +53208,15 @@ def _merge_spend_details(payloads, hosts, local):
                 keys.append(a)
         n = len(keys)
         pos = {e: i for i, e in enumerate(epochs)} if name == "hours" else {k: i for i, k in enumerate(keys)}
-        # per stack: usd[], tok[], turns[], keyUsd[] and a flags dict (T353: the list's columns per bucket). A peer of
-        # an OLDER build sends stacks with usd and tok alone: its turns and key dollars are UNKNOWN, so the flags drop
-        # those arrays from its stacks (the modal shows a dash and a note names the host), never a zero that would
+        # per stack: usd[], tok[], turns[], keyUsd[], keyTok[] and a flags dict (T353: the list's columns per bucket). A
+        # peer of an OLDER build sends stacks with usd and tok alone: its turns and key dollars are UNKNOWN, so the flags
+        # drop those arrays from its stacks (the modal shows a dash and a note names the host), never a zero that would
         # read as a count and undercount the total
-        per = {}           # (host, sid) -> ([usd], [tok], [turns], [keyUsd], {"turns": bool, "key": bool})
+        per = {}           # (host, sid) -> ([usd], [tok], [turns], [keyUsd], [keyTok], {"turns": bool, "key": bool})
         others = {}        # host -> ([usd], [tok], [count], [turns], {"turns": bool}): an OLDER peer's own "other" fold
         #                    (its build still folds beyond a top-N); kept as that host's stack so its dollars are not
         #                    lost, and named with the host — a current build folds nothing (T247e)
-        una = ([0.0] * n, [0] * n, [0] * n)
+        una = ([0.0] * n, [0] * n, [0] * n, [0.0] * n, [0] * n)
         una_turns = [True]   # false once any peer's unattributed stack came without turns: the merged row shows a dash
         una_hosts = {}
         rts = {}             # (host, route) -> ([usd], [turns]): the By account summary's series, on our axes
@@ -53210,19 +53240,20 @@ def _merge_spend_details(payloads, hosts, local):
                 usd, tok = s.get("usd") or [], s.get("tok") or []
                 turns = s.get("turns") if isinstance(s.get("turns"), list) else None
                 keyu = s.get("keyUsd") if isinstance(s.get("keyUsd"), list) else None
+                keyt = s.get("keyTok") if isinstance(s.get("keyTok"), list) else None
                 kind = s.get("kind")
-                tarr = karr = None
+                tarr = karr = ktarr = None
                 if kind == "sid":
                     key = (host, str(s.get("sid") or ""))
                     if key not in top_set:
                         continue          # a stack for a session the roster does not know: nothing to draw it as
-                    dst = per.setdefault(key, ([0.0] * n, [0] * n, [0] * n, [0.0] * n, {"turns": True, "key": True}))
+                    dst = per.setdefault(key, ([0.0] * n, [0] * n, [0] * n, [0.0] * n, [0] * n, {"turns": True, "key": True}))
                     if turns is None:
-                        dst[4]["turns"] = False
+                        dst[5]["turns"] = False
                         no_turns.add(host)
                     if keyu is None:
-                        dst[4]["key"] = False
-                    tarr, karr = dst[2], dst[3]
+                        dst[5]["key"] = False
+                    tarr, karr, ktarr = dst[2], dst[3], dst[4]
                 elif kind == "other":
                     o = others.setdefault(host, ([0.0] * n, [0] * n, [0], [0] * n, {"turns": True}))
                     o[2][0] += int(s.get("count") or 0)
@@ -53236,7 +53267,7 @@ def _merge_spend_details(payloads, hosts, local):
                     if turns is None:
                         una_turns[0] = False
                         no_turns.add(host)
-                    tarr = una[2]
+                    tarr, karr, ktarr = una[2], una[3], una[4]
                     hu = una_hosts.setdefault(host, ([0.0] * n, [0] * n))
                     # a merged-shaped answer breaks its unattributed stack down by host: take the peer's own share
                     if isinstance(s.get("hosts"), dict) and isinstance(s["hosts"].get(p.get("host") or host), dict):
@@ -53253,6 +53284,8 @@ def _merge_spend_details(payloads, hosts, local):
                         tarr[i] += int((turns[j] if j < len(turns) else 0) or 0)
                     if karr is not None and keyu is not None and j < len(keyu):
                         karr[i] += float(keyu[j] or 0)
+                    if ktarr is not None and keyt is not None and j < len(keyt):
+                        ktarr[i] += int(keyt[j] or 0)
                     if kind == "unattributed":
                         hu[0][i] += v; hu[1][i] += t
         stacks = []
@@ -53266,10 +53299,11 @@ def _merge_spend_details(payloads, hosts, local):
             m = meta[key]
             row = {"kind": "sid", "host": key[0], "sid": key[1], "name": m.get("name") or "", "bg": m.get("bg") or "",
                    "live": bool(m.get("live")), "usd": u, "tok": arr[1]}
-            if arr[4]["turns"]:
+            if arr[5]["turns"]:
                 row["turns"] = arr[2]
-            if arr[4]["key"]:
+            if arr[5]["key"]:
                 row["keyUsd"] = [round(v, 4) for v in arr[3]]
+                row["keyTok"] = arr[4]
             stacks.append(row)
         for oh, o in others.items():
             ou = [round(v, 4) for v in o[0]]
@@ -53280,6 +53314,7 @@ def _merge_spend_details(payloads, hosts, local):
         if any(uu) or any(una[1]):
             stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uu, "tok": una[1],
                            **({"turns": una[2]} if una_turns[0] else {}),
+                           "keyUsd": [round(v, 4) for v in una[3]], "keyTok": una[4],
                            "hosts": {h: {"usd": [round(v, 4) for v in a[0]], "tok": a[1]} for h, a in una_hosts.items()}})
         out = {"keys": keys, "stacks": stacks,
                "routes": [{"host": h, "route": r, "usd": [round(v, 4) for v in a[0]], "turns": a[1]}
@@ -73045,7 +73080,7 @@ var WINS=[['fiveHour',5*3600,'5 hours'],
 // tooltip detail for the ones drawn into the aggregate; SELF names this machine for its hover heading
 // when there is more than one host.
 var ROWS=[],LAST=[],SELF='',NOREPORT=[];   // NOREPORT: machines attached and up with no usage report yet (named, never a column)
-var ACCTS=[],ACCTS_MISS=[];   // the by-account line (2026-10-01): every machine's week folded into accounts by the kernel, and the machines it could not fold
+var ACCTS=[];   // the accounts (2026-10-01; per window since 2026-10-08): every machine's billing routes folded into accounts by the kernel
 // Limit / judge-degraded SIGNATURES (the user 2026-07-03; reshaped 2026-07-27): these used to gate fixed
 // top banners with a ✕ dismissal; the banners are gone — the same situations now log ONE entry each in
 // the shell's notification center (the bell, _LANDING_ERRS_JS). The stored signature means "this exact
@@ -73093,31 +73128,44 @@ function fmtSig3(v){return v.toFixed(v>=100?0:v>=10?1:2);}
 function fmtTok(n){if(n>=1e9)return fmtSig3(n/1e9)+'B';
 if(n>=1e6)return fmtSig3(n/1e6)+'M';
 if(n>=1e3)return fmtSig3(n/1e3)+'k';return String(n);}
-function fmtUsd(v){return '$'+String(Math.round(v));}   // whole dollars everywhere — no cents (the user 2026-08-09)
-// pay-per-token has no reset windows (the user 2026-08-13): the key's story is 1 hour (the user
-// 2026-08-15) / 1 day / 1 week / 1 month.
-// fiveHour/sevenDay fallbacks remain readable from older remote kernels (version skew) via day||fiveHour.
-// 'month' is a ROLLING 30 days (T235, 2026-09-03: a superset window must never read lower than the
-// week — it did, three days into a month, while month meant calendar-to-date); the bill figure sits
-// on its own row directly under it so it is still one glance away.
-var SPEND_WINS=[['hour','1 hour'],['day','1 day'],['week','1 week'],['month','1 month'],['monthToDate','this month']];
-// The per-host SPEND detail for the rich hover: plain NUMBERS per window (dollars, tokens, turns).
-// No bars anywhere for spend (the user 2026-08-08: the spend bar graphs told you nothing. The old
-// hover scaled each window's bar to the largest window, a shape with no meaning, and the budget-fill
-// tracks die with it): the numbers are the information, so the numbers are the rendering.
-function spendDet(u,det){var sp=u&&u.spend;if(!sp||!det)return;
-if(typeof u.spendAt==='number')det._spendAt=u.spendAt;   // the spend's OWN last-record moment
-// VERSION SKEW (one release, T235): an older kernel ships only a CALENDAR 'month' and no monthToDate.
-// Summing that into the rolling "1 month" would mix two different windows in one number, so that
-// host's calendar figure is filed under "this month" (which is what it IS) and its share is LEFT OUT
-// of the rolling row, which then says how many machines it does not count — the honest option.
-var legacy=(sp.month&&typeof sp.month.usd==='number'&&!sp.monthToDate);
-if(legacy){det._spendLegacyMonth=true;}
-SPEND_WINS.forEach(function(w){var k=w[0];if(legacy&&k==='monthToDate')k='month';else if(legacy&&k==='month')return;
-var seg=sp[k];if(!seg||typeof seg.usd!=='number')return;
-var row=(det._spend=det._spend||{})[w[0]]={label:w[1],usd:seg.usd,tok:seg.tok||0,turns:seg.turns||0,tokIn:seg.tokIn,tokOut:seg.tokOut,tokCacheR:seg.tokCacheR,tokCacheW:seg.tokCacheW};
-if(w[0]==='month'&&typeof seg.since==='string')row.since=seg.since;});   // a ledger younger than the window says so
-if(u.spendSeries&&u.spendSeries.usd)det._spendSeries=u.spendSeries;}   // $/hour, for the hover graph (the user 2026-08-13)
+// whole dollars everywhere, no cents (the user 2026-08-09), with thousands grouped so a five-figure month reads at a
+// glance ($55,183, never $55183; 2026-10-08)
+function fmtUsd(v){return '$'+Math.round(v).toLocaleString('en-US');}
+// ── USAGE AT API PRICES (the user 2026-10-08, who read 'API' on the cell while nearly all of their usage bills an
+// enterprise seat, and wanted the seat's usage in the figure too, as the dollars it would cost at API prices, marked as
+// an estimate). Every recorded turn carries Claude Code's own cost (total_cost_usd: its tokens at the API's published
+// prices) and the route that billed it, the API key or a subscription seat (the machine's sign-in, a stored login);
+// the kernel ships each host's dollars by route for the calendar day and month (spendRoutes, _rail_routes). The cell
+// sums every route: dollars the key was charged are exact, dollars a seat billed are an estimate, and a figure that holds
+// any estimated part wears the approx mark. The windows are calendar ones in the user's words, 'today' and 'this
+// month': they nest, so neither can read above the other (the superset rule T235 wrote for rolling windows), and the
+// month is the one an enterprise seat's monthly allowance resets on. The hover splits each figure by account.
+var COST_WINS=[['today','today'],['monthToDate','this month']];
+var COST_GRAIN=0.00005;   // the kernel's _SPEND_GRAIN: dollars below this are rounding, not spend
+function hasCost(u){var sr=u&&u.spendRoutes;return !!(sr&&(sr.today||sr.monthToDate));}
+// one host's figures: per window its total, the key's (charged) share, and the route sums the hover folds by account. A
+// host that reports spend without the calendar routes is on an older build: it is named in the hover, never summed as
+// though its figures were these
+function costDet(u,det){var sr=u&&u.spendRoutes;
+if(hasCost(u)){var c=det._cost={at:(typeof sr.at==='number')?sr.at:null,tok:sr.tok||{}};
+COST_WINS.forEach(function(w){var m=sr[w[0]]||{},usd=0,key=0;
+Object.keys(m).forEach(function(r){var v=(m[r]&&m[r][0])||0;usd+=v;if(r==='key')key+=v;});
+c[w[0]]={usd:usd,key:key,routes:m};});}
+else if(hasSpend(u)||(sr&&sr.week))det._costOld=true;}
+// the approx mark: any part of the figure not charged to the key is an estimate
+function costEst(v){return (v.usd-v.key)>=COST_GRAIN;}
+function costUsd(v){return (costEst(v)?'\u2248':'')+fmtUsd(v.usd);}
+function costSums(live){var s={},any=false;COST_WINS.forEach(function(w){s[w[0]]={usd:0,key:0};});
+live.forEach(function(e){var c=e.det._cost;if(!c)return;any=true;
+COST_WINS.forEach(function(w){s[w[0]].usd+=c[w[0]].usd;s[w[0]].key+=c[w[0]].key;});});
+return any?s:null;}
+// THE CELL: each window's ONE display name in the name font, LEFT of its figure (the window cells' grammar, the user
+// 2026-08-09), and no label of its own: the figures are dollars, and an 'API' label claimed a billing they mostly were
+// not. No tokens on the bar (they live in the hover). The API-health dot is not in this cell: it reports errors from the
+// API, not money, and sits apart at the bar's right end (#rail-api).
+function costCellHTML(live){var s=costSums(live);if(!s)return '';
+return '<div class="ru-w ru-cost">'+COST_WINS.map(function(w){
+return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct>'+costUsd(s[w[0]])+'</div>';}).join('')+'</div>';}
 // One payload's WINDOW detail for the hover (used/elapsed/reset per window). Detail only, no markup:
 // the rail no longer draws each account's own bars (they aggregate, below), but the tip still tells
 // each host's story from this.
@@ -73170,36 +73218,6 @@ html+='<div class="ru-w" data-w="'+w[0]+'">'
 +'<div class=ru-pct>'+best.pct+'%</div>'
 +'</div>';});
 return html;}
-// The API cell (the user 2026-08-08): ONE compact entry for everything key-billed across the fleet \u2014
-// the 5-hour burn and the month-to-date, dollars AND tokens (the user 2026-08-09, who wanted the
-// tokens kept beside the spend). No bars (see spendDet). It wears the window cells' own grammar
-// (same day): each designator is the window's ONE display name, in the name font, LEFT of its value \u2014
-// never a '$12 5h' with the window trailing the number in a second vocabulary. The label is the
-// constant 'API' \u2014 no fragment of any key, not even a last-4 tail, reaches a surface (2026-08-08,
-// evening: a tail is still key material, and the hover's HOST names already tell whose spend is
-// whose). The full per-window, per-host breakdown is the hover's job.
-function apiCellHTML(live){var sum={day:{usd:0,tok:0},month:{usd:0,tok:0}},any=false,legacyN=0;
-live.forEach(function(e){var sp=e.det._spend;if(!sp)return;any=true;
-// VERSION SKEW, the hover's rule (T235b): a host on the previous build ships a CALENDAR month and no
-// monthToDate — spendDet filed it under 'this month' and left no rolling 'month' here, so it never
-// joins this rolling segment (two windows summed into one number is the lie T235 removed). Its DAY
-// still counts, so day can exceed month in the cell for that host — the caveat on the segment says why.
-if(e.det._spendLegacyMonth)legacyN++;
-// day||fiveHour: an older remote kernel ships no 'day' window yet (version skew) \u2014 its 5h burn is the
-// closest honest stand-in until it updates, and dropping it entirely would blank that host's spend
-var d=sp.day||sp.fiveHour,m=sp.month;   // m: the ROLLING month only (a legacy host has none here)
-if(d){sum.day.usd+=d.usd;sum.day.tok+=d.tok||0;}
-if(m){sum.month.usd+=m.usd;sum.month.tok+=m.tok||0;}});
-if(!any)return '';
-// the caveat is a GLYPH here, never a native title (the rail's one hover surface is the rich tip, which
-// already reads "N machines not counted (older build)" on its rolling-month row — one explanation, one place)
-var seg=function(k,lbl,cav){return '<div class=ru-name>'+lbl+(cav?' \u26a0':'')+'</div>'
-+'<div class=ru-pct>'+fmtUsd(sum[k].usd)+' \u00b7 '+fmtTok(sum[k].tok)+' tok</div>';};
-var monthCav=legacyN>0;   // some machine's calendar month was left out of this rolling segment (T235b)
-return '<div class="ru-w ru-api">'
-+'<div class=ru-name>API</div><span class=ah-slot></span>'   // the API-health dot's place (T301): the stable #rail-api moves in
-+seg('day','1 day')+seg('month','1 month',monthCav)
-+'</div>';}
 // The collapsed rail is the AGGREGATE story (the user 2026-08-08; supersedes the one-set-per-account
 // rendering of 2026-07-30): one set of window bars for the whole fleet plus one API cell, never a
 // per-host repeat. Each host still computes its own detail (LAST), and the hover is where that breaks
@@ -73228,26 +73246,14 @@ for(k in u)v[k]=u[k];
 ['fiveHour','sevenDay','fable','t','limited','acctName','noWindows','monthly'].forEach(function(w){
 if(b[w]!==undefined)v[w]=b[w];else delete v[w];});
 r.usage=v;});});}
-var RAIL_HOME=(function(){var c=document.getElementById('rail-api');return c?c.parentNode:null;})();   // where the dot lives with no readout
-// the API-health dot may sit INSIDE this cell (in the readout's slot); every innerHTML write below would destroy it
-// with the readout, so it is parked back at its own place first and moved into the fresh slot after (T301)
-// a DOM move blurs a focused node: the dot's script is told the move is ours (__rompApiCellMoving) so its blur and
-// focus handlers stand down, and focus is put back after, so a focus-shown hover survives the readout's minute repaint
-function moveApiCell(c,into){var had=document.activeElement===c,mv=window.__rompApiCellMoving;if(mv)mv(true);
-into();if(had){try{c.focus({preventScroll:true});}catch(e){}}if(mv)mv(false);}
-function parkApiCell(){var c=document.getElementById('rail-api');if(c&&el.contains(c)&&RAIL_HOME)moveApiCell(c,function(){RAIL_HOME.insertBefore(c,el.nextSibling);});}
-function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];parkApiCell();
-var live=ROWS.filter(function(r){return hasBars(r.usage)||hasSpend(r.usage)||!!(r.usage&&r.usage.noWindows);});
+function renderRows(rows,selfHost){ROWS=rows||[];LAST=[];
+var live=ROWS.filter(function(r){return hasBars(r.usage)||hasCost(r.usage)||hasSpend(r.usage)||!!(r.usage&&r.usage.noWindows);});
 if(!live.length){el.innerHTML='';tip.style.display='none';return;}
 shareFreshest(live);
 LAST=live.map(function(r){var det={};det._t=(typeof r.usage.t==='number')?r.usage.t:null;
-winDet(r.usage,det);spendDet(r.usage,det);
+winDet(r.usage,det);costDet(r.usage,det);
 return {host:r.host||selfHost||'this machine',det:det,acct:(r.usage&&r.usage.acct)||'',ownT:r.ownT,lag:!!r.lag};});
-el.innerHTML=aggBarsHTML(LAST)+apiCellHTML(LAST);
-// the API-health dot rides the readout (T301): the STABLE #rail-api node moves into the readout's slot, and back to
-// its own place in the rail when no readout renders; a move keeps its listeners, an innerHTML copy would not
-(function(){var cell=document.getElementById('rail-api');if(!cell)return;var slot=el.querySelector('.ah-slot');
-if(slot){moveApiCell(cell,function(){slot.appendChild(cell);});}else if(cell.parentNode!==RAIL_HOME&&RAIL_HOME){moveApiCell(cell,function(){RAIL_HOME.insertBefore(cell,el.nextSibling);});}})();
+el.innerHTML=aggBarsHTML(LAST)+costCellHTML(LAST);
 // a HOVER tip already open re-renders in place when fresh data lands (the 60s pull, the timeline's
 // live forward) — the user 2026-08-14, replacing the footer's click-me hint with the refresh itself.
 // Re-anchor the top edge after the swap: new content can change the tip's height, and it hangs ABOVE
@@ -73255,55 +73261,13 @@ if(slot){moveApiCell(cell,function(){slot.appendChild(cell);});}else if(cell.par
 if(tip.style.display==='block'&&!tip.classList.contains('ru-modal')){var th=tipHTML();
 if(th){tip.innerHTML=th;var rr=el.getBoundingClientRect();
 tip.style.top=Math.max(6,rr.top-tip.offsetHeight-8)+'px';}}
-// the spend modal's Totals section is these same rows: an open modal follows every landing too (T247)
-if(typeof SP!=='undefined'&&SP.open&&SP.data){var ts=document.getElementById('rsp-totals');if(ts)ts.innerHTML=totalsHTML(SP.data);}}
+// the open modal's allowance line is these same rows: it follows every landing too (T247)
+if(typeof SP!=='undefined'&&SP.open&&SP.data){var al=document.getElementById('rsp-allow');if(al)al.innerHTML=spAllowHTML();}}
 // The single-payload path the timeline still posts (and the mobile panel's own fetch): treat it as this
 // machine's row, leaving any other account's bars alone.
 function render(u){notices(u);
 var rest=ROWS.filter(function(r){return r.host;});
 renderRows([{host:'',acct:(u&&u.acct)||'',usage:u}].concat(rest),SELF);}
-// ONE shared tooltip for BOTH windows: per window, the used bar (colormap) over the elapsed bar (slate) +
-// (the per-window utilization sparklines that sat under each window's bars are gone — the user
-// 2026-08-14, who wanted the one fleet $/h graph and nothing per window; usage-history.json keeps
-// recording so a future graph starts with history, see sdk_backend _record_usage_history)
-function dotAt(p,color){return '<polyline points="'+p[0].toFixed(1)+','+p[1].toFixed(1)+' '+(p[0]+0.1).toFixed(1)+','+p[1].toFixed(1)+'" fill="none" stroke="'+color+'" stroke-width="3" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';}
-// The fleet $/h graph, grown into a real chart (the user 2026-08-14): taller, a left y-axis scaled to
-// the ceiling of the nearest $50 ($50 rules, doubled to $100/$200/… until at most four fit), and
-// midnight ticks with weekday initials for an x-axis. h0 = the epoch-hour of arr[0], which places the
-// midnights in LOCAL time. Gaps (null hours) split the line into segments; a lone reading draws a dot.
-function moneyGraph(arr,color,h0){if(!arr||!arr.length)return '';
-var W=168,H=64,n=arr.length,mx=0;
-for(var i=0;i<n;i++)if(arr[i]!=null&&arr[i]>mx)mx=arr[i];
-if(mx<=0)return '';
-var top=50*Math.ceil(mx/50),step=50;
-while(top/step>4)step*=2;
-var X=function(i){return (n>1?i/(n-1):0.5)*W;},Y=function(v){return H-1-Math.max(0,Math.min(1,v/top))*(H-2);};
-var grid='',ylab='',xlab='';
-for(var g=step;g<top;g+=step){var gy=Y(g);
-grid+='<line x1="0" y1="'+gy.toFixed(1)+'" x2="'+W+'" y2="'+gy.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"/>';}
-// ONE y label, the CEILING, always (the user 2026-08-15 twice: first the $100..$400 stack said the
-// same thing four times; then the ceiling-only label vanished whenever step-doubling made top (450)
-// miss the step loop entirely). The ceiling is already the nice number (the next $50 above the
-// peak: 423→450, 597→600) — draw its line and its one label unconditionally, off the loop.
-var ty=Y(top);
-grid+='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
-ylab='<span class=ru-tip-gy style="top:'+(ty/H*56).toFixed(0)+'px">$'+top+'</span>';
-for(var i=0;i<n;i++){var d=new Date((h0+i)*3600000);
-if(d.getHours()===0){var gx=X(i);
-grid+='<line x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke="rgba(255,255,255,0.06)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
-xlab+='<span style="left:'+(gx/W*100).toFixed(1)+'%">'+['S','M','T','W','T','F','S'][d.getDay()]+'</span>';}}
-var segs=[],cur=[];
-for(var i=0;i<n;i++){var v=arr[i];
-if(v==null){if(cur.length){segs.push(cur);cur=[];}continue;}
-cur.push([X(i),Y(v)]);}
-if(cur.length)segs.push(cur);
-var body=segs.map(function(s){
-if(s.length===1)return dotAt(s[0],color);
-var pts=s.map(function(p){return p[0].toFixed(1)+','+p[1].toFixed(1);}).join(' ');
-return '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="1.5" vector-effect="non-scaling-stroke"/>'
-+'<polygon points="'+s[0][0].toFixed(1)+','+(H-1)+' '+pts+' '+s[s.length-1][0].toFixed(1)+','+(H-1)+'" fill="'+color+'" opacity="0.18" stroke="none"/>';}).join('');
-return '<div class=ru-tip-graph><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+body+'</svg>'
-+ylab+'<div class=ru-tip-gx>'+xlab+'</div></div>';}
 // the % + reset — the exact set of bars that used to sit under the timeline, nothing more.
 function barRows(d){return (d.unk
 ? '<div class="ru-tip-row ru-unk"><span class=ru-tip-k>last known</span>'
@@ -73348,78 +73312,55 @@ if(manyMachines)h+='<div class=ru-tip-machines>'+g.members.map(function(e){retur
 var ts=g.members.map(function(e){return e.ownT;}).filter(function(t){return typeof t==='number';});
 if(ts.length&&wh)h+='<div class=ru-tip-age>updated '+fmtAgo(Math.min.apply(null,ts))+'</div>';
 return h+'</div>';});}
-// The ONE API-spend section for the whole hover (the user 2026-08-13): every host's windows summed —
-// one shared key is one number — plus the summed $/hour over the last 7 days as an area graph. A host
-// that ships no series (an older kernel) still joins the window sums; the graph adds only contributors.
-var _spendRowsOnly=false;   // set by spendRowsHTML for the modal's first section (T247); the signature below is pinned
-function spendRowsHTML(sets){_spendRowsOnly=true;try{return fleetSpendHTML(sets);}finally{_spendRowsOnly=false;}}
-function fleetSpendHTML(sets){var sum={},series=null,hosts=0,per=[],legacyN=0,rowsOnly=_spendRowsOnly;
-sets.forEach(function(e){var sp=e.det&&e.det._spend;if(!sp)return;hosts++;
-if(sp.week&&typeof sp.week.usd==='number')per.push({host:e.host,usd:sp.week.usd});
-SPEND_WINS.forEach(function(w){var v=sp[w[0]];if(!v)return;
-var t=(sum[w[0]]=sum[w[0]]||{label:w[1],usd:0,tok:0,turns:0,tokIn:0,tokOut:0,tokCacheR:0,tokCacheW:0,split:true});
-t.usd+=v.usd;t.tok+=v.tok;t.turns+=v.turns;
-// the by-KIND split of the tokens (the user 2026-09-06, who read the day's count and could not see
-// how it was possible — cache reads, every API call of a turn re-reading the whole context, are most
-// of it at a tenth of the price). A host whose kernel ships no split (older build) leaves the summed
-// row UNSPLIT rather than half-split: a partial breakdown would read as a whole one.
-if(typeof v.tokCacheR==='number'){t.tokIn+=v.tokIn||0;t.tokOut+=v.tokOut||0;t.tokCacheR+=v.tokCacheR;t.tokCacheW+=v.tokCacheW||0;}else t.split=false;
-if(v.since&&(!t.since||v.since>t.since))t.since=v.since;});   // the YOUNGEST ledger bounds the sum (T235b): it is complete only from there
-if(e.det._spendLegacyMonth)legacyN++;
-var ss=e.det._spendSeries;
-if(ss&&ss.usd){if(!series){series={h0:ss.h0,usd:ss.usd.slice()};}
-else{var off=ss.h0-series.h0;   // align on the base hour — hosts' polls may straddle an hour edge
-for(var i=0;i<ss.usd.length;i++){var j=i+off;if(j>=0&&j<series.usd.length)series.usd[j]+=ss.usd[i];}}}});
-var ks=SPEND_WINS.map(function(w){return w[0];}).filter(function(k){return sum[k];});
-if(!ks.length)return '';
-// the spend's OWN freshness (the user 2026-08-24, whose windows' "updated 9h 38m ago" sat directly
-// above this section and read as the spend's age): the newest contributing host's last-record
-// moment — the recorder writes per turn result, so this is an event time, not a poll time
-var sAt=0;sets.forEach(function(e){var a=e.det&&e.det._spendAt;if(typeof a==='number'&&a>sAt)sAt=a;});
-var h='<div class="ru-tip-win ru-tip-fleetspend"><div class=ru-tip-name><span>API spend'+(hosts>1?' \u00b7 '+hosts+' machines':'')+'</span></div>'
-+ks.map(function(k){var v=sum[k];
-// the rolling month's caveats ride its label: a ledger younger than 30 days ("since <date>"), and
-// the machines whose older build could contribute only a calendar month (left out, counted)
-var lab=v.label;
-if(k==='month'&&v.since)lab+=' \u00b7 complete since '+esc(v.since);
-if(k==='month'&&legacyN)lab+=' \u00b7 '+legacyN+' machine'+(legacyN>1?'s':'')+' not counted (older build)';
-var row='<div class=ru-tip-row><span class=ru-tip-k>'+lab+'</span>'
-+'<span class=ru-tip-v>'+fmtUsd(v.usd)+' \u00b7 '+fmtTok(v.tok)+' tok \u00b7 '+(v.turns||0)+' turns</span></div>';
-// the split sits under its window, largest kind first, as a sub-line (the .ru-tip-reset annotation grammar)
-if(v.split&&(v.tokIn+v.tokOut+v.tokCacheR+v.tokCacheW)>0)row+='<div class="ru-tip-row ru-tip-sub"><span class=ru-tip-k></span>'
-+'<span class=ru-tip-v>'+fmtTok(v.tokCacheR)+' cache read \u00b7 '+fmtTok(v.tokCacheW)+' cache write \u00b7 '+fmtTok(v.tokIn)+' in \u00b7 '+fmtTok(v.tokOut)+' out</span></div>';
-return row;}).join('');
-// rowsOnly: the usage MODAL's first section is THESE SAME window numbers (T247) — the sums across
-// every machine the hover shows, one renderer, so the two levels can never disagree; the graph and
-// the machine line stay the hover's (the modal draws its own stacked histogram instead)
-if(rowsOnly)return h.replace('<span>API spend','<span>Totals')+'</div>';
-// every machine in the sum, BY NAME (the user 2026-08-13: a host with no login \u2014 the devbox \u2014 vanished
-// from the hover entirely when the per-host spend rows collapsed into this one section; '3 machines'
-// with two names visible reads as a bug). One line, largest first, week numbers like the graph.
-if(per.length>1){per.sort(function(a,b){return b.usd-a.usd;});
-h+='<div class=ru-tip-row><span class=ru-tip-k>by machine \u00b7 1 week</span><span class=ru-tip-v>'
-+per.map(function(p){return esc(p.host)+' '+fmtUsd(p.usd);}).join(' \u00b7 ')+'</span></div>';}
-h+=acctLineHTML(ACCTS,ACCTS_MISS);
-if(series){var st=Math.max(0,series.usd.length-168),wk=series.usd.slice(st),mx=0;for(var i=0;i<wk.length;i++)if(wk[i]>mx)mx=wk[i];
-// 'peak $X/h': the costliest single HOUR of the week (the user 2026-08-13 asked whether the bare
-// number was per-hour \u2014 say so). The peak rides the label row's VALUE slot and the graph gets its
-// own line below, spanning the tip \u2014 squeezed between label and peak it rendered 120px wide with
-// empty space either side (the user 2026-08-14, who wanted the graph the full width of the box).
-// st keeps the slice aligned with h0 so the x-axis midnights land on real local midnights.
-if(mx>0)h+='<div class=ru-tip-row><span class=ru-tip-k>$/h \u00b7 7d</span>'
-+'<span class=ru-tip-v>peak '+fmtUsd(mx)+'/h</span></div>'
-+moneyGraph(wk,'#9cd2ff',series.h0+st);}
-if(sAt)h+='<div class=ru-tip-age>last charge recorded '+fmtAgo(sAt)+'</div>';
+// THE HOVER'S USAGE SECTION: the cell's two figures split by account, in a small table whose columns are the cell's
+// windows. Each account is the kernel's fold of every host's billing routes (ACCTS, _rail_accounts: one enterprise seat
+// reached through one machine's sign-in and another's stored token is ONE row), and its figures are its routes summed
+// from the same rows the cell sums, so the rows add up to the cell by construction. A route no account names yet (spend
+// recorded after the last /usage/fleet read) is not dropped: the key's joins the API key row, any other an 'other' row.
+// The key's row says 'charged'; a seat's figures wear the approx mark, and one line under the table says why.
+function costZero(){var v={};COST_WINS.forEach(function(w){v[w[0]]={usd:0,key:0};});return v;}
+function costRows(sets){var byHost={},taken={},rows=[];sets.forEach(function(e){if(e.det._cost)byHost[e.host]=e.det._cost;});
+var add=function(r,c,route){COST_WINS.forEach(function(w){var x=c[w[0]].routes[route],v=(x&&x[0])||0;r.v[w[0]].usd+=v;if(route==='key')r.v[w[0]].key+=v;});};
+(ACCTS||[]).forEach(function(a){var r={name:a.name,kind:a.kind,v:costZero()};
+(a.routes||[]).forEach(function(rt){var c=byHost[rt.host];if(!c||taken[rt.host+'|'+rt.route])return;taken[rt.host+'|'+rt.route]=1;add(r,c,rt.route);});
+rows.push(r);});
+var keyRow=rows.filter(function(r){return r.kind==='key';})[0]||null,other=null;
+Object.keys(byHost).forEach(function(h){var c=byHost[h],seen={};COST_WINS.forEach(function(w){Object.keys(c[w[0]].routes).forEach(function(rt){seen[rt]=1;});});
+Object.keys(seen).forEach(function(rt){if(taken[h+'|'+rt])return;taken[h+'|'+rt]=1;
+if(rt==='key'){if(!keyRow){keyRow={name:'API key',kind:'key',v:costZero()};rows.push(keyRow);}add(keyRow,c,rt);}
+else{if(!other){other={name:'other',kind:'unknown',v:costZero()};rows.push(other);}add(other,c,rt);}});});
+var rank={seat:0,key:1,unknown:2};
+return rows.filter(function(r){return COST_WINS.some(function(w){return r.v[w[0]].usd>=COST_GRAIN;});})
+.sort(function(a,b){return ((rank[a.kind]||0)-(rank[b.kind]||0))||(b.v.monthToDate.usd-a.v.monthToDate.usd);});}
+var COST_EST_WORDS='\u2248 marks an estimate: what that usage would cost at API prices, since a subscription seat is not billed per token.';
+function costTipHTML(sets){var s=costSums(sets),old=[],at=0;
+sets.forEach(function(e){if(e.det._costOld)old.push(e.host);var c=e.det._cost;if(c&&c.at&&c.at>at)at=c.at;});
+if(!s&&!old.length)return '';
+var h='<div class="ru-tip-win ru-tip-cost"><div class=ru-tip-name><span>Usage at API prices</span></div>';
+if(s){var rows=costRows(sets),anyEst=false,tk={},kinds={tokCacheR:0,tokCacheW:0,tokIn:0,tokOut:0},hosts=[];
+h+='<table class=ru-ctab><thead><tr><th></th>'+COST_WINS.map(function(w){return '<th>'+w[1]+'</th>';}).join('')+'</tr></thead><tbody>';
+rows.forEach(function(r){h+='<tr data-kind="'+esc(r.kind)+'"><td>'+esc(r.name)+(r.kind==='key'?' <span class=ru-ckey>charged</span>':'')+'</td>'
++COST_WINS.map(function(w){var v=r.v[w[0]];if(costEst(v))anyEst=true;return '<td>'+costUsd(v)+'</td>';}).join('')+'</tr>';});
+// a total only where it adds something: with one account the row above IS the total. It mixes estimate and charge
+// when both are present, and its approx mark says so
+if(rows.length>1)h+='<tr class=ru-ctot><td>Total</td>'+COST_WINS.map(function(w){return '<td>'+costUsd(s[w[0]])+'</td>';}).join('')+'</tr>';
+COST_WINS.forEach(function(w){tk[w[0]]=0;});
+sets.forEach(function(e){var c=e.det._cost;if(!c)return;hosts.push({host:e.host,v:c.monthToDate});
+COST_WINS.forEach(function(w){tk[w[0]]+=((c.tok||{})[w[0]]||{}).tok||0;});
+var m=(c.tok||{}).monthToDate||{};Object.keys(kinds).forEach(function(k){kinds[k]+=m[k]||0;});});
+h+='<tr class=ru-ctok><td>tokens</td>'+COST_WINS.map(function(w){return '<td>'+fmtTok(tk[w[0]])+'</td>';}).join('')+'</tr></tbody></table>';
+// the month's tokens by kind (the user 2026-09-06, who could not see how a day's count was possible: cache reads, every
+// call of a turn re-reading the context, are most of it at a tenth of the input price)
+if(tk.monthToDate>0)h+='<div class=ru-tip-note>this month: '+fmtTok(kinds.tokCacheR)+' cache read \u00b7 '+fmtTok(kinds.tokCacheW)+' cache write \u00b7 '+fmtTok(kinds.tokIn)+' in \u00b7 '+fmtTok(kinds.tokOut)+' out</div>';
+if(anyEst)h+='<div class=ru-tip-note>'+COST_EST_WORDS+'</div>';
+// every machine in the figures, by name, when there is more than one (the user 2026-08-13: a machine missing from the
+// hover read as a bug)
+if(hosts.length>1){hosts.sort(function(a,b){return b.v.usd-a.v.usd;});
+h+='<div class=ru-tip-note>by machine this month: '+hosts.map(function(x){return esc(x.host)+' '+costUsd(x.v);}).join(' \u00b7 ')+'</div>';}}
+if(old.length)h+='<div class=ru-tip-note>'+old.map(esc).join(', ')+': older build, '+(old.length>1?'their':'its')+' usage is not in these figures</div>';
+// the ledger's own freshness, the newest machine's last recorded turn (an event time: the recorder writes per turn)
+if(at)h+='<div class=ru-tip-age>last turn recorded '+fmtAgo(at)+'</div>';
 return h+'</div>';}
-// BY ACCOUNT, one line (the user 2026-10-01, who read seat dollars summed into this card's figures, unmarked): who
-// billed the week, folded by the kernel exactly as the spend detail's By account summary folds it (_rail_accounts). The
-// rows above are the key's dollars; a subscription seat's are Claude Code's cost at API prices, an estimate, and wear
-// the approx mark as they do in the detail. Drawn only when something besides the key billed the week: a key alone is
-// already the rows above. A machine whose older build sends no routes is counted out by name.
-function acctLineHTML(accts,miss){if(!(accts||[]).some(function(a){return a.kind!=='key';}))return '';
-return '<div class=ru-tip-row><span class=ru-tip-k>by account \u00b7 1 week</span><span class=ru-tip-v>'
-+accts.map(function(a){return esc(a.name)+' '+(a.est?'\u2248':'')+fmtUsd(a.usd);}).join(' \u00b7 ')
-+((miss||[]).length?' \u00b7 '+miss.map(esc).join(', ')+' not counted (older build)':'')+'</span></div>';}
 function tipHTML(){var sets=LAST||[];if(!sets.length&&!NOREPORT.length)return '';
 var manyMachines=(sets.length+NOREPORT.length)>1;
 var blocks=acctBlocksHTML(sets,manyMachines);
@@ -73435,7 +73376,7 @@ if(NOREPORT.length)h+='<div class=ru-tip-machines>no usage report yet from '+NOR
 // no footer hint: refresh is AUTOMATIC (the 60s pull below + the timeline's live forward), and a
 // click-me line misread on a hover surface (the user 2026-08-14) — the click stays as a manual
 // kick, it just doesn't advertise. An OPEN tip follows every data landing via renderRows.
-h+=fleetSpendHTML(sets);
+h+=costTipHTML(sets);
 return h;}
 // The tip anchors ABOVE the rail, centered on the cursor (the user 2026-08-08: it used to pin to the
 // container's RIGHT edge, nowhere near a hover on the left end of a wide multi-account rail).
@@ -73444,7 +73385,7 @@ if(!h){tip.style.display='none';return;}
 // the compact level says there is more underneath (T247d, the user 2026-09-08): the click opens the
 // per-session breakdown — one footnote line in the hover's own footnote style; the phone panel has
 // its "By session" button instead (openIt), because a tap there opens nothing
-tip.classList.remove('ru-modal');tip.innerHTML=h+'<div class=ru-tip-hint>Click for the full breakdown by session.</div>';
+tip.classList.remove('ru-modal');tip.innerHTML=h+'<div class=ru-tip-hint>Click for the charts and the breakdown by session.</div>';
 var r=el.getBoundingClientRect();tip.style.display='block';
 var x=(ev&&typeof ev.clientX==='number')?ev.clientX:(r.left+r.width/2);
 tip.style.left=Math.max(6,Math.min(window.innerWidth-tip.offsetWidth-6,x-tip.offsetWidth/2))+'px';
@@ -73457,7 +73398,7 @@ function openIt(){var h=tipHTML();if(!h)return;
 try{window.__rompApiClose&&window.__rompApiClose();}catch(e){}   // one modal on #ru-back at a time (the API detail does the same)
 // the deeper level is one tap away here too (T247): the rail — and its click — do not exist on a
 // phone, and a compact view must never dead-end (progressive disclosure)
-tip.innerHTML=h+'<div class=ru-tip-more><button class=rsp-btn id=ru-bysession>By session \u2192</button></div>';   // its own row, the hover's button size (T247b review: inside .ru-tip-age it read as a 10px annotation at .55)
+tip.innerHTML=h+'<div class=ru-tip-more><button class=rsp-btn id=ru-bysession>Charts and sessions \u2192</button></div>';   // its own row, the hover's button size (T247b review: inside .ru-tip-age it read as a 10px annotation at .55)
 tip.classList.add('ru-modal');tip.style.left='';tip.style.top='';tip.style.display='block';
 back.classList.add('on');
 var off=function(){tip.style.display='none';tip.classList.remove('ru-modal');back.classList.remove('on');
@@ -73468,15 +73409,8 @@ var bs=document.getElementById('ru-bysession');if(bs)bs.onclick=function(e){e.st
 window.__rompUsageClose=off;
 back.onclick=off;}
 pullFleet().then(openIt,openIt);};
-// the API-health dot sits inside this cell (T301): a pointer arriving on the DOT gets the dot's own tip, not this one
-el.addEventListener('mouseenter',function(ev){var c=document.getElementById('rail-api');
-if(c&&ev&&typeof ev.clientX==='number'){var at=document.elementFromPoint(ev.clientX,ev.clientY);if(at&&(at===c||c.contains(at)))return;}showTip(ev);});
+el.addEventListener('mouseenter',function(ev){showTip(ev);});
 el.addEventListener('mouseleave',function(){tip.style.display='none';});
-// the dot's own tip takes over while the pointer is on the dot (T301 review): the dot's script hides this tip as its
-// own shows and asks for it back when the pointer slides from the dot onto the readout's figures (its mouseenter
-// and mouseleave, never a timer), so the two tips are never up at once
-window.__rompUsageTipHide=function(){tip.style.display='none';};
-window.__rompUsageTipShow=function(ev){showTip(ev);};
 // Refresh-from-source (the user 2026-06-30): GET /usage re-reads usage.json — the snapshot Claude Code's
 // statusline (tmux) OR the SDK backend's RateLimitEvent capture writes — and re-renders. `pull(ack)` is the
 // shared path: a CLICK forces it now (ack=true → instant dim pulse before the round-trip, per the button
@@ -73490,7 +73424,7 @@ var _ruBusy=false;
 // today's exact rendering \u2014 whenever every machine is signed into the same login.
 function pullFleet(){return fetch('/usage/fleet',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
 .then(function(d){var rows=(d&&d.rows)||[];SELF=(d&&d.host)||SELF;NOREPORT=(d&&Array.isArray(d.noReport))?d.noReport:[];
-ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];ACCTS_MISS=(d&&Array.isArray(d.accountsMissing))?d.accountsMissing:[];
+ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];
 var local=rows.length?rows[0].usage:null;
 notices(local);renderRows(rows,SELF);});}
 function pull(ack){if(_ruBusy)return;_ruBusy=true;
@@ -73508,9 +73442,7 @@ pullFleet().then(done,function(){if(ROWS.length)renderRows(ROWS,SELF);done();});
 // kernel-side, the ledger's bySid series — fetched on open behind the romp loader, never scraped from
 // the hover's HTML. The click still kicks the hover's own refresh (pull), so both levels are fresh.
 var spBack=document.getElementById('rsp-back'),spPanel=document.getElementById('rsp-panel'),spTip=null;
-// acctsOpen: the narrow card's By account fold, opened by the user (spPaintAccts). Kept for the page's life, as a keyed
-// expand is: closing and reopening the modal keeps it open, and a reload starts it closed (it is not a saved pref)
-var SP={data:null,err:'',range:'hours',measure:'usd',order:'spend',merge:false,open:false,acctsOpen:false};
+var SP={data:null,err:'',range:'hours',measure:'usd',order:'spend',merge:false,open:false};
 // the toggles persist across opens and reloads (T247f): range, measure, and the list's order
 var SP_PREFS_KEY='romp:spendModal';
 function spLoadPrefs(){try{var p=JSON.parse(localStorage.getItem(SP_PREFS_KEY)||'{}')||{};if(p.range==='days'||p.range==='day')SP.range=p.range;if(p.measure==='tok')SP.measure='tok';if(p.order==='yours')SP.order='yours';if(p.merge===true)SP.merge=true;}catch(e){}}
@@ -73559,36 +73491,36 @@ function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="d
 var SP_RANGE_BUCKETS={day:24,hours:168};
 function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
 function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
-return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);
+return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);if(s.keyTok)o.keyTok=s.keyTok.slice(cut);
 if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;}),routes:(ser.routes||[]).map(function(r){return {host:r.host,route:r.route,usd:(r.usd||[]).slice(cut),turns:(r.turns||[]).slice(cut)};})};}
 // the hosts whose rows in THIS range view show a dash for turns (an older build's stacks carry none): a session row's
 // host, or the fold's hosts when the fold's turns are unknown; the local machine's own rows always carry turns
 function spDashedHosts(d){var dashed={};(d.sessions||[]).forEach(function(s){if(s.turns==null)dashed[String(s.host||d.host||'')]=1;});
 if(d.other&&d.other.turns==null&&(d.other.usd>0||d.other.tok>0))(d.other.hosts||[]).forEach(function(hn){dashed[hn]=1;});return Object.keys(dashed).filter(function(x){return x;}).sort();}   // a fold with nothing in range draws no row, so no dash
-// The list FOLLOWS THE CHART (T353, the user 2026-09-11): the per-session rows are summed from the SAME buckets the
-// chart draws (spSeries: the range's tail of the ledger's series), so the list's total is the chart's total by
-// construction for every range, dollars, tokens and turns alike, and the key-billed column too (keyUsd). The
-// payload's own 90-day sessions stay the roster: names, colours, liveness, the viewer's order and the tag store's
-// members are read off them by key; a session with nothing in the range is no row and no stack. An older peer's
-// stacks carry no turns or keyUsd: those columns read 0 for it, never a guess.
+// The list FOLLOWS THE CHARTS (T353, the user 2026-09-11): the per-session rows are summed from the SAME buckets the
+// charts draw (spSeries: the range's tail of the ledger's series), so the list's columns are the charts' totals by
+// construction for every range. The payload's own 90-day sessions stay the roster: names, colours, liveness, the
+// viewer's order and the tag store's members are read off them by key; a session with nothing in the range is no row
+// and no stack. An older peer's stacks carry no turns: a dash, never a guess.
 function spSumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function spRound4(v){return Math.round(v*10000)/10000;}
-// ── By account (the user 2026-10-01, who read an email in the spend display and could not tell which account it was, nor
-// how the breakdown worked): the kernel folds every host's billing routes into accounts by identity (_spend_accounts:
-// one enterprise seat reached by one machine's sign-in and another's stored token is ONE row, "Enterprise seat"); the
-// rows here sum each account's routes over the buckets the chart draws, like the session rows. Dollars billed to a
-// subscription seat are Claude Code's cost at API prices, not a bill: they wear the approx mark, with the reason in the
-// hover and once under the summary; key-billed dollars stay plain. The email stays in the hover. The hover words ride
-// the modal's own tooltip from a data-tip attribute (spWordsAt below), never a native title: the rich tip is the ONE
-// hover surface (the user 2026-08-08, who got the browser's flat box on top of the rich hover).
-var SP_GRAIN=0.00005,SP_APPROX='\u2248',SP_DOT='\u00b7',SP_EST_TIP='An estimate at API prices: a subscription seat is not billed per token';
-function spUsd(v,est){return est?'<span class=rsp-est data-tip="'+esc(SP_EST_TIP)+'">'+SP_APPROX+fmtUsd(v)+'</span>':fmtUsd(v);}
-// a stack's host's billing rule, and the part of its dollars a subscription seat billed under it: none where the list
-// counts key-billed turns only, all of it where nothing bills a key ("computed"), and where every turn counts whatever
-// the key did not bill (an older peer's stack carries no key dollars: unknown, so no mark)
+// ── THE TWO KINDS OF DOLLARS, drawn apart (the user 2026-10-08, who wanted the enterprise seat and the API key in
+// separate charts, since the one is not charged in dollars and the other is). Every stack carries every turn (usd, tok)
+// and the key-billed part of it (keyUsd, keyTok, _spend_detail_local): the key's part is what the key was charged, and
+// the rest, the seat's part, is Claude Code's cost of the seat's turns at API prices, an estimate (the approx mark). An
+// older machine that still sends the key's turns alone (its own "keyed" rule) has only a key part. One reader for both
+// halves, so the charts, the cards and the list cannot disagree.
+var SP_GRAIN=0.00005,SP_APPROX='\u2248',SP_DOT='\u00b7';
 function spHostScope(d,host){var hs=(d.hosts||[]).filter(function(h){return h.host===(host||d.host);})[0];return (hs&&hs.scope)||d.scope;}
-function spSeatPart(d,st,usd){var sc=spHostScope(d,st.host);if(sc==='keyed')return 0;if(sc==='computed')return usd;return st.keyUsd?Math.max(0,usd-spSumArr(st.keyUsd)):0;}
+function spKeyArr(d,st,meas){var tot=st[meas]||[];if(spHostScope(d,st.host)==='keyed')return tot.slice();
+var k=meas==='usd'?st.keyUsd:st.keyTok;return tot.map(function(v,i){return Math.min(v||0,(k&&k[i])||0);});}
+function spPart(d,st,sec,meas){var tot=st[meas]||[],k=spKeyArr(d,st,meas);
+return sec==='key'?k:tot.map(function(v,i){return Math.max(0,(v||0)-(k[i]||0));});}
+function spUsd(v,est){return (est&&v>=SP_GRAIN?SP_APPROX:'')+fmtUsd(v);}
 function spRouteSums(d){var ser=spSeries(d),m={};((ser&&ser.routes)||[]).forEach(function(r){var k=String(r.host||d.host)+'|'+r.route,e=m[k]||(m[k]={usd:0,turns:0});e.usd+=spSumArr(r.usd);e.turns+=spSumArr(r.turns);});return m;}
+// the accounts, each its routes summed over the range the charts draw (the kernel folds every host's routes into
+// accounts by identity, _spend_accounts: one enterprise seat reached by one machine's sign-in and another's stored token
+// is ONE account). The email and the organisation stay in the hover words (data-tip), never on the card
 function spAccountRows(d){var sums=spRouteSums(d),out=[];
 (d.accounts||[]).forEach(function(a){var usd=0,turns=0,via=[],est=false;
 (a.routes||[]).forEach(function(r){var e=sums[String(r.host)+'|'+r.route];if(!e||!(e.usd>=SP_GRAIN||e.turns>0))return;usd+=e.usd;turns+=e.turns;if(via.indexOf(r.via)<0)via.push(r.via);if(r.estimate)est=true;});
@@ -73596,82 +73528,47 @@ if(usd>=SP_GRAIN||turns>0)out.push({name:a.name,kind:a.kind,note:a.note||'',titl
 out.sort(function(x,y){return ((x.kind==='unknown')-(y.kind==='unknown'))||(y.usd-x.usd);});return out;}
 // the account a session's stored login belongs to, by name ("" when that login has no spend in the ledger's reach)
 function spAcctName(d,s){var want=String(s.host||d.host)+'|login:'+s.loginId,hit='';(d.accounts||[]).forEach(function(a){(a.routes||[]).forEach(function(r){if(String(r.host)+'|'+r.route===want)hit=a.name;});});return hit;}
-// the hosts whose chart, list and Totals count key-billed turns only while the summary counts every route (the #74
-// review's keyed-host finding): a keyed host with spend in this range on any route but the key (its seat turns, a
-// signed-out or unreadable sign-in's, or spend from before billing was tracked). Decided per host, as spSeatPart
-// decides, since a keyed and a total host can feed one seat row
-function spKeyedHosts(d){var ser=spSeries(d),out=[];((ser&&ser.routes)||[]).forEach(function(r){var h=String(r.host||d.host);
-if(r.route==='key'||out.indexOf(h)>=0||spHostScope(d,h)!=='keyed')return;if(spSumArr(r.usd)>=SP_GRAIN||spSumArr(r.turns)>0)out.push(h);});return out;}
-// the summary beside Totals (mode ''), or, on a card too narrow for that, where it stacked above the session list and
-// pushed the list down, at 390x844 wholly off the card (the #74 review's narrow-card finding), a fold: 'closed' is ONE
-// line, the head and each account's dollars, and a click opens it; 'open' is the full summary under the same head.
-// spPaintAccts picks the mode.
-// The closed line's marks carry no hover words: the line is the fold's button, and a tap on a touch screen hovers as well
-// as clicks, so the estimate's words would be left up over the rows the tap opens. The open rows and the estimate line
-// under them keep the words
-function accountsHTML(d,mode){var rows=spAccountRows(d),miss=d.accountsMissing||[],anyEst=false;if(!rows.length&&!miss.length)return '';
-var fold=mode==='closed'||mode==='open';
-var h=fold?'<button class="ru-tip-name rsp-afold" data-act=accts:toggle aria-expanded='+(mode==='open'?'true':'false')+'><span><i class=rsp-acaret aria-hidden=true>\u25b8</i>By account</span>':'<div class=ru-tip-name><span>By account</span>';
-if(mode==='closed')return h+'<span class=ru-tip-reset>'+(rows.length?rows.map(function(r){return esc(r.name)+' '+(r.est?SP_APPROX:'')+fmtUsd(r.usd);}).join(', '):miss.map(esc).join(', ')+': older build')+'</span></button>';
-h+='<span class=ru-tip-reset>'+spRangeWords(spSeries(d))+'</span>'+(fold?'</button>':'</div>')+'<table class=rsp-acct><tbody>';
-rows.forEach(function(r){if(r.est)anyEst=true;h+='<tr data-acct="'+esc(r.kind)+'"><td class=rsp-name'+(r.title?' data-tip="'+esc(r.title)+'"':'')+'>'+esc(r.name)
-+'<span class=ru-tip-reset> '+SP_DOT+' '+esc(r.via.join(', '))+(r.note?' '+SP_DOT+' '+esc(r.note):'')+'</span></td>'
-+'<td class=n>'+spUsd(r.usd,r.est)+'</td><td class=n>'+r.turns+' turn'+(r.turns===1?'':'s')+'</td></tr>';});
-h+='</tbody></table>';
-if(miss.length)h+='<div class=rsp-note>'+miss.map(esc).join(', ')+': older build, not in this breakdown</div>';
-var kh=spKeyedHosts(d),their=kh.length===1?'its':'their';
-if(kh.length)h+='<div class=rsp-note>'+kh.map(esc).join(', ')+': all '+their+' turns count here; the chart, the list and Totals count only '+their+' key-billed turns</div>';
-if(anyEst)h+='<div class=rsp-note>'+SP_APPROX+' '+esc(SP_EST_TIP)+'.</div>';
-return h;}
-// paint the summary in the mode its place allows: beside Totals, the full summary; stacked under them (a narrow card,
-// where the row wrapped, which the sections' 300px basis decides from the card's width alone, whatever they hold) one
-// line unless the user opened it (SP.acctsOpen, kept across re-renders and resizes). A paint that would change nothing
-// is skipped, so a resize keeps the fold's focus
-function spPaintAccts(){var ac=document.getElementById('rsp-accts'),tt=document.getElementById('rsp-totals');if(!ac||!SP.data)return;
-var ah=accountsHTML(SP.data,'');if(!ah){ac.innerHTML='';ac.hidden=true;ac.__rspH='';return;}
-ac.hidden=false;if(tt&&ac.getBoundingClientRect().top>tt.getBoundingClientRect().top+1)ah=accountsHTML(SP.data,SP.acctsOpen?'open':'closed');
-if(ac.__rspH!==ah){ac.innerHTML=ah;ac.__rspH=ah;}}
 function spRangeView(d){var ser=spSeries(d);if(!ser||!ser.stacks)return d;var meta={};(d.sessions||[]).forEach(function(s){meta[spKey(d,s)]=s;});
-var sessions=[],un={usd:0,tok:0,turns:0},other=null;
+var sessions=[],un={usd:0,tok:0,turns:0,keyUsd:0,seatUsd:0},other=null;
 ser.stacks.forEach(function(st){var usd=spSumArr(st.usd),tok=spSumArr(st.tok),turns=st.turns?spSumArr(st.turns):null;   // null: an older peer's stack carries no turns (a dash, never a zero)
+var ku=spSumArr(spPart(d,st,'key','usd')),su=spSumArr(spPart(d,st,'seat','usd'));
 if(st.kind==='sid'){if(!(usd>0||tok>0||(turns||0)>0))return;var m=meta[spKey(d,st)]||{};
-var row={sid:st.sid,host:st.host,name:st.name||m.name||'',bg:st.bg||m.bg||'',fg:m.fg||'',live:!!st.live,usd:spRound4(usd),tok:tok,turns:turns};
+var row={sid:st.sid,host:st.host,name:st.name||m.name||'',bg:st.bg||m.bg||'',fg:m.fg||'',live:!!st.live,usd:spRound4(usd),tok:tok,turns:turns,keyUsd:spRound4(ku),seatUsd:spRound4(su)};
 if(m.bgDerived)row.bgDerived=true;if(m.login){row.login=m.login;row.loginId=m.loginId||'';row.loginLabel=m.loginLabel||'';}   // the stored login it bills, from the roster
-row.seat=spRound4(spSeatPart(d,st,usd));   // the part of its dollars billed to a subscription seat: an estimate at API prices
-// the key column follows the range too, but only where the ledger tracks a key split for the session (the roster's own
-// `key`, or key dollars inside the range): a stack whose keyUsd is all zeros on a login-only host grows no $0 column
-var ku=st.keyUsd?spSumArr(st.keyUsd):0;if(st.keyUsd&&(ku>0||(m.key&&typeof m.key.usd==='number')))row.key={usd:spRound4(ku)};sessions.push(row);}
-else if(st.kind==='other'){other=other||{usd:0,tok:0,turns:0,count:0,hosts:[]};other.usd+=usd;other.tok+=tok;if(turns==null)other.turns=null;else if(other.turns!=null)other.turns+=turns;other.count+=st.count||0;if(st.host&&other.hosts.indexOf(st.host)<0)other.hosts.push(st.host);}
-else if(st.kind==='unattributed'){un.usd+=usd;un.tok+=tok;if(turns==null)un.turns=null;else if(un.turns!=null)un.turns+=turns;}});
+sessions.push(row);}
+else if(st.kind==='other'){other=other||{usd:0,tok:0,turns:0,count:0,hosts:[],keyUsd:0,seatUsd:0};other.usd+=usd;other.tok+=tok;other.keyUsd+=ku;other.seatUsd+=su;if(turns==null)other.turns=null;else if(other.turns!=null)other.turns+=turns;other.count+=st.count||0;if(st.host&&other.hosts.indexOf(st.host)<0)other.hosts.push(st.host);}
+else if(st.kind==='unattributed'){un.usd+=usd;un.tok+=tok;un.keyUsd+=ku;un.seatUsd+=su;if(turns==null)un.turns=null;else if(un.turns!=null)un.turns+=turns;}});
 sessions.sort(function(a,b){return (b.usd-a.usd)||(b.tok-a.tok)||String(a.name).localeCompare(String(b.name));});
-var out={};for(var k in d)out[k]=d[k];out.sessions=sessions;out.unattributed={usd:spRound4(un.usd),tok:un.tok,turns:un.turns};
+var out={};for(var k in d)out[k]=d[k];out.sessions=sessions;out.unattributed={usd:spRound4(un.usd),tok:un.tok,turns:un.turns,keyUsd:spRound4(un.keyUsd),seatUsd:spRound4(un.seatUsd)};
 if(other){other.usd=spRound4(other.usd);out.other=other;}return out;}
-// the range in words, from the buckets the chart draws: '1 day \u00b7 by hour' reads 'last 24 hours', the week 'last 7 days',
+// the range in words, from the buckets the charts draw: '1 day · by hour' reads 'last 24 hours', the week 'last 7 days',
 // the daily range 'last N days' (the payload's own key count, 90 today)
 function spRangeWords(ser){var n=ser&&ser.keys?ser.keys.length:0;if(SP.range==='days')return 'last '+n+' days';if(SP.range==='day')return 'last '+n+' hours';return 'last '+Math.round(n/24)+' days';}
 // the rows: the ordered sessions, or — merged by tag — one row per tag holding sessions here (named
 // by the tag, colored by the tag store's color, the strip's chip color) and the untagged sessions as
 // themselves. A session under several tags counts under EACH (the user's ruling: tags are equivalent,
 // no home tag); the footer says how many do, because the rows then sum past the totals.
-function spRows(d){var ss=spOrdered(d);if(!SP.merge||!(d.tags&&d.tags.length))return {rows:ss.map(function(s,i){return {kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,seat:s.seat,rank:i};}),multi:0};
+function spRows(d){var ss=spOrdered(d);if(!SP.merge||!(d.tags&&d.tags.length))return {rows:ss.map(function(s,i){return {kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,keyUsd:s.keyUsd||0,seatUsd:s.seatUsd||0,rank:i};}),multi:0};
 var byKey={},counts={},tagged={},rows=[];ss.forEach(function(s,i){byKey[spKey(d,s)]={s:s,i:i};});
 d.tags.forEach(function(t){var mem=[];(t.members||[]).forEach(function(m){var e=byKey[m];if(e){mem.push(e);counts[m]=(counts[m]||0)+1;}});if(!mem.length)return;
-var usd=0,tok=0,turns=0,seat=0,live=false,hosts={},minI=1e9;mem.forEach(function(e){usd+=e.s.usd||0;tok+=e.s.tok||0;seat+=e.s.seat||0;if(e.s.turns==null)turns=null;else if(turns!=null)turns+=e.s.turns;live=live||!!e.s.live;hosts[String(e.s.host)]=1;if(e.i<minI)minI=e.i;tagged[spKey(d,e.s)]=1;});
-var hk=Object.keys(hosts);rows.push({kind:'tag',sid:'tag:'+t.name,name:t.name,bg:t.color||'',live:live,usd:usd,tok:tok,turns:turns,seat:seat,members:mem.map(function(e){return e.s;}),host:(hk.length===1?hk[0]:''),rank:minI});});
-ss.forEach(function(s,i){if(!tagged[spKey(d,s)])rows.push({kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,key:s.key,seat:s.seat,rank:i});});
+var usd=0,tok=0,turns=0,ku=0,su=0,live=false,hosts={},minI=1e9;mem.forEach(function(e){usd+=e.s.usd||0;tok+=e.s.tok||0;ku+=e.s.keyUsd||0;su+=e.s.seatUsd||0;if(e.s.turns==null)turns=null;else if(turns!=null)turns+=e.s.turns;live=live||!!e.s.live;hosts[String(e.s.host)]=1;if(e.i<minI)minI=e.i;tagged[spKey(d,e.s)]=1;});
+var hk=Object.keys(hosts);rows.push({kind:'tag',sid:'tag:'+t.name,name:t.name,bg:t.color||'',live:live,usd:usd,tok:tok,turns:turns,keyUsd:ku,seatUsd:su,members:mem.map(function(e){return e.s;}),host:(hk.length===1?hk[0]:''),rank:minI});});
+ss.forEach(function(s,i){if(!tagged[spKey(d,s)])rows.push({kind:'sid',s:s,sid:s.sid,name:s.name,bg:s.bg,live:s.live,usd:s.usd,tok:s.tok,turns:s.turns,host:s.host,keyUsd:s.keyUsd||0,seatUsd:s.seatUsd||0,rank:i});});
 if(SP.order==='yours')rows.sort(function(a,b){return a.rank-b.rank;});else rows.sort(function(a,b){return ((b.usd||0)-(a.usd||0))||((b.tok||0)-(a.tok||0));});
 var multi=0;Object.keys(counts).forEach(function(k){if(counts[k]>1)multi++;});return {rows:rows,multi:multi};}
-// the stacks follow the rows: a tag row's stack is its members' stacks summed; untagged sessions keep
+// the stacks follow the rows: a tag row's stack is its members' stacks summed (both halves); untagged sessions keep
 // their own; unattributed (and an older peer's fold) stay last
 function spStacks(d,ser,model){var stacks=spStackOrderRows(d,ser.stacks||[],model.rows);if(!SP.merge||!(d.tags&&d.tags.length))return stacks;
 var byKey={};stacks.forEach(function(s){if(s.kind==='sid')byKey[spKey(d,s)]=s;});var out=[];
-model.rows.forEach(function(r){if(r.kind==='tag'){var usd=null,tok=null,turns=null,tk=true;r.members.forEach(function(m){var st=byKey[spKey(d,m)];if(!st)return;if(!st.turns)tk=false;
-if(!usd){usd=st.usd.slice();tok=st.tok.slice();turns=(st.turns||[]).slice();}else{for(var i=0;i<usd.length;i++){usd[i]+=st.usd[i]||0;tok[i]+=st.tok[i]||0;turns[i]=(turns[i]||0)+((st.turns||[])[i]||0);}}});
-if(usd&&(usd.some(function(v){return v>0;})||tok.some(function(v){return v>0;})))out.push({kind:'tag',name:r.name,bg:r.bg,live:r.live,usd:usd,tok:tok,turns:tk?turns:undefined});}
+var addTo=function(a,b){if(!a)return (b||[]).slice();for(var i=0;i<a.length;i++)a[i]+=(b||[])[i]||0;return a;};
+model.rows.forEach(function(r){if(r.kind==='tag'){var usd=null,tok=null,turns=null,ku=null,kt=null,tk=true;r.members.forEach(function(m){var st=byKey[spKey(d,m)];if(!st)return;if(!st.turns)tk=false;
+usd=addTo(usd,st.usd);tok=addTo(tok,st.tok);turns=addTo(turns,st.turns);ku=addTo(ku,spKeyArr(d,st,'usd'));kt=addTo(kt,spKeyArr(d,st,'tok'));});
+if(usd&&(usd.some(function(v){return v>0;})||tok.some(function(v){return v>0;})))out.push({kind:'tag',name:r.name,bg:r.bg,live:r.live,usd:usd,tok:tok,turns:tk?turns:undefined,keyUsd:ku,keyTok:kt});}
 else{var st=byKey[spKey(d,r)];if(st)out.push(st);}});
 stacks.forEach(function(s){if(s.kind!=='sid')out.push(s);});return out;}
 function spColor(s){return (s.bg&&/^#[0-9a-fA-F]{3,8}$/.test(s.bg))?s.bg:SP_NONE;}
-function spHead(){var d=SP.data,ok=d?spHosts(d):[];return '<div class=rsp-top><span>'+(d&&d.scope==='computed'?'Spend (computed)':'API spend')
+// the card's head names what the card holds in the user's terms: every machine's usage, priced at the API's rates
+function spHead(){var d=SP.data,ok=d?spHosts(d):[];return '<div class=rsp-top><span>Usage at API prices'
 +(ok.length>1?' \u00b7 '+ok.length+' machines':(d&&d.host?' \u00b7 '+esc(d.host):''))+'</span>'
 +'<button class=rsp-x data-act=close aria-label=Close>\u00d7</button></div>';}
 var spPending=null;   // the in-flight detail fetch's controller: a close or a re-open aborts it
@@ -73698,127 +73595,142 @@ window.__rompOpenSpend=openSpend;
 var spDown=false;
 if(spBack){spBack.onpointerdown=function(e){spDown=(e.target===spBack);};
 spBack.onclick=function(e){var d=spDown;spDown=false;if(e.target===spBack&&d)closeSpend();};}
-// ONE listener on the STABLE panel (the click-safety rule): every control is a data-act, acknowledged
-// at once (the pressed state flips before the chart re-renders) — never a handler on a node a render
-// rebuilds. The close ✕ and the retry ride the same door.
-// the hover words of the By account summary and the session rows (data-tip: an account's identity, why a figure is
-// approximate, the stored login a row bills), shown in the chart's own tooltip box; ONE pair of listeners on the STABLE
-// panel, so a re-render under the pointer loses nothing; the words follow the element the pointer enters and leaves
+// the hover words (data-tip: an account's identity, why a figure is approximate, the stored login a row bills), shown in
+// the charts' own tooltip box; ONE pair of listeners on the STABLE panel, so a re-render under the pointer loses nothing;
+// the words follow the element the pointer enters and leaves (never a native title: the rich tip is the ONE hover
+// surface, the user 2026-08-08)
 var spWordsOn=null;
 function spWordsAt(t){while(t&&t!==spPanel){if(t.getAttribute&&t.getAttribute('data-tip'))return t;t=t.parentNode;}return null;}
 if(spPanel){spPanel.addEventListener('mouseover',function(e){var t=spWordsAt(e.target);if(t===spWordsOn)return;spWordsOn=t;if(!t){spTipHide();return;}
 var box=spTipBox();box.textContent=t.getAttribute('data-tip');spTipPlace(e.clientX,e.clientY,null);});
 spPanel.addEventListener('mouseleave',function(){if(spWordsOn){spWordsOn=null;spTipHide();}});}
+// ONE listener on the STABLE panel (the click-safety rule): every control is a data-act, acknowledged at once (the
+// pressed state flips before the charts re-render), never a handler on a node a render rebuilds. The close and the
+// retry ride the same door.
 if(spPanel)spPanel.addEventListener('click',function(e){var t=e.target,b=null;
 while(t&&t!==spPanel){if(t.getAttribute&&t.getAttribute('data-act')){b=t;break;}t=t.parentNode;}
 if(!b)return;var a=b.getAttribute('data-act');
 if(a==='close'){closeSpend();return;}
 if(a==='retry'){openSpend();return;}
-if(a==='merge:toggle'){SP.merge=!SP.merge;spSavePrefs();if(SP.merge)b.classList.add('on');else b.classList.remove('on');
-var tb2=document.getElementById('rsp-table');if(tb2){tb2.innerHTML=sessionTable(spRangeView(SP.data));tb2.scrollTop=0;}renderChart();return;}
-// the narrow card's By account fold: opened or closed at once, the session pane refitted to the room it leaves, and the
-// keyboard's place kept on the rebuilt button
-if(a==='accts:toggle'){SP.acctsOpen=!SP.acctsOpen;spPaintAccts();spSizePane();var fb=document.querySelector('#rsp-accts [data-act="accts:toggle"]');if(fb)fb.focus();return;}
-var m=/^(range|measure|order):(\\w+)$/.exec(a);if(!m)return;
-SP[m[1]]=m[2];spSavePrefs();
-// the list follows the chart (T353): a new RANGE re-sums the rows over the buckets the chart now draws, and the head
-// names the range; a new order's head rows, not a mid-list slice (review find)
-if(m[1]==='order'||m[1]==='range'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}
-var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));
-spPaintAccts();}
-var sib=b.parentNode.querySelectorAll('[data-act^="'+m[1]+':"]');
-for(var i=0;i<sib.length;i++){if(sib[i]===b)sib[i].classList.add('on');else sib[i].classList.remove('on');}
-renderChart();});
-function sessionTable(d){var ss=d.sessions||[],un=d.unattributed;
+var m=/^(range|measure|order|merge):(\\w+)$/.exec(a);if(!m)return;
+if(m[1]==='merge')SP.merge=!SP.merge;else SP[m[1]]=m[2];spSavePrefs();
+if(m[1]==='merge'){if(SP.merge)b.classList.add('on');else b.classList.remove('on');}
+else{var sib=spPanel.querySelectorAll('[data-act^="'+m[1]+':"]');for(var i=0;i<sib.length;i++){if(sib[i]===b)sib[i].classList.add('on');else sib[i].classList.remove('on');}}
+// a new range re-sums everything: the cards' figures, both charts and the list (T353: the list follows the charts)
+if(m[1]==='range'){renderSpend();return;}
+if(m[1]==='measure'){spPaintCards();renderChart();return;}
+var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}renderChart();});
+// the seat's allowance, from the same usage rows as the bar and its hover (LAST): an enterprise seat's monthly
+// allowance, or a personal plan's 5-hour and weekly windows, one line per account
+function spAllowHTML(){var seen={},lines=[];(LAST||[]).forEach(function(e){var d=e.det,a=e.acct||('host:'+e.host);if(seen[a])return;
+var bar=function(pct,col){return '<span class=ru-tip-track><i style="width:'+pct+'%;background:'+col+'"></i></span>';},h='';
+if(d._monthly){var mo=d._monthly;h=mo.stale?'monthly allowance reset '+esc(mo.reset)+'; no reading since'
+:'monthly allowance '+bar(mo.pct,mo.col)+' <b>'+mo.pct+'%</b> used \u00b7 resets '+esc(mo.reset);}
+else{var ws=WINS.filter(function(w){return d[w[0]]&&!d[w[0]].unk;});if(ws.length)h=ws.map(function(w){var v=d[w[0]];return esc(w[2])+' '+bar(v.pct,v.col)+' <b>'+v.pct+'%</b>';}).join(' \u00b7 ');}
+if(!h)return;seen[a]=1;lines.push({name:d._acct||'',h:h});});
+var many=lines.length>1;return lines.map(function(l){return '<div class=rsp-allow>'+(many&&l.name?esc(l.name)+' \u00b7 ':'')+l.h+'</div>';}).join('');}
+// the two cards' model over the range: each half's dollars and tokens, the accounts behind the seat's, and the seat's
+// title (the one account's own name, "Enterprise seat", when one account holds it; "Subscription logins" otherwise)
+function spCards(d){var ser=spSeries(d),st=(ser&&ser.stacks)||[],c={seat:{usd:0,tok:0},key:{usd:0,tok:0}};
+st.forEach(function(s){['seat','key'].forEach(function(sec){c[sec].usd+=spSumArr(spPart(d,s,sec,'usd'));c[sec].tok+=spSumArr(spPart(d,s,sec,'tok'));});});
+var acc=spAccountRows(d),seats=acc.filter(function(a){return a.kind!=='key';}),keys=acc.filter(function(a){return a.kind==='key';});
+var known=(d.accounts||[]),hasSeat=known.some(function(a){return a.kind!=='key';}),hasKey=known.some(function(a){return a.kind==='key';});
+c.seat.accts=seats;c.key.accts=keys;
+c.seat.name=(seats.length===1&&seats[0].kind==='seat')?seats[0].name:'Subscription logins';
+c.seat.tip=(seats.length===1&&seats[0].title)?seats[0].title:'';
+c.key.name='API key';c.key.tip=keys.length?((keys[0].title||'')+(keys[0].via.length?' Machines: '+keys[0].via.join(', ')+'.':'')):'';
+// a half is drawn when it holds anything in the range, or when an account of its kind exists in the ledger's reach
+// (then as one quiet line saying the range holds nothing); a half no account of which exists is not drawn at all
+c.seat.show=c.seat.usd>=SP_GRAIN||c.seat.tok>0||hasSeat;c.key.show=c.key.usd>=SP_GRAIN||c.key.tok>0||hasKey;
+c.seat.live=c.seat.usd>=SP_GRAIN||c.seat.tok>0;c.key.live=c.key.usd>=SP_GRAIN||c.key.tok>0;
+return c;}
+// one card: its title (the account's identity in the hover words), its figure in the head, what the figure is in one
+// plain line, the seat's allowance, the accounts when the seat's dollars come from more than one, and the chart
+function spCardHTML(d,c,sec){var x=c[sec],words=spRangeWords(spSeries(d));
+var h='<section class=rsp-card data-sec='+sec+'><div class=rsp-card-h><span class=rsp-card-t'+(x.tip?' data-tip="'+esc(x.tip)+'"':'')+'>'+esc(x.name)+'</span>'
++'<span class=rsp-card-v id=rsp-v-'+sec+'></span></div>';
+h+='<div class=rsp-card-sub>'+(sec==='seat'?'Estimated at API prices; the seat is not billed per token':'Charged per token')+' \u00b7 '+esc(words)+'</div>';
+if(sec==='seat')h+='<div id=rsp-allow>'+spAllowHTML()+'</div>';
+if(sec==='seat'&&(x.accts.length>1||(x.accts.length===1&&x.accts[0].kind!=='seat'))){h+='<table class=rsp-acct><tbody>';
+x.accts.forEach(function(r){h+='<tr data-acct="'+esc(r.kind)+'"><td class=rsp-name'+(r.title?' data-tip="'+esc(r.title)+'"':'')+'>'+esc(r.name)
++'<span class=ru-tip-reset> '+SP_DOT+' '+esc(r.via.join(', '))+(r.note?' '+SP_DOT+' '+esc(r.note):'')+'</span></td>'
++'<td class=n>'+spUsd(r.usd,r.est)+'</td></tr>';});h+='</tbody></table>';}
+if(!x.live)return h+'<div class=rsp-card-none>Nothing in the '+esc(words)+'.</div></section>';
+return h+'<div class=rsp-chart id=rsp-chart-'+sec+'></div></section>';}
+// the figures in the cards' heads follow the measure: dollars (the seat's with the approx mark) and tokens beside
+function spPaintCards(){var d=SP.data;if(!d)return;var c=spCards(d);['seat','key'].forEach(function(sec){var n=document.getElementById('rsp-v-'+sec);if(!n)return;var x=c[sec];
+var usd=sec==='seat'?spUsd(x.usd,true):fmtUsd(x.usd),tok=fmtTok(Math.round(x.tok))+' tokens';
+n.innerHTML=SP.measure==='tok'?'<b>'+tok+'</b><span class=rsp-card-alt>'+usd+'</span>':'<b>'+usd+'</b><span class=rsp-card-alt>'+tok+'</span>';});}
+function sessionTable(d){var ss=d.sessions||[],un=d.unattributed,c=spCards(SP.data||d);
 if(!ss.length&&!(un&&(un.usd>0||un.tok>0)))return '<div class=rsp-note>No per-session records yet.</div>';
-// the key-billed split shows where the hover would show it: the TOTAL scope on a mixed host, where a
-// session's key dollars differ from its computed total
-var keyCol=d.scope!=='keyed'&&ss.some(function(s){return s.key&&typeof s.key.usd==='number'&&Math.round(s.key.usd)!==Math.round(s.usd);});
-// EVERY session, in a pane that scrolls under a sticky header (T247e): the list is the chart's legend,
-// each row its tab title in its identity color; no fold, no swatch
-var h='<table class=rsp-tbl><thead><tr><th>session</th><th class=n>dollars</th>'+(keyCol?'<th class=n>key-billed</th>':'')
+// one dollar column per half the range holds, headed by the card's own title, the seat's figures with the approx mark
+var seatCol=c.seat.live,keyCol=c.key.live;if(!seatCol&&!keyCol)seatCol=true;
+var cell=function(r,sec){var v=sec==='key'?(r.keyUsd||0):(r.seatUsd||0);return '<td class=n>'+(v>=SP_GRAIN?spUsd(v,sec==='seat'):'\u2014')+'</td>';};
+// EVERY session, in a pane that scrolls under a sticky header (T247e): the list is the charts' legend, each row its tab
+// title in its identity color; no fold, no swatch
+var h='<table class=rsp-tbl><thead><tr><th>session</th>'+(seatCol?'<th class=n>'+esc(c.seat.name)+'</th>':'')+(keyCol?'<th class=n>API key</th>':'')
 +'<th class=n>turns</th><th class=n>tokens</th></tr></thead><tbody>';
 var many=spMany(d);
 var model=spRows(d);
 model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' class=rsp-live':' class=rsp-dead')+(s.kind==='tag'?' data-tag="'+esc(s.name)+'"':'')+'>'
 +'<td class=rsp-name>'+(s.kind==='tag'?(spTagChip(s)+'<span class=ru-tip-reset> \u00b7 '+s.members.length+' session'+(s.members.length===1?'':'s')+'</span>'):spTitle(s.s,many)+(s.s&&s.s.login?'<span class=ru-tip-reset data-tip="'+esc(s.s.login)+'"> \u00b7 bills '+esc(spAcctName(d,s.s)||s.s.loginLabel||'a stored login')+'</span>':''))+(s.live?'':'<span class=ru-tip-reset> \u00b7 not running</span>')+'</td>'
-+'<td class=n>'+spUsd(s.usd,s.seat>SP_GRAIN)+'</td>'+(keyCol?'<td class=n>'+(s.key?fmtUsd(s.key.usd):'\u2014')+'</td>':'')
++(seatCol?cell(s,'seat'):'')+(keyCol?cell(s,'key'):'')
 +'<td class=n>'+(s.turns==null?'\u2014':(s.turns||0))+'</td><td class=n>'+fmtTok(s.tok||0)+'</td></tr>';});   // a dash: the turns are unknown (an older peer)
-// spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
-// session accounts for: shown as its own row, never dropped or folded into a session (fail loudly);
-// its hatch mark is the chart's hatched stack, not a session swatch
-var oth=d.other;   // an OLDER peer's own "other" fold (its build still folds beyond a top-N): a row of its own, its host named
+// an OLDER peer's own "other" fold (its build still folds beyond a top-N): a row of its own, its host named
+var oth=d.other;
 if(oth&&(oth.usd>0||oth.tok>0))h+='<tr class=rsp-dead><td class=rsp-name><i class=rsp-sw></i> other ('+(oth.count||0)+' session'+(oth.count===1?'':'s')+(oth.hosts&&oth.hosts.length?' on '+esc(oth.hosts.join(', ')):'')+')</td>'
-+'<td class=n>'+fmtUsd(oth.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(oth.turns==null?'\u2014':(oth.turns||0))+'</td><td class=n>'+fmtTok(oth.tok||0)+'</td></tr>';
++(seatCol?cell(oth,'seat'):'')+(keyCol?cell(oth,'key'):'')+'<td class=n>'+(oth.turns==null?'\u2014':(oth.turns||0))+'</td><td class=n>'+fmtTok(oth.tok||0)+'</td></tr>';
+// spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no session accounts
+// for: its own row, never dropped or folded into a session (fail loudly); its hatch mark is the charts' hatched stack
 if(un&&(un.usd>0||un.tok>0))h+='<tr class=rsp-dead>'
 +'<td class=rsp-name><i class="rsp-sw rsp-hatch"></i> unattributed<span class=ru-tip-reset> \u00b7 recorded before per-session tracking</span></td>'
-+'<td class=n>'+fmtUsd(un.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(un.turns==null?'\u2014':(un.turns||0))+'</td><td class=n>'+fmtTok(un.tok||0)+'</td></tr>';
++(seatCol?cell(un,'seat'):'')+(keyCol?cell(un,'key'):'')+'<td class=n>'+(un.turns==null?'\u2014':(un.turns||0))+'</td><td class=n>'+fmtTok(un.tok||0)+'</td></tr>';
 h+='</tbody></table>';
-// the older-build note (T353 review): only where THIS range shows a dashed row, naming those hosts, and naming key
-// dollars only when the key column is drawn; it lives in the table's node so a range switch re-decides it
+// the older-build note (T353 review): only where THIS range shows a dashed row, naming those hosts; it lives in the
+// table's node so a range switch re-decides it
 var dh=spDashedHosts(d);
-if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';
-// (the one-line "By login" note that sat here is the By account summary above the list since 2026-10-01: every account
-// a row, the machine's sign-ins and the key included, rather than one login named and the rest called the remainder)
+if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\u2019 turns in this range are unknown (a dash)</div>';
 if(model.multi)h+='<div class=rsp-note>'+model.multi+(model.multi===1?' session carries':' sessions carry')+' several tags and count'+(model.multi===1?'s':'')+' under each of them, so the rows add up past the totals.</div>';
 return h;}
-// 1. the SAME window numbers the hover shows — the sums across every machine, rows only (one renderer).
-// Its own node: renderRows re-renders it whenever fresh rows land while the modal is open, so the
-// two levels agree at every moment, not only at the instant the modal opened (review find)
-function totalsHTML(d){var rows=spendRowsHTML(LAST||[]);
-// a login with no key (scope "computed"): the rail shows no API spend for this machine on purpose, and
-// what the ledger holds is a computed cost nobody is billed — said here, not dressed up as a bill
-var computed=d.scope==='computed';
-return rows||('<div class=ru-tip-name><span>Totals</span></div><div class=rsp-note>'
-+(computed?'No API spend on this machine: its sessions run on a login. The figures below are computed costs, not a bill.':'Nothing recorded yet.')+'</div>');}
-function renderSpend(){if(!spPanel)return;var d=SP.data,h=spHead();
-if(!d){h+='<div class=rsp-err>Couldn\u2019t load the spend detail'+(SP.err?': '+esc(SP.err):'')+'. '
+function spChip(act,on,label){return '<button class="rsp-btn'+(on?' on':'')+'" data-act='+act+'>'+label+'</button>';}
+function renderSpend(){if(!spPanel)return;spTipHide();var d=SP.data,h=spHead();
+if(!d){h+='<div class=rsp-err>Couldn\u2019t load the usage detail'+(SP.err?': '+esc(SP.err):'')+'. '
 +'<button class=rsp-btn data-act=retry>Try again</button></div>';spPanel.innerHTML=h;return;}
-var computed=d.scope==='computed';
-// 1b. By account (2026-10-01) BESIDE the totals, the summary level side by side, wrapping into a stack on a narrow card:
-// below the chart it took the room the session pane needs and the card itself scrolled. Stacked, it folds to one line
-// (spPaintAccts, run once the card's HTML is in place, before the chart is drawn and the pane sized), since its rows
-// above the list pushed the session rows down, at 390x844 every one of them off the card
-var ah=accountsHTML(d);
-h+='<div class=rsp-sum><div class=rsp-sec id=rsp-totals>'+totalsHTML(d)+'</div><div class=rsp-sec id=rsp-accts'+(ah?'':' hidden')+'>'+ah+'</div></div>';
-// 2. the histogram FIRST (T247e, the user 2026-09-08): the two ranges the ledger itself holds; dollars
-// by default, tokens on a toggle; the session list below is its legend
-h+='<div class=rsp-sec><div class=ru-tip-name><span>Spend over time</span></div>'
-+'<div class=rsp-ctl>'
-+'<button class="rsp-btn'+(SP.range==='day'?' on':'')+'" data-act=range:day>1 day \u00b7 by hour</button>'
-+'<button class="rsp-btn'+(SP.range==='hours'?' on':'')+'" data-act=range:hours>7 days \u00b7 by hour</button>'
-+'<button class="rsp-btn'+(SP.range==='days'?' on':'')+'" data-act=range:days>90 days \u00b7 by day</button>'
-+'<span class=rsp-gap></span>'
-+'<button class="rsp-btn'+(SP.measure==='usd'?' on':'')+'" data-act=measure:usd>dollars</button>'
-+'<button class="rsp-btn'+(SP.measure==='tok'?' on':'')+'" data-act=measure:tok>tokens</button>'
-+'<span class=rsp-gap></span>'
-+'<button class="rsp-btn'+(SP.order==='spend'?' on':'')+'" data-act=order:spend>by spend</button>'
-+'<button class="rsp-btn'+(SP.order==='yours'?' on':'')+'" data-act=order:yours>your order</button>'
-+'<span class=rsp-gap></span>'
-+'<button class="rsp-btn'+(SP.merge?' on':'')+'" data-act=merge:toggle>merge by tag</button>'
-+'</div><div id=rsp-chart></div></div>';
-// 3. per session — EVERY attached kernel's sessions (T247c), each machine's own story merged here;
-// the billing rule is named when every contributing machine shares one, else each keeps its own
+// 1. the range and the measure: they govern everything below (both cards, both charts, the list)
+h+='<div class="rsp-ctl rsp-ctl-top">'+spChip('range:day',SP.range==='day','1 day \u00b7 by hour')+spChip('range:hours',SP.range==='hours','7 days \u00b7 by hour')
++spChip('range:days',SP.range==='days','90 days \u00b7 by day')+'<span class=rsp-gap></span>'
++spChip('measure:usd',SP.measure==='usd','dollars')+spChip('measure:tok',SP.measure==='tok','tokens')+'</div>';
+// 2. the two halves side by side, each its own card and chart (the user 2026-10-08): the seat, estimated at API prices
+// and not charged, beside the API key, charged; on a narrow card they stack
+var c=spCards(d),both=c.seat.live&&c.key.live;
+var cards=[];if(c.seat.show)cards.push(spCardHTML(d,c,'seat'));if(c.key.show)cards.push(spCardHTML(d,c,'key'));
+if(!cards.length)h+='<div class=rsp-note>Nothing recorded in the '+esc(spRangeWords(spSeries(d)))+'.</div>';
+else h+='<div class="rsp-cards'+(both?' rsp-two':'')+'">'+cards.join('')+'</div>';
+// 3. a figure that mixes the two says so in words, never as one unlabelled number
+if(both)h+='<div class=rsp-both>Together '+spUsd(c.seat.usd+c.key.usd,true)+' at API prices: '+spUsd(c.seat.usd,true)+' estimated for the '+esc(c.seat.name)+' and '+fmtUsd(c.key.usd)+' charged to the API key.</div>';
+// a machine whose older build sends its key's turns alone: its seat usage cannot be drawn, and the cards say so
+var kh=spHosts(d).filter(function(x){return x.scope==='keyed';}).map(function(x){return x.host;});
+if(kh.length)h+='<div class=rsp-note>'+kh.map(esc).join(', ')+': older build, only '+(kh.length===1?'its':'their')+' API-key usage is drawn</div>';
+// 4. per session — EVERY attached kernel's sessions (T247c), each machine's own story merged here
 var ok=spHosts(d),many=ok.length>1;
-var scopes={};ok.forEach(function(x){scopes[x.scope||d.scope]=1;});var sk=Object.keys(scopes);
-var rule=sk.length===1?(sk[0]==='keyed'?'key-billed turns':sk[0]==='computed'?'computed cost, not billed':'all turns'):'each machine\u2019s own billing rule';
-h+='<div class=rsp-sec><div class=ru-tip-name><span>By session'+(many?' \u00b7 '+ok.length+' machines':'')+'</span>'
-+'<span class=ru-tip-reset>'+rule+' \u00b7 <span id=rsp-range-note>'+spRangeWords(spSeries(d))+'</span></span></div>';
+h+='<div class=rsp-sec><div class="ru-tip-name rsp-lhead"><span>By session'+(many?' \u00b7 '+ok.length+' machines':'')+'<span class=ru-tip-reset> \u00b7 '+esc(spRangeWords(spSeries(d)))+'</span></span>'
++'<span class=rsp-ctl>'+spChip('order:spend',SP.order==='spend','by spend')+spChip('order:yours',SP.order==='yours','your order')
++'<span class=rsp-gap></span>'+spChip('merge:toggle',SP.merge,'merge by tag')+'</span></div>';
 // a machine that could not join is NAMED, never silently missing: down, timed out, refused, or too old
 ((d.hosts)||[]).forEach(function(x){if(x.status==='ok')return;
 h+='<div class=rsp-note>'+esc(x.host)+': '+(x.status==='older'?'older build, no per-session data':'not reachable')+(x.detail?' \u2014 '+esc(x.detail):'')+'</div>';});
-h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';   // the list over the chart's own range (T353)
-spPanel.innerHTML=h;spPaintAccts();renderChart();spSizePane();}
-// the list pane takes exactly the room left under the chart (review find: a fixed 38vh cap left the card
-// itself scrolling at common viewport heights, a scroll region inside a scroll region); a floor keeps a
-// few rows visible on a very short screen, where the card then scrolls as the last resort
+h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';   // the list over the charts' own range (T353)
+spPanel.innerHTML=h;spPaintCards();renderChart();spSizePane();}
+// the list pane takes exactly the room left under the cards (review find: a fixed 38vh cap left the card itself
+// scrolling at common viewport heights, a scroll region inside a scroll region); a floor keeps a few rows visible on a
+// very short screen, where the card then scrolls as the last resort
 function spSizePane(){var pane=document.getElementById('rsp-table');if(!pane||!spPanel)return;
 var cap=Math.floor(window.innerHeight*0.92),cs=getComputedStyle(spPanel),pad=parseFloat(cs.paddingTop)+parseFloat(cs.paddingBottom)+2;
 var above=pane.offsetTop-spPanel.offsetTop-spPanel.clientTop;   // everything rendered above the pane, inside the card
 var room=cap-pad-above-8;pane.style.maxHeight=Math.max(120,room)+'px';}
 // 1-2-5 ceilings: the y-axis top is the nearest clean number above the tallest bucket
 function niceTop(mx){if(!(mx>0))return 1;var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),f=mx/p;return (f<=1?1:f<=2?2:f<=5?5:10)*p;}
-function spFill(s){return s.kind==='unattributed'?'url(#rsp-hatch)':s.kind==='other'?SP_OTHER:spColor(s);}
+function spFill(s,hid){return s.kind==='unattributed'?'url(#'+hid+')':s.kind==='other'?SP_OTHER:spColor(s);}   // hid: the chart's own hatch pattern (two charts, two ids)
 function spStackName(s){return s.kind==='other'?('other ('+(s.count||0)+' session'+(s.count===1?'':'s')+(s.host?' on '+s.host:'')+')'):s.kind==='unattributed'?'unattributed':spName(s);}
 // the plain-text form for the tooltip: host · name when more than one machine contributes; the
 // unattributed stack names each machine's share of the hovered bucket
@@ -73860,32 +73772,38 @@ if(top.more>0||!top.rows.length){var m=document.createElement('div');m.className
 spTipPlace(x,y,rect);}
 function spTipHide(){if(spTip)spTip.style.display='none';}
 // a rebuild (a resize under a still pointer, a toggle) takes the tooltip down with the svg it described (review find)
-function renderChart(){spTipHide();var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
-var d=SP.data,ser=spSeries(d),meas=SP.measure;
-if(!ser||!ser.keys||!ser.keys.length){box.innerHTML='<div class=rsp-note>No history yet.</div>';return;}
-var stacks=spStacks(d,ser,spRows(spRangeView(d))),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
+function renderChart(){spTipHide();var d=SP.data;if(!d)return;var ser=spSeries(d);if(!ser||!ser.keys||!ser.keys.length)return;
+var two=!!document.querySelector('#rsp-panel .rsp-cards.rsp-two');
+['seat','key'].forEach(function(sec){var box=document.getElementById('rsp-chart-'+sec);if(box)spDrawChart(box,d,ser,sec,two?120:150);});}
+// one half's chart: the range's buckets, one column each, stacked by session in the list's order, each stack its part
+// of the half (spPart). The axis, the crosshair and the bucket tooltip are T247/T293's
+function spDrawChart(box,d,ser,sec,H){var meas=SP.measure,model=spRows(spRangeView(d));
+var stacks=spStacks(d,ser,model).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=spPart(d,s,sec,'usd');o.tok=spPart(d,s,sec,'tok');return o;});
+var n=ser.keys.length,W=Math.max(240,box.clientWidth||600);
 var tots=[],mx=0;for(var i=0;i<n;i++){var t=0;for(var s=0;s<stacks.length;s++){t+=(stacks[s][meas]&&stacks[s][meas][i])||0;}tots.push(t);if(t>mx)mx=t;}
-if(!(mx>0)){box.innerHTML='<div class=rsp-note>Nothing recorded in this range.</div>';return;}
+if(!(mx>0)){box.innerHTML='<div class=rsp-card-none>Nothing in the '+esc(spRangeWords(ser))+'.</div>';return;}
 var top=niceTop(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(1,slot-gap),PADT=6;
 var Y=function(v){return H-Math.max(0,Math.min(1,v/top))*(H-PADT);};
-var fmt=function(v){return meas==='usd'?(v>0&&v<0.5?'under $1':fmtUsd(v)):fmtTok(Math.round(v));};   // whole dollars, and a sliver says so rather than "$0"
-// axis labels wear whole dollars like every spend surface (no cents anywhere, the user 2026-08-09);
-// a half-line whose value is not a whole dollar (a $5 ceiling's $2.50) stays an unlabeled hairline
-// rather than rounding into a twin of another label
+var est=sec==='seat'&&meas==='usd';
+var fmt=function(v){return meas==='usd'?(v>0&&v<0.5?'under $1':(est?SP_APPROX:'')+fmtUsd(v)):fmtTok(Math.round(v));};   // whole dollars, and a sliver says so rather than "$0"
+// axis labels wear whole dollars like every spend surface (no cents anywhere, the user 2026-08-09); a half-line whose
+// value is not a whole dollar (a $5 ceiling's $2.50) stays an unlabeled hairline rather than rounding into a twin of
+// another label
 var afmt=function(v){if(meas!=='usd')return fmtTok(Math.round(v));return v===Math.round(v)?fmtUsd(v):'';};
 // EVERY attribute quoted (review of the first render): this markup goes through innerHTML, i.e. the HTML
 // parser, where an unquoted value swallows the closing slash (`class=rsp-grid/>` is a line with the value
 // "rsp-grid/" left OPEN) and every later element became that line's child — an empty chart
+var hid='rsp-hatch-'+sec;
 var svg='<svg class="rsp-svg" viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'">'
-+'<defs><pattern id="rsp-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
++'<defs><pattern id="'+hid+'" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
 +'<rect width="6" height="6" fill="rgba(138,151,166,0.18)"></rect><line x1="0" y1="0" x2="0" y2="6" stroke="#8a97a6" stroke-width="1.5"></line></pattern></defs>';
-// recessive hairline gridlines at thirds + the ceiling, labels overlaid in HTML (the hover graph's grammar)
+// recessive hairline gridlines at half + the ceiling, labels overlaid in HTML (the hover graph's grammar)
 var ylab='';[top,top/2].forEach(function(g){var gy=Y(g);
 svg+='<line x1="0" y1="'+gy.toFixed(1)+'" x2="'+W+'" y2="'+gy.toFixed(1)+'" class="rsp-grid"></line>';
 var al=afmt(g);if(al)ylab+='<span class=ru-tip-gy style="top:'+(gy+1).toFixed(0)+'px">'+al+'</span>';});
-// one column per bucket, stacked bottom-up in stack order (the session list's order — by dollars, or
-// the viewer's own — then unattributed); a 2px surface gap between touching segments; the topmost segment's top corners
-// rounded (4px data-end, square at the baseline) — the dataviz mark specs
+// one column per bucket, stacked bottom-up in stack order (the session list's order — by dollars, or the viewer's own —
+// then unattributed); a 2px surface gap between touching segments; the topmost segment's top corners rounded (4px
+// data-end, square at the baseline) — the dataviz mark specs
 for(var i=0;i<n;i++){if(!(tots[i]>0))continue;var x=i*slot+gap/2,segs=[];
 for(var s=0;s<stacks.length;s++){var v=(stacks[s][meas]&&stacks[s][meas][i])||0;if(v>0)segs.push([s,v]);}
 var acc=0;for(var j=0;j<segs.length;j++){var si=segs[j][0],v=segs[j][1],yb=Y(acc),yt=Y(acc+v);acc+=v;
@@ -73894,22 +73812,23 @@ var r=Math.min(4,bw/2,hgt);var dpath;
 if(last&&r>=1.5){dpath='M'+x.toFixed(1)+','+y1.toFixed(1)+' L'+x.toFixed(1)+','+(y0+r).toFixed(1)+' Q'+x.toFixed(1)+','+y0.toFixed(1)+' '+(x+r).toFixed(1)+','+y0.toFixed(1)
 +' L'+(x+bw-r).toFixed(1)+','+y0.toFixed(1)+' Q'+(x+bw).toFixed(1)+','+y0.toFixed(1)+' '+(x+bw).toFixed(1)+','+(y0+r).toFixed(1)+' L'+(x+bw).toFixed(1)+','+y1.toFixed(1)+' Z';}
 else{dpath='M'+x.toFixed(1)+','+y0.toFixed(1)+' h'+bw.toFixed(1)+' v'+hgt.toFixed(1)+' h-'+bw.toFixed(1)+' Z';}
-svg+='<path class="rsp-seg" d="'+dpath+'" fill="'+spFill(stacks[si])+'" data-i="'+i+'" data-s="'+si+'"></path>';}}
+svg+='<path class="rsp-seg" d="'+dpath+'" fill="'+spFill(stacks[si],hid)+'" data-i="'+i+'" data-s="'+si+'"></path>';}}
 svg+='</svg>';
-// x labels: hourly range → weekday initials at the ledger's local midnights (the hover graph's rule);
-// daily range → the 1st and 15th. The keys are the KERNEL's local time — named when the viewer's differs.
+// x labels: hourly range → weekday initials at the ledger's local midnights (the hover graph's rule); daily range → the
+// 1st and 15th; the day range every six hours. The keys are the KERNEL's local time — named when the viewer's differs.
 var xlab='';for(var i=0;i<n;i++){var k=ser.keys[i],m;
 if(SP.range==='day'){m=/T(\\d\\d)$/.exec(k);if(m&&(+m[1])%6===0)xlab+='<span style="left:'+(((i+0.5)*slot)/W*100).toFixed(1)+'%">'+m[1]+':00</span>';}
 else if(SP.range==='hours'){m=/^(\\d{4})-(\\d\\d)-(\\d\\d)T00$/.exec(k);if(m){var dd=new Date(+m[1],+m[2]-1,+m[3]);
 xlab+='<span style="left:'+(((i+0.5)*slot)/W*100).toFixed(1)+'%">'+['S','M','T','W','T','F','S'][dd.getDay()]+'</span>';}}
 else{m=/^(\\d{4})-(\\d\\d)-(01|15)$/.exec(k);if(m)xlab+='<span style="left:'+(((i+0.5)*slot)/W*100).toFixed(1)+'%">'+Number(m[2])+'/'+Number(m[3])+'</span>';}}
 var many=spMany(d);
-// no legend (T247e): the session list under the chart is the legend, each row in its stack's color
+// no legend (T247e): the session list under the charts is the legend, each row in its stack's color
 var tzNote='';var mine=-(new Date().getTimezoneOffset());
+if(sec==='seat'||!document.getElementById('rsp-chart-seat')){
 if(typeof d.tzOffsetMin==='number'&&d.tzOffsetMin!==mine)tzNote+='<div class=rsp-note>Bucket times are '+esc(d.tz||'the kernel\u2019s clock')+' (the machine that recorded them), not your local time.</div>';
 // machines in different zones (T247c): the rule is stated, not left to be guessed
 var offs={};spHosts(d).forEach(function(x){offs[String(x.tzOffsetMin)]=1;});
-if(Object.keys(offs).length>1)tzNote+='<div class=rsp-note>Hourly buckets are aligned by clock time across machines; daily buckets follow each machine\u2019s own calendar day.</div>';
+if(Object.keys(offs).length>1)tzNote+='<div class=rsp-note>Hourly buckets are aligned by clock time across machines; daily buckets follow each machine\u2019s own calendar day.</div>';}
 box.innerHTML=svg+ylab+'<div class=ru-tip-gx>'+xlab+'</div>'+tzNote;
 // the hover (T293, the user 2026-09-09): a crosshair at the pointer's bucket — a hairline inside the svg and a stamp
 // naming the bucket in words — with the bucket's sessions in spend order in the tooltip; over a bar the same box, that
@@ -73919,7 +73838,7 @@ box.innerHTML=svg+ylab+'<div class=ru-tip-gx>'+xlab+'</div>'+tzNote;
 var svgEl=box.querySelector('svg');if(!svgEl)return;
 var xh=document.createElementNS('http://www.w3.org/2000/svg','line');xh.setAttribute('class','rsp-xh');xh.setAttribute('y1','0');xh.setAttribute('y2',String(H));xh.style.display='none';svgEl.appendChild(xh);
 var stamp=document.createElement('div');stamp.className='rsp-xh-stamp';stamp.style.display='none';box.appendChild(stamp);
-var range=SP.range==='day'?'hours':SP.range,other=meas==='usd'?'tok':'usd',ofmt=function(v){return meas==='usd'?fmtTok(Math.round(v))+' tok':fmtUsd(v);};
+var range=SP.range==='day'?'hours':SP.range,other=meas==='usd'?'tok':'usd',ofmt=function(v){return meas==='usd'?fmtTok(Math.round(v))+' tok':(sec==='seat'?SP_APPROX:'')+fmtUsd(v);};
 var xhHide=function(){xh.style.display='none';stamp.style.display='none';spTipHide();};
 svgEl.onpointermove=function(e){var r=svgEl.getBoundingClientRect(),i=spBucketAt(e.clientX-r.left,r.width,n);if(i<0){xhHide();return;}
 var cx=(i+0.5)*slot,pct=cx/W*100;xh.setAttribute('x1',cx.toFixed(1));xh.setAttribute('x2',cx.toFixed(1));xh.style.display='';
@@ -73931,7 +73850,7 @@ spBucketTipShow(e.clientX,e.clientY,ofmt(ot)+' \u00b7 '+st,fmt(top.total),top,st
 svgEl.onpointerleave=xhHide;}
 var spResizeRaf=0;
 window.addEventListener('resize',function(){if(!(SP.open&&SP.data)||spResizeRaf)return;
-spResizeRaf=requestAnimationFrame(function(){spResizeRaf=0;if(SP.open&&SP.data){spPaintAccts();renderChart();spSizePane();}});});   // a resize across the narrow card's width folds or unfolds By account
+spResizeRaf=requestAnimationFrame(function(){spResizeRaf=0;if(SP.open&&SP.data){renderChart();spSizePane();}});});
 el.addEventListener('click',function(){pull(true);openSpend();});
 setInterval(function(){pull(false);},60000);     // backup auto-refresh: re-read usage.json every 60s
 pull(false);                                     // fill on load, independent of the timeline-forward path
@@ -74011,7 +73930,6 @@ function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LAND
 function ageTick(){var n=tip.querySelector('.ah-ago');if(n){var w=ageWords();if(w)n.textContent=w;}}
 function armAge(){if(!ageTimer)ageTimer=setInterval(ageTick,60000);}
 function disarmAge(){if(ageTimer){clearInterval(ageTimer);ageTimer=null;}}
-var moving=false;  // the readout is re-parenting the cell (moveApiCell): its blur and focus are not the user's
 var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
 // the legend (T316, the user's design; T340, the user 2026-09-11): vertical and left-justified, no swatches: the class token
 // itself wears its colour and the explanation sits beside it as plain text, 429 on one line and 5xx on its own below it;
@@ -74275,6 +74193,9 @@ function html(m,full){var mg=merged(),rd=readingOf('');
 // document's longest window; before the read lands, the day
 var win=MERGE?MERGE.windowWords(rd?rd.windowS:86400):'';
 var h='<div class=ru-tip-win><div class=ru-tip-name><span>API health'+(mg.n>1?' \u00b7 '+mg.n+' machines':'')+'</span>'+(win?'<span class="ru-tip-reset ah-win">'+esc(win)+'</span>':'')+'</div>';
+// what the signal is, in one plain line (2026-10-08: the dot alone did not say what it reported): how the API answers,
+// whichever account a session bills, never money
+h+='<div class=ah-what>How Anthropic\u2019s API is answering your sessions, whichever account they bill.</div>';
 // one line per machine (T316): the dot in that machine's state, its name, then its counts in their colours, or the
 // kernel's own words when its sessions are waiting or it is paused; a machine not reachable says so in its line
 mg.machines.forEach(function(x){h+='<div class="ru-tip-row ah-mline" data-host="'+esc(x.host)+'"><i class=ah-dot data-dot='+esc(x.dot)+'></i><span class=ah-nm>'+esc(x.name)+'</span>'+partsHTML(x.parts||[])
@@ -74310,7 +74231,6 @@ try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 // The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
 // user who Tabs onto the cell must not meet a modal dialog their focus sits outside of. open() makes it the dialog.
 function show(ev){if(!LAST)return;lastX=(ev&&typeof ev.clientX==='number')?ev.clientX:null;
-try{window.__rompUsageTipHide&&window.__rompUsageTipHide();}catch(e){}   // the readout's tip yields while ours shows (the cell sits inside it)
 tip.classList.remove('ru-modal');tip.setAttribute('role','tooltip');tip.removeAttribute('aria-modal');
 tip.style.display='block';el.setAttribute('aria-describedby','ah-summary');load(true);render();armAge();}
 function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');disarmAge();}
@@ -74336,20 +74256,13 @@ window.__rompApiClose=close;back.onclick=close;try{tip.focus();}catch(e){}if(!wa
 // document did not change, so no re-read and no flash to the loader's dots
 el.addEventListener('mouseenter',function(ev){if(pinned)return;
 if(tip.style.display==='block'){if(typeof ev.clientX==='number')lastX=ev.clientX;anchor();return;}show(ev);});
-el.addEventListener('mouseleave',function(ev){if(pinned)return;hide();
-// the pointer slid from the dot onto the readout's own figures: the readout's tip comes back (its mouseenter fired
-// before ours and yielded to the dot, so nothing else would show it now); a pointer that left the readout too gets none
-var ru=document.getElementById('rail-usage'),to=ev&&ev.relatedTarget;if(ru&&to&&ru.contains(to)&&window.__rompUsageTipShow)window.__rompUsageTipShow(ev);});
+el.addEventListener('mouseleave',function(){if(pinned)return;hide();});
 // keyboard focus shows the hover as the pointer does (the tooltip pattern) and blur hides it; a pinned detail is
 // unmoved, a hover the pointer already opened is left where it anchored, and a focus the browser re-dispatches
 // because the window regained focus while the cell already held it (winFocusEl) is not the user reaching for the cell
-el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
-el.addEventListener('blur',function(){if(moving)return;if(!pinned)hide();});
-// the readout re-parents the cell on every repaint (moveApiCell): while it does, the blur and the focus it causes are
-// not the user's, and once it is done a shown hover is re-anchored from the cell's new place
-window.__rompApiCellMoving=function(on){moving=!!on;if(!on&&!pinned&&tip.style.display==='block')anchor();};
-// the cell sits INSIDE the spend readout, whose own click opens the spend modal: ours must not reach it (review find)
-el.addEventListener('click',function(ev){if(ev&&ev.stopPropagation)ev.stopPropagation();if(pinned)close();else open();});
+el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});
+el.addEventListener('blur',function(){if(!pinned)hide();});
+el.addEventListener('click',function(){if(pinned)close();else open();});
 // Escape on the focused cell dismisses the hover that focus showed, without moving focus (content shown on focus
 // must be dismissible in place); the pinned dialog's Escape lands via _LANDING_ESC_JS, inert while no modal is on
 el.addEventListener('keydown',function(ev){if(ev.key==='Escape'){if(!pinned&&tip.style.display==='block'){ev.preventDefault();hide();}return;}
@@ -77141,6 +77054,8 @@ def _landing():
             # the tooltip, labelled "last known" and faded, which is honest because it says what it is.
             ".ru-tip-row.ru-unk i{opacity:.3}.ru-tip-row.ru-unk .ru-tip-k,.ru-tip-row.ru-unk .ru-tip-v{color:#8a97a6}"
             ".ru-pct{font:600 10px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfe6ff;font-variant-numeric:tabular-nums;white-space:nowrap}"
+            # the usage figures (2026-10-08): the window names and figures in the bar's own two fonts, a pair per window
+            ".ru-cost{gap:6px;cursor:pointer}.ru-cost .ru-pct+.ru-name{margin-left:6px}"
             # the API health cell. The dot wears STATUS hexes, never var(--accent): the label gray at .55 for
             # ok (a healthy API costs no attention), the tab-retrying amber for degraded, the API-error red
             # (--st-blocked-bg) for paused. The word is .ru-pct's declaration byte for byte (no new font
@@ -77159,14 +77074,13 @@ def _landing():
             "#rail-api[data-dot=fine] .ah-dot,.ah-dot[data-dot=fine]{background:var(--accent,#9cd2ff);opacity:1}"
             "#rail-api[data-dot=errors] .ah-dot,.ah-dot[data-dot=errors]{background:var(--st-blocked-bg,#e5484d);opacity:1}"
             "#rail-api[data-dot=quiet] .ah-dot,.ah-dot[data-dot=quiet]{background:var(--dim,#9aa4ad);opacity:.55}"
-            "#rail-api{cursor:pointer;margin:0 1px;padding:4px 2px}"   # a 15px hit target around a 7px dot; sits inside the readout's slot
-            # the slot is not a flex item of its own (display:contents), so the readout pays no gap for a dot that is
-            # still hidden and exactly one for a shown one (review find: the API label and the 1-day label sat 14 px
-            # apart before the first frame and jumped when the dot appeared)
-            ".ah-slot{display:contents}"
+            # the cell at the head of the right-hand cluster (2026-10-08): the dot and its words "API health" in the
+            # bar's label font, a little apart from the icon buttons after it; a flat wash on hover says it opens
+            "#rail-api{cursor:pointer;gap:6px;padding:3px 7px;margin-right:6px;border-radius:5px}"
+            "#rail-api:hover,#rail-api:focus-visible{background:rgba(255,255,255,0.06);outline:none}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
             ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{color:#8b939c;margin-left:auto}"
-            ".ah-line{margin-top:4px;max-width:340px}"
+            ".ah-line{margin-top:4px;max-width:340px}.ah-what{margin:0 0 4px;max-width:250px;opacity:.6;font-size:10px}"
             ".ah-btn{margin-top:6px;font:inherit;padding:3px 9px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#cfd6dd;cursor:pointer}"
             ".ah-btn[disabled]{opacity:.55;cursor:default}#ah-tip .romp-acted{opacity:.6}"
             ".ah-row{cursor:pointer;border-radius:4px;margin:2px -4px 0;padding:1px 4px}"
@@ -77251,9 +77165,6 @@ def _landing():
             "#rsp-panel{width:min(880px,94%);max-height:92vh;overflow:auto;background:#252526;border:1px solid #3a3a3a;"
             "border-radius:10px;box-shadow:0 12px 36px #000000aa;padding:16px 20px;color:#cfd6dd;"
             "font:500 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;line-height:1.4}"
-            # where the card's width follows the viewport, it keeps its scrollbar's room whether it scrolls or not, so that
-            # a scrollbar appearing does not change the content width after spPaintAccts has decided By account's fold
-            "@media (max-width:936px){#rsp-panel{scrollbar-gutter:stable}}"
             ".rsp-top{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:#e8eaed;"
             "margin:0 0 12px;padding-bottom:10px;border-bottom:1px solid #34343a}.rsp-top span{flex:1 1 auto}"
             ".rsp-x{background:none;border:none;color:#9aa0a6;font-size:16px;line-height:1;cursor:pointer;padding:0 2px}"
@@ -77275,7 +77186,7 @@ def _landing():
             # variable; a fallback carries the dark value where the landing defines none.
             ".rsp-name .tab-label.colored{color:var(--chip-bg);font-weight:600}"
             ".rsp-name .host-prefix{color:var(--dim,#9aa0a6);font-weight:400;font-style:italic;font-size:0.86em}"
-            ".rsp-tbl th{text-align:left;font-weight:400;color:#8a97a6;padding:2px 6px 4px 0;border-bottom:1px solid rgba(255,255,255,0.08)}"   # muted by color, not opacity: the sticky header must occlude the rows scrolling under it (review find)
+            ".rsp-tbl th{text-align:left;font-weight:400;color:#8a97a6;padding:2px 6px 4px 0;border-bottom:1px solid rgba(255,255,255,0.08);white-space:nowrap}"   # muted by color, not opacity: the sticky header must occlude the rows scrolling under it (review find)
             ".rsp-tbl td{padding:3px 6px 3px 0;border-bottom:1px solid rgba(255,255,255,0.05);white-space:nowrap}"
             ".rsp-tbl .n{text-align:right;font-variant-numeric:tabular-nums}"
             ".rsp-tbl td.rsp-name{width:100%;max-width:0;overflow:hidden;text-overflow:ellipsis}"
@@ -77283,22 +77194,31 @@ def _landing():
             # cells carry the dimming, the annotation inside stays at the row's level (it used to compound
             # .55 × .6 to a 2.3:1 read)
             ".rsp-dead td{opacity:.55}.rsp-dead .ru-tip-reset{opacity:1}"
-            # the By account summary (2026-10-01): the session list's cell grammar (its own class: the list's selectors,
-            # the scroll pane and the tests' row counts stay the sessions' alone), the route words free to wrap on a
-            # narrow card; an estimate's approx mark carries its reason in the hover
-            ".rsp-sum{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px 28px}.rsp-sum>.rsp-sec{flex:1 1 300px;min-width:0;margin-top:0}"
-            ".rsp-acct{width:100%;border-collapse:collapse;margin-top:2px}"
-            ".rsp-acct td{padding:3px 6px 3px 0;border-bottom:1px solid rgba(255,255,255,0.05)}"
+            # THE TWO CARDS (2026-10-08): the enterprise seat (estimated at API prices, not charged) and the API key
+            # (charged), each its own flat wash, side by side, folding into a stack on a narrow card. The title in the
+            # section-name grammar (.ru-tip-name: 11px bold), the figure in the head's 14px, the line under it in the
+            # 10px annotation size: no new font size. The chart's own backing plate gives way to the card's wash
+            ".rsp-ctl-top{margin:0 0 12px}"
+            ".rsp-cards{display:flex;flex-wrap:wrap;gap:12px}"
+            ".rsp-card{flex:1 1 100%;min-width:0;display:flex;flex-direction:column;background:rgba(255,255,255,0.035);border-radius:8px;padding:10px 12px 8px}"
+            ".rsp-cards.rsp-two .rsp-card{flex:1 1 320px}"
+            ".rsp-card-h{display:flex;align-items:baseline;justify-content:space-between;gap:12px}"
+            ".rsp-card-t{font-weight:700;color:#e8eef5}.rsp-card-t[data-tip]{cursor:help}"
+            ".rsp-card-v{white-space:nowrap}.rsp-card-v b{font-size:14px;font-weight:600;color:#e8eef5;font-variant-numeric:tabular-nums}"
+            ".rsp-card-alt{margin-left:8px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums}"
+            ".rsp-card-sub{font-size:10px;opacity:.6;margin:1px 0 7px}"
+            ".rsp-allow{display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:10px}.rsp-allow b{font-weight:600}"
+            ".rsp-card-none{font-size:10px;opacity:.6;padding:2px 0 4px}"
+            ".rsp-card .rsp-svg{background:transparent}.rsp-chart{position:relative;margin-top:auto}"   # side by side, the two charts share a baseline
+            # the y labels sit over the bars at the plot's left edge: a chip of the card's own wash keeps them legible
+            ".rsp-chart .ru-tip-gy{padding:0 2px;border-radius:2px;background:rgba(46,46,47,0.85)}"
+            ".rsp-both{margin:10px 2px 0;opacity:.8}"
+            ".rsp-lhead{align-items:center}.rsp-lhead .rsp-ctl{margin:0;font-weight:400}"
+            # the seat's accounts, when its dollars come from more than one (the session list's cell grammar, its own
+            # class: the list's selectors and the tests' row counts stay the sessions' alone)
+            ".rsp-acct{width:100%;border-collapse:collapse;margin:0 0 8px}"
+            ".rsp-acct td{padding:2px 6px 2px 0;border-bottom:1px solid rgba(255,255,255,0.05)}"
             ".rsp-acct td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.rsp-acct td.rsp-name{width:100%}"
-            # the narrow card's fold (spPaintAccts): the section head as a button, its bold and colour from .ru-tip-name (a
-            # later rule), the closed line clipped to one line, a caret turned when open, the accent ring for the keyboard
-            ".rsp-afold{width:100%;background:none;border:none;margin:0;padding:0;font:inherit;text-align:left;cursor:pointer;align-items:baseline}"
-            ".rsp-afold>span:first-child{flex:none;white-space:nowrap}"
-            ".rsp-afold>.ru-tip-reset{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-            ".rsp-afold:focus-visible{outline:1px solid var(--accent,#9cd2ff);outline-offset:2px}"
-            ".rsp-acaret{display:inline-block;width:.9em;font-style:normal;transition:transform .12s ease}"
-            ".rsp-afold[aria-expanded=true] .rsp-acaret{transform:rotate(90deg)}"
-            ".rsp-est{cursor:help}"
             ".rsp-sw{display:inline-block;width:10px;height:10px;border-radius:3px;vertical-align:-1px;background:#6b7a8c}"
             # unattributed spend wears a TEXTURE, not a hue: it is not a session, and texture is the
             # dataviz fallback for a class that must never be confused with one
@@ -77335,8 +77255,6 @@ def _landing():
             ".ru-tip-reset{font-weight:400;opacity:.6;font-size:10px}"
             ".ru-tip-row{display:flex;align-items:center;gap:6px;margin-top:3px}"
             ".ru-tip-k{opacity:.55;min-width:46px}"
-            # the by-kind token split under a spend row: the sub-annotation grammar .ru-tip-reset wears
-            ".ru-tip-sub{margin-top:0}.ru-tip-sub .ru-tip-v{opacity:.6;font-size:10px}"
             ".ru-tip-track{width:64px;height:6px;border-radius:3px;background:rgba(255,255,255,0.10);overflow:hidden;display:inline-block}"
             # the fleet $/h chart (the user 2026-08-14): full tip width, framed by a faint backing
             # plate, with overlay y-labels (px offsets against the fixed 56px plot) and a
@@ -77356,6 +77274,19 @@ def _landing():
             ".ru-tip-v{min-width:30px;text-align:right;font-variant-numeric:tabular-nums;margin-left:auto}"
             ".ru-tip-more{margin-top:8px;text-align:center}"   # the phone panel's door into the spend modal (T247b)
             ".ru-tip-hint{margin-top:5px;opacity:.55;font-size:10px}"   # the hover's click affordance (T247d): the footnote's size and opacity, no rule line
+            # the hover's usage table (2026-10-08): the cell's windows as columns, an account per row, the figures
+            # right-aligned in tabular digits; the total under a hairline, the tokens and the notes in the 10px
+            # annotation size. No new font size
+            ".ru-ctab{border-collapse:collapse;margin-top:3px;font-variant-numeric:tabular-nums}"
+            ".ru-ctab th{font-weight:400;font-size:10px;opacity:.55;text-align:right;padding:0 0 2px 18px;white-space:nowrap}"
+            ".ru-ctab td{text-align:right;padding:2px 0 2px 18px;white-space:nowrap}.ru-ctab td:first-child{text-align:left;padding-left:0}"
+            ".ru-ckey{font-size:10px;opacity:.55}"
+            ".ru-ctot td{border-top:1px solid rgba(255,255,255,0.10);padding-top:4px;font-weight:700;color:#e8eef5}"
+            ".ru-ctok td{font-size:10px;opacity:.55}"
+            ".ru-tip-note{margin-top:5px;opacity:.6;font-size:10px;max-width:360px}"
+            # after the account blocks the usage section opens under a hairline, so a block's machines line reads as
+            # that block's footer and never as this section's heading
+            ".ru-tip-block+.ru-tip-cost,.ru-tip-cols+.ru-tip-cost,.ru-tip-machines+.ru-tip-cost{margin-top:9px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)}"
             ".ru-tip-age{margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);"
             "opacity:.55;font-size:10px}"
             # (The per-host .ru-set/.ru-host rail sets are gone, the user 2026-08-08, and the per-host .ru-tip-host
@@ -77684,6 +77615,13 @@ def _landing():
             "body.theme-light .rsp-tbl th{border-bottom-color:rgba(0,0,0,0.10)}body.theme-light .rsp-tbl td{border-bottom-color:rgba(0,0,0,0.06)}"
             "body.theme-light .rsp-tbl thead th{background:#FFFFFF}body.theme-light .rsp-tbl th{color:#5D574E}"
             "body.theme-light .rsp-acct td{border-bottom-color:rgba(0,0,0,0.06)}"
+            # the cards on the white panel: a warm wash of the page's own cream, never a white alpha (it vanishes there)
+            "body.theme-light .rsp-card{background:#F7F2EC}body.theme-light .rsp-card .rsp-svg{background:transparent}"
+            "body.theme-light .rsp-chart .ru-tip-gy{background:rgba(247,242,236,0.85)}"
+            "body.theme-light .ru-tip-block+.ru-tip-cost,body.theme-light .ru-tip-cols+.ru-tip-cost,body.theme-light .ru-tip-machines+.ru-tip-cost{border-top-color:rgba(0,0,0,0.10)}"
+            "body.theme-light .rsp-card-t,body.theme-light .rsp-card-v b{color:#1F1E1D}"
+            "body.theme-light .ru-ctot td{border-top-color:rgba(0,0,0,0.10);color:#1F1E1D}"
+            "body.theme-light #rail-api:hover,body.theme-light #rail-api:focus-visible{background:rgba(0,0,0,0.05)}"
             "body.theme-light .rsp-name .host-prefix{color:var(--dim,#5D574E)}"
             "body.theme-light .ru-tip-machines .host-prefix{color:var(--dim,#5D574E)}"
             "body.theme-light .rsp-btn{border-color:rgba(0,0,0,0.18);color:#1F1E1D}"
@@ -77709,13 +77647,17 @@ def _landing():
             # and the History head's dot for the signal's quiet states (healthy, unknown) is the same glyph: the base
             # gray falls to about 1.6:1 on the white tip too
             "body.theme-light #rail-api[data-dot=quiet] .ah-dot,body.theme-light .ah-dot[data-dot=quiet]{background:#5D574E}"
+            # FINE is blue in the light theme too (2026-10-08): the light accent is an orange (#C2410C) that sits next to the
+            # error red on a 7 px dot, so a healthy API read as a warning. The dark accent's hue at a lightness the cream
+            # page carries (--kind-command's light blue, styles.css), and the same for the successes it counts below
+            "body.theme-light #rail-api[data-dot=fine] .ah-dot,body.theme-light .ah-dot[data-dot=fine]{background:#356890}"
             # the failure line in the light theme's error-text red (styles.css --err #B02A1C, about 6.6:1 on white;
             # the dark line's #ef6b6f is 3.0:1 there)
             "body.theme-light .ah-err{color:#B02A1C}"
             # T316, the light tip is white: the counts' inks (the clay accent, the light error red, a deep violet 11.90:1, the
             # other band's indigo 6.3:1) and the bars' fills in the light palette's chip colours (T340: no swatches)
-            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:var(--st-5xx-ink,#4c1b7e)}body.theme-light .ah-c-none{color:#4f46e5}"
-            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:var(--st-5xx-bg,#4c1b7e)}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#4f46e5}"
+            "body.theme-light .ah-c-ok{color:#356890}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:var(--st-5xx-ink,#4c1b7e)}body.theme-light .ah-c-none{color:#4f46e5}"
+            "body.theme-light .ah-seg-ok{fill:#356890}body.theme-light .ah-seg-serverErrors{fill:var(--st-5xx-bg,#4c1b7e)}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#4f46e5}"
             "body.theme-light .ah-gridy{stroke:rgba(0,0,0,0.14)}body.theme-light .ah-gridx{stroke:rgba(0,0,0,0.08)}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
@@ -77810,21 +77752,20 @@ def _landing():
             # the Claude /usage rate-limit bars (Pro/Max): three compact vertical bar-pairs (used % colored +
             # elapsed % slate), %-label, full detail on hover — side-by-side in the bottom bar.
             "<div id=rail-usage data-keycmd=usage.open></div>"
-            # the API health cell (T301, the user 2026-09-10): ONE small dot and nothing else, no second "API" word
-            # and no "ok". It ships here after the usage bars and MOVES into the spend readout's slot (.ah-slot,
-            # right after that readout's existing API label and left of its 1-day segment) whenever the readout
-            # renders (_LANDING_USAGE_JS renderRows re-parents the node, so its listeners survive every rebuild
-            # of the readout's innerHTML); with no spend readout it stays here. Painted by _LANDING_APIH_JS from the
-            # kernel's apiHealth push, merged across every attached machine. Ships HIDDEN: it shows on its first frame, so a kernel that never sends
-            # one shows nothing rather than a false ok. Its own element, not a child of #rail-usage (renderRows
-            # empties that one when there are no bars and no spend). No title (the rail's no-title rule); no
-            # data-keycmd yet. role=button + tabindex=0 make it a keyboard control (Enter / Space open the
-            # detail); aria-label follows the frame's text.
-            "<div id=rail-api class=\"ru-w ru-ah\" hidden role=button tabindex=0 aria-label=\"API health\" data-dot=fine>"
-            "<i class=ah-dot></i></div>"
             "</div>"   # /.rail-scroll
             # refresh + network + settings, pinned to the far RIGHT (settings last), always visible:
             "<div class=rail-acts>"
+            # the API health cell (T301, the user 2026-09-10; moved and named 2026-10-08): the dot and the words "API
+            # health", FIRST in this right-hand cluster, apart from the usage figures. It reports how Anthropic's API is
+            # answering the sessions (rate limits, server errors), never money, and beside the spend readout, after its
+            # old "API" label, it read as part of the spend (the user 2026-10-08, who could not tell what the dot meant
+            # or which figure it belonged to). Painted by _LANDING_APIH_JS from the kernel's apiHealth push, merged
+            # across every attached machine. Ships HIDDEN: it shows on its first frame, so a kernel that never sends one
+            # shows nothing rather than a false ok. No title (the rail's no-title rule: its hover is the rich tip); no
+            # data-keycmd yet. role=button + tabindex=0 make it a keyboard control (Enter / Space open the detail);
+            # aria-label follows the frame's text.
+            "<div id=rail-api class=\"ru-w ru-ah\" hidden role=button tabindex=0 aria-label=\"API health\" data-dot=fine>"
+            "<i class=ah-dot></i><span class=ru-name>API health</span></div>"
             # The Log's opener LEFT this cluster (T290, the user 2026-09-09: the bar keeps only its few
             # important controls): the Log opens from the gear's Updates & debug section ("Open log", which
             # posts {romp:'openLog'} to the shell), from the command palette (log.open) and from the mobile

@@ -95,7 +95,7 @@ test("the middle range is 7 days over the hourly ledger's last 168 buckets; 1 da
   const { SP_RANGE_BUCKETS, SP_TIP_ROWS } = pure();
   assert.deepEqual(SP_RANGE_BUCKETS, { day: 24, hours: 168 });
   assert.ok(SP_TIP_ROWS >= 4 && SP_TIP_ROWS <= 8, "the tooltip lists the top several, then folds: " + SP_TIP_ROWS);
-  assert.ok(USAGE_JS.includes('data-act=range:hours>7 days \\u00b7 by hour</button>'), "the button says 7 days");
+  assert.ok(USAGE_JS.includes("spChip('range:hours',SP.range==='hours','7 days \\u00b7 by hour')"), "the button says 7 days");
   assert.ok(!USAGE_JS.includes("8 days"), "no 8-day wording survives in the modal");
   assert.ok(KERNEL.includes("_SERIES_HOURS = 192"), "the ledger keeps 192 hours: a day of slack past the view");
   // spSeries executed: the range's tail of a 192-key series
@@ -141,7 +141,7 @@ test("a persisted pick from the old 8-day button reads as the 7-day view: the st
   assert.equal(load({ range: "week" }).SP.range, "hours", "an unknown value falls back to the default, the 7-day view");
   assert.equal(load({}).SP.range, "hours", "no stored range: the default is the 7-day view");
   // the label the stored value selects
-  const btn = /data-act=range:hours>([^<]+)<\/button>/.exec(USAGE_JS);
+  const btn = /spChip\('range:hours',SP\.range==='hours','([^']+)'\)/.exec(USAGE_JS);
   assert.ok(btn, "the hours button");
   assert.equal(btn![1], "7 days \\u00b7 by hour");
 });

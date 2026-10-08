@@ -113,7 +113,7 @@ class SpendDetail(unittest.TestCase):
         d = km._spend_detail(now=NOW)
         self.assertEqual(d["host"], "TESTHOST")
         self.assertEqual([(h["host"], h["status"]) for h in d["hosts"]], [("TESTHOST", "ok")])
-        self.assertEqual(d["scope"], "total")
+        self.assertEqual(d["scope"], "all", "every turn counts, the key's part beside it (2026-10-08)")
         names = [s["name"] for s in d["sessions"]]
         self.assertEqual(names, ["web", "api", "tests"], "sorted by dollars, largest first")
         web, api, tests = d["sessions"]
@@ -178,8 +178,11 @@ class SpendDetail(unittest.TestCase):
         self.assertEqual(len(set(derived[:free])), free, "…each once")
         self.assertEqual(d["hours"]["stacks"][0]["name"], "web", "stack order is the table's: top by dollars")
 
-    def test_the_keyed_scope_reads_each_sids_key_split_like_the_rail(self):
-        # a login's windows beside the key's spend: the rail sums ONLY key-billed turns, so does the modal
+    def test_every_turn_counts_on_every_machine_with_the_keys_part_beside_it(self):
+        # 2026-10-08 (the user, who wanted the enterprise seat and the API key drawn apart, the one estimated at API prices
+        # and the other charged): a machine with a login beside a key used to read its key's turns alone ("keyed"), and its
+        # seat turns could not be drawn at all. Every turn counts now, on every machine, and the key-billed part rides
+        # beside each total (keyUsd / keyTok per stack, `key` per session), so the modal draws both halves from one read
         km._claude_account = lambda: "acct-digest"
         (km.jd.STATE / "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}}))
         state = km.jd.STATE
@@ -187,22 +190,39 @@ class SpendDetail(unittest.TestCase):
                                                            "key": {"usd": 2.0, "turns": 2, "tok": 20000}},
                                                      API: {"usd": 4.0, "turns": 4, "tok": 40000}},
                                   key={"usd": 2.0, "turns": 2, "tok": 20000})}
+        hours = {_hour(0): dict(days[_day(0)])}
+        (state / "spend.json").write_text(json.dumps({"days": days, "hours": hours}))
+        for login in ("acct-digest", ""):   # a login beside the key, and a key-only machine: one rule
+            km._claude_account = lambda login=login: login
+            d = km._spend_detail(now=NOW)
+            self.assertEqual(d["scope"], "all")
+            by = {s["name"]: s for s in d["sessions"]}
+            self.assertAlmostEqual(by["web"]["usd"], 6.0, places=3, msg="every turn")
+            self.assertEqual(by["web"]["key"], {"usd": 2.0, "tok": 20000, "turns": 2}, "the key's part beside it")
+            self.assertAlmostEqual(by["api"]["usd"], 4.0, places=3, msg="a seat-only session is a row on every machine")
+            self.assertNotIn("key", by["api"])
+            st = {s["name"]: s for s in d["days"]["stacks"]}
+            self.assertEqual(sorted(st), ["api", "web"])
+            self.assertAlmostEqual(st["web"]["keyUsd"][-1], 2.0, places=3)
+            self.assertEqual(st["web"]["keyTok"][-1], 20000, "the key's tokens too, for the modal's token measure")
+            self.assertEqual(st["api"]["keyUsd"][-1], 0.0)
+            self.assertEqual(d["unattributed"]["usd"], 0.0)
+
+    def test_the_unattributed_stack_carries_the_keys_part_no_session_accounts_for(self):
+        # a bucket's key dollars beyond its sessions' key sub-counts (a sid-less key turn), and a pre-attribution bucket's
+        # key sub-count whole: the unattributed stack's key part, so the modal draws it under the key, never the seat
+        state = km.jd.STATE
+        days = {_day(0): _bucket(10.0, 100000, 10, {WEB: {"usd": 6.0, "turns": 6, "tok": 60000,
+                                                           "key": {"usd": 2.0, "turns": 2, "tok": 20000}}},
+                                  key={"usd": 5.0, "turns": 3, "tok": 50000}),
+                _day(1): _bucket(3.0, 30000, 3, None, key={"usd": 1.0, "turns": 1, "tok": 10000})}
         (state / "spend.json").write_text(json.dumps({"days": days, "hours": {}}))
         d = km._spend_detail(now=NOW)
-        self.assertEqual(d["scope"], "keyed")
-        by = {s["name"]: s for s in d["sessions"]}
-        self.assertAlmostEqual(by["web"]["usd"], 2.0, places=3, msg="the key-billed dollars only")
-        self.assertNotIn("api", by, "a login-only session bills nothing to the key: not a row, not a stack")
-        self.assertEqual([s["name"] for s in d["days"]["stacks"]], ["web"])
-        self.assertEqual(d["unattributed"]["usd"], 0.0)
-        # the TOTAL scope, same ledger: the split rides beside the totals where the hover would show it
-        km._claude_account = lambda: ""
-        d2 = km._spend_detail(now=NOW)
-        self.assertEqual(d2["scope"], "total")
-        by2 = {s["name"]: s for s in d2["sessions"]}
-        self.assertAlmostEqual(by2["web"]["usd"], 6.0, places=3)
-        self.assertEqual(by2["web"]["key"], {"usd": 2.0, "tok": 20000, "turns": 2})
-        self.assertNotIn("key", by2["api"])
+        una = [s for s in d["days"]["stacks"] if s["kind"] == "unattributed"][0]
+        self.assertAlmostEqual(una["usd"][-1], 4.0, places=3, msg="the bucket less its sessions")
+        self.assertAlmostEqual(una["keyUsd"][-1], 3.0, places=3, msg="the key's dollars no session accounts for")
+        self.assertEqual(una["keyTok"][-1], 30000)
+        self.assertAlmostEqual(una["keyUsd"][-2], 1.0, places=3, msg="a pre-attribution bucket's key sub-count, whole")
 
     def test_the_hosts_asked_are_the_hovers_spend_hosts(self):
         # the hover's predicate exactly: a remote joins when it reports SPEND windows (a login-only
@@ -221,18 +241,19 @@ class SpendDetail(unittest.TestCase):
         self.assertEqual(d["hosts"][1]["status"], "unreachable", "nothing answers on port 1")
         self.assertEqual(d["hosts"][2]["status"], "unreachable")
 
-    def test_a_login_without_a_key_is_the_computed_scope(self):
-        # the rail's THIRD arm: windows present, no key → the rail shows no spend at all; the modal must
-        # not dress computed costs up as API spend (review find)
+    def test_a_login_without_a_key_reads_every_turn_as_the_others_do(self):
+        # the old third arm ("computed": a login, no key) needed its own head and note; every machine reads every turn
+        # now, and the modal names what the figures are in its own words (Usage at API prices, the seat's estimated)
         km._claude_account = lambda: "acct-digest"
         km._auth_key_present = lambda: False
         (km.jd.STATE / "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}}))
         d = km._spend_detail(now=NOW)
-        self.assertEqual(d["scope"], "computed")
-        self.assertEqual(d["sessions"][0]["name"], "web", "the computed costs are still per session")
+        self.assertEqual(d["scope"], "all")
+        self.assertEqual(d["sessions"][0]["name"], "web", "the costs are per session")
         html = km._landing()
-        self.assertIn("computed cost, not billed", html)
-        self.assertIn("Spend (computed)", html)
+        self.assertIn("Usage at API prices", html)
+        self.assertNotIn("Spend (computed)", html)
+        self.assertNotIn("computed cost, not billed", html)
 
     def test_totals_cover_the_days_the_chart_draws_not_every_bucket_kept(self):
         # the recorder keeps the 90 most RECENT spend days, which can reach past 90 calendar days; the
@@ -298,25 +319,24 @@ class SpendDetail(unittest.TestCase):
         self.assertEqual(d["days"]["stacks"][-1]["kind"], "unattributed")
         self.assertAlmostEqual(d["unattributed"]["usd"], 0.05, places=4)
 
-    def test_the_keyed_scopes_other_stack_counts_only_sessions_that_billed_the_key(self):
-        # T247b review find: in the keyed scope a login-only session contributed (0,0,0) yet was counted
-        # into "other (N sessions)", while the table dropped it — the legend said 17, the fold said 2
+    def test_every_session_is_a_row_whatever_billed_it(self):
+        # T247b review find, under the old keyed scope: a login-only session contributed nothing yet was counted into
+        # "other (N sessions)". Every turn counts now, so every session that spent is a row and a stack, key or seat
         km._claude_account = lambda: "acct-digest"
         (km.jd.STATE / "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}}))
         by = {}
-        for i in range(12):   # twelve key-billed sessions, two beyond the top ten
+        for i in range(12):   # twelve key-billed sessions
             by["11111111-2222-3333-4444-0000000002%02d" % i] = {"usd": 1.0 + i, "turns": 1, "tok": 1000,
                                                                 "key": {"usd": 1.0 + i, "turns": 1, "tok": 1000}}
-        for i in range(5):    # five login-only sessions: no key sub-map
+        for i in range(5):    # five seat-only sessions: no key sub-map
             by["11111111-2222-3333-4444-0000000003%02d" % i] = {"usd": 9.0, "turns": 9, "tok": 9000}
-        days = {_day(0): _bucket(sum(v["usd"] for v in by.values()), 17000, 26, by,
+        days = {_day(0): _bucket(sum(v["usd"] for v in by.values()), 17000, 57, by,
                                  key={"usd": sum(1.0 + i for i in range(12)), "turns": 12, "tok": 12000})}
         (km.jd.STATE / "spend.json").write_text(json.dumps({"days": days, "hours": {}}))
         d = km._spend_detail(now=NOW)
-        self.assertEqual(d["scope"], "keyed")
-        self.assertEqual(len(d["sessions"]), 12, "the table lists the key-billed sessions only")
-        self.assertEqual([s["kind"] for s in d["days"]["stacks"]], ["sid"] * 12, "twelve stacks, no fold (T247e)")
-        self.assertEqual(d["unattributed"]["usd"], 0.0, "every key dollar is a session's: nothing unattributed")
+        self.assertEqual(len(d["sessions"]), 17, "every session that spent, key or seat")
+        self.assertEqual([s["kind"] for s in d["days"]["stacks"]], ["sid"] * 17, "seventeen stacks, no fold (T247e)")
+        self.assertEqual(d["unattributed"]["usd"], 0.0, "every dollar is a session's: nothing unattributed")
 
     # ── T247c: every attached kernel's sessions, merged kernel-side ──────────────────────────────
     def _peer_server(self, payload=None, status=200, token="peer-tok", hang=False, seen=None):
@@ -601,8 +621,10 @@ class SpendDetail(unittest.TestCase):
         self.assertIn("older build", html)
         self.assertIn("aligned by clock time across machines", html)
         self.assertIn("recorded before per-session tracking", html, "unattributed spend is named, never folded")
-        self.assertIn("var rows=spendRowsHTML(LAST||[]);", html, "the modal's window numbers are the hover's own renderer")
-        self.assertIn("function fleetSpendHTML(sets){", html, "…whose signature the other suites pin, untouched")
+        # 2026-10-08: the panel's head is the cards (the seat's estimate, the API key's charge), each with its own chart;
+        # the allowance line is the hover's own rows (LAST), refreshed when they land
+        self.assertIn("function spCards(d){", html)
+        self.assertIn("if(typeof SP!=='undefined'&&SP.open&&SP.data){var al=document.getElementById('rsp-allow');if(al)al.innerHTML=spAllowHTML();}}", html)
         self.assertIn("body.theme-light #rsp-panel{", html, "a light-theme step of its own")
         # T247b: the pressed toggle's light rule is written explicitly — a state rule must win the cascade
         # (body.theme-light .rsp-btn at (0,2,1) beat .rsp-btn.on at (0,2,0) and painted dark text on the clay)
@@ -619,7 +641,7 @@ class SpendDetail(unittest.TestCase):
         # every session (no fold), each row its TAB TITLE (the strip's classes, the identity color as
         # --chip-bg), no swatch, no legend
         js = html
-        self.assertLess(js.index("<span>Spend over time</span>"), js.index("<span>By session"), "the chart comes first")
+        self.assertLess(js.index("<div class=\"rsp-cards'"), js.index("<span>By session"), "the cards and their charts come first")
         self.assertNotIn("more session", js, "no fold")
         self.assertNotIn("rsp-leg", js, "no legend: the list is the legend")
         self.assertIn("#rsp-table{max-height:38vh;overflow-y:auto", js)
@@ -637,15 +659,15 @@ class SpendDetail(unittest.TestCase):
         self.assertTrue(twin.group(1).startswith(shared.group(1) + "border-radius:9px;border:1px solid "), "the pill, byte for byte up to the colour (the row's size: no font-size)")
         self.assertIn(";background:transparent;white-space:nowrap;font-weight:400;letter-spacing:normal;", twin.group(1), "the tail after the colour: the shared weight and tracking")
         # T247f: the order chips beside the measure chips; the choice persists with the other toggles
-        self.assertIn('data-act=order:spend>by spend</button>', js)
-        self.assertIn('data-act=order:yours>your order</button>', js)
+        self.assertIn("spChip('order:spend',SP.order==='spend','by spend')", js)
+        self.assertIn("spChip('order:yours',SP.order==='yours','your order')", js)
         self.assertIn("var SP_PREFS_KEY='romp:spendModal';", js)
         # T247g: three ranges and the merge toggle, persisted with the rest
-        self.assertIn('data-act=range:day>1 day ', js)
-        self.assertIn('data-act=range:hours>7 days ', js)   # T293: 7 days over 168 hourly buckets (the ledger's 192 keep a day of slack)
+        self.assertIn("spChip('range:day',SP.range==='day','1 day ", js)
+        self.assertIn("spChip('range:hours',SP.range==='hours','7 days ", js)   # T293: 7 days over 168 hourly buckets (the ledger's 192 keep a day of slack)
         self.assertNotIn('8 days', js)
-        self.assertIn('data-act=range:days>90 days ', js)
-        self.assertIn('data-act=merge:toggle>merge by tag</button>', js)
+        self.assertIn("spChip('range:days',SP.range==='days','90 days ", js)
+        self.assertIn("spChip('merge:toggle',SP.merge,'merge by tag')", js)
         self.assertIn("JSON.stringify({range:SP.range,measure:SP.measure,order:SP.order,merge:SP.merge})", js)
         # the same two keys view-order.ts reads, in the same order: the kernel's arrangement as this browser
         # caches it (2026-09-23), falling back to the pre-move local key until the kernel serves one

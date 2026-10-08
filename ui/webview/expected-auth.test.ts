@@ -19,9 +19,9 @@ test("the hover renders the spend section even when NO host has window bars", ()
   // section, so an all-keyed box's API cell had an empty hover exactly when spend was all there
   // was to show. blocks are optional now; the spend section always appends.
   assert.ok(usageJS.includes("var h=blocks.length?"), "empty blocks no longer short-circuit");
-  assert.ok(usageJS.includes("h+=fleetSpendHTML(sets);"));
+  assert.ok(usageJS.includes("h+=costTipHTML(sets);"), "the usage section always appends (2026-10-08: usage at API prices)");
   assert.ok(!usageJS.includes("if(!blocks.length)return '';"), "the early return is gone");
-  assert.ok(!usageJS.includes("return h+fleetSpendHTML(sets);"),
+  assert.ok(!usageJS.includes("return h+costTipHTML(sets);"),
     "the return-time append (unreachable on empty blocks) is gone with it");
 });
 

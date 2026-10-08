@@ -563,12 +563,16 @@ like Opus or Fable at high effort, the judging costs much less than the sessions
 themselves.
 
 Settings, Debug holds **Token usage analytics**: your sessions' tokens beside
-the judges' over a period you pick. The bottom bar's spend readout opens API
-spend: the sessions' spend in dollars, by session and over time.
+the judges' over a period you pick.
+
+The bottom bar shows what today's and this month's usage would cost at API
+prices. A `≈` marks figures that include a subscription seat's usage, which is
+not billed per token. Clicking it opens the seat and the API key as separate
+charts, with the breakdown by session.
 
 You can also reconfigure the judges from the gear: the high-volume indexing tier
 defaults to Haiku, and the judgment tier defaults to Sonnet.
 
-The bottom bar carries a small dot for how the API is treating your sessions:
-red while errors are being met on any connected machine, gray when nothing is
-calling it.
+**API health**, at the bottom bar's right end, is a dot for how Anthropic's API
+is answering your sessions: red while errors are being met on any connected
+machine, gray when nothing is calling it.

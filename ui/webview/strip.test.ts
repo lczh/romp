@@ -6,7 +6,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { usageColor, fmtAgo, fmtReset, fmtUsd, fmtTok, usageWindows, apiCell, STRIP_PANES, fillHostSelect, droppedRowsNote, asFetchError, hostPickerVerdict, tunnelsFailureLine } from "./strip";
+import { usageColor, fmtAgo, fmtReset, fmtUsd, fmtTok, usageWindows, costCell, STRIP_PANES, fillHostSelect, droppedRowsNote, asFetchError, hostPickerVerdict, tunnelsFailureLine } from "./strip";
 
 test("fmtTok: 3 significant figures at every magnitude (the user 2026-08-13)", () => {
   assert.equal(fmtTok(1_318_619_909), "1.32B");
@@ -190,55 +190,59 @@ test("both bundles init the strip; the web pages never opt in", () => {
   assert.ok(!kernel.includes("__rompShowStrip"), "the web shell keeps its own rail — no strip opt-in kernel-side");
 });
 
-// ── the API spend CELL (the user 2026-08-11): the rail moved key spend to one compact cell — "API",
-// then designator → dollars·tokens pairs, no bars — and the strip must mirror it. Pay-per-token wears
-// calendar-ish windows (the user 2026-08-13): 1 day + 1 month on the cell, 1 week in the hover.
-test("apiCell arms on the spend windows' presence and carries 1 day + 1 month", () => {
-  const cell = apiCell({ spend: {
-    day: { usd: 12.34, tok: 3_456_000, turns: 5, tokIn: 300, tokOut: 20_000, tokCacheR: 3_000_000, tokCacheW: 435_700 },
-    week: { usd: 40.2, tok: 9_000_000, turns: 21 },
-    month: { usd: 87.9, tok: 20_500_000, turns: 60 },
-  } });
+// ── the USAGE CELL (the user 2026-10-08): every turn at API prices, by the route that billed it, for the calendar day and
+// month; the key's dollars are charged, any other route's an estimate (a subscription seat is not billed per token), and a
+// figure that holds any estimate wears the approx mark. The strip mirrors the rail's costCellHTML.
+const routes = (over: Record<string, unknown> = {}) => ({ spendRoutes: Object.assign({
+  today: { machine: [183.4, 30] },
+  monthToDate: { key: [4871.6, 700], machine: [183.4, 30] },
+  week: { key: [4700, 690], machine: [183.4, 30] },
+  tok: { today: { tok: 60_300_000 }, monthToDate: { tok: 1_670_000_000 } },
+}, over) });
+
+test("costCell sums every route per calendar window and marks a figure holding any estimate", () => {
+  const cell = costCell(routes());
   assert.ok(cell);
   assert.deepEqual(cell!.segs.map((s) => [s.key, s.label, s.short]),
-    [["day", "1 day", "1d"], ["month", "1 month", "1mo"]],
-    "the collapsed cell shows 1 day + 1 month only — 1 week lives in the hover");
-  assert.deepEqual(cell!.segs.map((s) => fmtUsd(s.usd)), ["$12", "$88"], "whole dollars, no cents");
-  assert.match(cell!.title, /^API-key spend\n/);
-  assert.match(cell!.title, /1 week — \$40 · 9\.00M tok · 21 turns/, "the hover keeps the full breakdown");
-  assert.match(cell!.title, /1 day — \$12 · 3\.46M tok · 5 turns/);   // 3 sig figs (the user 2026-08-13)
-  // the by-kind split under a window that carries one (the user 2026-09-06: the count is mostly cache
-  // reads, and the hover says so); a window without it (an older kernel) has no second line
-  assert.match(cell!.title, /1 day — \$12 · 3\.46M tok · 5 turns\n    3\.00M cache read · 436k cache write · 300 in · 20\.0k out\n1 week/);
-  assert.match(cell!.title, /1 week — \$40 · 9\.00M tok · 21 turns\n1 month/);
+    [["today", "today", "today"], ["monthToDate", "this month", "month"]], "the windows in the user's words");
+  assert.deepEqual(cell!.segs.map((s) => [fmtUsd(s.usd), s.est]), [["$183", true], ["$5,055", true]],
+    "a seat's dollars are an estimate: today is all seat, the month mixes the key's charge with the seat's estimate");
+  assert.deepEqual(cell!.segs.map((s) => Math.round(s.keyUsd)), [0, 4872], "the key's share is kept apart");
+  assert.match(cell!.title, /^Usage at API prices\n/);
+  assert.match(cell!.title, /this month: ≈\$5,055 \(≈\$183 on subscription seats, \$4,872 charged to the API key\) · 1\.67B tok/);
+  assert.match(cell!.title, /≈ marks an estimate: what that usage would cost at API prices/);
 });
 
-test("an older kernel's fiveHour window still arms the cell (version skew)", () => {
-  const cell = apiCell({ spend: { fiveHour: { usd: 3.2, tok: 900_000, turns: 2 } } });
-  assert.ok(cell, "day||fiveHour — a remote host on an older kernel must not blank its spend");
-  assert.deepEqual(cell!.segs.map((s) => [s.key, fmtUsd(s.usd)]), [["day", "$3"]],
-    "the 5h burn stands in under the 1-day designator until that host updates");
+test("a key-only figure carries no approx mark, and fmtUsd groups thousands", () => {
+  const cell = costCell(routes({ today: { key: [14, 3] }, monthToDate: { key: [1320.4, 80] } }));
+  assert.deepEqual(cell!.segs.map((s) => [fmtUsd(s.usd), s.est]), [["$14", false], ["$1,320", false]]);
+  assert.match(cell!.title, /today: \$14 charged to the API key/);
+  assert.ok(!cell!.title.includes("marks an estimate"), "no estimate, no footnote");
+  assert.equal(fmtUsd(55183.4), "$55,183");
+  assert.equal(fmtUsd(12.4), "$12", "whole dollars, no cents (the user 2026-08-09)");
 });
 
-test("no key spend → no cell; and no fragment of any key ever reaches the strip", () => {
-  assert.equal(apiCell(null), null);
-  assert.equal(apiCell({ spend: {} }), null, "presence of the day window is the whole test — the rail's hasSpend branch");
+test("no calendar routes → no cell (an older kernel ships the week alone); no key material on the strip", () => {
+  assert.equal(costCell(null), null);
+  assert.equal(costCell({ spend: { day: { usd: 3 } } }), null, "the old key windows alone do not arm it");
+  assert.equal(costCell({ spendRoutes: { week: { key: [3, 1] } } }), null, "an older kernel's week-only routes do not either");
   const ROOT = path.resolve(process.cwd(), "..");
   const src = fs.readFileSync(path.join(ROOT, "ui", "webview", "strip.ts"), "utf8");
-  assert.ok(!src.includes("apiTail") && !src.includes("authTail"), "constant 'API' label — no key-tail plumbing");
+  assert.ok(!src.includes("apiTail") && !src.includes("authTail"), "no key-tail plumbing");
+  assert.ok(!src.includes('lbl.textContent = "API"'), "no 'API' label on the cell: its figures are mostly a seat's");
 });
 
-test("the cell's dollars survive every tier; tokens fold at tier 2, labels at 3 (source pins)", () => {
+test("the cell's figures survive every tier; labels fold at tier 3 (source pins)", () => {
   const ROOT = path.resolve(process.cwd(), "..");
   const src = fs.readFileSync(path.join(ROOT, "ui", "webview", "strip.ts"), "utf8");
   assert.match(src, /box\.className = "ru-w ru-api";/);
-  assert.match(src, /lbl\.textContent = "API";/);
-  assert.match(src, /val\.className = "ru-apiv";/, "dollars wear their own class, never .ru-pct");
-  assert.match(src, /tok\.className = "ru-apitok";/);
+  assert.match(src, /val\.className = "ru-apiv";/, "figures wear their own class, never .ru-pct");
+  assert.match(src, /val\.textContent = \(s\.est \? "\\u2248" : ""\) \+ fmtUsd\(s\.usd\);/, "the approx mark rides the figure");
+  assert.doesNotMatch(src, /ru-apitok/, "no tokens on the bar (they ride the hover title)");
   assert.doesNotMatch(src, /spendWindows/, "spend-as-rows is gone, not merely unused");
   const css = fs.readFileSync(path.join(ROOT, "ui", "webview", "strip.css"), "utf8");
   assert.match(css, /\.ru-apiv \{ font: 600 10px/);
-  assert.match(css, /#romp-strip\[data-tier="2"\] \.ru-apitok, #romp-strip\[data-tier="3"\] \.ru-apitok \{ display: none; \}/);
+  assert.doesNotMatch(css, /ru-apitok/);
   assert.doesNotMatch(css, /ru-textonly/, "the ghost-row mechanism died with spend-as-rows");
 });
 

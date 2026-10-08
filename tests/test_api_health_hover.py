@@ -704,7 +704,7 @@ class Docs(unittest.TestCase):
         # with the rest of the interface detail (CLAUDE.md "The documentation front pages"), so the
         # pin follows the text: the one-line mention here, every fact it defers to there.
         guide = re.sub(r"\s+", " ", Path(DOCS, "guide.md").read_text())
-        self.assertIn("The bottom bar carries a small dot for how the API is treating your sessions", guide)
+        self.assertIn("**API health**, at the bottom bar's right end, is a dot for how Anthropic's API is answering your sessions", guide)
         self.assertIn("red while errors are being met on any connected machine, gray when nothing is calling it", guide)
         doc = re.sub(r"\s+", " ", Path(DOCS, "reference.md").read_text())
         self.assertIn("Under the lines, the **History** draws one stacked histogram per machine", doc)
@@ -820,11 +820,13 @@ class Script(unittest.TestCase):
         html = km._landing()
         # the inks (review find: chip colours as text sit under 4.5:1; the failure line's #ef6b6f / #B02A1C is the precedent),
         # each with its light twin; the bars' fills as classes with their light twins; the swatches keep the chip colours
-        for dark, light in ((".ah-c-ok{color:var(--accent,#9cd2ff)}", "body.theme-light .ah-c-ok{color:#C2410C}"),
+        # (the light successes are blue since 2026-10-08, the dark accent's hue at the light lightness, as the fine dot is:
+        # the light accent is an orange that reads beside the 429 red as a warning)
+        for dark, light in ((".ah-c-ok{color:var(--accent,#9cd2ff)}", "body.theme-light .ah-c-ok{color:#356890}"),
                             (".ah-c-r429{color:#ef6b6f}", "body.theme-light .ah-c-r429{color:#B02A1C}"),
                             (".ah-c-r5xx{color:var(--st-5xx-ink,#8a8aff)}", "body.theme-light .ah-c-r5xx{color:var(--st-5xx-ink,#4c1b7e)}"),   # the inks through the token since 2026-09-21 (plans/needs-you.md: apart from the Needs you magenta)
                             (".ah-c-none{color:#d9f99d}", "body.theme-light .ah-c-none{color:#4f46e5}"),   # T340: the other band's hue as ink
-                            (".ah-seg-ok{fill:var(--accent,#9cd2ff)}", "body.theme-light .ah-seg-ok{fill:#C2410C}"),
+                            (".ah-seg-ok{fill:var(--accent,#9cd2ff)}", "body.theme-light .ah-seg-ok{fill:#356890}"),
                             (".ah-seg-serverErrors{fill:var(--st-5xx-bg,#cb94d1)}", "body.theme-light .ah-seg-serverErrors{fill:var(--st-5xx-bg,#4c1b7e)}"),
                             (".ah-seg-noStatus,.ah-seg-other{fill:#d9f99d}", "body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#4f46e5}")):
             self.assertIn(dark, html, dark)
@@ -854,7 +856,7 @@ class Script(unittest.TestCase):
         self.assertIn("return dup?fam+' · '+(b.label||b.auth||key.split('|')[0]):fam;}", HIST, "two of one family are told apart by the login's label, else the auth label")
 
     def test_the_roles_follow_the_mode_and_the_cell_is_described_by_the_short_summary(self):
-        self.assertIn("el.addEventListener('focus',function(){if(moving||skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)
+        self.assertIn("el.addEventListener('focus',function(){if(skipFocus||winFocusEl===el||pinned||tip.style.display==='block')return;show(null);});", JS)
         self.assertNotIn("winFocus=true", JS, "the mark is an element, not a flag")
         self.assertIn("var desc=document.createElement('span');desc.id='ah-summary';desc.className='ah-vh';document.body.appendChild(desc);", JS)
         self.assertIn("tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);desc.textContent=descText();", JS, "refreshed on every render")
@@ -871,7 +873,7 @@ class Script(unittest.TestCase):
         self.assertIn("tip.setAttribute('role','dialog');tip.setAttribute('aria-modal','true');el.removeAttribute('aria-describedby');", JS, "open: dialog")
         self.assertEqual(JS.count("'aria-modal'"), 2, "set by open, removed by show, nowhere else")
         self.assertIn("function hide(){tip.style.display='none';el.removeAttribute('aria-describedby');disarmAge();}", JS)
-        self.assertIn("el.addEventListener('blur',function(){if(moving)return;if(!pinned)hide();});", JS)
+        self.assertIn("el.addEventListener('blur',function(){if(!pinned)hide();});", JS)
         self.assertIn("skipFocus=true;try{(fb&&fb.focus?fb:el).focus();}catch(e){}skipFocus=false;}", JS,
                       "the close's refocus fires the cell's focus event; the flag covers that one call")
 

@@ -114,34 +114,24 @@ const R = await page.evaluate((SID) => {
   R.kbClosed = tip().style.display === "none" && !back.classList.contains("on");
   R.kbFocusBack = document.activeElement === el;
   });
-  step('inside', () => {
-  // 4b. the cell sits inside the spend readout (T301 review): its click must not reach the readout's own click (the
-  // spend modal), the readout's tip yields while the dot's shows and comes back when the pointer slides onto the
-  // figures, and the readout's repaint (a move of the cell) keeps focus and a focus-shown hover
-  const ru = document.getElementById("rail-usage"); let bubbled = 0; ru.addEventListener("click", () => { bubbled++; });
-  let hid = 0, shown = 0; window.__rompUsageTipHide = () => { hid++; }; window.__rompUsageTipShow = () => { shown++; };
-  ru.appendChild(el);
+  step('home', () => {
+  // 4b. the cell heads the bar's right-hand cluster (2026-10-08), apart from the spend readout it sat inside from T301:
+  // a click opens the detail and never the spend modal, and a readout repaint cannot touch it, its focus, or a
+  // focus-shown hover (the readout's writes are to #rail-usage alone)
+  const acts = document.querySelector(".rail-acts"), ru = document.getElementById("rail-usage"), sp = document.getElementById("rsp-back");
+  R.homeFirstInActs = !!acts && acts.firstElementChild === el && !ru.contains(el);
+  R.homeName = (el.querySelector(".ru-name") || {}).textContent || "";
   el.click();
-  R.insideOpened = tip().style.display === "block" && tip().classList.contains("ru-modal"); R.insideBubbled = bubbled;
-  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  el.focus(); el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-  R.insideKbOpened = tip().classList.contains("ru-modal"); R.insideKbBubbled = bubbled;
+  R.homeOpened = tip().style.display === "block" && tip().classList.contains("ru-modal"); R.homeSpendShut = !!sp && sp.hidden;
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   el.blur();
-  const hid0 = hid;   // the focus above showed the hover once already (and hid the readout's tip then)
-  el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, clientX: el.getBoundingClientRect().left + 10 }));
-  R.usageTipHidOnEnter = hid - hid0;
-  el.dispatchEvent(new MouseEvent("mouseleave", { relatedTarget: ru }));
-  R.usageTipBackOnLeave = shown; R.dotTipHiddenAfterLeave = tip().style.display === "none";
-  el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, clientX: el.getBoundingClientRect().left + 10 }));
-  el.dispatchEvent(new MouseEvent("mouseleave", { relatedTarget: document.body }));
-  R.usageTipBackOnLeaveOutside = shown;
   el.focus();
   R.focusShown = tip().style.display === "block" && !tip().classList.contains("ru-modal");
-  window.__rompApiCellMoving(true); document.body.appendChild(el); ru.appendChild(el); el.focus({ preventScroll: true }); window.__rompApiCellMoving(false);
-  R.movedKeptFocus = document.activeElement === el; R.movedKeptHover = tip().style.display === "block" && !tip().classList.contains("ru-modal");
+  ru.innerHTML = '<div class="ru-w ru-cost"><div class=ru-name>today</div><div class=ru-pct>$1</div></div>';   // a readout repaint
+  R.repaintKeptFocus = document.activeElement === el && el.isConnected;
+  R.repaintKeptHover = tip().style.display === "block" && !tip().classList.contains("ru-modal");
   el.blur();
-  R.blurHidesAfterMove = tip().style.display === "none";
+  R.blurHides = tip().style.display === "none";
   });
   step('usage', () => {
   // 5. an open usage modal is closed first, explicitly, so the shared backdrop never serves two modals
@@ -493,15 +483,17 @@ class ServedCell(unittest.TestCase):
         self.assertEqual(self.R["preFrameDisplay"], "none", "and the attribute must actually hide it: %r" % self.R)
         self.assertEqual(self.R["firstFrameDisplay"], "flex", "the first frame reveals the cell")
         self.assertEqual(self.R["firstFrameDot"], "errors", "a degraded frame paints the errors dot (T301)")
-        self.assertEqual(self.R["firstFrameText"], "", "a dot alone: no word beside it")
+        self.assertEqual(self.R["firstFrameText"], "API health", "the dot and its name (2026-10-08), never a state word beside it")
 
     def test_the_driver_hit_no_script_error(self):
         self.assertEqual(self.R["err"], {})
 
-    def test_the_light_theme_gives_the_fine_dot_its_accent(self):
-        # T301: an ok frame with no history read yet is the FINE dot, the theme's accent (the light clay, not the dark
-        # sky blue); the quiet gray (rgb(93, 87, 78), the light label colour) is pinned in tests/test_api_health_hosts.py
-        self.assertEqual(self.R["lightDot"], "rgb(194, 65, 12)", "errors: %r" % self.R.get("err"))
+    def test_the_light_theme_gives_the_fine_dot_a_blue_apart_from_the_error_red(self):
+        # T301: an ok frame with no history read yet is the FINE dot. In the light theme it was the accent clay, an orange
+        # that sits beside the error red on a 7 px dot (2026-10-08: a healthy API read as a warning); it takes the dark
+        # accent's hue at the light lightness instead (#356890). The quiet gray (rgb(93, 87, 78), the light label colour)
+        # is pinned in tests/test_api_health_hosts.py
+        self.assertEqual(self.R["lightDot"], "rgb(53, 104, 144)", "errors: %r" % self.R.get("err"))
         self.assertEqual(self.R["lightDotOpacity"], "1")
 
     def test_an_emptied_usage_cell_takes_no_gap(self):
@@ -571,29 +563,24 @@ class ServedCell(unittest.TestCase):
         self.assertEqual(self.R["rowDead"], {"hintBefore": "", "open": True, "hint": "Not sent: the dashboard is disconnected. Try again."},
                          "errors: %r" % self.R.get("err"))
 
-    def test_a_click_inside_the_spend_readout_opens_the_detail_and_never_reaches_the_readout_s_own_click(self):
-        self.assertTrue(self.R["insideOpened"])
-        self.assertEqual(self.R["insideBubbled"], 0, "the click did not bubble to #rail-usage (the spend modal)")
-        self.assertTrue(self.R["insideKbOpened"])
-        self.assertEqual(self.R["insideKbBubbled"], 0)
+    def test_the_cell_heads_the_right_hand_cluster_named_and_its_click_opens_the_detail_not_the_spend_modal(self):
+        self.assertTrue(self.R["homeFirstInActs"], "first in the pinned right-hand cluster, never inside the spend readout: %r" % self.R.get("err"))
+        self.assertEqual(self.R["homeName"], "API health")
+        self.assertTrue(self.R["homeOpened"])
+        self.assertTrue(self.R["homeSpendShut"], "the spend modal stays shut")
 
-    def test_the_readout_s_tip_yields_to_the_dot_s_and_comes_back_when_the_pointer_slides_onto_the_figures(self):
-        self.assertEqual(self.R["usageTipHidOnEnter"], 1, "the dot's show hides the readout's tip")
-        self.assertEqual(self.R["usageTipBackOnLeave"], 1, "a leave onto the readout asks for its tip back")
-        self.assertTrue(self.R["dotTipHiddenAfterLeave"])
-        self.assertEqual(self.R["usageTipBackOnLeaveOutside"], 1, "a leave out of the readout asks for nothing")
-
-    def test_the_readout_s_repaint_moves_the_cell_without_losing_focus_or_a_focus_shown_hover(self):
+    def test_a_readout_repaint_leaves_the_cell_its_focus_and_a_focus_shown_hover(self):
         self.assertTrue(self.R["focusShown"])
-        self.assertTrue(self.R["movedKeptFocus"], "focus is put back after the move")
-        self.assertTrue(self.R["movedKeptHover"], "the blur the move caused was not the user's")
-        self.assertTrue(self.R["blurHidesAfterMove"], "a real blur still hides it")
+        self.assertTrue(self.R["repaintKeptFocus"])
+        self.assertTrue(self.R["repaintKeptHover"])
+        self.assertTrue(self.R["blurHides"], "a real blur still hides it")
 
     def test_the_light_theme_keeps_the_head_dot_s_state_colors(self):
         # a bare light rule on the dot would outrank the state rules, so the detail's headline dot would read the
         # label gray while the rail's id-scoped dot kept amber and red
-        # T301: degraded and paused are both the ERRORS dot (the blocked red); ok is the fine dot (the accent)
-        red, accent = "rgb(229, 72, 77)", "rgb(194, 65, 12)"
+        # T301: degraded and paused are both the ERRORS dot (the blocked red); ok is the fine dot (blue in the light theme
+        # since 2026-10-08)
+        red, accent = "rgb(229, 72, 77)", "rgb(53, 104, 144)"
         self.assertEqual(self.R["lightDegraded"], {"rail": red, "head": red, "headOpacity": "1"}, "errors: %r" % self.R.get("err"))
         self.assertEqual(self.R["lightPaused"], {"rail": red, "head": red})
         self.assertEqual(self.R["lightOkHead"], {"head": accent, "headOpacity": "1"})

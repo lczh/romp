@@ -101,50 +101,45 @@ export function fmtTok(n: number): string {
   return String(n);
 }
 
-// API-key spend is ONE compact CELL, the strip twin of the web rail's apiCellHTML (the user
-// 2026-08-11: the rail moved to this presentation and the strip must reflect it — spend rendered as
-// three bar-less window rows was the OLD grammar, and on a key-billed machine it read as broken).
-// Spend is NUMBERS, never bars (the user 2026-08-08: the spend bar graphs told you nothing): a
-// constant "API" label — no fragment of any key, not even a last-4 tail, reaches a surface — then the
-// 5-hour burn and the month-to-date, dollars AND tokens (the user 2026-08-09), each designator the
-// window's ONE display name to the LEFT of its value. The full per-window breakdown (7 days and turn
-// counts included) rides the cell's hover title. Keyed on the spend windows' PRESENCE, not the legacy
-// apiKey flag — the same hasSpend branch the rail runs; rail-spend.test.ts holds the two in step.
-export function fmtUsd(v: number): string { return "$" + String(Math.round(v)); }   // whole dollars everywhere — no cents (the user 2026-08-09)
-export type ApiCell = {
-  segs: Array<{ key: string; label: string; short: string; usd: number; tok: number }>;
+// Usage at API prices is ONE compact CELL, the strip twin of the web rail's costCellHTML (the user 2026-10-08, who read
+// "API" on the cell while nearly all of their usage bills an enterprise seat, and wanted the seat's usage in the figure
+// too, as the dollars it would cost at API prices, marked as an estimate). The kernel ships the host's dollars by billing
+// route for the calendar day and month (spendRoutes, _rail_routes): every turn at Claude Code's own cost, the key's
+// charged, any other route's an estimate. Each window's ONE display name to the LEFT of its figure ("today", "this
+// month"), no label of its own and no tokens on the bar; a figure that holds any estimated part wears the approx mark.
+// The split (the key's charge, the seats' estimate, the tokens) rides the cell's hover title. rail-spend.test.ts holds
+// the two copies in step.
+export function fmtUsd(v: number): string { return "$" + Math.round(v).toLocaleString("en-US"); }   // whole dollars, thousands grouped (the user 2026-08-09; 2026-10-08)
+const COST_GRAIN = 0.00005;   // the kernel's _SPEND_GRAIN: dollars below this are rounding, not spend
+export type CostCell = {
+  segs: Array<{ key: string; label: string; short: string; usd: number; keyUsd: number; est: boolean }>;
   title: string;
 };
-export function apiCell(usage: any): ApiCell | null {
-  const sp = usage && usage.spend;
-  // pay-per-token has no reset windows (the user 2026-08-13): the key's story is 1 day / 1 week /
-  // 1 month. day||fiveHour: an older kernel ships no 'day' yet (version skew) — its 5h burn is the
-  // closest honest stand-in until it updates.
-  if (!sp || !(sp.day || sp.fiveHour)) return null;
-  const segs: ApiCell["segs"] = [];
-  const daySeg = sp.day || sp.fiveHour;
-  for (const [key, label, short, seg] of [["day", "1 day", "1d", daySeg],
-                                          ["month", "1 month", "1mo", sp.month]] as const) {
-    if (!seg || typeof seg.usd !== "number") continue;
-    segs.push({ key, label, short, usd: seg.usd, tok: seg.tok || 0 });
+export function costCell(usage: any): CostCell | null {
+  const sr = usage && usage.spendRoutes;
+  // presence of the calendar windows is the whole test: an older kernel ships the week alone, and its figures are not these
+  if (!sr || !(sr.today || sr.monthToDate)) return null;
+  const segs: CostCell["segs"] = [];
+  const lines = ["Usage at API prices"];
+  let anyEst = false;
+  for (const [key, label, short] of [["today", "today", "today"], ["monthToDate", "this month", "month"]] as const) {
+    const m = sr[key] || {};
+    let usd = 0, keyUsd = 0;
+    for (const r of Object.keys(m)) {
+      const v = (m[r] && m[r][0]) || 0;
+      usd += v;
+      if (r === "key") keyUsd += v;
+    }
+    const est = usd - keyUsd >= COST_GRAIN;
+    anyEst = anyEst || est;
+    segs.push({ key, label, short, usd, keyUsd, est });
+    const tok = (sr.tok && sr.tok[key] && sr.tok[key].tok) || 0;
+    lines.push(`${label}: ${est ? "\u2248" : ""}${fmtUsd(usd)}`
+      + (est && keyUsd >= COST_GRAIN ? ` (\u2248${fmtUsd(usd - keyUsd)} on subscription seats, ${fmtUsd(keyUsd)} charged to the API key)` : "")
+      + (!est && keyUsd >= COST_GRAIN ? " charged to the API key" : "")
+      + ` \u00b7 ${fmtTok(tok)} tok`);
   }
-  if (!segs.length) return null;
-  const lines = ["API-key spend"];
-  // '1 month' is ROLLING 30 days (T235); 'this month' is the calendar figure the bill accrues — an older
-  // kernel ships only a calendar `month`, which the hover files under "this month" (the same skew rule)
-  for (const [key, label] of [["day", "1 day"], ["week", "1 week"], ["month", "1 month"], ["monthToDate", "this month"]] as const) {
-    const seg = sp[key];
-    if (!seg || typeof seg.usd !== "number") continue;
-    const turns = seg.turns || 0;
-    lines.push(`${label} — ${fmtUsd(seg.usd)} · ${fmtTok(seg.tok || 0)} tok · ${turns} turn${turns === 1 ? "" : "s"}`);
-    // the by-KIND split under each window (the user 2026-09-06, who read the day's token count and
-    // could not see how it was possible): cache reads — every API call of a turn re-reads the whole
-    // context — are most of it, at a tenth of the input price. A window without the split (an older
-    // kernel) simply has no second line — the rail hover's fleetSpendHTML makes the same call.
-    if (typeof seg.tokCacheR === "number")
-      lines.push(`    ${fmtTok(seg.tokCacheR)} cache read · ${fmtTok(seg.tokCacheW || 0)} cache write · `
-                 + `${fmtTok(seg.tokIn || 0)} in · ${fmtTok(seg.tokOut || 0)} out`);
-  }
+  if (anyEst) lines.push("\u2248 marks an estimate: what that usage would cost at API prices, since a subscription seat is not billed per token.");
   return { segs, title: lines.join("\n") };
 }
 
@@ -257,7 +252,7 @@ export function initStrip(openSettings: () => void, post?: (m: Record<string, un
   function render(usage: any) {
     const nowS = Math.floor(Date.now() / 1000);
     usageWrap.textContent = "";
-    // the subscription windows render as bar rows; key spend follows as ONE API cell (the rail's order)
+    // the subscription windows render as bar rows; the usage figures follow as ONE cell (the rail's order)
     // An UNKNOWN window is not drawn AT ALL (the user 2026-08-13; supersedes the 2026-07-31 '?' slot):
     // the bar shows only what we know. Its last-known reading survives on HOVER — the strip has no rich
     // panel, so the unknown rows' text rides the whole strip's title, labelled as such.
@@ -299,19 +294,14 @@ export function initStrip(openSettings: () => void, post?: (m: Record<string, un
       box.append(name, bars, pct);
       usageWrap.appendChild(box);
     }
-    // The API cell — the rail's apiCellHTML twin (see apiCell above): "API", then designator → value
-    // pairs. The dollars are the cell's own class (.ru-apiv), NOT .ru-pct: they are the information on
-    // a key-billed machine, so the compress tiers fold the tokens (tier 2) and the labels (tier 3,
-    // like every row) but never the dollars themselves.
-    const cell = apiCell(usage);
+    // The usage cell — the rail's costCellHTML twin (see costCell above): designator → figure pairs. The figures are the
+    // cell's own class (.ru-apiv), NOT .ru-pct: they are the information, so the compress tiers fold the labels (tier 3,
+    // like every row) but never the figures themselves.
+    const cell = costCell(usage);
     if (cell) {
       const box = document.createElement("span");
       box.className = "ru-w ru-api";
       box.title = cell.title;
-      const lbl = document.createElement("span");
-      lbl.className = "ru-name";
-      lbl.textContent = "API";
-      box.appendChild(lbl);
       for (const s of cell.segs) {
         const name = document.createElement("span");
         name.className = "ru-name";
@@ -324,11 +314,7 @@ export function initStrip(openSettings: () => void, post?: (m: Record<string, un
         name.append(nameFull, nameShort);
         const val = document.createElement("span");
         val.className = "ru-apiv";
-        val.textContent = fmtUsd(s.usd);
-        const tok = document.createElement("span");
-        tok.className = "ru-apitok";
-        tok.textContent = " · " + fmtTok(s.tok) + " tok";
-        val.appendChild(tok);
+        val.textContent = (s.est ? "\u2248" : "") + fmtUsd(s.usd);
         box.append(name, val);
       }
       usageWrap.appendChild(box);

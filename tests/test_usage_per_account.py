@@ -166,29 +166,24 @@ class RailRendering(unittest.TestCase):
         self.assertIn("function renderRows(rows,selfHost)", self.js)
 
     def test_the_rail_aggregates_and_never_repeats_the_windows_per_host(self):
-        # collapsed = one set of bars (worst window across hosts) + one API cell; the per-host
+        # collapsed = one set of bars (worst window across hosts) + one usage cell; the per-host
         # .ru-set/.ru-host rail markup is gone (the user 2026-08-08) — hosts appear only in the hover
         self.assertIn("function aggBarsHTML(live)", self.js)
-        self.assertIn("function apiCellHTML(live)", self.js)
-        self.assertIn("aggBarsHTML(LAST)+apiCellHTML(LAST)", self.js)
+        self.assertIn("function costCellHTML(live)", self.js)
+        self.assertIn("aggBarsHTML(LAST)+costCellHTML(LAST)", self.js)
         self.assertNotIn("class=ru-set", self.js)
         self.assertNotIn("class=ru-host>", self.js)
         self.assertIn("if(!best||d.pct>best.pct)best=d;", self.js, "worst known reading wins the bar")
 
-    def test_the_api_cell_is_numbers_under_a_constant_label_and_no_bars(self):
-        # a bare 'API' label — never any fragment of the key, not even a last-4 tail (the user
-        # 2026-08-08, evening); each window then wears its ONE display name LEFT of its dollars+tokens
-        # (the user 2026-08-09 — same words, font and position as the account bars); the spend bar
-        # graphs are gone everywhere (2026-08-08, morning: they told you nothing)
-        self.assertIn("'<div class=ru-name>API</div><span class=ah-slot></span>'", self.js)   # T301: the API-health dot's slot follows the label
+    def test_the_usage_cell_is_figures_under_window_names_with_no_label_and_no_bars(self):
+        # 2026-10-08: the constant 'API' label claimed a billing the figures mostly were not (an enterprise seat bills
+        # them): each window wears its ONE display name LEFT of its figure (the user 2026-08-09), the figure every turn
+        # at API prices, approximate where a seat billed any of it; no tokens on the bar; still no key fragment and no
+        # spend bars anywhere (2026-08-08)
+        self.assertNotIn("<div class=ru-name>API</div>", self.js)
         self.assertNotIn("_tail", self.js)
-        # pay-per-token wears calendar-ish windows (the user 2026-08-13): 1 day + 1 month on the cell
-        # (1 week rides the hover); day||fiveHour keeps an older remote's spend visible (version skew)
-        # …the month segment carries the version-skew caveat (T235b): a legacy host's CALENDAR month is
-        # left out of this rolling segment and the title says how many machines were not counted
-        self.assertIn("seg('day','1 day')+seg('month','1 month',monthCav)", self.js)
-        self.assertIn("var d=sp.day||sp.fiveHour,m=sp.month;   // m: the ROLLING month only (a legacy host has none here)", self.js)
-        self.assertIn("'<div class=ru-pct>'+fmtUsd(sum[k].usd)+' · '+fmtTok(sum[k].tok)+' tok</div>'", self.js)
+        self.assertIn("var COST_WINS=[['today','today'],['monthToDate','this month']];", self.js)
+        self.assertIn("return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct>'+costUsd(s[w[0]])+'</div>';", self.js)
         self.assertNotIn("spendColor", self.js)
         self.assertNotIn("spendWinsHTML", self.js)
 
@@ -202,12 +197,12 @@ class RailRendering(unittest.TestCase):
         # a host section can carry BOTH its login's windows and its key's spend (per-session auth),
         # and the spend rows are numbers only — no track span
         self.assertIn("function winDet(u,det)", self.js)
-        self.assertIn("winDet(r.usage,det);spendDet(r.usage,det);", self.js)
-        # spend is ONE fleet-level section now (the user 2026-08-13): one shared key, one number,
-        # "· N machines" when several — never a per-host repeat
-        self.assertIn("function fleetSpendHTML(sets)", self.js)
-        self.assertIn("API spend'+(hosts>1?' · '+hosts+' machines':'')", self.js)
-        self.assertIn("' tok · '+(v.turns||0)+' turns</span>", self.js)
+        self.assertIn("winDet(r.usage,det);costDet(r.usage,det);", self.js)
+        # the usage is ONE section for every machine at once (the user 2026-08-13: never a per-host repeat), split by
+        # account (2026-10-08), every machine named on one line when several
+        self.assertIn("function costTipHTML(sets){", self.js)
+        self.assertIn("<span>Usage at API prices</span>", self.js)
+        self.assertIn("by machine this month: ", self.js)
 
     def test_the_account_wide_notices_read_off_THIS_machine(self):
         # a limit pauses THIS kernel's retries and judges; a remote account's limit does not
@@ -394,8 +389,12 @@ class RailByAccount(unittest.TestCase):
                     "billing": [{"route": "key"}, dict(seat, route="login:aaaa1111", label="work")]}}},
                 {"host": "TESTHOSTC", "usage": {"spend": {"week": {"usd": 1.0}}}}]
         accts, missing = km._rail_accounts(rows)
-        self.assertEqual(accts, [{"name": "Enterprise seat", "kind": "seat", "usd": 10.0, "est": True},
-                                 {"name": "API key", "kind": "key", "usd": 15.0, "est": False}])
+        self.assertEqual([{k: a[k] for k in ("name", "kind", "usd", "est")} for a in accts],
+                         [{"name": "Enterprise seat", "kind": "seat", "usd": 10.0, "est": True},
+                          {"name": "API key", "kind": "key", "usd": 15.0, "est": False}])
+        # 2026-10-08: each account names its (host, route) pairs, so the shell sums the cell's windows from the rows
+        self.assertEqual(accts[0]["routes"], [{"host": "TESTHOSTA", "route": "machine", "est": True},
+                                              {"host": "TESTHOSTB", "route": "login:aaaa1111", "est": True}])
         self.assertEqual(missing, ["TESTHOSTC"], "spend on the rail that the line cannot fold is counted out by name")
 
     def test_the_route_ships_the_fold(self):

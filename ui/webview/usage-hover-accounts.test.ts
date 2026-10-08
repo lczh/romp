@@ -39,12 +39,12 @@ function fn(start: string): string {
 }
 
 const SRC = ["function shareFreshest(live){", "function barRows(d){", "function winsHTML(d){", "function monthlyHTML(d){",
-  "function machineHTML(name){", "function acctBlocksHTML(sets,manyMachines){", "function acctLineHTML(accts,miss){"].map(fn).join("\n");
+  "function machineHTML(name){", "function acctBlocksHTML(sets,manyMachines){"].map(fn).join("\n");
 const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as Record<string, string>)[c]);
 const fmtUsd = (v: number) => "$" + String(Math.round(v));
 const fmtAgo = (ep: number) => Math.round((Date.now() / 1000 - ep) / 86400) + "d ago";
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
-const F = new Function("esc", "fmtUsd", "fmtAgo", SRC + "\n; return {shareFreshest, acctBlocksHTML, acctLineHTML};")(esc, fmtUsd, fmtAgo);
+const F = new Function("esc", "fmtUsd", "fmtAgo", SRC + "\n; return {shareFreshest, acctBlocksHTML};")(esc, fmtUsd, fmtAgo);
 
 const NOW = Math.floor(Date.now() / 1000), DAY = 86400, ACCT = "a1".repeat(6);
 const old = (pct: number) => ({ pct, resetsAt: NOW - 25 * DAY, color: [84, 178, 4] });
@@ -101,18 +101,11 @@ test("the head reads the payload's account name, never the email", () => {
     "the freshest member's account fields are shared across the group");
 });
 
-test("the by-account line splits the week between the key and the seat, the seat's dollars marked as an estimate", () => {
-  const h = F.acctLineHTML([{ name: "Enterprise seat", kind: "seat", usd: 10.2, est: true }, { name: "API key", kind: "key", usd: 15, est: false }], ["TESTHOSTC"]);
-  assert.ok(h.includes("by account · 1 week"));
-  assert.ok(h.includes("Enterprise seat ≈$10"), "the seat wears the approx mark");
-  assert.ok(h.includes("API key $15") && !h.includes("API key ≈"), "the key's dollars stay plain");
-  assert.ok(h.includes("TESTHOSTC not counted (older build)"), "a machine the fold cannot read is counted out by name");
-  assert.equal(F.acctLineHTML([{ name: "API key", kind: "key", usd: 15, est: false }], []), "", "a key alone is the rows above already");
-  assert.equal(F.acctLineHTML([], []), "");
-});
-
-test("the line rides the hover's spend section, from the fleet route's fold", () => {
-  assert.ok(USAGE_JS.includes("h+=acctLineHTML(ACCTS,ACCTS_MISS);"));
+test("the hover's usage section is the accounts split by window, from the /usage/fleet route's fold (2026-10-08)", () => {
+  // the one-line by-account summary of the rolling week became the usage section's table, an account per row and the
+  // cell's two windows as columns; its behaviour executes in usage-at-api-prices.test.ts
+  assert.ok(!USAGE_JS.includes("function acctLineHTML("), "the one-line week summary is gone");
+  assert.ok(USAGE_JS.includes("(ACCTS||[]).forEach(function(a){var r={name:a.name,kind:a.kind,v:costZero()};"), "the rows are the kernel's accounts");
   assert.ok(USAGE_JS.includes("ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];"));
 });
 

@@ -35,7 +35,7 @@ function fn(start: string): string {
 }
 
 const SRC = ["var SP_RANGE_BUCKETS=", "function spSeries(d){", "function spTail(ser,keep){", "function spKey(d,s){",
-  "function spSumArr(a){", "function spRound4(v){", "function spHostScope(d,host){", "function spSeatPart(d,st,usd){", "function spRangeView(d){", "function spRangeWords(ser){",
+  "function spSumArr(a){", "function spRound4(v){", "function spHostScope(d,host){", "function spKeyArr(d,st,meas){", "function spPart(d,st,sec,meas){", "function spRangeView(d){", "function spRangeWords(ser){",
   "function spOrdered(d){", "function spRows(d){", "function spStackOrderRows(d,stacks,rows){", "function spDashedHosts(d){",
   "function spStacks(d,ser,model){"].map(fn).join("\n");
 
@@ -102,21 +102,27 @@ test("the 90-day view agrees with the payload's own sessions, and the day view d
     const r = v.sessions.find((x: any) => x.sid === s.sid);
     assert.ok(r, s.name);
     assert.ok(Math.abs(r.usd - s.usd) < 1e-6 && r.tok === s.tok, s.name);
-    if (s.name === "old") { assert.equal(r.turns, null, "the older peer's turns are unknown in every range, whatever its roster row said"); assert.equal(r.key, undefined); continue; }
+    if (s.name === "old") {
+      assert.equal(r.turns, null, "the older peer's turns are unknown in every range, whatever its roster row said");
+      assert.equal(r.keyUsd, 0, "no key split: nothing of it is a known key charge…");
+      assert.ok(Math.abs(r.seatUsd - r.usd) < 1e-6, "…so it is drawn with the seat's estimate (the approx mark), never dropped");
+      continue;
+    }
     assert.equal(r.turns, s.turns, s.name);
-    assert.ok(Math.abs(r.key.usd - s.key.usd) < 1e-6, "the key column follows too");
+    assert.ok(Math.abs(r.keyUsd - s.key.usd) < 1e-6, "the key column follows too");
+    assert.ok(Math.abs(r.seatUsd + r.keyUsd - r.usd) < 1e-6, "the two halves add up to the row's every turn");
   }
-  assert.deepEqual(v.unattributed, d.unattributed);
+  assert.deepEqual({ usd: v.unattributed.usd, tok: v.unattributed.tok, turns: v.unattributed.turns }, d.unattributed);
   assert.deepEqual(v.sessions.map((s: any) => s.name), ["web", "api", "old", "tests"], "by spend, the range's own order");
   const day = lift("day").spRangeView(payload());
   assert.deepEqual(day.sessions.map((s: any) => s.name), ["web", "api", "old"], "tests spent nothing in the last 24 hours: no row; the older peer's session has one");
   const old = day.sessions.find((s: any) => s.name === "old");
   assert.equal(old.turns, null, "an older peer's stack carries no turns: unknown, never a zero");
-  assert.equal(old.key, undefined, "…nor key dollars");
+  assert.equal(old.keyUsd, 0, "…nor a known key charge");
   assert.equal(day.sessions[0].turns, 48, "web: 2 turns an hour over 24 hours");
   assert.equal(day.sessions[1].turns, 12, "api: every other hour");
-  assert.ok(Math.abs(day.sessions[0].key.usd - 6) < 1e-6, "web's key dollars over the day: 12 odd hours at $0.50");
-  assert.deepEqual(day.unattributed, { usd: 0, tok: 0, turns: 0 }, "the unattributed hour is older than a day");
+  assert.ok(Math.abs(day.sessions[0].keyUsd - 6) < 1e-6, "web's key dollars over the day: 12 odd hours at $0.50");
+  assert.deepEqual(day.unattributed, { usd: 0, tok: 0, turns: 0, keyUsd: 0, seatUsd: 0 }, "the unattributed hour is older than a day");
   assert.equal(day.other.count, 3, "an older peer's fold is a row of its own");
   assert.ok(Math.abs(day.other.usd - 2.4) < 1e-6, "24 hours at $0.10");
   assert.equal(day.other.turns, null, "…with no turns array its turns are unknown: a dash, never a zero");
@@ -187,21 +193,20 @@ test("the range is named from the buckets the chart draws, and the renderer hand
   assert.equal(lift("hours").spRangeWords(lift("hours").spSeries(payload())), "last 7 days");
   assert.equal(lift("days").spRangeWords(lift("days").spSeries(payload())), "last 90 days");
   assert.ok(USAGE_JS.includes("h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';"), "the first render");
-  assert.ok(USAGE_JS.includes("if(m[1]==='order'||m[1]==='range'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));"), "a range switch re-sums the list");
-  assert.ok(USAGE_JS.includes("var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));"), "…and renames the range");
-  assert.ok(USAGE_JS.includes("tb2.innerHTML=sessionTable(spRangeView(SP.data))"), "the tag merge too");
-  assert.ok(USAGE_JS.includes("<span id=rsp-range-note>'+spRangeWords(spSeries(d))+'</span>"), "the head names the range");
-  assert.ok(USAGE_JS.includes("var stacks=spStacks(d,ser,spRows(spRangeView(d)))"), "the chart's stacks follow the list's rows");
+  assert.ok(USAGE_JS.includes("if(m[1]==='range'){renderSpend();return;}"), "a range switch re-sums everything: the cards, both charts, the list");
+  assert.ok(USAGE_JS.includes("var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}renderChart();"), "an order or a tag merge re-sorts the list and the stacks");
+  assert.ok(USAGE_JS.includes("'<span class=ru-tip-reset> \\u00b7 '+esc(spRangeWords(spSeries(d)))+'</span></span>'"), "the list's head names the range");
+  assert.ok(USAGE_JS.includes("var meas=SP.measure,model=spRows(spRangeView(d));"), "each chart's stacks follow the list's rows");
   // unknown turns read as a dash in every row kind, and the host is named (the older-build note)
   assert.ok(USAGE_JS.includes("(s.turns==null?'\\u2014':(s.turns||0))"), "a session row's dash");
   assert.ok(USAGE_JS.includes("(oth.turns==null?'\\u2014':(oth.turns||0))"), "the fold's dash");
   assert.ok(USAGE_JS.includes("(un.turns==null?'\\u2014':(un.turns||0))"), "the unattributed row's dash");
-  // the older-build note lives in the table's node (a range switch re-decides it), names only the hosts with a dashed
-  // row in THIS range, and promises a key-billed dash only when the key column is drawn
+  // the older-build note lives in the table's node (a range switch re-decides it) and names only the hosts with a dashed
+  // row in THIS range
   assert.ok(USAGE_JS.includes("var dh=spDashedHosts(d);"), "the note is computed from the range view's rows");
-  assert.ok(USAGE_JS.includes("if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';"), "the note's words");
+  assert.ok(USAGE_JS.includes("if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\\u2019 turns in this range are unknown (a dash)</div>';"), "the note's words");
   assert.ok(!USAGE_JS.includes("if(x.noTurns)"), "no range-independent note from the hosts rows");
   assert.ok(USAGE_JS.includes("s.kind==='sid'&&(any(s.usd)||any(s.tok)||any(s.turns))"), "the stack predicate is the row's");
   // spTail cuts the two new arrays with the keys
-  assert.ok(USAGE_JS.includes("if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);"));
+  assert.ok(USAGE_JS.includes("if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);if(s.keyTok)o.keyTok=s.keyTok.slice(cut);"), "spTail cuts the key arrays with the keys");
 });

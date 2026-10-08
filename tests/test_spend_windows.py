@@ -168,22 +168,65 @@ class RollingMonthAcrossDst(SpendWindows):
         self.assertEqual(usd, 31.0, "exactly today plus the 30 dates before it — the transition date 2026-03-08 must not be skipped for an older one")
 
 
-class DisplayCaveatsFollowTheData(unittest.TestCase):
-    """T235b, source pins on the kernel-served rail JS: the summed rolling month is complete only
-    from the YOUNGEST ledger (fold `since` with MAX, and say so), and the collapsed API cell follows
-    the hover's version-skew rule instead of silently dropping or mixing a legacy host's month."""
-    JS = Path(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read_text()
+class RailRoutesByCalendarWindow(SpendWindows):
+    """2026-10-08 (the user, who read "API" on the bar's spend cell while nearly all of their usage bills an enterprise
+    seat): the cell shows USAGE AT API PRICES for the calendar day and month, every turn by the route that billed it
+    (_rail_routes): the key's dollars charged, every other route's an estimate. Calendar windows nest, so the superset
+    rule T235 wrote for the rolling rows holds by construction; the month comes from the day ledger, which keeps 90 days,
+    so it is never short. Frozen clock (the 3rd of a month), synthetic ledger."""
 
-    def test_since_folds_to_the_youngest_ledger_and_says_complete_since(self):
-        self.assertIn("if(v.since&&(!t.since||v.since>t.since))t.since=v.since;", self.JS,
-                      "MAX: the sum is complete only from the youngest host's reach")
-        self.assertIn("' \\u00b7 complete since '+esc(v.since)", self.JS)
-        self.assertNotIn("v.since<t.since", self.JS, "the MIN fold overstated coverage")
+    def _routed(self, usd, key=0.0, login=None, sid="11111111-2222-3333-4444-000000000001", key_turns=1):
+        e = {"usd": usd, "turns": 4, "tokIn": 100, "tokOut": 50, "tokCacheR": 800, "tokCacheW": 50,
+             "bySid": {sid: {"usd": usd, "turns": 4, "tok": 1000}}}
+        if key:
+            e["key"] = {"usd": key, "turns": key_turns, "tok": 250}
+        if login:
+            e["byLogin"] = {login[0]: {"usd": login[1], "turns": 1, "tok": 250}}
+        return e
 
-    def test_the_collapsed_cell_carries_the_legacy_caveat(self):
-        cell = self.JS[self.JS.index("function apiCellHTML"):self.JS.index("// The collapsed rail is the AGGREGATE story")]
-        self.assertIn("_spendLegacyMonth", cell, "the cell counts the hosts whose month it cannot fold in")
-        self.assertIn("var monthCav=legacyN>0;", cell, "…and the month segment wears the caveat glyph (no native title — the rich tip explains)")
+    def test_today_and_the_month_split_every_turn_by_the_route_that_billed_it(self):
+        self._ledger(days={_day(0): self._routed(10.0, key=2.0, login=("0a0b0c0d0e0f", 3.0)),
+                           _day(2): self._routed(100.0, key=100.0, key_turns=4),   # the 1st: the key's era
+                           _day(3): self._routed(999.0)})                     # last month: in neither window
+        rr = km._rail_routes()
+        self.assertEqual(rr["today"], {"key": [2.0, 1], "login:0a0b0c0d0e0f": [3.0, 1], "machine": [5.0, 2]},
+                         "the day's every turn: the key's, the stored login's, and the machine sign-in's remainder")
+        self.assertEqual(rr["monthToDate"], {"key": [102.0, 5], "login:0a0b0c0d0e0f": [3.0, 1], "machine": [5.0, 2]},
+                         "the calendar month so far: the 1st through today, never the 31st of the month before")
+        self.assertEqual(rr["tok"]["today"], {"tokIn": 100, "tokOut": 50, "tokCacheR": 800, "tokCacheW": 50, "tok": 1000})
+        self.assertEqual(rr["tok"]["monthToDate"]["tok"], 2000)
+        self.assertEqual(sorted(m["route"] for m in rr["billing"]), ["key", "login:0a0b0c0d0e0f", "machine"],
+                         "every route either window names carries its identity, for the accounts fold")
+
+    def test_a_ledger_with_nothing_in_the_windows_ships_them_empty_and_no_ledger_ships_nothing(self):
+        # an honest zero: the windows genuinely hold nothing (the cell reads $0); a host that ships no routes at all is
+        # then known to be an older build, which the hover names rather than reading as $0
+        self._ledger(days={_day(40): self._routed(5.0)})
+        rr = km._rail_routes()
+        self.assertEqual((rr["today"], rr["monthToDate"], rr["week"]), ({}, {}, {}))
+        self.assertEqual(rr["tok"]["monthToDate"]["tok"], 0)
+        self._ledger()
+        self.assertIsNone(km._rail_routes(), "an empty ledger: nothing recorded, nothing shown")
+        (km.jd.STATE / "spend.json").unlink()
+        self.assertIsNone(km._rail_routes(), "no ledger at all")
+
+    def test_the_accounts_carry_their_routes_so_the_shell_sums_any_window(self):
+        rows = [{"host": "", "usage": {"spendRoutes": {
+                    "today": {"machine": [5.0, 2]}, "monthToDate": {"machine": [5.0, 2], "key": [100.0, 2]}, "week": {},
+                    "billing": [{"route": "key"}, {"route": "machine", "state": "ok", "acct": "a1", "org": "Notes Co",
+                                                   "orgDigest": "o1", "kind": "enterprise"}]}}},
+                {"host": "OLDHOST", "usage": {"spend": {"day": {"usd": 3.0}}}}]
+        saved = km._self_host
+        km._self_host = lambda: "TESTHOST"
+        try:
+            accts, missing = km._rail_accounts(rows)
+        finally:
+            km._self_host = saved
+        self.assertEqual([(a["name"], a["kind"]) for a in accts], [("Enterprise seat", "seat"), ("API key", "key")],
+                         "an account with spend in any window is kept, the rolling week's empty or not")
+        self.assertEqual(accts[0]["routes"], [{"host": "TESTHOST", "route": "machine", "est": True}])
+        self.assertEqual(accts[1]["routes"], [{"host": "TESTHOST", "route": "key", "est": False}])
+        self.assertEqual(missing, ["OLDHOST"], "a host whose older build sends no routes is named")
 
 
 if __name__ == "__main__":
