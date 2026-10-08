@@ -52,6 +52,9 @@ def _backend():
     logs = []
     be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda m, problem=False, **k: logs.append((str(m), problem)))
     be._logs = logs
+    # the version canary has cleared this (fake) Claude Code: its own tests are tests/test_subagent_standard_canary.py
+    be.cli_version = lambda: "2.1.282"
+    Path(d, sb.SUBAGENT_STANDARD_CANARY_STORE).write_text(json.dumps({"2.1.282": {"verdict": "pass"}}))
     return be
 
 

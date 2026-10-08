@@ -5485,6 +5485,60 @@ def subagent_standard_shell_script(state_dir, sid: str, chain: str = "", log=Non
     return p
 
 
+# THE VERSION CANARY (2026-10-08). The recipe rests on undocumented Claude Code behaviour, so before it rides any session's
+# launch on a Claude Code version romp has not seen it work on, romp probes it there once: kernel/subagent_canary.py, run as
+# a subprocess of the kernel's own interpreter, builds a backend over a temp state root (session hosts off), starts a fresh
+# session (a new id, a scratch directory) with the switch on, sends one tiny turn whose main loop starts one subagent, reads
+# the same speed check the sessions use, prints a verdict and deletes its state, its directory and that directory's
+# transcripts. No peer messaging, no host, nothing it shares with a live session but the machine's Claude login, which it
+# uses the way any session does. One fast Opus 5.5 turn and one standard subagent call: a few cents per version. The
+# verdicts are kept per version in SUBAGENT_STANDARD_CANARY_STORE; inside the probe's own process the gate is open
+# (SUBAGENT_STANDARD_CANARY_ENV), since it is the probe.
+SUBAGENT_STANDARD_CANARY_STORE = "subagent-standard-canary.json"
+SUBAGENT_STANDARD_CANARY_ENV = "ROMP_SUBAGENT_CANARY"
+SUBAGENT_CANARY_TIMEOUT_S = 420
+SUBAGENT_CANARY_PROMPT = ('Call the Agent tool exactly once, with subagent_type "general-purpose" and the prompt "Reply '
+                          'with the single word OK and nothing else." After it returns, reply with the single word DONE.')
+
+
+def subagent_canary_verdict(check, launched: bool, finished: bool, fast: str, fast_reason: str) -> dict:
+    """The probe's verdict from what its session's speed check counted (`check`: mainFast, mainStandard, subFast,
+    subStandard), whether its launch carried the recipe, whether its turn finished, and the fast-mode state its CLI
+    reported. "pass": the main loop ran fast and the subagent ran at standard speed. "fail": a subagent call ran fast, or
+    the CLI could not run the main loop fast for no reason it names (what the recipe's breakage looks like). Anything that
+    proves neither, "inconclusive": no finished turn, no subagent call, a launch without the recipe, fast mode unavailable
+    to the account."""
+    c = check if isinstance(check, dict) else {}
+    n = lambda k: int(c.get(k) or 0)
+    figures = {k: n(k) for k in ("mainFast", "mainStandard", "subFast", "subStandard")}
+    def out(verdict, why):
+        return dict(figures, verdict=verdict, why=why)
+    if not launched:
+        return out("inconclusive", "the probe's launch did not carry the workaround")
+    if not finished:
+        return out("inconclusive", "the probe's turn did not finish")
+    if figures["subFast"]:
+        return out("fail", "a subagent call ran in fast mode")
+    if fast != "on" and fast_reason:
+        return out("inconclusive", "fast mode is not available here (%s)" % fast_reason)
+    if not figures["mainFast"]:
+        return out("fail", "the main loop did not run in fast mode")
+    if not figures["subStandard"]:
+        return out("inconclusive", "the probe's subagent made no call")
+    return out("pass", "")
+
+
+def subagent_canary_env(base, auth_env) -> dict:
+    """The probe's environment: the kernel's, less every session identity and state location (ROMP_*, XDG_STATE_HOME: the
+    probe makes its own), less the recipe's own variables (the probe's launch sets them), plus the login tokens the kernel
+    took out of its environment at boot (startup_auth_env), and the canary marker."""
+    drop = set(SUBAGENT_STANDARD_ENV) | {"CLAUDE_ENV_FILE", "XDG_STATE_HOME"}
+    env = {k: v for k, v in dict(base).items() if not k.startswith("ROMP_") and k not in drop}
+    env.update(auth_env or {})
+    env[SUBAGENT_STANDARD_CANARY_ENV] = "1"
+    return env
+
+
 def subagent_standard_refusal(model, fast) -> str:
     """Why the Subagents at standard speed switch cannot apply to a session whose model pick is `model` and whose fast
     mode is `fast` (on at its next launch); "" when it can. Said to the user as is, by the setter and at a launch."""
@@ -7940,7 +7994,14 @@ class SdkSession:
         """Whether a launch from this session's state now carries the Subagents at standard speed recipe: the switch is
         on and its preconditions hold. The launch record says so (launch_values), so a pick the serving CLI was not
         launched with relaunches like any other."""
-        return bool(getattr(self, "subagent_standard", False)) and not self.subagent_standard_refusal()
+        return (bool(getattr(self, "subagent_standard", False)) and not self.subagent_standard_refusal()
+                and not self.subagent_standard_hold())
+
+    def subagent_standard_hold(self) -> str:
+        """What holds the recipe back on the Claude Code version a launch would run ("" when nothing does): the version
+        canary's verdict for it (SdkBackend.recipe_hold). Never starts the probe; the launch does."""
+        hold = getattr(self.backend, "recipe_hold", None)
+        return hold() if hold is not None else ""
 
     # ---- Subagents at standard speed: the speed check and the repricing (SUBAGENT_STANDARD_ENV) ----
     _SUB_STD_PROBLEMS = {
@@ -8301,8 +8362,12 @@ class SdkSession:
         active = bool(getattr(self, "_sub_std_launched", False)) and self.client is not None
         if not on and not active:
             return ""
-        return subagent_speed_line(on, self.subagent_standard_refusal() if on else "",
-                                   getattr(self, "_sub_std_check", None), pending=not active, active=active)
+        refusal = self.subagent_standard_refusal() if on else ""
+        if on and not refusal and not active:
+            hold = self.subagent_standard_hold()   # the version canary: checking, or held off and why
+            if hold:
+                return hold
+        return subagent_speed_line(on, refusal, getattr(self, "_sub_std_check", None), pending=not active, active=active)
 
     def subagent_standard_offered(self) -> bool:
         """Whether the fast menu offers the switch: it is on, or the serving CLI still carries the recipe (so it can be
@@ -10664,6 +10729,8 @@ class SdkSession:
             # Fast-mode truth rides the init payload — the AUTHORITATIVE re-assert behind set_fast's
             # optimistic flip, shared with the connect-time initialize response (_adopt_fast_state).
             self._adopt_fast_state(d)
+            if getattr(self, "_sub_std_launched", False) and d.get("claude_code_version"):
+                self.backend._note_cli_version(self, str(d.get("claude_code_version")))   # the canary's backstop
             # HOW this CLI authenticates (verified live 2026-08-04: 'ANTHROPIC_API_KEY' on API-key auth;
             # the field is absent on a subscription login). An auth flip is the deciding event for the
             # rail's /usage bars — see _note_auth_source.
@@ -13163,6 +13230,13 @@ class SdkBackend:
         self.login_ok = lambda: True              # the kernel wires its credential-store probe (T124); permissive unwired
         self.last_auth_refusal = ""               # why the last set_auth refused (auth_unavailable_why) → the kernel's toast names it
         self.last_subagent_standard_refusal = ""  # why the last set_subagent_standard refused → the kernel's toast names it
+        self._cli_version_cache = None            # ((realpath, size, mtime_ns), version) of claude_bin (cli_version)
+        self._canary_lock = threading.Lock()      # the version canary's bookkeeping (recipe_hold, _start_canary)
+        self._canary_running = set()              # versions whose probe is running now
+        self._canary_tried = set()                # versions probed this kernel life without a verdict (inconclusive)
+        self._canary_said = set()                 # (version, verdict) already said in the error center
+        self._canary_runner = None                # test seam: version -> result dict or None (still running)
+        self._canary_sync = False                 # test seam: run the probe on the calling thread
         self._usage_all_keyed = False             # refresh_usage's one-shot: the last refresh found only
         #                                           keyed candidates (already logged); reset when a
         #                                           pollable session exists again, so the 60s rail timer
@@ -16710,7 +16784,8 @@ class SdkBackend:
         # force a model change on the subagents.
         overrides = None
         if getattr(sess, "subagent_standard", False):
-            why = sess.subagent_standard_refusal()
+            refusal = sess.subagent_standard_refusal()
+            why = refusal or self.recipe_hold(start=True)   # the canary: start it, or hold off
             if not why:
                 chain = str(env_vars.get("CLAUDE_ENV_FILE") or os.environ.get("CLAUDE_ENV_FILE") or "")
                 env_vars = dict(env_vars, **SUBAGENT_STANDARD_ENV)
@@ -16721,8 +16796,10 @@ class SdkBackend:
                 sess._sub_std_inert_said = ""
             elif sess._sub_std_inert_said != why:
                 sess._sub_std_inert_said = why
+                # a precondition is this session's to fix, said in the error center; a canary hold is said there once
+                # per version by the canary itself (_canary_finished), so here it is a log line
                 self._log("subagent speed (%s): Subagents at standard speed is on but this launch leaves it out: %s"
-                          % (sess.name, why), problem=True)
+                          % (sess.name, why), problem=bool(refusal))
         fs = flag_settings_path(self.state_dir, sess.sid,
                                 ultracode=(sess.effort or "") == "ultracode", fast=sess.fast_effective(),
                                 env=env_vars, no_helper=login, model_overrides=overrides, log=self._log)
@@ -19607,6 +19684,164 @@ class SdkBackend:
             self._wake_push()
         return True
 
+    # ---- the version canary (SUBAGENT_STANDARD_CANARY_STORE) ----
+    def cli_version(self) -> str:
+        """The Claude Code version this kernel launches: `claude_bin --version`, read once per binary (its real path, size
+        and mtime; an update replaces the file or the link). "" when it cannot be read."""
+        try:
+            real = os.path.realpath(self.claude_bin)
+            st = os.stat(real)
+            key = (real, st.st_size, st.st_mtime_ns)
+        except (OSError, TypeError, ValueError):
+            return ""
+        cached = self._cli_version_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        version = ""
+        try:
+            out = subprocess.run([self.claude_bin, "--version"], capture_output=True, text=True, timeout=15,
+                                 stdin=subprocess.DEVNULL).stdout
+            m = re.search(r"(\d+\.\d+\.\d+)", out or "")
+            version = m.group(1) if m else ""
+        except (OSError, subprocess.SubprocessError):
+            version = ""
+        self._cli_version_cache = (key, version)
+        return version
+
+    def _canary_verdicts(self) -> dict:
+        try:
+            d = json.loads((self.state_dir / SUBAGENT_STANDARD_CANARY_STORE).read_text())
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def recipe_hold(self, start: bool = False, retry: bool = False) -> str:
+        """What holds Subagents at standard speed back on the Claude Code version this kernel launches ("" when nothing
+        does): the version canary's verdict for it. A version with a pass is clear; a failure holds it off for good; a probe
+        that could not finish holds it off until it is run again (once per kernel life, or when the switch is turned on:
+        `retry`). With `start`, a version with no verdict starts its probe. Inside the probe's own process: clear."""
+        if os.environ.get(SUBAGENT_STANDARD_CANARY_ENV):
+            return ""
+        v = self.cli_version()
+        if not v:
+            return "held off: the Claude Code version could not be read, so the workaround cannot be checked on it"
+        rec = self._canary_verdicts().get(v)
+        rec = rec if isinstance(rec, dict) else {}
+        verdict = rec.get("verdict")
+        if verdict == "pass":
+            return ""
+        if verdict == "fail":
+            return "held off: the workaround failed its check on Claude Code %s (%s)" % (v, rec.get("why") or "no reason")
+        with self._canary_lock:
+            running = v in self._canary_running
+            go = start and not running and (verdict != "inconclusive" or retry or v not in self._canary_tried)
+        if go:
+            self._start_canary(v)
+            return self.recipe_hold()   # a synchronous probe has ruled already
+        if running:
+            return "checking the workaround on Claude Code %s first (one short probe turn)" % v
+        if verdict == "inconclusive":
+            return ("held off: the check on Claude Code %s could not finish (%s); turning the switch on runs it again"
+                    % (v, rec.get("why") or "no reason"))
+        return "not yet checked on Claude Code %s" % v
+
+    def _start_canary(self, version: str) -> None:
+        with self._canary_lock:
+            if version in self._canary_running:
+                return
+            self._canary_running.add(version)
+            self._canary_tried.add(version)
+        self._log("subagent speed: checking the workaround on Claude Code %s in an isolated probe before any session "
+                  "launches with it" % version)
+        runner = self._canary_runner or self._run_canary_subprocess
+
+        def go():
+            try:
+                res = runner(version)
+            except Exception as e:
+                res = {"verdict": "inconclusive", "why": "the probe raised %s" % e}
+            if res is not None:
+                self._canary_finished(version, res)
+        if self._canary_sync:
+            go()
+        else:
+            threading.Thread(target=go, name="subagent-canary", daemon=True).start()
+
+    def _run_canary_subprocess(self, version: str) -> dict:
+        """The probe, in a subprocess of this interpreter (it has the SDK): kernel/subagent_canary.py. Its stdout's last
+        JSON line is the verdict."""
+        script = _HERE / "subagent_canary.py"
+        env = subagent_canary_env(os.environ, startup_auth_env())
+        try:
+            p = subprocess.run([sys.executable, str(script), "--claude", str(self.claude_bin), "--kernel-dir", str(_HERE)],
+                               env=env, capture_output=True, text=True, timeout=SUBAGENT_CANARY_TIMEOUT_S,
+                               stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return {"verdict": "inconclusive", "why": "the probe did not finish within %d s" % SUBAGENT_CANARY_TIMEOUT_S}
+        except OSError as e:
+            return {"verdict": "inconclusive", "why": "the probe did not start (%s)" % e}
+        for line in reversed((p.stdout or "").splitlines()):
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and d.get("verdict") in ("pass", "fail", "inconclusive"):
+                return d
+        tail = (p.stderr or "").strip().splitlines()[-1:] or [""]
+        return {"verdict": "inconclusive", "why": "the probe gave no verdict (exit %s) %s" % (p.returncode, tail[0][:200])}
+
+    def _canary_finished(self, version: str, res: dict) -> None:
+        """Keep the probe's verdict for `version` and act on it: a pass relaunches, once quiet, every session waiting with
+        the switch on; a failure or a probe that could not finish is said once (the switch holds off on that version)."""
+        res = dict(res or {})
+        verdict = res.get("verdict") if res.get("verdict") in ("pass", "fail", "inconclusive") else "inconclusive"
+        rec = {k: res[k] for k in ("why", "mainFast", "mainStandard", "subFast", "subStandard", "usd") if k in res}
+        rec.update(verdict=verdict, t=int(time.time()))
+        with self._canary_lock:
+            self._canary_running.discard(version)
+            if verdict == "pass":
+                self._canary_tried.discard(version)
+            try:
+                store = self._canary_verdicts()
+                store[version] = rec
+                tmp = self.state_dir / (SUBAGENT_STANDARD_CANARY_STORE + ".tmp")
+                tmp.write_text(json.dumps(store, sort_keys=True) + "\n")
+                os.replace(tmp, self.state_dir / SUBAGENT_STANDARD_CANARY_STORE)
+            except OSError as e:
+                self._log("subagent speed: the canary's verdict for Claude Code %s could not be kept (%s)" % (version, e),
+                          problem=True)
+            said = (version, verdict) in self._canary_said
+            self._canary_said.add((version, verdict))
+        if verdict == "pass":
+            self._log("subagent speed: the workaround passed its check on Claude Code %s; sessions with the switch on "
+                      "relaunch with it once quiet" % version)
+            for s in list(self.sessions.values()):
+                if getattr(s, "subagent_standard", False):
+                    s._sub_std_requalify()
+        elif not said:
+            why = rec.get("why") or "no reason given"
+            self._log(("subagent speed: the workaround failed its check on Claude Code %s (%s): Subagents at standard "
+                       "speed is held off on that version and sessions launch without it" if verdict == "fail" else
+                       "subagent speed: could not check the workaround on Claude Code %s (%s): Subagents at standard "
+                       "speed is held off on that version until a check passes; turning the switch on runs it again")
+                      % (version, why), problem=True)
+        self._wake_push()
+
+    def _note_cli_version(self, sess, version: str) -> None:
+        """A CLI launched with the recipe reported its version at init: one the canary never cleared (the binary changed
+        between the check and the launch) is probed now, and the session's own speed check is the backstop meanwhile."""
+        rec = self._canary_verdicts().get(version)
+        if isinstance(rec, dict) and rec.get("verdict") == "pass":
+            return
+        if os.environ.get(SUBAGENT_STANDARD_CANARY_ENV):
+            return
+        with self._canary_lock:
+            go = version not in self._canary_running and version not in self._canary_tried
+        if go:
+            self._log("subagent speed (%s): this CLI reports Claude Code %s, which the workaround's check has not cleared; "
+                      "checking it now" % (getattr(sess, "name", ""), version))
+            self._start_canary(version)
+
     def set_subagent_standard(self, sid: str, value: str) -> bool:
         """Turn this session's Subagents at standard speed switch 'on' or 'off' (experimental, SUBAGENT_STANDARD_ENV): its
         main loop keeps fast mode while every subagent runs Opus 5.5 at standard speed. 'on' is refused, with the reason
@@ -19639,6 +19874,13 @@ class SdkBackend:
         if s is not None:
             s.subagent_standard = on
             s._sub_std_inert_said = ""
+        if on and self.recipe_hold(start=True, retry=True):
+            # the version canary has to clear this Claude Code first (or failed it): nothing to relaunch for yet; a pass
+            # relaunches every waiting session once quiet (_canary_finished)
+            self._log("subagent speed (%s): Subagents at standard speed on: %s"
+                      % (reg.get("name") or sid[:8], self.recipe_hold()))
+            self._wake_push()
+            return True
         if live is not None:
             self._note_pick_waits(live, "subagentStandard", "subagent speed")
             live.request_reconnect(why="subagent speed")

@@ -459,6 +459,20 @@ A difference a turn cannot absorb carries to the next turn. Claude Code's own co
 entry's rates. The spend repair reads such a row by Claude Code's own figure (`cliUsd`) where it compares a turn with
 its cumulative, and a turn it corrects keeps its repricing.
 
+**Claude Code updates.** Before the recipe rides any session's launch on a Claude Code version romp has not seen it
+work on, romp probes it there once. The probe (kernel/subagent_canary.py) runs as a subprocess of the kernel with its own
+temporary state, session hosts off, a fresh session in a scratch directory and no peer messaging: one fast turn whose
+main loop starts one subagent, judged by the speed check above, after which it deletes its state, its directory and that
+directory's transcripts. It uses the machine's Claude login the way any session does; a probe has taken about ten
+seconds and cost between ten and thirty cents. The version is the binary's own `claude --version`, and the verdicts are
+kept per version in the state directory's `subagent-standard-canary.json`. While a version is being checked, sessions
+launch without the recipe and the row says so; a pass relaunches every session waiting with the switch on, once nothing
+would be cut. A failure (a subagent call ran fast, or the main loop could not run fast) holds the switch off on that
+version, said once in the error center and on the row. A probe that proves nothing (it did not finish, its subagent made
+no call, fast mode is unavailable) holds it off too, said once, and runs again when the switch is turned on or the
+kernel restarts. A CLI whose init reports a version the probe has not cleared (the binary changed between the check and
+the launch) is probed then, with the session's own speed check as the backstop meanwhile.
+
 **Side effects, and why it is experimental.**
 
 - The subagents' environment line names the borrowed entry: "Opus 4.7 (1M context) … claude-opus-5-5[1m] … knowledge
@@ -475,8 +489,8 @@ its cumulative, and a turn it corrects keeps its repricing.
   model string, and a per-call `opus` resolves to the parent's model too, so the commonest subagents would still run
   fast. Only FORCE overrides an inherited model.
 - It rests on undocumented behaviour: `CLAUDE_CODE_MODEL_CAPABILITIES` and how `modelOverrides` values decide a model's
-  capabilities. A Claude Code update can change either without notice; the speed check is the backstop, and the switch
-  should be turned off when it reports a fast subagent call or a slow main loop.
+  capabilities. A Claude Code update can change either without notice; the version probe above checks each new version
+  before the recipe uses it, and the speed check watches every launch after it.
 
 ### Always fast, and retrying an upgrade after a downgrade
 
