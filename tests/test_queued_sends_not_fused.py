@@ -1904,6 +1904,111 @@ class LifecycleTakes(unittest.TestCase):
         self._wait(lambda: len(c.writes) == 3, "the next text goes in")
         self.assertTrue(any("without running it" in l for l in self.lines), "and the log says why")
 
+    # -- a reconnect to the same CLI (a host re-exec at a turn's end), 2026-10-08 --
+    CLI_PID, CLI_START = 9001, "t-1"
+
+    def _host_road(self, pid=None, start=None):
+        """The NEXT connects take the host road: a stand-in for _host_transport_for whose transport delivers the hello the
+        real _on_host_hello reads (HostTransport.connect does so inside the SDK client's connect, before the session counts
+        itself connected), naming the CLI `pid`:`start`. The reg's epoch names CLI_PID:CLI_START, the CLI the session ran
+        until now, so the default hello is a survivor and another identity is a fresh CLI."""
+        be = self.be
+        reg = sb.read_reg(be.state_dir, SID) or {}
+        reg["spawnedAtCli"] = "%s:%s" % (self.CLI_PID, self.CLI_START)
+        sb.write_reg(be.state_dir, SID, reg)
+        pid, start = pid or self.CLI_PID, start or self.CLI_START
+        hello = {"host": {"pid": 7001, "start": "h-1", "version": ""}, "journal": {"next": 0}, "parked": [], "inflight": 0,
+                 "inflightScope": "main", "cli": {"pid": pid, "start": start, "fsid": FSID, "spawnedAt": 1700000000}}
+
+        async def transport_for(sess, opts, classes):
+            t = types.SimpleNamespace(hello=hello, ack_offset=-1)
+            sess._host, sess._host_is_attach, sess._host_intent = t, True, True
+            be._on_host_hello(sess, hello)
+            return t
+        be._host_transport_for = transport_for
+        be.session_hosts_on = lambda: True
+
+    def _reexec_at_the_turns_end(self, client):
+        """The host's `reexec-now` at a result (SdkBackend._on_host_reexec_now, as the transport calls it), then the stream's
+        end as the host closes the socket for its exec."""
+        self.s.loop.call_soon_threadsafe(self.be._on_host_reexec_now, self.s)
+        self._push(client, _EOF)
+
+    def _held_behind_notifications(self, first_text, second_text, received=True):
+        """A held first text behind a notification turn the CLI started itself, a second text queued behind it in romp's
+        queue, and the turn the first was fed into ended (the hold settled): the moment a host re-execs at."""
+        s, c = self.s, self._first_turn()
+        self._result_frame(c)
+        self._wait(lambda: s.inflight == 0, "turn 1 settled")
+        self._init(c)
+        self._assistant(c, "noted the tick")
+        self._wait(lambda: s.inflight == 1, "a notification turn")
+        self.assertTrue(self.be.send(SID, first_text))
+        self._wait(lambda: len(c.writes) == 2, "the first text forwarded mid-turn")
+        self.assertTrue(self.be.send(SID, second_text))
+        if received:
+            self._life(c, c.uuids[1], "queued")
+        self._result_frame(c)
+        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "the turn ended with the first text held")
+        return c
+
+    def test_a_hold_the_cli_reported_holding_stands_across_a_host_re_exec_and_its_own_start_releases_it(self):
+        """The deploy's road (2026-10-08): every host re-execs at its first turn end after the kernel restart, and the
+        kernel reconnects to the SAME CLI. The loop top dropped the hold and handed its text to the stranded reconcile, so a
+        peer's banner went back to the bus (which sends it again while the CLI still holds the first copy), a typed text was
+        flagged never delivered, and the next queued text was fed at once behind it, to fuse with it. The CLI keeps its
+        queue across the exec, and its `started` for the text reaches the next connection, so the hold stands until then."""
+        restored = []
+        self.be.postal_restore = lambda sid, mids: (restored.append(list(mids)), set(mids))[1]
+        banner = "####################\n📬 a synthetic note from peer api about the notes-api build\n<!-- romp-msg-id: lab-0001 -->"
+        c = self._held_behind_notifications(banner, "and a typed follow-up")
+        cu = c.uuids[1]
+        self._host_road()
+        self._reexec_at_the_turns_end(c)
+        self._wait(lambda: len(self._Client.instances) == 2 and self.s.client is self._Client.instances[1], "the reconnect")
+        c2 = self._Client.instances[1]
+        self._settle()
+        self.assertEqual(c2.writes, [], "nothing fed behind the held text on the new connection (the base fed the next text "
+                                        "here, or the banner again)")
+        self.assertEqual(restored, [], "the banner was not handed back to the bus: the CLI still holds it")
+        self.assertEqual((self.s._untaken or {}).get("cu"), cu, "the hold stands on the same text")
+        self.assertFalse(any("stranded" in l or "never reached" in l for l in self.lines), self.lines[-6:])
+        self.assertFalse([a for a in self.be.live_atoms(SID) if a.get("dropped")], "nothing flagged never delivered")
+        self.assertEqual(self.s.pending(), ["and a typed follow-up"], "the follow-up waits in romp's queue")
+        self.assertIn(banner, self.s.fed_texts(), "the held text is still owed")
+        self._init(c2)                                              # another notification turn: not the take
+        self._settle()
+        self.assertEqual(c2.writes, [])
+        self._life(c2, cu, "started")                               # the CLI takes it, on the replayed stream
+        self._wait(lambda: len(c2.writes) == 1, "the follow-up fed once the held text was taken")
+        self.assertEqual(c2.writes[0][0], "and a typed follow-up")
+
+    def test_a_carried_hold_that_meets_another_cli_takes_the_stranded_road_and_the_queue_moves(self):
+        """The handover failed and the connect started a fresh CLI (the hello names another CLI): the text was in the old
+        CLI's queue, so it takes the stranded road (flagged, on a resumable conversation) and the hold goes, never waiting
+        for a frame no CLI will write."""
+        c = self._held_behind_notifications("a typed text", "the next one")
+        self._host_road(pid=9002, start="t-2")
+        self._reexec_at_the_turns_end(c)
+        self._wait(lambda: len(self._Client.instances) == 2 and self.s.client is self._Client.instances[1], "the reconnect")
+        c2 = self._Client.instances[1]
+        self._wait(lambda: len(c2.writes) == 1, "the queue moved on")
+        self.assertEqual(c2.writes[0][0], "the next one")
+        echo = next(a for a in self.be.live_atoms(SID) if a.get("_echo_text") == "a typed text")
+        self.assertTrue(echo.get("dropped"), "the loss is visible: the CLI that held it is gone")
+
+    def test_a_hold_the_cli_never_reported_holding_takes_the_stranded_road_at_the_reconnect(self):
+        """No `queued` for the held text (its line lost in the handover, or a CLI that writes no lifecycle frames): nothing
+        says the CLI holds it, so the reconnect strands it as before, even to the same CLI."""
+        c = self._held_behind_notifications("a typed text", "the next one", received=False)
+        self._host_road()
+        self._reexec_at_the_turns_end(c)
+        self._wait(lambda: len(self._Client.instances) == 2 and self.s.client is self._Client.instances[1], "the reconnect")
+        c2 = self._Client.instances[1]
+        self._wait(lambda: len(c2.writes) == 1, "the queue moved on")
+        echo = next(a for a in self.be.live_atoms(SID) if a.get("_echo_text") == "a typed text")
+        self.assertTrue(echo.get("dropped"))
+
     def test_a_cli_without_the_capability_keeps_the_turn_boundary_road_and_says_so_once(self):
         s = self.s
         s.start()
