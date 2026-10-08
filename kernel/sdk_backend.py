@@ -1078,7 +1078,11 @@ def cost_state_watermarks(o):
             for k, mk in SdkSession._USAGE_KEYS:
                 v = m.get(mk)
                 tokens[k] += int(v) if isinstance(v, (int, float)) else 0
-    return {"total": float(total), "tokens": tokens}
+    out = {"total": float(total), "tokens": tokens}
+    rc = mu.get(SUBAGENT_STANDARD_SUBAGENT_MODEL) if isinstance(mu, dict) else None
+    if isinstance(rc, dict) and isinstance(rc.get("costUSD"), (int, float)):
+        out["recipeCost"] = float(rc["costUSD"])   # Subagents at standard speed: what the CLI charged under the recipe's key
+    return out
 
 
 def last_cost_state(path, max_line: int = 4 << 20):
@@ -5452,14 +5456,15 @@ def subagent_standard_refusal(model, fast) -> str:
     return ""
 
 
-def subagent_speed_line(on, refusal: str, check, pending: bool = False) -> str:
-    """The Subagents at standard speed row's sub-line: "" while the switch is off; the precondition that holds it back;
-    "applies at the next relaunch" while the serving CLI was launched without it (`pending`); else the speed check's own
-    line (SdkSession._sub_std_settle)."""
+def subagent_speed_line(on, refusal: str, check, pending: bool = False, active: bool = False) -> str:
+    """The Subagents at standard speed row's sub-line: "" while the switch is off (and no CLI carries it); while the
+    serving CLI still carries the recipe (`active`) and a relaunch will drop it, "still active until the relaunch" (with
+    the reason when a precondition lapsed); the precondition that holds it back; "applies at the next relaunch" while
+    the serving CLI was launched without it (`pending`); else the speed check's own line (SdkSession._sub_std_settle)."""
     if not on:
-        return ""
+        return "still active until the relaunch" if active else ""
     if refusal:
-        return "not applied: " + refusal
+        return ("still active until the relaunch, then off: " if active else "not applied: ") + refusal
     line = check.get("line") if isinstance(check, dict) else ""
     if pending or not line:
         return "applies at the next relaunch" if pending else "no call checked yet"
@@ -6346,6 +6351,12 @@ class SdkSession:
         self._sub_std_counts = {}        # this launch's tallies (mainFast, mainStandard, subFast, subStandard, repricedUsd)
         self._sub_std_said = set()       # the verdicts already said for this launch ("subagent-fast", "main-slow")
         self._sub_std_check = reg.get("subagentSpeed") if isinstance(reg.get("subagentSpeed"), dict) else None
+        self._sub_std_charged = 0.0      # the serving CLI's cumulative charge under the recipe's key at the last result
+        #   (None = not known: an attach to a CLI no episode of ours names), seeded with the spend watermarks
+        self._sub_std_acc = [0.0, 0.0, 0.0]   # charge, its expectation and the real cost not yet paired (_sub_std_reconcile)
+        self._sub_std_mismatch = 0       # consecutive results whose charge and expectation disagreed
+        self._sub_std_deferred = []      # calls stamped after the result that read them: the next result pays for them
+        self._sub_std_cli = ""           # the spawn identity the episode belongs to (_cli_ident)
         self.fast_off = bool(reg.get("fastOff"))   # the user put THIS session on Slow explicitly (set_fast "off", the
         #   reg's `fastOff`, 2026-09-17): the machine's Always fast switch (fast_effective) leaves such a session at normal
         #   speed until its next "on" — a Slow pick that flipped back at the next reconnect would be a switch nobody asked for.
@@ -7911,50 +7922,114 @@ class SdkSession:
     def _sub_std_begin(self, launch, launched_here: bool) -> None:
         """At every connect, after the reconcile: whether the CLI serving this session was LAUNCHED with the Subagents at
         standard speed recipe (its launch record: this connect's own, or a host's echo for an attach, LAUNCH_KEY_DEFAULTS
-        for a record older than the key), and a fresh episode for the speed check: tallies at zero, nothing said yet. The
-        check reads only what this CLI writes from now: each transcript from its present end, a new one (a subagent's)
-        from its start, and no record stamped before the launch (a fork's copied history). An ATTACH to a CLI the
-        previous kernel already checked resumes that kernel's episode from the registry (`subagentSpeedScan`): its
-        tallies, what it said, and every subagent transcript written since its last counted call, so a call made while
-        no kernel watched is repriced once; the main transcript resumes from its end (the verdict, not the dollars, is
-        all it feeds). Loop thread."""
+        for a record older than the key), and the speed check's episode for that CLI. The check reads only what this CLI
+        writes: each transcript from its present end, a new one (a subagent's) from its start, and no record stamped
+        before the launch (a fork's copied history).
+
+        Every LAUNCH starts a fresh episode in the registry as well as in memory (`subagentSpeedScan`, keyed to the CLI
+        by its spawn identity, _cli_ident; none for a launch without the recipe), so a kernel that attaches to that CLI
+        later never resumes an earlier launch's tallies, alarms or charge (the 2026-10-08 review: a relaunch then a kernel
+        restart resumed the old episode). An ATTACH resumes the episode only when it names the CLI attached to: its
+        tallies, what it said, the CLI's charge so far, and every subagent transcript written since its last counted
+        call, so a call made while no kernel watched is checked and repriced once; the main transcript resumes from its
+        end (the verdict, not the dollars, is all it feeds). Another CLI's, or none, starts a fresh one, and the CLI's
+        charge is then unknown until its first result names it. Loop thread."""
         on = bool(isinstance(launch, dict) and launch_value(launch, "subagentStandard"))
         self._sub_std_launched = on
         self._sub_std_said = set()
         self._sub_std_counts = {"mainFast": 0, "mainStandard": 0, "subFast": 0, "subStandard": 0, "repricedUsd": 0.0}
+        self._sub_std_acc = [0.0, 0.0, 0.0]   # (charged, expected at Opus 5 rates, real) not yet reconciled
+        self._sub_std_mismatch = 0
+        self._sub_std_deferred = []
         self._sub_std_seen.clear()
         self._sub_std_offsets = {}
         self._sub_std_mark = 0.0
         self._sub_std_resume_mark = 0.0
         self._sub_std_rescan = set()
-        self._sub_std_since = time.time() - 2.0   # the transcript's stamps are this machine's clock, to the millisecond
+        self._sub_std_since = time.time()   # the transcript's stamps are this machine's clock; a call starts after its connect
+        ident = ""
+        try:
+            ident = str(self._cli_ident() or "")
+        except Exception:
+            pass
         if not on:
+            if launched_here:
+                self._sub_std_drop_scan()
             if getattr(self, "subagent_standard", False):
                 why = self.subagent_standard_refusal()
                 self._sub_std_record({"verdict": "inert" if why else "pending",
                                       "line": ("not applied: " + why) if why else "applies at the next relaunch"})
             return
         main, subs = self._sub_std_paths()
-        scan = (read_reg(self.backend.state_dir, self.sid) or {}).get("subagentSpeedScan")
-        resumed = not launched_here and isinstance(scan, dict) and isinstance(scan.get("counts"), dict)
+        scan = None if launched_here else (read_reg(self.backend.state_dir, self.sid) or {}).get("subagentSpeedScan")
+        resumed = (isinstance(scan, dict) and isinstance(scan.get("counts"), dict) and bool(ident)
+                   and str(scan.get("cli") or "") == ident)
         if resumed:
             self._sub_std_since = float(scan.get("since") or self._sub_std_since)
             self._sub_std_mark = self._sub_std_resume_mark = float(scan.get("mark") or 0.0)
             self._sub_std_counts.update({k: v for k, v in scan["counts"].items() if isinstance(v, (int, float))})
             self._sub_std_said = set(x for x in (scan.get("said") or []) if isinstance(x, str))
             self._sub_std_seen.extend(str(x) for x in (scan.get("seen") or []))
+            ch = scan.get("charged")
+            self._sub_std_charged = float(ch) if isinstance(ch, (int, float)) else None
+            acc = scan.get("acc")
+            if isinstance(acc, list) and len(acc) == 3 and all(isinstance(x, (int, float)) for x in acc):
+                self._sub_std_acc = [float(x) for x in acc]
+        elif not launched_here:
+            self._sub_std_charged = None   # an attach to a CLI no episode of ours names: its charge so far is not known
         for p in [main] + subs:
             try:
                 st = p.stat()
             except OSError:
                 continue
-            if resumed and p != main and st.st_mtime >= self._sub_std_mark - 1.0:
+            if resumed and p != main and st.st_mtime >= max(self._sub_std_mark, self._sub_std_since) - 1.0:
                 self._sub_std_offsets[str(p)] = 0   # written since the last counted call: read whole, stamps decide
                 self._sub_std_rescan.add(str(p))
             else:
                 self._sub_std_offsets[str(p)] = st.st_size
+        self._sub_std_cli = ident
         if not resumed:
-            self._sub_std_record(dict({"verdict": "waiting", "line": "no call checked yet"}, **self._sub_std_counts))
+            self._sub_std_record(dict({"verdict": "waiting", "line": "no call checked yet"}, **self._sub_std_counts),
+                                 scan=self._sub_std_scan())
+
+    def _sub_std_scan(self) -> dict:
+        """The episode's resume point, as the registry keeps it for a kernel that attaches to this CLI later."""
+        return {"cli": getattr(self, "_sub_std_cli", ""), "since": self._sub_std_since, "mark": self._sub_std_mark,
+                "counts": dict(self._sub_std_counts), "said": sorted(self._sub_std_said),
+                "seen": list(self._sub_std_seen)[-64:], "charged": getattr(self, "_sub_std_charged", None),
+                "acc": list(getattr(self, "_sub_std_acc", [0.0, 0.0, 0.0]))}
+
+    def _sub_std_drop_scan(self) -> None:
+        try:
+            if (read_reg(self.backend.state_dir, self.sid) or {}).get("subagentSpeedScan") is not None:
+                self.backend._update_reg(self.sid, subagentSpeedScan=None)
+        except Exception as e:
+            self.backend._log("subagent speed (%s): registry write failed: %s" % (self.name, e), problem=True)
+
+    def _sub_std_pending(self) -> bool:
+        """The CLI serving this session carries the recipe and a launch now would not, or the reverse: a relaunch is
+        waiting to bring the two together (requested by set_subagent_standard and _sub_std_requalify)."""
+        if self.client is None or getattr(self, "ended", False):
+            return False
+        return bool(getattr(self, "_sub_std_launched", False)) != self.subagent_standard_carried()
+
+    def _sub_std_requalify(self) -> None:
+        """After a live change that can move the session in or out of the recipe's preconditions (a model pick applied
+        live, a fast-mode toggle sent live): when the serving CLI's recipe no longer matches what a launch would carry,
+        the pick is recorded as waiting and the CLI relaunches once quiet (the 2026-10-08 review: a live pick of
+        claude-opus-5-5[1m] left the recipe running under a model it re-canonicalized, the main loop at standard
+        speed). Until then the row says the recipe is still active. Kernel thread."""
+        try:
+            if not self._sub_std_pending():
+                return
+            self.backend._note_pick_waits(self, "subagentStandard", "subagent speed")
+            self.request_reconnect(why="subagent speed")
+            self.backend._log("subagent speed (%s): the session %s Subagents at standard speed's conditions; it relaunches "
+                              "%s it once nothing would be cut"
+                              % (self.name, "no longer meets" if self._sub_std_launched else "now meets",
+                                 "without" if self._sub_std_launched else "with"))
+        except Exception as e:
+            self.backend._log("subagent speed (%s): %s" % (self.name, e), problem=True)
 
     def _sub_std_read(self, path: Path):
         """The final records of API calls appended to `path` since the last read: [(message id, model, usage, stamp)],
@@ -7995,53 +8070,83 @@ class SdkSession:
             calls[str(m["id"])] = (str(m["id"]), str(m.get("model") or ""), u, ts)
         return list(calls.values())
 
-    def _sub_std_settle(self) -> float:
-        """At a result settle: read what the CLI wrote since the last one, tally each new call's `usage.speed` (the main
-        loop's and the subagents', Opus 5.5 calls only), judge the episode, and return the repricing for the subagent
-        calls: Claude Code charged a recipe subagent call at the rates of the canonical id the override gives it
-        (SUBAGENT_STANDARD_CLI_PRICED_AS), and the call costs Opus 5.5's own; the difference, priced from the call's own
-        usage by cli_prices (1-hour cache writes, geography and web searches included), is negative. A FAST subagent
-        call is left as the CLI priced it: it was not priced as that id's standard call, and the check says so. Zero
-        and nothing read when the serving CLI was not launched with the recipe.
+    def _sub_std_main_on_key(self) -> bool:
+        """Whether the main loop's model string is the recipe's own (a live pick of claude-opus-5-5[1m] or opus[1m]
+        before its relaunch lands): Claude Code bills those main calls under the recipe's key too."""
+        m = str(getattr(self, "chosen_model", "") or "").lower()
+        return m == SUBAGENT_STANDARD_SUBAGENT_MODEL or (m.endswith("[1m]") and m[:-4] in ("opus", SUBAGENT_STANDARD_MODEL))
 
-        The verdict, said ONCE PER LAUNCH (a relaunch starts a new episode) as a problem row and kept as the session's
-        speed line: a subagent call that ran fast ("subagent-fast"), or a main loop that has run only at standard
-        speed since the launch ("main-slow": a fast-mode cooldown starts after fast calls, the recipe's breakage
-        before any, and a cooldown the CLI reports is not judged). Recorded in the registry (`subagentSpeed`, the
-        episode's resume point in `subagentSpeedScan`) whenever a call was counted."""
+    def _sub_std_settle(self, msg=None, now=None) -> float:
+        """At a result settle: read what the CLI wrote since the last one, tally each new call's `usage.speed` (the main
+        loop's and the subagents', Opus 5.5 calls only), judge the episode, and return the repricing. Zero and nothing
+        read when the serving CLI was not launched with the recipe.
+
+        THE REPRICING is authoritative on both sides (the 2026-10-08 review). What Claude Code CHARGED for the calls it
+        billed under the recipe's model string is its own figure: the result's modelUsage["claude-opus-5-5[1m]"]
+        costUSD, cumulative per process like the rest of the map, folded as a delta against its watermark (seeded with
+        the spend watermarks: zero for a fresh CLI, the restored cost-state record's for a resumed one, the episode's
+        record for an attach to the same CLI, unknown otherwise until a first result names it). What those calls COST is
+        each call's own transcript usage priced by cli_prices at Opus 5.5's rates (fast rates for a fast call). Each new
+        call is also priced as Claude Code is expected to have charged it (Opus 5's standard rates, the canonical id the
+        override gives the string; Opus 5.5's own for a fast call, which only that id can make), and the turn's
+        correction is cost less charge only while charge and expectation AGREE: the expectation is how the two sides are
+        known to cover the same calls. A disagreement is held for the next result (a call that finished after the result
+        was emitted is read now and paid for by the next; calls stamped after this result's arrival wait for it in the
+        first place), and one that outlasts two results is said once per launch and dropped: the turn records Claude
+        Code's figure as is, so a CLI that already charges these calls at their real rate (a server-side price, say) is
+        never discounted twice. A result without the per-model map corrects nothing, said once.
+
+        THE VERDICT, said ONCE PER LAUNCH (a relaunch starts a new episode) as a problem row and kept as the session's
+        speed line: a subagent call that ran fast ("subagent-fast"), or a main loop that ran no fast call since the launch
+        while the CLI reports fast mode off WITHOUT a reason although it is wanted and the connection carries the opt-in
+        ("main-slow": what the recipe's breakage of the main loop looks like; a cooldown, a refusal with its reason, the
+        user's own Slow, a state of "on" and a relaunch already on its way are each explained otherwise). Recorded in the
+        registry (`subagentSpeed`, the episode's resume point in `subagentSpeedScan`) whenever a call was counted."""
         if not getattr(self, "_sub_std_launched", False):
             return 0.0
+        now = time.time() if now is None else float(now)
         main, subs = self._sub_std_paths()
         c = self._sub_std_counts
-        corr, counted = 0.0, False
+        on_key = self._sub_std_main_on_key()
+        expected = real = 0.0
+        counted = False
+        calls = list(getattr(self, "_sub_std_deferred", []))
+        self._sub_std_deferred = []
         for path in [main] + subs:
-            sub = path != main
             for mid, model, u, ts in self._sub_std_read(path):
-                if ts < self._sub_std_since or mid in self._sub_std_seen:
-                    continue
-                if str(path) in self._sub_std_rescan and ts < self._sub_std_resume_mark:
-                    continue   # read whole on an attach: a call stamped before the last one counted was counted then
-                self._sub_std_seen.append(mid)
-                self._sub_std_mark = max(self._sub_std_mark, ts)
-                if _cpr.model_id(model) != SUBAGENT_STANDARD_MODEL:
-                    continue
-                counted = True
-                fast = u.get("speed") == "fast"
-                if not sub:
-                    c["mainFast" if fast else "mainStandard"] += 1
-                    continue
-                c["subFast" if fast else "subStandard"] += 1
-                if not fast:
-                    real = _cpr.call_cost(SUBAGENT_STANDARD_MODEL, u)
-                    charged = _cpr.call_cost(SUBAGENT_STANDARD_CLI_PRICED_AS, u)
-                    if real is not None and charged is not None:
-                        corr += real - charged
-        if not counted:
+                calls.append((path != main, str(path), mid, model, u, ts))
+        for sub, key, mid, model, u, ts in calls:
+            if ts < self._sub_std_since - 0.002 or mid in self._sub_std_seen:   # stamps are truncated to the millisecond
+                continue
+            if key in self._sub_std_rescan and ts < self._sub_std_resume_mark:
+                continue   # read whole on an attach: a call stamped before the last one counted was counted then
+            if ts > now:
+                self._sub_std_deferred.append((sub, key, mid, model, u, ts))   # this result has not paid for it yet
+                continue
+            self._sub_std_seen.append(mid)
+            self._sub_std_mark = max(self._sub_std_mark, ts)
+            if _cpr.model_id(model) != SUBAGENT_STANDARD_MODEL:
+                continue
+            counted = True
+            fast = u.get("speed") == "fast"
+            c[("sub" if sub else "main") + ("Fast" if fast else "Standard")] += 1
+            if sub or on_key:
+                r = _cpr.call_cost(SUBAGENT_STANDARD_MODEL, u)
+                e = r if fast else _cpr.call_cost(SUBAGENT_STANDARD_CLI_PRICED_AS, u)
+                if r is not None and e is not None:
+                    real += r
+                    expected += e
+        corr = self._sub_std_reconcile(msg, expected, real)
+        if not counted and msg is None:
             return 0.0
         c["repricedUsd"] = round(float(c.get("repricedUsd") or 0.0) + corr, 6)
+        if not any(c[k] for k in ("mainFast", "mainStandard", "subFast", "subStandard")):
+            self._sub_std_record(dict({"verdict": "waiting", "line": "no call checked yet"}, **{k: c[k] for k in c}),
+                                 scan=self._sub_std_scan())
+            return corr
         if c["subFast"]:
             verdict = "subagent-fast"
-        elif c["mainStandard"] and not c["mainFast"] and getattr(self, "fast", "") != "cooldown":
+        elif c["mainStandard"] and not c["mainFast"] and self._sub_std_main_lost_fast():
             verdict = "main-slow"
         else:
             verdict = "ok"
@@ -8054,10 +8159,57 @@ class SdkSession:
                 "ok": "main loop %s · %s" % ("fast" if c["mainFast"] else "not checked yet",
                                             ("%d subagent call%s at standard speed" % (n, "" if n == 1 else "s"))
                                             if n else "no subagent call yet")}[verdict]
-        self._sub_std_record(dict({"verdict": verdict, "line": line}, **{k: c[k] for k in c}),
-                             scan={"since": self._sub_std_since, "mark": self._sub_std_mark, "counts": dict(c),
-                                   "said": sorted(self._sub_std_said), "seen": list(self._sub_std_seen)[-64:]})
+        self._sub_std_record(dict({"verdict": verdict, "line": line}, **{k: c[k] for k in c}), scan=self._sub_std_scan())
         return corr
+
+    def _sub_std_main_lost_fast(self) -> bool:
+        """The CLI says the main loop cannot run fast for a reason it does not name, while fast mode is wanted, the
+        connection carries the opt-in, and no relaunch is already on its way (see _sub_std_settle)."""
+        return (getattr(self, "fast", "") == "off" and not getattr(self, "fast_reason", "")
+                and bool(getattr(self, "_fast_unlocked", False)) and self.fast_effective()
+                and self.subagent_standard_carried() and not self._sub_std_pending())
+
+    def _sub_std_reconcile(self, msg, expected: float, real: float) -> float:
+        """The turn's repricing from Claude Code's own charge under the recipe's key (see _sub_std_settle)."""
+        mu = getattr(msg, "model_usage", None) if msg is not None else None
+        if msg is None:
+            return 0.0
+        acc = self._sub_std_acc
+        if not isinstance(mu, dict):
+            if expected and "no-map" not in self._sub_std_said:
+                self._sub_std_said.add("no-map")
+                self.backend._log("subagent speed (%s): the result carried no per-model charge (modelUsage), so the "
+                                  "subagent calls are recorded at Claude Code's own figure, not repriced" % self.name,
+                                  problem=True)
+            self._sub_std_acc = [0.0, 0.0, 0.0]
+            return 0.0
+        ent = mu.get(SUBAGENT_STANDARD_SUBAGENT_MODEL)
+        cum = float(ent.get("costUSD") or 0.0) if isinstance(ent, dict) and isinstance(ent.get("costUSD"), (int, float)) else 0.0
+        base = getattr(self, "_sub_std_charged", None)
+        self._sub_std_charged = cum
+        if base is None:
+            self._sub_std_acc = [0.0, 0.0, 0.0]   # the CLI's charge before this result is not known: nothing to pair
+            return 0.0
+        charged = cum - base if cum >= base else cum   # below the watermark: a reset this kernel did not see
+        acc[0] += charged
+        acc[1] += expected
+        acc[2] += real
+        if abs(acc[0] - acc[1]) <= 0.0005 + 0.005 * max(acc[0], acc[1]):
+            corr = acc[2] - acc[0]
+            self._sub_std_acc = [0.0, 0.0, 0.0]
+            self._sub_std_mismatch = 0
+            return corr
+        self._sub_std_mismatch += 1
+        if self._sub_std_mismatch >= 2:
+            if "charge" not in self._sub_std_said:
+                self._sub_std_said.add("charge")
+                self.backend._log("subagent speed (%s): Claude Code charged $%.4f for calls under %s where Opus 5's rates "
+                                  "give $%.4f (Opus 5.5's: $%.4f): romp records Claude Code's figure as is instead of "
+                                  "repricing it" % (self.name, acc[0], SUBAGENT_STANDARD_SUBAGENT_MODEL, acc[1], acc[2]),
+                                  problem=True)
+            self._sub_std_acc = [0.0, 0.0, 0.0]
+            self._sub_std_mismatch = 0
+        return 0.0
 
     def _sub_std_record(self, check: dict, scan: dict | None = None) -> None:
         """Keep the speed check's outcome (the session's speed line) in memory and in the registry."""
@@ -8072,13 +8224,21 @@ class SdkSession:
             self.backend._log("subagent speed (%s): registry write failed: %s" % (self.name, e), problem=True)
 
     def subagent_speed_line(self) -> str:
-        """The session's Subagents at standard speed line, in the user's words ("" while the switch is off, without a
-        look at the preconditions: the snapshot runs per push)."""
-        if not getattr(self, "subagent_standard", False):
+        """The session's Subagents at standard speed line, in the user's words: "" while the switch is off and the
+        serving CLI runs without the recipe (no look at the preconditions then: the snapshot runs per push)."""
+        on = bool(getattr(self, "subagent_standard", False))
+        active = bool(getattr(self, "_sub_std_launched", False)) and self.client is not None
+        if not on and not active:
             return ""
-        return subagent_speed_line(True, self.subagent_standard_refusal(),
-                                   getattr(self, "_sub_std_check", None),
-                                   pending=not getattr(self, "_sub_std_launched", False))
+        return subagent_speed_line(on, self.subagent_standard_refusal() if on else "",
+                                   getattr(self, "_sub_std_check", None), pending=not active, active=active)
+
+    def subagent_standard_offered(self) -> bool:
+        """Whether the fast menu offers the switch: it is on, or the serving CLI still carries the recipe (so it can be
+        turned off), or the session meets its conditions (a session on Slow does not: the switch would buy nothing)."""
+        if getattr(self, "subagent_standard", False) or (getattr(self, "_sub_std_launched", False) and self.client is not None):
+            return True
+        return (getattr(self, "chosen_model", "") or "") == SUBAGENT_STANDARD_MODEL and self.fast_effective()
 
     def billing_launch(self) -> tuple:
         """(side, stored login id) this session is set to bill, as its launch record carries it: its own pick, else the
@@ -9805,6 +9965,7 @@ class SdkSession:
         restoring CLI took its counters from is the old one; the new fsid's file has no record yet."""
         self._last_cost_total = 0.0   # a fresh CLI process starts its cumulative cost at zero
         self._last_usage_totals = {}  # and its cumulative token counters
+        self._sub_std_charged = 0.0   # …and its charge under the Subagents at standard speed key (None = not known)
         self._spend_first_result = True
         self._spend_baseline = "fresh"
         self._spend_unknown_open = False   # no unknown window on a fresh seed (the follow-up's second round, low 3)
@@ -9819,6 +9980,7 @@ class SdkSession:
             # watermark the previous kernel persisted on the registry is read at the first result, when the host's
             # hello has named the CLI (_seed_from_reg_cost_state); until then nothing is folded.
             self._spend_baseline = "attach-pending"
+            self._sub_std_charged = None   # the surviving CLI's charge so far: its own episode's record says (_sub_std_begin)
             return
         sid = resume_sid or self.resume_sid
         if not sid:
@@ -9828,6 +9990,7 @@ class SdkSession:
             return
         self._last_cost_total = cs["total"]
         self._last_usage_totals = dict(cs["tokens"])
+        self._sub_std_charged = float(cs.get("recipeCost") or 0.0)   # restored with the record: history, not this launch
         self.backend._log("spend: %s resumes a transcript with a cost-state record: watermarks seeded at its "
                           "totals (cumulative $%.2f) so the first result records only this turn"
                           % (self.name, cs["total"]), problem=False)
@@ -10403,6 +10566,7 @@ class SdkSession:
                     # every LIVE result; only a record inside a host's replay window is read as a redelivery.
                     self._last_cost_total = 0.0
                     self._last_usage_totals = {}
+                    self._sub_std_charged = 0.0   # the per-model map went with it
                     if getattr(self, "_spend_baseline", "fresh") == "attach-pending":
                         # a /clear as the first turn after an attach (MEDIUM of 1450's round two): the deferred seed
                         # from the registry would have restored the pre-clear cumulative over this zero at the first
@@ -10812,7 +10976,7 @@ class SdkSession:
                     # difference applies only to a delta this result folds. What a turn cannot absorb (a call whose cost an
                     # earlier turn recorded, read now) carries to the next. The row keeps the CLI's own figure (cliUsd).
                     try:
-                        corr = self._sub_std_settle()
+                        corr = self._sub_std_settle(msg)
                     except Exception as e:
                         corr = 0.0
                         self.backend._log("subagent speed (%s): the speed check failed: %s" % (self.name, e), problem=True)
@@ -12338,12 +12502,13 @@ class SdkSession:
                 #   would wake it in seconds (the user 2026-08-13). Dormant rows carry no spawning
                 #   key at all, so they read ready.
                 "fast": self.fast,   # fast-mode state from init ("on"/"off"/"cooldown"; "" = unknown → no badge)
-                "fastPending": bool(getattr(self, "_fast_pending", "")),   # the opt-in waits for its relaunch → the fast badge's dots
-                # Subagents at standard speed (experimental): the switch, whether the fast menu offers it (on, or the model
-                # it needs), and its line (the speed check's outcome, or what holds it back)
+                # the opt-in waits for its relaunch → the fast badge's dots, and the fast menu's Apply now; so does a
+                # Subagents at standard speed change waiting for its relaunch (_sub_std_pending, 2026-10-08)
+                "fastPending": bool(getattr(self, "_fast_pending", "")) or self._sub_std_pending(),
+                # Subagents at standard speed (experimental): the switch, whether the fast menu offers it, and its line
+                # (the speed check's outcome, what holds it back, or that the running CLI still carries it)
                 "subagentStandard": bool(getattr(self, "subagent_standard", False)),
-                "subagentStandardOffered": bool(getattr(self, "subagent_standard", False))
-                                           or (getattr(self, "chosen_model", "") or "") == SUBAGENT_STANDARD_MODEL,
+                "subagentStandardOffered": self.subagent_standard_offered(),
                 "subagentSpeed": self.subagent_speed_line(),
                 "modelFallback": model_fallback_row(self.chosen_model, getattr(self, "_served_model", "") or self.model, getattr(self, "_fallback_cause", ""),
                                                     getattr(self, "_upgrade_retry", None),
@@ -18843,6 +19008,7 @@ class SdkBackend:
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
             self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
+            s._sub_std_requalify()   # a live pick out of (or into) Subagents at standard speed's conditions relaunches once quiet
         else:
             write_sdk_default(self.state_dir, model=value)   # the seed for the NEXT new session (the user 2026-06-27)
             # DORMANT (no live thread): no turn is coming to report a real name, so resolve to the chosen
@@ -19127,10 +19293,12 @@ class SdkBackend:
                 return False
             s.fast = value
             s._fast_expect = value             # the send's own turn-init is one word stale; let it yield
+            s._sub_std_requalify()             # fast off ends Subagents at standard speed's conditions: relaunch once quiet
             self._wake_push()
             return True
         if value == "off":                     # no flag at connect → fast mode is already off; nothing to send
             s._fast_pending = ""               # …and an opt-in still waiting for its relaunch is withdrawn
+            s._sub_std_requalify()
             return True
         s._fast_pending = "on"                 # the badge's dots until a launch carries the flag (2026-10-01: it flipped to
         #                                        On here, while the opt-in still waited for a quiet session)
@@ -20025,7 +20193,8 @@ class SdkBackend:
                     "fastReason": reg.get("liveFastReason", ""),
                     "subagentStandard": bool(reg.get("subagentStandard")),   # same as snapshot()
                     "subagentStandardOffered": bool(reg.get("subagentStandard"))
-                                               or (reg.get("model") or "") == SUBAGENT_STANDARD_MODEL,
+                                               or ((reg.get("model") or "") == SUBAGENT_STANDARD_MODEL
+                                                   and self._reg_fast_effective(reg)),
                     "subagentSpeed": subagent_speed_line(
                         bool(reg.get("subagentStandard")),
                         subagent_standard_refusal(reg.get("model") or "", self._reg_fast_effective(reg))
