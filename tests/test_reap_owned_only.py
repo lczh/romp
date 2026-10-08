@@ -189,6 +189,38 @@ class TwoKernelsShareASessionId(unittest.TestCase):
         self.assertIsNotNone(sb.read_lease(dA, SID), "A's own lease is untouched (B never writes outside its root)")
 
 
+class AnUnreadableLeaseIsNoEvidence(unittest.TestCase):
+    """The boot ends a CLI, and stops a host's scope, for want of a valid lease. A lease file that exists but cannot be read
+    is no evidence its host is gone (the rule every lease reader keeps since 2026-10-08): it was skipped as nobody's claim,
+    so a booting kernel ended a CLI and stopped the host scope of a session whose live host it simply could not read. Both
+    are left alone and named on one line, the session stays down with its CLI, and the lease is left as it stands."""
+
+    def test_the_boot_spares_the_cli_and_the_host_scope_of_a_session_whose_lease_cannot_be_read(self):
+        d = _root()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "api", "cwd": "/tmp", "alive": True, "lastSid": SID})
+        sb.append_state(Path(d), SID, "working")
+        lp = sb.lease_path(d, SID)
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.write_text('{"sid": "a lease cut short')                        # not a lease record: write_lease is atomic
+        ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER,
+              "  %d %d /usr/bin/python3 /x/romp/bin/romp-session-host /x/state/hosts/%s/spawn.json" % (HOST_A, MANAGER, SID),
+              _cli(CLI_A, HOST_A)]
+        host = "romp-host-%s-1757374800000.scope" % SID[:8]
+        boot = Boot(d, ps, [], [_scope_line(host, "romp session host %s romp-state=%s" % (SID, _tag(d)))],
+                    tags={CLI_A: _tag(d)}, starts={CLI_A: "1000", HOST_A: "500"})
+        with mock.patch.object(sb, "proc_session_id", lambda p, **k: {CLI_A: SID}.get(p)):
+            boot.go()
+        self.assertEqual(boot.signaled(), [], "the CLI of a session whose lease cannot be read is not ended")
+        self.assertEqual(boot.stops(), [], "nor its host's scope stopped")
+        self.assertEqual(boot.started, [], "and the session is not resumed beside it")
+        self.assertEqual(sb.read_reg(Path(d), SID).get("queue") or [], [], "no restart notice")
+        self.assertTrue(lp.exists(), "the lease is left as it stands")
+        said = [m for m in boot.said if "host lease cannot be read" in m and "left alone" in m]
+        self.assertEqual(len(said), 2, boot.said)                            # the CLI's line, and the host scope's
+        self.assertIn("claude pid %d" % CLI_A, said[0] + said[1])
+        self.assertIn(host, said[0] + said[1])
+
+
 class UntaggedIsLeftAloneAndNamed(unittest.TestCase):
     """A unit or CLI with no state tag at all (an older build's, or one whose environment cannot be read) cannot be
     attributed to this kernel: it is left alone, and ONE log line names every such thing, never stopped silently."""

@@ -991,6 +991,175 @@ class BackendHostRules(unittest.TestCase):
         sb.write_reg(Path(d2), SID, {"sid": SID, "name": "web", "alive": True})
         self.assertFalse(be2._end_host_by_lease(SID))
 
+    # ── an unreadable lease is no evidence about the host (the 2026-10-08 review of #149): every reader states its answer ──
+    def _unreadable_lease(self, d, sid=SID):
+        """A lease file that is not a lease record (write_lease is atomic, so this is a damaged file, never a half-written one):
+        the reading fails for real, as an EIO or an EACCES would, and works the same when the tests run as root."""
+        p = sb.lease_path(d, sid)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"sid": "a lease cut short')
+
+    def _said_once(self, be):
+        said = [m for m in be._test_logs if "cannot read the session host's lease" in m]
+        self.assertEqual(len(said), 1, "the episode is said once: %r" % be._test_logs[-8:])
+
+    def test_an_unreadable_lease_launches_nothing_beside_a_host_that_may_hold_the_cli(self):
+        """The connect's launch decision: an unreadable lease read as no lease, so the connect spawned a fresh host, or with the
+        setting off launched a kernel child, beside a host that may still run the session's CLI (two writers on one
+        conversation). Now the connect refuses to launch, the refusal is filed as a launch error by the connect loop, and the
+        next connect reads the lease again; and the host road applies whatever the setting says."""
+        for setting in ("on", "off"):
+            with self.subTest(setting=setting):
+                d, be = self._be()
+                Path(d, "session-hosts").write_text(setting)
+                sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+                self._unreadable_lease(d)
+                s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                          _seed_for_dead_cli=lambda cli: None)
+                self.assertTrue(be._host_lease_applies(s), "a lease nobody can read may be a live host's: the host road applies")
+                spawned = []
+                def spawn_spec(*a, **k):
+                    spawned.append(1)
+                    raise AssertionError("a host was spawned beside a lease that cannot be read")
+                with mock.patch.object(ht, "spawn_spec", spawn_spec):
+                    with self.assertRaises(sb.CLIConnectionErrorLike) as cm:
+                        asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+                self.assertIn("cannot be read", str(cm.exception))
+                self.assertEqual(spawned, [])
+                self.assertTrue(sb.lease_path(d, SID).exists(), "the lease is left as it stands")
+                self._said_once(be)
+
+    def test_the_boot_leaves_a_session_whose_lease_cannot_be_read_as_it_stands(self):
+        """The boot's cut-turn resume: an unreadable lease read as no host, so a session whose turn a live host still runs got
+        the restart notice, a machine-cut stamp and a resume (a second CLI on its conversation). Now it stays down, untouched,
+        until the lease reads."""
+        d, be = self._be()
+        reg = {"sid": SID, "name": "web", "cwd": d, "alive": True, "lastSid": SID, "queue": []}
+        sb.write_reg(Path(d), SID, reg)
+        sb.append_state(Path(d), SID, "working")
+        self._unreadable_lease(d)
+        started = []
+        with mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
+            be._boot_reconcile([dict(reg)])
+        after = sb.read_reg(Path(d), SID) or {}
+        self.assertEqual(after.get("queue") or [], [], "no restart notice for a turn a host may still be running")
+        self.assertNotIn("machineCut", (Path(d) / "states" / (SID + ".jsonl")).read_text(), "no machine-cut stamp")
+        self.assertNotIn(SID, be._boot_attach_sids)
+        self.assertEqual(started, [], "nothing started on a lease nobody can read")
+        self.assertTrue(any("stays down: its host lease cannot be read" in m for m in be._test_logs))
+        self._said_once(be)
+
+    def test_an_unreadable_lease_is_no_change_of_the_lease_for_a_stand_down(self):
+        """The stand-down lifts on new information (a user's send, a change of the lease). An unreadable lease is none: the
+        marker holds and is kept, and an automatic message queues behind it, where it used to drop the marker and start the
+        session on a lease nobody could read."""
+        d, be = self._be()
+        self._marked(d)
+        self._unreadable_lease(d)
+        self.assertTrue(be._attach_stand_down_holds(SID))
+        self.assertIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {}, "the marker is kept")
+        started = []
+        with mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
+            self.assertTrue(be.send(SID, "<!-- romp-injected --><!-- romp-auto --> a nudge"))
+        reg = sb.read_reg(Path(d), SID) or {}
+        self.assertEqual(reg.get("queue"), ["<!-- romp-injected --><!-- romp-auto --> a nudge"], "queued behind the stand-down")
+        self.assertEqual(started, [])
+        self._said_once(be)
+
+    def test_a_thread_whose_lease_cannot_be_read_hears_no_dead_life_notices(self):
+        """A dormant thread's wake reports what its dead CLI took with it, unless a host kept it alive. An unreadable lease
+        read as no host, so a thread a host kept alive was told its question and its tasks had died; now nothing is reported
+        and the flags stand for a wake that can read the lease."""
+        d, be = self._be()
+        tsid = "33333333-2222-3333-4444-0000000000b4"
+        sb.write_reg(Path(d), tsid, {"sid": tsid, "name": "t1", "cwd": d, "alive": True, "lastSid": tsid, "threadOf": SID,
+                                      "bgTasks": [{"id": "x", "desc": "a task"}], "pendingAsk": True, "spawnedAt": 1})
+        self._unreadable_lease(d, tsid)
+        with mock.patch.object(sb.SdkSession, "start", lambda self: None):
+            be._ensure(tsid)
+        reg = sb.read_reg(Path(d), tsid) or {}
+        self.assertEqual(reg.get("queue") or [], [], "no killed-question or dead-task notice")
+        self.assertTrue(reg.get("pendingAsk") and reg.get("bgTasks"), "the flags stand")
+
+    def test_the_users_end_reaches_a_host_whose_lease_cannot_be_read(self):
+        """kill() with no session object ends the host through its lease; an unreadable lease answered 'no live host', and the
+        host and its CLI ran on under a session the user had ended. Now the end goes through the session's host socket."""
+        d, be = self._be(short=True)
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True})
+        self._unreadable_lease(d)
+        host, stop = self._serve_fake_host(d)
+        try:
+            self.assertTrue(be._end_host_by_lease(SID))
+            be._end_threads[SID].join(10)
+            self.assertIn("end", [f.get("t") for f in host.got], "the host was told to end: %r" % be._test_logs[-4:])
+        finally:
+            stop()
+
+    def test_a_stand_down_on_an_unreadable_lease_writes_no_marker_and_claims_nothing(self):
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        self._unreadable_lease(d)
+        s = types.SimpleNamespace(sid=SID, name="web", backend=be, inflight=1, detached=False, _reconnect=True,
+                                  _host_attach_retries=4, _host=types.SimpleNamespace(hello={"host": {"pid": 5, "start": "h"}}))
+        sb.SdkSession._host_stand_down(s, TimeoutError("initialize"))
+        self.assertNotIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {}, "a marker names the host, which cannot be read")
+        self.assertFalse(any("no longer holds" in m for m in be._test_logs), "never a claim the host is gone")
+        self.assertTrue(any("lease cannot be read at the stand-down" in m for m in be._test_logs))
+
+    def test_the_wait_for_an_ended_hosts_lease_waits_for_its_removal_not_for_an_unreadable_read(self):
+        """The host this kernel asked to end removes its lease; the connect waits for that removal. A read that failed
+        meanwhile read as the removal, and the connect went on while the old host was still finishing."""
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        self._host_lease(d)
+        be._host_recently_ended[SID] = "999999996:2"
+        sleeps = []
+        async def sleep(t):
+            sleeps.append(t)
+            if len(sleeps) == 1:
+                self._unreadable_lease(d)                               # the read fails while the file is still there
+            else:
+                sb.lease_path(d, SID).unlink()                          # the host's removal
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                  _seed_for_dead_cli=lambda cli: None)
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: None), mock.patch.object(sb.asyncio, "sleep", sleep):
+            out = asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+        self.assertIsNone(out)
+        self.assertEqual(len(sleeps), 2, "the wait went on through the failed read and ended on the removal")
+
+    def test_the_reexec_wait_reads_an_unreadable_lease_as_no_evidence(self):
+        """The wait for a re-executed host ended at once when its lease read as naming no holder, filed as the host dying in
+        its start. A lease that cannot be read names nothing either way: the wait goes on to its bound and says so."""
+        d, be = self._be(short=True)
+        be.code_version = "def67890"
+        me = {"pid": os.getpid(), "start": sb.proc_start(os.getpid())}
+        old = {"sid": SID, "fsid": SID, "name": "web", "pid": me["pid"], "start": me["start"], "holder": dict(me, kind="host"),
+               "version": "abc12345", "t": time.time()}
+        self._unreadable_lease(d)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_reexec_from=None)
+        with mock.patch.object(ht, "SOCKET_WAIT_S", 0.5):
+            got = asyncio.run(be._await_reexeced_host(s, old, "abc12345"))
+        self.assertIsNone(got)
+        self.assertFalse(any("gone before it served" in m for m in be._test_logs), "never read as the host dying")
+        self.assertIn("host.reexec-failed", self._kinds(d), "the bound ran out: said as such, and the connect reads the lease again")
+
+    def test_the_lost_socket_check_says_an_unreadable_lease(self):
+        d, be = self._be()
+        self._unreadable_lease(d)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_reexec_closed=False, _host_reexec_from="abc12345")
+        t = types.SimpleNamespace(hello={"host": {"pid": 5, "start": "h"}})
+        be._on_host_socket_lost(s, t)
+        self.assertTrue(any("lease cannot be read; read as a lost host" in m for m in be._test_logs), be._test_logs[-4:])
+        self._said_once(be)
+
+    def test_the_interrupt_escalations_pid_search_says_an_unreadable_lease(self):
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        self._unreadable_lease(d)
+        self.assertIsNone(be._session_cli_pid(types.SimpleNamespace(sid=SID, name="web")))
+        self._said_once(be)
+
     def test_two_automatic_messages_with_the_same_words_are_both_queued(self):
         # the fourth item: a by-text dedupe dropped a legitimately repeated notice and reported it accepted
         d, be = self._be()
