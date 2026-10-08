@@ -12,14 +12,16 @@ for fast mode, the per-model fast rates in its cost code, which are not in the c
 not at run time: the catalog is a minified script literal inside a 230 MB executable and the fast rates are code
 constants whose names change every build, so nothing romp could parse there is a contract. The table checks against
 the ledger instead: priced by it, a turn's calls (its main transcript's and its subagents') sum to the turn's recorded
-dollars, fast and standard Opus 5.5 alike. When Claude Code ships a model, add its row here.
+dollars, fast and standard Opus 5.5 alike. When Claude Code ships a model, add its row here; the SDK backend says
+so when a result bills a model the table lacks, or a model's tokens at dollars its rates cannot reach (cost_bounds).
 
 The arithmetic follows the CLI's: cache writes at the 1-hour rate for the tokens `cache_creation.ephemeral_1h_input_tokens`
 names and at the 5-minute rate for the rest; a call whose usage says `speed: "fast"` at the model's fast rates where it
 has them (a model without them stays at its standard rates, as the CLI does); `inference_geo: "us"` multiplies the
 token cost by 1.1; each web search request is a cent.
 
-stdlib only, loaded by path as `romp_cli_prices` from the kernel and from cli/spend_repair.py."""
+stdlib only, loaded by path as `romp_cli_prices` from the kernel, the SDK backend and cli/spend_repair.py."""
+import re
 
 # $ per million tokens: (input, output, cache write 5 m, cache write 1 h, cache read)
 _T_3_15, _T_5_25, _T_10_50 = (3, 15, 3.75, 6, 0.3), (5, 25, 6.25, 10, 0.5), (10, 50, 12.5, 20, 1)
@@ -39,14 +41,19 @@ CLI_FAST_PRICES = {"claude-opus-5-5": (8, 40, 10, 16, 0.4), "claude-opus-5": _T_
 WEB_SEARCH_USD = 0.01
 US_GEO_MULTIPLIER = 1.1
 
-_IDS = sorted(CLI_PRICES, key=len, reverse=True)   # the longest id first: claude-opus-5-5 before claude-opus-5
+_DATED = re.compile(r"(.+)-\d{8}")                 # a dated model id: the id, a dash, eight digits
 
 
 def model_id(model):
     """The table's id for a model id as a transcript or a result names it: exact, or a dated form of it
-    (`claude-haiku-4-5-20251001`), with any context-window suffix (`[1m]`) dropped; None for a model the table lacks."""
+    (`claude-haiku-4-5-20251001`), with any context-window suffix (`[1m]`) dropped; None for a model the table lacks.
+    Only a date may follow a known id: `claude-sonnet-5-5` is not `claude-sonnet-5`, nor `claude-fable-5-2`
+    `claude-fable-5` (the review of #170: the first cut took any dash, and priced both silently as their neighbour)."""
     m = str(model or "").replace("[1m]", "").replace("[2m]", "").lower()
-    return next((c for c in _IDS if m == c or m.startswith(c + "-")), None)
+    if m in CLI_PRICES:
+        return m
+    d = _DATED.fullmatch(m)
+    return d.group(1) if d and d.group(1) in CLI_PRICES else None
 
 
 def _row(rates):
@@ -102,6 +109,20 @@ def call_usd(row, usage):
 
 
 _ROWS = price_rows()
+
+
+def cost_bounds(model, tok_in, tok_out, cache_r, cache_w, web_searches=0):
+    """(lowest, highest) dollars the table's rates can bill a model's token totals at, whatever the calls' mix: lowest
+    every call at the standard rates with every cache write held 5 minutes, highest every call at the fast rates where
+    the model has them, every write held an hour and US inference; None for a model the table lacks. A per-model total
+    Claude Code billed outside these is a rate the table does not have (the SDK backend's drift check)."""
+    mid = model_id(model)
+    if mid is None:
+        return None
+    row = _ROWS[mid]
+    lo = cost_parts(row, tok_in, tok_out, cache_w, cache_r, 0, False, False, web_searches)
+    hi = cost_parts(row, tok_in, tok_out, cache_w, cache_r, cache_w, "fast" in row, True, web_searches)
+    return lo, hi
 
 
 def call_cost(model, usage):

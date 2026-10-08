@@ -937,6 +937,13 @@ class RestoredCostState(unittest.TestCase):
         self.assertAlmostEqual(rp.call_cost("claude-sonnet-5", {"server_tool_use": {"web_search_requests": 3}}), 0.03)
         self.assertIsNone(rp.call_cost("claude-unknown-9", {"input_tokens": 1}), "no price here: never a guess")
 
+    def test_call_cost_prices_no_unknown_version_by_a_neighbours_row(self):
+        """Review of #170: a known id plus any dash matched, so claude-sonnet-5-5 was priced as claude-sonnet-5. Only a
+        date may follow a known id; anything else has no price here, and the rule's match never runs on a guess."""
+        self.assertIsNone(rp.call_cost("claude-sonnet-5-5", {"input_tokens": 1e6}))
+        self.assertIsNone(rp.call_cost("claude-fable-5-2", {"cache_read_input_tokens": 1e6}))
+        self.assertAlmostEqual(rp.call_cost("claude-fable-5-1-20261201", {"cache_read_input_tokens": 1e6}), 0.25)
+
     def test_the_plan_finds_the_rows_that_recorded_a_restored_record_and_only_those(self):
         p = rp.restored_plan(read_turns(self.state), self.state, self.claude)
         got = {c["sid"]: c for c in p["rows"]}

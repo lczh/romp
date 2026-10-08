@@ -5928,7 +5928,12 @@ hour. Each call is priced the way Claude Code prices it, from its own rates
 held for an hour at their own rate, the same table the cost view uses, so the
 rate reads beside the dollars the CLI records. A model the table lacks is
 priced as the newest model of its family, or the dearest row when no family
-matches, and named once in the kernel log. The data is what
+matches, and named once in the kernel log; only a date may follow a known id
+(`claude-sonnet-5-5` is not `claude-sonnet-5`). The table is kept by hand, so
+each result's per-model dollars from Claude Code are checked against what its
+rates can give that model's tokens at any speed and cache duration: a model the
+table lacks, or a bill outside that reach by more than a percent, is raised in
+the error center once per kernel life, naming the model and the ratio. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
 check reads little that is new: an agent file that changed inside the window is
 read, and after a restart an agent file inside the window whose restored tail
@@ -7169,7 +7174,9 @@ was logged; session cost is each call's tokens priced at Claude Code's own
 rates, fast calls and hour-long cache writes included, with
 `~/.config/romp/model-prices.json` overriding a model's row (dollars per token:
 `in`, `out`, `cache_w`, `cache_w_1h`, `cache_r`, and a `fast` row of the same
-keys).
+keys; a key the row leaves out keeps Claude Code's rate, a partial `fast` row
+fills from Claude Code's fast rates, and a model the table lacks writes an hour
+at its 5-minute rate unless the row names one).
 
 **What your usage costs.** The bottom bar's usage figures open **Usage at API
 prices**, which the palette reaches as **Token usage** too: a card for the

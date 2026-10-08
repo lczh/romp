@@ -778,6 +778,47 @@ class CostWeighting(unittest.TestCase):
         self.assertIn("'claude-opus-9' is not in Claude Code's price table", said[0])
         self.assertIn("priced as claude-opus-5-5", said[0])
 
+    def test_an_unknown_version_of_a_known_model_is_a_family_guess_said_once_never_a_neighbours_row(self):
+        """Review of #170: the table's id match took any known id plus a dash, so claude-sonnet-5-5 priced silently as
+        claude-sonnet-5 (Claude Code bills it about three times that) and claude-fable-5-2 as claude-fable-5 (four times
+        Fable 5.1's cache-read rate). Only a date may follow a known id; an unknown version is a family guess, said."""
+        import io
+        cp = sys.modules["romp_cli_prices"]
+        for mid in ("claude-sonnet-5-5", "claude-fable-5-2", "claude-opus-5-6"):
+            self.assertIsNone(cp.model_id(mid), mid)
+        self.assertEqual(cp.model_id("claude-opus-5-5-20261001"), "claude-opus-5-5", "a dated id is the model")
+        self.assertEqual(cp.model_id("claude-opus-5-5[1m]"), "claude-opus-5-5")
+        prices = km._model_prices()
+        km._PRICE_UNKNOWN_SAID.difference_update({"claude-sonnet-5-5", "claude-fable-5-2"})
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self.assertIs(km._price_for("claude-sonnet-5-5", prices), prices["claude-sonnet-5"], "the newest Sonnet, guessed")
+            self.assertIs(km._price_for("claude-sonnet-5-5", prices), prices["claude-sonnet-5"])
+            self.assertIs(km._price_for("claude-fable-5-2", prices), prices["claude-fable-5-1"], "the newest Fable, not Fable 5")
+        said = err.getvalue().splitlines()
+        self.assertEqual(len(said), 2, said)
+        self.assertIn("'claude-sonnet-5-5' is not in Claude Code's price table", said[0])
+        self.assertIn("'claude-fable-5-2' is not in Claude Code's price table", said[1])
+
+    def test_a_partial_config_row_fills_from_the_right_rates(self):
+        """A partial `fast` override fills its missing keys from Claude Code's fast rates, never the standard ones; a
+        config-only model gets its 1-hour write rate from its own 5-minute rate when it names none, never 0."""
+        km.PRICE_CONFIG.write_text(json.dumps({
+            "claude-opus-5-5": {"fast": {"in": 7e-6}},
+            "claude-house-1": {"in": 1e-6, "out": 2e-6, "cache_w": 3e-6, "cache_r": 0.1e-6, "fast": {"in": 2e-6}}}))
+        pr = km._model_prices()
+        fast = pr["claude-opus-5-5"]["fast"]
+        self.assertEqual(fast["in"], 7e-6)
+        cli_fast = sys.modules["romp_cli_prices"].price_rows()["claude-opus-5-5"]["fast"]
+        self.assertEqual([fast[k] for k in ("out", "cache_w", "cache_w_1h", "cache_r")],
+                         [cli_fast[k] for k in ("out", "cache_w", "cache_w_1h", "cache_r")],
+                         "the rest of the fast row is Claude Code's fast rates")
+        self.assertAlmostEqual(fast["out"], 40e-6, places=12)
+        house = pr["claude-house-1"]
+        self.assertEqual(house["cache_w_1h"], 3e-6, "no 1-hour rate named: the 5-minute rate, as the CLI does")
+        self.assertEqual(house["fast"]["cache_w_1h"], 3e-6)
+        self.assertEqual(house["fast"]["out"], 2e-6, "a config-only model's fast row fills from its own row")
+
     def test_analytics_carries_cost_both_sides(self):
         p1 = pathlib.Path(self.td.name) / "s1.jsonl"
         p1.write_text(_asst({"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 100000},

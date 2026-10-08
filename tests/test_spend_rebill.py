@@ -597,5 +597,52 @@ class Rebill(unittest.TestCase):
         self.assertIn('costState={"total": float(total), "tokens": dict(self._last_usage_totals),', inspect.getsource(sb.SdkSession._persist_cost_state))
 
 
+def _result_mu(total, mu):
+    """A result whose modelUsage map carries, per model, cumulative (input, output, cache read, cache write) tokens and
+    the dollars Claude Code billed them."""
+    r = _ResultMessage()
+    r.total_cost_usd = total
+    r.model_usage = {m: {"inputTokens": t[0], "outputTokens": t[1], "cacheReadInputTokens": t[2], "cacheCreationInputTokens": t[3],
+                         "webSearchRequests": 0, "costUSD": c} for m, (t, c) in mu.items()}
+    r.usage = {}
+    return r
+
+
+class PriceDrift(unittest.TestCase):
+    """Drift must be loud (review of #170): romp's price table is kept by hand, so each result's per-model dollars from
+    Claude Code are checked against what the table's rates can give that model's tokens. Out of reach at any speed and
+    any cache duration, or a model the table lacks: one problem naming the model, once per kernel life."""
+    setUp, _session, _run = Rebill.setUp, Rebill._session, Rebill._run
+
+    def said(self):
+        return [p["text"] for p in self.be.problems() if p["text"].startswith("prices:")]
+
+    def test_a_turn_the_table_cannot_price_as_claude_code_did_is_said_once_per_model(self):
+        s = self._session()
+        haiku = ((1000, 0, 0, 0), 0.001)
+        # Opus 5.5, 10,000 output tokens and a million cache reads a turn: $0.40 at its standard rates, $0.80 fast
+        self._run(s, _result_mu(0.401, {"claude-opus-5-5": ((0, 10000, 1000000, 0), 0.40), "claude-haiku-4-5-20251001": haiku}))
+        self._run(s, _result_mu(1.201, {"claude-opus-5-5": ((0, 20000, 2000000, 0), 1.20), "claude-haiku-4-5-20251001": haiku}))
+        self.assertEqual(self.said(), [], "the standard turn and the fast one are both within the table's reach")
+        # the same tokens billed at $0.30: below anything the table's rates give them
+        self._run(s, _result_mu(1.501, {"claude-opus-5-5": ((0, 30000, 3000000, 0), 1.50), "claude-haiku-4-5-20251001": haiku}))
+        said = self.said()
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("claude-opus-5-5", said[0])
+        self.assertIn("0.75x", said[0])
+        self._run(s, _result_mu(1.801, {"claude-opus-5-5": ((0, 40000, 4000000, 0), 1.80), "claude-haiku-4-5-20251001": haiku}))
+        self.assertEqual(len(self.said()), 1, "once per model")
+        # a model the table lacks
+        self._run(s, _result_mu(4.801, {"claude-opus-5-5": ((0, 40000, 4000000, 0), 1.80), "claude-haiku-4-5-20251001": haiku,
+                                        "claude-sonnet-5-5": ((10000, 1000, 0, 0), 3.0)}))
+        said = self.said()
+        self.assertEqual(len(said), 2, said)
+        self.assertIn("claude-sonnet-5-5", said[1])
+        self.assertIn("does not have", said[1])
+        self.assertAlmostEqual(self._day()["usd"], 4.801, msg="the check never touches the count")
+
+    _day = Rebill._day
+
+
 if __name__ == "__main__":
     unittest.main()

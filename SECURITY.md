@@ -178,10 +178,9 @@ and per-machine, from this trust level).
 
 ## Network access
 
-romp makes one outbound request by default: it fetches a public model-pricing
-table (`raw.githubusercontent.com/.../model_prices_and_context_window.json`)
-every few hours to label context/cost. The response is parsed strictly as
-numeric pricing. No telemetry or session data is sent anywhere.
+romp fetches no pricing data: it prices tokens from Claude Code's own rates,
+which it carries in its source (`kernel/cli_prices.py`). No telemetry or session
+data is sent anywhere.
 
 ## Reporting a vulnerability
 

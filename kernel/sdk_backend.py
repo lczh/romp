@@ -89,7 +89,8 @@ _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", _
 _logins = sys.modules.get("romp_logins") or load_source("romp_logins", _HERE / "logins.py")
 # Claude Code's own per-call prices (cli_prices.py, the one table that prices tokens): the Subagents at standard speed
 # repricing (SdkSession._sub_std_settle) prices a subagent call from its transcript usage at the rates the CLI charged and
-# at Opus 5.5's own. The kernel's copy when it is loaded (the _cred idiom).
+# at Opus 5.5's own, and each result's per-model dollars are checked against it so a rate change or a new model is said
+# (SdkSession._check_price_drift). The kernel's copy when it is loaded (the _cred idiom).
 _cpr = sys.modules.get("romp_cli_prices") or load_source("romp_cli_prices", _HERE / "cli_prices.py")
 
 
@@ -6449,6 +6450,8 @@ class SdkSession:
         #   at each connect to what the CLI process it starts holds: zero for a fresh process, or the
         #   totals of the resumed transcript's last cost-state record when it carries one
         #   (_seed_spend_watermarks, last_cost_state).
+        self._price_marks = {}        # model -> [costUSD, the four token kinds, web searches] at the last result: the
+        #   price drift check's own per-model watermark (_check_price_drift)
         self._last_usage_totals = {}  # the TOKEN watermarks — kept against the result's `model_usage`
         #   map (the CLI's modelUsage), the per-model counter the CLI documents as cumulative like
         #   total_cost_usd, same lifecycle, so each field folds as a delta exactly like the dollars.
@@ -9761,6 +9764,62 @@ class SdkSession:
         self._note_usage_fallback(msg)   # after the count: a count that raises is the containment's one report
         return out
 
+    PRICE_DRIFT_MIN_USD = 0.01   # a model's share of a turn below this is not judged (float noise, a side call's cents)
+    PRICE_DRIFT_TOL = 0.01       # the relative slack either side of what the table's rates can give
+
+    def _check_price_drift(self, msg) -> None:
+        """Drift must be loud (the review of #170; CLAUDE.md, fail loudly): romp's price table (cli_prices.py) is kept by
+        hand, and nothing else would tell it that Claude Code's rates moved or a model arrived. A result's modelUsage map
+        carries, per model, the CLI's cumulative tokens and the dollars it billed them; this turn's share (the delta
+        against the last result, a counter below its mark read whole, as _turn_usage folds) is checked against
+        cli_prices.cost_bounds: what the table's rates can give those tokens at any speed and any cache duration, which
+        the map does not split. Outside that by more than PRICE_DRIFT_TOL, or a model the table lacks: one problem naming
+        the model and the ratio, once per model per kernel life. The table changes only with the code, so a kernel life
+        is the episode, and a mix of fast and standard turns cannot make it ring again and again. Per result, from the
+        message alone, no transcript read; a fault here is swallowed, since a line is not worth the turn's count."""
+        try:
+            mu = getattr(msg, "model_usage", None)
+            if not isinstance(mu, dict):
+                return
+            marks = getattr(self, "_price_marks", None)
+            if marks is None:
+                marks = self._price_marks = {}
+            keys = ("costUSD", "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens",
+                    "webSearchRequests")
+            for model, m in mu.items():
+                if not isinstance(m, dict):
+                    continue
+                cur = [float(m.get(k) or 0) if isinstance(m.get(k), (int, float)) else 0.0 for k in keys]
+                last = marks.get(model)
+                marks[model] = cur
+                d = cur if last is None or any(c < l for c, l in zip(cur, last)) else [c - l for c, l in zip(cur, last)]
+                if d[0] < self.PRICE_DRIFT_MIN_USD:
+                    continue
+                b = _cpr.cost_bounds(model, d[1], d[2], d[3], d[4], d[5])
+                if b is not None and b[0] * (1 - self.PRICE_DRIFT_TOL) <= d[0] <= b[1] * (1 + self.PRICE_DRIFT_TOL):
+                    continue
+                be = self.backend
+                with be._lock:
+                    said = getattr(be, "_price_drift_said", None)
+                    if said is None:
+                        said = be._price_drift_said = set()
+                    if model in said:
+                        continue
+                    said.add(model)
+                if b is None:
+                    text = ("prices: Claude Code billed $%.2f for %s on %s's last turn, a model romp's price table does "
+                            "not have (kernel/cli_prices.py). The spend guard and the cost view guess its price from its "
+                            "family until the table gains a row." % (d[0], model, self.name))
+                else:
+                    ratio = d[0] / b[0] if d[0] < b[0] else d[0] / b[1]
+                    text = ("prices: Claude Code billed $%.2f for %s on %s's last turn, %.2fx the nearest figure romp's "
+                            "price table gives those tokens ($%.2f to $%.2f at any speed and cache duration). The table "
+                            "(kernel/cli_prices.py) no longer matches Claude Code's rates for this model, so the spend "
+                            "guard and the cost view misprice it." % (d[0], model, self.name, ratio, b[0], b[1]))
+                be._log(text, problem=True, key=("price-drift", model))
+        except Exception:
+            pass
+
     def _note_usage_fallback(self, msg):
         """_turn_usage read the flat `usage` dict because the paid result carried no modelUsage map:
         this turn's token columns are the main loop's count alone. Recorded silently before, so a kernel
@@ -10837,6 +10896,8 @@ class SdkSession:
                     #   rail and the optimizer; a deliberate fork has no threadOf and bills itself)
                     #   + token readout; keyed = THIS session's init-reported auth, so the API sum stays
                     #   honest on a mixed host (see _record_spend)
+                    if not duplicate:
+                        self._check_price_drift(msg)   # after the record: the check never costs the count
                     if first and delta > SANE_TURN_USD:
                         # A first-after-connect delta above the mark, traced as an INFO line, not a problem: the figure
                         # is right and there is nothing for the user to act on. The text names which process this is
@@ -12814,6 +12875,7 @@ class SdkBackend:
         self._thinking_override_logged = False   # thinking_override_note said once per backend (see _options)
         self._usage_fallback_sdk_noted = False   # usage_fallback_notice's SDK cause said once per backend: the
         #   imported SDK is one fact for every session (SdkSession._note_usage_fallback)
+        self._price_drift_said = set()            # models whose price drift was said this kernel life (_check_price_drift)
         self.sessions: dict[str, SdkSession] = {}
         self._lock = threading.Lock()
         self._turn_seq: dict = {}                 # sid -> turns ended this kernel life (turn_seq; under _lock)
