@@ -9296,7 +9296,10 @@ def _leaf_retired(sid, leaf):
         return str(leaf) in _LEAF_RETIRED.get(sid, ())
 
 
-_lastsid_memo = {}   # sid -> (the registration's stamp, diverged lastSid or None) — the registry is rewritten
+_lastsid_memo = {}   # sid -> (the registration's stamp, diverged lastSid or None), kept only from a read that READ: a failed
+                     # read says nothing about the file (an EMFILE heals with nothing on disk moving, and a failure kept under
+                     # the stat stood until the registration was next written, the 2026-10-08 review), so the call that met it
+                     # is served the last good answer and the next call reads again. The registry is rewritten
                      # constantly while a session works (ctx%, queue mirror), but lastSid flips only on a
                      # /clear-style fork, so a stat memo keeps the fingerprint's per-push reads cheap
 
@@ -9325,9 +9328,12 @@ def _sdk_last_sid(sid):
     if hit is not None and hit[0] == mt:
         return hit[1]
     try:
-        ls = json.loads(p.read_text()).get("lastSid")
+        reg = json.loads(p.read_text())
     except (OSError, ValueError):
-        ls = None
+        reg = None
+    if not isinstance(reg, dict):                 # a failed read: the last good answer for this call, nothing kept
+        return hit[1] if hit is not None else None
+    ls = reg.get("lastSid")
     ls = ls if (isinstance(ls, str) and ls and ls != sid) else None
     _lastsid_memo[sid] = (mt, ls)
     return ls
@@ -9354,9 +9360,12 @@ def _sdk_transcript_path(sid):
     if hit is not None and hit[0] == mt:
         return hit[1]
     try:
-        tp = json.loads(p.read_text()).get("transcriptPath")
+        reg = json.loads(p.read_text())
     except (OSError, ValueError):
-        tp = None
+        reg = None
+    if not isinstance(reg, dict):                 # a failed read: the last good answer for this call, nothing kept
+        return hit[1] if hit is not None else None
+    tp = reg.get("transcriptPath")
     tp = tp if (isinstance(tp, str) and tp) else None
     _recpath_memo[sid] = (mt, tp)
     return tp

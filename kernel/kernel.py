@@ -19888,7 +19888,7 @@ def _comment_msg_text(rec):
     return "\n".join(p for p in parts if p).strip()
 
 
-_thread_reg_memo = {}   # tsid -> ((mtime_ns, size, inode, ctime_ns), state, dict): one stat per read, the outcome memoized too — see _thread_reg_read
+_thread_reg_memo = {}   # tsid -> ((mtime_ns, size, inode, ctime_ns), dict): one stat per read of a record that read; a failed read is never kept — see _thread_reg_read
 
 
 # the stat errors that mean "no such record" (ENOENT, and the path shapes that cannot hold one: a component that is not a
@@ -19903,8 +19903,10 @@ def _thread_reg_read(tsid):
     """(state, dict) for the session's durable SDK registry entry: ("ok", the record), ("missing", {}) when there is no
     record, ("unreadable", {}) when one exists but cannot be read or is not a JSON object. Memoized on the file's
     (mtime, size, inode, ctime) — thirteen callers, two of them per chat build, each decoded the file afresh
-    (2026-09-03); the OUTCOME is memoized too, so an unreadable record costs one stat per call, never a re-parse, and
-    ctime in the key means a permissions repair (no rewrite) is seen. The dict is the memo's own: callers copy."""
+    (2026-09-03). Only a record that READ is kept: a failed read says nothing about the file (an EMFILE or EIO heals with
+    nothing on disk moving), so "unreadable" is answered for that call and the next call reads again; until the
+    2026-10-08 review the outcome was kept too, and a registration that faulted once read as unreadable until it was next
+    written. The dict is the memo's own: callers copy."""
     p = jd.STATE / "sdk" / (tsid + ".json")
     try:
         st = p.stat()
@@ -19914,16 +19916,17 @@ def _thread_reg_read(tsid):
         return ("missing" if e.errno in _REG_MISSING_ERRNOS else "unreadable"), {}
     hit = _thread_reg_memo.get(tsid)
     if hit is not None and hit[0] == key:
-        return hit[1], hit[2]
+        return "ok", hit[1]
     try:
         d = json.loads(p.read_text())
-        state, d = ("ok", d) if isinstance(d, dict) else ("unreadable", {})
     except (OSError, ValueError):
-        state, d = "unreadable", {}
+        d = None
+    if not isinstance(d, dict):
+        return "unreadable", {}
     if tsid not in _thread_reg_memo and len(_thread_reg_memo) >= _thread_reg_memo_bound[0]:
         _thread_reg_memo_sweep()
-    _thread_reg_memo[tsid] = (key, state, d)
-    return state, d
+    _thread_reg_memo[tsid] = (key, d)
+    return "ok", d
 
 
 _thread_reg_memo_bound = [256]   # the memo's size that triggers a sweep (_thread_reg_memo_sweep): twice the registrations the last

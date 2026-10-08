@@ -4,6 +4,7 @@ MISSING record (ENOENT, ENOTDIR, EBADF, ELOOP) from an UNREADABLE one (any other
 Path.exists(), whose ignored set CPython 3.14 widened to every error; a directory that cannot be read is never empty; a task
 directory that exists but cannot be listed raises to its caller. Each fault staged for real (a mode-000 directory, a symlink
 loop), never a stub of the call that would raise. Hermetic: temp roots; synthetic sids."""
+import json
 import os
 import tempfile
 import unittest
@@ -429,6 +430,82 @@ class TaskPlanLoudOnUnreadable(unittest.TestCase):
             else:
                 os.environ["CLAUDE_CONFIG_DIR"] = saved
 
+
+
+class _NoDescriptors:
+    """Every open in this process fails with EMFILE while the block runs (the soft descriptor limit lowered to the lowest free
+    descriptor), and a stat still succeeds: the read fault a loaded host returns, staged for real. It heals when the block
+    ends, and nothing on disk moves, which is the point: a memo keyed on the file's stat cannot see the heal."""
+
+    def __enter__(self):
+        import resource
+        self.resource = resource
+        self.saved = resource.getrlimit(resource.RLIMIT_NOFILE)
+        fd = os.open(os.devnull, os.O_RDONLY)
+        os.close(fd)                                                # the descriptor the next open would get
+        resource.setrlimit(resource.RLIMIT_NOFILE, (fd, self.saved[1]))
+        return self
+
+    def __exit__(self, *exc):
+        self.resource.setrlimit(self.resource.RLIMIT_NOFILE, self.saved)
+        return False
+
+
+class AFailedReadIsNeverKept(unittest.TestCase):
+    """A registration read that fails (EMFILE, EIO) says nothing about the file, so no reader keeps it as the file's answer:
+    the next call reads again. Each memo here is keyed on the registration's stat (mtime, size, inode, ctime), which such a
+    fault never moves, so a kept failure stood until the session's registration was next written (the 2026-10-08 review).
+    The fault is a real EMFILE (_NoDescriptors), never a stub of the read."""
+
+    FORK1 = "11111111-2222-4333-8444-0000000000f1"
+    FORK2 = "11111111-2222-4333-8444-0000000000f2"
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "sdk").mkdir()
+        self.saved = jd.STATE
+        jd._rebind_state(self.root)
+        self.reg = self.root / "sdk" / (SID + ".json")
+
+    def tearDown(self):
+        jd._rebind_state(self.saved)
+        for memo in (jd._lastsid_memo, jd._recpath_memo, km._thread_reg_memo):
+            memo.pop(SID, None)
+
+    def _write(self, **reg):
+        tmp = self.reg.with_name(self.reg.name + ".tmp")
+        tmp.write_text(json.dumps(dict({"sid": SID, "alive": True}, **reg)))
+        os.replace(tmp, self.reg)                                   # write_reg's publish: a new inode, so the stat key moves
+
+    def test_the_last_sid_reader_never_keeps_a_failed_read(self):
+        self._write(lastSid=self.FORK1)
+        self.assertEqual(jd._sdk_last_sid(SID), self.FORK1)
+        self._write(lastSid=self.FORK2)
+        with _NoDescriptors():
+            during = jd._sdk_last_sid(SID)
+        after = jd._sdk_last_sid(SID)
+        self.assertEqual(after, self.FORK2, "the read healed: the file's answer, not the failure kept under its stat")
+        self.assertEqual(during, self.FORK1, "a failed read serves the last good answer for that call, and keeps nothing")
+
+    def test_the_transcript_path_reader_never_keeps_a_failed_read(self):
+        self._write(transcriptPath="/work/a.jsonl")
+        self.assertEqual(jd._sdk_transcript_path(SID), "/work/a.jsonl")
+        self._write(transcriptPath="/work/b.jsonl")
+        with _NoDescriptors():
+            during = jd._sdk_transcript_path(SID)
+        after = jd._sdk_transcript_path(SID)
+        self.assertEqual(after, "/work/b.jsonl", "the read healed: the file's answer, not the failure kept under its stat")
+        self.assertEqual(during, "/work/a.jsonl", "a failed read serves the last good answer for that call, and keeps nothing")
+
+    def test_the_kernels_registration_reader_never_keeps_a_failed_read(self):
+        self._write(lastSid=self.FORK1)
+        self.assertEqual(km._thread_reg_read(SID), ("ok", {"sid": SID, "alive": True, "lastSid": self.FORK1}))
+        self._write(lastSid=self.FORK2)
+        with _NoDescriptors():
+            during = km._thread_reg_read(SID)
+        after = km._thread_reg_read(SID)
+        self.assertEqual(after, ("ok", {"sid": SID, "alive": True, "lastSid": self.FORK2}), "the read healed: read again")
+        self.assertEqual(during, ("unreadable", {}), "the failing call says so, as its callers expect")
 
 if __name__ == "__main__":
     unittest.main()
