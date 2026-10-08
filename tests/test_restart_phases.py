@@ -101,16 +101,27 @@ class PeriodicCheckpoints(unittest.TestCase):
         sid, leaf = "44444444-aaaa-0000-0000-000000000001", "/synthetic/leaf.jsonl"
         km._CKPT_SETTLE_SEEN.clear(); km._CKPT_PERIODIC_SEEN.clear()
         it_stat = iter(leaf_stats); it_key = iter(settle_keys); it_mono = iter(monos)
+        # The scripted clock steps for THIS thread's reads only. `km.time` is the process's one time module, so the patch is
+        # process-wide, and a read by any other thread (another test's kernel thread, a backend's sweep) took one of the
+        # steps, the way a read took one in tests/test_perf_stats.py's cycle split (PR #150). Another thread gets the real
+        # clock; one reads it between every two passes below to keep it so.
+        mine, real_clock = threading.get_ident(), time.monotonic
+
+        def _clock():
+            return next(it_mono) if threading.get_ident() == mine else real_clock()
         with mock.patch.object(km, "_sessions", lambda now: [{"sid": sid, "path": leaf}]), \
              mock.patch.object(km, "_turn_end_key", lambda s, reg=None: next(it_key)), \
              mock.patch.object(km, "_stat_key", lambda p: ("states", 1) if "states" in str(p) else next(it_stat)), \
-             mock.patch.object(km.time, "monotonic", lambda: next(it_mono)), \
+             mock.patch.object(km.time, "monotonic", _clock), \
              mock.patch.object(km, "_prime_leaf_folds", lambda leaf: True), \
              mock.patch.object(km.em, "checkpoint_dirty", lambda: []), \
              mock.patch.object(km.em, "asm_checkpoint_write", lambda *a, **k: writes.append(a[0]) or True), \
              mock.patch.object(km, "_display_sdk_human", lambda s: False):
             for _ in range(len(monos)):
                 km._persist_checkpoints(0)
+                other = threading.Thread(target=time.monotonic, name="another-thread-reads-the-clock")
+                other.start()
+                other.join()              # a read between the passes, off this thread: not one of the scripted steps
         return writes
 
     def test_a_moving_leaf_with_no_settle_evidence_writes_once_per_period(self):
