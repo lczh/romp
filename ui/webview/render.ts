@@ -20885,14 +20885,14 @@ function chatTail(msg: any) {
   if (s.proto === 2 && s.headKnown && !(s.regions && s.regions.some((r) => r.kind === "gap"))) s.headTotal = s.events.reduce((n, e) => n + (isOptimistic(e) || isHeldGroup(e) ? 0 : 1), 0);   // the WHOLE is resident (no gap): its count (T386 stage 2, low 7: a mid-transcript gap holds older history, so the resident count is not the total)
   const before = awaitKey(s.status);
   if (msg.status) s.status = msg.status;
+  // the per-session view flags ride the tail beside the status (2026-09-11): a bell flipped in another column or
+  // browser reaches this caught-up copy on the flip, not on the next full frame
+  applyFrameFlags(s, msg, pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back
   // the background box's task set rides the tail whenever it moved (kernel _chat_bgt_digest, 2026-10-08): until then only a
   // full frame carried it, so a caught-up page kept the set it was last handed whole, and three agents that had finished
   // half an hour earlier still wore the running dot and Stop under a header that counted the one still working
   const bgMoved = "bgTasks" in msg;
   if (bgMoved) s.bgTasks = msg.bgTasks;
-  // the per-session view flags ride the tail beside the status (2026-09-11): a bell flipped in another column or
-  // browser reaches this caught-up copy on the flip, not on the next full frame
-  applyFrameFlags(s, msg, pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
   scheduleRenderTabs();   // once per animation frame however many tails a cycle lands (2026-09-04)
   if (msg.id === activeId) {
