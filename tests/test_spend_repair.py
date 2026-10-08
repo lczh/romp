@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -802,6 +802,299 @@ class Plan(unittest.TestCase):
         repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0, "repairRule": rp.REPAIR_RULE}, turns[2], turns[3] | {"usd": 315.0, "usdRecorded": 320.0}]
         again = {c["t"]: (c["current"], c["corrected"]) for c in rp.plan(repaired, restarts, DAY)["rows"]}
         self.assertEqual(again, {at(10, 5): (315.0, 15.0)}, "315 becomes 15; the standing 2.0 this rule wrote on the first cumulative is kept (low C)")
+
+
+# ── rule 6: a first result that recorded a restored cost-state record (the resume seed's old 8 MB bound) ──
+O = "dddddddd-1111-2222-3333-444444444444"           # a long-lived session (web) whose transcript holds the records
+T6 = "eeeeeeee-1111-2222-3333-444444444444"          # a comment thread of web, forked from it on DAY6
+T2 = "ffffffff-1111-2222-3333-444444444444"          # an earlier comment thread of web, forked on 09-30
+SB = "abababab-1111-2222-3333-444444444444"          # api: a resume its seed read right
+SU = "cdcdcdcd-1111-2222-3333-444444444444"          # tests: a fresh row a record could explain but its calls do not
+DAY6, SEP = "2026-10-05", "2026-09-30"
+MU = lambda i, o, r, w: {"claude-opus-5-5": {"inputTokens": i, "outputTokens": o, "cacheReadInputTokens": r,
+                                             "cacheCreationInputTokens": w, "webSearchRequests": 0, "costUSD": 0}}
+
+
+def iso(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def call(mid, t, model="claude-opus-5-5", **usage):
+    return json.dumps({"type": "assistant", "timestamp": iso(t), "message": {"id": mid, "model": model, "role": "assistant",
+                                                                             "content": [], "usage": usage}})
+
+
+def cost_state(sid, total, mu):
+    return json.dumps({"type": "cost-state", "sessionId": sid, "totalCostUSD": total, "totalAPIDuration": 1,
+                       "totalDuration": 2, "startTime": 3, "modelUsage": mu})
+
+
+class RestoredCostState(unittest.TestCase):
+    """Rule 6 over a synthetic ledger: web's transcript holds two cost-state records, $40 then $100. Its comment thread
+    web-comment-2 (forked on DAY6) restored the $100 record and its first row carries $100 and the record's tokens on top
+    of its own three calls; web-comment-1 (forked on 09-30, before the $100 record existed) restored the $40 one, and its
+    calls survive only in a repair backup's split copy. api's resume was seeded right (its row is its own calls), and
+    tests' row sits $79.50 above its calls with a $70 record in its transcript: no record explains it, so it stands."""
+
+    def setUp(self):
+        self.state = Path(tempfile.mkdtemp())
+        self.claude = Path(tempfile.mkdtemp())
+        proj = self.claude / "projects" / "-tmp-notes-api"
+        (proj / T6 / "subagents").mkdir(parents=True)
+        self.t6 = int(datetime(2026, 10, 5, 10, 30).timestamp())
+        self.t2 = int(datetime(2026, 9, 30, 18, 0).timestamp())
+        self.tb = int(datetime(2026, 10, 5, 10, 40).timestamp())
+        self.tu = int(datetime(2026, 10, 5, 11, 5).timestamp())
+        old = self.t2 - 86400
+        (proj / ("%s.jsonl" % O)).write_text("\n".join([
+            call("msg_old", old, input_tokens=5, output_tokens=5),
+            cost_state(O, 40.0, MU(400, 800, 120000, 16000)),
+            call("msg_mid", old + 60, input_tokens=5, output_tokens=5),
+            cost_state(O, 100.0, MU(1000, 2000, 300000, 40000)),
+            call("msg_late", self.t6 - 600, input_tokens=5, output_tokens=5)]) + "\n")
+        # the thread's own file: the copied history (its old stamps), then its first turn: a call streamed as two records
+        # (one id), a fast-mode call, and a haiku call in a subagent's file
+        (proj / ("%s.jsonl" % T6)).write_text("\n".join([
+            call("msg_old", old, input_tokens=5, output_tokens=5),
+            call("msg_t1", self.t6 - 20, input_tokens=10, output_tokens=200, cache_read_input_tokens=100000, cache_creation_input_tokens=2000),
+            call("msg_t1", self.t6 - 19, input_tokens=10, output_tokens=500, cache_read_input_tokens=100000, cache_creation_input_tokens=2000),
+            call("msg_t2", self.t6 - 5, input_tokens=0, output_tokens=1000, cache_read_input_tokens=200000, speed="fast")]) + "\n")
+        (proj / T6 / "subagents" / "agent-a1.jsonl").write_text(
+            call("msg_s1", self.t6 - 10, model="claude-haiku-4-5-20251001", input_tokens=1000, output_tokens=100) + "\n")
+        own6 = (10 * 4 + 500 * 20 + 100000 * 0.2 + 2000 * 5) / 1e6 + (1000 * 40 + 200000 * 0.4) / 1e6 + (1000 * 1 + 100 * 5) / 1e6
+        self.own6 = own6
+        # web-comment-1's calls only in the split copy a repair kept
+        bk = self.state / "repair-backup-20261005T000000Z" / "projects" / "-tmp-notes-api"
+        bk.mkdir(parents=True)
+        (bk / ("%s.jsonl.superseded-1.at-2" % T2)).write_text(
+            call("msg_c1", self.t2 - 10, input_tokens=100, output_tokens=1000, cache_read_input_tokens=50000) + "\n")
+        own2 = (100 * 4 + 1000 * 20 + 50000 * 0.2) / 1e6
+        (proj / ("%s.jsonl" % SB)).write_text("\n".join([
+            cost_state(SB, 50.0, MU(10, 10, 10, 10)),
+            call("msg_b1", self.tb - 3, input_tokens=1000, output_tokens=10000, cache_read_input_tokens=500000)]) + "\n")
+        ownb = (1000 * 4 + 10000 * 20 + 500000 * 0.2) / 1e6
+        (proj / ("%s.jsonl" % SU)).write_text("\n".join([
+            cost_state(SU, 70.0, MU(10, 10, 10, 10)),
+            call("msg_u1", self.tu - 3, input_tokens=0, output_tokens=25000)]) + "\n")
+        reg(self.state, O, name="web", lastSid=O, launchedLogin="login-one")
+        reg(self.state, T6, name="web-comment-2", lastSid=T6, threadOf=O, forkedFrom={"sid": O, "name": "web"}, launchedLogin="login-one")
+        reg(self.state, T2, name="web-comment-1", lastSid=T2, threadOf=O, forkedFrom={"sid": O, "name": "web"})
+        reg(self.state, SB, name="api", lastSid=SB)
+        reg(self.state, SU, name="tests", lastSid=SU)
+        fresh = lambda sid, name, t, usd, tok, dur: {"t": t, "sid": sid, "name": name, "resultT": t + 0.25, "fedT": t - dur,
+                                                     "durationMs": int(dur * 1000), "usd": round(usd, 6),
+                                                     "cumulativeUsd": round(usd, 6), "spendBaseline": "fresh",
+                                                     "tokIn": tok[0], "tokOut": tok[1], "tokCacheR": tok[2], "tokCacheW": tok[3]}
+        self.row6 = fresh(T6, "web-comment-2", self.t6, 100.0 + own6, [1000 + 1010, 2000 + 1600, 300000 + 300000, 40000 + 2000], 25)
+        self.row2 = fresh(T2, "web-comment-1", self.t2, 40.0 + own2, [400 + 100, 800 + 1000, 120000 + 50000, 16000], 20)
+        self.rowb = fresh(SB, "api", self.tb, ownb, [1000, 10000, 500000, 0], 10)
+        self.rowu = fresh(SU, "tests", self.tu, 80.0, [10, 25010, 10, 10], 10)
+        ordinary = {"t": self.t6 + 60, "sid": O, "name": "web", "resultT": self.t6 + 60, "usd": 2.0, "cumulativeUsd": 900.0,
+                    "tokIn": 5, "tokOut": 5, "tokCacheR": 0, "tokCacheW": 0}
+        self.turns = [self.row2, self.row6, ordinary, self.rowb, self.rowu]
+        (self.state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in self.turns))
+        tok = lambda r: [r["tokIn"], r["tokOut"], r["tokCacheR"], r["tokCacheW"]]
+        def bucket(rows, login_rows=(), key=None):
+            b = {"usd": round(sum(r["usd"] for r in rows), 6), "turns": len(rows)}
+            for i, k in enumerate(("tokIn", "tokOut", "tokCacheR", "tokCacheW")):
+                b[k] = sum(tok(r)[i] for r in rows)
+            by = {}
+            for r in rows:
+                owner = O if r["sid"] in (T6, T2) else r["sid"]
+                e = by.setdefault(owner, {"usd": 0.0, "turns": 0, "tok": 0})
+                e["usd"] = round(e["usd"] + r["usd"], 6); e["turns"] += 1; e["tok"] += sum(tok(r))
+            b["bySid"] = by
+            if login_rows:
+                b["byLogin"] = {"login-one": {"usd": round(sum(r["usd"] for r in login_rows), 6), "turns": len(login_rows),
+                                              "tok": sum(sum(tok(r)) for r in login_rows)}}
+            if key:
+                b["key"] = key
+            return b
+        h10, h11 = [self.row6, ordinary, self.rowb], [self.rowu]
+        self.spend = {"hours": {"%sT10" % DAY6: bucket(h10, [self.row6, ordinary]), "%sT11" % DAY6: bucket(h11),
+                                "%sT18" % SEP: bucket([self.row2])},
+                      "days": {DAY6: bucket(h10 + h11, [self.row6, ordinary], key={"usd": 0.3, "turns": 1, "tok": 10}),
+                               SEP: bucket([self.row2]), "2026-09-29": {"usd": 7.0, "turns": 2}}}
+        (self.state / "spend.json").write_text(json.dumps(self.spend))
+        rp._RECORDS.clear(); rp._CALLS.clear()
+
+    def run_main(self, *args):
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = rp.main(["--restored-cost-state", "--state", str(self.state), "--claude-dir", str(self.claude), *args])
+        return code, out.getvalue()
+
+    def test_call_cost_is_claude_codes_per_call_price(self):
+        self.assertAlmostEqual(rp.call_cost("claude-opus-5-5", {"input_tokens": 1e6}), 4.0)
+        self.assertAlmostEqual(rp.call_cost("claude-opus-5-5", {"input_tokens": 1e6, "speed": "fast"}), 8.0, msg="the fast rate")
+        self.assertAlmostEqual(rp.call_cost("claude-opus-5", {"cache_read_input_tokens": 1e6}), 0.5, msg="opus-5 is not opus-5-5")
+        self.assertAlmostEqual(rp.call_cost("claude-opus-5-5[1m]", {"cache_creation_input_tokens": 3e6,
+                                                                    "cache_creation": {"ephemeral_1h_input_tokens": 1e6}}),
+                               8.0 + 2 * 5.0, msg="the 1 h writes at their own rate, the rest at the 5 m rate")
+        self.assertAlmostEqual(rp.call_cost("claude-haiku-4-5-20251001", {"output_tokens": 1e6, "inference_geo": "us"}), 5.5)
+        self.assertAlmostEqual(rp.call_cost("claude-sonnet-5", {"server_tool_use": {"web_search_requests": 3}}), 0.03)
+        self.assertIsNone(rp.call_cost("claude-unknown-9", {"input_tokens": 1}), "no price here: never a guess")
+
+    def test_the_plan_finds_the_rows_that_recorded_a_restored_record_and_only_those(self):
+        p = rp.restored_plan(read_turns(self.state), self.state, self.claude)
+        got = {c["sid"]: c for c in p["rows"]}
+        self.assertEqual(sorted(got), sorted([T6, T2]), "the two threads; api's right seed and tests' unexplained row stand")
+        c6 = got[T6]
+        self.assertEqual((c6["dusd"], c6["dtok"], c6["owner"], c6["source"]),
+                         (100.0, [1000, 2000, 300000, 40000], O, "its parent's transcript"))
+        self.assertAlmostEqual(c6["corrected"], self.own6, places=6)
+        self.assertEqual(c6["tokCorrected"], [1010, 1600, 300000, 2000], "the turn's own tokens, the subagent's included")
+        self.assertEqual(c6["calls"], 3, "a call streamed as two records is one; the copied history is outside the turn")
+        self.assertEqual(got[T2]["dusd"], 40.0, "the record the CLI could have restored then: the $100 one is above the row")
+        self.assertEqual([c["sid"] for c in p["unverified"]], [SU])
+        self.assertIn("no record in the transcripts it loaded holds that figure", p["unverified"][0]["why"])
+
+    def test_a_dry_run_prints_the_days_and_the_months_and_writes_nothing(self):
+        before = {f.name: f.read_bytes() for f in self.state.iterdir() if f.is_file()}
+        code, out = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertIn("rule 6: 2 row(s) recorded a restored cost-state record", out)
+        self.assertIn("2026-09-30    1 row(s)  -       40.00   in -400  out -800  cache read -120000  cache write -16000", out)
+        self.assertIn("2026-10-05    1 row(s)  -      100.00   in -1000  out -2000  cache read -300000  cache write -40000", out)
+        sep_before = 7.0 + self.row2["usd"]
+        self.assertIn("2026-09  %12.2f -> %12.2f" % (sep_before, sep_before - 40.0), out)
+        oct_before = self.spend["days"][DAY6]["usd"]
+        self.assertIn("2026-10  %12.2f -> %12.2f" % (oct_before, oct_before - 100.0), out)
+        self.assertIn("login login-one (the only login whose share holds it)", out)
+        self.assertIn("login - (no byLogin split in its buckets)", out)
+        self.assertIn("dry run: nothing written", out)
+        self.assertEqual({f.name: f.read_bytes() for f in self.state.iterdir() if f.is_file()}, before)
+
+    def test_apply_takes_the_record_out_of_the_buckets_bysid_and_bylogin_and_stamps_the_rows(self):
+        code, out = self.run_main("--apply")
+        self.assertEqual(code, 0, out)
+        self.assertIn("applied: 2 turn row(s) corrected", out)
+        after = json.loads((self.state / "spend.json").read_text())
+        h, d, s = after["hours"]["%sT10" % DAY6], after["days"][DAY6], self.spend
+        for b, b0 in ((h, s["hours"]["%sT10" % DAY6]), (d, s["days"][DAY6])):
+            self.assertAlmostEqual(b["usd"], b0["usd"] - 100.0, places=6)
+            self.assertEqual([b[k] for k in rp.TOKS], [b0[k] - v for k, v in zip(rp.TOKS, (1000, 2000, 300000, 40000))])
+            self.assertAlmostEqual(b["bySid"][O]["usd"], b0["bySid"][O]["usd"] - 100.0, places=6)
+            self.assertEqual(b["bySid"][O]["tok"], b0["bySid"][O]["tok"] - 343000)
+            self.assertEqual(b["bySid"][SB], b0["bySid"][SB], "api untouched")
+            self.assertAlmostEqual(b["byLogin"]["login-one"]["usd"], b0["byLogin"]["login-one"]["usd"] - 100.0, places=6)
+            self.assertEqual(b["byLogin"]["login-one"]["tok"], b0["byLogin"]["login-one"]["tok"] - 343000)
+            self.assertEqual((b["turns"], b["byLogin"]["login-one"]["turns"]), (b0["turns"], b0["byLogin"]["login-one"]["turns"]),
+                             "turn counts stay")
+        self.assertEqual(d["key"], s["days"][DAY6]["key"], "the key split stays")
+        self.assertEqual(after["hours"]["%sT11" % DAY6], s["hours"]["%sT11" % DAY6], "tests' hour untouched")
+        self.assertAlmostEqual(after["days"][SEP]["usd"], s["days"][SEP]["usd"] - 40.0, places=6)
+        self.assertAlmostEqual(after["hours"]["%sT18" % SEP]["bySid"][O]["usd"], s["hours"]["%sT18" % SEP]["bySid"][O]["usd"] - 40.0, places=6)
+        rows = {(r["sid"], r["t"]): r for r in read_turns(self.state)}
+        r6 = rows[(T6, self.t6)]
+        self.assertAlmostEqual(r6["usd"], self.own6, places=6)
+        self.assertEqual((r6["usdRecorded"], r6["restoredCostUsd"], r6["repairRule"]), (self.row6["usd"], 100.0, rp.REPAIR_RULE_RESTORED))
+        self.assertEqual([r6[k] for k in rp.TOKS], [1010, 1600, 300000, 2000])
+        self.assertEqual(r6["tokRecorded"], [2010, 3600, 600000, 42000], "the kernel's figures are kept")
+        self.assertEqual(r6["cumulativeUsd"], self.row6["cumulativeUsd"], "the CLI's own cumulative stays as it said it")
+        self.assertEqual(rows[(SB, self.tb)], self.rowb)
+        self.assertEqual(rows[(SU, self.tu)], self.rowu)
+        self.assertEqual(len(rows), len(self.turns), "no row lost")
+        baks = sorted(p.name.split(".bak-")[0] for p in self.state.glob("*.bak-*"))
+        self.assertEqual(baks, ["spend.json", "turns.jsonl"])
+        self.assertEqual(json.loads(next(self.state.glob("spend.json.bak-*")).read_text()), self.spend)
+        self.assertEqual(len(after["repairJournal"]["folded"]), 1, "the completion rides the ledger's own write")
+        self.assertEqual(rp.journal_pending(self.state, after, name=rp.RESTORED_JOURNAL), [])
+
+    def test_a_second_run_finds_nothing_and_the_staircase_rule_leaves_the_rows_alone(self):
+        self.assertEqual(self.run_main("--apply")[0], 0)
+        spend1, turns1 = (self.state / "spend.json").read_bytes(), (self.state / "turns.jsonl").read_bytes()
+        rp._RECORDS.clear(); rp._CALLS.clear()
+        code, out = self.run_main("--apply", "--no-backup")
+        self.assertEqual(code, 0)
+        self.assertIn("rule 6: 0 row(s)", out)
+        self.assertIn("nothing to apply", out)
+        self.assertEqual(((self.state / "spend.json").read_bytes(), (self.state / "turns.jsonl").read_bytes()), (spend1, turns1))
+        stair = rp.plan(read_turns(self.state), [], DAY6)
+        self.assertEqual(stair["rows"], [], "a corrected fresh-baseline row is no staircase step and nothing to restore")
+
+    def test_a_run_that_dies_between_the_writes_is_folded_once_by_the_next(self):
+        # after the rows' rewrite, before the ledger's: the journaled deltas fold on the next run, once
+        real = rp.mark_folded
+        def boom(*a, **k):
+            raise RuntimeError("died before the ledger's write")
+        rp.mark_folded = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                self.run_main("--apply", "--no-backup")
+        finally:
+            rp.mark_folded = real
+        self.assertEqual(json.loads((self.state / "spend.json").read_text()), self.spend, "the ledger was not written")
+        self.assertEqual(rows_stamped(self.state), 2, "the rows were")
+        rp._RECORDS.clear(); rp._CALLS.clear()
+        code, out = self.run_main("--apply", "--no-backup")
+        self.assertEqual(code, 0, out)
+        self.assertIn("2 delta(s) from 1 earlier run(s) whose bucket write did not complete were folded now", out)
+        after = json.loads((self.state / "spend.json").read_text())
+        self.assertAlmostEqual(after["days"][DAY6]["usd"], self.spend["days"][DAY6]["usd"] - 100.0, places=6, msg="once, not twice")
+        self.assertAlmostEqual(after["days"][SEP]["usd"], self.spend["days"][SEP]["usd"] - 40.0, places=6)
+        # before the rows' rewrite: the journal entry is there, the rows are not stamped, so it folds nothing and the plan
+        # finds the rows again
+        self.setUp()
+        real_turns = rp.apply_restored_to_turns
+        def boom_rows(path, rows, write=True):
+            if write:
+                raise RuntimeError("died before the rows' rewrite")
+            return real_turns(path, rows, write)
+        rp.apply_restored_to_turns = boom_rows
+        try:
+            with self.assertRaises(RuntimeError):
+                self.run_main("--apply", "--no-backup")
+        finally:
+            rp.apply_restored_to_turns = real_turns
+        self.assertEqual(rows_stamped(self.state), 0)
+        rp._RECORDS.clear(); rp._CALLS.clear()
+        code, out = self.run_main("--apply", "--no-backup")
+        self.assertEqual(code, 0, out)
+        after = json.loads((self.state / "spend.json").read_text())
+        self.assertAlmostEqual(after["days"][DAY6]["usd"], self.spend["days"][DAY6]["usd"] - 100.0, places=6, msg="once, not twice")
+        self.assertEqual(rows_stamped(self.state), 2)
+        self.assertEqual(rp.journal_pending(self.state, after, name=rp.RESTORED_JOURNAL), [])
+
+    def test_a_promoted_thread_a_pruned_hour_and_an_untranscribed_side_call_are_still_folded_where_the_kernel_put_them(self):
+        """Three shapes of the live ledger. A thread promoted since bills itself now, but the kernel billed its turn to
+        the owner then: the owner's bySid share is the one that holds the row. The ledger keeps 800 hours, fewer than its
+        days: a row whose hour is gone is corrected in its day, said once. And the CLI bills small side calls it writes to
+        no transcript (a session title): a row a few cents above its calls plus the record still matches it."""
+        reg(self.state, T6, name="web-comment-2", lastSid=T6, forkedFrom={"sid": O, "name": "web"}, launchedLogin="login-one")
+        spend = json.loads((self.state / "spend.json").read_text())
+        del spend["hours"]["%sT18" % SEP]
+        side = 0.035
+        for b in (spend["hours"]["%sT10" % DAY6], spend["days"][DAY6]):
+            b["usd"] = round(b["usd"] + side, 6)
+            b["bySid"][O]["usd"] = round(b["bySid"][O]["usd"] + side, 6)
+            b["byLogin"]["login-one"]["usd"] = round(b["byLogin"]["login-one"]["usd"] + side, 6)
+        (self.state / "spend.json").write_text(json.dumps(spend))
+        turns = read_turns(self.state)
+        for r in turns:
+            if r["sid"] == T6:
+                r["usd"] = r["cumulativeUsd"] = round(r["usd"] + side, 6)
+        (self.state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in turns))
+        code, out = self.run_main("--apply", "--no-backup")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 row(s) fall in hours the ledger no longer keeps", out)
+        self.assertNotIn("below zero", out)
+        after = json.loads((self.state / "spend.json").read_text())
+        self.assertAlmostEqual(after["days"][DAY6]["bySid"][O]["usd"], spend["days"][DAY6]["bySid"][O]["usd"] - 100.0, places=6,
+                               msg="billed where the kernel put it: the owner, not the promoted thread")
+        self.assertNotIn(T6, after["days"][DAY6]["bySid"])
+        self.assertAlmostEqual(after["days"][SEP]["usd"], spend["days"][SEP]["usd"] - 40.0, places=6)
+        r6 = [r for r in read_turns(self.state) if r["sid"] == T6][0]
+        self.assertAlmostEqual(r6["usd"], self.own6 + side, places=6, msg="the side call stays the turn's: only the record goes")
+
+
+def read_turns(state):
+    return [json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines() if l.strip()]
+
+
+def rows_stamped(state):
+    return sum(1 for r in read_turns(state) if r.get("repairRule") == rp.REPAIR_RULE_RESTORED)
 
 
 if __name__ == "__main__":
