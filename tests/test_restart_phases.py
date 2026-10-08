@@ -171,24 +171,27 @@ class ExitPhases(unittest.TestCase):
         # the pre-drain line (the deadline less the drain's reserve), and the drain gets what the deadline has left. These pin
         # the lines that implement it; each is also driven in tests/test_restart_cuts.py ExitPath: the line and the checkpoint
         # writes by test_one_deadline_from_the_handlers_entry_holds_the_drains_reserve and
-        # test_no_checkpoint_write_starts_past_the_pre_drain_line, the priming's and the assembly documents' caps and line by
-        # test_the_priming_and_assembly_phases_skip_at_their_cap_and_at_the_line, the drain's floor by
-        # test_the_drain_is_handed_its_floor_when_the_deadline_is_spent
+        # test_no_checkpoint_write_starts_past_the_pre_drain_line, the priming's cap and line by
+        # test_the_priming_phase_skips_at_its_cap_and_at_the_line, the drain's floor by
+        # test_the_drain_is_handed_its_floor_when_the_deadline_is_spent, and the absent assembly phase by
+        # test_the_exit_writes_no_assembly_document_and_the_drain_follows_the_checkpoint_writes
         import inspect
         src = inspect.getsource(km._drain_and_exit)
         self.assertIn("_pre_drain = _end - float(EXIT_DRAIN_BUDGET_S)", src, "the drain's reserve is held back from the start")
         self.assertIn("_prime_end = min(_t + float(EXIT_PRIME_BUDGET_S), _pre_drain)", src)
         self.assertIn("_write_end = min(_t + float(EXIT_CKPT_WRITE_BUDGET_S), _pre_drain)", src,
                       "the fold checkpoint writes end by their cap and the pre-drain line (the 1:19 PM exit met the SIGKILL)")
-        self.assertIn("_asm_end = min(_t + float(EXIT_ASM_BUDGET_S), _pre_drain)", src, "and so do the assembly-document writes")
+        self.assertNotIn("asm_checkpoint_write", src, "the exit writes no assembly document (2026-10-08)")
+        self.assertFalse(hasattr(km, "EXIT_ASM_BUDGET_S"), "and holds no share of the grace for one")
         self.assertIn("_drain_timeout = max(0.25, _end - _t)", src, "the SDK drain is handed what the deadline has left")
         self.assertIn("res = be.drain(_drain_timeout)", src)
-        self.assertLessEqual(km.EXIT_PRIME_BUDGET_S + km.EXIT_CKPT_WRITE_BUDGET_S + km.EXIT_ASM_BUDGET_S + km.EXIT_DRAIN_BUDGET_S,
+        self.assertLessEqual(km.EXIT_PRIME_BUDGET_S + km.EXIT_CKPT_WRITE_BUDGET_S + km.EXIT_DRAIN_BUDGET_S,
                              km.EXIT_DEADLINE_S + 1e-9, "the caps and the reserve fit inside the deadline")
         self.assertLess(km.EXIT_DEADLINE_S, km.EXIT_GRACE_S, "and the deadline inside the manager's grace")
-        for key in ("rowS", "memosS", "listS", "primeS", "writeS", "asmS", "drainS"):
+        for key in ("rowS", "memosS", "listS", "primeS", "writeS", "drainS"):
             self.assertIn('_phase("%s", ' % key, src, "each phase is timed and logged")
-        self.assertIn('_phases["ckptS"]', src, "the priming-to-assembly window older cut rows carried as ckptS")
+        self.assertNotIn('_phase("asmS", ', src, "no assembly phase")
+        self.assertIn('_phases["ckptS"]', src, "the priming-to-checkpoints window older cut rows carried as ckptS")
         self.assertIn("audit_reason=reason, phases=_phases)", src, "the phases reach the row an exit writes after its drain when "
                                                                     "its early row could not be built")
         self.assertIn("boot_phase=_mark_boot,", open(os.path.join(BIN, "romp-kernel")).read(),
@@ -248,7 +251,9 @@ class ExitBudgetsScaleWithTheGrace(unittest.TestCase):
     def test_the_deadline_and_the_caps_follow_the_manager_grace(self):
         # the exit path (2026-10-05): one deadline, 40 percent of the grace and at most 4 s; the drain's reserve 35 percent of
         # it, never under the 0.9 s top of the drain times recorded with session hosts on (the review's round two: 0.7 s at the
-        # default 5 s grace was under it) nor over the deadline; the three caps shares of the window before the drain.
+        # default 5 s grace was under it) nor over the deadline; the two caps shares of the window before the drain, the
+        # priming's 15 percent and the checkpoint writes' 70 (45 until 2026-10-08, when the exit stopped writing assembly
+        # documents and their 25 percent went to the checkpoint writes; the rest is the memos and the listing).
         # _exit_budgets is what the module's load computes, for any grace and environment, so each grace value is read here
         # without loading a kernel per value
         self.assertEqual(km.EXIT_DRAIN_FLOOR_S, 0.9)
@@ -257,7 +262,10 @@ class ExitBudgetsScaleWithTheGrace(unittest.TestCase):
             self.assertAlmostEqual(b["deadline"], deadline, places=6, msg="grace %s" % grace)
             self.assertAlmostEqual(b["drain"], drain, places=6, msg="grace %s" % grace)
             self.assertAlmostEqual(b["work"], deadline - drain, places=6)
-            self.assertLessEqual(b["prime"] + b["ckpt"] + b["asm"] + b["drain"], b["deadline"] + 1e-9,
+            self.assertNotIn("asm", b, "no assembly-document cap")
+            self.assertAlmostEqual(b["prime"], 0.15 * b["work"], places=6)
+            self.assertAlmostEqual(b["ckpt"], 0.70 * b["work"], places=6, msg="the assembly share went to the checkpoint writes")
+            self.assertLessEqual(b["prime"] + b["ckpt"] + b["drain"], b["deadline"] + 1e-9,
                                  "the caps and the reserve fit inside the deadline at %s s" % grace)
         b = km._exit_budgets(8.0, env={"ROMP_EXIT_DEADLINE_S": "3", "ROMP_EXIT_DRAIN_BUDGET_S": "1", "ROMP_EXIT_CKPT_WRITE_BUDGET_S": "0.5"})
         self.assertEqual((b["deadline"], b["drain"], b["ckpt"]), (3.0, 1.0, 0.5), "an explicit knob still sets its value outright")
@@ -265,8 +273,8 @@ class ExitBudgetsScaleWithTheGrace(unittest.TestCase):
         self.assertEqual(km._exit_budgets(10.0, env={"ROMP_EXIT_DRAIN_BUDGET_S": "9"})["work"], 0.0,
                          "a reserve past the deadline leaves no window, never a negative one")
         here = km._exit_budgets(km.EXIT_GRACE_S)
-        self.assertEqual((km.EXIT_DEADLINE_S, km.EXIT_DRAIN_BUDGET_S, km.EXIT_PRIME_BUDGET_S, km.EXIT_CKPT_WRITE_BUDGET_S, km.EXIT_ASM_BUDGET_S),
-                         (here["deadline"], here["drain"], here["prime"], here["ckpt"], here["asm"]), "the module's values are the function's")
+        self.assertEqual((km.EXIT_DEADLINE_S, km.EXIT_DRAIN_BUDGET_S, km.EXIT_PRIME_BUDGET_S, km.EXIT_CKPT_WRITE_BUDGET_S),
+                         (here["deadline"], here["drain"], here["prime"], here["ckpt"]), "the module's values are the function's")
         src = open(km.__file__).read()
         self.assertIn('EXIT_GRACE_S = float(os.environ.get("ROMP_SHUTDOWN_GRACE_MS", "5000")) / 1000.0', src, "the kernel assumes 5 s unless the manager says otherwise")
         mgr = open(os.path.join(BIN, "romp-manager")).read()

@@ -165,6 +165,7 @@ def bucket_bounds(key: str, kind: str, tz=None) -> tuple[float, float]:
 
 # ── the ledgers, parsed ─────────────────────────────────────────────────────────────────────────────────
 DONE_FIELDS = ("ckptWritten", "ckptLeft", "primed", "primeSkipped", "asmSkipped", "asmBusy", "deadlineS", "elapsedS")
+#               asmSkipped and asmBusy: only in the done rows of exits before 2026-10-08, the last that wrote assembly documents
 
 
 def fold_exit_done(rows: list) -> list:

@@ -14132,11 +14132,12 @@ def _checkpoint_first_sight(now):
     holds, its settle evidence (_ckpt_settle_key) goes into _CKPT_SETTLE_SEEN and its leaf's stat into _CKPT_PERIODIC_SEEN,
     and nothing is written. The settle write (_persist_checkpoints) runs LAST in the pass and took first sight there itself,
     tens of seconds into a boot's first pass, so a turn that settled during that pass was recorded as first sight and its
-    documents waited for the next settle, a leaf move past CKPT_PERIOD_S, or the exit drain (a crash before either left the
-    next boot the older document and the longer tail). Taken here, a move during the pass is new evidence at its end. At
-    the pass's start rather than at boot: the pass's discover memo (_sessions) is open here and its jobs read it anyway, so
-    this adds no sweep (main(), where the boot runs, has no such scope), and a session first seen after the boot is covered
-    by the same rule. A session either table already holds costs a dict lookup."""
+    documents waited for the next settle, a leaf move past CKPT_PERIOD_S, or the exit drain (its fold checkpoints only: the
+    exit writes no assembly document; a crash before either left the next boot the older document and the longer tail).
+    Taken here, a move during the pass is new evidence at its end. At the pass's start rather than at boot: the pass's
+    discover memo (_sessions) is open here and its jobs read it anyway, so this adds no sweep (main(), where the boot runs,
+    has no such scope), and a session first seen after the boot is covered by the same rule. A session either table already
+    holds costs a dict lookup."""
     mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
@@ -14159,8 +14160,9 @@ def _persist_checkpoints(now):
     A second trigger (the restart-path work, 2026-09-11): a session whose LEAF moved since its last periodic
     write, at most once per CKPT_PERIOD_S, so a turn that runs for an hour with no states-log row still keeps
     its checkpoints and assembly document close to current, and the exit path finds little left to write (the
-    exit's own writes cost 4 to 6 s of a 20 s restart when they carried everything). Exit still writes everything
-    dirty (_drain_and_exit). Returns how many files were written.
+    exit's own writes cost 4 to 6 s of a 20 s restart when they carried everything). The exit still writes every dirty
+    fold checkpoint it has time for (_drain_and_exit) and, since 2026-10-08, no assembly document: this write, the periodic
+    one and the converge pass are their writers. Returns how many files were written.
     WHO runs this (2026-10-05): the jobs thread, as the LAST job of its pass (_jobs_pass). It was a job of the pusher's
     cycle, where each write (a fold document's carry, which can re-read the document it replaces, and an assembly
     document's build) ran inside the cycle and held up the next dashboard frame, though nothing in a frame reads it and it
@@ -14176,8 +14178,8 @@ def _persist_checkpoints(now):
     session, so a pass running when SIGTERM lands finishes the one session it is writing and stops, rather than writing the
     same dirty set the exit's own checkpoint phase writes (two writers on one interpreter lock). The exit does not wait for it:
     a fold document both write ends as one whole document (each write stages to a tmp of its own thread and renames it into
-    place), the exit's assembly document of the same leaf waits on the leaf's writer lock for what is left of its own window
-    and skips the leaf when the write in flight outlasts it, and whatever the pass leaves is still dirty for the exit's phase.
+    place), an assembly document the pass is writing is staged to a tmp and renamed the same way (the process exit can cut
+    it short, never leave half a document), and whatever the pass leaves is still dirty for the exit's phase.
     The session in flight starts no document refresh once the stand-down is set (_asm_refresh_maybe starts a whole-leaf
     parse on a thread of its own, which would compete with the exit for the interpreter lock until the process ends)."""
     written = 0
@@ -30801,9 +30803,19 @@ def _kernel_sample_tick(now=None):
 # what the deadline has left (at least 0.25 s). The
 # reserve is smaller than the drain's old share of the grace (1.12 s at the manager's 8 s, where the old share was 2.625 s;
 # 0.9 s at the default 5 s, where it was 1.575 s): the drain is handed every second the earlier phases leave, but a slow
-# drain past its reserve now meets the deadline sooner than it met the old share. The three phase budgets are CAPS inside
-# the work window before the drain (priming 15 percent, checkpoint writes 45, assembly documents 25; the rest is the
-# memos and the listing).
+# drain past its reserve now meets the deadline sooner than it met the old share. The two phase budgets are CAPS inside
+# the work window before the drain (priming 15 percent, checkpoint writes 70; the rest is the memos and the listing).
+# The exit writes NO assembly documents (2026-10-08). Their writers run while the kernel lives (the settle, the periodic
+# write of a turn that runs on, the converge pass for idle leaves), and the one the exit owed was rare (no document an
+# exit wrote still stood on either live kernel after nine exits) and cost more to write than it saved: a document left
+# stale or missing costs the next boot a longer or whole parse (0.1 to 0.3 s per session measured at 4 to 24 MB) and is
+# never wrong, while its write walks every pre-cut record and cannot be stopped once begun (one took 4.86 s against its
+# 0.28 s cap in a lab, the exit's whole grace but 0.12 s, the drain left its floor). The case the exit still covered: an
+# idle leaf with no document whose whole read a quiescence drop popped before the converge pass looked (the pass writes
+# from that read, never one of its own) waits for a later kernel's pass or its next settle, parsing whole meanwhile. The phase's
+# 25 percent went to the checkpoint writes, the last phase before the drain that owes work: a fold checkpoint write
+# encodes states already in memory, bounded by its document (each fold's state capped at _CKPT_FOLD_CAP), so the one
+# write in flight at the line overruns it by milliseconds, not seconds.
 # Before this the four budgets were shares of the grace that summed to 94 percent of it, counted from the drain's own start
 # (after the broadcast and the audit read), with the memos, the listing and the reap left out, and the cut row was written
 # last: a busy exit met the SIGKILL and lost the one row that would have said so. An explicit ROMP_EXIT_DEADLINE_S or
@@ -30818,8 +30830,8 @@ EXIT_DRAIN_FLOOR_S = 0.9                  # the drain's reserve is never under t
 
 def _exit_budgets(grace_s, env=None):
     """The exit's deadline and budgets in seconds for a SIGTERM grace of `grace_s`, read from `env` (the process environment
-    by default): {deadline, drain, work, prime, ckpt, asm}. `work` is the window before the drain (the deadline less the
-    drain's reserve, never below zero); the three phase budgets are shares of it and caps, each phase also ending at the
+    by default): {deadline, drain, work, prime, ckpt}. `work` is the window before the drain (the deadline less the
+    drain's reserve, never below zero); the two phase budgets are shares of it and caps, each phase also ending at the
     pre-drain line. The reserve is 35 percent of the deadline, floored at EXIT_DRAIN_FLOOR_S and capped at the deadline; an
     explicit ROMP_EXIT_DRAIN_BUDGET_S sets it outright. Pure, so the shares are pinned for any grace without loading a kernel
     per value; the module calls it once, at load."""
@@ -30829,8 +30841,7 @@ def _exit_budgets(grace_s, env=None):
     work = max(0.0, deadline - drain)
     return {"deadline": deadline, "drain": drain, "work": work,
             "prime": float(env.get("ROMP_EXIT_PRIME_BUDGET_S") or 0.15 * work),
-            "ckpt": float(env.get("ROMP_EXIT_CKPT_WRITE_BUDGET_S") or 0.45 * work),
-            "asm": float(env.get("ROMP_EXIT_ASM_BUDGET_S") or 0.25 * work)}
+            "ckpt": float(env.get("ROMP_EXIT_CKPT_WRITE_BUDGET_S") or 0.70 * work)}
 
 
 _EXIT_BUDGETS = _exit_budgets(EXIT_GRACE_S)
@@ -30838,7 +30849,6 @@ EXIT_DEADLINE_S = _EXIT_BUDGETS["deadline"]             # every phase of the exi
 EXIT_DRAIN_BUDGET_S = _EXIT_BUDGETS["drain"]            # held back for the SDK drain (0.1 to 0.9 s measured with session hosts on; floored there)
 EXIT_PRIME_BUDGET_S = _EXIT_BUDGETS["prime"]            # the exit's fold priming, a cap
 EXIT_CKPT_WRITE_BUDGET_S = _EXIT_BUDGETS["ckpt"]        # its fold checkpoint writes, a cap
-EXIT_ASM_BUDGET_S = _EXIT_BUDGETS["asm"]                # its assembly-document writes, a cap
 
 
 def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None, sample=None):
@@ -30866,14 +30876,14 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phas
            "reaped": int(d.get("reaped") or 0),
            "watchesArmed": int(watches_armed or 0),
            "reason": str(audit_reason or "")}
-    if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints and assembly documents
-        row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # written), drainS (the sessions closed)
+    if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints written), drainS (the
+        row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # sessions closed)
     row.update(_kernel_process_sample() if sample is None else dict(sample))   # T304: the kernel's own size and CPU as its
     return row                                                                 #  exit began (the exit's start, 2026-10-05)
 
 
-EXIT_DONE_PHASES = ("rowS", "memosS", "listS", "primeS", "writeS", "asmS", "ckptS", "drainS")
-EXIT_DONE_COUNTS = ("ckptWritten", "ckptLeft", "primed", "primeSkipped", "asmSkipped", "asmBusy")
+EXIT_DONE_PHASES = ("rowS", "memosS", "listS", "primeS", "writeS", "ckptS", "drainS")   # asmS, asmSkipped and asmBusy: exits
+EXIT_DONE_COUNTS = ("ckptWritten", "ckptLeft", "primed", "primeSkipped")                 #  before 2026-10-08 wrote assembly documents
 
 
 def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="", phases=None, counts=None,
@@ -30886,9 +30896,9 @@ def _exit_done_row(cut_row, drain_res, cut_turns, reason, err="", reason_err="",
     predicate, so they differ only for a turn that started or ended in between), drainError and reasonError when those faults
     happened, `finalReason` only when the verdict decided after the drain differs from the row's (the manager's stop note
     landing during the drain), the phases' seconds (EXIT_DONE_PHASES: rowS the cut row, memosS, listS the session listing,
-    primeS, writeS the checkpoint writes, asmS, ckptS the window from the priming's start to the assembly documents' end as
-    older cut rows carried it, drainS), the checkpoint counts (EXIT_DONE_COUNTS; asmBusy the assembly documents skipped
-    because the leaf's key lock stayed taken past the phase's end), and the deadline and the seconds the exit had taken. A
+    primeS, writeS the checkpoint writes, ckptS the window from the priming's start to the checkpoint writes' end, the
+    window older cut rows carried as ckptS, drainS), the checkpoint counts (EXIT_DONE_COUNTS), and the deadline and the
+    seconds the exit had taken. A
     drain that raised (`err`) leaves stopped, unjoined, reaped and drainCutTurns out: it returned nothing, so the cut row's
     prediction stands and the record says drainError. It carries
     none of cutTurns, reason, auditT, bootSettled or bootHealth, so every reader that keys on those reads the cut row alone,
@@ -83339,9 +83349,11 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
     _provisional_signal_reason reads without a side effect, auditT, watchesArmed, the backend's session count, the turns the
     drain will cut by its own predicate, would_cut, plus the Codex turns, and `expectsDone`), so a SIGKILL anywhere after it
     still leaves the row; the four memos and the listing run whole (counted against the deadline, never capped: the memos are written at every
-    exit); the priming, the checkpoint writes (the leaves primed here first, then every other dirty path) and the assembly
-    documents each end by their cap and by the PRE-DRAIN line (the deadline less the drain's reserve, EXIT_DRAIN_BUDGET_S),
-    plus the one item in flight, so only the memos, the listing and those items can eat into the drain's reserve; the drain is
+    exit); the priming and the checkpoint writes (the leaves primed here first, then every other dirty path) each end by their
+    cap and by the PRE-DRAIN line (the deadline less the drain's reserve, EXIT_DRAIN_BUDGET_S), plus the one item in flight,
+    so only the memos, the listing and those items can eat into the drain's reserve. No assembly document is written here
+    (2026-10-08): their writers run while the kernel lives, a stale one costs the next boot a longer tail parse and is never
+    wrong, and a write once begun ran seconds past its cap (see _exit_budgets); the drain is
     handed what the deadline has left (at least 0.25 s); after it the unrequested verdict is decided exactly as before (its
     wait, its `signal` row) and the DONE row (_exit_done_row) records the drain's result, the phases and that verdict when
     it differs; the judges' child is joined with what the deadline has left. One line per phase on the log
@@ -83353,9 +83365,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
     behind its turns, so it carries `cutTurnsError` (the build's fault), and the reader counts it unmeasured when the drain
     raised as well (the review of 2026-10-06). `sample` is the process sample taken as the exit began (_graceful_term
     takes it once it owns the exit; the parent watch passes none and it is taken here): the cut row and a late full row both
-    carry it. The checkpoint writes start only before their line (no write
-    starts past it), and the assembly documents wait for a leaf's key lock only until their line, a wait that runs out
-    counted as `asmBusy`.
+    carry it. The checkpoint writes start only before their line (no write starts past it).
     The quiesce (_exit_quiesce) runs first, and the whole body sits inside one try whose finally reaches the process exit,
     so no raise leaves a kernel with collection off and its loops stopped holding the port until the SIGKILL."""
     if t0 is None:
@@ -83474,24 +83484,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
             _exit_log("romp-kernel: the exit's checkpoint writes failed: %s\n" % traceback.format_exc().strip().splitlines()[-1][:200])
         _counts.update(ckptWritten=_ckpt_n, ckptLeft=_ckpt_left)
         _phase("writeS", "checkpoints", _t, _write_end - _t, "%d written, %d left dirty" % (_ckpt_n, _ckpt_left))
-        _t = time.monotonic()
-        _asm_end = min(_t + float(EXIT_ASM_BUDGET_S), _pre_drain)
-        _asm_skipped = _asm_busy = 0
-        try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
-            for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; BOUNDED (the periodic
-                if time.monotonic() > _asm_end:   # writer keeps them close; what is left waits for the next settle)
-                    _asm_skipped += 1; continue
-                _why = []                     # the leaf's key lock is waited for only until the phase's end: its holder can be another
-                #                               thread's whole document write (14 s at 110 MB in a lab), longer than the grace
-                em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_stored_tree(_s["path"], _s["sid"]),
-                                        reason_out=_why, lock_timeout=max(0.0, _asm_end - time.monotonic()))   # the store's
-                if "busy" in _why:            #  tree gives the turns section (stage 4c); a turnless document is rewritten with its turns
-                    _asm_busy += 1            #  at the next settle; a busy leaf keeps its standing document until its next settle
-        except Exception:
-            pass
-        _counts.update(asmSkipped=_asm_skipped, asmBusy=_asm_busy)
-        _phase("asmS", "assembly", _t, _asm_end - _t, "%d left unwritten, %d busy" % (_asm_skipped, _asm_busy))
-        _phases["ckptS"] = round(time.monotonic() - _t_prime, 2)   # the window older cut rows carried as ckptS
+        _phases["ckptS"] = round(time.monotonic() - _t_prime, 2)   # the window older cut rows carried as ckptS; the drain follows
         _t = time.monotonic()
         _drain_timeout = max(0.25, _end - _t)   # what the deadline has left: only the memos and the listing (they run whole)
         #                                         and an item in flight at the line shrink this

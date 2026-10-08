@@ -5587,16 +5587,19 @@ plus the Codex turns), `stopped` the backend's session count, and
 `expectsDone: true`. For a signal with no request on record the row's reason is
 a provisional verdict read without waiting (the manager's pid already gone or
 its stop note already written). The memos and the session listing follow and run whole, counted against the
-deadline; then the fold priming, the checkpoint writes (the leaves just primed
-first) and the assembly documents, each capped by its `ROMP_EXIT_*_BUDGET_S`
-share and ending by the deadline less the drain's reserve
-(`EXIT_DRAIN_BUDGET_S`, 35 percent of the deadline and never under 0.9 s, the
-top of the drain times recorded with session hosts on, nor over the deadline),
-plus the one item in flight, so an overrun shrinks the later phases. No
-checkpoint write starts past that line or once its cap is spent, and an
-assembly document waits for its leaf's lock only until the line: a leaf whose
-lock another thread holds longer is skipped and counted as `asmBusy`, and
-keeps its standing document until its next settle. The drain is handed what
+deadline; then the fold priming and the checkpoint writes (the leaves just
+primed first), each capped by its `ROMP_EXIT_*_BUDGET_S` share of the window
+before the drain (15 and 70 percent) and ending by the deadline less the
+drain's reserve (`EXIT_DRAIN_BUDGET_S`, 35 percent of the deadline and never
+under 0.9 s, the top of the drain times recorded with session hosts on, nor
+over the deadline), plus the one item in flight, so an overrun shrinks the
+later phases. No checkpoint write starts past that line or once its cap is
+spent. The exit writes no assembly documents: the settle, the periodic write
+of a long turn and the converge pass keep them current while the kernel runs.
+A document left stale costs the next boot a longer tail parse and is never
+wrong, while writing one cannot be stopped once begun (one took 4.86 s against
+a 0.28 s cap in a lab). Exits before 2026-10-08 wrote them in a phase of their
+own, so older done rows carry `asmS`, `asmSkipped` and `asmBusy`. The drain is handed what
 the deadline has left, at least 0.25 s. The reserve is smaller than the
 drain's share of the grace before this change (1.12 s at the manager's 8 s,
 where the share was 2.625 s; 0.9 s at the default 5 s, where it was 1.575 s),
@@ -5610,10 +5613,10 @@ prediction (a drain that raised returned nothing, so its done row has neither
 the counts nor the list, and the cut row's prediction stands), `drainError`
 and `reasonError` when those faults happened,
 `finalReason` when the late verdict differs from the cut row's, `phases`
-(`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `asmS`, `ckptS` for the whole
-priming-to-assembly window as older cut rows carried it, `drainS`), the
-checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`,
-`asmSkipped`, `asmBusy`), `deadlineS` and `elapsedS`. A cut row whose append
+(`rowS`, `memosS`, `listS`, `primeS`, `writeS`, `ckptS` for the whole
+priming-to-checkpoints window as older cut rows carried it, `drainS`), the
+checkpoint counts (`ckptWritten`, `ckptLeft`, `primed`, `primeSkipped`),
+`deadlineS` and `elapsedS`. A cut row whose append
 failed is written after the drain instead, as the exit's one row: the row the
 exit built, with the done row's fields applied the way `romp restart-metrics`
 joins the pair, so a drain that raised leaves the prediction and the session
