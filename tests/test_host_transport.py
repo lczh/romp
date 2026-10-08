@@ -1162,6 +1162,12 @@ class BackendHostRules(unittest.TestCase):
         self._said_once(be)
 
     # ── a damaged lease nobody rewrites is a stale lease (the review of #150): the heartbeat rule, read off the file ──
+    @staticmethod
+    def _lease_keys(be):
+        """The keys of the lease rows in the backend's problem ring (any other problem the machine has, an SDK that does
+        not import on CI for one, is not these tests' subject)."""
+        return [r.get("key") for r in be.problems() if str((r.get("key") or ("",))[0]).startswith("lease-")]
+
     def _age(self, d, seconds, sid=SID):
         """Set the lease file's mtime `seconds` into the past: the beat a holder would have rewritten it with, absent."""
         p = sb.lease_path(d, sid)
@@ -1198,7 +1204,7 @@ class BackendHostRules(unittest.TestCase):
                 self.assertEqual(len(said), 1, be._test_logs[-6:])
                 self.assertIn("has not been rewritten for", said[0])
                 self.assertIn(str(sb.lease_path(d, SID)), said[0], "the row names the file")
-                self.assertEqual([r.get("key") for r in be.problems()], [("lease-stale", SID)], "said once, as a problem")
+                self.assertEqual(self._lease_keys(be), [("lease-stale", SID)], "said once, as a problem")
 
     def test_a_stale_damaged_lease_of_a_host_walks_the_orphan_road_and_waits_for_its_cli(self):
         """With the session's host directory there a host held the lease, so its stale road is the orphan road: the
@@ -1265,7 +1271,7 @@ class BackendHostRules(unittest.TestCase):
         logs = be._test_logs
         self.assertEqual(sum("cannot read the session host's lease" in m for m in logs), 1, logs)
         self.assertEqual(sum("treated as a stale lease, which the session's next start replaces" in m for m in logs), 1, logs)
-        self.assertEqual([r.get("key") for r in be.problems()], [("lease-unreadable", SID)], "one problem row for the file")
+        self.assertEqual(self._lease_keys(be), [("lease-unreadable", SID)], "one problem row for the file")
         self._host_lease(d)
         be._host_lease(SID, if_unreadable="unreadable")
         self.assertEqual(sum("lease reads again" in m for m in logs), 1)
