@@ -15000,7 +15000,7 @@ class SdkBackend:
         five fields the CLI's get_usage schema documents for it (is_enabled, monthly_limit, used_credits,
         utilization, currency; amounts in the currency's minor units), as answered. The answer carries no reset
         date, so the file is also rewritten when an answer lands in a later calendar month than the reading it
-        holds (the kernel's _monthly_allowance dates the reset as Claude Code's own /usage screen does): an
+        holds (the browser dates the reset as Claude Code's own /usage screen does, the first of the next month): an
         unchanged answer leaves the reading in the month it was taken, and a new month's needs its own stamp."""
         rl = r.get("rate_limits") if isinstance(r, dict) else None
         if not isinstance(rl, dict):

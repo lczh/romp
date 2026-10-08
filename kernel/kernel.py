@@ -51609,7 +51609,8 @@ def _monthly_allowance(o, now=None):
     plan with no limit, pct then None), {"stale": True, "month"} once the month the reading was taken in is over (last
     month's spend is not this month's), None when the answer carried no figures. The percent is the answer's
     utilization, or used over limit where it has none, as that screen reads the same fields. The answer carries no
-    reset date, so none is shown; "month" is the reading's own month (YYYY-MM, this machine's local calendar)."""
+    reset date, so none is served: the browser dates it as that screen does, the first of the next month in the
+    viewer's zone (spendLimitResets); "month" is the reading's own month (YYYY-MM, this machine's local calendar)."""
     m = o.get("monthly") if isinstance(o, dict) else None
     if not isinstance(m, dict):
         return None
@@ -73677,8 +73678,8 @@ if(u.noWindows)det._noWin=true;      // the account answered that it has no usag
 // …and that spend limit, its monthly allowance (2026-10-01): one bar the hover draws in place of the windows; a reading from
 // before its reset arrives as stale, a date and no figure
 var mo=u.noWindows&&u.monthly;
-// the account's monthly spend limit as Claude Code reads it (2026-10-08): what it has spent of the limit this month, no reset
-// date (the reading carries none); a reading from an earlier month says so instead of standing in for this one
+// the account's monthly spend limit as Claude Code reads it (2026-10-08): what it has spent of the limit this month (the
+// reset is dated in the browser, spendLimitResets); a reading from an earlier month says so instead of standing in for this one
 if(mo)det._monthly=mo.stale?{stale:true}
 :{pct:(typeof mo.pct==='number')?Math.max(0,Math.min(100,mo.pct)):null,col:segCol(mo,mo.pct||0),tp:null,unk:false,
 used:(typeof mo.used==='number')?mo.used:null,limit:(typeof mo.limit==='number')?mo.limit:null,cur:mo.currency||'USD'};
@@ -73797,15 +73798,21 @@ return '<div class=ru-tip-win><div class=ru-tip-name><span>'+esc(v.name)+'</span
 // THE ACCOUNT'S MONTHLY SPEND LIMIT (2026-10-01; reworded 2026-10-08): an enterprise seat has no 5-hour or weekly window;
 // it is metered against a monthly spend limit, which Claude Code reads as "<used> / <limit> spent" (its extra-usage spend
 // for the billing period). Shown in those words, attributed to Claude Code, and never called this member's usage: the
-// reading does not say whether it counts this member alone or the organisation's shared limit. It carries no reset
-// date, so none is shown. A reading from an earlier month is not this month's: no bar, and it says so.
+// reading does not say whether it counts this member alone or the organisation's shared limit. A reading from an earlier
+// month is not this month's: no bar, and it says so.
+// THE RESET DATE (the user 2026-10-08, who wanted it beside the figures): neither the reading nor the claude.ai answer it
+// comes from carries one (extra_usage and spend have no date field, checked against Claude Code's schema and a live
+// answer), so it is dated the way Claude Code's own /usage screen dates it, the first of the next calendar month in the
+// viewer's zone, and, as there, only when the plan has a limit to reset. `now` is for the tests.
+function spendLimitResets(m,now){if(!m||m.stale||m.limit==null)return '';var d=now||new Date(),n=new Date(d.getFullYear(),d.getMonth()+1,1);
+return 'resets '+n.toLocaleDateString('en-US',{month:'short',day:'numeric'});}
 function spendLimitWords(m){var cur=(m.cur&&m.cur!=='USD')?' '+m.cur:'';
-if(m.used==null)return m.pct!=null?m.pct+'% of the limit spent':'';
-return '$'+Math.round(m.used).toLocaleString('en-US')+(m.limit!=null?' of $'+Math.round(m.limit).toLocaleString('en-US'):'')+cur+' spent'+(m.limit!=null?'':' (no limit)');}
+if(m.used==null)return m.pct!=null?m.pct+'% of the limit spent this month':'';
+return '$'+Math.round(m.used).toLocaleString('en-US')+(m.limit!=null?' of $'+Math.round(m.limit).toLocaleString('en-US'):'')+cur+' spent this month'+(m.limit!=null?'':' (no limit)');}
 function monthlyHTML(d){var m=d._monthly;if(!m)return '';
 return '<div class=ru-tip-win><div class=ru-tip-name><span>Monthly spend limit</span><span class=ru-tip-reset>'
-+(m.stale?'no reading this month yet':'this month')+'</span></div>'
-+(m.stale?'':(m.pct!=null?barRows(m):'')+'<div class=ru-tip-note>'+esc(spendLimitWords(m))+', as Claude Code reads it for this account</div>')+'</div>';}
++esc(m.stale?'no reading this month yet':(spendLimitResets(m)||'this month'))+'</span></div>'
++(m.stale?'':(m.pct!=null?barRows(m):'')+'<div class=ru-tip-note>'+esc(spendLimitWords(m))+', as Claude Code reads it</div>')+'</div>';}
 function machineHTML(name){return '<span class="ru-tip-machine host-prefix">'+esc(name)+'</span>';}
 function acctBlocksHTML(sets,manyMachines){var groups=[],by={};
 sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;
@@ -74154,7 +74161,8 @@ var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spR
 function spAllowHTML(){var seen={},lines=[];(LAST||[]).forEach(function(e){var d=e.det,a=e.acct||('host:'+e.host);if(seen[a])return;
 var bar=function(pct,col){return '<span class=ru-tip-track><i style="width:'+pct+'%;background:'+col+'"></i></span>';},h='';
 if(d._monthly){var mo=d._monthly;h=mo.stale?'monthly spend limit: no reading this month yet'
-:'monthly spend limit: <b>'+esc(spendLimitWords(mo))+'</b> this month'+(mo.pct!=null?' '+bar(mo.pct,mo.col)+' '+mo.pct+'%':'')+' <span class=rsp-allow-src>as Claude Code reads it</span>';}
+:'monthly spend limit: <b>'+esc(spendLimitWords(mo))+'</b>'+(mo.pct!=null?' '+bar(mo.pct,mo.col)+' '+mo.pct+'%':'')
++' <span class=rsp-allow-src>'+(spendLimitResets(mo)?esc(spendLimitResets(mo))+' \u00b7 ':'')+'as Claude Code reads it</span>';}
 else{var ws=WINS.filter(function(w){return d[w[0]]&&!d[w[0]].unk;});if(ws.length)h=ws.map(function(w){var v=d[w[0]];return esc(w[2])+' '+bar(v.pct,v.col)+' <b>'+v.pct+'%</b>';}).join(' \u00b7 ');}
 if(!h)return;seen[a]=1;lines.push({name:d._acct||'',h:h});});
 var many=lines.length>1;return lines.map(function(l){return '<div class=rsp-allow>'+(many&&l.name?esc(l.name)+' \u00b7 ':'')+l.h+'</div>';}).join('');}

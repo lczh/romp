@@ -42,7 +42,7 @@ const SRC = ["var SP_RANGE_BUCKETS=", "function spSeries(d){", "function spTail(
   "function spSumArr(a){", "function spRound4(v){", "var SP_GRAIN=", "function spUsd(v,est){", "function spHostScope(d,host){",
   "function spKeyArr(d,st,meas){", "function spPart(d,st,sec,meas){", "function spRouteSums(d){", "function spAccountRows(d){",
   "function spAcctName(d,s){", "function spRangeView(d){", "function spRangeWords(ser){", "function spNothing(ser){", "function spWinFigs(d){",
-  "function spendLimitWords(m){", "function lrRound(vals){", "function wholeUsd(n,est){", "function spAllowHTML(){", "function spCards(d){",
+  "function spendLimitResets(m,now){", "function spendLimitWords(m){", "function lrRound(vals){", "function wholeUsd(n,est){", "function spAllowHTML(){", "function spCards(d){",
   "function spCardHTML(d,c,sec){"].map(fn).join("\n");
 
 /** the lifted functions over a fresh SP state */

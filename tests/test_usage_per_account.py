@@ -315,7 +315,8 @@ class SeatMonthlyAllowance(AccountWithoutWindows):
     it has spent of its limit this month in dollars, the limit and the percent; a reading from an earlier calendar month is
     served stale, with no figure; a plan with no limit serves its spend alone. Claude Code's schema calls the figure the
     plan's extra-usage spend for the billing period, and whose spend it counts (this member's or the organisation's) the
-    answer does not say, so the shell shows it in Claude Code's words; the answer carries no reset date, so none is served.
+    answer does not say, so the shell shows it in Claude Code's words; the answer carries no reset date, so none is served
+    (the browser dates it as Claude Code's /usage screen does).
     Synthetic figures only."""
     test_it_is_said_named_by_kind_and_the_key_spend_rides_beside_it = None
     test_an_answer_from_another_login_is_not_this_ones = None

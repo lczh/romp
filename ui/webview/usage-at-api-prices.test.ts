@@ -142,7 +142,7 @@ test("windows a kernel could not build in this browser's zone say whose they are
 const PANEL = ["var SP_RANGE_BUCKETS=", "function spSeries(d){", "function spTail(ser,keep){", "function spKey(d,s){", "function spSumArr(a){",
   "function spRound4(v){", "var SP_GRAIN=", "function spHostScope(d,host){", "function spKeyArr(d,st,meas){", "function spPart(d,st,sec,meas){",
   "function spUsd(v,est){", "function spRouteSums(d){", "function spAccountRows(d){", "function spAcctName(d,s){", "function spRangeView(d){",
-  "function spRangeWords(ser){", "function spNothing(ser){", "function spWinFigs(d){", "function spendLimitWords(m){", "function spAllowHTML(){",
+  "function spRangeWords(ser){", "function spNothing(ser){", "function spWinFigs(d){", "function spendLimitResets(m,now){", "function spendLimitWords(m){", "function spAllowHTML(){",
   "function spCards(d){", "function spCardHTML(d,c,sec){", "function spHosts(d){",
   "function spMany(d){", "function spName(s){", "function spColor(s){", "var SP_OTHER=", "function spTitle(s,many){", "function spTagChip(s){",
   "function spApplyViewOrder(seed,view){", "function spOrdered(d){", "function spRows(d){", "function spDashedHosts(d){",
@@ -152,7 +152,7 @@ function panel(data: unknown, last: unknown[] = [], range = "hours") {
   const fmtUsd = (v: number) => "$" + Math.round(v).toLocaleString("en-US");
   const WINS = [["fiveHour", 5 * 3600, "5 hours"], ["sevenDay", 7 * 86400, "7 days"]];
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
-  return new Function("SP", "LAST", "WINS", "esc", "fmtUsd", "fmtTok", "spViewOrder", PANEL + "\n; return {SP, spCards, spCardHTML, spRangeView, sessionTable, spPart};")(
+  return new Function("SP", "LAST", "WINS", "esc", "fmtUsd", "fmtTok", "spViewOrder", PANEL + "\n; return {SP, spCards, spCardHTML, spRangeView, sessionTable, spPart, spendLimitResets};")(
     SP, last, WINS, esc, fmtUsd, fmtTok, () => []);
 }
 const H = 192, arr = <T,>(n: number, f: (i: number) => T): T[] => Array.from({ length: n }, (_, i) => f(i));
@@ -242,18 +242,32 @@ test("an older machine that sends its key's turns alone (scope keyed) is drawn a
   assert.deepEqual(P.spPart(d, api, "seat", "usd").slice(0, 2), [0, 0], "and nothing of it is the seat's");
 });
 
-test("the seat card carries the account's monthly spend limit in Claude Code's words, attributed, with no reset date", () => {
+// the reading carries no reset date, so the browser dates it as Claude Code's /usage screen does: the first of the next
+// calendar month in the viewer's zone, and only for a plan with a limit to reset
+const resetsWords = (d = new Date()) => "resets " + new Date(d.getFullYear(), d.getMonth() + 1, 1).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+test("the spend limit resets on the first of the next month in the viewer's zone, the date Claude Code's /usage gives", () => {
+  const P = panel(detail());
+  const lim = { used: 17000, limit: 50000, pct: 34 };
+  assert.equal(P.spendLimitResets(lim, new Date(2026, 9, 8, 14)), "resets Nov 1");
+  assert.equal(P.spendLimitResets(lim, new Date(2026, 11, 31, 23, 59)), "resets Jan 1", "December rolls into the new year");
+  assert.equal(P.spendLimitResets(lim, new Date(2026, 1, 1, 0, 0)), "resets Mar 1");
+  assert.equal(P.spendLimitResets({ used: 812, limit: null, pct: null }, new Date(2026, 9, 8)), "", "no limit: nothing to reset, as on Claude Code's screen");
+  assert.equal(P.spendLimitResets({ stale: true }, new Date(2026, 9, 8)), "", "a stale reading carries no figures to reset");
+});
+
+test("the seat card carries the account's monthly spend limit in Claude Code's words, attributed, with its reset date", () => {
   const d = detail();
   const last = [{ host: "TESTHOST", acct: "acct1", det: { _acct: "Enterprise seat", _monthly: { pct: 34, col: "#5196B8", used: 17000, limit: 50000, cur: "USD" } } }];
   const P = panel(d, last);
-  const t = text(P.spCardHTML(d, P.spCards(d), "seat"));
-  assert.match(t, /monthly spend limit: \$17,000 of \$50,000 spent this month 34% as Claude Code reads it/);
-  assert.ok(P.spCardHTML(d, P.spCards(d), "seat").includes("<span class=rsp-allow-src>as Claude Code reads it</span>"), "the attribution sits on its own line");
-  assert.ok(!/resets/.test(t), "the reading carries no reset date, so none is shown");
+  const h = P.spCardHTML(d, P.spCards(d), "seat"), t = text(h);
+  assert.ok(t.includes("monthly spend limit: $17,000 of $50,000 spent this month 34% " + resetsWords() + " · as Claude Code reads it"), t);
+  assert.ok(h.includes("<span class=rsp-allow-src>" + resetsWords() + " \u00b7 as Claude Code reads it</span>"), "the reset and the attribution sit on their own line");
   const stale = panel(d, [{ host: "TESTHOST", acct: "acct1", det: { _monthly: { stale: true } } }]);
   assert.match(text(stale.spCardHTML(d, stale.spCards(d), "seat")), /monthly spend limit: no reading this month yet/);
   const unlimited = panel(d, [{ host: "TESTHOST", acct: "acct1", det: { _monthly: { pct: null, used: 1234.5, limit: null, cur: "USD" } } }]);
-  assert.match(text(unlimited.spCardHTML(d, unlimited.spCards(d), "seat")), /monthly spend limit: \$1,235 spent \(no limit\) this month/);
+  const ut = text(unlimited.spCardHTML(d, unlimited.spCards(d), "seat"));
+  assert.match(ut, /monthly spend limit: \$1,235 spent this month \(no limit\) as Claude Code reads it/);
+  assert.ok(!/resets/.test(ut), "no limit: no reset date, as on Claude Code's screen");
 });
 
 test("the API-health dot lives apart from the spend figures, named, its keyboard focus the accent ring", () => {

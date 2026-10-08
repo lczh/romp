@@ -722,14 +722,16 @@ and no lagging note, even beside a machine on an older build still holding a
 reading from before; a usage request the endpoint cannot answer says nothing
 about the account and changes nothing. When that answer carries the seat's
 monthly spend limit, the block shows it instead as one `Monthly spend limit`
-bar with Claude Code's own figures, `$X of $Y spent, as Claude Code reads it for
-this account` (the answer's `extra_usage`, which Claude Code's schema describes
-as the plan's extra-usage spend for the billing period, in minor units of the
+bar with Claude Code's own figures, `$X of $Y spent this month, as Claude Code
+reads it` (the answer's `extra_usage`, which Claude Code's schema describes as
+the plan's extra-usage spend for the billing period, in minor units of the
 currency; whether it counts this member alone or the organisation against a
 shared limit the answer does not say, so romp never calls it this member's
-usage). The answer carries no reset date, so none is shown. A reading from an
-earlier calendar month shows no bar, only `no reading this month yet`; a plan
-with no limit shows what it spent. Under the blocks, the **Usage at API prices** section is a
+usage). The answer carries no reset date, so the heading dates it the way
+Claude Code's own `/usage` screen does: `resets Nov 1`, the first of the next
+calendar month in the viewer's time zone, shown only when the plan has a limit.
+A reading from an earlier calendar month shows no bar, only `no reading this
+month yet`; a plan with no limit shows what it spent. Under the blocks, the **Usage at API prices** section is a
 small table with the cell's two windows as columns and one row per account
 (the kernel folds every host's billing routes into accounts, the rule below,
 and the rows are summed from the same payloads the cell sums, so they add up
@@ -752,8 +754,8 @@ named by its account (`Enterprise seat`) when one account billed them all,
 `Subscription logins` with a row per account otherwise, its figure an
 estimate (`≈`) and the line under it saying it is romp's estimate from the
 tokens at the API's list prices, with the account's monthly spend limit as
-Claude Code reads it (or a personal plan's 5-hour and weekly windows) from the
-same readings the hover shows. The second, **API key**,
+Claude Code reads it and its reset date, dated as in the hover (or a personal
+plan's 5-hour and weekly windows), from the same readings the hover shows. The second, **API key**,
 holds the key-billed turns, charged per token. Each card has its own chart,
 stacked by session; a card whose kind holds nothing in the range is one line
 saying so, and a kind no account in the ledger's reach has is not drawn. When

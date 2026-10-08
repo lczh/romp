@@ -248,8 +248,11 @@ class MonthlyAllowanceServed(NoWindowsServed):
         o = self._drive()
         b = o["tip"]["blocks"][0]
         self.assertEqual(b["head"], NAME2, "headed by the account's kind")
-        self.assertEqual((b["windows"], b["resets"], b["used"]), (["Monthly spend limit"], ["this month"], ["23%"]),
-                         "the account's spend limit in Claude Code's words, no reset date (the reading carries none)")
+        self.assertEqual((b["windows"], b["used"]), (["Monthly spend limit"], ["23%"]), "the account's spend limit, one bar")
+        # the reading carries no reset date: the browser dates it as Claude Code's /usage screen does, the first of
+        # the next calendar month in the viewer's zone ("resets Nov 1"), only for a plan with a limit to reset
+        self.assertEqual(len(b["resets"]), 1)
+        self.assertRegex(b["resets"][0], r"^resets [A-Z][a-z]{2} 1$")
         self.assertEqual(b["nowin"], "", "the bar takes the one-line note's place")
         self.assertEqual(b["age"], "", "no age line")
         self.assertFalse(o["tip"]["email"])
