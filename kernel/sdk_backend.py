@@ -13860,13 +13860,10 @@ class SdkBackend:
         prepend = ([nudge] if cut else []) \
                 + ([ASK_DIED_NOTICE] if ask_died else []) \
                 + ([task_death_notice(dead_tasks)] if dead_tasks else [])
-        # The check that the session is not running and the writes it resumes with are ONE step under self._lock, the lock
-        # _ensure starts a session under. A message that lands meanwhile either started the session first (running: the
-        # session is the message's now, and nothing is written for it) or starts it after, and then its seed adopts the
-        # saved queue with the notices in it (_ensure). With the check made under the lock and the write after letting go of
-        # it, a message in between started the session from the saved queue as it stood, and the notices then sat in the
-        # saved queue of a running session (its next queue write dropped them, or a later boot delivered them about a
-        # restart long past), with the cut stamped on a session that had moved on. _lock, then _reg_lock: _ensure's order
+        # Not running, and the writes below: ONE step under self._lock, which _ensure starts sessions under. A message that
+        # started the session first owns it (nothing written); one after adopts the saved queue, notices and all. Checked
+        # apart from the write, a message in between left the notices in a running session's saved queue and the cut
+        # stamped on a session that had moved on. _lock, then _reg_lock: _ensure's order
         with self._lock:
             s = self.sessions.get(sid)
             running = bool(s and s.thread.is_alive())
