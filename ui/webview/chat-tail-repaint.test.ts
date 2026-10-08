@@ -21,7 +21,8 @@ test("a tail for the active tab schedules ONE repaint per frame instead of paint
   // (2026-09-10: the render moved just past the active/inactive branch, as awaitChanged(sid) — the box for the
   // active session, and the subagent viewer's header when the active tab is a viewer into this one — so a viewer
   // tab, for which msg.id !== activeId, reaches it too; still keyed on THIS frame's status change)
-  assert.match(tail, /\n  \}\n  if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/, "the awaited-agents box still keys on the SAME frame's status change");
+  // (2026-10-08: …or on the frame's new task set for the rows, kernel _chat_bgt_digest)
+  assert.match(tail, /\n  \}\n  if \(awaitKey\(s\.status\) !== before \|\| bgMoved\) awaitChanged\(msg\.id\);/, "the awaited-agents box still keys on the SAME frame's status change");
   assert.doesNotMatch(active, /renderBgTasks\(\)/, "…and no inline box render on the active branch");
 });
 

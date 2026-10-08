@@ -20888,6 +20888,11 @@ function chatTail(msg: any) {
   // the per-session view flags ride the tail beside the status (2026-09-11): a bell flipped in another column or
   // browser reaches this caught-up copy on the flip, not on the next full frame
   applyFrameFlags(s, msg, pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back
+  // the background box's task set rides the tail whenever it moved (kernel _chat_bgt_digest, 2026-10-08): until then only a
+  // full frame carried it, so a caught-up page kept the set it was last handed whole, and three agents that had finished
+  // half an hour earlier still wore the running dot and Stop under a header that counted the one still working
+  const bgMoved = "bgTasks" in msg;
+  if (bgMoved) s.bgTasks = msg.bgTasks;
   if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
   scheduleRenderTabs();   // once per animation frame however many tails a cycle lands (2026-09-04)
   if (msg.id === activeId) {
@@ -20909,7 +20914,7 @@ function chatTail(msg: any) {
     if (v) v.rendered = Math.min(v.rendered, from);
     schedulePrebuild(); // rebuild the now-stale off-screen view in idle, before the user switches to it (the keyed paint: its changed units only)
   }
-  if (awaitKey(s.status) !== before) awaitChanged(msg.id);   // (see the comment above: the box, keyed on the awaited fields changing)
+  if (awaitKey(s.status) !== before || bgMoved) awaitChanged(msg.id);   // (see the comment above: the box, keyed on the awaited fields or its task set changing)
 }
 
 // Older history streaming in from a loadOlder request (scroll-back past the loaded tail, the user 2026-06-25).

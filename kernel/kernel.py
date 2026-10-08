@@ -58235,10 +58235,42 @@ def _chat_wm_note(client, sid, m):
 # its replacement, as 2071 guarantees; the page verifies every delta's anchor against the list it was cut from (baseFp).
 def _chat_view_key(m, end):
     """The view a client holds of session `m` once a frame cut from it lands: `end` (the key the list's last event carries on
-    the uuid wire, the list's length on the index wire), the status, the notify / hideFromFeed / postalServiceOff flags and
-    the build's watermark, every field an empty-suffix tail carries besides its anchor. A string, compared whole."""
-    return json.dumps([end, m.get("status"), m.get("notify"), m.get("hideFromFeed"), m.get("postalServiceOff"), m.get("wm")],
-                      sort_keys=True, default=str)
+    the uuid wire, the list's length on the index wire), the status, the notify / hideFromFeed / postalServiceOff flags, the
+    build's watermark and the background box's task set (_chat_bgt_digest), every field an empty-suffix tail carries besides
+    its anchor. A string, compared whole."""
+    return json.dumps([end, m.get("status"), m.get("notify"), m.get("hideFromFeed"), m.get("postalServiceOff"), m.get("wm"),
+                       _chat_bgt_digest(m)], sort_keys=True, default=str)
+
+
+_BGT_MEMO = {}   # id(a build's bgTasks) -> (that object, its digest): one digest per build, however many clients and sends read it
+
+
+def _chat_bgt_digest(m):
+    """The background box's task set as a delta compares it (2026-10-08): `m`'s bgTasks (_bg_tasks: every tracked task, its
+    status, label, command and agent, the rows' Stop handles) without each task's output tail, which a running command grows
+    every cycle and which stays a full-frame field as it always was. Until this, bgTasks rode the full session frame alone,
+    so a caught-up page kept the set it was last handed whole: three background agents that had finished half an hour
+    earlier still wore the running dot and Stop, under a header (the status, which rides every delta) that counted the one
+    still working. A delta now carries bgTasks exactly when this digest differs from the one the page holds (the view
+    record's `bgt`, _chat_view_note). Memoized by the build's object, which is shared by every client of the build."""
+    bg = m.get("bgTasks")
+    hit = _BGT_MEMO.get(id(bg))
+    if hit is not None and hit[0] is bg:
+        return hit[1]
+    tasks = bg.get("tasks") if isinstance(bg, dict) else None
+    face = [bg.get("count") if isinstance(bg, dict) else bg,
+            [{k: v for k, v in t.items() if k != "output"} if isinstance(t, dict) else t for t in (tasks or ())]]
+    d = hashlib.blake2b(json.dumps(face, sort_keys=True, default=str).encode("utf-8"), digest_size=12).hexdigest()
+    if len(_BGT_MEMO) > 512:
+        _BGT_MEMO.clear()
+    _BGT_MEMO[id(bg)] = (bg, d)
+    return d
+
+
+def _chat_bgt_rides(c, sid, m):
+    """Whether a delta to client `c` must carry `m`'s bgTasks: the set the page holds (the view record's digest) differs, or
+    nothing records what it holds (a record dropped with its base, which a full re-records)."""
+    return _chat_bgt_digest(m) != ((c.get("echatView") or {}).get(sid) or {}).get("bgt")
 
 
 def _chat_ev_digest(e):
@@ -58258,7 +58290,8 @@ def _chat_view_note(c, sid, m, evs, end, anchor=None):
         i = _uuid_positions(evs, sid).get(anchor)
         if i is not None:
             after = tuple((_event_key(e), _chat_ev_digest(e)) for e in evs[i + 1:])
-    c.setdefault("echatView", {})[sid] = {"view": _chat_view_key(m, end), "anchor": anchor, "after": after}
+    c.setdefault("echatView", {})[sid] = {"view": _chat_view_key(m, end), "anchor": anchor, "after": after,
+                                          "bgt": _chat_bgt_digest(m)}   # the background box's set the page now holds (_chat_bgt_rides)
 
 
 def _chat_skip_held(c, sid, evs, start):
@@ -61161,6 +61194,8 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
                     tail["baseFp"] = _chat_base_fp(evs, max(pf, start - CHAT_BASE_FP_K), start)
                     if led_changed:
                         tail["ledger"] = m.get("ledger")
+                    if _chat_bgt_rides(c, sid, m):    # the background box's set moved: the rows follow it (_chat_bgt_digest)
+                        tail["bgTasks"] = m.get("bgTasks")
                     _send_client(c, ("chat", sid), tail, kind="delta")
                 st[sid] = {"first": pc["first"], "last": _last_anchor(evs)}
                 _chat_view_note(c, sid, m, evs, _event_key(evs[-1]), anchor=st[sid]["last"])
@@ -61369,6 +61404,8 @@ def _send_chat_locked(c, m, ms, change_from, led_changed):
             tail["wm"] = m.get("wm")                  # what the build read (_chat_wm): the page's own copy of the stale-build rule reads it (2026-09-22)
             if led_changed:                           # the TOC only changed on a judge pass → usually omitted
                 tail["ledger"] = m.get("ledger")
+            if _chat_bgt_rides(c, sid, m):            # the background box's set moved: the rows follow it (_chat_bgt_digest)
+                tail["bgTasks"] = m.get("bgTasks")
             _send_client(c, ("chat", sid), tail, kind="delta")   # the chat's delta form, for /perf's sends split
         _chat_view_note(c, sid, m, evs, total)
         st[sid] = (pc[0], pc[1])                       # same tail base, now caught up through `total`

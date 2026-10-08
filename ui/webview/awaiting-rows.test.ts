@@ -356,7 +356,7 @@ test("the subagent viewer's header tail reads the PARENT's rows: '· waiting on 
   assert.match(RENDER, /const tail = subWaitTail\(s\.sub\.running, liveSession\(s\.sub\.parentId\)\?\.status\.awaitingItems, s\.sub\.agentId\)/,
                "renderSubHead reads the parent session's awaitingItems — the same rows the box draws");
   assert.match(RENDER, /if \(a && a\.sub && a\.sub\.parentId === sid\) renderSubHead\(\);/, "the header re-renders when the parent's awaited fields change");
-  assert.equal((RENDER.match(/if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/g) || []).length, 3,
+  assert.equal((RENDER.match(/if \(awaitKey\(s\.status\) !== before( \|\| bgMoved)?\) awaitChanged\(msg\.id\);/g) || []).length, 3,   // (chatTail's also on a new task set, 2026-10-08)
                "every status-bearing frame path (full, tail, status-only) goes through awaitChanged");
   assert.ok(STYLES.includes(".sub-head-waits {"), "the tail's own class");
 });
