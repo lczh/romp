@@ -615,7 +615,7 @@ class KernelFolds(Base):
             "retryingSince": km._fold_records(km._retrying_since_cache, jd.STATE / "states" / (SID + ".jsonl"), lambda: None,
                                               km._retrying_since_step, ckpt="retryingSince"),
             "queueLedger": km._pending_ledger(self.queue_leaf),
-            "wakeTail": km._undelivered_wake_tail(self.queue_leaf),
+            "wakeTail2": km._undelivered_wake_tail(self.queue_leaf),
             "nudgeTimes": km._nudge_times(),
             "bgJudge": [dict(t) for t in jd._bg_unresolved(self.leaf, now=TS0 + 100)],
             "postalLog": {k: (dict(v) if isinstance(v, dict) else sorted(v)) for k, v in
@@ -636,12 +636,12 @@ class KernelFolds(Base):
             self.assertTrue(em.checkpoint_write(p), p)
             names |= set(self.doc(p)["folds"])
         ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
-                     "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail", "postalLog", "lastState",
+                     "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail2", "postalLog", "lastState",
                      "lastNaturalState", "retryingSince", "nudgeTimes", "parkedHandoffs"}
         self.assertEqual(names, ALL_NAMES, "every kernel fold this test drives left its state in the checkpoint")
         ksrc = open(os.path.join(BIN, "romp-kernel")).read(); jsrc = open(os.path.join(BIN, "romp-judge")).read()
         import re as _re
-        named = set(_re.findall(r'ckpt="([A-Za-z]+)"', ksrc)) | set(_re.findall(r'name_fold_cache\([^,]+, "([A-Za-z]+)"\)', jsrc))
+        named = set(_re.findall(r'ckpt="([A-Za-z0-9]+)"', ksrc)) | set(_re.findall(r'name_fold_cache\([^,]+, "([A-Za-z]+)"\)', jsrc))
         self.assertEqual(named, ALL_NAMES, "every checkpoint name the kernel and the judge give a fold is driven here")
         self.fresh_process()
         for p in self.files:
@@ -670,12 +670,35 @@ class KernelFolds(Base):
         self.assertEqual(km._last_state(SID), ("waiting", TS0 + 12))
         self.assertEqual(km._last_natural_state(SID), ("retrying", TS0 + 9.5), "the session's own newest state skips rows with `by`")
         self.assertEqual(cold["queueLedger"], ["second", "third"])
-        self.assertEqual([e["text"] for e in cold["wakeTail"][0]], ["second", "third"])
+        self.assertEqual([e["text"] for e in cold["wakeTail2"][0]], ["second", "third"])
         self.assertEqual(cold["nudgeTimes"], {SID + ":g1": [TS0 + 1, TS0 + 2, TS0 + 4], SID + ":g2": [TS0 + 3]})
         self.assertEqual([t["id"] for t in cold["bgJudge"]], ["toolu_bg2"], "the judge's settled gate reads the same pairing")
         self.assertEqual(cold["postalLog"]["ended"], ["m2"])
         self.assertNotIn("m1", cold["postalLog"]["execd"])
         self.assertEqual(sorted(cold["parkedHandoffs"]), ["m3"], "the one park:true send, folded from the tail alone after the restore")
+
+    def test_a_wake_tail_checkpoint_written_under_the_old_rules_is_never_restored(self):
+        """The wake tail's rules changed on 2026-10-08 (romp's content-less sends kept out, meta deliveries read, a content-less
+        remove taking nothing), and a document holding a tail folded under the old ones carries their phantoms: its fold's
+        checkpoint name moved, so the first fold after the deploy reads the transcript whole instead of restoring them."""
+        recs = [{"type": "queue-operation", "operation": "enqueue", "timestamp": _iso(TS0 + i)} for i in range(3)]   # romp's sends
+        recs.append({"type": "queue-operation", "operation": "enqueue", "content": "kept", "timestamp": _iso(TS0 + 3)})
+        _write(self.queue_leaf, recs)
+
+        def old_rules(state, o):                                         # the shape the old fold kept: one entry per enqueue
+            tail, n = state
+            if o.get("type") == "queue-operation" and o.get("operation") == "enqueue":
+                tail.append({"pos": n, "ts": str(o.get("timestamp") or ""), "text": o.get("content") or "", "wrapper": False})
+            return (tail, n + 1)
+        old = em.fold_records({}, self.queue_leaf, lambda: ([], 0), old_rules, ckpt="wakeTail")
+        self.assertEqual(len(old[0]), 4, "the old document's tail: three phantoms and the real entry")
+        self.assertTrue(em.checkpoint_write(self.queue_leaf))
+        self.assertIn("wakeTail", self.doc(self.queue_leaf)["folds"])
+        self.fresh_process()
+        _append(self.queue_leaf, {"type": "queue-operation", "operation": "enqueue", "content": "later", "timestamp": _iso(TS0 + 4)})
+        tail, mark = km._undelivered_wake_tail(self.queue_leaf)
+        self.assertEqual([e["text"] for e in tail], ["kept", "later"], "the phantoms were not restored")
+        self.assertNotIn("wakeTail", em.checkpoint_stats()["restoredFolds"], "nothing restored under the old name")
 
     def test_the_kernel_writes_at_a_settle_or_a_states_log_move_and_not_otherwise(self):
         self.write_all(tail=False)
@@ -731,7 +754,7 @@ class KernelFolds(Base):
             self.assertGreaterEqual(km._persist_checkpoints(TS0), 1)
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
-        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"],
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail2"],
                          "the leaf's document holds every leaf fold, the judges' pairing included")
         self.fresh_process()
         km._session_meta(self.leaf)                               # a restored TAIL entry: priming would read the file whole
@@ -873,7 +896,7 @@ class KernelFolds(Base):
         self.assertGreaterEqual(em.read_bytes_report().get(self.leaf, 0), size, "the boot paid the whole read")
         self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf], "a dirty document lacking a fold this process holds")
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
-        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"],
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail2"],
                          "the write carries every leaf fold: the four others primed over the whole entry, and the ledger and wake folds (T377)")
         self.assertTrue(all("state" in f for f in self.doc(self.leaf)["folds"].values()))
         cv = em.checkpoint_stats()["converge"]
@@ -1034,7 +1057,7 @@ class KernelFolds(Base):
         jd._bg_scan(self.leaf)
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "extraA", "extraB", "queueLedger", "sessionMeta", "wakeTail"], "nine: the two carried, and the ledger and wake folds primed (T377)")
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "extraA", "extraB", "queueLedger", "sessionMeta", "wakeTail2"], "nine: the two carried, and the ledger and wake folds primed (T377)")
         self.assertTrue(all("state" in f for f in d["folds"].values()))
         self.fresh_process()
         self.assertEqual(em.fold_records({}, self.leaf, list, lambda st, o: st + [1], on=self.kinds_sink(), ckpt="extraA"), [1] * 4)
@@ -1220,7 +1243,7 @@ class KernelFolds(Base):
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 0, "the pass wrote nothing itself")
         self.assertGreater(em._CKPT_CYCLE["spent"], 0, "the drop's write charged the cycle's take")
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"])
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail2"])
         self.assertTrue(all("state" in f for f in d["folds"].values()), "the healed view and the primed folds, all complete")
         with em._JSONL_CACHE_LOCK:
             self.assertIsNone(em._JSONL_CACHE.get(self.leaf), "and the entry left memory")
@@ -1290,7 +1313,7 @@ class KernelFolds(Base):
         km._begin_checkpoint_cycle()
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 0)
         d = self.doc(self.leaf)
-        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail"], "every leaf fold, primed before the drop")
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "queueLedger", "sessionMeta", "wakeTail2"], "every leaf fold, primed before the drop")
         self.assertTrue(all("state" in f for f in d["folds"].values()), "the healed launch state complete, the rest primed")
         cv = em.checkpoint_stats()["converge"]
         self.assertEqual((cv["heals"], cv["viaDrop"], cv["dropWrites"], cv["writes"]), (1, 1, 1, 0), "%s" % cv)
@@ -1348,7 +1371,7 @@ class KernelFolds(Base):
             km._prime_leaf_folds(self.leaf); em.checkpoint_write(self.leaf)   #  entry), no read, one document that carries them
         self.assertEqual(sorted(calls), ["ledger"] * 3 + ["wake"] * 3, "advanced at every settle like the five: %s" % calls)
         d = self.doc(self.leaf)
-        self.assertIn("state", d["folds"].get("queueLedger", {}), "%s" % sorted(d["folds"])); self.assertIn("state", d["folds"].get("wakeTail", {}))
+        self.assertIn("state", d["folds"].get("queueLedger", {}), "%s" % sorted(d["folds"])); self.assertIn("state", d["folds"].get("wakeTail2", {}))
         self.assertEqual(em.checkpoint_stats()["refolds"].get("queueLedger"), rf["queueLedger"], "the prime over records in hand is no refold read")
         self.fresh_process()
         km._session_meta(self.leaf)                                  # the next boot: the tail
