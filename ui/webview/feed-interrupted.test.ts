@@ -13,7 +13,7 @@ const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", 
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.css"), "utf8") + fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "card-sections.css"), "utf8");   // the badge and paragraph rules moved to the sheet both pages import (plans/needs-you.md)
 
 test("the interrupted badge is built once and rides the wrapping chip row", () => {
-  assert.match(FEED, /badge\("fask-interrupted", BADGE_WORDS\.interrupted\.text, BADGE_WORDS\.interrupted\.title\)/);   // the badges moved to card-sections.ts (round two of the box content PR: one builder for the card and the Needs you row)
+  assert.match(FEED, /badge\("fask-interrupted", BADGE_WORDS\.interrupted\.text, it\.interrupted === "spend" \? BADGE_WORDS\.interruptedSpend\.title : BADGE_WORDS\.interrupted\.title\)/);   // the hover names the spend guard when it made the stop (2026-10-08)   // the badges moved to card-sections.ts (round two of the box content PR: one builder for the card and the Needs you row)
   assert.match(FEED, /interrupted: \{ text: "interrupted", title: /, "text label, no emoji/glyph (the words in card-sections.ts, worn by the Needs you row too)");
   assert.match(FEED, /row2\.append\(idwrap, retryBadge, apiBadge, apiRetry, apiLogin, capLine, capBtn, jauthBadge, blkBadge, badges\)/);
   assert.match(FEED, /a\._badges = badges;/);
@@ -23,11 +23,12 @@ test("it.interrupted toggles the badge, yielding to the stalled chips and the in
   assert.match(FEED,
     /if \(it\.interrupted && !it\.interrupting && !it\.nudgeFailed\) out\.push\(badge\("fask-interrupted"/,
     "past-tense badge shows only once the interrupt has SETTLED (not while interrupting) and no nudge-failed story covers the card");
-  assert.match(FEED, /interrupted\?: boolean;/, "the card payload carries the kernel flag");
+  assert.match(FEED, /interrupted\?: boolean \| "spend";/, "the card payload carries the kernel flag: true for the user's stop, \"spend\" for the spend guard's");
 });
 
 test("the tooltip explains the suppression contract", () => {
   assert.match(FEED, /you stopped this session mid-turn; romp won't follow up on its own until you message it again/);
+  assert.match(FEED, /the spend guard stopped this session mid-turn; romp won't follow up on its own until you message it again/, "and names the guard when it made the stop");
 });
 
 test("the badge is a warning-yellow pill, same treatment as the warn chip", () => {

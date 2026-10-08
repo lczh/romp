@@ -484,6 +484,8 @@ class NudgeWalkParseGate(unittest.TestCase):
             "_nudge_gate_memo", "_NUDGE_GATE_STATS",   # the placement gate's memo (the parse identity, the store view, the episode log's
             #                                         stat, the clears log's stat) and its counters
             "_last_state_cache", "_machine_cut_cache",   # _fold_records cursors over the state log (a keyed file), keyed by its path and stat
+            "_spend_cuts_cache",                    # the same, for the spend guard's cut records (_spend_cuts, which _interrupt_stop_cause
+            #                                         reads to name the guard's stop on the card, 2026-10-08)
             "_stat_key",                            # a (mtime, size) reader
             "_NUDGE_HORIZON",                       # the look's thread-local horizon: its notes, and the keyed and overflow asker sets the
             #                                         gate derived from the postal log's maps (keyed) before the look; no input of its own

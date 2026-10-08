@@ -9,13 +9,29 @@ whole stack.
 
 ## Hermeticity (non-negotiable)
 
-`lab.sh` exports `XDG_STATE_HOME` into a fresh temp root BEFORE anything loads —
+`lab.sh` first re-executes itself under `env -i` with an ALLOWLIST of its
+caller's environment (`LAB_ENV_KEEP`: PATH, HOME, the user, locale, terminal,
+temp dir, Claude Code's config dir, the browser cache, `LAB_MODEL`). A lab started
+from inside a live romp session therefore carries none of that session's identity
+(`ROMP_SID`, the Claude Code session id the postal tools read, its messaging
+socket, the live kernel's port, the user bus), and neither do the CLIs its kernel
+starts. Everything romp-shaped it sets itself through `lab_set`.
+
+It then exports `XDG_STATE_HOME` into a fresh temp root BEFORE anything loads —
 the never-load-romp-modules-against-live-state rule: a kernel booted against live
 state reconciles it (resumes turns, spawns writers). Its own `ROMP_SERVE_TOKEN`,
-its own free port, `ROMP_KERNEL_NO_OPEN=1` (nothing pops up), headless Chromium
-(the playwright cache vscode-extension pins). Live state, live postal, and every
-visible display stay untouched. Session content is SYNTHETIC ONLY: invented
-prompts, never anything from live transcripts.
+its own free port, a postal port of its own that nothing serves,
+`ROMP_KERNEL_NO_OPEN=1` (nothing pops up), no per-session systemd scopes, per-session
+hosts off (`--session-hosts` opts in), headless Chromium (the playwright cache
+vscode-extension pins). Live state, live postal, and every visible display stay
+untouched. Session content is SYNTHETIC ONLY: invented prompts, never anything
+from live transcripts.
+
+`tools/romp-lab/lab.sh --env-only` is the instrument for all of this: no build,
+no browser, no model. The kernel's CLI is a probe (`env-probe-cli.py`) that writes
+down what it was handed; the phase (`env-loop.py`) checks the kernel's own
+environment against the allowlist and that the session's CLI runs under the lab's
+new session id. `tests/test_romp_lab_env.py` runs it under a polluted environment.
 
 ## Run
 

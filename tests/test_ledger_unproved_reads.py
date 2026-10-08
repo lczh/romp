@@ -471,7 +471,7 @@ class _InterruptTickRig(unittest.TestCase):
         self.marks = (1200, 900)                           # the stop is newer than the last human message: a user stop
         km._interrupt_marks = lambda turns, sid="", **k: self.marks   # the tick names its memo family
         self.recorded, self.lifted, self.pushes = [], [], []
-        km._record_interrupt_block = lambda sid, ev: self.recorded.append((sid, ev)) or GID
+        km._record_interrupt_block = lambda sid, ev, why=None: self.recorded.append((sid, ev)) or GID   # why: the spend guard's own words (2026-10-08)
         km._lift_interrupt_block = lambda sid, gid, ev: self.lifted.append((sid, gid, ev)) or True   # spent; the real
         #                                            one returns False only on a goal-store read fault, keeping the marker (PR #1019)
         km._intr_block_stands = lambda sid, gid: True

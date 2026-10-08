@@ -771,6 +771,8 @@ export const BADGE_WORDS = {
   nudgeFailed: { text: "follow-up failed", title: "romp followed up once; the response didn't resolve it and it won't be re-asked — it's waiting on you" },
   interrupting: { text: "interrupting…", title: "stop sent — waiting for this session to reach a stopping point" },
   interrupted: { text: "interrupted", title: "you stopped this session mid-turn; romp won't follow up on its own until you message it again" },
+  // the same stop when the spend guard made it (kernel _interrupted_by: `interrupted` carries "spend"); the user did not stop it
+  interruptedSpend: { title: "the spend guard stopped this session mid-turn; romp won't follow up on its own until you message it again" },
 } as const;
 
 export interface BadgeItem {
@@ -779,7 +781,7 @@ export interface BadgeItem {
   warns?: { kind: string; t: number; msg: string; detail: string }[] | null;   // judge-stamped anomalies → the yellow "warning" chip
   failLog?: { t: number; line: string; model: string; note: string }[] | null;   // the summarizer's failed attempts: the chip's hover evidence
   nudged?: { count: number; times: number[] } | null;
-  interrupting?: boolean | null; interrupted?: boolean | null;
+  interrupting?: boolean | null; interrupted?: boolean | "spend" | null;   // true: the user's stop; "spend": the spend guard's
   waitingOn?: { peerSid?: string; name: string; color?: { bg: string; fg: string } | null; inCycle?: boolean; kind?: string; since?: number | null } | null;
   origin?: { peer: string; peerSid: string; peerHost?: string; color?: { bg: string; fg: string } | null; live?: boolean } | null;
   handoffTo?: { peer: string; peerSid: string; peerHost?: string; color?: { bg: string; fg: string } | null } | null;
@@ -855,7 +857,7 @@ export function stateBadges(it: BadgeItem, env: Pick<SectionEnv, "durNodes" | "o
     out.push(b);
   }
   if (it.interrupting && !it.nudgeFailed) { const b = badge("fask-interrupting", BADGE_WORDS.interrupting.text, ""); setTip(b, BADGE_WORDS.interrupting.title); out.push(b); }   // styled tip (tip.ts), not a native title
-  if (it.interrupted && !it.interrupting && !it.nudgeFailed) out.push(badge("fask-interrupted", BADGE_WORDS.interrupted.text, BADGE_WORDS.interrupted.title));
+  if (it.interrupted && !it.interrupting && !it.nudgeFailed) out.push(badge("fask-interrupted", BADGE_WORDS.interrupted.text, it.interrupted === "spend" ? BADGE_WORDS.interruptedSpend.title : BADGE_WORDS.interrupted.title));   // whose stop: the hover names the spend guard when it made it
   if (it.warns && it.warns.length) {
     // "warning" chip: a judge stamped an anomaly on this goal — the latest msg on hover, detail on click. A BUTTON so it is focusable.
     const allDistill = it.warns.every((w) => DISTILL_FAIL_RE.test(w.kind));

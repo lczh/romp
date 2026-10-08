@@ -76,6 +76,19 @@ def rec_result(t, uid, parent, tool):
             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool, "content": "ok"}]}}
 
 
+def live_shape(guard):
+    """The live shape: a turn the stop cut mid-tool-use, the session's settle, then `guard` (the guard's message, or a
+    typed prompt in the user-stop fixtures) and the session's reply to it."""
+    return [rec_user(T0, "u1", "Run the notes-api test suite and fix what fails.", ps="sdk"),
+            rec_assistant(T0 + 5, "a1", "u1", tool="tu-1"),
+            rec_result(T0 + 6, "r1", "a1", "tu-1"),
+            rec_assistant(T0 + 8, "a2", "r1", tool="tu-2"),
+            rec_user(T0 + 11, "i1", "[Request interrupted by user for tool use]", parent="a2"),
+            rec_assistant(T0 + 12, "a3", "i1", text="I stopped; tell me how to continue."),
+            rec_user(T0 + 14, "g1", guard, ps="sdk", parent="a3"),
+            rec_assistant(T0 + 20, "a4", "g1", text="It was the test fan-out; it is stopped now.")]
+
+
 class TheInjectedBytesAreUnchanged(unittest.TestCase):
     def test_the_body_is_byte_for_byte_what_the_user_approved(self):
         self.assertEqual(BODY, (
@@ -287,14 +300,7 @@ class TheBuiltChat(unittest.TestCase):
         return out["events"]
 
     def _live_shape(self, guard):
-        return [rec_user(T0, "u1", "Run the notes-api test suite and fix what fails.", ps="sdk"),
-                rec_assistant(T0 + 5, "a1", "u1", tool="tu-1"),
-                rec_result(T0 + 6, "r1", "a1", "tu-1"),
-                rec_assistant(T0 + 8, "a2", "r1", tool="tu-2"),
-                rec_user(T0 + 11, "i1", "[Request interrupted by user for tool use]", parent="a2"),
-                rec_assistant(T0 + 12, "a3", "i1", text="I stopped; tell me how to continue."),
-                rec_user(T0 + 14, "g1", guard, ps="sdk", parent="a3"),
-                rec_assistant(T0 + 20, "a4", "g1", text="It was the test fan-out; it is stopped now.")]
+        return live_shape(guard)
 
     def test_the_stop_and_the_message_both_read_as_the_guard(self):
         evs = self._build("11111111-2222-3333-4444-0000000a5c01", self._live_shape(BODY), cuts=[T0 + 10.4])
@@ -329,6 +335,102 @@ class TheBuiltChat(unittest.TestCase):
         self.assertNotIn("interruptCause", marker)
         self.assertFalse(any(e.get("spendGuard") for e in evs))
 
+
+class TheCardReadsWhoseStopItWas(unittest.TestCase):
+    """The feed card's reading of whose stop it was (2026-10-08). The chat named the guard (above); the card did not, so a
+    session the guard stopped sat in Needs you saying "you stopped this session mid-turn", and its badge's hover said the
+    same. The card reads the stop off the guard's own cut record now, under the chat's own order rule (_spend_cut_runs),
+    never off the guard's message. The guard's stop is still a stop the session waits on the user after: the tally, the
+    nudge hold and the Needs you move are unchanged, only the words name who made it."""
+
+    SID3 = "11111111-2222-3333-4444-0000000a5c10"     # this class's own synthetic sid: its states file carries the cut
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.path = Path(self.td.name) / (self.SID3 + ".jsonl")
+        self.states = km.jd.STATE / "states" / (self.SID3 + ".jsonl")
+        self.states.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(self.states.unlink, missing_ok=True)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _turns(self, records, cuts=()):
+        """The thread parsed, with the guard's cut records (press epochs) in its states file, as append_spend_cut writes."""
+        self.path.write_text("".join(json.dumps(dict(r, sessionId=self.SID3)) + "\n" for r in records))
+        self.states.write_text("".join(json.dumps({"t": c, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}) + "\n"
+                                       for c in cuts))
+        return km.jd.parsed_session(self.SID3, [str(self.path)], T0 + 600)["turns"]
+
+    def _cause(self, turns):
+        stop_t, human_t = km._interrupt_marks(turns, self.SID3)
+        self.assertGreater(stop_t, human_t, "a counted stop stands")
+        return km._interrupt_stop_cause(turns, self.SID3, stop_t)
+
+    def test_the_guards_cut_names_its_stop_on_the_card(self):
+        turns = self._turns(live_shape(BODY), cuts=[T0 + 10.4])        # the press, then the stop record at T0+11
+        self.assertEqual(self._cause(turns), "spend")
+        self.assertEqual(km._interrupted_by(turns, self.SID3), "spend", "the badge's value names the guard")
+
+    def test_the_guards_stop_still_waits_on_the_user(self):
+        turns = self._turns(live_shape(BODY), cuts=[T0 + 10.4])
+        self.assertTrue(km._interrupt_suppresses_nudge(turns, self.SID3),
+                        "the guard hands the session to the user: still a counted stop, and nothing drives it on meanwhile")
+
+    def test_a_guard_message_with_no_cut_record_leaves_the_users_stop_theirs(self):
+        # the review of #169's shape for the card: the guard's message is sent whether or not it cut a turn (an idle
+        # session, a detached host, the user's own stop already in flight), so the message alone names nobody
+        turns = self._turns(live_shape(BODY))
+        self.assertEqual(self._cause(turns), "")
+        self.assertIs(km._interrupted_by(turns, self.SID3), True)
+
+    def test_a_press_that_met_a_prompt_first_names_no_later_stop(self):
+        recs = live_shape(BODY)[:4] + [rec_user(T0 + 9, "p1", "keep going with the other file", ps="typed", parent="a2"),
+                                       rec_assistant(T0 + 10, "a5", "p1", tool="tu-3"),
+                                       rec_user(T0 + 11, "i1", "[Request interrupted by user]", parent="a5")]
+        turns = self._turns(recs, cuts=[T0 + 8.2])                     # pressed at T0+8; a prompt landed at T0+9
+        self.assertEqual(self._cause(turns), "")
+
+    def test_a_users_own_stop_stays_theirs(self):
+        turns = self._turns(live_shape(BODY)[:6])
+        self.assertEqual(self._cause(turns), "")
+        self.assertIs(km._interrupted_by(turns, self.SID3), True)
+
+    def test_the_card_and_the_chat_read_the_stop_by_one_rule(self):
+        rows = [(100, "prompt"), (104, "marker"), (104, "skip"), (105, "marker"), (106, "other"), (107, "marker")]
+        self.assertEqual(km._spend_cut_runs(rows, [{"t": 103.6}]), [({"t": 103.6}, [1, 3])],
+                         "the first stop at or after the press, and its back-to-back twin")
+        self.assertEqual(km._spend_cut_runs(rows, [{"t": 99.5}]), [], "a prompt after the press's second came first")
+        self.assertEqual(km._spend_cut_runs(rows, [{"t": 100.2}]), [({"t": 100.2}, [1, 3])],
+                         "a prompt in the press's own second bounds nothing (it may precede the press)")
+
+    def _tick_why(self, records, cuts=()):
+        """The why the interrupt tick files for the stopped session, the store write stubbed to capture it."""
+        from unittest import mock
+        self._turns(records, cuts)
+        row = {"sid": self.SID3, "path": str(self.path), "name": "api"}
+        filed = []
+        stubs = dict(_task_tracking_on=lambda: True, _alive_sessions=lambda now, live_map: [row],
+                     _session_flag=lambda sid, flag: False, _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
+                     _auto_nudge_data=lambda: {}, _interrupt_block_key=lambda s, snap: None, _auto_nudge_resume=lambda: None,
+                     _intr_blocked=lambda sid=None, data=None: None, _set_intr_blocked=lambda sid, gid: True,
+                     _tick_job_done=lambda *a, **k: None,
+                     _record_interrupt_block=lambda sid, ev, why=None: (filed.append(why), self.SID3 + ":g1")[1])
+        with mock.patch.multiple(km, **stubs):
+            km._interrupt_block_tick(int(T0 + 600), {self.SID3: {"state": "idle"}})
+        self.assertEqual(len(filed), 1, "the tick filed one block")
+        return filed[0] or km.jd.INTERRUPT_BLOCK_WHY
+
+    def test_the_block_the_guards_stop_files_names_the_guard(self):
+        why = self._tick_why(live_shape(BODY), cuts=[T0 + 10.4])
+        self.assertEqual(why, km.jd.SPEND_STOP_BLOCK_WHY)
+        self.assertNotIn("you stopped", why)
+        self.assertTrue(km.jd.procedural_block_why(why), "romp's own bookkeeping: no invented decision brief")
+
+    def test_the_block_a_users_stop_files_is_unchanged(self):
+        self.assertEqual(self._tick_why(live_shape(BODY)[:6]), km.jd.INTERRUPT_BLOCK_WHY)
+        self.assertEqual(self._tick_why(live_shape(BODY)), km.jd.INTERRUPT_BLOCK_WHY,
+                         "the guard's message with no cut record: the user's stop, said as theirs")
 
 if __name__ == "__main__":
     unittest.main()

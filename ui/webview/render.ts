@@ -382,7 +382,7 @@ interface ChatNotice { itemId: string; key: string; rev: number; title: string; 
                        summary?: string | null; blockSummary?: string | null; briefParts?: { id?: string; since: number }[] | null; summaryParts?: { id?: string; since: number }[] | null;
                        distillState?: "completed" | "blocked" | null; summaryStale?: boolean | null; relayNote?: string | null; background?: string | null;
                        stalled?: SectionItem["stalled"]; tree?: AskTreeNode[] | null; awaiting?: SectionItem["awaiting"];
-                       recheck?: boolean | null; rejudging?: boolean | null; nudgeFailed?: boolean | null; nudged?: BadgeItem["nudged"]; interrupting?: boolean | null; interrupted?: boolean | null;
+                       recheck?: boolean | null; rejudging?: boolean | null; nudgeFailed?: boolean | null; nudged?: BadgeItem["nudged"]; interrupting?: boolean | null; interrupted?: BadgeItem["interrupted"];
                        waitingOn?: BadgeItem["waitingOn"]; origin?: BadgeItem["origin"]; handoffTo?: BadgeItem["handoffTo"];
                        warns?: BadgeItem["warns"]; failLog?: BadgeItem["failLog"]; doneConfirming?: boolean | null;
                        summaryAnchorUuid?: string | null; summaryAnchorQuote?: string | null; summaryAnchorsPara?: SectionItem["summaryAnchorsPara"];

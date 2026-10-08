@@ -5975,6 +5975,14 @@ row is recognized by its opening sentence (`_spend_ceiling_parse`), so a
 message the session took merged behind another send in one record is headed
 by that record's first line instead.
 
+The session's card reads the stop the same way, from the same record and by
+the same order rule (`_spend_cut_runs`). A stop the guard made is still one the
+session waits on you after, so the card
+moves to Needs you and romp does not follow up on its own, exactly as for your
+own stop, but its reason reads "the spend guard stopped this session
+mid-turn — it's waiting on your next instruction" and the "interrupted"
+badge's hover names the guard too.
+
 ## The spend ledger across a host re-attach
 
 A session under a host keeps its CLI process across a kernel restart, and the
