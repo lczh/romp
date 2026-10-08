@@ -33641,27 +33641,42 @@ def _wake_ts_epoch(ts):
 def _undelivered_wake_tail(path):
     """The transcript's still-pending queue-operation enqueues, resolved PER ENTRY on the evidence the
     CLI actually writes (measured live 2026-08-18 — the comment block above):
+      * a CONTENT-LESS enqueue is romp's own input and never enters the tail (2026-10-08). The CLI writes
+        an enqueue's text only when the queued value is a string; romp feeds every message as content
+        blocks (SdkSession.inputs), and on an SDK session's stdin nothing else writes, so an enqueue with
+        no content is exactly one of romp's sends, which romp tracks itself (its own queue, the feed hold,
+        the CLI's lifecycle frames) and which is never a wake signal. Kept, they could never be matched:
+        one long-lived session's tail held 4,383 entries, most of them these, copied on every push;
       * a `remove` carrying content discards exactly the entry with that text (the CLI's removes are
         content-addressed single-item discards, routinely of a NON-oldest entry while others stay
-        pending); a content-less remove discards the oldest, matching _queue_ledger_step's fold;
+        pending); a CONTENT-LESS remove discards nothing here: the CLI omits the text for the same
+        content-block values, so it removed one of romp's own sends, which the tail does not hold (it
+        discarded the OLDEST entry until 2026-10-08, which could be a notification still owed a turn);
       * a `popAll` discards EVERY pending entry — the whole queue withdrawn in one record, so none of it
         is still owed a turn (unhandled until 2026-08-26: a recalled queue went on reading as undriven
         signals indefinitely, one session holding twelve of them);
       * a `dequeue` alone clears NOTHING — the CLI's idle deliveries write no dequeue at all, and an
         agent notification's instant dequeue must not wipe an older undriven signal; the delivery
         evidence is the user record it produces;
-      * a later non-isMeta USER record clears exactly the entries whose text it CONTAINS — the CLI's
-        idle auto-delivery, its bare-message delivery at a turn start, and romp's own driven turn
-        (whose user record carries the wrapper texts verbatim) all resolve this way. ONE entry per
+      * a later USER record clears exactly the entries whose text it CONTAINS — the CLI's idle
+        auto-delivery, its bare-message delivery at a turn start, its delivery of a peer's message as a
+        META record (isMeta; read as delivery since 2026-10-08: the record carries the text, and before
+        that every such message stayed in the tail for good), and romp's own driven turn (whose user
+        record carries the wrapper texts verbatim) all resolve this way. ONE entry per
         carried occurrence, oldest first: a varianceless recurring monitor enqueues byte-identical
         firings (live census: 6 of 1373 enqueues are exact repeats), and a record carrying that
         text once delivered exactly one of them — an identical firing enqueued mid-flight is a
         distinct signal still owed a turn, not already-heard news. The driven turn joins k
         delivered copies "\\n\\n"-separated, k non-overlapping occurrences, so it still clears
         exactly what it carried and no re-drive loop opens;
-      * assistant records and isMeta user records clear NOTHING: a turn merely running is not
-        evidence any particular queued signal was delivered — in the stuck regime, mid-turn arrivals
-        are never folded into the open turn, and the old whole-tail clear silently dropped them.
+      * a record that does not carry an entry's text clears NOTHING (an assistant record, a user record
+        without it): a turn merely running is not evidence any particular queued signal was delivered —
+        in the stuck regime, mid-turn arrivals are never folded into the open turn, and the old
+        whole-tail clear silently dropped them.
+    So the tail holds what the CLI's own records say is still queued, and grows only with it. One gap
+    stays, named here because nothing in the log resolves it: a notice the CLI takes by a `dequeue` (no
+    content) and delivers in another form, folded into a combined notice, keeps its entry; the drive's
+    watermark latch keeps it from being sent twice.
     Returns ([{pos, ts, text, wrapper}], (pos, ts) of the newest one) or ([], None). `wrapper` marks
     the wake-signal class — harness system wrappers (<task-notification>/<system-reminder>) EXCEPT
     background-agent completion notices (a-prefixed 17-hex <task-id>), which the CLI delivers itself
@@ -33680,8 +33695,10 @@ def _undelivered_wake_tail(path):
         n += 1
         if o.get("type") == "queue-operation":
             op = o.get("operation")
+            if op == "enqueue" and not isinstance(o.get("content"), str):
+                return (tail, n)                             # romp's own content-block send (docstring): not a wake signal
             if op == "enqueue":
-                text = o.get("content") if isinstance(o.get("content"), str) else ""
+                text = o.get("content")
                 w = bool(em.SYSTEM_WRAPPER_RE.match(text))
                 if w:
                     m = _AGENT_TASK_ID_RE.search(text)
@@ -33695,15 +33712,14 @@ def _undelivered_wake_tail(path):
                     i = next((i for i, e in enumerate(tail) if e["text"] == c), None)
                     if i is not None:                        # content-addressed single-item discard —
                         del tail[i]                          # the CLI's call on THAT entry only
-                elif tail:
-                    del tail[0]                              # content-less: the oldest, as _queue_ledger_step folds
+                #      a content-less remove took one of romp's own sends, which the tail does not hold (docstring)
             elif op == "popAll":                             # the whole queue recalled at once: every entry is
                 tail.clear()                                 # withdrawn, so nothing here is owed a turn any more
             #      a `dequeue` clears nothing — its delivery evidence is the user record it produces
             return (tail, n)
         if not tail:
             return (tail, n)                                 # nothing pending → nothing to resolve (fast path)
-        if o.get("type") == "user" and not o.get("isMeta"):
+        if o.get("type") == "user":                         # a meta record (a peer's message) delivers too (docstring)
             mc = (o.get("message") or {}).get("content")
             if isinstance(mc, str):
                 utext = mc
@@ -33726,7 +33742,10 @@ def _undelivered_wake_tail(path):
                     kept.append(e)
                 tail = kept
         return (tail, n)
-    tail, _n = _fold_records(_wake_tail_cache, path, lambda: ([], 0), step, ckpt="wakeTail")
+    # The checkpoint name carries the fold's rules: "wakeTail2" since the rules above (2026-10-08), so a document written
+    # under the old ones, whose tail held every phantom they kept, is never restored; the first fold of each transcript reads
+    # it whole once. The old entry is carried by later writes only while its count stays inside the lag bound.
+    tail, _n = _fold_records(_wake_tail_cache, path, lambda: ([], 0), step, ckpt="wakeTail2")
     tail = [dict(e) for e in tail]                           # callers get their own copies of the carried entries
     return (tail, (tail[-1]["pos"], tail[-1]["ts"]) if tail else None)
 

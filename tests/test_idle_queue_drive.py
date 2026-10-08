@@ -123,8 +123,9 @@ class WakeTail(unittest.TestCase):
     """kernel._undelivered_wake_tail — the trailing unconsumed enqueues, from the transcript's own
     queue-operation records (the authoritative queue). The ledger reader _pending_ledger is a SEPARATE
     reader with its own semantics — it credits a dequeue, which this one deliberately does not — and the
-    two agree only on the record kinds whose meaning is unambiguous: a content-addressed remove, a
-    content-less remove taking the oldest, and popAll withdrawing everything."""
+    two agree only on the record kinds whose meaning is unambiguous: a content-addressed remove and popAll
+    withdrawing everything. A content-less enqueue or remove is romp's own content-block send (the CLI
+    writes text only for string values), which this tail never holds (2026-10-08)."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -155,11 +156,41 @@ class WakeTail(unittest.TestCase):
         entries, mark = self._tail(_turn() + [_qop("enqueue", _wrap()), _qop("remove", _wrap())])
         self.assertEqual((entries, mark), ([], None), "a remove means the CLI discarded it — its call")
 
-    def test_a_contentless_remove_resolves_the_oldest(self):
+    def test_a_contentless_remove_takes_one_of_romps_sends_never_an_older_signal(self):
+        """The CLI logs a remove without text exactly when the removed value is not a string: one of romp's content-block
+        sends, absorbed mid-turn. The fold took the OLDEST entry for it (2026-10-08), which could be a notification still owed
+        a turn; romp's sends are not in the tail, so such a remove takes nothing from it."""
         entries, _ = self._tail(_turn() + [_qop("enqueue", _wrap(0)),
                                            _qop("enqueue", _wrap(1), ts=TS % (15, 0)), _qop("remove")])
-        self.assertEqual([e["text"] for e in entries], [_wrap(1)],
-                         "no content → FIFO, exactly as _queue_ledger_step folds the same records")
+        self.assertEqual([e["text"] for e in entries], [_wrap(0), _wrap(1)],
+                         "a content-less remove names one of romp's sends; both notifications are still owed a turn")
+        entries, _ = self._tail(_turn() + [_qop("enqueue", _wrap(0)), _qop("enqueue"),            # romp's send behind the signal
+                                           _qop("remove", ts=TS % (15, 0))])                       # …absorbed mid-turn
+        self.assertEqual([e["text"] for e in entries], [_wrap(0)], "the signal survives the removal of romp's own send")
+
+    def test_romps_own_contentless_sends_never_enter_the_tail(self):
+        """The unbounded tail (2026-10-08): every send romp feeds is content blocks, which the CLI enqueues with no text, so
+        no record could ever match or clear it, and one long-lived session's tail held thousands of them, copied on every
+        push. They are romp's own input, tracked by romp, and never a wake signal."""
+        recs = _turn()
+        for i in range(40):                                              # a working day of sends: enqueue, then the CLI takes it
+            recs += [_qop("enqueue", ts=TS % (15 + i // 60, i % 60)), _qop("dequeue", ts=TS % (15 + i // 60, i % 60))]
+        recs += [_qop("enqueue", "a queued plain message", ts=TS % (16, 0))]
+        entries, mark = self._tail(recs)
+        self.assertEqual([e["text"] for e in entries], ["a queued plain message"], "only what the CLI's records say is queued")
+        self.assertEqual(mark[0], entries[-1]["pos"])
+
+    def test_a_meta_record_carrying_the_text_delivers_it(self):
+        """A peer's message reaches the conversation as a META user record (isMeta) carrying its text; the fold read only
+        non-meta records as delivery, so every such message stayed in the tail for good (2026-10-08)."""
+        peer = "📬 a synthetic peer message about the notes-api build"
+        entries, mark = self._tail(_turn() + [_qop("enqueue", peer), _qop("enqueue", _wrap(0), ts=TS % (15, 0)),
+                                              _urec(peer, meta=True, ts=TS % (15, 30)),
+                                              _urec(_wrap(0), meta=True, ts=TS % (15, 40))])
+        self.assertEqual((entries, mark), ([], None), "each meta record carried its entry's text: both delivered")
+        entries, _ = self._tail(_turn() + [_qop("enqueue", peer), _qop("enqueue", peer, ts=TS % (15, 0)),
+                                           _urec(peer, meta=True, ts=TS % (15, 30))])
+        self.assertEqual([e["text"] for e in entries], [peer], "one carried copy delivers one entry, as for any record")
 
     def test_popAll_withdraws_the_whole_tail(self):
         # popAll — the whole queue recalled in one record — was unhandled here too (the user 2026-08-26),
@@ -266,7 +297,7 @@ class WakeTail(unittest.TestCase):
 
     def test_meta_records_do_not_eat_wake_signals(self):
         entries, _ = self._tail(_turn() + [_qop("enqueue", _wrap())] + [_urec(meta=True, ts=TS % (15, 0))])
-        self.assertEqual(len(entries), 1, "an isMeta record is CLI bookkeeping, not the session being awake")
+        self.assertEqual(len(entries), 1, "an isMeta record that does not carry the text is bookkeeping, not a delivery")
 
     def test_non_wrapper_content_is_in_the_tail_but_not_a_wake_signal(self):
         entries, mark = self._tail(_turn() + [_qop("enqueue", "a queued plain message")])
