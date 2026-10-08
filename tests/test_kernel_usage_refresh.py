@@ -63,7 +63,17 @@ class UsageRefreshWiring(unittest.TestCase):
     def test_get_usage_route_returns_the_usage_read(self):
         src = Path(os.path.join(BIN, "romp-kernel")).read_text()
         self.assertIn('if p == "/usage":', src, "a GET /usage endpoint exists")
-        self.assertIn("json.dumps(_usage() or {})", src, "it serves the SAME _usage() read the push uses")
+        self.assertIn("json.dumps(_usage_payload(", src, "it serves _usage_payload, the reading plus the usage figures")
+        # the body is the SAME _usage() read the push uses, with the usage figures beside it on every branch
+        reading = {"five_hour": {"used_percentage": 12}}
+        real_usage, real_hours = km._usage, km._spend_hours_payload
+        try:
+            km._usage, km._spend_hours_payload = (lambda: dict(reading)), (lambda now=None: None)
+            self.assertEqual(km._usage_payload(), reading)
+            km._usage = lambda: None   # no reading yet: still a body, never a crash
+            self.assertEqual(km._usage_payload(), {})
+        finally:
+            km._usage, km._spend_hours_payload = real_usage, real_hours
 
     def test_rail_usage_widget_is_click_to_refresh(self):
         html = km._landing()

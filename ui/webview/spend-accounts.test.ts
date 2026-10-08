@@ -41,7 +41,8 @@ function fn(start: string): string {
 const SRC = ["var SP_RANGE_BUCKETS=", "function spSeries(d){", "function spTail(ser,keep){", "function spKey(d,s){",
   "function spSumArr(a){", "function spRound4(v){", "var SP_GRAIN=", "function spUsd(v,est){", "function spHostScope(d,host){",
   "function spKeyArr(d,st,meas){", "function spPart(d,st,sec,meas){", "function spRouteSums(d){", "function spAccountRows(d){",
-  "function spAcctName(d,s){", "function spRangeView(d){", "function spRangeWords(ser){", "function spAllowHTML(){", "function spCards(d){",
+  "function spAcctName(d,s){", "function spRangeView(d){", "function spRangeWords(ser){", "function spNothing(ser){", "function spWinFigs(d){",
+  "function spendLimitResets(m,now){", "function spendLimitWords(m){", "function lrRound(vals){", "function wholeUsd(n,est){", "function spAllowHTML(){", "function spCards(d){",
   "function spCardHTML(d,c,sec){"].map(fn).join("\n");
 
 /** the lifted functions over a fresh SP state */
@@ -75,7 +76,10 @@ function payload(): Record<string, any> {
   const days = { keys: dk, stacks: [], routes: [] };
   const seat = [{ host: "TESTHOST", route: "machine", via: "TESTHOST sign-in", estimate: true },
     { host: "PEERHOST", route: "login:0a0b0c0d0e0f", via: "token on PEERHOST", estimate: true }];
+  // today: the kernel's regrouping of the hour ledger by the viewer's own hours (here, the last 24 of them), read live
+  const tail = (x: any) => { const o: any = {}; for (const k in x) o[k] = Array.isArray(x[k]) ? x[k].slice(-24) : x[k]; return o; };
   return { host: "TESTHOST", scope: "keyed", order: [], tags: [], unattributed: { usd: 0, tok: 0, turns: 0 }, hours, days,
+    get today() { return { keys: this.hours.keys.slice(-24), stacks: this.hours.stacks.map(tail), routes: this.hours.routes.map(tail) }; },
     hosts: [{ host: "TESTHOST", status: "ok", scope: "keyed" }, { host: "PEERHOST", status: "ok", scope: "total" }],
     sessions: [{ sid: "s-web", host: "TESTHOST", name: "web", live: true, usd: 0, tok: 0, turns: 0 },
       { sid: "s-api", host: "PEERHOST", name: "api", live: true, usd: 0, tok: 0, turns: 0, login: "enterprise · dev@example.com", loginId: "0a0b0c0d0e0f", loginLabel: "enterprise" },
@@ -90,7 +94,7 @@ function payload(): Record<string, any> {
 }
 
 test("one account row per Claude account, summed over the chart's range, the key plain and Unknown last", () => {
-  const { spAccountRows } = lift("day");
+  const { spAccountRows } = lift("today");
   const rows = spAccountRows(payload());
   assert.deepEqual(rows.map((r: any) => r.name), ["Enterprise seat", "API key", "Unknown"]);
   const [seat, key, unk] = rows;
@@ -109,7 +113,7 @@ test("one account row per Claude account, summed over the chart's range, the key
 });
 
 test("the seat's card lists its accounts when its dollars come from more than one, each marked, the email only in the hover", () => {
-  const { spCards, spCardHTML, SP_APPROX } = lift("day");
+  const { spCards, spCardHTML, SP_APPROX } = lift("today");
   assert.equal(SP_APPROX, "≈");
   const p = payload(), c = spCards(p);
   assert.equal(c.seat.name, "Subscription logins", "the seat and a signed-out sign-in's spend: the card names neither alone");
@@ -125,7 +129,7 @@ test("the seat's card lists its accounts when its dollars come from more than on
 });
 
 test("one seat account names the card itself, its identity in the hover words, no account rows", () => {
-  const { spCards, spCardHTML } = lift("day");
+  const { spCards, spCardHTML } = lift("today");
   const p = payload(); p.accounts = p.accounts.filter((a: any) => a.kind !== "unknown");
   const c = spCards(p);
   assert.equal(c.seat.name, "Enterprise seat");
@@ -135,7 +139,7 @@ test("one seat account names the card itself, its identity in the hover words, n
 });
 
 test("a session row's two halves follow its host's billing rule, and a stored login names its account", () => {
-  const { spRangeView, spUsd, spAcctName } = lift("day");
+  const { spRangeView, spUsd, spAcctName } = lift("today");
   const v = spRangeView(payload());
   const by = (n: string) => v.sessions.find((s: any) => s.name === n);
   assert.deepEqual([by("web").keyUsd, by("web").seatUsd], [24, 0], "an older keyed host's rows are its key's turns alone");

@@ -196,10 +196,10 @@ class NoWindowsServed(UsageByAccountServed):
         def old(pct):
             return {"pct": pct, "resetsAt": now - 25 * 86400, "color": [84, 178, 4]}
         spend = {w: {"usd": 5.0, "tok": 10, "turns": 1} for w in ("hour", "day", "week", "month", "monthToDate")}
-        routes = {"today": {"key": [5.0, 1], "machine": [10.4, 3]}, "monthToDate": {"key": [5.0, 1], "machine": [10.4, 3]},
-                  "week": {"key": [5.0, 1], "machine": [10.4, 3]}, "tok": {"today": {"tok": 2_000_000}, "monthToDate": {"tok": 2_000_000}}}
+        win = {"routes": {"key": 5.0, "machine": 10.4}, "tok": {"tok": 2_000_000}}
+        sw = {"tz": "", "today": win, "monthToDate": win, "billing": []}   # this machine's windows (built in the viewer's zone)
         rows = [{"host": "", "acct": ACCT2, "usage": {"noWindows": True, "t": now - 60, "acct": ACCT2, "acctName": NAME2, "spend": spend,
-                                                      "spendRoutes": routes}},
+                                                      "spendWin": sw}},
                 {"host": "TESTHOSTB", "acct": ACCT2, "usage": {"fiveHour": old(71), "sevenDay": old(16), "fable": old(27),
                                                                "t": now - 26 * 86400, "acct": ACCT2, "acctLabel": EMAIL}},
                 {"host": "TESTHOSTC", "acct": "", "usage": {"apiKey": True, "acct": "", "spend": spend}}]
@@ -207,7 +207,8 @@ class NoWindowsServed(UsageByAccountServed):
                                     "routes": [{"host": "TESTHOSTA", "route": "machine", "est": True}]},
                                    {"name": "API key", "kind": "key", "usd": 5.0, "est": False,
                                     "routes": [{"host": "TESTHOSTA", "route": "key", "est": False}]}],
-                      "accountsMissing": ["TESTHOSTC"]}
+                      "accountsMissing": ["TESTHOSTC"],
+                      "missing": [{"host": "TESTHOSTC", "why": "older build: it sends no hourly usage", "at": None}]}
 
     def test_an_account_without_windows_is_said_once_and_the_spend_splits_by_account(self):
         o = self._drive()
@@ -225,9 +226,10 @@ class NoWindowsServed(UsageByAccountServed):
         self.assertTrue(t["spend"], "the usage section")
         self.assertEqual(t["costRows"], ["Enterprise seat | \u2248$10 | \u2248$10", "API key charged | $5 | $5",
                                          "Total | \u2248$15 | \u2248$15", "tokens | 2.00M | 2.00M"], t["costRows"])
-        self.assertIn("TESTHOSTC: older build, its usage is not in these figures", t["costNotes"], t["costNotes"])
-        self.assertTrue(any(n.startswith("\u2248 marks an estimate") for n in t["costNotes"]), t["costNotes"])
-        self.assertEqual(o["rail"]["cost"], "today\u2248$15this month\u2248$15", "the cell: every route, the seat's estimate marked")
+        self.assertIn("TESTHOSTC: older build: it sends no hourly usage; its usage is not in these figures", t["costNotes"], t["costNotes"])
+        self.assertTrue(any(n.startswith("\u2248 marks romp\u2019s estimate") for n in t["costNotes"]), t["costNotes"])
+        self.assertEqual(o["rail"]["cost"], "today\u2248$15this month\u2248$15TESTHOSTC missing",
+                         "the cell: every route, the seat's estimate marked, and the machine its figures leave out named")
         self.assertEqual((o["rail"]["windows"], o["rail"]["pcts"]), ([], []), "no window bars on the rail: %r" % o["rail"])
 
 
@@ -238,14 +240,19 @@ class MonthlyAllowanceServed(NoWindowsServed):
 
     def _rows(self, now):
         rows, extra = NoWindowsServed._rows(self, now)
-        rows[0]["usage"]["monthly"] = {"pct": 23, "resetsOn": "2026-11-01", "color": [84, 178, 4], "tone": [81, 150, 184]}
+        rows[0]["usage"]["monthly"] = {"pct": 23, "used": 11500.0, "limit": 50000.0, "currency": "USD", "month": "2026-10",
+                                       "color": [84, 178, 4], "tone": [81, 150, 184]}
         return rows, extra
 
     def test_the_seats_monthly_allowance_is_its_one_bar(self):
         o = self._drive()
         b = o["tip"]["blocks"][0]
         self.assertEqual(b["head"], NAME2, "headed by the account's kind")
-        self.assertEqual((b["windows"], b["resets"], b["used"]), (["Monthly allowance"], ["resets Nov 1"], ["23%"]))
+        self.assertEqual((b["windows"], b["used"]), (["Monthly spend limit"], ["23%"]), "the account's spend limit, one bar")
+        # the reading carries no reset date: the browser dates it as Claude Code's /usage screen does, the first of
+        # the next calendar month in the viewer's zone ("resets Nov 1"), only for a plan with a limit to reset
+        self.assertEqual(len(b["resets"]), 1)
+        self.assertRegex(b["resets"][0], r"^resets [A-Z][a-z]{2} 1$")
         self.assertEqual(b["nowin"], "", "the bar takes the one-line note's place")
         self.assertEqual(b["age"], "", "no age line")
         self.assertFalse(o["tip"]["email"])

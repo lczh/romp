@@ -41,7 +41,7 @@ class SpendWindows(unittest.TestCase):
         km.jd.STATE = Path(self.td.name)
         # freeze the module's clock: time() answers FROZEN; every formatter stays the real one, fed
         # explicit struct_times by the implementation (a bare strftime() would read the wall clock)
-        frozen = types.SimpleNamespace(time=lambda: FROZEN, strftime=time.strftime, localtime=time.localtime,
+        frozen = types.SimpleNamespace(time=lambda: FROZEN, strftime=time.strftime, strptime=time.strptime, localtime=time.localtime,
                                        gmtime=time.gmtime, mktime=time.mktime, sleep=time.sleep,
                                        monotonic=time.monotonic, time_ns=time.time_ns)
         km.time = frozen
@@ -168,65 +168,86 @@ class RollingMonthAcrossDst(SpendWindows):
         self.assertEqual(usd, 31.0, "exactly today plus the 30 dates before it — the transition date 2026-03-08 must not be skipped for an older one")
 
 
-class RailRoutesByCalendarWindow(SpendWindows):
+class RailWindowsInTheViewersZone(SpendWindows):
     """2026-10-08 (the user, who read "API" on the bar's spend cell while nearly all of their usage bills an enterprise
-    seat): the cell shows USAGE AT API PRICES for the calendar day and month, every turn by the route that billed it
-    (_rail_routes): the key's dollars charged, every other route's an estimate. Calendar windows nest, so the superset
-    rule T235 wrote for the rolling rows holds by construction; the month comes from the day ledger, which keeps 90 days,
-    so it is never short. Frozen clock (the 3rd of a month), synthetic ledger."""
+    seat; then the reviewer, who found "today" and "this month" read off each KERNEL's clock): the cell shows USAGE AT
+    API PRICES for the VIEWER's calendar day and month, every turn by the route that billed it, built from the hour
+    ledger in the browser's own zone (_spend_hours_payload, _spend_win). An hour counts in a window when it starts in it.
+    Frozen clock (the 3rd of a month, midday local), synthetic ledger, hour keys written the recorder's way."""
 
-    def _routed(self, usd, key=0.0, login=None, sid="11111111-2222-3333-4444-000000000001", key_turns=1):
+    def _routed(self, usd, key=0.0, login=None, key_turns=1):
         e = {"usd": usd, "turns": 4, "tokIn": 100, "tokOut": 50, "tokCacheR": 800, "tokCacheW": 50,
-             "bySid": {sid: {"usd": usd, "turns": 4, "tok": 1000}}}
+             "bySid": {"11111111-2222-3333-4444-000000000001": {"usd": usd, "turns": 4, "tok": 1000}}}
         if key:
             e["key"] = {"usd": key, "turns": key_turns, "tok": 250}
         if login:
             e["byLogin"] = {login[0]: {"usd": login[1], "turns": 1, "tok": 250}}
         return e
 
-    def test_today_and_the_month_split_every_turn_by_the_route_that_billed_it(self):
-        self._ledger(days={_day(0): self._routed(10.0, key=2.0, login=("0a0b0c0d0e0f", 3.0)),
-                           _day(2): self._routed(100.0, key=100.0, key_turns=4),   # the 1st: the key's era
-                           _day(3): self._routed(999.0)})                     # last month: in neither window
-        rr = km._rail_routes()
-        self.assertEqual(rr["today"], {"key": [2.0, 1], "login:0a0b0c0d0e0f": [3.0, 1], "machine": [5.0, 2]},
-                         "the day's every turn: the key's, the stored login's, and the machine sign-in's remainder")
-        self.assertEqual(rr["monthToDate"], {"key": [102.0, 5], "login:0a0b0c0d0e0f": [3.0, 1], "machine": [5.0, 2]},
-                         "the calendar month so far: the 1st through today, never the 31st of the month before")
-        self.assertEqual(rr["tok"]["today"], {"tokIn": 100, "tokOut": 50, "tokCacheR": 800, "tokCacheW": 50, "tok": 1000})
-        self.assertEqual(rr["tok"]["monthToDate"]["tok"], 2000)
-        self.assertEqual(sorted(m["route"] for m in rr["billing"]), ["key", "login:0a0b0c0d0e0f", "machine"],
-                         "every route either window names carries its identity, for the accounts fold")
+    def _hours_at(self, epochs):
+        """an hour bucket at each absolute epoch, keyed by this machine's local hour (the recorder's spelling)"""
+        hours, days = {}, {}
+        for ep, b in epochs:
+            hours[time.strftime("%Y-%m-%dT%H", time.localtime(ep))] = b
+            dk = time.strftime("%Y-%m-%d", time.localtime(ep))
+            days[dk] = dict(days.get(dk) or {"usd": 0.0, "turns": 0}, usd=(days.get(dk) or {}).get("usd", 0.0) + b["usd"])
+        self._ledger(days=days, hours=hours)
 
-    def test_a_ledger_with_nothing_in_the_windows_ships_them_empty_and_no_ledger_ships_nothing(self):
-        # an honest zero: the windows genuinely hold nothing (the cell reads $0); a host that ships no routes at all is
-        # then known to be an older build, which the hover names rather than reading as $0
-        self._ledger(days={_day(40): self._routed(5.0)})
-        rr = km._rail_routes()
-        self.assertEqual((rr["today"], rr["monthToDate"], rr["week"]), ({}, {}, {}))
-        self.assertEqual(rr["tok"]["monthToDate"]["tok"], 0)
-        self._ledger()
-        self.assertIsNone(km._rail_routes(), "an empty ledger: nothing recorded, nothing shown")
+    def test_today_and_the_month_split_every_turn_by_route_in_the_zone_asked(self):
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt
+        hour0 = int(FROZEN // 3600) * 3600
+        self._hours_at([(hour0 - 3600 * i, self._routed(1.0, key=0.25, login=("0a0b0c0d0e0f", 0.25))) for i in range(60)])
+        hp = km._spend_hours_payload()
+        self.assertEqual(len(hp["rows"]), 60)
+        self.assertIsNone(hp["from"], "every recorded turn is in the hours")
+        for tz in ("UTC", "America/Los_Angeles", "Asia/Tokyo"):
+            zi = ZoneInfo(tz)
+            now_z = _dt.fromtimestamp(FROZEN, zi)
+            t0 = _dt(now_z.year, now_z.month, now_z.day, tzinfo=zi).timestamp()
+            m0 = _dt(now_z.year, now_z.month, 1, tzinfo=zi).timestamp()
+            want_today = sum(1 for i in range(60) if hour0 - 3600 * i >= t0)
+            want_month = sum(1 for i in range(60) if hour0 - 3600 * i >= m0)
+            w = km._spend_win(hp, tz)
+            self.assertEqual(w["tz"], tz)
+            self.assertAlmostEqual(sum(w["today"]["routes"].values()), want_today, places=3, msg=tz + ": today in that zone")
+            self.assertAlmostEqual(sum(w["monthToDate"]["routes"].values()), want_month, places=3, msg=tz + ": the month in that zone")
+            self.assertAlmostEqual(w["today"]["routes"]["key"], 0.25 * want_today, places=3)
+            self.assertAlmostEqual(w["today"]["routes"]["login:0a0b0c0d0e0f"], 0.25 * want_today, places=3)
+            self.assertEqual(w["today"]["tok"]["tok"], 1000 * want_today)
+        self.assertNotEqual(sum(km._spend_win(hp, "America/Los_Angeles")["today"]["routes"].values()),
+                            sum(km._spend_win(hp, "Asia/Tokyo")["today"]["routes"].values()),
+                            "two viewers in different zones have different todays from the same hours")
+        unknown = km._spend_win(hp, "Not/AZone")
+        self.assertEqual(unknown["tz"], time.strftime("%Z", time.localtime()), "an unknown zone: this machine's own, named")
+
+    def test_hours_the_ledger_no_longer_keeps_mark_the_month_incomplete(self):
+        # older spend in the day ledger than the oldest hour kept: the hours are complete from that hour only, and a window
+        # beginning before it carries "from", so the shell says the figure is partial rather than showing it short
+        hour0 = int(FROZEN // 3600) * 3600
+        self._hours_at([(hour0 - 3600 * i, self._routed(1.0)) for i in range(5)])
+        d = json.loads((km.jd.STATE / "spend.json").read_text())
+        d["days"][_day(2)] = {"usd": 40.0, "turns": 9}   # the 1st: spend the hours no longer hold
+        (km.jd.STATE / "spend.json").write_text(json.dumps(d))
+        hp = km._spend_hours_payload()
+        self.assertEqual(hp["from"], int((hour0 - 4 * 3600) // 3600), "complete from the oldest hour kept")
+        w = km._spend_win(hp, "UTC")
+        self.assertIn("from", w["monthToDate"], "the month began before the hours do")
+
+    def test_an_unreadable_ledger_says_so_and_no_ledger_is_nothing(self):
+        (km.jd.STATE / "spend.json").write_text("{not json")
+        hp = km._spend_hours_payload()
+        self.assertTrue(hp.get("error", "").startswith("the spend ledger could not be read"), hp)
+        self.assertEqual(km._spend_win(hp, "UTC"), {"error": hp["error"]}, "carried through, never a confident $0")
         (km.jd.STATE / "spend.json").unlink()
-        self.assertIsNone(km._rail_routes(), "no ledger at all")
+        self.assertIsNone(km._spend_hours_payload())
 
-    def test_the_accounts_carry_their_routes_so_the_shell_sums_any_window(self):
-        rows = [{"host": "", "usage": {"spendRoutes": {
-                    "today": {"machine": [5.0, 2]}, "monthToDate": {"machine": [5.0, 2], "key": [100.0, 2]}, "week": {},
-                    "billing": [{"route": "key"}, {"route": "machine", "state": "ok", "acct": "a1", "org": "Notes Co",
-                                                   "orgDigest": "o1", "kind": "enterprise"}]}}},
-                {"host": "OLDHOST", "usage": {"spend": {"day": {"usd": 3.0}}}}]
-        saved = km._self_host
-        km._self_host = lambda: "TESTHOST"
-        try:
-            accts, missing = km._rail_accounts(rows)
-        finally:
-            km._self_host = saved
-        self.assertEqual([(a["name"], a["kind"]) for a in accts], [("Enterprise seat", "seat"), ("API key", "key")],
-                         "an account with spend in any window is kept, the rolling week's empty or not")
-        self.assertEqual(accts[0]["routes"], [{"host": "TESTHOST", "route": "machine", "est": True}])
-        self.assertEqual(accts[1]["routes"], [{"host": "TESTHOST", "route": "key", "est": False}])
-        self.assertEqual(missing, ["OLDHOST"], "a host whose older build sends no routes is named")
+    def test_a_peers_hours_are_composed_in_this_viewers_zone(self):
+        # the remote poll asks for the raw hours (/usage?hours=1) and /usage/fleet builds the windows itself
+        src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
+        self.assertIn('path = "/usage?hours=1"', src)
+        self.assertIn('u["spendWin"] = _spend_win(hp, tz)', src)
+        self.assertIn('rows, missing = _fleet_usage(tz)', src)
 
 
 if __name__ == "__main__":

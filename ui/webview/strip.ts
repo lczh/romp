@@ -103,43 +103,46 @@ export function fmtTok(n: number): string {
 
 // Usage at API prices is ONE compact CELL, the strip twin of the web rail's costCellHTML (the user 2026-10-08, who read
 // "API" on the cell while nearly all of their usage bills an enterprise seat, and wanted the seat's usage in the figure
-// too, as the dollars it would cost at API prices, marked as an estimate). The kernel ships the host's dollars by billing
-// route for the calendar day and month (spendRoutes, _rail_routes): every turn at Claude Code's own cost, the key's
-// charged, any other route's an estimate. Each window's ONE display name to the LEFT of its figure ("today", "this
-// month"), no label of its own and no tokens on the bar; a figure that holds any estimated part wears the approx mark.
-// The split (the key's charge, the seats' estimate, the tokens) rides the cell's hover title. rail-spend.test.ts holds
-// the two copies in step.
+// too, as the dollars it would cost at API prices, marked as an estimate). The kernel builds the host's two windows in
+// THIS webview's zone (spendWin, _spend_win; the reviewer 2026-10-08: they were the kernel's own day and month) from its
+// hour ledger: every turn at Claude Code's own cost, the key's charged, any other route's romp's estimate. Each window's
+// ONE display name to the LEFT of its figure ("today", "this month"), no label of its own and no tokens on the bar; a
+// figure that holds any estimated part wears the approx mark. The split (the key's charge, the estimate, the tokens) rides
+// the cell's hover title. rail-spend.test.ts holds the two copies in step.
 export function fmtUsd(v: number): string { return "$" + Math.round(v).toLocaleString("en-US"); }   // whole dollars, thousands grouped (the user 2026-08-09; 2026-10-08)
 const COST_GRAIN = 0.00005;   // the kernel's _SPEND_GRAIN: dollars below this are rounding, not spend
+export const VIEW_TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } })();
 export type CostCell = {
   segs: Array<{ key: string; label: string; short: string; usd: number; keyUsd: number; est: boolean }>;
   title: string;
 };
 export function costCell(usage: any): CostCell | null {
-  const sr = usage && usage.spendRoutes;
-  // presence of the calendar windows is the whole test: an older kernel ships the week alone, and its figures are not these
-  if (!sr || !(sr.today || sr.monthToDate)) return null;
+  const sw = usage && usage.spendWin;
+  // presence of the viewer-zone windows is the whole test: an older kernel ships none, and its figures are not these
+  if (!sw || sw.error || !(sw.today || sw.monthToDate)) return null;
   const segs: CostCell["segs"] = [];
-  const lines = ["Usage at API prices"];
+  const lines = ["Usage at API prices" + (sw.tz && VIEW_TZ && sw.tz !== VIEW_TZ ? ` (in ${sw.tz})` : "")];
   let anyEst = false;
   for (const [key, label, short] of [["today", "today", "today"], ["monthToDate", "this month", "month"]] as const) {
-    const m = sr[key] || {};
+    const w = sw[key] || {};
+    const m = w.routes || {};
     let usd = 0, keyUsd = 0;
     for (const r of Object.keys(m)) {
-      const v = (m[r] && m[r][0]) || 0;
+      const v = m[r] || 0;
       usd += v;
       if (r === "key") keyUsd += v;
     }
     const est = usd - keyUsd >= COST_GRAIN;
     anyEst = anyEst || est;
     segs.push({ key, label, short, usd, keyUsd, est });
-    const tok = (sr.tok && sr.tok[key] && sr.tok[key].tok) || 0;
+    const tok = (w.tok && w.tok.tok) || 0;
     lines.push(`${label}: ${est ? "\u2248" : ""}${fmtUsd(usd)}`
       + (est && keyUsd >= COST_GRAIN ? ` (\u2248${fmtUsd(usd - keyUsd)} on subscription seats, ${fmtUsd(keyUsd)} charged to the API key)` : "")
       + (!est && keyUsd >= COST_GRAIN ? " charged to the API key" : "")
-      + ` \u00b7 ${fmtTok(tok)} tok`);
+      + ` \u00b7 ${fmtTok(tok)} tok`
+      + (w.from ? " (incomplete: this machine's hourly record starts later)" : ""));
   }
-  if (anyEst) lines.push("\u2248 marks an estimate: what that usage would cost at API prices, since a subscription seat is not billed per token.");
+  if (anyEst) lines.push("\u2248 marks romp\u2019s estimate: the tokens priced at the API\u2019s list prices, not what the account is charged.");
   return { segs, title: lines.join("\n") };
 }
 
@@ -331,15 +334,25 @@ export function initStrip(openSettings: () => void, post?: (m: Record<string, un
     const m = ev.data;
     if (!m) return;
     if (windowSender(ev) === "foreign") { noteForeign("strip", ev, post); return; }
-    if (m.type === "usage") render(m.usage || null);                      // live: host-relayed timeline forwards
+    if (m.type === "usage") render(withWin(m.usage || null));             // live: host-relayed timeline forwards
     else if (m.type === "stripShow") strip.style.display = m.show ? "" : "none";  // feed-over-chat rule
     else if (m.type === "stripPanes") renderPanes(m.hidden || {});        // which quick-opens to offer
   });
 
-  fetch(kernelUrl("/usage"), { cache: "no-store" })
+  // The usage figures are built in THIS webview's zone, so they come from this webview's own /usage read (the zone rides
+  // the request), refreshed each minute; the timeline's forwards carry the rate-limit reading alone, and render with the
+  // last figures read (withWin)
+  let lastWin: any = null;
+  function withWin(u: any): any {
+    if (u && !u.spendWin && lastWin) return Object.assign({}, u, { spendWin: lastWin });
+    return u;
+  }
+  const readUsage = () => fetch(kernelUrl("/usage" + (VIEW_TZ ? "?tz=" + encodeURIComponent(VIEW_TZ) : "")), { cache: "no-store" })
     .then((r) => r.json())
-    .then((u) => render(u))
-    .catch(() => { /* the live pushes fill it in */ });
+    .then((u) => { if (u && u.spendWin) lastWin = u.spendWin; render(u); })
+    .catch(() => { /* the live pushes fill the bars in; the figures wait for the next read */ });
+  readUsage();
+  setInterval(readUsage, 60000);
 }
 
 // The attach box's host list, as <option> ELEMENTS: value and text set as properties, never as markup.

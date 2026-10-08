@@ -76,7 +76,10 @@ function payload(): Payload {
   const sessions = days.stacks.filter((s) => s.kind === "sid").map((s: any) => ({ sid: s.sid, host: s.host, name: s.name, bg: s.bg, fg: "#fff", live: s.live,
     usd: sum(s.usd), tok: sum(s.tok), turns: s.turns ? sum(s.turns) : 7, ...(s.keyUsd ? { key: { usd: sum(s.keyUsd) } } : {}) }));
   const una = days.stacks.find((s) => s.kind === "unattributed") as any;
+  // today: the kernel's regrouping of the hour ledger by the viewer's own hours (here, the last 24 of them)
+  const tail = (x: any) => { const o: any = {}; for (const k in x) o[k] = Array.isArray(x[k]) ? x[k].slice(-24) : x[k]; return o; };
   return { host: "TESTHOST", scope: "all", sessions, order: [], tags: [], unattributed: { usd: sum(una.usd), tok: sum(una.tok), turns: sum(una.turns) }, hours, days,
+    get today() { return { keys: this.hours.keys.slice(-24), stacks: this.hours.stacks.map(tail) }; },   // read live: a test's edit to the hours shows
     hosts: [{ host: "TESTHOST", status: "ok" }, { host: "OLDHOST", status: "ok", noTurns: true }] };
 }
 
@@ -84,14 +87,14 @@ const chartTotals = (ser: any, meas: string) => ser.stacks.reduce((t: number, s:
 const listTotals = (v: any, meas: string) => v.sessions.reduce((t: number, s: any) => t + (s[meas] || 0), 0) + ((v.unattributed || {})[meas] || 0) + ((v.other || {})[meas] || 0);
 
 test("for every range the list's total is the chart's total, in dollars, tokens and turns", () => {
-  for (const range of ["day", "hours", "days"]) {
+  for (const range of ["today", "hours", "days"]) {
     const { spSeries, spRangeView } = lift(range);
     const d = payload(), ser = spSeries(d), view = spRangeView(d);
     for (const meas of ["usd", "tok", "turns"]) {
       const chart = chartTotals(ser, meas), list = listTotals(view, meas);
       assert.ok(Math.abs(chart - list) < 1e-6, `${range} ${meas}: chart ${chart} vs list ${list}`);
     }
-    assert.equal(ser.keys.length, range === "day" ? 24 : range === "hours" ? 168 : 90, "the same buckets the chart draws");
+    assert.equal(ser.keys.length, range === "today" ? 24 : range === "hours" ? 168 : 90, "the same buckets the chart draws");
   }
 });
 
@@ -114,7 +117,7 @@ test("the 90-day view agrees with the payload's own sessions, and the day view d
   }
   assert.deepEqual({ usd: v.unattributed.usd, tok: v.unattributed.tok, turns: v.unattributed.turns }, d.unattributed);
   assert.deepEqual(v.sessions.map((s: any) => s.name), ["web", "api", "old", "tests"], "by spend, the range's own order");
-  const day = lift("day").spRangeView(payload());
+  const day = lift("today").spRangeView(payload());
   assert.deepEqual(day.sessions.map((s: any) => s.name), ["web", "api", "old"], "tests spent nothing in the last 24 hours: no row; the older peer's session has one");
   const old = day.sessions.find((s: any) => s.name === "old");
   assert.equal(old.turns, null, "an older peer's stack carries no turns: unknown, never a zero");
@@ -133,13 +136,13 @@ test("the 90-day view agrees with the payload's own sessions, and the day view d
 });
 
 test("the chart's stacks follow the list's rows in every order; the fold and the unattributed stay last", () => {
-  const { spSeries, spRangeView, spRows, spStacks } = lift("day");
+  const { spSeries, spRangeView, spRows, spStacks } = lift("today");
   const d = payload(), ser = spSeries(d), view = spRangeView(d);
   const stacks = spStacks(d, ser, spRows(view));
   assert.deepEqual(stacks.map((s: any) => s.kind + ":" + (s.name || "")), ["sid:web", "sid:api", "sid:old", "other:other", "unattributed:unattributed"],
     "the day view has no tests stack (nothing in range) and keeps the fold and the unattributed last");
   // "your order" ranks by the viewer's arrangement: api first here
-  const yours = lift("day", "yours");
+  const yours = lift("today", "yours");
   const d2 = payload(); d2.order = [["TESTHOST", "s-api"], ["TESTHOST", "s-web"]];
   const v2 = yours.spRangeView(d2);
   const rows2 = yours.spRows(v2);
@@ -149,7 +152,7 @@ test("the chart's stacks follow the list's rows in every order; the fold and the
 });
 
 test("a turns-only session keeps its row AND its stack, and a tag with an unknown-turns member reads unknown", () => {
-  const { spSeries, spRangeView, spRows, spStacks } = lift("day", "spend", true);
+  const { spSeries, spRangeView, spRows, spStacks } = lift("today", "spend", true);
   const d = payload();
   // a zero-cost session: turns without dollars or tokens (an aborted or free turn)
   const H = 192;
@@ -171,7 +174,7 @@ test("a turns-only session keeps its row AND its stack, and a tag with an unknow
 });
 
 test("the older-build note names only the hosts with a dashed row in the range shown", () => {
-  const { spRangeView, spDashedHosts } = lift("day");
+  const { spRangeView, spDashedHosts } = lift("today");
   assert.deepEqual(spDashedHosts(spRangeView(payload())), ["OLDHOST"], "the older peer's session and fold show dashes in the day view");
   // the same peer with nothing in the last 24 hours: no row, no dash, no note in the day view; the 90-day view keeps it
   const quiet = payload();
@@ -188,8 +191,8 @@ test("the older-build note names only the hosts with a dashed row in the range s
 });
 
 test("the range is named from the buckets the chart draws, and the renderer hands the table the range view", () => {
-  const { spSeries, spRangeWords } = lift("day");
-  assert.equal(spRangeWords(spSeries(payload())), "last 24 hours");
+  const { spSeries, spRangeWords } = lift("today");
+  assert.equal(spRangeWords(spSeries(payload())), "today");
   assert.equal(lift("hours").spRangeWords(lift("hours").spSeries(payload())), "last 7 days");
   assert.equal(lift("days").spRangeWords(lift("days").spSeries(payload())), "last 90 days");
   assert.ok(USAGE_JS.includes("h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';"), "the first render");

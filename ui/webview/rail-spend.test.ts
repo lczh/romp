@@ -26,10 +26,12 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
   assert.ok(KERNEL.includes('out = {"apiKey": True, "spend": _spend_windows(login_split=True),'));
   // the key windows still ride for an older shell (rolling hour/day/week/month and the calendar month, T235)
   assert.ok(KERNEL.includes('"hour": _rolling(1),'));
-  // …and every arm with recorded spend carries the host's dollars by billing route for the rail's calendar windows,
-  // the seat's turns included (2026-10-08): the cell's figure, its approx mark and the hover's split are one read
-  assert.ok(KERNEL.includes('out = {"today": today, "monthToDate": mtd, "week": week,'));
-  assert.equal((KERNEL.match(/return _with_rail_routes\(out\)/g) || []).length, 3, "the key-only arm, the no-windows arm and the windows arm");
+  // …and /usage carries the host's usage at API prices in the VIEWER's zone on EVERY branch, a reading or none (2026-10-08
+  // review: the figures rode only the branches that return a reading): the payload wrapper adds them, never _usage's arms
+  assert.ok(KERNEL.includes('    u = dict(_usage() or {})\n    hp = _spend_hours_payload()\n    if hp:\n        u["spendWin"] = _spend_win(hp, tz)'));
+  assert.ok(!KERNEL.includes("_with_rail_routes"), "no arm attaches the figures on its own");
+  assert.ok(KERNEL.includes('return self._send(200, json.dumps(_usage_payload((q.get("tz") or [""])[0], bool((q.get("hours") or [""])[0]))),'),
+    "the route builds them in the zone the caller names, and hands a peer the hours");
   // …and the $/hour series rides beside the windows for the hover graph (the user 2026-08-13)
   assert.ok(KERNEL.includes('out["spendSeries"] = ss'));
   // the bars payload attaches the KEYED split only — a login turn's computed cost there would be
@@ -60,13 +62,16 @@ test("the kernel serves spend windows for BOTH payload shapes, keyed-only beside
     "the settle threads the OWNING sid — a comment thread bills its owner (T144), a plain session itself (T100)");
   assert.ok(BACKEND.includes("if keyed or ke:   # carry an existing key split forward even on a login turn"));
   assert.ok(BACKEND.includes("_fold(days, day, 90)"));
-  assert.ok(BACKEND.includes("_fold(hours, hour, 192)"), "8 days of hour buckets feed the rolling windows");
+  assert.ok(BACKEND.includes("_fold(hours, hour, 800)"), "800 hour buckets: the rolling windows, and a month of hours for any viewer's today and month");
 });
 
-test("VS Code strip: the usage cell is the rail's twin, armed on the calendar routes' presence", () => {
+test("VS Code strip: the usage cell is the rail's twin, armed on the viewer-zone windows' presence, read in its own zone", () => {
   assert.match(STRIP, /export function costCell\(usage: any\): CostCell \| null/);
-  assert.ok(STRIP.includes("const sr = usage && usage.spendRoutes;"));
-  assert.ok(STRIP.includes("if (!sr || !(sr.today || sr.monthToDate)) return null;"), "an older kernel's week-only routes arm nothing");
+  assert.ok(STRIP.includes("const sw = usage && usage.spendWin;"));
+  assert.ok(STRIP.includes("if (!sw || sw.error || !(sw.today || sw.monthToDate)) return null;"), "an older kernel's payload arms nothing");
+  assert.ok(STRIP.includes('fetch(kernelUrl("/usage" + (VIEW_TZ ? "?tz=" + encodeURIComponent(VIEW_TZ) : "")), { cache: "no-store" })'),
+    "the webview reads its own figures in its own zone (the timeline's forwards carry the rate-limit reading alone)");
+  assert.ok(STRIP.includes("setInterval(readUsage, 60000);"), "refreshed each minute, as the web rail's figures are");
   assert.ok(STRIP.includes('if (r === "key") keyUsd += v;'), "the key's route is the charged one");
   assert.ok(STRIP.includes("const est = usd - keyUsd >= COST_GRAIN;"), "anything else is an estimate");
   assert.doesNotMatch(STRIP, /export function apiCell/, "the API-key cell is gone");
@@ -78,8 +83,10 @@ test("VS Code strip: the usage cell is the rail's twin, armed on the calendar ro
 test("the web rail's usage cell: window names left of their figures, no label, no tokens, no spend bars", () => {
   const usageJS = KERNEL.split('_LANDING_USAGE_JS = """')[1].split('"""')[0];
   assert.ok(usageJS.includes("function costCellHTML(live){"));
-  assert.ok(usageJS.includes("return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct>'+costUsd(s[w[0]])+'</div>';}).join('')+'</div>';}"),
+  assert.ok(usageJS.includes("if(s)h+=COST_WINS.map(function(w){return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct data-win='+w[0]+'>'+costUsd(s[w[0]])+'</div>';}).join('');"),
     "each window's ONE display name in the name font, LEFT of its figure (the user 2026-08-09)");
+  assert.ok(usageJS.includes("var VIEW_TZ=(function(){try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){return '';}})();"), "this browser's zone");
+  assert.ok(usageJS.includes("fetch('/usage/fleet'+(VIEW_TZ?'?tz='+encodeURIComponent(VIEW_TZ):''),"), "the figures are built in it, kernel-side");
   assert.ok(!usageJS.includes("<div class=ru-name>API</div>"), "no 'API' label: the figures are mostly a seat's");
   assert.ok(!usageJS.includes("ah-slot"), "the API-health dot is not in the spend cell");
   assert.ok(usageJS.includes("function costUsd(v){return (costEst(v)?'\\u2248':'')+fmtUsd(v.usd);}"), "the approx mark on a figure holding an estimate");
@@ -88,7 +95,7 @@ test("the web rail's usage cell: window names left of their figures, no label, n
   // the graph and the budget fills are gone: no spend track, no spend color ramp
   assert.ok(!usageJS.includes("spendColor"), "the budget-fill ramp died with the spend bars");
   assert.ok(!usageJS.includes("spendWinsHTML"), "spend never renders as window rows with tracks");
-  assert.ok(usageJS.includes("function hasCost(u){var sr=u&&u.spendRoutes;return !!(sr&&(sr.today||sr.monthToDate));}"), "presence-keyed, like the strip");
+  assert.ok(usageJS.includes("function hasCost(u){var sw=u&&u.spendWin;return !!(sw&&!sw.error&&(sw.today||sw.monthToDate));}"), "presence-keyed, like the strip");
   assert.ok(usageJS.includes("var live=ROWS.filter(function(r){return hasBars(r.usage)||hasCost(r.usage)||hasSpend(r.usage)||!!(r.usage&&r.usage.noWindows);});"),
     "a host with spend from an older build still joins, to be named in the hover");
 });
@@ -132,10 +139,13 @@ test("the rich tip is the ONE hover surface: no native titles, account blocks, o
     "a machine with no window block joins no account block (2026-09-19), unless its account answered it has none (2026-10-01)");
   // ONE usage section for every machine at once, appended even when no host has window blocks
   assert.ok(usageJS.includes("h+=costTipHTML(sets);"));
-  assert.ok(usageJS.includes("var h='<div class=\"ru-tip-win ru-tip-cost\"><div class=ru-tip-name><span>Usage at API prices</span></div>';"));
+  assert.ok(usageJS.includes("var h='<div class=\"ru-tip-win ru-tip-cost\"><div class=ru-tip-name><span>Usage at API prices</span>'"));
+  // every machine the figures leave out is named with why and since when (2026-10-08 review: never under-report silently)
+  assert.ok(usageJS.includes("gaps.forEach(function(g){h+='<div class=\"ru-tip-note ru-tip-gap\">'+costGapWords(g)+'</div>';});"));
   // every machine in the figures BY NAME when there is more than one (the user 2026-08-13: a machine missing from the
   // hover read as a bug)
-  assert.ok(usageJS.includes("h+='<div class=ru-tip-note>by machine this month: '+hosts.map(function(x){return esc(x.host)+' '+costUsd(x.v);}).join(' \\u00b7 ')+'</div>';}}"));
+  assert.ok(usageJS.includes("h+='<div class=ru-tip-note>by machine this month: '+hosts.map(function(x,i){return esc(x.host)+' '+wholeUsd(hw[i],costEst(x.v));}).join(' \\u00b7 ')+'</div>';}}"),
+    "…their dollars adding up to the month (lrRound)");
   // the tip anchors ABOVE the rail, centered on the CURSOR — never pinned to the container edge
   assert.ok(usageJS.includes("var x=(ev&&typeof ev.clientX==='number')?ev.clientX:(r.left+r.width/2);"));
   assert.ok(usageJS.includes("x-tip.offsetWidth/2"));

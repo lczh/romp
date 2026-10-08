@@ -130,17 +130,20 @@ class SpendModalServed(unittest.TestCase):
 
             def do_GET(self):
                 p = self.path.split("?", 1)[0]
+                from urllib.parse import parse_qs, urlparse
+                tz = (parse_qs(urlparse(self.path).query).get("tz") or [""])[0]   # the browser's zone rides each read
                 if p == "/":
                     return self._out(200, html, "text/html; charset=utf-8")
                 if p == "/spend/detail":
                     # the fixture's OWN clock (review find: served with the wall clock, the 192-hour window
                     # slid off the anchored ledger within days and the hourly pins became a time bomb)
-                    return self._out(200, json.dumps(km._spend_detail(now=_sd.NOW)).encode(), "application/json")
+                    return self._out(200, json.dumps(km._spend_detail(now=_sd.NOW, tz=tz)).encode(), "application/json")
                 if p == "/usage/fleet":
-                    return self._out(200, json.dumps({"rows": [{"host": "", "acct": "", "usage": km._usage()}],
-                                                      "host": "TESTHOST"}).encode(), "application/json")
+                    rows, _missing = km._fleet_usage(tz)
+                    rows = rows[:1]   # this machine's own row (the peers' cached readings are the stand-in servers' business)
+                    return self._out(200, json.dumps({"rows": rows, "host": "TESTHOST", "missing": []}).encode(), "application/json")
                 if p == "/usage":
-                    return self._out(200, json.dumps(km._usage() or {}).encode(), "application/json")
+                    return self._out(200, json.dumps(km._usage_payload(tz)).encode(), "application/json")
                 if p.startswith("/media/") or p.startswith("/dist/"):
                     f = os.path.join(ROOT, p.lstrip("/"))
                     if p == "/dist/styles.css" and not os.path.isfile(f):
@@ -181,6 +184,7 @@ class SpendModalServed(unittest.TestCase):
         self.assertEqual(r.returncode, 0, "the driver failed:\n" + r.stderr[-3000:])
         o = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertTrue(o["hiddenBefore"], "closed until the click")
+        self.assertEqual(o["opened"], "range:month", "the readout's click opens on this month, the cell's own figure (2026-10-08)")
         # T247d: the desktop hover ends in the affordance line, in the footnote style; the phone panel does not carry it
         self.assertEqual(o["hoverHint"]["text"], "Click for the charts and the breakdown by session.", o["hoverHint"])
         self.assertEqual((o["hoverHint"]["cls"], o["hoverHint"]["font"], o["hoverHint"]["opacity"]), ("ru-tip-hint", "10px", "0.55"), o["hoverHint"])
@@ -360,7 +364,8 @@ class SpendModalServed(unittest.TestCase):
         self.assertIn("dev@example.com", ac["seatTip"], "…which the panel's own tooltip shows on hover")
         self.assertIn("TESTHOST is signed in to this account now", ac["seatTip"], "the hover says the sign-in is named by the account signed in now")
         self.assertTrue(seat["value"].startswith("\u2248$"), "the seat card's figure is an estimate: " + seat["value"])
-        self.assertTrue(seat["sub"].startswith("Estimated at API prices; the seat is not billed per token"), seat["sub"])
+        self.assertTrue(seat["sub"].startswith("\u2248 romp\u2019s estimate: the tokens priced at the API\u2019s list prices"), seat["sub"])
+        self.assertNotIn("not billed per token", seat["sub"], "no claim about how a seat is billed (2026-10-08)")
         self.assertEqual(key["title"], "API key")
         self.assertTrue(key["value"].startswith("$"), "the key's figure is plain: " + key["value"])
         self.assertTrue(key["sub"].startswith("Charged per token"), key["sub"])
