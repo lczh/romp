@@ -14816,7 +14816,9 @@ class SdkBackend:
                     buckets.pop(k, None)
 
             _fold(days, day, 90)      # the daily ledger: month-to-date + history
-            _fold(hours, hour, 192)   # hour buckets, 8 days — the rolling 5h/7d windows read these
+            # hour buckets: 800 kept, a month of hours on a machine that spends every hour — the rolling 5h/7d windows read
+            # them, and the rail builds "today" and "this month" in each viewer's own zone from them (2026-10-08)
+            _fold(hours, hour, 800)
             try:
                 tmp = self.state_dir / "spend.json.tmp"
                 tmp.write_text(json.dumps({"days": days, "hours": hours}))

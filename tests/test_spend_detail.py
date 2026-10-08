@@ -224,6 +224,31 @@ class SpendDetail(unittest.TestCase):
         self.assertEqual(una["keyTok"][-1], 30000)
         self.assertAlmostEqual(una["keyUsd"][-2], 1.0, places=3, msg="a pre-attribution bucket's key sub-count, whole")
 
+    def test_today_and_this_month_are_the_viewers_own_and_carry_the_cells_figures(self):
+        # 2026-10-08 review: the panel opened on a 7-day view whatever figure was clicked, and its "1 day" was rolling 24 h
+        # against the cell's calendar today. today and this month are now the hour ledger regrouped by the VIEWER's own
+        # hours and days, and `wins` carries the cell's own figures for this host from the same composition (_spend_win)
+        saved_time = km.time
+        import types as _types
+        km.time = _types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
+        km.time.time = lambda: NOW
+        try:
+            for tz in ("UTC", "America/Los_Angeles"):
+                d = km._spend_detail(now=NOW, tz=tz)
+                win = km._spend_win(km._spend_hours_payload(NOW), tz, NOW)
+                self.assertEqual(d["wins"], [dict(win, host="TESTHOST")], tz + ": the cell's figures, from the same composition")
+                today_usd = sum(sum(st["usd"]) for st in d["today"]["stacks"])
+                self.assertAlmostEqual(today_usd, sum(win["today"]["routes"].values()), places=2, msg=tz + ": the chart's today is the cell's")
+                month_usd = sum(sum(st["usd"]) for st in d["month"]["stacks"])
+                self.assertAlmostEqual(month_usd, sum(win["monthToDate"]["routes"].values()), places=2, msg=tz + ": and its month")
+                self.assertEqual(d["tzView"], tz)
+                self.assertTrue(d["month"]["keys"][0].endswith("-01"), "this month by day starts on the 1st of the viewer's month")
+            self.assertNotEqual(len(km._spend_detail(now=NOW, tz="UTC")["today"]["keys"]),
+                                len(km._spend_detail(now=NOW, tz="Pacific/Kiritimati")["today"]["keys"]),
+                                "a viewer elsewhere has another today")
+        finally:
+            km.time = saved_time
+
     def test_the_hosts_asked_are_the_hovers_spend_hosts(self):
         # the hover's predicate exactly: a remote joins when it reports SPEND windows (a login-only
         # remote contributes bars, not spend, and is not asked); a down one is reported, never omitted
@@ -441,7 +466,7 @@ class SpendDetail(unittest.TestCase):
         km._spend_detail(now=NOW)
         self.assertEqual(seen, ["/spend/detail?local=1"], "the peer is asked for its own half, nothing more")
         ksrc = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
-        self.assertIn('if (q.get("local") or [""])[0]:\n                    return self._send(200, json.dumps(_spend_detail_local())', ksrc,
+        self.assertIn('if (q.get("local") or [""])[0]:\n                    return self._send(200, json.dumps(_spend_detail_local(tz=tz))', ksrc,
                       "a peer's ask is served the local reader — the fan-out never runs on a peer's behalf")
 
     def test_a_merged_shaped_answer_from_a_peer_counts_only_its_own_rows(self):
@@ -603,12 +628,13 @@ class SpendDetail(unittest.TestCase):
     def test_the_route_and_the_shell_are_wired(self):
         ksrc = inspect.getsource(km.Handler.do_GET) if hasattr(km.Handler, "do_GET") else open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
         self.assertIn('if p == "/spend/detail":', ksrc, "the kernel route exists")
-        self.assertIn("json.dumps(_spend_detail())", ksrc)
+        self.assertIn("json.dumps(_spend_detail(tz=tz))", ksrc)   # the viewer's zone: today and this month are its own
         html = km._landing()
         self.assertIn("id=rsp-back hidden", html, "the modal's shell-native backdrop, hidden until the click")
         self.assertIn("fetch('/spend/detail'", html, "the shell fetches the route on open, never scrapes the hover")
-        self.assertIn("el.addEventListener('click',function(){pull(true);openSpend();});", html,
-                      "the click on the readout opens the modal (and still kicks the hover's refresh)")
+        self.assertIn("el.addEventListener('click',function(ev){var t=ev&&ev.target,w=t&&t.closest?t.closest('[data-win]'):null;pull(true);\n"
+                      "openSpend(w&&w.getAttribute('data-win')==='today'?'today':'month');});", html,
+                      "the click on the readout opens the modal on the figure clicked (and still kicks the hover's refresh)")
         self.assertIn("if(sp&&!sp.hidden&&window.__rompCloseSpend){window.__rompCloseSpend();closed=true;}", html,
                       "Escape closes it through the shell's one Escape chain")
         self.assertIn("#rsp-back{position:fixed;inset:0;z-index:205;display:flex;align-items:center;justify-content:center;"
@@ -663,7 +689,10 @@ class SpendDetail(unittest.TestCase):
         self.assertIn("spChip('order:yours',SP.order==='yours','your order')", js)
         self.assertIn("var SP_PREFS_KEY='romp:spendModal';", js)
         # T247g: three ranges and the merge toggle, persisted with the rest
-        self.assertIn("spChip('range:day',SP.range==='day','1 day ", js)
+        # today and this month, the bar's own two figures in this browser's zone, before the rolling ranges (2026-10-08)
+        self.assertIn("spChip('range:today',SP.range==='today','today ", js)
+        self.assertIn("spChip('range:month',SP.range==='month','this month ", js)
+        self.assertNotIn("range:day'", js, "the rolling 24 hours gave way to today")
         self.assertIn("spChip('range:hours',SP.range==='hours','7 days ", js)   # T293: 7 days over 168 hourly buckets (the ledger's 192 keep a day of slack)
         self.assertNotIn('8 days', js)
         self.assertIn("spChip('range:days',SP.range==='days','90 days ", js)
@@ -677,7 +706,7 @@ class SpendDetail(unittest.TestCase):
         # bucket, a stamp naming the bucket in words placed out of the flow (nothing moves under the pointer), and the
         # tooltip listing that bucket's sessions in spend order; all three leave with the pointer. The pure functions
         # are executed by ui/webview/spend-crosshair.test.ts; the served-page test hovers the real chart.
-        self.assertIn("var SP_RANGE_BUCKETS={day:24,hours:168};", js)
+        self.assertIn("var SP_RANGE_BUCKETS={hours:168};", js)   # today and this month are the kernel's own viewer-zone series, uncut
         self.assertIn("xh.setAttribute('class','rsp-xh');", js)
         self.assertIn("stamp.className='rsp-xh-stamp'", js)
         self.assertIn("svgEl.onpointerleave=xhHide;", js, "the line, the stamp and the tooltip leave with the pointer")

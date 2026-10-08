@@ -91,9 +91,9 @@ test("the bucket's sessions: spend order, zeros dropped, capped with the rest co
   assert.deepEqual(spBucketTop([], "usd", 0, 6, -1), { rows: [], more: 0, total: 0 });
 });
 
-test("the middle range is 7 days over the hourly ledger's last 168 buckets; 1 day is its last 24; 90 days is whole", () => {
+test("7 days is the hourly ledger's last 168 buckets; 90 days, today and this month are their series whole", () => {
   const { SP_RANGE_BUCKETS, SP_TIP_ROWS } = pure();
-  assert.deepEqual(SP_RANGE_BUCKETS, { day: 24, hours: 168 });
+  assert.deepEqual(SP_RANGE_BUCKETS, { hours: 168 }, "today and this month are the kernel's own viewer-zone series, uncut (2026-10-08)");
   assert.ok(SP_TIP_ROWS >= 4 && SP_TIP_ROWS <= 8, "the tooltip lists the top several, then folds: " + SP_TIP_ROWS);
   assert.ok(USAGE_JS.includes("spChip('range:hours',SP.range==='hours','7 days \\u00b7 by hour')"), "the button says 7 days");
   assert.ok(!USAGE_JS.includes("8 days"), "no 8-day wording survives in the modal");
@@ -106,7 +106,8 @@ test("the middle range is 7 days over the hourly ledger's last 168 buckets; 1 da
     const keys = Array.from({ length: 192 }, (_, i) => "k" + i);
     const d = { hours: { keys, epochs: keys.map((_, i) => 1000 + i),
       stacks: [{ kind: "sid", sid: "s1", usd: keys.map((_, i) => i), tok: keys.map((_, i) => i * 10), hosts: { A: { usd: keys.map(() => 1), tok: keys.map(() => 2) } } }] },
-      days: { keys: ["d1", "d2"], stacks: [{ usd: [1, 2], tok: [3, 4] }] } };
+      days: { keys: ["d1", "d2"], stacks: [{ usd: [1, 2], tok: [3, 4] }] },
+      today: { keys: ["t0", "t1"], stacks: [] }, month: { keys: ["m1"], stacks: [] } };
     return { d, out: spSeries(d) };
   };
   const week = series("hours");
@@ -118,9 +119,10 @@ test("the middle range is 7 days over the hourly ledger's last 168 buckets; 1 da
   assert.equal(week.out.stacks[0].tok.length, 168);
   assert.equal(week.out.stacks[0].hosts.A.usd.length, 168, "a per-host split is cut too");
   assert.equal(week.out.stacks[0].sid, "s1", "the stack's other fields ride along");
-  const day = series("day");
-  assert.equal(day.out.keys.length, 24);
-  assert.equal(day.out.keys[0], "k168");
+  const today = series("today");
+  assert.equal(today.out, today.d.today, "today is the viewer's own hours, as the kernel regrouped them");
+  const month = series("month");
+  assert.equal(month.out, month.d.month, "…and this month its own days");
   const days = series("days");
   assert.equal(days.out, days.d.days, "the daily range is the ledger's series itself");
   assert.equal(series("hours").d.hours.keys.length, 192, "the input is not cut in place");
@@ -136,10 +138,11 @@ test("a persisted pick from the old 8-day button reads as the 7-day view: the st
   const old = load({ range: "hours", measure: "usd", order: "spend", merge: false });   // what the 8-day button wrote
   assert.equal(old.SP.range, "hours");
   assert.equal(old.buckets, 168, "…and that value now selects 168 hourly buckets");
-  assert.equal(load({ range: "day" }).buckets, 24);
+  assert.equal(load({ range: "day" }).SP.range, "today", "a saved rolling day reads as today, the range that took its place");
+  assert.equal(load({ range: "month" }).SP.range, "month");
   assert.equal(load({ range: "days" }).buckets, undefined, "the daily range is uncut");
-  assert.equal(load({ range: "week" }).SP.range, "hours", "an unknown value falls back to the default, the 7-day view");
-  assert.equal(load({}).SP.range, "hours", "no stored range: the default is the 7-day view");
+  assert.equal(load({ range: "week" }).SP.range, "month", "an unknown value falls back to the default, this month (2026-10-08: the cell's own figure)");
+  assert.equal(load({}).SP.range, "month", "no stored range: this month");
   // the label the stored value selects
   const btn = /spChip\('range:hours',SP\.range==='hours','([^']+)'\)/.exec(USAGE_JS);
   assert.ok(btn, "the hours button");

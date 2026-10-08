@@ -27157,22 +27157,29 @@ def _poll_remote_usage(r):
         return r.get("usage")
     try:
         c = http.client.HTTPConnection("127.0.0.1", int(r["local_port"]), timeout=5)
-        path = "/usage" + (("?token=" + urllib.parse.quote(r["token"])) if r.get("token") else "")
+        # hours=1: the peer's spend by absolute hour, from which this kernel builds the rail's windows in its own
+        # viewer's zone (_spend_win); an older peer ignores it and answers without them (named as an older build)
+        path = "/usage?hours=1" + (("&token=" + urllib.parse.quote(r["token"])) if r.get("token") else "")
         c.request("GET", path)
         resp = c.getresponse()
         data = resp.read()
         c.close()
         if resp.status != 200:
+            r["_usage_err"] = "its kernel answered HTTP %s" % resp.status   # the last reading is kept, said not current
             return r.get("usage")
         u = json.loads(data.decode("utf-8"))
         r["_usage_at"] = now
+        r.pop("_usage_err", None)
         # an ANSWERED empty payload is a real "nothing to show" — return the sentinel so the caller
         # CLEARS the row instead of freezing the last reading forever (the user 2026-08-13: a host that
         # stopped reporting kept stale bars for the kernel's whole lifetime); a network blip below still
         # keeps the last good reading
         return u if isinstance(u, dict) and u else {}
-    except Exception:
-        return r.get("usage")   # keep the last good reading rather than blanking the bars on one blip
+    except Exception as e:
+        # keep the last good reading rather than blanking the bars on one blip, and say the read failed: the rail's
+        # usage figures leave this machine out and name it until a read succeeds again (_fleet_usage)
+        r["_usage_err"] = "could not reach its kernel: %s" % e
+        return r.get("usage")
 
 
 REMOTE_APIH_EVERY = 10.0    # the API-health frame: a storm shows within a few passes; the frame is a few hundred bytes
@@ -29539,24 +29546,51 @@ def _watch_tick(now):
         _watches_save()
 
 
-def _fleet_usage():
-    """One row per HOST whose usage is known — local always first (the notices read off it), each row
-    {host, acct, usage}.
+def _fleet_usage(tz=None):
+    """(rows, missing): one row per HOST whose usage is current, local always first (the notices read off it), each row
+    {host, acct, usage}, every row's usage at API prices built in the VIEWER's zone (tz, _spend_win: a peer's from the
+    hour payload its last read carried); and `missing`, every attached machine whose usage figures are NOT in the rows'
+    sums, [{host, why, at}] (at: when its usage was last read, or None), so the rail never under-reports silently
+    (the reviewer 2026-10-08: a machine down or restarting dropped out of the cell with nothing said). A machine is
+    missing when it is not up, when its last usage read failed (the read's own event, not an age), when it never
+    reported, when its build sends no hour payload, or when its ledger could not be read. Its last reading still feeds
+    the window bars only while it is up (the bars carry their own staleness); its spend figures are never summed from a
+    reading that is not current.
 
     This USED to emit one row per distinct account digest, because the rail drew every row as its own
     set of bars and a shared login drawn twice reads as two allowances (the user 2026-07-30). The rail
     no longer draws rows: it AGGREGATES one set of bars (worst window across accounts, deduped by
     `acct` client-side) and breaks down PER HOST on hover (the user 2026-08-08) — so every reporting
-    host must ride along. That includes a host with no login at all (acct ""), whose API-key spend the
-    dedup used to drop entirely: with per-session auth a host's payload can carry bars AND spend, and
-    the spend half has no account digest to group by — the host IS its identity."""
-    local = _usage() or {}
+    host must ride along."""
+    local = _usage_payload(tz)
     rows = [{"host": "", "acct": local.get("acct") or "", "usage": local or None}]
+    missing = []
+    if isinstance(local.get("spendWin"), dict) and local["spendWin"].get("error"):
+        missing.append({"host": _self_host(), "why": local["spendWin"]["error"], "at": None})
     with _remotes_lock:
-        cand = [(r["host"], r.get("usage")) for r in _remotes.values() if (r.get("status") == "up") and r.get("usage")]
-    for host, u in sorted(cand):
-        rows.append({"host": host, "acct": (u or {}).get("acct") or "", "usage": u})
-    return rows
+        cand = [(r["host"], r.get("status"), r.get("usage"), r.get("_usage_at"), r.get("_usage_err"))
+                for r in _remotes.values() if r.get("host")]
+    for host, status, u, at, err in sorted(cand, key=lambda c: c[0]):
+        at = int(at) if isinstance(at, (int, float)) and at else None
+        if status != "up":
+            missing.append({"host": host, "why": "not reachable", "at": at})
+            continue
+        if err:
+            missing.append({"host": host, "why": str(err), "at": at})
+            continue
+        if not u:
+            missing.append({"host": host, "why": "no usage reading yet", "at": None})
+            continue
+        u = dict(u)
+        hp = u.pop("spendHours", None)
+        if isinstance(hp, dict):
+            u["spendWin"] = _spend_win(hp, tz)
+            if hp.get("error"):
+                missing.append({"host": host, "why": str(hp["error"]), "at": at})
+        elif u.get("spend") or u.get("spendRoutes"):
+            missing.append({"host": host, "why": "older build: it sends no hourly usage", "at": at})
+        rows.append({"host": host, "acct": u.get("acct") or "", "usage": u})
+    return rows, missing
 
 
 def _usage_no_report():
@@ -51498,7 +51532,7 @@ def _usage():
             if sa:
                 out["spendAt"] = sa       # the spend's OWN freshness (the user 2026-08-24: the windows'
                                           # stale "updated 9h ago" sat over the spend and read as its age)
-            return _with_rail_routes(out)
+            return out
         # The account ANSWERED that it has no usage windows (the snapshot writer's `noWindows`: an enterprise seat
         # metered by a monthly spend limit instead), stamped by the login signed in now: that is known, so it is
         # said, the account named, and the key's spend rides beside it as on the windows arm (the user 2026-10-01,
@@ -51506,13 +51540,13 @@ def _usage():
         if o.get("noWindows") and o.get("acct") and o.get("acct") == _claude_account():
             out = {"noWindows": True, "t": o.get("t") if isinstance(o.get("t"), (int, float)) else None,
                    "acct": _claude_account(), "acctName": _acct_name()}
-            mo = _monthly_allowance(o)        # the seat's monthly allowance, the one bar such an account has (2026-10-01)
+            mo = _monthly_allowance(o)        # the account's monthly spend limit, the one bar such an account has (2026-10-01)
             if mo:
-                if "pct" in mo:
+                if isinstance(mo.get("pct"), (int, float)):
                     mo.update({k: v for k, v in seg(mo).items() if k in ("color", "tone")})
                 out["monthly"] = mo
             _attach_key_spend(out)
-            return _with_rail_routes(out)
+            return out
         return None
     # LIMIT REACHED (the user 2026-07-01): a window at 100% whose reset is still in the future = the account is
     # rate-limited on it now. Drives the top banner + the auto retry-pause. A window past its resetsAt has rolled
@@ -51545,7 +51579,7 @@ def _usage():
     # (the winSeries per-window utilization series is gone — the user 2026-08-14, who wanted the one
     # fleet $/h graph and nothing per window. usage-history.json keeps recording — sdk_backend
     # _record_usage_history — so a future graph starts with history instead of a blank.)
-    return _with_rail_routes(out)
+    return out
 
 
 def _attach_key_spend(out):
@@ -51564,13 +51598,18 @@ def _attach_key_spend(out):
 
 
 def _monthly_allowance(o, now=None):
-    """The seat's monthly allowance from a no-windows reading's `monthly` (the get_usage answer's documented extra_usage
-    fields, kept as answered by the snapshot writer, sdk_backend _record_usage_snapshot), for the usage hover's one bar:
-    {"pct", "resetsOn"} while the reading is from the current month, {"stale": True, "resetsOn"} once that reset has
-    passed (the bar would show last month's spend as this month's), None when the answer carried no limit to measure
-    against (no extra_usage, an unlimited one, no figures). The percent is the answer's utilization, or used over
-    limit where it has none, the way Claude Code's /usage screen reads the same fields. The answer carries no reset
-    date: resetsOn is the first of the month after the reading (local time), the date that screen shows for it."""
+    """The account's monthly spend limit from a no-windows reading's `monthly` (the get_usage answer's extra_usage, kept as
+    answered by the snapshot writer, sdk_backend _record_usage_snapshot), for the usage hover and the seat's card. Claude
+    Code's own schema describes it as the plan's extra-usage (overage) spend for the billing period, in the currency's
+    minor units, and its /usage screen shows it as "<used> / <limit> spent". Whose spend it counts, this member's or the
+    organisation's against a shared limit, the answer does not say (2026-10-08: it read $31,958 of $50,000 the day the
+    ledger estimated far more for this member's own turns at API prices, so it is not that estimate), so it is shown as
+    the account's spend limit in Claude Code's words, never as this member's usage.
+    {"pct", "used", "limit", "currency", "month"} while the reading is from the current calendar month (limit None for a
+    plan with no limit, pct then None), {"stale": True, "month"} once the month the reading was taken in is over (last
+    month's spend is not this month's), None when the answer carried no figures. The percent is the answer's
+    utilization, or used over limit where it has none, as that screen reads the same fields. The answer carries no
+    reset date, so none is shown; "month" is the reading's own month (YYYY-MM, this machine's local calendar)."""
     m = o.get("monthly") if isinstance(o, dict) else None
     if not isinstance(m, dict):
         return None
@@ -51578,13 +51617,19 @@ def _monthly_allowance(o, now=None):
     def num(v):
         return isinstance(v, (int, float)) and not isinstance(v, bool)
     lim, used, ut, t = m.get("monthly_limit"), m.get("used_credits"), m.get("utilization"), o.get("t")
-    if not (num(lim) and lim > 0 and (num(ut) or num(used)) and num(t)):
+    if not (num(t) and (num(used) or (num(lim) and lim > 0 and num(ut)))):
         return None
-    read = time.localtime(t)
-    resets_on = "%04d-%02d-01" % (read.tm_year + (read.tm_mon == 12), read.tm_mon % 12 + 1)
-    if time.strftime("%Y-%m-%d", time.localtime(time.time() if now is None else now)) >= resets_on:
-        return {"stale": True, "resetsOn": resets_on}
-    return {"pct": max(0, min(100, round(ut if num(ut) else used / lim * 100))), "resetsOn": resets_on}
+    month = time.strftime("%Y-%m", time.localtime(t))
+    if time.strftime("%Y-%m", time.localtime(time.time() if now is None else now)) != month:
+        return {"stale": True, "month": month}
+    cur = str(m.get("currency") or "USD").upper()
+    scale = 1 if cur in ("JPY", "KRW") else 100   # minor units to the currency's whole units
+    out = {"used": round(float(used) / scale, 2) if num(used) else None,
+           "limit": round(float(lim) / scale, 2) if (num(lim) and lim > 0) else None, "currency": cur, "month": month,
+           "pct": None}
+    if out["limit"]:
+        out["pct"] = max(0, min(100, round(ut if num(ut) else float(used) / float(lim) * 100)))
+    return out
 
 
 def _acct_name():
@@ -51600,109 +51645,190 @@ def _acct_name():
 _RAIL_BILLING_KEYS = ("route", "state", "acct", "org", "orgDigest", "kind", "label", "missing", "linked")
 
 
-def _rail_routes(now=None):
-    """This host's spend by billing route (_bucket_routes) over the rail's windows, each route's identity (_spend_billing)
-    beside it, stripped to what folding accounts reads: {"today": {route: [usd, turns]}, "monthToDate": {...}, "week":
-    {...}, "tok": {"today": {tok, tokIn, tokOut, tokCacheR, tokCacheW}, "monthToDate": {...}}, "at": the ledger's last
-    record, "billing": [...]}, or None when the ledger holds nothing at all (no file, no bucket). A ledger whose windows
-    hold nothing ships them empty, so the cell reads an honest $0 (the honest-zero rule _spend_windows keeps) and a host
-    that ships no routes at all can only be an older build, which the hover names.
-    today and monthToDate are the rail's own two figures (the user 2026-10-08, who could not tell why the cell said API
-    when nearly all of their usage bills an enterprise seat): the local calendar day and month so far, from the day
-    ledger, every recorded turn at API prices (Claude Code's own cost of the turn, total_cost_usd, which the recorder
-    files whatever billed it) under the route that billed it. One read gives the cell its total, its approximate mark
-    (any route but the key is an estimate: a subscription seat is not billed per token) and the hover its split by
-    account, so the three cannot disagree. The two calendar windows nest (a day inside its month), so neither can read
-    above the other. week is the rolling week from the hour ledger that an older build's /usage/fleet folds (version
-    skew). /usage/fleet folds every host's routes into accounts (_rail_accounts)."""
+_SPEND_HOURS_SPAN = 33 * 24     # the hours any viewer's "this month" can reach: a month and a zone's offset from this machine
+_SPEND_HOURS_MEMO = [None]      # [(the ledger file's stamp and the current hour, the payload)]: one parse per change or hour
+
+
+def _spend_hours_payload(now=None):
+    """This host's spend by ABSOLUTE hour over the last _SPEND_HOURS_SPAN hours, the raw material for the rail's two
+    windows in any viewer's own zone (_spend_win; the reviewer 2026-10-08: "today" read off each kernel's local clock, so
+    a viewer in another zone lost "today" at that kernel's midnight and two machines were summed over different days):
+    {"rows": [[epoch hour, {route: usd}, tokIn, tokOut, tokCacheR, tokCacheW], ...] oldest first, "from": the epoch hour
+    the rows are complete from (None when every recorded turn is in them), "asOf", "at" (the ledger's last record),
+    "billing" (each route's identity, _spend_billing, for the accounts fold)}; None when there is no ledger; {"error"}
+    when the ledger exists but cannot be read (the reader says so: an unreadable ledger is never a confident $0).
+    Each turn's dollars are Claude Code's own cost of it (total_cost_usd: its tokens at the API's published prices) under
+    the route that billed it (_bucket_routes). The hour ledger keeps 800 hour buckets (sdk_backend _record_spend), a
+    month of hours on a machine that spends every hour; when it no longer reaches back far enough (older spend in the
+    day ledger), "from" says where the hours start, and a window that begins before it is said to be incomplete. The
+    hour keys are this machine's local hours, read back to epoch hours (a fall-back hour's two clock hours share one key:
+    they count from the first). Memoized on the file's stamp and the current hour."""
+    p = jd.STATE / "spend.json"
+    now = time.time() if now is None else now
     try:
-        d = json.loads((jd.STATE / "spend.json").read_text())
-    except Exception:
+        stt = p.stat()
+    except FileNotFoundError:
         return None
+    except OSError as e:
+        return {"error": "the spend ledger could not be read: %s" % (e.strerror or e)}
+    key = (str(p), stt.st_mtime_ns, stt.st_size, int(now // 3600))
+    held = _SPEND_HOURS_MEMO[0]
+    if held and held[0] == key:
+        return held[1]
+    try:
+        d = json.loads(p.read_text())
+        if not isinstance(d, dict):
+            raise ValueError("not an object")
+    except Exception as e:
+        return {"error": "the spend ledger could not be read: %s" % e}
     hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
     days = d.get("days") if isinstance(d.get("days"), dict) else {}
-    now = time.time() if now is None else now
-
-    def fold(entries):
-        acc = {}
-        for e in entries:
-            for r, (u, n) in _bucket_routes(e).items():
-                a = acc.setdefault(r, [0.0, 0])
-                a[0] += u
-                a[1] += n
-        return {r: [round(a[0], 4), a[1]] for r, a in acc.items() if round(a[0], 4) or a[1]}
-
-    def toks(entries):
-        out = {k: 0 for k in ("tokIn", "tokOut", "tokCacheR", "tokCacheW")}
-        for e in entries:
-            for k in out:
-                out[k] += int(e.get(k) or 0)
-        out["tok"] = sum(out.values())
-        return out
-    keys = {time.strftime("%Y-%m-%dT%H", time.localtime(now - i * 3600)) for i in range(7 * 24 + 1)}
-    week = fold(e for k, e in hours.items() if k in keys and isinstance(e, dict))
-    day_k = time.strftime("%Y-%m-%d", time.localtime(now))
-    today_e = [days[day_k]] if isinstance(days.get(day_k), dict) else []
-    month_e = [e for k, e in days.items() if isinstance(k, str) and k.startswith(day_k[:7]) and isinstance(e, dict)]
-    today, mtd = fold(today_e), fold(month_e)
-    if not (week or today or mtd or days or hours):
+    h_now = int(now // 3600)
+    lo = h_now - _SPEND_HOURS_SPAN
+    rows, oldest, routes_all = [], None, set()
+    for k, e in hours.items():
+        if not isinstance(e, dict):
+            continue
+        try:
+            eh = int(time.mktime(time.strptime(k, "%Y-%m-%dT%H")) // 3600)
+        except Exception:
+            continue
+        oldest = eh if oldest is None or eh < oldest else oldest
+        if eh < lo:
+            continue
+        rts = {r: round(u, 4) for r, (u, _n) in _bucket_routes(e).items() if round(u, 4)}
+        routes_all |= set(rts)
+        rows.append([eh, rts, int(e.get("tokIn") or 0), int(e.get("tokOut") or 0), int(e.get("tokCacheR") or 0),
+                     int(e.get("tokCacheW") or 0)])
+    rows.sort(key=lambda r: r[0])
+    if not rows and not hours and not days:
         return None
-    routes = set(week) | set(today) | set(mtd)
-    billing = [{k: m[k] for k in _RAIL_BILLING_KEYS if k in m} for m in _spend_billing(routes)]
-    out = {"today": today, "monthToDate": mtd, "week": week,
-           "tok": {"today": toks(today_e), "monthToDate": toks(month_e)}, "billing": billing}
+    # the rows are complete from the oldest hour the ledger still keeps when spend was recorded before it: a day bucket
+    # dated earlier, or that hour's own day holding more than its hours do
+    cover = None
+    if oldest is None:
+        if any(isinstance(e, dict) and float(e.get("usd") or 0) >= _SPEND_GRAIN for e in days.values()):
+            cover = h_now
+    else:
+        od = time.strftime("%Y-%m-%d", time.localtime(oldest * 3600))
+        before = any(isinstance(e, dict) and isinstance(k, str) and k < od and float(e.get("usd") or 0) >= _SPEND_GRAIN
+                     for k, e in days.items())
+        de = days.get(od)
+        if not before and isinstance(de, dict):
+            hsum = sum(float(e.get("usd") or 0) for k, e in hours.items() if isinstance(e, dict) and str(k).startswith(od))
+            before = float(de.get("usd") or 0) > hsum + 0.01
+        if before:
+            cover = oldest
+    out = {"rows": rows, "from": cover, "asOf": int(now),
+           "billing": [{k: m[k] for k in _RAIL_BILLING_KEYS if k in m} for m in _spend_billing(routes_all)]}
     at = _spend_recorded_at()
     if at:
-        out["at"] = at          # the ledger's own last record, the hover's freshness line (an event time, not a poll's)
+        out["at"] = at
+    _SPEND_HOURS_MEMO[0] = (key, out)
     return out
 
 
-def _with_rail_routes(out):
-    """`out` with this host's spend by billing route (_rail_routes) as `spendRoutes`, when there is any."""
-    rr = _rail_routes()
-    if rr:
-        out["spendRoutes"] = rr
+def _viewer_zone(tz):
+    """(ZoneInfo, its name) for the viewer's IANA zone when this machine knows it, else (None, this machine's own zone
+    name): a window built in the machine's zone says so by name, so a viewer elsewhere can tell."""
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            return ZoneInfo(str(tz)), str(tz)
+        except Exception:
+            pass
+    return None, time.strftime("%Z", time.localtime())
+
+
+def _zone_starts(now, zi):
+    """(the start of today, the start of this month) in the zone, as epochs (zi None: this machine's local zone)."""
+    if zi is None:
+        lt = time.localtime(now)
+        return (time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)),
+                time.mktime((lt.tm_year, lt.tm_mon, 1, 0, 0, 0, 0, 0, -1)))
+    dt = datetime.fromtimestamp(now, zi)
+    return datetime(dt.year, dt.month, dt.day, tzinfo=zi).timestamp(), datetime(dt.year, dt.month, 1, tzinfo=zi).timestamp()
+
+
+def _spend_win(hp, tz=None, now=None):
+    """The rail's two windows, "today" and "this month", in the VIEWER's zone (tz, the browser's IANA name), from an hour
+    payload (_spend_hours_payload, this host's or a peer's): {"tz", "today": {"routes": {route: usd}, "tok": {...},
+    "from"?}, "monthToDate": {...}, "asOf", "at", "billing"}, or {"error"} carried through. An hour counts in a window
+    when it STARTS at or after the window's start: exact for every zone a whole number of hours from the machine's (a
+    zone half an hour off counts the hour that straddles its midnight in the day it began). A window that starts before
+    the hours do ("from") carries that moment, so the shell says the figure is incomplete rather than short."""
+    if not isinstance(hp, dict):
+        return None
+    if hp.get("error"):
+        return {"error": hp["error"]}
+    now = time.time() if now is None else now
+    zi, name = _viewer_zone(tz)
+    t0, m0 = _zone_starts(now, zi)
+    out = {"tz": name, "asOf": hp.get("asOf"), "billing": hp.get("billing") or []}
+    if hp.get("at"):
+        out["at"] = hp["at"]
+    cover = hp.get("from")
+    for w, start in (("today", t0), ("monthToDate", m0)):
+        routes, kinds = {}, [0, 0, 0, 0]
+        for row in hp.get("rows") or []:
+            if not (isinstance(row, list) and len(row) >= 6) or row[0] * 3600 < start:
+                continue
+            for r, u in (row[1] or {}).items():
+                routes[r] = routes.get(r, 0.0) + float(u or 0)
+            for i in range(4):
+                kinds[i] += int(row[2 + i] or 0)
+        win = {"routes": {r: round(u, 4) for r, u in routes.items() if round(u, 4)},
+               "tok": {"tokIn": kinds[0], "tokOut": kinds[1], "tokCacheR": kinds[2], "tokCacheW": kinds[3], "tok": sum(kinds)}}
+        if isinstance(cover, (int, float)) and cover * 3600 > start:
+            win["from"] = int(cover * 3600)
+        out[w] = win
     return out
 
 
-_RAIL_WINDOWS = ("today", "monthToDate", "week")
+def _usage_payload(tz=None, with_hours=False):
+    """GET /usage's body: the rate-limit reading (_usage) plus this host's usage at API prices in the viewer's zone
+    (`spendWin`, _spend_win), on EVERY branch (the reviewer 2026-10-08: the figures rode only the branches that return a
+    reading, so a machine with no reading yet, or one stamped by another account after a switch, dropped its turns);
+    and, for a peer kernel composing windows in ITS viewer's zone, the hour payload itself (`spendHours`)."""
+    u = dict(_usage() or {})
+    hp = _spend_hours_payload()
+    if hp:
+        u["spendWin"] = _spend_win(hp, tz)
+        if with_hours:
+            u["spendHours"] = hp
+    return u
+
+
+_RAIL_WINDOWS = ("today", "monthToDate")
 
 
 def _rail_accounts(rows):
-    """The usage hover's accounts, from every /usage/fleet row's spendRoutes folded by the spend detail's own rule
-    (_spend_accounts): ([{name, kind, usd, est, routes: [{host, route, est}]}], hosts). routes name each account's
-    (host, route) pairs, so the shell sums any window from the rows themselves (the same rows its cell sums, so the
-    cell, the split and their total are one reading); est says a route's dollars are an estimate at API prices (a
-    subscription seat billed them). usd and est over the rolling week stay for an older shell's one-line summary. An
-    account is kept while any rail window holds its spend. hosts are the machines whose spend is on the rail but whose
-    payload carries no routes (an older build), named rather than silently left out."""
+    """The usage hover's accounts, from every /usage/fleet row's spendWin folded by the spend detail's own rule
+    (_spend_accounts): ([{name, kind, routes: [{host, route, est}]}], hosts). routes name each account's (host, route)
+    pairs, so the shell sums the cell's windows from the rows themselves (the same rows its cell sums, so the cell, the
+    split and their total are one reading); est says a route's dollars are not a known charge to the key. An account is
+    kept while either window holds its spend. hosts are the machines whose payload carries spend from an older build
+    (no spendWin), named rather than silently left out."""
     per_host, sums, missing = [], {}, []
     for row in rows:
         host = row.get("host") or _self_host()
         u = row.get("usage") if isinstance(row.get("usage"), dict) else {}
-        sr = u.get("spendRoutes")
-        if not isinstance(sr, dict):
-            if u.get("spend"):
+        sw = u.get("spendWin")
+        if not isinstance(sw, dict) or sw.get("error"):
+            if u.get("spend") or u.get("spendRoutes"):
                 missing.append(host)
             continue
-        per_host.append((host, sr.get("billing") or []))
+        per_host.append((host, sw.get("billing") or []))
         for w in _RAIL_WINDOWS:
-            for r, v in (sr.get(w) or {}).items():
-                if isinstance(v, list) and v:
-                    sums[(w, host, r)] = float(v[0] or 0)
+            for r, v in ((sw.get(w) or {}).get("routes") or {}).items():
+                sums[(w, host, r)] = float(v or 0)
     out = []
     for a in _spend_accounts(per_host):
-        usd, est, live, routes = 0.0, False, False, []
-        for rt in a.get("routes") or []:
-            v = sums.get(("week", rt["host"], rt["route"]), 0.0)
-            if v >= _SPEND_GRAIN:
-                usd += v
-                est = est or bool(rt.get("estimate"))
-            if any(sums.get((w, rt["host"], rt["route"]), 0.0) >= _SPEND_GRAIN for w in _RAIL_WINDOWS):
-                live = True
-                routes.append({"host": rt["host"], "route": rt["route"], "est": bool(rt.get("estimate"))})
-        if live:
-            out.append({"name": a["name"], "kind": a["kind"], "usd": round(usd, 4), "est": est, "routes": routes})
+        routes = [{"host": rt["host"], "route": rt["route"], "est": bool(rt.get("estimate"))}
+                  for rt in a.get("routes") or []
+                  if any(sums.get((w, rt["host"], rt["route"]), 0.0) >= _SPEND_GRAIN for w in _RAIL_WINDOWS)]
+        if routes:
+            out.append({"name": a["name"], "kind": a["kind"], "routes": routes})
     return out, missing
 
 
@@ -52821,7 +52947,10 @@ def _spend_accounts(per_host):
             elif r.startswith("login:"):
                 (seats if _acct_known(m) else unrec).append((1, host, r, m, "token on %s" % host))
             elif r == "untracked":
-                unknown.append({"host": host, "route": r, "via": "before billing was recorded", "estimate": False})   # one phrase for every host
+                # before billing was recorded nothing says the key was charged: like every route but the key, its dollars
+                # are Claude Code's cost at API prices, not a known charge (2026-10-08 review: the row lacked the mark its
+                # card carried)
+                unknown.append({"host": host, "route": r, "via": "before billing was recorded", "estimate": True})   # one phrase for every host
     seats.sort(key=lambda x: x[0])        # stable: the machines' sign-ins first in host order, then the stored logins
     groups = []
     for _o, host, r, m, via in seats:
@@ -52886,7 +53015,7 @@ def _spend_accounts(per_host):
     return out
 
 
-def _spend_detail_local(now=None):
+def _spend_detail_local(now=None, tz=None):
     """THIS kernel's half of GET /spend/detail — the usage modal's per-SESSION story (T247, the user 2026-09-07, who wanted
     to click the usage readout and see how much each session used, with a stacked histogram colored
     by session). Read from spend.json's bySid maps (T100's per-session attribution) — the ledger, never
@@ -53120,7 +53249,43 @@ def _spend_detail_local(now=None):
     hrs = _series(hours, hour_keys)
     hrs["epochs"] = epochs
     dys = _series(days, day_keys)
-    return {"host": me, "scope": "all",
+    # TODAY and THIS MONTH in the VIEWER's zone (the reviewer 2026-10-08: the cell's "today" and "this month" must be the
+    # figures the panel opens on): the hour ledger's buckets regrouped by the viewer's own hours and calendar days, so a
+    # range's stacks, list and routes are the same turns the rail's cell sums (_spend_win), and `win` carries that cell's
+    # own figures for this host, from the same composition, so the panel's cards show exactly what was clicked
+    zi, zname = _viewer_zone(tz)
+    t0, m0 = _zone_starts(now, zi)
+
+    def _vlabel(eh, fmt):
+        ts = eh * 3600
+        return (datetime.fromtimestamp(ts, zi) if zi else datetime.fromtimestamp(ts)).strftime(fmt)
+    tday, mon = {}, {}
+    for k, e in hours.items():
+        if not isinstance(e, dict):
+            continue
+        try:
+            eh = int(time.mktime(time.strptime(k, "%Y-%m-%dT%H")) // 3600)
+        except Exception:
+            continue
+        if eh * 3600 >= m0:
+            _bucket_add(mon.setdefault(_vlabel(eh, "%Y-%m-%d"), {}), e)
+        if eh * 3600 >= t0:
+            _bucket_add(tday.setdefault(_vlabel(eh, "%Y-%m-%dT%H"), {}), e)
+    h_now = int(now // 3600)
+    today_keys = []
+    for eh in range(int(-(-t0 // 3600)), h_now + 1):
+        kk = _vlabel(eh, "%Y-%m-%dT%H")
+        if not today_keys or today_keys[-1] != kk:
+            today_keys.append(kk)
+    month_keys = []
+    for eh in range(int(-(-m0 // 3600)), h_now + 1, 1):
+        kk = _vlabel(eh, "%Y-%m-%d")
+        if not month_keys or month_keys[-1] != kk:
+            month_keys.append(kk)
+    tds = _series(tday, today_keys)
+    mos = _series(mon, month_keys)
+    win = _spend_win(_spend_hours_payload(now), tz, now)
+    return {"host": me, "scope": "all", "tzView": zname, "today": tds, "month": mos, "win": win,
             "tz": time.strftime("%Z", lt), "tzOffsetMin": int((getattr(lt, "tm_gmtoff", 0) or 0) // 60),
             "recordedAt": _spend_recorded_at(),
             "sessions": sessions,
@@ -53138,6 +53303,19 @@ def _spend_detail_local(now=None):
             "hours": hrs, "days": dys}
 
 
+def _bucket_add(acc, e):
+    """Fold one ledger bucket into an accumulator of the same shape, every number summed and every map merged (the
+    viewer-zone regrouping of _spend_detail_local: hour buckets into the viewer's hours and days). A bucket without a
+    per-session map or a key sub-count adds none, so its dollars stay unattributed, or off the key, as they were."""
+    for k, v in e.items():
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            acc[k] = acc.get(k, 0) + v
+        elif isinstance(v, dict):
+            _bucket_add(acc.setdefault(k, {}), v)
+
+
 def _epoch_of_local_hour(key, off_min):
     """The absolute epoch-hour of a peer's LOCAL hour key, given the offset (minutes east of UTC) that
     peer reported — the fallback for a peer whose build ships keys without epochs."""
@@ -53148,7 +53326,7 @@ def _epoch_of_local_hour(key, off_min):
         return None
 
 
-def _peer_spend_call(row, timeout):
+def _peer_spend_call(row, timeout, tz=None):
     """GET /spend/detail?local=1 on an attached kernel — mirror_trust's transport (the tunnel's local
     forward, THAT machine's serve token), asking for the peer's LOCAL half only: the route never fans out
     when serving a peer, so a mutual attachment (the ordinary pairing: an ssh attach one way and the
@@ -53163,7 +53341,9 @@ def _peer_spend_call(row, timeout):
         return None, None, "no admin path to '%s' (missing forward or token)" % host
     try:
         conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=timeout)
-        conn.request("GET", "/spend/detail?local=1", None, {"X-Romp-Token": tok})
+        import urllib.parse
+        conn.request("GET", "/spend/detail?local=1" + ("&tz=" + urllib.parse.quote(str(tz)) if tz else ""), None,
+                     {"X-Romp-Token": tok})
         resp = conn.getresponse()
         data = resp.read()
         conn.close()
@@ -53220,7 +53400,7 @@ def _spend_tags():
     return tags
 
 
-def _spend_detail(now=None):
+def _spend_detail(now=None, tz=None):
     """GET /spend/detail — EVERY attached kernel's sessions, merged here (T247c, the user 2026-09-08:
     the per-session breakdown covered this machine only, and the federated kernels' sessions matter).
     Each kernel owns its spend.json and resolves its own names and colors, so a host's story comes
@@ -53234,13 +53414,14 @@ def _spend_detail(now=None):
     own calendar date. Sessions and stacks carry their host; the top-N is taken across hosts; per-host
     unattributed folds into one stack with a per-host breakdown for the tooltip."""
     now = time.time() if now is None else now
-    local = _spend_detail_local(now)
+    local = _spend_detail_local(now, tz)
     me = local["host"]
     # the hosts the hover's spend covers: a remote whose usage carries its spend by route (every arm with recorded spend
     # since 2026-10-08, the seat's estimate included) or, from an older build, the key's spend windows
     with _remotes_lock:
         peers = [dict(r) for r in _remotes.values()
-                 if isinstance((r.get("usage") or {}).get("spendRoutes"), dict)
+                 if isinstance((r.get("usage") or {}).get("spendHours"), dict)
+                 or isinstance((r.get("usage") or {}).get("spendRoutes"), dict)
                  or isinstance((r.get("usage") or {}).get("spend"), dict)]
     results = {}
     threads = []
@@ -53250,7 +53431,7 @@ def _spend_detail(now=None):
             continue
 
         def _ask(row=r):
-            results[row["host"]] = _peer_spend_call(row, _PEER_SPEND_TIMEOUT_S)
+            results[row["host"]] = _peer_spend_call(row, _PEER_SPEND_TIMEOUT_S, tz)
         t = threading.Thread(target=_ask, daemon=True)
         t.start()
         threads.append(t)
@@ -53277,6 +53458,8 @@ def _spend_detail(now=None):
             payloads.append((host, j))
     if len(payloads) == 1:
         out = dict(local)
+        out["wins"] = [dict(local.get("win") or {}, host=me)]
+        out.pop("win", None)
         out["hosts"] = hosts
         out["order"] = [[me, s] for s in (local.get("order") or []) if isinstance(s, str)]
         out["tags"] = _spend_tags()
@@ -53365,8 +53548,9 @@ def _merge_spend_details(payloads, hosts, local):
         rts = {}             # (host, route) -> ([usd], [turns]): the By account summary's series, on our axes
         for host, p, rng, ax in peer_axes:
             idx = [pos.get(a) for a in ax]
-            if "routes" not in rng:
+            if "routes" not in rng and name in ("hours", "days"):
                 no_routes.add(host)     # an older build: its dollars are not in the By account summary, said by name
+                #                         (today and this month are newer still: an older peer is named for those as noZone)
             for rt in rng.get("routes") or []:
                 if not isinstance(rt, dict) or not _own(host, p, rt):
                     continue
@@ -53489,6 +53673,8 @@ def _merge_spend_details(payloads, hosts, local):
     no_turns = set()   # hosts whose stacks carry no turns or key dollars per bucket (an older build), for the modal's note
     no_routes = set()  # hosts whose series carry no billing routes (an older build): named under the By account summary
     hrs, dys = _merge_range("hours"), _merge_range("days")
+    tds, mos = _merge_range("today"), _merge_range("month")   # the viewer's own hours and days: every peer spells them alike
+    no_zone = [h for h, p in payloads if not isinstance(p.get("month"), dict)]   # an older peer: not in today / this month
     for h in hosts:
         if h.get("host") in no_turns:
             h["noTurns"] = True         # the modal: a dash in those columns for this host's rows, and a note naming it
@@ -53497,7 +53683,9 @@ def _merge_spend_details(payloads, hosts, local):
                 "byLogin": _merge_by_login(),
                 "accounts": _spend_accounts([(host, p.get("billing")) for host, p in payloads]),
                 "accountsMissing": [h for h, _p in payloads if h in no_routes],
-                "hours": hrs, "days": dys})
+                "hours": hrs, "days": dys, "today": tds, "month": mos, "noZone": no_zone,
+                "wins": [dict(p.get("win") or {}, host=h) for h, p in payloads if isinstance(p.get("win"), dict)]})
+    out.pop("win", None)
     out.pop("billing", None)
     return out
 
@@ -73427,24 +73615,26 @@ function fmtUsd(v){return '$'+Math.round(v).toLocaleString('en-US');}
 // ── USAGE AT API PRICES (the user 2026-10-08, who read 'API' on the cell while nearly all of their usage bills an
 // enterprise seat, and wanted the seat's usage in the figure too, as the dollars it would cost at API prices, marked as
 // an estimate). Every recorded turn carries Claude Code's own cost (total_cost_usd: its tokens at the API's published
-// prices) and the route that billed it, the API key or a subscription seat (the machine's sign-in, a stored login);
-// the kernel ships each host's dollars by route for the calendar day and month (spendRoutes, _rail_routes). The cell
-// sums every route: dollars the key was charged are exact, dollars a seat billed are an estimate, and a figure that holds
-// any estimated part wears the approx mark. The windows are calendar ones in the user's words, 'today' and 'this
-// month': they nest, so neither can read above the other (the superset rule T235 wrote for rolling windows), and the
-// month is the one an enterprise seat's monthly allowance resets on. The hover splits each figure by account.
+// prices) and the route that billed it, the API key or a subscription seat (the machine's sign-in, a stored login). The
+// windows are the VIEWER's calendar day and month (the reviewer 2026-10-08: they were each kernel's own, so a viewer
+// elsewhere lost "today" at that kernel's midnight and two machines summed different days): every kernel ships its spend
+// by absolute hour and the serving kernel builds both windows in this browser's zone (spendWin, _spend_win). The cell sums
+// every route: dollars the key was charged are exact, any other route's are romp's estimate, and a figure that holds any
+// estimated part wears the approx mark. The two windows nest, so neither can read above the other.
 var COST_WINS=[['today','today'],['monthToDate','this month']];
 var COST_GRAIN=0.00005;   // the kernel's _SPEND_GRAIN: dollars below this are rounding, not spend
-function hasCost(u){var sr=u&&u.spendRoutes;return !!(sr&&(sr.today||sr.monthToDate));}
-// one host's figures: per window its total, the key's (charged) share, and the route sums the hover folds by account. A
-// host that reports spend without the calendar routes is on an older build: it is named in the hover, never summed as
-// though its figures were these
-function costDet(u,det){var sr=u&&u.spendRoutes;
-if(hasCost(u)){var c=det._cost={at:(typeof sr.at==='number')?sr.at:null,tok:sr.tok||{}};
-COST_WINS.forEach(function(w){var m=sr[w[0]]||{},usd=0,key=0;
-Object.keys(m).forEach(function(r){var v=(m[r]&&m[r][0])||0;usd+=v;if(r==='key')key+=v;});
-c[w[0]]={usd:usd,key:key,routes:m};});}
-else if(hasSpend(u)||(sr&&sr.week))det._costOld=true;}
+var VIEW_TZ=(function(){try{return Intl.DateTimeFormat().resolvedOptions().timeZone||'';}catch(e){return '';}})();   // the zone the windows are built in
+// the machines whose usage is NOT in the figures (/usage/fleet's `missing`: down, a failed read, no reading yet, an older
+// build, an unreadable ledger), each named with why and when it was last read: the cell never under-reports silently
+var MISSING=[];
+function hasCost(u){var sw=u&&u.spendWin;return !!(sw&&!sw.error&&(sw.today||sw.monthToDate));}
+// one host's figures: per window its total, the key's (charged) share, the route sums the hover folds by account, the
+// tokens, and `from` when the host's hours start after the window does (its figure is then incomplete, and said so)
+function costDet(u,det){var sw=u&&u.spendWin;if(!hasCost(u))return;
+var c=det._cost={at:(typeof sw.at==='number')?sw.at:null,tz:sw.tz||'',tok:{}};
+COST_WINS.forEach(function(w){var x=sw[w[0]]||{},m=x.routes||{},usd=0,key=0;
+Object.keys(m).forEach(function(r){var v=m[r]||0;usd+=v;if(r==='key')key+=v;});
+c[w[0]]={usd:usd,key:key,routes:m,from:x.from||null};c.tok[w[0]]=x.tok||{};});}
 // the approx mark: any part of the figure not charged to the key is an estimate
 function costEst(v){return (v.usd-v.key)>=COST_GRAIN;}
 function costUsd(v){return (costEst(v)?'\u2248':'')+fmtUsd(v.usd);}
@@ -73452,13 +73642,26 @@ function costSums(live){var s={},any=false;COST_WINS.forEach(function(w){s[w[0]]
 live.forEach(function(e){var c=e.det._cost;if(!c)return;any=true;
 COST_WINS.forEach(function(w){s[w[0]].usd+=c[w[0]].usd;s[w[0]].key+=c[w[0]].key;});});
 return any?s:null;}
+// what the figures leave out, per machine: the missing ones, and a machine whose hours start after a window does
+function costGaps(live){var g=MISSING.map(function(m){return {host:m.host,why:m.why,at:m.at,kind:'missing'};});
+live.forEach(function(e){var c=e.det._cost;if(!c)return;var f=(c.monthToDate&&c.monthToDate.from)||(c.today&&c.today.from);
+if(f)g.push({host:e.host,at:f,kind:'partial'});});return g;}
+// whole dollars that ADD UP: each figure floored, the dollars the floors lose handed to the largest remainders, so a
+// column of rows sums to its total's own rounding (the reviewer 2026-10-08: a row off by $1 from its Total)
+function lrRound(vals){var tot=0;vals.forEach(function(v){tot+=v;});var t=Math.round(tot),fl=vals.map(function(v){return Math.floor(v);}),s=0;
+fl.forEach(function(v){s+=v;});var order=vals.map(function(v,i){return i;}).sort(function(a,b){return (vals[b]-Math.floor(vals[b]))-(vals[a]-Math.floor(vals[a]))||a-b;});
+for(var i=0;i<order.length&&s<t;i++){fl[order[i]]++;s++;}return fl;}
+function wholeUsd(n,est){return (est?'\u2248':'')+'$'+n.toLocaleString('en-US');}
 // THE CELL: each window's ONE display name in the name font, LEFT of its figure (the window cells' grammar, the user
 // 2026-08-09), and no label of its own: the figures are dollars, and an 'API' label claimed a billing they mostly were
-// not. No tokens on the bar (they live in the hover). The API-health dot is not in this cell: it reports errors from the
-// API, not money, and sits apart at the bar's right end (#rail-api).
-function costCellHTML(live){var s=costSums(live);if(!s)return '';
-return '<div class="ru-w ru-cost">'+COST_WINS.map(function(w){
-return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct>'+costUsd(s[w[0]])+'</div>';}).join('')+'</div>';}
+// not. No tokens on the bar (they live in the hover). A machine whose usage is not in the figures is NAMED on the cell
+// itself (the reviewer 2026-10-08: a machine down or restarting dropped out with nothing said), the hover saying why and
+// since when. The API-health dot is not in this cell: it reports errors from the API, not money (#rail-api).
+function costCellHTML(live){var s=costSums(live),g=costGaps(live);if(!s&&!g.length)return '';
+var h='<div class="ru-w ru-cost">';
+if(s)h+=COST_WINS.map(function(w){return '<div class=ru-name>'+w[1]+'</div><div class=ru-pct data-win='+w[0]+'>'+costUsd(s[w[0]])+'</div>';}).join('');
+if(g.length)h+='<div class="ru-name ru-cost-gap">'+(g.length>1?g.length+' machines incomplete':esc(g[0].host)+(g[0].kind==='missing'?' missing':' partial'))+'</div>';
+return h+'</div>';}
 // One payload's WINDOW detail for the hover (used/elapsed/reset per window). Detail only, no markup:
 // the rail no longer draws each account's own bars (they aggregate, below), but the tip still tells
 // each host's story from this.
@@ -73474,8 +73677,11 @@ if(u.noWindows)det._noWin=true;      // the account answered that it has no usag
 // …and that spend limit, its monthly allowance (2026-10-01): one bar the hover draws in place of the windows; a reading from
 // before its reset arrives as stale, a date and no figure
 var mo=u.noWindows&&u.monthly;
-if(mo)det._monthly=mo.stale?{stale:true,reset:fmtDay(mo.resetsOn)}
-:{pct:Math.max(0,Math.min(100,mo.pct||0)),col:segCol(mo,mo.pct||0),tp:null,unk:false,reset:fmtDay(mo.resetsOn)};
+// the account's monthly spend limit as Claude Code reads it (2026-10-08): what it has spent of the limit this month, no reset
+// date (the reading carries none); a reading from an earlier month says so instead of standing in for this one
+if(mo)det._monthly=mo.stale?{stale:true}
+:{pct:(typeof mo.pct==='number')?Math.max(0,Math.min(100,mo.pct)):null,col:segCol(mo,mo.pct||0),tp:null,unk:false,
+used:(typeof mo.used==='number')?mo.used:null,limit:(typeof mo.limit==='number')?mo.limit:null,cur:mo.currency||'USD'};
 WINS.forEach(function(w){var seg=u[w[0]];if(!seg)return;
 // A ROLLED window (its reset passed since the last report) is UNKNOWN, not 0 (the user 2026-07-31: a
 // remote whose kernel had no live session to ask sat on a days-old snapshot, and the rail drew a
@@ -73560,6 +73766,10 @@ if(typeof SP!=='undefined'&&SP.open&&SP.data){var al=document.getElementById('rs
 // machine's row, leaving any other account's bars alone.
 function render(u){notices(u);
 var rest=ROWS.filter(function(r){return r.host;});
+// the timeline's usage carries the rate-limit reading alone: the usage figures are /usage/fleet's, built in this browser's
+// zone, and the local row keeps the last ones until the next pull brings fresh ones
+var prev=ROWS.filter(function(r){return !r.host;})[0];
+if(u&&!u.spendWin&&prev&&prev.usage&&prev.usage.spendWin){u=Object.assign({},u);u.spendWin=prev.usage.spendWin;}
 renderRows([{host:'',acct:(u&&u.acct)||'',usage:u}].concat(rest),SELF);}
 // the % + reset — the exact set of bars that used to sit under the timeline, nothing more.
 function barRows(d){return (d.unk
@@ -73584,12 +73794,18 @@ return keys.map(function(k){var v=d[k];
 return '<div class=ru-tip-win><div class=ru-tip-name><span>'+esc(v.name)+'</span>'
 +(v.unk?'<span class=ru-tip-reset>window reset '+esc(v.ago)+'; no reading since</span>'
 :(v.reset?'<span class=ru-tip-reset>resets in '+esc(v.reset)+'</span>':''))+'</div>'+barRows(v)+'</div>';}).join('');}
-// THE SEAT'S MONTHLY ALLOWANCE (2026-10-01): an enterprise seat has no 5-hour or weekly window; it is metered by a monthly
-// spend limit, drawn as the windows are (the percent used, the date it resets). A reading from before that reset is not
-// this month's figure: no bar, the reset and that nothing has been read since.
+// THE ACCOUNT'S MONTHLY SPEND LIMIT (2026-10-01; reworded 2026-10-08): an enterprise seat has no 5-hour or weekly window;
+// it is metered against a monthly spend limit, which Claude Code reads as "<used> / <limit> spent" (its extra-usage spend
+// for the billing period). Shown in those words, attributed to Claude Code, and never called this member's usage: the
+// reading does not say whether it counts this member alone or the organisation's shared limit. It carries no reset
+// date, so none is shown. A reading from an earlier month is not this month's: no bar, and it says so.
+function spendLimitWords(m){var cur=(m.cur&&m.cur!=='USD')?' '+m.cur:'';
+if(m.used==null)return m.pct!=null?m.pct+'% of the limit spent':'';
+return '$'+Math.round(m.used).toLocaleString('en-US')+(m.limit!=null?' of $'+Math.round(m.limit).toLocaleString('en-US'):'')+cur+' spent'+(m.limit!=null?'':' (no limit)');}
 function monthlyHTML(d){var m=d._monthly;if(!m)return '';
-return '<div class=ru-tip-win><div class=ru-tip-name><span>Monthly allowance</span><span class=ru-tip-reset>'
-+(m.stale?'reset '+esc(m.reset)+'; no reading since':'resets '+esc(m.reset))+'</span></div>'+(m.stale?'':barRows(m))+'</div>';}
+return '<div class=ru-tip-win><div class=ru-tip-name><span>Monthly spend limit</span><span class=ru-tip-reset>'
++(m.stale?'no reading this month yet':'this month')+'</span></div>'
++(m.stale?'':(m.pct!=null?barRows(m):'')+'<div class=ru-tip-note>'+esc(spendLimitWords(m))+', as Claude Code reads it for this account</div>')+'</div>';}
 function machineHTML(name){return '<span class="ru-tip-machine host-prefix">'+esc(name)+'</span>';}
 function acctBlocksHTML(sets,manyMachines){var groups=[],by={};
 sets.forEach(function(e){if(!['fiveHour','sevenDay','fable'].some(function(k){return e.det[k];})&&!e.det._noWin)return;
@@ -73608,12 +73824,13 @@ return h+'</div>';});}
 // THE HOVER'S USAGE SECTION: the cell's two figures split by account, in a small table whose columns are the cell's
 // windows. Each account is the kernel's fold of every host's billing routes (ACCTS, _rail_accounts: one enterprise seat
 // reached through one machine's sign-in and another's stored token is ONE row), and its figures are its routes summed
-// from the same rows the cell sums, so the rows add up to the cell by construction. A route no account names yet (spend
-// recorded after the last /usage/fleet read) is not dropped: the key's joins the API key row, any other an 'other' row.
-// The key's row says 'charged'; a seat's figures wear the approx mark, and one line under the table says why.
+// from the same rows the cell sums, rounded so the rows add up to the Total and the cell (lrRound). A route no account
+// names yet (spend recorded after the last /usage/fleet read) is not dropped: the key's joins the API key row, any other
+// an 'other' row. The key's row says 'charged'; every other figure wears the approx mark, and one line says why. Every
+// machine the figures leave out is named with why and since when.
 function costZero(){var v={};COST_WINS.forEach(function(w){v[w[0]]={usd:0,key:0};});return v;}
 function costRows(sets){var byHost={},taken={},rows=[];sets.forEach(function(e){if(e.det._cost)byHost[e.host]=e.det._cost;});
-var add=function(r,c,route){COST_WINS.forEach(function(w){var x=c[w[0]].routes[route],v=(x&&x[0])||0;r.v[w[0]].usd+=v;if(route==='key')r.v[w[0]].key+=v;});};
+var add=function(r,c,route){COST_WINS.forEach(function(w){var v=c[w[0]].routes[route]||0;r.v[w[0]].usd+=v;if(route==='key')r.v[w[0]].key+=v;});};
 (ACCTS||[]).forEach(function(a){var r={name:a.name,kind:a.kind,v:costZero()};
 (a.routes||[]).forEach(function(rt){var c=byHost[rt.host];if(!c||taken[rt.host+'|'+rt.route])return;taken[rt.host+'|'+rt.route]=1;add(r,c,rt.route);});
 rows.push(r);});
@@ -73625,15 +73842,23 @@ else{if(!other){other={name:'other',kind:'unknown',v:costZero()};rows.push(other
 var rank={seat:0,key:1,unknown:2};
 return rows.filter(function(r){return COST_WINS.some(function(w){return r.v[w[0]].usd>=COST_GRAIN;});})
 .sort(function(a,b){return ((rank[a.kind]||0)-(rank[b.kind]||0))||(b.v.monthToDate.usd-a.v.monthToDate.usd);});}
-var COST_EST_WORDS='\u2248 marks an estimate: what that usage would cost at API prices, since a subscription seat is not billed per token.';
-function costTipHTML(sets){var s=costSums(sets),old=[],at=0;
-sets.forEach(function(e){if(e.det._costOld)old.push(e.host);var c=e.det._cost;if(c&&c.at&&c.at>at)at=c.at;});
-if(!s&&!old.length)return '';
-var h='<div class="ru-tip-win ru-tip-cost"><div class=ru-tip-name><span>Usage at API prices</span></div>';
-if(s){var rows=costRows(sets),anyEst=false,tk={},kinds={tokCacheR:0,tokCacheW:0,tokIn:0,tokOut:0},hosts=[];
+var COST_EST_WORDS='\u2248 marks romp\u2019s estimate: the tokens priced at the API\u2019s list prices, not what the account is charged.';
+// a clock time, with its date when it is not today (an unreachable machine's last read can be days old)
+function costWhen(ep){var d=new Date(ep*1000),n=new Date(),hm=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);
+return d.toDateString()===n.toDateString()?hm:(['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate()+', '+hm);}
+function costGapWords(g){if(g.kind==='partial')return esc(g.host)+': counted from '+costWhen(g.at)+', where its hourly record begins; earlier usage is not in these figures';
+return esc(g.host)+': '+esc(g.why)+(g.at?', last read '+costWhen(g.at):'')+'; its usage is not in these figures';}
+function costTipHTML(sets){var s=costSums(sets),at=0,tz='';
+sets.forEach(function(e){var c=e.det._cost;if(c&&c.at&&c.at>at)at=c.at;if(c&&c.tz)tz=c.tz;});
+var gaps=costGaps(sets);if(!s&&!gaps.length)return '';
+var h='<div class="ru-tip-win ru-tip-cost"><div class=ru-tip-name><span>Usage at API prices</span>'
+// the windows are this browser's day and month; a kernel that could not build them in this zone says whose they are
++(tz&&VIEW_TZ&&tz!==VIEW_TZ?'<span class=ru-tip-reset>in '+esc(tz)+'</span>':'')+'</div>';
+if(s){var rows=costRows(sets),anyEst=false,tk={},kinds={tokCacheR:0,tokCacheW:0,tokIn:0,tokOut:0},hosts=[],shown={};
+COST_WINS.forEach(function(w){shown[w[0]]=lrRound(rows.map(function(r){return r.v[w[0]].usd;}));});
 h+='<table class=ru-ctab><thead><tr><th></th>'+COST_WINS.map(function(w){return '<th>'+w[1]+'</th>';}).join('')+'</tr></thead><tbody>';
-rows.forEach(function(r){h+='<tr data-kind="'+esc(r.kind)+'"><td>'+esc(r.name)+(r.kind==='key'?' <span class=ru-ckey>charged</span>':'')+'</td>'
-+COST_WINS.map(function(w){var v=r.v[w[0]];if(costEst(v))anyEst=true;return '<td>'+costUsd(v)+'</td>';}).join('')+'</tr>';});
+rows.forEach(function(r,i){h+='<tr data-kind="'+esc(r.kind)+'"><td>'+esc(r.name)+(r.kind==='key'?' <span class=ru-ckey>charged</span>':'')+'</td>'
++COST_WINS.map(function(w){var v=r.v[w[0]];if(costEst(v))anyEst=true;return '<td>'+wholeUsd(shown[w[0]][i],costEst(v))+'</td>';}).join('')+'</tr>';});
 // a total only where it adds something: with one account the row above IS the total. It mixes estimate and charge
 // when both are present, and its approx mark says so
 if(rows.length>1)h+='<tr class=ru-ctot><td>Total</td>'+COST_WINS.map(function(w){return '<td>'+costUsd(s[w[0]])+'</td>';}).join('')+'</tr>';
@@ -73647,10 +73872,10 @@ h+='<tr class=ru-ctok><td>tokens</td>'+COST_WINS.map(function(w){return '<td>'+f
 if(tk.monthToDate>0)h+='<div class=ru-tip-note>this month: '+fmtTok(kinds.tokCacheR)+' cache read \u00b7 '+fmtTok(kinds.tokCacheW)+' cache write \u00b7 '+fmtTok(kinds.tokIn)+' in \u00b7 '+fmtTok(kinds.tokOut)+' out</div>';
 if(anyEst)h+='<div class=ru-tip-note>'+COST_EST_WORDS+'</div>';
 // every machine in the figures, by name, when there is more than one (the user 2026-08-13: a machine missing from the
-// hover read as a bug)
-if(hosts.length>1){hosts.sort(function(a,b){return b.v.usd-a.v.usd;});
-h+='<div class=ru-tip-note>by machine this month: '+hosts.map(function(x){return esc(x.host)+' '+costUsd(x.v);}).join(' \u00b7 ')+'</div>';}}
-if(old.length)h+='<div class=ru-tip-note>'+old.map(esc).join(', ')+': older build, '+(old.length>1?'their':'its')+' usage is not in these figures</div>';
+// hover read as a bug); their dollars add up to the month's total too
+if(hosts.length>1){hosts.sort(function(a,b){return b.v.usd-a.v.usd;});var hw=lrRound(hosts.map(function(x){return x.v.usd;}));
+h+='<div class=ru-tip-note>by machine this month: '+hosts.map(function(x,i){return esc(x.host)+' '+wholeUsd(hw[i],costEst(x.v));}).join(' \u00b7 ')+'</div>';}}
+gaps.forEach(function(g){h+='<div class="ru-tip-note ru-tip-gap">'+costGapWords(g)+'</div>';});
 // the ledger's own freshness, the newest machine's last recorded turn (an event time: the recorder writes per turn)
 if(at)h+='<div class=ru-tip-age>last turn recorded '+fmtAgo(at)+'</div>';
 return h+'</div>';}
@@ -73715,9 +73940,9 @@ var _ruBusy=false;
 // /usage/fleet is /usage plus one row per OTHER Claude account in the fleet (the remote readings come from
 // the tunnel supervisor's own cached poll, so this never dials anything). It collapses to a single row \u2014
 // today's exact rendering \u2014 whenever every machine is signed into the same login.
-function pullFleet(){return fetch('/usage/fleet',{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
+function pullFleet(){return fetch('/usage/fleet'+(VIEW_TZ?'?tz='+encodeURIComponent(VIEW_TZ):''),{cache:'no-store'}).then(function(r){return r.ok?r.json():null;})
 .then(function(d){var rows=(d&&d.rows)||[];SELF=(d&&d.host)||SELF;NOREPORT=(d&&Array.isArray(d.noReport))?d.noReport:[];
-ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];
+ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];MISSING=(d&&Array.isArray(d.missing))?d.missing:[];
 var local=rows.length?rows[0].usage:null;
 notices(local);renderRows(rows,SELF);});}
 function pull(ack){if(_ruBusy)return;_ruBusy=true;
@@ -73735,10 +73960,11 @@ pullFleet().then(done,function(){if(ROWS.length)renderRows(ROWS,SELF);done();});
 // kernel-side, the ledger's bySid series — fetched on open behind the romp loader, never scraped from
 // the hover's HTML. The click still kicks the hover's own refresh (pull), so both levels are fresh.
 var spBack=document.getElementById('rsp-back'),spPanel=document.getElementById('rsp-panel'),spTip=null;
-var SP={data:null,err:'',range:'hours',measure:'usd',order:'spend',merge:false,open:false};
+var SP={data:null,err:'',range:'month',measure:'usd',order:'spend',merge:false,open:false};
 // the toggles persist across opens and reloads (T247f): range, measure, and the list's order
 var SP_PREFS_KEY='romp:spendModal';
-function spLoadPrefs(){try{var p=JSON.parse(localStorage.getItem(SP_PREFS_KEY)||'{}')||{};if(p.range==='days'||p.range==='day')SP.range=p.range;if(p.measure==='tok')SP.measure='tok';if(p.order==='yours')SP.order='yours';if(p.merge===true)SP.merge=true;}catch(e){}}
+// a saved 'day' (the rolling 24 hours, until 2026-10-08) reads as today, the range that took its place
+function spLoadPrefs(){try{var p=JSON.parse(localStorage.getItem(SP_PREFS_KEY)||'{}')||{};if(p.range==='days'||p.range==='hours'||p.range==='today'||p.range==='month')SP.range=p.range;else if(p.range==='day')SP.range='today';if(p.measure==='tok')SP.measure='tok';if(p.order==='yours')SP.order='yours';if(p.merge===true)SP.merge=true;}catch(e){}}
 function spSavePrefs(){try{localStorage.setItem(SP_PREFS_KEY,JSON.stringify({range:SP.range,measure:SP.measure,order:SP.order,merge:SP.merge}));}catch(e){}}
 spLoadPrefs();
 // "your order" (T247f, the user 2026-09-08): the order the tab strip and the timeline lanes show — the
@@ -73781,8 +74007,11 @@ function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="d
 // the series for the range: "1 day" is the hourly series' last 24 buckets and "7 days" its last 168 (T293, the
 // user 2026-09-09; the ledger holds 192 hours, a day of slack past the view, and 90 days; a range is a slice of
 // the hours, never a third ledger); the daily range is the ledger's series whole
-var SP_RANGE_BUCKETS={day:24,hours:168};
-function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
+// today and this month are the VIEWER's own (2026-10-08), the kernel's regrouping of its hour ledger by this browser's
+// hours and days (_spend_detail_local), so they hold exactly the turns the bar's cell sums; 7 days is the hour ledger's
+// last 168 buckets and 90 days the day ledger whole, each in the recording machine's own time
+var SP_RANGE_BUCKETS={hours:168};
+function spSeries(d){var ser=d[SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
 function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
 return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);if(s.keyTok)o.keyTok=s.keyTok.slice(cut);
 if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;}),routes:(ser.routes||[]).map(function(r){return {host:r.host,route:r.route,usd:(r.usd||[]).slice(cut),turns:(r.turns||[]).slice(cut)};})};}
@@ -73836,7 +74065,13 @@ var out={};for(var k in d)out[k]=d[k];out.sessions=sessions;out.unattributed={us
 if(other){other.usd=spRound4(other.usd);out.other=other;}return out;}
 // the range in words, from the buckets the charts draw: '1 day · by hour' reads 'last 24 hours', the week 'last 7 days',
 // the daily range 'last N days' (the payload's own key count, 90 today)
-function spRangeWords(ser){var n=ser&&ser.keys?ser.keys.length:0;if(SP.range==='days')return 'last '+n+' days';if(SP.range==='day')return 'last '+n+' hours';return 'last '+Math.round(n/24)+' days';}
+function spRangeWords(ser){var n=ser&&ser.keys?ser.keys.length:0;if(SP.range==='today')return 'today';if(SP.range==='month')return 'this month';if(SP.range==='days')return 'last '+n+' days';return 'last '+Math.round(n/24)+' days';}
+// "Nothing today.", "Nothing this month.", "Nothing in the last 7 days."
+function spNothing(ser){var w=spRangeWords(ser);return 'Nothing '+(SP.range==='today'||SP.range==='month'?w:'in the '+w)+'.';}
+// the cell's own figures for today and this month, summed over every machine's window (the same composition, _spend_win):
+// the cards show exactly what was clicked. {seat, key, from: [hosts whose hours start after the window does]}
+function spWinFigs(d){var w=SP.range==='today'?'today':SP.range==='month'?'monthToDate':null;if(!w||!d.wins)return null;var o={seat:0,key:0,from:[]};
+d.wins.forEach(function(x){var v=x&&x[w];if(!v)return;Object.keys(v.routes||{}).forEach(function(r){if(r==='key')o.key+=v.routes[r];else o.seat+=v.routes[r];});if(v.from)o.from.push({host:x.host,at:v.from});});return o;}
 // the rows: the ordered sessions, or — merged by tag — one row per tag holding sessions here (named
 // by the tag, colored by the tag store's color, the strip's chip color) and the untagged sessions as
 // themselves. A session under several tags counts under EACH (the user's ruling: tags are equivalent,
@@ -73865,14 +74100,15 @@ function spHead(){var d=SP.data,ok=d?spHosts(d):[];return '<div class=rsp-top><s
 +(ok.length>1?' \u00b7 '+ok.length+' machines':(d&&d.host?' \u00b7 '+esc(d.host):''))+'</span>'
 +'<button class=rsp-x data-act=close aria-label=Close>\u00d7</button></div>';}
 var spPending=null;   // the in-flight detail fetch's controller: a close or a re-open aborts it
-function openSpend(){if(!spBack||!spPanel)return;SP.open=true;spBack.hidden=false;SP.data=null;SP.err='';
+function openSpend(range){if(!spBack||!spPanel)return;SP.open=true;spBack.hidden=false;SP.data=null;SP.err='';
+if(range==='today'||range==='month')SP.range=range;   // the figure the click landed on (not saved: a chip saves a choice)
 spPanel.innerHTML=spHead()+'<div class=rsp-load>'+__ROMP_LOADER__+'</div>';   // the loader FIRST (the loader rule)
 // the loader ends on the EVENT (the answer) — with a backstop that cannot trap (T247b review: a hung
 // socket spun the loader forever): a generous timer aborts the fetch onto the error + retry path
 if(spPending){try{spPending.abort();}catch(e){}}
 var spAbort=new AbortController(),ms=(window.__rompSpendTimeoutMs|0)||20000;spPending=spAbort;
 var spTimer=setTimeout(function(){spAbort.abort();},ms);
-fetch('/spend/detail',{cache:'no-store',signal:spAbort.signal}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+fetch('/spend/detail'+(VIEW_TZ?'?tz='+encodeURIComponent(VIEW_TZ):''),{cache:'no-store',signal:spAbort.signal}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
 .then(function(d){clearTimeout(spTimer);var mine=(spPending===spAbort);if(mine)spPending=null;if(!SP.open||!mine)return;SP.data=d;renderSpend();},
 // a SUPERSEDED fetch (a re-open aborted it) yields whatever it carries: its AbortError rejects on the
 // next tick, while the successor is still loading and SP.data is null — a guard that leaned on SP.data
@@ -73917,8 +74153,8 @@ var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spR
 // allowance, or a personal plan's 5-hour and weekly windows, one line per account
 function spAllowHTML(){var seen={},lines=[];(LAST||[]).forEach(function(e){var d=e.det,a=e.acct||('host:'+e.host);if(seen[a])return;
 var bar=function(pct,col){return '<span class=ru-tip-track><i style="width:'+pct+'%;background:'+col+'"></i></span>';},h='';
-if(d._monthly){var mo=d._monthly;h=mo.stale?'monthly allowance reset '+esc(mo.reset)+'; no reading since'
-:'monthly allowance '+bar(mo.pct,mo.col)+' <b>'+mo.pct+'%</b> used \u00b7 resets '+esc(mo.reset);}
+if(d._monthly){var mo=d._monthly;h=mo.stale?'monthly spend limit: no reading this month yet'
+:'monthly spend limit: <b>'+esc(spendLimitWords(mo))+'</b> this month'+(mo.pct!=null?' '+bar(mo.pct,mo.col)+' '+mo.pct+'%':'')+' <span class=rsp-allow-src>as Claude Code reads it</span>';}
 else{var ws=WINS.filter(function(w){return d[w[0]]&&!d[w[0]].unk;});if(ws.length)h=ws.map(function(w){var v=d[w[0]];return esc(w[2])+' '+bar(v.pct,v.col)+' <b>'+v.pct+'%</b>';}).join(' \u00b7 ');}
 if(!h)return;seen[a]=1;lines.push({name:d._acct||'',h:h});});
 var many=lines.length>1;return lines.map(function(l){return '<div class=rsp-allow>'+(many&&l.name?esc(l.name)+' \u00b7 ':'')+l.h+'</div>';}).join('');}
@@ -73926,6 +74162,8 @@ var many=lines.length>1;return lines.map(function(l){return '<div class=rsp-allo
 // title (the one account's own name, "Enterprise seat", when one account holds it; "Subscription logins" otherwise)
 function spCards(d){var ser=spSeries(d),st=(ser&&ser.stacks)||[],c={seat:{usd:0,tok:0},key:{usd:0,tok:0}};
 st.forEach(function(s){['seat','key'].forEach(function(sec){c[sec].usd+=spSumArr(spPart(d,s,sec,'usd'));c[sec].tok+=spSumArr(spPart(d,s,sec,'tok'));});});
+// today and this month: the cards' dollars are the cell's own figures (the charts and the list are the same turns by session)
+var wf=spWinFigs(d);if(wf){c.seat.usd=wf.seat;c.key.usd=wf.key;c.from=wf.from;}
 var acc=spAccountRows(d),seats=acc.filter(function(a){return a.kind!=='key';}),keys=acc.filter(function(a){return a.kind==='key';});
 var known=(d.accounts||[]),hasSeat=known.some(function(a){return a.kind!=='key';}),hasKey=known.some(function(a){return a.kind==='key';});
 c.seat.accts=seats;c.key.accts=keys;
@@ -73942,17 +74180,20 @@ return c;}
 function spCardHTML(d,c,sec){var x=c[sec],words=spRangeWords(spSeries(d));
 var h='<section class=rsp-card data-sec='+sec+'><div class=rsp-card-h><span class=rsp-card-t'+(x.tip?' data-tip="'+esc(x.tip)+'"':'')+'>'+esc(x.name)+'</span>'
 +'<span class=rsp-card-v id=rsp-v-'+sec+'></span></div>';
-h+='<div class=rsp-card-sub>'+(sec==='seat'?'Estimated at API prices; the seat is not billed per token':'Charged per token')+' \u00b7 '+esc(words)+'</div>';
+// the seat's figure is romp's estimate from the tokens (2026-10-08: never a claim about how the seat is billed; its own
+// spend-limit reading sits under it), the key's what the key was charged
+h+='<div class=rsp-card-sub>'+(sec==='seat'?'\u2248 romp\u2019s estimate: the tokens priced at the API\u2019s list prices':'Charged per token at the API\u2019s prices')+' \u00b7 '+esc(words)+'</div>';
 if(sec==='seat')h+='<div id=rsp-allow>'+spAllowHTML()+'</div>';
 if(sec==='seat'&&(x.accts.length>1||(x.accts.length===1&&x.accts[0].kind!=='seat'))){h+='<table class=rsp-acct><tbody>';
 x.accts.forEach(function(r){h+='<tr data-acct="'+esc(r.kind)+'"><td class=rsp-name'+(r.title?' data-tip="'+esc(r.title)+'"':'')+'>'+esc(r.name)
 +'<span class=ru-tip-reset> '+SP_DOT+' '+esc(r.via.join(', '))+(r.note?' '+SP_DOT+' '+esc(r.note):'')+'</span></td>'
 +'<td class=n>'+spUsd(r.usd,r.est)+'</td></tr>';});h+='</tbody></table>';}
-if(!x.live)return h+'<div class=rsp-card-none>Nothing in the '+esc(words)+'.</div></section>';
+if(!x.live)return h+'<div class=rsp-card-none>'+esc(spNothing(spSeries(d)))+'</div></section>';
 return h+'<div class=rsp-chart id=rsp-chart-'+sec+'></div></section>';}
 // the figures in the cards' heads follow the measure: dollars (the seat's with the approx mark) and tokens beside
-function spPaintCards(){var d=SP.data;if(!d)return;var c=spCards(d);['seat','key'].forEach(function(sec){var n=document.getElementById('rsp-v-'+sec);if(!n)return;var x=c[sec];
-var usd=sec==='seat'?spUsd(x.usd,true):fmtUsd(x.usd),tok=fmtTok(Math.round(x.tok))+' tokens';
+function spPaintCards(){var d=SP.data;if(!d)return;var c=spCards(d),wd=lrRound([c.seat.usd,c.key.usd]);['seat','key'].forEach(function(sec,i){var n=document.getElementById('rsp-v-'+sec);if(!n)return;var x=c[sec];
+// whole dollars that add up to the cell's total (lrRound): the two cards together are the figure that was clicked
+var usd=wholeUsd(wd[i],sec==='seat'&&x.usd>=SP_GRAIN),tok=fmtTok(Math.round(x.tok))+' tokens';
 n.innerHTML=SP.measure==='tok'?'<b>'+tok+'</b><span class=rsp-card-alt>'+usd+'</span>':'<b>'+usd+'</b><span class=rsp-card-alt>'+tok+'</span>';});}
 function sessionTable(d){var ss=d.sessions||[],un=d.unattributed,c=spCards(SP.data||d);
 if(!ss.length&&!(un&&(un.usd>0||un.tok>0)))return '<div class=rsp-note>No per-session records yet.</div>';
@@ -73990,17 +74231,23 @@ function renderSpend(){if(!spPanel)return;spTipHide();var d=SP.data,h=spHead();
 if(!d){h+='<div class=rsp-err>Couldn\u2019t load the usage detail'+(SP.err?': '+esc(SP.err):'')+'. '
 +'<button class=rsp-btn data-act=retry>Try again</button></div>';spPanel.innerHTML=h;return;}
 // 1. the range and the measure: they govern everything below (both cards, both charts, the list)
-h+='<div class="rsp-ctl rsp-ctl-top">'+spChip('range:day',SP.range==='day','1 day \u00b7 by hour')+spChip('range:hours',SP.range==='hours','7 days \u00b7 by hour')
-+spChip('range:days',SP.range==='days','90 days \u00b7 by day')+'<span class=rsp-gap></span>'
+// today and this month first: the bar's own two figures, in this browser's day and month (2026-10-08)
+h+='<div class="rsp-ctl rsp-ctl-top">'+spChip('range:today',SP.range==='today','today \u00b7 by hour')+spChip('range:month',SP.range==='month','this month \u00b7 by day')
++spChip('range:hours',SP.range==='hours','7 days \u00b7 by hour')+spChip('range:days',SP.range==='days','90 days \u00b7 by day')+'<span class=rsp-gap></span>'
 +spChip('measure:usd',SP.measure==='usd','dollars')+spChip('measure:tok',SP.measure==='tok','tokens')+'</div>';
 // 2. the two halves side by side, each its own card and chart (the user 2026-10-08): the seat, estimated at API prices
 // and not charged, beside the API key, charged; on a narrow card they stack
 var c=spCards(d),both=c.seat.live&&c.key.live;
 var cards=[];if(c.seat.show)cards.push(spCardHTML(d,c,'seat'));if(c.key.show)cards.push(spCardHTML(d,c,'key'));
-if(!cards.length)h+='<div class=rsp-note>Nothing recorded in the '+esc(spRangeWords(spSeries(d)))+'.</div>';
+if(!cards.length)h+='<div class=rsp-note>'+esc(spNothing(spSeries(d)))+'</div>';
 else h+='<div class="rsp-cards'+(both?' rsp-two':'')+'">'+cards.join('')+'</div>';
 // 3. a figure that mixes the two says so in words, never as one unlabelled number
-if(both)h+='<div class=rsp-both>Together '+spUsd(c.seat.usd+c.key.usd,true)+' at API prices: '+spUsd(c.seat.usd,true)+' estimated for the '+esc(c.seat.name)+' and '+fmtUsd(c.key.usd)+' charged to the API key.</div>';
+// (whole dollars that add up: the two parts sum to the total shown, lrRound)
+if(both){var tw=lrRound([c.seat.usd,c.key.usd]);h+='<div class=rsp-both>Together '+wholeUsd(tw[0]+tw[1],true)+' at API prices: '+wholeUsd(tw[0],true)+' estimated for the '+esc(c.seat.name)+' and '+wholeUsd(tw[1],false)+' charged to the API key.</div>';}
+// a window that begins before a machine's hours do: its figure is incomplete, and the panel says from when
+((c.from)||[]).forEach(function(f){h+='<div class=rsp-note>'+esc(f.host)+': '+esc(spRangeWords(spSeries(d)))+' counted from '+esc(costWhen(f.at))+', where its hourly record begins; earlier usage is not in these figures</div>';});
+// an older peer has no today or this month of its own: named, its usage left out of those two ranges
+if((SP.range==='today'||SP.range==='month')&&(d.noZone||[]).length)h+='<div class=rsp-note>'+d.noZone.map(esc).join(', ')+': older build, not in today or this month</div>';
 // a machine whose older build sends its key's turns alone: its seat usage cannot be drawn, and the cards say so
 var kh=spHosts(d).filter(function(x){return x.scope==='keyed';}).map(function(x){return x.host;});
 if(kh.length)h+='<div class=rsp-note>'+kh.map(esc).join(', ')+': older build, only '+(kh.length===1?'its':'their')+' API-key usage is drawn</div>';
@@ -74077,9 +74324,11 @@ function spDayOf(k){return String(k).slice(0,10);}
 function spXTicks(keys,range){var out=[],n=(keys||[]).length,wd=function(k){var y=+k.slice(0,4),mo=+k.slice(5,7),dd=+k.slice(8,10);return SP_DOW[new Date(y,mo-1,dd).getDay()]+' '+dd;};
 if(range==='hours'){var i=0;while(i<n){var j=i;while(j+1<n&&spDayOf(keys[j+1])===spDayOf(keys[i]))j++;
 if(j-i+1>=6)out.push({at:(i+j+1)/2,label:wd(String(keys[i]))});i=j+1;}return out;}
-if(range==='day'){for(var h=0;h<n;h++){var m=/T(\\d\\d)$/.exec(keys[h]);if(!m)continue;var hr=+m[1];
+if(range==='day'||range==='today'){for(var h=0;h<n;h++){var m=/T(\\d\\d)$/.exec(keys[h]);if(!m)continue;var hr=+m[1];
 if(hr===0)out.push({at:h,label:wd(String(keys[h]))});else if(hr%6===0)out.push({at:h+0.5,label:m[1]+':00'});}return out;}
-for(var d=0;d<n;d++){var m2=/^(\\d{4})-(\\d\\d)-(01|15)$/.exec(keys[d]);if(m2)out.push({at:d+0.5,label:SP_MON[+m2[2]-1]+' '+Number(m2[3])});}return out;}
+// this month by day: the 1st, 8th, 15th, 22nd and 29th; the 90 days: the 1st and the 15th
+var days=range==='month'?'(01|08|15|22|29)':'(01|15)',re=new RegExp('^(\\\\d{4})-(\\\\d\\\\d)-'+days+'$');
+for(var d=0;d<n;d++){var m2=re.exec(keys[d]);if(m2)out.push({at:d+0.5,label:SP_MON[+m2[2]-1]+' '+Number(m2[3])});}return out;}
 // one half's chart: the range's buckets, one column each, stacked by session in the list's order, each stack its part
 // of the half (spPart). The axis, the crosshair and the bucket tooltip are T247/T293's
 function spDrawChart(box,d,ser,sec,H){var meas=SP.measure,model=spRows(spRangeView(d));
@@ -74134,7 +74383,8 @@ var xlab='';spXTicks(ser.keys,SP.range).forEach(function(t){xlab+='<span style="
 var many=spMany(d);
 // no legend (T247e): the session list under the charts is the legend, each row in its stack's color
 var tzNote='';var mine=-(new Date().getTimezoneOffset());
-if(sec==='seat'||!document.getElementById('rsp-chart-seat')){
+// (today and this month are this browser's own hours and days: no zone to name)
+if((sec==='seat'||!document.getElementById('rsp-chart-seat'))&&SP.range!=='today'&&SP.range!=='month'){
 if(typeof d.tzOffsetMin==='number'&&d.tzOffsetMin!==mine)tzNote+='<div class=rsp-note>Bucket times are '+esc(d.tz||'the kernel\u2019s clock')+' (the machine that recorded them), not your local time.</div>';
 // machines in different zones (T247c): the rule is stated, not left to be guessed
 var offs={};spHosts(d).forEach(function(x){offs[String(x.tzOffsetMin)]=1;});
@@ -74148,7 +74398,7 @@ box.innerHTML=svg+ylab+'<div class=ru-tip-gx>'+xlab+'</div>'+tzNote;
 var svgEl=box.querySelector('svg');if(!svgEl)return;
 var xh=document.createElementNS('http://www.w3.org/2000/svg','line');xh.setAttribute('class','rsp-xh');xh.setAttribute('y1','0');xh.setAttribute('y2',String(H));xh.style.display='none';svgEl.appendChild(xh);
 var stamp=document.createElement('div');stamp.className='rsp-xh-stamp';stamp.style.display='none';box.appendChild(stamp);
-var range=SP.range==='day'?'hours':SP.range,other=meas==='usd'?'tok':'usd',ofmt=function(v){return meas==='usd'?fmtTok(Math.round(v))+' tok':(sec==='seat'?SP_APPROX:'')+fmtUsd(v);};
+var range=SP.range==='today'?'hours':SP.range==='month'?'days':SP.range,other=meas==='usd'?'tok':'usd',ofmt=function(v){return meas==='usd'?fmtTok(Math.round(v))+' tok':(sec==='seat'?SP_APPROX:'')+fmtUsd(v);};
 var xhHide=function(){xh.style.display='none';stamp.style.display='none';spTipHide();};
 svgEl.onpointermove=function(e){var r=svgEl.getBoundingClientRect(),k=r.width/W,i=spBucketAt(e.clientX-r.left-GUT*k,r.width-GUT*k,n);if(i<0){xhHide();return;}
 var cx=GUT+(i+0.5)*slot,pct=cx/W*100;xh.setAttribute('x1',cx.toFixed(1));xh.setAttribute('x2',cx.toFixed(1));xh.style.display='';
@@ -74161,7 +74411,10 @@ svgEl.onpointerleave=xhHide;}
 var spResizeRaf=0;
 window.addEventListener('resize',function(){if(!(SP.open&&SP.data)||spResizeRaf)return;
 spResizeRaf=requestAnimationFrame(function(){spResizeRaf=0;if(SP.open&&SP.data){renderChart();spSizePane();}});});
-el.addEventListener('click',function(){pull(true);openSpend();});
+// the click opens the panel on the figure it landed on (the reviewer 2026-10-08: "this month" opened on a 7-day view):
+// today's figure on today, the month's (or anywhere else on the readout) on this month
+el.addEventListener('click',function(ev){var t=ev&&ev.target,w=t&&t.closest?t.closest('[data-win]'):null;pull(true);
+openSpend(w&&w.getAttribute('data-win')==='today'?'today':'month');});
 setInterval(function(){pull(false);},60000);     // backup auto-refresh: re-read usage.json every 60s
 pull(false);                                     // fill on load, independent of the timeline-forward path
 // (The old vertical-fit degrade ladder (fitRail/data-ruc, the user 2026-06-27/07-01) is gone: it shrank the
@@ -77366,6 +77619,9 @@ def _landing():
             ".ru-pct{font:600 10px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#cfe6ff;font-variant-numeric:tabular-nums;white-space:nowrap}"
             # the usage figures (2026-10-08): the window names and figures in the bar's own two fonts, a pair per window
             ".ru-cost{gap:6px;cursor:pointer}.ru-cost .ru-pct+.ru-name{margin-left:6px}"
+            # a machine whose usage is not in the figures, named on the cell itself in the warn amber (a text tint, the
+            # light theme its own darker step); the hover's line for it in the same tint
+            ".ru-cost .ru-cost-gap{color:#d7a23a}.ru-tip-note.ru-tip-gap{color:#d7a23a;opacity:.95}"
             # the API health cell. The dot wears STATUS hexes, never var(--accent): the label gray at .55 for
             # ok (a healthy API costs no attention), the tab-retrying amber for degraded, the API-error red
             # (--st-blocked-bg) for paused. The word is .ru-pct's declaration byte for byte (no new font
@@ -77387,7 +77643,10 @@ def _landing():
             # the cell at the head of the right-hand cluster (2026-10-08): the dot and its words "API health" in the
             # bar's label font, a little apart from the icon buttons after it; a flat wash on hover says it opens
             "#rail-api{cursor:pointer;gap:6px;padding:3px 7px;margin-right:6px;border-radius:5px}"
-            "#rail-api:hover,#rail-api:focus-visible{background:rgba(255,255,255,0.06);outline:none}"
+            # a flat wash on hover; the keyboard's focus wears the accent ring every focusable head does (.mhead), never the
+            # hover's look (the reviewer 2026-10-08: with the outline removed, focus could not be told from hover)
+            "#rail-api:hover{background:rgba(255,255,255,0.06)}"
+            "#rail-api:focus-visible{outline:1px solid var(--accent,#9cd2ff);outline-offset:-1px}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
             ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{color:#8b939c;margin-left:auto}"
             ".ah-line{margin-top:4px;max-width:340px}.ah-what{margin:0 0 4px;max-width:250px;opacity:.6;font-size:10px}"
@@ -77517,7 +77776,8 @@ def _landing():
             ".rsp-card-v{white-space:nowrap}.rsp-card-v b{font-size:14px;font-weight:600;color:#e8eef5;font-variant-numeric:tabular-nums}"
             ".rsp-card-alt{margin-left:8px;font-size:10px;opacity:.6;font-variant-numeric:tabular-nums}"
             ".rsp-card-sub{font-size:10px;opacity:.6;margin:1px 0 7px}"
-            ".rsp-allow{display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:10px}.rsp-allow b{font-weight:600}"
+            # one line of words that wraps as text (never a column of fragments on a narrow card), the bar inline in it
+            ".rsp-allow{margin:0 0 8px;font-size:10px;line-height:1.7}.rsp-allow b{font-weight:600}.rsp-allow .ru-tip-track{vertical-align:middle;margin:0 2px}.rsp-allow-src{display:block;opacity:.65}"
             ".rsp-card-none{font-size:10px;opacity:.6;padding:2px 0 4px}"
             ".rsp-card .rsp-svg{background:transparent}.rsp-chart{position:relative;margin-top:auto}"   # side by side, the two charts share a baseline
             # the y labels stand in their own gutter left of the plot, right-aligned against it, so no bar runs beneath one;
@@ -77928,12 +78188,13 @@ def _landing():
             "body.theme-light .rsp-tbl thead th{background:#FFFFFF}body.theme-light .rsp-tbl th{color:#5D574E}"
             "body.theme-light .rsp-acct td{border-bottom-color:rgba(0,0,0,0.06)}"
             # the cards on the white panel: a warm wash of the page's own cream, never a white alpha (it vanishes there)
+            "body.theme-light .ru-cost .ru-cost-gap,body.theme-light .ru-tip-gap{color:#8a5a00}"
             "body.theme-light .rsp-card{background:#F7F2EC}body.theme-light .rsp-card .rsp-svg{background:transparent}"
             "body.theme-light .rsp-gridx{stroke:rgba(0,0,0,0.07)}"
             "body.theme-light .ru-tip-block+.ru-tip-cost,body.theme-light .ru-tip-cols+.ru-tip-cost,body.theme-light .ru-tip-machines+.ru-tip-cost{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .rsp-card-t,body.theme-light .rsp-card-v b{color:#1F1E1D}"
             "body.theme-light .ru-ctot td{border-top-color:rgba(0,0,0,0.10);color:#1F1E1D}"
-            "body.theme-light #rail-api:hover,body.theme-light #rail-api:focus-visible{background:rgba(0,0,0,0.05)}"
+            "body.theme-light #rail-api:hover{background:rgba(0,0,0,0.05)}"
             "body.theme-light .rsp-name .host-prefix{color:var(--dim,#5D574E)}"
             "body.theme-light .ru-tip-machines .host-prefix{color:var(--dim,#5D574E)}"
             "body.theme-light .rsp-btn{border-color:rgba(0,0,0,0.18);color:#1F1E1D}"
@@ -78163,7 +78424,7 @@ def _landing():
             # the usage MODAL (T247): the click on the rail's readout opens the per-session breakdown +
             # stacked histogram here — shell-native like #rnet-back, a centered card over the dimmed,
             # unchanged dashboard (filled by _LANDING_USAGE_JS on open; Esc + backdrop tap close it).
-            "<div id=rsp-back hidden><div id=rsp-panel role=dialog aria-label=\"API spend\"></div></div>"
+            "<div id=rsp-back hidden><div id=rsp-panel role=dialog aria-label=\"Usage at API prices\"></div></div>"
             # the rail's network popover — manage federated remote kernels (driven by _LANDING_REMOTES_JS).
             "<div id=rnet-back hidden><div id=rnet-panel>"
             "<div class=rnet-top><span>Remote kernels</span><button id=rnet-x aria-label=Close>×</button></div>"
@@ -79229,7 +79490,8 @@ class Handler(BaseHTTPRequestHandler):
                         be.refresh_usage()
                 except Exception:
                     pass
-                return self._send(200, json.dumps(_usage() or {}), "application/json", cache="no-cache")
+                return self._send(200, json.dumps(_usage_payload((q.get("tz") or [""])[0], bool((q.get("hours") or [""])[0]))),
+                                  "application/json", cache="no-cache")
             if p == "/usage/fleet":                           # one set of bars PER CLAUDE ACCOUNT (the user
                 # 2026-07-30, who switches accounts and had two separate allowances drawn as one). The rail
                 # collapses to today's single set whenever every machine is on the same login, which is the
@@ -79240,10 +79502,12 @@ class Handler(BaseHTTPRequestHandler):
                         be.refresh_usage()
                 except Exception:
                     pass
-                rows = _fleet_usage()
-                accts, accts_missing = _rail_accounts(rows)   # the hover's by-account line (2026-10-01)
+                tz = (q.get("tz") or [""])[0]
+                rows, missing = _fleet_usage(tz)   # the windows in the viewer's zone, every machine accounted for
+                accts, accts_missing = _rail_accounts(rows)   # the hover's accounts (2026-10-01)
                 return self._send(200, json.dumps({"rows": rows, "host": _self_host(), "noReport": _usage_no_report(),
-                                                   "accounts": accts, "accountsMissing": accts_missing}),
+                                                   "accounts": accts, "accountsMissing": accts_missing,
+                                                   "missing": missing}),
                                   "application/json", cache="no-cache")
             if p == "/spend/detail":                          # the usage MODAL's per-session breakdown (T247):
                 # who spent what and spend over time stacked by session, read from the ledger's bySid
@@ -79252,9 +79516,10 @@ class Handler(BaseHTTPRequestHandler):
                 # kernel's sessions ride along, asked over the tunnel and merged here (T247c) — and a
                 # PEER's ask (?local=1) gets this kernel's own half, never a fan-out: two kernels attached
                 # to each other would otherwise ask each other forever (review find).
+                tz = (q.get("tz") or [""])[0]   # the viewer's zone: today and this month are its own (2026-10-08)
                 if (q.get("local") or [""])[0]:
-                    return self._send(200, json.dumps(_spend_detail_local()), "application/json", cache="no-cache")
-                return self._send(200, json.dumps(_spend_detail()), "application/json", cache="no-cache")
+                    return self._send(200, json.dumps(_spend_detail_local(tz=tz)), "application/json", cache="no-cache")
+                return self._send(200, json.dumps(_spend_detail(tz=tz)), "application/json", cache="no-cache")
             if p == "/api-health/frame":
                 # This kernel's LAST apiHealth shell frame, its local half only (no `hosts`): what an attached
                 # peer's tunnel supervisor polls to carry this machine in ITS shell's per-host map (T301). Authed

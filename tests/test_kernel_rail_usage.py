@@ -118,12 +118,12 @@ class RailUsage(unittest.TestCase):
         self.assertNotIn("_telemUnavail", self.html)
         self.assertIn("if(at)h+='<div class=ru-tip-age>last turn recorded '+fmtAgo(at)+'</div>';", self.html,
                       "the ledger's own last record (2026-10-08: a turn, since a seat's turn is no charge)")
-        self.assertIn("var c=det._cost={at:(typeof sr.at==='number')?sr.at:null,tok:sr.tok||{}};", self.html)
+        self.assertIn("var c=det._cost={at:(typeof sw.at==='number')?sw.at:null,tz:sw.tz||'',tok:{}};", self.html)
         self.assertIn("pullFleet().then(done,function(){if(ROWS.length)renderRows(ROWS,SELF);done();});", self.html)
         # the kernel side: the payload stamps spend.json's own mtime on both spend-attaching arms
         ksrc = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertEqual(ksrc.count('out["spendAt"] = sa'), 2, "the key-only arm and the mixed-host arm (an older shell's)")
-        self.assertIn('out["at"] = at          # the ledger\'s own last record', ksrc, "…and the routes every arm carries")
+        self.assertIn('out["at"] = at\n    _SPEND_HOURS_MEMO[0] = (key, out)', ksrc, "…and the hour payload every /usage answer's windows are built from")
 
     def test_the_spend_hover_splits_each_windows_tokens_by_kind(self):
         # the user 2026-09-06 read the day's token count in the API cell and could not see how a handful
@@ -141,7 +141,8 @@ class RailUsage(unittest.TestCase):
                                  "cooked Python string: the source's \\u00b7 renders as the character itself)")
         self.assertIn(".ru-tip-note{margin-top:5px;opacity:.6;font-size:10px;max-width:360px}", self.html)
         ksrc = open(os.path.join(BIN, "romp-kernel")).read()
-        self.assertIn('"tok": {"today": toks(today_e), "monthToDate": toks(month_e)}', ksrc, "the kernel ships the kinds per window")
+        self.assertIn('"tok": {"tokIn": kinds[0], "tokOut": kinds[1], "tokCacheR": kinds[2], "tokCacheW": kinds[3], "tok": sum(kinds)}}', ksrc,
+                      "the kernel builds the kinds per window, in the viewer's zone")
 
 
     def test_the_tooltip_shows_the_snapshots_age(self):

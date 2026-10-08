@@ -684,19 +684,28 @@ the per-init check above confirms each one.
 The usage rail reflects a mixed machine: the window bars (5 hours / 7 days /
 Fable 5) are drawn once, aggregated across every connected host's login as the
 worst reading per window, and beside them the **usage at API prices**:
-`today` and `this month` (the local calendar day and month so far), each the
-dollars of every recorded turn on every connected machine at Claude Code's own
-cost (its `total_cost_usd`, the turn's tokens at the API's published prices),
-whatever billed it. A figure that includes any turn a subscription seat billed
-(a machine's sign-in or a stored login) wears `≈`, since a seat is not billed
-per token; a figure that is all API-key turns is what the key was charged and
-stays plain. The cell carries no label and no tokens. Each kernel ships its
-ledger's dollars by billing route for the two windows (`spendRoutes` on the
-usage payload: `today`, `monthToDate`, the rolling `week` an older shell
-reads, the tokens by kind, and the ledger's last-record time), and the cell
-sums the routes, so its figures, its marks and the hover's split are one
-reading. A machine on an older build that sends no such routes is named in the
-hover rather than summed. Hovering
+`today` and `this month`, the VIEWER's own calendar day and month so far (the
+browser's time zone), each the dollars of every recorded turn on every
+connected machine at Claude Code's own cost (its `total_cost_usd`, the turn's
+tokens at the API's published prices), whatever billed it. A figure that
+includes any turn not billed to an API key (a subscription seat, through a
+machine's sign-in or a stored login) wears `≈`: it is romp's estimate from the
+tokens, not what the account is charged; a figure that is all API-key turns is
+what the key was charged and stays plain. The cell carries no label and no
+tokens. Each kernel keeps its spend by hour (800 hour buckets, a month of hours
+on a machine that spends every hour) and the kernel serving the page builds both
+windows in the viewer's zone from them: its own, and each attached machine's
+from the hours that machine's last usage read carried (`/usage?hours=1`). An
+hour counts in a window when it starts in it, so a zone a whole number of hours
+from a machine's is exact; a zone half an hour off counts the hour that
+straddles its midnight in the day it began. Every attached machine is accounted
+for: one that is not up, whose last usage read failed, that has never
+reported, that runs an older build, or whose ledger cannot be read is left out
+of the figures and NAMED on the cell itself (`server missing`, or `2 machines
+incomplete`), the hover saying why and when its usage was last read; a
+machine's last reading is never summed as if current. A window that begins
+before a machine's hourly record does (spend older than the hours kept) is
+marked `partial` the same way, with where the record begins. Hovering
 breaks the windows down by ACCOUNT: one block per distinct login (headed by
 the account's kind, `Enterprise seat` or `Personal plan`, the name the spend
 detail gives it, never its email; the meters written once, since they are the
@@ -712,30 +721,39 @@ block says `no 5-hour or weekly limits on this account`, with no bars, no age
 and no lagging note, even beside a machine on an older build still holding a
 reading from before; a usage request the endpoint cannot answer says nothing
 about the account and changes nothing. When that answer carries the seat's
-monthly spend limit, the block shows it instead as one `Monthly allowance`
-bar: the percent used and the date it resets, the first of the next month as
-Claude Code's own `/usage` screen dates it (the answer carries no reset date).
-A reading from before that reset shows no bar, only `reset <date>; no reading
-since`; an answer with no limit to measure against (none, or unlimited) leaves
-the one-line note. Under the blocks, the **Usage at API prices** section is a
+monthly spend limit, the block shows it instead as one `Monthly spend limit`
+bar with Claude Code's own figures, `$X of $Y spent, as Claude Code reads it for
+this account` (the answer's `extra_usage`, which Claude Code's schema describes
+as the plan's extra-usage spend for the billing period, in minor units of the
+currency; whether it counts this member alone or the organisation against a
+shared limit the answer does not say, so romp never calls it this member's
+usage). The answer carries no reset date, so none is shown. A reading from an
+earlier calendar month shows no bar, only `no reading this month yet`; a plan
+with no limit shows what it spent. Under the blocks, the **Usage at API prices** section is a
 small table with the cell's two windows as columns and one row per account
 (the kernel folds every host's billing routes into accounts, the rule below,
 and the rows are summed from the same payloads the cell sums, so they add up
-to it): a seat's figures wear `≈`, the API key's row says `charged`, a
+to it, in whole dollars that add up: each row floored and the dollars the
+floors lose given to the largest remainders, so a column sums to its `Total`
+and to the cell): a seat's figures wear `≈`, the API key's row says `charged`, a
 `Total` row appears when there is more than one account, then the tokens per
 window, the month's tokens by kind, one line saying what `≈` means, every
 machine's month when several contribute, and when the ledger last recorded a
 turn. A route no account names yet (spend recorded since the last fold) is
 not dropped: the key's joins the API key row, any other an `other` row. A
-click on the readout opens the spend detail, **Usage at API prices**: the
-range (one day by hour, seven days by hour, ninety days by day) and the
-measure (dollars or tokens) at the top, then two cards side by side, which
+click on the readout opens the spend detail, **Usage at API prices**, on the
+figure clicked: the range (today by hour and this month by day, both the
+viewer's own and holding exactly the turns the cell sums, the cards showing
+the cell's figures; then seven days by hour and ninety days by day, in each
+recording machine's own time) and the measure (dollars or tokens) at the top,
+then two cards side by side, which
 stack on a narrow screen. The first holds every turn the key did not bill:
 named by its account (`Enterprise seat`) when one account billed them all,
 `Subscription logins` with a row per account otherwise, its figure an
-estimate (`≈`) and the line under it saying the seat is not billed per token,
-with the seat's monthly allowance (or a personal plan's 5-hour and weekly
-windows) from the same readings the hover shows. The second, **API key**,
+estimate (`≈`) and the line under it saying it is romp's estimate from the
+tokens at the API's list prices, with the account's monthly spend limit as
+Claude Code reads it (or a personal plan's 5-hour and weekly windows) from the
+same readings the hover shows. The second, **API key**,
 holds the key-billed turns, charged per token. Each card has its own chart,
 stacked by session; a card whose kind holds nothing in the range is one line
 saying so, and a kind no account in the ledger's reach has is not drawn. When
@@ -6946,8 +6964,9 @@ was logged; session cost is tokens priced from a table.
 **What your usage costs.** The bottom bar's usage figures open **Usage at API
 prices**, which the palette reaches as **Token usage** too: a card for the
 subscription seat (estimated at API prices, `≈`) and one for the **API key**
-(charged), each with its chart, then **By session**, over one day by hour,
-seven days by hour (the default) or ninety days by day, measured in dollars or
+(charged), each with its chart, then **By session**, over today by hour, this
+month by day (the default, and where a click on a figure lands on that figure),
+seven days by hour or ninety days by day, measured in dollars or
 tokens, ordered by spend or in your own order, and optionally merged by tag.
 The panel's choices are kept in this browser.
 

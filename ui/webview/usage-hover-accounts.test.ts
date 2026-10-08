@@ -38,7 +38,7 @@ function fn(start: string): string {
   return src;
 }
 
-const SRC = ["function shareFreshest(live){", "function barRows(d){", "function winsHTML(d){", "function monthlyHTML(d){",
+const SRC = ["function shareFreshest(live){", "function barRows(d){", "function winsHTML(d){", "function spendLimitWords(m){", "function monthlyHTML(d){",
   "function machineHTML(name){", "function acctBlocksHTML(sets,manyMachines){"].map(fn).join("\n");
 const esc = (s: unknown) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as Record<string, string>)[c]);
 const fmtUsd = (v: number) => "$" + String(Math.round(v));
@@ -109,10 +109,11 @@ test("the hover's usage section is the accounts split by window, from the /usage
   assert.ok(USAGE_JS.includes("ACCTS=(d&&Array.isArray(d.accounts))?d.accounts:[];"));
 });
 
-// THE SEAT'S MONTHLY ALLOWANCE (2026-10-01): an account with no windows whose answer carried its monthly spend limit draws
-// that limit as its one bar. Here the payload goes through the REAL winDet (lifted with a document stub), so the field
-// mapping executes too. The kernel half (the recorder, the percent, the reset date, staleness) executes in
-// tests/test_sdk_backend.py and tests/test_usage_per_account.py.
+// THE ACCOUNT'S MONTHLY SPEND LIMIT (2026-10-01; reworded 2026-10-08): an account with no windows whose answer carried its
+// monthly spend limit draws that limit as its one bar, with Claude Code's own words for it ("$X of $Y spent") attributed to
+// Claude Code, never as this member's usage, and no reset date (the reading carries none). Here the payload goes through
+// the REAL winDet (lifted with a document stub), so the field mapping executes too. The kernel half (the recorder, minor
+// units to dollars, staleness by month) executes in tests/test_usage_per_account.py.
 const DOC = { body: { classList: { contains: () => false } } };   // the classic palette: the reading's own colour
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
 const G = new Function("esc", "fmtUsd", "fmtAgo", "fmtR", "document", "WINS",
@@ -125,31 +126,33 @@ function seatBlock(usage: any): string {
   return G.acctBlocksHTML([{ host: "TESTHOSTA", det, acct: ACCT, ownT: usage.t, lag: false }], false).join("");
 }
 
-test("an account with no windows and a monthly limit shows one bar: the percent used and the date it resets", () => {
-  const h = seatBlock({ ...SEAT, monthly: { pct: 23, resetsOn: "2026-11-01", color: [84, 178, 4], tone: [81, 150, 184] } });
+test("an account with no windows and a monthly spend limit shows one bar and Claude Code's own figures, no reset date", () => {
+  const h = seatBlock({ ...SEAT, monthly: { pct: 23, used: 11500, limit: 50000, currency: "USD", month: "2026-10", color: [84, 178, 4], tone: [81, 150, 184] } });
   assert.ok(h.includes("<div class=ru-tip-acct>Enterprise seat</div>"), "the account's kind names the block");
-  assert.ok(h.includes("<span>Monthly allowance</span>"));
-  assert.ok(h.includes("<span class=ru-tip-reset>resets Nov 1</span>"), "the date it resets");
+  assert.ok(h.includes("<span>Monthly spend limit</span><span class=ru-tip-reset>this month</span>"));
   assert.equal((h.match(/class=ru-tip-track/g) || []).length, 1, "one bar");
   assert.ok(h.includes("width:23%;background:rgb(84,178,4)") && h.includes("<span class=ru-tip-v>23%</span>"), "the percent used");
+  assert.ok(h.includes("$11,500 of $50,000 spent, as Claude Code reads it for this account"), "the figures in Claude Code's words, attributed");
+  assert.ok(!/resets|allowance/.test(h), "no reset date (the reading carries none), and not called an allowance of this member's");
   assert.ok(!h.includes("no 5-hour or weekly limits"), "the bar takes the one-line note's place");
-  assert.ok(!h.includes("updated"), "no age line: the allowance dates itself by its reset");
+  assert.ok(!h.includes("updated"), "no age line");
 });
 
-test("a reading from before the reset draws no bar and says so", () => {
-  const h = seatBlock({ ...SEAT, monthly: { stale: true, resetsOn: "2026-10-01" } });
-  assert.ok(h.includes("<span>Monthly allowance</span>"));
-  assert.ok(h.includes("reset Oct 1; no reading since"));
+test("a reading from an earlier month draws no bar and says so; a plan with no limit says what it spent", () => {
+  const h = seatBlock({ ...SEAT, monthly: { stale: true, month: "2026-09" } });
+  assert.ok(h.includes("<span>Monthly spend limit</span><span class=ru-tip-reset>no reading this month yet</span>"));
   assert.ok(!h.includes("ru-tip-track") && !h.includes("%"), "no bar and no figure");
+  const u = seatBlock({ ...SEAT, monthly: { pct: null, used: 812.4, limit: null, currency: "USD", month: "2026-10" } });
+  assert.ok(u.includes("$812 spent (no limit), as Claude Code reads it") && !u.includes("ru-tip-track"), "no limit: no bar, the spend in words");
 });
 
-test("no monthly fields: nothing about an allowance, the one-line note as before", () => {
+test("no monthly fields: nothing about a limit, the one-line note as before", () => {
   const h = seatBlock(SEAT);
-  assert.ok(!h.includes("Monthly allowance") && !h.includes("ru-tip-track"));
+  assert.ok(!h.includes("spend limit") && !h.includes("ru-tip-track"));
   assert.ok(h.includes("no 5-hour or weekly limits on this account"));
-  const w = seatBlock({ ...SEAT, noWindows: undefined, monthly: { pct: 23, resetsOn: "2026-11-01", color: [84, 178, 4] },
+  const w = seatBlock({ ...SEAT, noWindows: undefined, monthly: { pct: 23, used: 1, limit: 2, color: [84, 178, 4] },
     fiveHour: { pct: 40, resetsAt: NOW + 3600, color: [84, 178, 4] } });
-  assert.ok(w.includes("5 hours") && !w.includes("Monthly allowance"), "an account with windows draws its windows, never the allowance");
+  assert.ok(w.includes("5 hours") && !w.includes("spend limit"), "an account with windows draws its windows, never the limit");
 });
 
 test("the hover's bar track keeps a visible wash on the light card", () => {

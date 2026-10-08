@@ -28,6 +28,11 @@ const { chromium } = require('playwright');
   await pg.waitForFunction(() => !document.getElementById('rsp-back').hidden, null, { timeout: 5000 });
   const loaderSeen = await pg.evaluate(() => !!document.querySelector('#rsp-panel .rsp-load, #rsp-panel .rsp-tbl'));
   await pg.waitForSelector('#rsp-panel .rsp-tbl', { timeout: 15000 });
+  // the readout's click opens the panel on this month, the cell's own figure (2026-10-08); the 7-day view the rest of the
+  // run reads is one chip away
+  const opened = await pg.evaluate(() => { const on = document.querySelector('#rsp-panel .rsp-ctl-top .rsp-btn.on'); return on ? on.getAttribute('data-act') : null; });
+  await pg.click('#rsp-panel [data-act="range:hours"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:hours"]').classList.contains('on'), null, { timeout: 5000 });
   await pg.waitForSelector('#rsp-chart-seat .rsp-svg', { timeout: 15000 });
   const out = await pg.evaluate(() => ({
     head: document.querySelector('#rsp-panel .rsp-top span').textContent,
@@ -76,8 +81,8 @@ const { chromium } = require('playwright');
     await panel.screenshot({ path: shots + '-cards-light.png' });
     await pg.evaluate(() => document.body.classList.remove('theme-light'));
   }
-  await pg.click('#rsp-panel [data-act="range:day"]');
-  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:day"]').classList.contains('on'), null, { timeout: 5000 });
+  await pg.click('#rsp-panel [data-act="range:today"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:today"]').classList.contains('on'), null, { timeout: 5000 });
   accts.dayCards = await cardsAt();
   await pg.click('#rsp-panel [data-act="range:hours"]');
   await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:hours"]').classList.contains('on'), null, { timeout: 5000 });
@@ -113,8 +118,8 @@ const { chromium } = require('playwright');
   await pg.mouse.move(5, 400); await pg.waitForTimeout(60);
   const xhAfter = await pg.evaluate(() => { const line = document.querySelector('#rsp-chart-seat .rsp-xh'), st = document.querySelector('#rsp-chart-seat .rsp-xh-stamp'), t = document.getElementById('rsp-tip'); return { line: line ? line.style.display : null, stamp: st ? st.style.display : null, tip: t ? t.style.display : null }; });
   // the 1-day view: an hourly stamp too; then back to the 7-day view the rest of the run expects
-  await pg.click('#rsp-panel [data-act="range:day"]');
-  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:day"]').classList.contains('on'), null, { timeout: 5000 });
+  await pg.click('#rsp-panel [data-act="range:today"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:today"]').classList.contains('on'), null, { timeout: 5000 });
   const xhDay = await xhProbe(0.5, 0.01);
   if (shots) { await pg.screenshot({ path: shots + '-xh-1day-dark.png' }); await pg.evaluate(() => document.body.classList.add('theme-light')); await pg.waitForTimeout(120); await pg.screenshot({ path: shots + '-xh-1day-light.png' }); await pg.evaluate(() => document.body.classList.remove('theme-light')); }
   await pg.setViewportSize({ width: 1200, height: 820 }); await pg.waitForTimeout(250);   // a rebuild under a still pointer takes the tooltip down with the svg
@@ -234,6 +239,9 @@ const { chromium } = require('playwright');
   await pg.keyboard.press('Escape');
   await pg.evaluate(() => document.getElementById('rail-usage').click());
   await pg.waitForSelector('#rsp-panel .rsp-tbl', { timeout: 10000 });
+  // the readout's click opens on this month (2026-10-08); the merged rows below are read over the 90 days
+  await pg.click('#rsp-panel [data-act="range:days"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:days"]').classList.contains('on'), null, { timeout: 5000 });
   // T247g: merge by tag, and the 1-day range — under "by spend", so the merged rows sort by dollars
   await pg.click('#rsp-panel [data-act="order:spend"]');
   await pg.click('#rsp-panel [data-act="merge:toggle"]');
@@ -259,8 +267,8 @@ const { chromium } = require('playwright');
     return names;
   });
   if (shots) { await pg.screenshot({ path: shots + '-merged.png' }); await pg.evaluate(() => document.body.classList.add('theme-light')); await pg.waitForTimeout(120); await pg.screenshot({ path: shots + '-merged-light.png' }); await pg.evaluate(() => document.body.classList.remove('theme-light')); }
-  await pg.click('#rsp-panel [data-act="range:day"]');
-  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:day"]').classList.contains('on'), null, { timeout: 5000 });
+  await pg.click('#rsp-panel [data-act="range:today"]');
+  await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:today"]').classList.contains('on'), null, { timeout: 5000 });
   const day = await pg.evaluate(() => { const xs = new Set(); document.querySelectorAll('#rsp-chart-seat .rsp-seg').forEach((p) => xs.add(p.getAttribute('d').split(/[ ,]/)[0])); return { buckets: xs.size, labels: Array.from(document.querySelectorAll('#rsp-chart-seat .ru-tip-gx span')).map((e) => e.textContent) }; });
   merge.dayBuckets = day.buckets; merge.dayLabels = day.labels;
   await pg.click('#rsp-panel [data-act="range:hours"]'); await pg.click('#rsp-panel [data-act="merge:toggle"]');
@@ -297,5 +305,5 @@ const { chromium } = require('playwright');
   await pg.click('#rsp-panel [data-act="order:spend"]');   // restore the default for whoever runs next
   const mobile = { railHidden, panelOpened: true, modalOpened: true, btn, panelHint, persisted, phone };
   await b.close();
-  console.log(JSON.stringify({ accts, merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
+  console.log(JSON.stringify({ opened, accts, merge, yourOrder, hoverHint, hiddenBefore, loaderSeen, out, days, tip, tipOn, xh, xhAfter, xhDay, xhDays, xhShort, afterResize, week, hBefore, hiddenAfter, hiddenAfterTap, hiddenAfterDrag, lightErr, lightBtn, dim, timeout, mobile, errs }));
 })().catch((e) => { console.error(e); process.exit(1); });

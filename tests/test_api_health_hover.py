@@ -620,7 +620,7 @@ class Route(unittest.TestCase):
         self.assertEqual(status, 403, "a cross-site page's cookie is refused")
         self.assertIn("fetchDoc(h?'/remote/'+encodeURIComponent(h)+'/api-health':'/api-health')", JS)
         self.assertIn("fetch(u,{cache:'no-store'})", JS)
-        self.assertIn("fetch('/usage/fleet',{cache:'no-store'})", km._LANDING_USAGE_JS, "the same shape as the shell's other read")
+        self.assertIn("fetch('/usage/fleet'+(VIEW_TZ?'?tz='+encodeURIComponent(VIEW_TZ):''),{cache:'no-store'})", km._LANDING_USAGE_JS, "the same shape as the shell's other read")
 
     def test_a_missing_backend_is_a_loud_503_that_the_section_shows_as_its_failure_line(self):
         km._sdk = lambda: None

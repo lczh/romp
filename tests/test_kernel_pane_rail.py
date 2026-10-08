@@ -274,7 +274,11 @@ class ApiHealthCell(unittest.TestCase):
     def test_the_cell_adds_no_font_size(self):
         self.assertNotIn(".ah-text", self.html, "the name wears the bar's own label class, so no font rule of its own")
         self.assertIn("#rail-api{cursor:pointer;gap:6px;padding:3px 7px;margin-right:6px;border-radius:5px}", self.html)
-        self.assertIn("#rail-api:hover,#rail-api:focus-visible{background:rgba(255,255,255,0.06);outline:none}", self.html, "a flat wash says it opens")
+        self.assertIn("#rail-api:hover{background:rgba(255,255,255,0.06)}", self.html, "a flat wash says it opens")
+        # the keyboard's focus wears the accent ring every focusable head does, never the hover's look (2026-10-08 review:
+        # with the outline removed, keyboard focus could not be told from hover)
+        self.assertIn("#rail-api:focus-visible{outline:1px solid var(--accent,#9cd2ff);outline-offset:-1px}", self.html)
+        self.assertNotIn("outline:none}", self.html.split("#rail-api:focus-visible")[1][:80], "never a focus with no ring")
 
     def test_the_dot_wears_the_accent_when_fine_and_the_status_tokens_otherwise(self):
         # T301 (the user 2026-09-10): the fine dot IS the romp accent; errors the blocked red; quiet the label gray;

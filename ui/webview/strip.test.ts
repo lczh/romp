@@ -190,14 +190,14 @@ test("both bundles init the strip; the web pages never opt in", () => {
   assert.ok(!kernel.includes("__rompShowStrip"), "the web shell keeps its own rail — no strip opt-in kernel-side");
 });
 
-// ── the USAGE CELL (the user 2026-10-08): every turn at API prices, by the route that billed it, for the calendar day and
-// month; the key's dollars are charged, any other route's an estimate (a subscription seat is not billed per token), and a
-// figure that holds any estimate wears the approx mark. The strip mirrors the rail's costCellHTML.
-const routes = (over: Record<string, unknown> = {}) => ({ spendRoutes: Object.assign({
-  today: { machine: [183.4, 30] },
-  monthToDate: { key: [4871.6, 700], machine: [183.4, 30] },
-  week: { key: [4700, 690], machine: [183.4, 30] },
-  tok: { today: { tok: 60_300_000 }, monthToDate: { tok: 1_670_000_000 } },
+// ── the USAGE CELL (the user 2026-10-08): every turn at API prices, by the route that billed it, for the viewer's calendar
+// day and month (built by the kernel in this webview's zone, spendWin); the key's dollars are charged, any other route's
+// romp's estimate, and a figure that holds any estimate wears the approx mark. The strip mirrors the rail's costCellHTML.
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const routes = (over: Record<string, unknown> = {}) => ({ spendWin: Object.assign({
+  tz: TZ,
+  today: { routes: { machine: 183.4 }, tok: { tok: 60_300_000 } },
+  monthToDate: { routes: { key: 4871.6, machine: 183.4 }, tok: { tok: 1_670_000_000 } },
 }, over) });
 
 test("costCell sums every route per calendar window and marks a figure holding any estimate", () => {
@@ -210,11 +210,13 @@ test("costCell sums every route per calendar window and marks a figure holding a
   assert.deepEqual(cell!.segs.map((s) => Math.round(s.keyUsd)), [0, 4872], "the key's share is kept apart");
   assert.match(cell!.title, /^Usage at API prices\n/);
   assert.match(cell!.title, /this month: ≈\$5,055 \(≈\$183 on subscription seats, \$4,872 charged to the API key\) · 1\.67B tok/);
-  assert.match(cell!.title, /≈ marks an estimate: what that usage would cost at API prices/);
+  assert.match(cell!.title, /≈ marks romp’s estimate: the tokens priced at the API’s list prices/);
+  assert.ok(!cell!.title.includes(" (in "), "built in this webview's own zone: no zone named");
+  assert.match(costCell(routes({ tz: TZ === "UTC" ? "Asia/Kolkata" : "UTC" }))!.title, /^Usage at API prices \(in (Asia\/Kolkata|UTC)\)/, "another zone is named");
 });
 
 test("a key-only figure carries no approx mark, and fmtUsd groups thousands", () => {
-  const cell = costCell(routes({ today: { key: [14, 3] }, monthToDate: { key: [1320.4, 80] } }));
+  const cell = costCell(routes({ today: { routes: { key: 14 }, tok: { tok: 0 } }, monthToDate: { routes: { key: 1320.4 }, tok: { tok: 0 } } }));
   assert.deepEqual(cell!.segs.map((s) => [fmtUsd(s.usd), s.est]), [["$14", false], ["$1,320", false]]);
   assert.match(cell!.title, /today: \$14 charged to the API key/);
   assert.ok(!cell!.title.includes("marks an estimate"), "no estimate, no footnote");
@@ -222,10 +224,11 @@ test("a key-only figure carries no approx mark, and fmtUsd groups thousands", ()
   assert.equal(fmtUsd(12.4), "$12", "whole dollars, no cents (the user 2026-08-09)");
 });
 
-test("no calendar routes → no cell (an older kernel ships the week alone); no key material on the strip", () => {
+test("no viewer-zone windows → no cell (an older kernel ships none); an unreadable ledger is no cell either; no key material", () => {
   assert.equal(costCell(null), null);
   assert.equal(costCell({ spend: { day: { usd: 3 } } }), null, "the old key windows alone do not arm it");
-  assert.equal(costCell({ spendRoutes: { week: { key: [3, 1] } } }), null, "an older kernel's week-only routes do not either");
+  assert.equal(costCell({ spendRoutes: { today: { key: [3, 1] } } }), null, "nor the previous build's kernel-day routes");
+  assert.equal(costCell({ spendWin: { error: "the spend ledger could not be read" } }), null, "an unreadable ledger is no confident figure");
   const ROOT = path.resolve(process.cwd(), "..");
   const src = fs.readFileSync(path.join(ROOT, "ui", "webview", "strip.ts"), "utf8");
   assert.ok(!src.includes("apiTail") && !src.includes("authTail"), "no key-tail plumbing");

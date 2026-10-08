@@ -237,8 +237,9 @@ class Accounts(unittest.TestCase):
         self.assertEqual(unk["name"], "Unknown")
         self.assertEqual(_vias(unk), ["TESTHOST's own sign-in, unreadable just now", "before billing was recorded",
                                       "PEERHOST's own sign-in, signed out now"])
-        self.assertEqual([r["estimate"] for r in unk["routes"]], [True, False, True],
-                         "a sign-in's turns are a seat's (an estimate); untracked spend may be the key's")
+        self.assertEqual([r["estimate"] for r in unk["routes"]], [True, True, True],
+                         "a sign-in's turns are a seat's (an estimate); untracked spend is no known charge to the key either "
+                         "(2026-10-08 review: its row lacked the approx mark its card carried)")
         self.assertEqual(_vias(accts[0]), ["PEERHOST"])
 
 
