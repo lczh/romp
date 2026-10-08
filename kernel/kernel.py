@@ -32247,6 +32247,16 @@ def _listing_rows_part(view, live_map, names):
     L["missBy"][why] = L["missBy"].get(why, 0) + 1
 
 
+def _rows_table_cycle():
+    """Tell the SDK backend a pusher cycle began (SdkBackend.rows_table_cycle): the cycle is when its registry rows table
+    takes again a scan that met an unreadable registration. A backend or a stand-in without the method has nothing to
+    take again."""
+    be = _sdk()
+    fn = getattr(be, "rows_table_cycle", None) if be is not None else None
+    if fn is not None:
+        fn()
+
+
 def _listing_threads_part(view, live_map, names):
     """The comment-thread rows (?threads=1, rule 3), from the backend's thread table as this cycle reads it
     (SdkBackend.thread_sessions: the thread set from the registry's rows table, scanned again only when the registry
@@ -69206,6 +69216,9 @@ def _pusher_cycle():
         #                                       token and per postal card (~38% of pusher wall, py-spy
         #                                       2026-08-31). INSIDE the try: a raise here must still hit
         #                                       the finally, or the liveness scope above leaks set
+        _rows_table_cycle()                     # …and the backend's registry rows table: a scan that met an unreadable
+        #                                       registration is taken again by this cycle's first read, once per cycle,
+        #                                       never once per chat build (SdkBackend.rows_table_cycle)
         _PERF_STATS.stage("prelude", time.monotonic() - _t_cycle)   # the cycle's opening: liveness, names, scopes (T397)
         _pusher_cycle_jobs(now, live_map, any_client)
     finally:

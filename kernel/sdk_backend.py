@@ -3335,20 +3335,51 @@ def reg_rev() -> int:
     return REG_REV[0]
 
 
-_FS_CLOCK = getattr(time, "CLOCK_REALTIME_COARSE", None)   # the clock Linux takes file timestamps from (current_time())
+_CLOCK_REALTIME_COARSE = 5   # linux/time.h's clock id, part of the kernel's ABI; CPython names no constant for it (the
+#                              getattr(time, "CLOCK_REALTIME_COARSE") this replaced was always None, so the rule fell to
+#                              time.time_ns(), which reads ahead of every stamp a write is about to take: 3000 of 3000 scans
+#                              counted as settled on a Linux 6.8 host, and a same-tick write was missed; the 2026-10-08 review)
+_FS_CLOCK_FAULT = []         # the error the coarse clock raised, said once (an empty list: it reads)
 
 
-def _fs_clock_ns() -> int:
-    """Now, on the clock a file's mtime is stamped from: Linux stamps it from the coarse realtime clock, which ticks every
-    few milliseconds, so a file written twice inside one tick keeps one mtime; elsewhere the realtime clock. Read by
-    SdkBackend._rows_table to tell a scan the registry directory's timestamp can vouch for from one taken inside the tick
-    of the directory's last write."""
-    if _FS_CLOCK is not None:
-        try:
-            return time.clock_gettime_ns(_FS_CLOCK)
-        except OSError:
-            pass
-    return time.time_ns()
+def _fs_clock_ns() -> "int | None":
+    """Now, on the clock the filesystem stamps a file's or directory's ctime and mtime from, or None when that clock cannot
+    be read. Linux stamps from the coarse realtime clock (current_time(): the time at the last tick, every 1 to 10 ms
+    by HZ), so two writes inside one tick can keep one stamp, and a fine reading such as time.time_ns() runs up to a tick
+    ahead of the stamp a write takes a moment later. From Linux 6.13 a multigrain filesystem (ext4, xfs, btrfs, tmpfs)
+    gives the first change after a stat a fine stamp, and an unwatched one max(coarse, the newest fine stamp handed
+    out), both at or past the coarse clock, so the coarse clock is the one no later stamp can fall behind on every
+    kernel. macOS stamps from the fine realtime clock (APFS keeps nanoseconds, taken when the change happens, with no
+    tick between), so there time.time_ns() is that clock. Both claims are checked against real directory stamps wherever
+    the suite runs (tests/test_sessions_listing.py, the clock's own test). Read by _fs_stamp_settled."""
+    if not sys.platform.startswith("linux"):
+        return time.time_ns()
+    try:
+        return time.clock_gettime_ns(_CLOCK_REALTIME_COARSE)
+    except OSError as e:                              # no coarse clock (a sandbox that refuses it): no stamp is vouched for
+        if not _FS_CLOCK_FAULT:
+            _FS_CLOCK_FAULT.append(e)
+            sys.stderr.write("sdk_backend: the coarse realtime clock will not read (%s), so no directory stamp is trusted to "
+                             "keep a registry scan; every read scans\n" % e)
+        return None
+
+
+def _fs_stamp_settled(stamp_ns: int) -> bool:
+    """Whether the filesystem clock has passed the whole granule of a stamp it gave, so that every later change will stamp
+    past it (the racy-index rule git applies to its index). A filesystem storing coarser stamps truncates each to the start
+    of its granule (whole seconds on HFS+ or on ext4 with 128-byte inodes, two on FAT, 10 ms on exFAT), and a stamp a
+    filesystem truncated to 10^k ns ends in k zeros, so the stamp's own digits bound the granule: 1 ns for a stamp that
+    ends in a nonzero digit, two seconds once all nine sub-second digits are zero. A nanosecond stamp ends in k zeros by
+    chance once in 10^k, at the cost of one more scan. False when the clock cannot be read."""
+    now = _fs_clock_ns()
+    if now is None:
+        return False
+    granule = 1
+    while granule < 1_000_000_000 and stamp_ns % (granule * 10) == 0:
+        granule *= 10
+    if granule == 1_000_000_000:
+        granule = 2_000_000_000                       # FAT stores even seconds
+    return now >= stamp_ns + granule
 
 
 REG_ROWS_FIELDS = ("lastSid", "threadOf", "alive")   # the registration fields the kernel's /sessions rows key reads THROUGH THIS
@@ -17047,25 +17078,34 @@ class SdkBackend:
 
         Kept until the registry directory moves, the one key every writer moves: a registration is published by renaming a
         temp file into the directory (write_reg, in this process or in the outgoing kernel during a handover), which moves
-        the directory's mtime. Two bounds make that key exact. The directory's timestamp is coarse (Linux stamps it from a
-        clock that ticks every few milliseconds), so a write landing after a scan but inside the same tick would leave it
-        unchanged: a scan is kept only when the clock those timestamps come from (_fs_clock_ns) had already passed the
-        directory's own when the scan began, the racy-index rule, and is otherwise taken again on the next call. And a
-        scan that met a registration it could not read (list_regs' faults: one served from its last good copy, or dropped
-        because it had none) is used for this call and never kept, so a thread whose registration faulted on the scan is
-        listed, and an ended one leaves, as soon as the read heals. This process's own write count (REG_REV) rides the key
-        too, so its writes need no clock at all. A scan of 312 registrations costs about 3 ms; between writes a call costs a
-        directory stat. Every caller reads the table's own dicts, so none may write to them."""
+        the directory's mtime and ctime. The key is the directory's inode, mtime and ctime: the ctime because rsync -a,
+        cp -a and tar set a directory's mtime back after writing into it, and nothing but a change sets a ctime (the
+        kernel's _stat_ident carries it for the same reason). Two bounds make that key exact. The stamps are coarse (Linux
+        stamps from a clock that ticks every few milliseconds), so a write landing after a scan but inside the same tick
+        would leave them unchanged: a scan is kept only when the filesystem clock had already passed the ctime's whole
+        granule when the scan began (_fs_stamp_settled, the racy-index rule; the ctime, because every change of any kind
+        sets it to that clock's now, where an mtime can be set anywhere, the future included), and is otherwise taken again
+        on the next call. And a scan that met a registration it could not read (list_regs' faults: one served from its
+        last good copy, or dropped because it had none) is never kept as a good one: no file event says when such a read
+        heals (an EIO or an EMFILE moves nothing on disk), so it is served for the rest of the kernel cycle that took it
+        and taken again by the next cycle's first read (rows_table_cycle), and a thread whose registration faulted is
+        listed, and an ended one leaves, the cycle after the read heals. Each call used to scan again, about 3 ms a call
+        from every chat build while a registration stayed unreadable (the 2026-10-08 review). A backend no kernel cycles
+        (rows_table_cycle never called) keeps no faulted scan at all. This process's own write count (REG_REV) rides the
+        key too, so its writes need no clock at all. A scan of 312 registrations costs about 3 ms; between writes a call
+        costs a directory stat. Every caller reads the table's own dicts, so none may write to them. Not vouched for on a
+        filesystem stamped by another machine's clock (NFS), as the kernel's directory memos are not."""
         d = os.path.join(str(self.state_dir), "sdk")
         try:
             st = os.stat(d)
-            stamp = (st.st_ino, st.st_mtime_ns, REG_REV[0])
+            stamp = (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, REG_REV[0])
         except OSError:
             stamp = None                                  # no registry yet, or one that will not stat: list_regs answers
+        cycle = getattr(self, "_rows_cycle", None)        # the kernel cycle a faulted scan is served for (rows_table_cycle)
         memo = getattr(self, "_rows_table_memo", None)
-        if stamp is not None and memo is not None and memo[0] == stamp:
+        if stamp is not None and memo is not None and memo[0] in (stamp, ("faulted", stamp, cycle)):
             return memo[1]
-        settled = stamp is not None and _fs_clock_ns() > stamp[1]   # read BEFORE the scan: a later write stamps later
+        settled = stamp is not None and _fs_stamp_settled(stamp[2])   # read BEFORE the scan: a later change stamps past it
         faults: list = []
         threads, parents, children = {}, {}, {}
         for reg in list_regs(self.state_dir, faults=faults):
@@ -17084,8 +17124,20 @@ class SdkBackend:
         for kids in children.values():
             kids.sort(key=lambda k: k["t"])
         table = {"threads": threads, "forkParents": parents, "forkChildren": children}
-        self._rows_table_memo = ((stamp if settled and not faults else None), table)   # a racy or faulted scan: taken again
+        if not settled:
+            key = None                                    # a racy scan: taken again by the next call
+        elif faults:
+            key = ("faulted", stamp, cycle) if cycle is not None else None   # served until the next cycle, never as a good scan
+        else:
+            key = stamp
+        self._rows_table_memo = (key, table)
         return table
+
+    def rows_table_cycle(self) -> None:
+        """A kernel cycle began (the pusher calls this at each cycle's start, _pusher_cycle): a registry scan that met an
+        unreadable registration, served since the cycle that took it, is taken again by this cycle's first read
+        (_rows_table). The cycle is the event: nothing on disk moves when such a read heals."""
+        self._rows_cycle = getattr(self, "_rows_cycle", 0) + 1
 
     def session_state(self, sid: str) -> str:
         """Live state ('working'/'waiting'/…) for ONE sid, comment threads included — live_sessions

@@ -576,8 +576,6 @@ class OneListingPerChange(_Listing):
         writers = [m.start() for m in re.finditer(r"\bwrite_reg\(", src)]
         self.assertGreaterEqual(len(writers), 10, "the registry's writers all call write_reg")
         root = Path(os.path.dirname(HERE))
-        marks = re.compile(r"_reg_path\((?:self\.)?state_dir|/ \"sdk\" /|\"sdk\"[^\n]*\.json|\.json[^\n]*\"sdk\"")   # the SDK registry's
-        #                                                              marks alone: the Codex backend's registry.json is its own table, read by no listing field
         offenders = []
         for sub in ("kernel", "cli", "postal", "bin"):
             for f in sorted((root / sub).glob("*")):
@@ -587,14 +585,59 @@ class OneListingPerChange(_Listing):
                     text = f.read_text()
                 except (OSError, UnicodeDecodeError):
                     continue
-                lines = text.split("\n")
-                for i, line in enumerate(lines):
-                    if not re.search(r"\.write_text\(|os\.replace\(|\.unlink\(|os\.unlink\(|os\.remove\(", line):
-                        continue
-                    window = "\n".join(lines[max(0, i - 6):i + 1])
-                    if marks.search(window) and "def write_reg" not in "\n".join(lines[max(0, i - 12):i + 1]):
-                        offenders.append("%s:%d" % (f.relative_to(root), i + 1))
+                offenders += ["%s:%d" % (f.relative_to(root), n) for n in _registry_write_sites(text)]
         self.assertEqual(offenders, [], "registry files written or removed outside write_reg")
+
+    def test_the_census_catches_a_registration_written_in_place(self):
+        """The census reads every way a file is written, not only the publish write_reg makes: an in-place write (open for
+        writing and json.dump into it, write_bytes, a truncate) changes a registration without renaming anything into the
+        directory, so the directory's stamps stand and the rows table keeps a scan that no longer matches the file; a
+        rename or a copy moves a file in without write_reg's revision. Each shape below, written beside the registry's
+        marks, is named; write_reg's own body is not."""
+        shapes = {
+            "open for writing, json.dump": 'with open(_reg_path(state_dir, sid), "w") as f:\n    json.dump(reg, f)',
+            "open to append": 'p = Path(state_dir) / "sdk" / (sid + ".json")\nwith open(p, "a") as fh:\n    fh.write(line)',
+            "open r+ by keyword": 'fh = open(_reg_path(self.state_dir, sid), mode="r+")',
+            "json.dump into a handle": 'fh = Path(state_dir) / "sdk" / (sid + ".json")\njson.dump(reg, out)',
+            "Path.open for writing": 'with _reg_path(state_dir, sid).open("w") as fh:\n    fh.write(text)',
+            "write_bytes": '_reg_path(state_dir, sid).write_bytes(data)',
+            "os.open for writing": 'fd = os.open(_reg_path(state_dir, sid), os.O_WRONLY | os.O_TRUNC)',
+            "truncate": 'os.truncate(_reg_path(state_dir, sid), 0)',
+            "rename in": 'os.rename(tmp, _reg_path(state_dir, sid))',
+            "Path.rename in": 'Path(tmp).rename(_reg_path(state_dir, sid))',
+            "copy in": 'shutil.copy(src, _reg_path(state_dir, sid))',
+            "move in": 'shutil.move(src, Path(state_dir) / "sdk" / (sid + ".json"))',
+        }
+        missed = [name for name, text in shapes.items() if not _registry_write_sites(text)]
+        self.assertEqual(missed, [], "in-place and side-door writes the census does not see")
+        self.assertEqual(_registry_write_sites(inspect.getsource(sb.write_reg)), [], "write_reg itself is the one write path")
+        self.assertEqual(_registry_write_sites('d = json.loads(_reg_path(state_dir, sid).read_text())\nwith open(_reg_path(state_dir, sid)) as f:\n    f.read()'),
+                         [], "a read is not a write")
+
+
+_REG_MARKS = re.compile(r"_reg_path\((?:self\.)?state_dir|/ \"sdk\" /|\"sdk\"[^\n]*\.json|\.json[^\n]*\"sdk\"")   # the SDK registry's
+#                                              marks alone: the Codex backend's registry.json is its own table, read by no listing field
+_FILE_WRITES = re.compile(
+    r"\.write_text\(|\.write_bytes\(|os\.replace\(|os\.rename\(|\.rename\(|\.unlink\(|os\.unlink\(|os\.remove\(|os\.truncate\("
+    r"|shutil\.(?:copy\w*|move)\(|json\.dump\("                       # the publish, a side door in, the removal, an in-place dump
+    r"|\bopen\([^\n]*?(?:,\s*|mode\s*=\s*)[\"'][rwxabt]*[wxa+][rwxabt+]*[\"']"   # open for writing, positional or mode=
+    r"|\.open\(\s*[\"'][rwxabt]*[wxa+][rwxabt+]*[\"']"                     # Path.open, whose first argument is the mode
+    r"|os\.open\([^\n]*O_(?:WRONLY|RDWR|TRUNC|APPEND|CREAT)")              # and the descriptor form
+
+
+def _registry_write_sites(text):
+    """The 1-based line numbers in `text` where a registration file is written or removed outside write_reg: a write call
+    with one of the SDK registry's marks within the six lines up to it. Before 2026-10-08 the write calls were the publish
+    and the removal alone, so an in-place write (open for writing, json.dump) was invisible to the census."""
+    lines = text.split("\n")
+    out = []
+    for i, line in enumerate(lines):
+        if not _FILE_WRITES.search(line):
+            continue
+        window = "\n".join(lines[max(0, i - 6):i + 1])
+        if _REG_MARKS.search(window) and "def write_reg" not in "\n".join(lines[max(0, i - 12):i + 1]):
+            out.append(i + 1)
+    return out
 
 
 T1 = "66666666-7777-8888-9999-0000000000b1"          # web's comment threads (synthetic)
@@ -707,6 +750,12 @@ class _Threads(_Listing):
         tmp.write_text(json.dumps(reg))
         os.replace(tmp, p)
 
+    def _settle(self):
+        """Return once the filesystem clock has passed the registry directory's stamp (_fs_stamp_settled): the event after
+        which a scan is kept. A few milliseconds at most, where the filesystem stamps from a coarse clock."""
+        while not sb._fs_stamp_settled((self.root / "sdk").stat().st_ctime_ns):
+            pass
+
     def _faulting_reads(self, *sids):
         """Reads of these registrations raise EIO while the returned list holds True (the EMFILE/EIO a loaded host returns)."""
         armed = [True]
@@ -817,7 +866,9 @@ class ThreadRowsFromTheCycle(_Threads):
     def test_the_registry_is_scanned_once_per_move_of_its_directory_and_never_on_a_quiet_cycle(self):
         """The thread set is the registry's rows table, kept until the registry directory moves (every writer's publish
         moves it), so a quiet cycle scans nothing and a write is read by one scan, however many readers ask that cycle (the
-        listing's thread set and lineage, and every chat build's branch chips)."""
+        listing's thread set and lineage, and every chat build's branch chips). Each write's timestamp tick is let pass
+        first: a scan inside it is taken again by the next call, the racy-index rule's own test below."""
+        self._settle()
         self._cycle()
         walks = self._count_walks()
         for _ in range(3):
@@ -826,11 +877,13 @@ class ThreadRowsFromTheCycle(_Threads):
         self.assertEqual(walks.count("list_regs"), 0, "quiet cycles: the registry is not scanned")
         sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": T1,
                                      "ctxTokens": 100})
+        self._settle()
         self._cycle()
         self.be.fork_children()
         self.be.fork_parents()
         self.assertEqual(walks.count("list_regs"), 1, "a write: one scan, shared by every reader")
         self._thread(T3, "web-comment-3")
+        self._settle()
         self._cycle()
         self.assertEqual(walks.count("list_regs"), 2)
         self.assertIn(T3, {r["id"] for r in self._rows()})
@@ -903,6 +956,32 @@ class ThreadRowsFromTheCycle(_Threads):
         self.assertIn(T3, ids, "the read healed: the next cycle scans again and lists it")
         self.assertNotIn(T2, ids, "and the ended thread leaves")
 
+    def test_a_faulted_scan_is_taken_again_once_per_cycle_never_per_call(self):
+        """A scan that met an unreadable registration is never kept as a good one, and no file event says when the read
+        heals (an EIO or an EMFILE moves nothing on disk), so it is taken again on the next cycle: every read in between
+        (the listing's thread set and lineage, each chat build's branch chips) is served the scan the cycle took, where
+        each call used to scan the whole registry again (about 3 ms a scan on a host with 312 registrations)."""
+        self._settle()
+        self._cycle()
+        armed = self._faulting_reads(T3)
+        self._thread(T3, "web-comment-3")                                   # a new thread whose registration will not read
+        self._settle()
+        walks = self._count_walks()
+        self._cycle()
+        for _ in range(5):
+            self.be.fork_children()                                         # the chat builds between two cycles
+        self.assertEqual(walks.count("list_regs"), 1, "one scan for the cycle and every read until the next")
+        self.assertNotIn(T3, {r["id"] for r in self._rows()})
+        self._cycle()
+        self.assertEqual(walks.count("list_regs"), 2, "the next cycle takes it again: a faulted scan is never kept as good")
+        armed[0] = False
+        self._cycle()
+        self.assertIn(T3, {r["id"] for r in self._rows()}, "the read healed: the next cycle lists the thread")
+        n = walks.count("list_regs")
+        self._cycle()
+        self.be.fork_children()
+        self.assertEqual(walks.count("list_regs"), n, "and a clean scan is kept across cycles until the directory moves")
+
     def test_another_processs_registry_write_is_seen_by_the_next_cycle(self):
         """The thread set and the fork lineage follow the registry directory, which every writer moves (each publish renames
         a temp file into it), not a revision only this process's writes move: a thread another process registered, an end it
@@ -921,19 +1000,84 @@ class ThreadRowsFromTheCycle(_Threads):
         self.assertEqual(self.be.fork_parents().get(SID2), SID, "a fork it recorded is in the lineage")
         self.assertEqual([k["sid"] for k in self.be.fork_children().get(SID, [])], [SID2], "the branch chips read the same")
 
-    def test_a_scan_in_the_same_timestamp_tick_as_the_last_write_is_scanned_again(self):
-        """The directory's timestamp is coarse: a write landing after a scan but in the same tick leaves it unchanged. A scan
-        taken while the clock the timestamps come from had not yet passed the directory's own is not trusted, and the next
-        call scans again (the racy-index rule)."""
+    def test_the_filesystem_clock_never_reads_ahead_of_the_stamp_a_later_write_gives_the_directory(self):
+        """The racy-index rule rests on one fact about _fs_clock_ns: a reading taken before a write is never later than the
+        stamp that write gives the directory, so a scan begun once the clock has passed the directory's stamp cannot miss a
+        write that keeps it. Checked on the real clock against real directory stamps. On Linux a directory is stamped from
+        the coarse realtime clock, which trails the wall clock by up to a tick, so time.time_ns() reads ahead of the stamp
+        a write gives it a moment later (every time on a 6.8 host; at each tick boundary on a later one). Each round's
+        first write clears the mark a stat leaves (from Linux 6.13 a multigrain filesystem stamps the first change after a
+        stat from the fine clock), so the write measured is stamped the way a write no one has looked at is."""
+        d = self.root / "clock-probe"
+        d.mkdir()
+
+        def publish(name, i):                                               # write_reg's publish: a temp file renamed in
+            tmp = d / ("%s.%d.tmp" % (name, i))
+            tmp.write_text("{}")
+            os.replace(tmp, d / name)
+        ahead = []
+        for i in range(3000):
+            publish("a.json", i)
+            before = sb._fs_clock_ns()
+            publish("b.json", i)
+            stamp = os.stat(d).st_ctime_ns
+            if before > stamp:
+                ahead.append((before, stamp))
+        self.assertEqual(ahead[:3], [], "%d of 3000 readings were ahead of the stamp of the write after them" % len(ahead))
+
+    def test_a_write_in_the_tick_of_the_write_a_scan_read_is_seen_by_the_next_call(self):
+        """Another process's write landing right after a scan, inside the timestamp tick of the write that scan read, leaves
+        the directory's stamp as it was wherever the filesystem stamps from a coarse clock (Linux before 6.13, and any
+        filesystem without multigrain stamps after it). The real clock and real directory stamps, nothing stubbed: each
+        round scans right after the previous round's write and writes a new thread right after the scan, and the next call
+        must list it, so the scan inside the tick was never kept (the racy-index rule)."""
+        armed = 0
+        for i in range(200):
+            self.be.thread_sessions()                                       # the scan, in the tick of the last write
+            before = (self.root / "sdk").stat()
+            tsid = "66666666-7777-8888-9999-%012x" % (0xc00 + i)
+            self._foreign_write(tsid, {"sid": tsid, "alive": True, "threadOf": SID, "lastSid": tsid})
+            after = (self.root / "sdk").stat()
+            armed += (before.st_mtime_ns, before.st_ctime_ns) == (after.st_mtime_ns, after.st_ctime_ns)
+            self.assertIn(tsid, self.be.thread_sessions(), "round %d (%d rounds so far kept the stamp)" % (i, armed))
+
+    def test_a_restored_directory_mtime_still_moves_the_key(self):
+        """rsync -a, cp -a and tar set a directory's mtime back after writing into it, which no write can do to its ctime: so
+        the key carries the ctime, as the kernel's directory identities do (_stat_ident). A kept scan, then another
+        process's write with the directory's mtime restored behind it, and the next call lists the write."""
         d = self.root / "sdk"
         self.be.thread_sessions()
+        self._settle()                                                      # the clock passing the stamp: an event, not a wait
+        self.be._rows_table_memo = None
+        self.be.thread_sessions()                                           # a scan the directory's stamp vouches for: kept
+        walks = self._count_walks()
+        self.be.thread_sessions()
+        self.assertEqual(walks.count("list_regs"), 0, "the scan was kept")
         st = d.stat()
-        with mock.patch.object(sb, "_fs_clock_ns", lambda: st.st_mtime_ns):   # the scan below lands inside the write's tick
-            self.be._rows_table_memo = None
-            self.be.thread_sessions()
         self._foreign_write(T3, {"sid": T3, "alive": True, "threadOf": SID, "lastSid": T3})
-        os.utime(d, ns=(st.st_atime_ns, st.st_mtime_ns))                    # …and the write lands in that same tick
-        self.assertIn(T3, self.be.thread_sessions(), "the racy scan is not kept: the next call scans and sees the write")
+        os.utime(d, ns=(st.st_atime_ns, st.st_mtime_ns))                    # what rsync -a does to the directory after the write
+        self.assertIn(T3, self.be.thread_sessions(), "the ctime moved: the key moved and the write is read")
+
+    def test_a_stamp_is_settled_only_once_the_clock_has_passed_its_whole_granule(self):
+        """A filesystem that stores coarser stamps (whole seconds on HFS+ or ext4 with small inodes, two on FAT) truncates
+        every stamp in a granule to its start, so a write a second later can carry the stamp a scan already read. The
+        stamp's own digits bound the granule: a stamp a filesystem truncated to 10^k ns ends in k zeros. Checked with the
+        real clock against stamps of each shape, taken just behind it."""
+        for _ in range(3):
+            now = sb._fs_clock_ns()
+            whole, ms10 = now - now % 1_000_000_000, now - now % 10_000_000
+            got = {"a nanosecond stamp just behind the clock": sb._fs_stamp_settled(now - now % 10 - 3),
+                   "a whole-second stamp inside its granule": sb._fs_stamp_settled(whole),
+                   "a whole-second stamp a second back (FAT stores two)": sb._fs_stamp_settled(whole - 1_000_000_000),
+                   "a whole-second stamp three seconds back": sb._fs_stamp_settled(whole - 3_000_000_000),
+                   "a 10 ms stamp inside its granule (exFAT)": sb._fs_stamp_settled(ms10)}
+            if sb._fs_clock_ns() - ms10 < 10_000_000:                       # no granule turned under the reads
+                break
+        self.assertEqual(got, {"a nanosecond stamp just behind the clock": True,
+                               "a whole-second stamp inside its granule": False,
+                               "a whole-second stamp a second back (FAT stores two)": False,
+                               "a whole-second stamp three seconds back": True,
+                               "a 10 ms stamp inside its granule (exFAT)": False})
 
     def test_the_thread_rows_lastsid_is_the_registration_the_key_read(self):
         """Two writes of a registration inside one timestamp tick: the key reads it by inode and ctime and moves, and the row
