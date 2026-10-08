@@ -153,7 +153,7 @@ class BuildSessionWiring(unittest.TestCase):
         src = inspect.getsource(km.build_session)
         self.assertIn("_stamp_interrupt_causes(events, _tail_cuts)", src)   # + the spend guard's cut records (#169 review)
         # …only the cuts this build's events can hold (#176 review): none pressed at or before the atom ahead of them
-        self.assertIn('_tail_cuts = [_c for _c in _cuts if last_t is None or _c["t"] > last_t]', src)
+        self.assertIn('_tail_cuts = [_c for _c in _cuts if last_t is None or int(_c["t"]) > last_t]', src)   # whole seconds (#177 review)
 
 
 if __name__ == "__main__":
