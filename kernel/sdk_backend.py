@@ -3554,13 +3554,18 @@ class _LaunchSlots:
         self.hand_over()
 
     def take(self, sess) -> bool:
-        """A slot for `sess`'s relaunch now, or False with `sess` queued for the next freed one."""
-        if self._sem.acquire(blocking=False):
-            self.unwait(sess)
-            return True
+        """A slot for `sess`'s relaunch now, or False with `sess` queued for the next freed one. The acquire and the enqueue
+        are ONE step under the lock hand_over reads the queue under, and release() frees the slot before hand_over looks, so
+        a release either lands before the acquire here (which then takes the slot) or finds `sess` already in the queue (and
+        offers it the slot). Two steps let a release land between the failed acquire and the enqueue: hand_over found no
+        waiter, `sess` queued after it looked, and the freed slot sat unused until something else asked (review 2026-10-08)."""
         with self._lock:
+            if self._sem.acquire(blocking=False):
+                if self._waiters.get(sess.sid) is sess:
+                    del self._waiters[sess.sid]
+                return True
             self._waiters.setdefault(sess.sid, sess)
-        return False
+            return False
 
     def unwait(self, sess) -> None:
         with self._lock:
@@ -4429,15 +4434,28 @@ def write_lease(state_dir, lease: dict) -> None:
             pass
 
 
-def read_lease(state_dir, sid: str) -> dict | None:
-    """The session's lease as written, or None when there is none (or it does not parse)."""
+def read_lease(state_dir, sid: str, strict: bool = False) -> dict | None:
+    """The session's lease as written, or None when there is none (or it does not parse). `strict`: None means only that
+    there is no lease file, and one that exists but cannot be read (an I/O error) or is not a lease record (it does not
+    parse, or names no sid; write_lease is atomic, so neither is a half-written file) raises instead, for a reader that
+    must not take an unreadable lease for no lease (SdkBackend._lease_survives)."""
     try:
         d = json.loads(lease_path(state_dir, sid).read_text())
+    except FileNotFoundError:
+        return None
     except (OSError, ValueError):
+        if strict:
+            raise
         return None
     if not isinstance(d, dict) or not d.get("sid"):
+        if strict:
+            raise ValueError("not a lease record")
         return None
     return d
+
+
+# Guards SdkBackend._lease_episode's per-session record of leases it could not read (one problem row per episode).
+_LEASE_EPISODE_LOCK = threading.Lock()
 
 
 def remove_lease(state_dir, sid: str) -> bool:
@@ -5907,9 +5925,11 @@ class SdkSession:
         # Billing is not among those exceptions (2026-10-07): the connect compares it with the CLI's launch record
         # whether or not a pick waits, and raises the mark there when they differ, so a mark kept here would only
         # repeat that ruling ahead of the evidence.
+        # A lease that cannot be read keeps the marks too: its host may still run the CLI launched before the pick, and the
+        # connect compares the pick with whichever CLI it reaches, so a kept mark is ruled on there either way.
         _wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
         _waiting = [p for p in (_wait.get("picks") or {}) if p in PICK_LAUNCH_KEYS and p != "billing"] \
-            if isinstance(_wait.get("picks"), dict) and backend._lease_survives(self.sid) else []
+            if isinstance(_wait.get("picks"), dict) and backend._lease_survives(self.sid, if_unreadable=True) else []
         if reg.get("effortPending") or reg.get("modelPending") or reg.get("authPending"):
             _heal = dict({"modelPending": False, "authPending": False},
                          **({} if "effort" in _waiting else {"effortPending": False}))
@@ -6330,9 +6350,11 @@ class SdkSession:
         # relight the bracket, but ONLY when the CLI its host KEPT still holds it (_lease_survives). A CLI
         # the restart did not survive never runs that /clear, so its echo is a genuine loss (_reseed_echoes /
         # _mark_dropped_echoes), not a boundary to wait on. Never inferred from the echoes (an old stuck
-        # /clear echo would relight a false Clearing row); only this explicit list restores.
+        # /clear echo would relight a false Clearing row); only this explicit list restores. A lease that cannot be read
+        # restores too: its host may still run the CLI that took the /clear, whose flip would otherwise find nothing to
+        # retire and leave the echo of a /clear that ran flagged never delivered; a turn's settle lowers a bracket no flip ends.
         try:
-            _kept = self.backend._lease_survives(self.sid) if hasattr(self.backend, "_lease_survives") else False
+            _kept = self.backend._lease_survives(self.sid, if_unreadable=True) if hasattr(self.backend, "_lease_survives") else False
         except Exception:
             _kept = False
         if _kept:
@@ -6951,15 +6973,17 @@ class SdkSession:
         this stands down, with one log line, when the session is detached or when the sid's lease reads
         'attach' (backend._lease_survives: the rule the boot heal and _reseed_echoes apply to leave a
         surviving CLI what it holds); the next kernel's attach reads the hold from the host's replay. A host
-        that died with its CLI leaves a lease that does not hold, so the crash road below is unchanged."""
+        that died with its CLI leaves a lease that does not hold, so the crash road below is unchanged. A lease
+        that cannot be read stands down too: a re-head under a host that may be alive can feed the text twice,
+        while a text left unre-headed keeps its echo, which the next fresh CLI's echo scan re-feeds or flags."""
         u = getattr(self, "_untaken", None)
         if u is None:
             return
         self._untaken = None
-        if self.detached or self.backend._lease_survives(self.sid):
+        if self.detached or self.backend._lease_survives(self.sid, if_unreadable=True):
             self.backend._log("sdk %s: the thread ended while it held a fed text, and the CLI lives on under its host "
                               "(%s): nothing re-headed, the next kernel attaches to the queue the host kept"
-                              % (self.sid[:8], "detached" if self.detached else "a live host lease"))
+                              % (self.sid[:8], "detached" if self.detached else "a live host lease, or one that cannot be read"))
             return
         item = u.get("item", u["text"])
         try:
@@ -12115,9 +12139,10 @@ class SdkBackend:
         # the CLI SURVIVES the kernel (a valid host lease names it) and its awaiting is real: the heal skips it, as
         # the connect thread's fresh-CLI block skips an attach (the spawnedAt fix's follow-up, 2026-09-14: every boot
         # wiped a surviving CLI's real awaiting and read its held send as never delivered).
+        # A lease that cannot be read is skipped too (its awaiting may be real): a fresh CLI's block heals it if none survived.
         regs = list_regs(self.state_dir)
         for reg in regs:
-            if reg.get("alive") and not self._lease_survives(reg["sid"]):
+            if reg.get("alive") and not self._lease_survives(reg["sid"], if_unreadable=True):
                 self._heal_stale_awaiting(reg["sid"])
         # The dropped-sends notice cards the reseed below has to post have no door yet: the kernel wires on_notice on
         # this CLASS after the constructor returns (type(_sdk_backend).on_notice = staticmethod(post_notice)), so a post
@@ -13434,7 +13459,8 @@ class SdkBackend:
                     # …except an effort pick still WAITING for its relaunch on a CLI a session host kept (relaunchWait): the
                     # attach reaches the CLI launched before it, so it is not moot; the connect decides (2026-10-01)
                     _w = r.get("relaunchWait") if isinstance(r.get("relaunchWait"), dict) else {}
-                    _keep = isinstance(_w.get("picks"), dict) and "effort" in _w["picks"] and self._lease_survives(sid)
+                    _keep = isinstance(_w.get("picks"), dict) and "effort" in _w["picks"] and \
+                        self._lease_survives(sid, if_unreadable=True)    # unreadable: kept, the connect decides (SdkSession.__init__)
                     if r.get("modelPending") or (r.get("effortPending") and not _keep):
                         _heal = dict({"modelPending": False}, **({} if _keep else {"effortPending": False}))
                         if r.get("modelPending") and "model" in r:
@@ -15986,13 +16012,41 @@ class SdkBackend:
         except Exception as e:
             self._log("echo mirror (%s): registry write failed: %s" % (sid[:8], e))
 
-    def _lease_survives(self, sid: str) -> bool:
+    def _lease_survives(self, sid: str, *, if_unreadable: bool) -> bool:
         """Whether a live session host holds `sid`'s CLI across this kernel's restart: its lease reads 'attach' (the rule the
-        host road applies to choose the attach), so the boot-time heals leave what the surviving CLI still owns."""
+        host road applies to choose the attach), so the boot-time heals leave what the surviving CLI still owns. No lease
+        file is no host. A lease that exists but cannot be read, or a reading that fails, is NOT evidence the host is gone
+        (it read as 'no host' until the 2026-10-08 review, silently): the problem log says so once per episode
+        (_lease_episode) and the answer is `if_unreadable`, which every caller states: its own answer, chosen so that a host
+        that may be alive is never treated as gone."""
         try:
-            return _ht().host_lease_state(read_lease(self.state_dir, sid), time.time()) == "attach"
-        except Exception:
-            return False
+            alive = _ht().host_lease_state(read_lease(self.state_dir, sid, strict=True), time.time()) == "attach"
+        except Exception as e:
+            self._lease_episode(sid, e)
+            return if_unreadable
+        self._lease_episode(sid, None)
+        return alive
+
+    def _lease_episode(self, sid: str, err) -> None:
+        """One problem row when `sid`'s lease turns unreadable (`err`), none while it stays so, and one plain line when it reads
+        again (`err` None), which ends the episode: every caller of _lease_survives asks, some per session per event, and
+        a lease that stays unreadable must not flood the error center."""
+        with _LEASE_EPISODE_LOCK:
+            open_ = self.__dict__.setdefault("_lease_unreadable", set())   # a stand-in that never ran __init__ has none
+            if err is None:
+                began = False
+                ended = sid in open_
+                open_.discard(sid)
+            else:
+                began = sid not in open_
+                ended = False
+                open_.add(sid)
+        if began:
+            self._log("lease (%s): cannot read the session host's lease (%s: %s). Until it reads, the kernel cannot tell whether "
+                      "a host still runs this session's CLI, so it leaves everything that CLI may own as it stands"
+                      % (sid[:8], type(err).__name__, err), problem=True, key=("lease-unreadable", sid))
+        elif ended:
+            self._log("lease (%s): the session host's lease reads again" % sid[:8], problem=False)
 
     def _reseed_echoes(self, regs: list[dict]) -> None:
         """Kernel boot: re-create each alive session's persisted unlanded echoes in the live store, so a
@@ -16030,9 +16084,10 @@ class SdkBackend:
                 if e.get("landed"):
                     atom["_landed"] = True           # already adjudicated landed: never re-scanned, never flagged
                 self._stash_live(reg["sid"], key, atom)
-            if self._live.get(reg["sid"]) and not self._lease_survives(reg["sid"]):
+            if self._live.get(reg["sid"]) and not self._lease_survives(reg["sid"], if_unreadable=True):
                 # a CLI that survived under its host still holds the sends the previous kernel handed it: nothing is
-                # dropped by the restart, so nothing is flagged (the fresh-CLI block's rule, applied at the boot)
+                # dropped by the restart, so nothing is flagged (the fresh-CLI block's rule, applied at the boot). Nor when
+                # the lease cannot be read: the host may hold them, and a fresh CLI's own scan flags what none did
                 _texts = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
                 try:
                     self._mark_dropped_echoes(reg["sid"], [{"md": t, "qid": (m or {}).get("qid")}
@@ -17991,9 +18046,10 @@ class SdkBackend:
     def _serving(self, sid: str, s=None) -> bool:
         """Whether a CLI serves this session right now: its session object's thread runs (connected, or launching one), or
         a live session host holds its CLI, which it does whether or not this kernel has attached to it (an unattached
-        comment thread, an attach that stood down: the host's lease is the authority, _lease_survives)."""
+        comment thread, an attach that stood down: the host's lease is the authority, _lease_survives). A lease that cannot
+        be read answers serving: the host may run the CLI, and a 'not serving' would land a switch it has not carried."""
         th = getattr(s, "thread", None) if s is not None else None
-        return (th is not None and th.is_alive()) or self._lease_survives(sid)
+        return (th is not None and th.is_alive()) or self._lease_survives(sid, if_unreadable=True)
 
     def _retarget_billing(self, s, why: str = "billing") -> None:
         """Bring a live session's CLI onto the billing it is set to (its own pick, else the machine default; launch_values):
@@ -19345,9 +19401,10 @@ class SdkBackend:
                 self.sessions.pop(sess.sid, None)
         if popped:
             _note_ended(sess)                      # #1735: register the ended session; the controller measures cyclicity at the idle tick
-        if not sess.detached and not self._lease_survives(sess.sid):
+        if not sess.detached and not self._lease_survives(sess.sid, if_unreadable=True):
             self._land_at_cli_end(sess)   # its CLI ended (a detach's host keeps it): a waiting billing switch lands, before
-            #                               anything below starts the session again (the crash heal, the task-death notice)
+            #                               anything below starts the session again (the crash heal, the task-death notice);
+            #                               a lease that cannot be read lands nothing, its host may still run the old CLI
         if not sess.ended and not sess.detached:
             if sess.inflight > 0 and not sess._interrupted:
                 # ABNORMAL death mid-turn (killed / crashed — not a user interrupt, not a clean

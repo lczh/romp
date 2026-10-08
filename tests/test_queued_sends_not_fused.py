@@ -1342,7 +1342,7 @@ class OneFedTextAtATime(unittest.TestCase):
         sb.write_lease(self.state, {"sid": SID, "fsid": FSID, "name": "web", "pid": pid, "start": start,
                                     "holder": {"kind": "host", "pid": pid, "start": start}, "version": "test",
                                     "t": time.time()})
-        self.assertTrue(self.be._lease_survives(SID), "the lease reads 'attach'")
+        self.assertTrue(self.be._lease_survives(SID, if_unreadable=False), "the lease reads 'attach'")
 
     def test_a_thread_exit_that_leaves_the_cli_to_its_host_does_not_re_head_the_held_text(self):
         """Session hosts are on by default: a kernel restart's drain latches `detached` on every hosted session
@@ -1392,7 +1392,7 @@ class OneFedTextAtATime(unittest.TestCase):
         self.assertIsNone(s._untaken)
         self.assertEqual(s.pending(), [], "nothing re-headed")
         self.assertEqual((sb.read_reg(self.state, SID) or {}).get("queue"), [])
-        self.assertTrue(any("lives on under its host (a live host lease)" in l for l in self.lines), self.lines[-5:])
+        self.assertTrue(any("lives on under its host (a live host lease" in l for l in self.lines), self.lines[-5:])
 
     def test_the_exit_release_re_heads_at_a_plain_exit_and_stands_down_only_when_the_cli_lives_on(self):
         """The predicate itself, on an unstarted session (no thread, no client): a plain CLI exit, no host and no
@@ -1419,6 +1419,24 @@ class OneFedTextAtATime(unittest.TestCase):
         self.assertEqual(s.pending(), ["plain exit"], "a live host lease: nothing added")
         self.assertEqual(sum("nothing re-headed" in l for l in self.lines), 2, self.lines)
         self.assertEqual(sum("exited while it still held a fed text" in l for l in self.lines), 1, self.lines)
+
+    def test_the_exit_release_stands_down_when_the_lease_cannot_be_read(self):
+        """A lease that exists and cannot be read is no evidence its host is gone (review 2026-10-08; it read as 'no host',
+        silently): a re-head under a host that may still run the CLI can feed the text twice, so the release stands down,
+        and the unreadable lease is said in the problem log. The text keeps its echo for the next fresh CLI's scan."""
+        s = self.s
+        self.be._text_landed = lambda *a, **k: False
+        p = sb.lease_path(self.state, SID)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"sid": ')                         # not a lease record
+        s._untaken = {"text": "held", "item": "held", "fresh": False, "settled": True, "t": int(time.time()),
+                      "off": None, "fsid": None}
+        s._release_hold_at_exit()
+        self.assertIsNone(s._untaken, "released all the same")
+        self.assertEqual(s.pending(), [], "nothing re-headed")
+        self.assertEqual((sb.read_reg(self.state, SID) or {}).get("queue") or [], [], "the mirror untouched")
+        self.assertTrue(any("one that cannot be read): nothing re-headed" in l for l in self.lines), self.lines[-5:])
+        self.assertTrue(any(r.get("key") == ("lease-unreadable", SID) for r in self.be.problems()), "said")
 
     # -- the feeder holds while a move is in flight --
     def _idle_after_the_first_turn(self):

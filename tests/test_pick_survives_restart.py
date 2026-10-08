@@ -163,7 +163,7 @@ class _Harness(unittest.TestCase):
         (a CLI launched with them), a dict as given, None for a host older than the record."""
         be = sb.SdkBackend(self.state, "/bin/true", lambda *a, **k: None, log=lambda m, **k: self.lines.append(str(m)))
         be.session_hosts_on = lambda: True
-        be._lease_survives = lambda sid: survives          # the lease a live host holds across the restart
+        be._lease_survives = lambda sid, **_: survives          # the lease a live host holds across the restart
         steps = list(plan)
 
         async def _transport_for(sess, opts, classes):
