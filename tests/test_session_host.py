@@ -802,6 +802,68 @@ class HostProcess(unittest.TestCase):
         self.assertEqual(kinds.count("turn-reopened"), 1, "the re-open happened once, for the queued turn")
         k3.close()
 
+    def test_a_backgrounded_subagents_output_after_the_result_opens_no_main_turn_and_still_holds_the_grace_gate(self):
+        """The stale "a turn in flight" after a kernel restart (2026-10-08): the host re-opened its count on ANY assistant or
+        user row after a result, a backgrounded subagent's too, though the kernel counts no subagent frame (since the feed
+        hold, 2026-09-19); the hello carried that count and the attaching kernel adopted it, so an idle session read as mid-turn
+        until the main conversation's next result. The hello now reports the MAIN conversation's turns (inflightScope "main");
+        the host's own count still re-opens on the subagent's rows, so the unattached grace gate leaves the working CLI alone."""
+        host, sock, spec = self._start(unattached_grace_s=1.0)
+        k, _ = self._attach(sock)
+        k.send({"t": "in", "data": self._user("one sleep=0.1 bgagent=4")})
+        res = k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result", timeout=15)
+        rows = []
+        while len(rows) < 4:                                                        # loop-ok: bounded by recv_until's own deadline
+            f = k.recv_until(lambda f: f.get("t") == "out" and f["offset"] > max([res["offset"]] + [r["offset"] for r in rows])
+                             and f["data"].get("parent_tool_use_id"), timeout=15)
+            rows.append(f)
+        self.assertEqual({r["data"]["type"] for r in rows}, {"assistant", "user"}, "the subagent's rows streamed after the result")
+        k.send({"t": "detach"}); k.close()
+        k2, hello = self._attach(sock, ack=rows[-1]["offset"], pid=4343)
+        self.assertEqual((hello["inflight"], hello.get("inflightScope")), (0, "main"),
+                         "no main turn is open after the result, whatever a subagent streams (the base reported 1)")
+        k2.send({"t": "detach"}); k2.close()
+        time.sleep(3.0)                                                             # past the 1 s grace and the gate's 1 s tick
+        kinds = [r["kind"] for r in self._hostlog()]
+        self.assertNotIn("unattached-grace-expired", kinds, "the subagent's output still holds the grace gate: the CLI is at work")
+        self.assertEqual([r.get("main") for r in self._hostlog() if r["kind"] == "turn-reopened"], [False],
+                         "the host's own count re-opened once, on the subagent's first row, and said it was not the main turn")
+        k3, hello3 = self._attach(sock, ack=rows[-1]["offset"], pid=4344)
+        self.assertEqual((hello3["inflight"], hello3["exited"]), (0, False), "still idle to a kernel, the CLI alive")
+        k3.close()
+
+    def test_the_main_turn_count_opens_on_main_frames_only_and_a_result_closes_both_counts(self):
+        """The two counts frame by frame (_track): every assistant or user row re-opens the host's own count (the grace gate
+        and the re-exec's quiet check read it), only a main-conversation frame re-opens the main count the hello reports (an
+        init or a row without parent_tool_use_id, the kernel's _turn_frame rule), and a result closes both."""
+        spec_path, spec = self._spec()
+        h = sh.SessionHost(spec_path, lease_api={"write_lease": lambda *a, **k: None, "remove_lease": lambda *a, **k: None,
+                                                 "proc_start": lambda pid: "1"})
+        h.fsid = FSID
+        sub = {"parent_tool_use_id": "toolu_task1"}
+        steps = [({"type": "assistant", **sub}, (1, 0)), ({"type": "user", **sub}, (1, 0)),
+                 ({"type": "result"}, (0, 0)),
+                 ({"type": "system", "subtype": "init", "session_id": FSID, **sub}, (0, 0)),
+                 ({"type": "system", "subtype": "init", "session_id": FSID}, (0, 1)),
+                 ({"type": "assistant"}, (1, 1)), ({"type": "result"}, (0, 0)),
+                 ({"type": "user"}, (1, 1)), ({"type": "assistant", **sub}, (1, 1)), ({"type": "result"}, (0, 0))]
+        for i, (msg, want) in enumerate(steps):
+            h._track(msg, i)
+            self.assertEqual((h.inflight, h.main_turns), want, "after %r" % (msg,))
+
+    def test_a_handover_from_code_without_the_main_count_starts_it_from_the_quiet_inflight(self):
+        """A host re-executed from code older than the main count hands over no main_turns; the handover runs only when the
+        host's own count is zero (the quiet check), so the main count starts there, and a newer handoff's own value wins."""
+        spec_path, spec = self._spec()
+        for handoff, want in (({"inflight": 0}, 0), ({"inflight": 0, "main_turns": 0}, 0), ({"inflight": 2, "main_turns": 1}, 1)):
+            hp = os.path.join(self.state, "reexec.json")
+            Path(hp).write_text(json.dumps(dict({"cli_pid": 1, "cli_start": "1", "fsid": FSID, "fds": {}, "read_count": 0,
+                                                 "acked": -1, "parked": [], "answered": []}, **handoff)))
+            h = sh.SessionHost(spec_path, lease_api={"write_lease": lambda *a, **k: None, "remove_lease": lambda *a, **k: None,
+                                                     "proc_start": lambda pid: "1"}, reexec_path=hp)
+            self.assertEqual(h.main_turns, want, "from the handoff %r" % (handoff,))
+            h.journal.close()
+
     def test_only_a_user_line_carrying_text_opens_a_turn(self):
         fn = getattr(sh, "_opens_turn", None)
         self.assertIsNotNone(fn, "the host decides which user lines open a turn (the base counted every one)")

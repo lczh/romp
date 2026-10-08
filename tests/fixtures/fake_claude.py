@@ -25,6 +25,10 @@ Behaviour:
     reads zero while they arrive), each with n=trigger<i>: output arriving while nothing was asked.
       merge=1          at the end of the turn, fold every user message queued meanwhile INTO this turn and answer
                        them all with this one result (the real CLI's shape for messages typed while it works)
+      bgagent=N        a backgrounded subagent streams on after the turn's result: N rows (an assistant row, then a
+                       tool_result user row, alternating) tagged parent_tool_use_id, from their own thread, starting
+                       bgagent-delay=S seconds after the result (default 0.05) and bgagent-gap=S apart (default 0.05):
+                       output the main conversation never opened a turn for
   * Stdin end-of-file: finish the current turn, then exit 0 (probe finding 4).
   * SIGINT, or an `interrupt` control request (the SDK's interrupt()): the current turn ends with an
     `interrupted` result, as the real CLI's does.
@@ -151,6 +155,24 @@ def run_turn(text: str) -> None:
           "num_turns": 1, "result": "interrupted" if _interrupted.is_set() else "done", "session_id": SESSION_ID,
           "total_cost_usd": 0.0, "usage": {"input_tokens": 1, "output_tokens": 1}, "uuid": str(uuid.uuid4())})
     _interrupted.clear()
+    if "bgagent" in opts:
+        threading.Thread(target=_bg_agent, args=(int(opts["bgagent"]), float(opts.get("bgagent-delay", "0.05")),
+                                                 float(opts.get("bgagent-gap", "0.05"))), daemon=True).start()
+
+
+def _bg_agent(count: int, delay: float, gap: float) -> None:
+    """A backgrounded subagent's own rows on the parent's stream, after the main turn's result: every row carries the
+    Task's tool-use id as parent_tool_use_id, the way the real CLI tags a subagent's messages."""
+    parent = "toolu_bgagent" + uuid.uuid4().hex[:8]
+    time.sleep(delay)
+    for i in range(count):                                       # loop-ok: a fixed count from the test
+        if i % 2 == 0:
+            emit({"type": "assistant", "message": {"role": "assistant", "model": "fake-model", "content": [{"type": "text",
+                  "text": "subagent step"}]}, "parent_tool_use_id": parent, "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
+        else:
+            emit({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_sub%d" % i,
+                  "content": "ok"}]}, "parent_tool_use_id": parent, "session_id": SESSION_ID, "uuid": str(uuid.uuid4())})
+        time.sleep(gap)
 
 
 def handle(line: str) -> None:
