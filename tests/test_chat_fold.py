@@ -327,6 +327,38 @@ class Gates(_Fold):
         self.assertEqual((marker.get("interruptCause"), marker.get("interruptSpend")), ("spend", {"rate": "1,240", "ceiling": "1,000"}))
         self.assert_folding()
 
+    def _sealed_cut_then_a_user_stop(self, opener):
+        """The guard cuts a turn (its record, its stop, its message), the user types once, then a turn some machine opener
+        starts (peer mail, a scheduled firing) is stopped by the USER. The cut's stop is sealed by then; the rebuilt tail must
+        not read the old cut as the user's later stop (the review of #176: the tail was stamped with every cut the session
+        ever had, and a scan that could not see the sealed stop ran on into the tail)."""
+        s = self.s
+        s.append(s.turn(0)); self.equiv("t0")
+        u = s.uid(); s.append([uline(s.tick(), "step 1: widen the notes-api search", u, s.last)])
+        a = s.uid(); s.append([aline(s.tick(), "Working on it.", a, u, tools=("Edit",), stop="tool_use")])
+        st = jd.STATE / "states"; st.mkdir(exist_ok=True)
+        with open(st / (SID + ".jsonl"), "a") as f:
+            f.write(json.dumps({"t": s.tick() + 0.25, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}) + "\n")
+        m = s.uid(); s.append([uline(s.tick(), "[Request interrupted by user for tool use]", m, a)])
+        g = s.uid(); s.append([uline(s.tick(), km._spend_ceiling_body(1240.0, 1000.0), g, m, ps="sdk")])
+        r = s.uid(); s.append([aline(s.tick(), "It was the search fan-out; stopped.", r, g)]); s.last = r
+        self.equiv("guard cut + message")
+        s.append(s.turn(2)); self.equiv("t2")
+        n = s.uid(); s.append([uline(s.tick(), opener, n, s.last, ps="sdk")])
+        a2 = s.uid(); s.append([aline(s.tick(), "On it.", a2, n, tools=("Edit",), stop="tool_use")])
+        mu = s.uid(); s.append([uline(s.tick(), "[Request interrupted by user for tool use]", mu, a2)]); s.last = mu
+        self.equiv("machine-opened turn the user stopped")
+        out = self.equiv("one more push, nothing new")
+        causes = [e.get("interruptCause") for e in out["events"] if e.get("interruptMarker")]
+        self.assertEqual(causes, ["spend", None], "the guard's stop stays the guard's; the user's later stop stays theirs")
+
+    def test_a_sealed_cut_never_names_a_later_stop_in_a_turn_peer_mail_opened(self):
+        self._sealed_cut_then_a_user_stop("#################### \U0001F4EC MESSAGE FROM api ####################\n"
+                                          "Can you re-run the search tests?\n<!-- romp-msg-id: 11111111-2222-3333-4444-00000000beef -->")
+
+    def test_a_sealed_cut_never_names_a_later_stop_in_a_turn_a_scheduled_firing_opened(self):
+        self._sealed_cut_then_a_user_stop("[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]\nRe-run the notes-api nightly check.")
+
     def test_a_seam_change_demotes(self):
         # a seam that really splits a sealed segment (its t strictly inside the segment's span, its segs
         # naming the segment): the tail past the seam gets new seg ids, so old events' tlIds move and the

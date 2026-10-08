@@ -45285,6 +45285,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         # a start above turn 0 (the render floor, a page): the note cursors, last_t and last_model the whole
         # build holds when it reaches this turn, from the earlier turns' lazy scalars (no body read)
         (_ri, _gi, _ei, _oi, _cgi), last_t, last_model = _cursors_before(_turns, _fk, (recoveries, gaveups, efforts, orphans, gestures), last_model)
+    # The spend guard's cut records this build's own events can hold (the review of #176): a cut pressed at or before the
+    # last atom ahead of them (the sealed prefix on a fold hit, the turns below a render floor or a page) made its stop in
+    # a turn that is not here, so its scan would run on into these events and name a later stop it never made. A cut
+    # recorded inside the sealed prefix AFTER the seal demotes the fold (the spend-cut gate), so a fold hit never owes one.
+    _tail_cuts = [_c for _c in _cuts if last_t is None or _c["t"] > last_t]
     def _texts_near(_t):
         """The disk texts an orphan note stamped at `_t` is deduped against: the turn holding the first atom stamped at or
         after it, the turn before and the turn after (a reply the transcript kept lands there), and ONLY those. Bounded
@@ -45730,7 +45735,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _chat_dep_scope.deps["postal_any"] = _chat_dep_scope.deps["postal_any"] or any(_chat_postal_relevant(_e) for _e in _raw_tail)
         _chat_dep_scope.deps["postal_key"], _chat_dep_scope.deps["pidx"], _chat_dep_scope.deps["msum"] = _pk, _pidx, _msum
     events = _hydrate_postal(events, _pidx, sid, captions=_msum)   # swap postal traffic for clean in/out cards (no boilerplate)
-    _stamp_interrupt_causes(events, _cuts)                # a restart/crash resume notice, or the spend guard's own cut
+    _stamp_interrupt_causes(events, _tail_cuts)           # a restart/crash resume notice, or the spend guard's own cut
     #                                                       record, names the seam's cause
     # The parse's turn index of each turn in this build's list, for the `turn` stamp below. The list is the live-merged one, which
     # can hold synthetic turns of stale echoes (_place_stale_echoes, `echoTurn`: at most one per idle gap, holding every echo placed
