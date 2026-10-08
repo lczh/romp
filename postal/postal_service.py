@@ -1222,12 +1222,70 @@ def _kernel_sessions(threads=False):
     per-session reg file on the REFUSAL path only, to corroborate a suspected listing blink before ruling
     a session dead — never to resolve delivery.) Loopback, authorized with X-Romp-Token
     (the shared 0600 serve-token file — the kernel gates every request, loopback included). [] if the kernel
-    is unreachable (rare — the manager supervises it); the bus then shows no local
+    is unreachable (rare — the manager supervises it) or refuses the listing; the bus then shows no local
     agents until it's back, rather than reaching past the abstraction.
 
     ROMP_SESSIONS_FILE is a test seam (like ROMP_*_BIN): a JSON file of the same rows, read instead of the
     live kernel so the bus is testable without one."""
     return _kernel_sessions_checked(threads=threads)[0]
+
+
+class ListingRefused:
+    """The `answered` half of a listing the kernel REFUSED: it answered GET /sessions with a non-2xx (its 503 when a
+    product of the listing faulted at its last build, kernel.py _listing_refused), so it is running but cannot vouch
+    for liveness. Falsy, exactly like the False of a kernel that did not answer, so every `if not answered` and
+    `if answered and …` gate reads it as before and no reader rules a session dead on it. What it adds is the
+    kernel's own words: `status` and `error` (a bounded slice), the keys a _kernel_post refusal carries, so the
+    refusal a sender sees says the kernel answered and why (_listing_unanswered) instead of claiming it did not
+    answer (2026-10-08: a listing fault's 503 was told to every sender as "didn't answer — likely mid-restart",
+    and the kernel's reason was logged nowhere)."""
+    __slots__ = ("status", "error")
+
+    def __init__(self, status, error):
+        self.status, self.error = status, error
+
+    def __bool__(self):
+        return False
+
+    def __repr__(self):
+        return "ListingRefused(%d, %r)" % (self.status, self.error)
+
+
+_LISTING_QUOTE = 400   # how much of the kernel's listing refusal a sender, and the log, are shown
+
+
+def _kernel_refusal_text(e, cap=512):
+    """A kernel refusal's reason, read off its HTTPError the one way _kernel_post, _kernel_get and the listing read
+    it: a bounded slice of the body (`cap` bytes), whitespace collapsed, never a whole error page; "" for none."""
+    try:
+        return " ".join((e.read(cap) or b"").decode("utf-8", "replace").split())
+    except Exception:
+        return ""
+
+
+def _listing_refusal(e):
+    """The ListingRefused for GET /sessions's HTTPError: the body's "error" when it is the kernel's JSON refusal
+    ({"ok": false, "error": ...}, read whole so it parses), else the raw slice, cut to _LISTING_QUOTE."""
+    text = _kernel_refusal_text(e, cap=4096)
+    try:
+        body = json.loads(text)
+        if isinstance(body, dict) and isinstance(body.get("error"), str):
+            text = " ".join(body["error"].split())
+    except ValueError:
+        pass
+    if len(text) > _LISTING_QUOTE:
+        text = text[:_LISTING_QUOTE - 1] + "…"
+    return ListingRefused(int(e.code), text)
+
+
+def _listing_unanswered(answered):
+    """The clause a refusal gives its reader when the listing could not vouch for liveness (`answered` is falsy): the
+    kernel's own words when it answered with a refusal (a ListingRefused), the mid-restart reading when it did not
+    answer at all. The caller's sentence goes on to say what was and was not done."""
+    if isinstance(answered, ListingRefused):
+        said = ('saying: "%s"' % answered.error) if answered.error else ("with HTTP %d and no reason" % answered.status)
+        return "the liveness source (the romp kernel) answered, but refused to list sessions, %s" % said
+    return "the liveness source (the romp kernel) didn't answer — likely mid-restart"
 
 
 def _kernel_sessions_checked(threads=False):
@@ -1236,7 +1294,17 @@ def _kernel_sessions_checked(threads=False):
     Callers that are about to make a CLAIM about liveness (resolve_recipient's refusal) must
     check `answered` — an unanswered fetch collapsed to [] read exactly like universal deadness,
     and the refusal it produced blamed a demonstrably live peer (sighting 2026-08-29: a send was
-    refused as not-live mid-restart; the retry 101 seconds later delivered)."""
+    refused as not-live mid-restart; the retry 101 seconds later delivered).
+
+    A kernel that answered with a REFUSAL (a non-2xx: its 503 for a listing fault) gives ([], a
+    ListingRefused): falsy like False, so it vouches for nothing either, but it carries the kernel's
+    words for the refusal a sender sees (_listing_unanswered). The refusal is logged once per
+    episode (consecutive refused fetches): the first refused fetch says it with the kernel's words,
+    the next answered listing says so in one line, and the fetches between stay quiet, because every
+    session's postal service fetches the listing constantly. An unreachable fetch is neither event
+    and leaves an open episode as it stands. The latch is _REFUSAL_SAID["listing"] (the episode's
+    start), opened by setdefault and closed by pop, single dict operations, so of concurrent fetches
+    exactly one says each end."""
     seam = os.environ.get("ROMP_SESSIONS_FILE")
     if seam:
         try:
@@ -1262,9 +1330,19 @@ def _kernel_sessions_checked(threads=False):
         # started the refusal chain the blink specimens rode.
         with urllib.request.urlopen(req, timeout=6) as r:
             data = json.loads(r.read().decode("utf-8"))
-        return (data if isinstance(data, list) else []), True
+    except urllib.error.HTTPError as e:
+        refused = _listing_refusal(e)
+        began = time.time()
+        if _REFUSAL_SAID.setdefault("listing", began) is began:
+            _log("kernel refused GET /sessions: HTTP %d %s (said once until the listing answers again; no session "
+                 "is ruled dead on it meanwhile)" % (refused.status, refused.error))
+        return [], refused
     except Exception:
         return [], False
+    since = _REFUSAL_SAID.pop("listing", None)
+    if since is not None:
+        _log("the kernel's session listing answers again (refused since %s)" % _hhmm_epoch(since))
+    return (data if isinstance(data, list) else []), True
 
 
 def local_agents(threads=False):
@@ -1306,7 +1384,8 @@ def local_agents_checked(threads=False):
     """(local_agents rows, answered) — the honesty-arm variant for consumers whose REFUSALS ride the
     listing (the inbound relay's bounces, the presence producer): 'answered' distinguishes a kernel
     that said "no sessions" from one that couldn't answer at all (mid-restart), the same bit the
-    sending resolver has carried since the answered-but-absent round (2026-08-31)."""
+    sending resolver has carried since the answered-but-absent round (2026-08-31). A kernel that
+    refused its listing passes its falsy ListingRefused through (see _kernel_sessions_checked)."""
     rows, answered = _kernel_sessions_checked(threads=threads)
     return _agent_rows(rows), answered
 
@@ -1335,11 +1414,7 @@ def _kernel_post(path, body, timeout=2):
                 return None
             return json.loads(r.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
-        text = ""
-        try:
-            text = " ".join((e.read(512) or b"").decode("utf-8", "replace").split())   # a bounded slice: the
-        except Exception:                                                                # kernel's reason, never
-            pass                                                                         # a whole error page
+        text = _kernel_refusal_text(e)                 # a bounded slice: the kernel's reason, never a whole error page
         _log("kernel refused POST %s: HTTP %d %s" % (path, e.code, text))
         return {"ok": False, "status": int(e.code), "error": text}
     except Exception:
@@ -1371,11 +1446,7 @@ def _kernel_get(path, timeout=2, said_once=()):
                 return None
             return json.loads(r.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
-        text = ""
-        try:
-            text = " ".join((e.read(512) or b"").decode("utf-8", "replace").split())
-        except Exception:
-            pass
+        text = _kernel_refusal_text(e)
         if int(e.code) not in said_once or (path, int(e.code)) not in _KERNEL_GET_SAID:
             _log("kernel refused GET %s: HTTP %d %s" % (path, e.code, text))
             if int(e.code) in said_once:
@@ -1851,11 +1922,11 @@ def resolve_recipient(to, frm_id=""):
     rows, answered = _kernel_sessions_checked(threads=True)
     if not answered and not any(not a.get("remote") for a in pool):
         # only an EMPTY local world raises the unreachable question — a pool with live locals in
-        # it proves the source was answering (and heartbeating remotes can't vouch for LOCALS)
+        # it proves the source was answering (and heartbeating remotes can't vouch for LOCALS).
+        # A kernel that answered with a refusal is quoted, never called silent (2026-10-08).
         return {"kind": "error", "status": 503,
-                "error": "can't tell whether '%s' is live right now: the liveness source (the romp "
-                         "kernel) didn't answer — likely mid-restart. Nothing was sent, and this is "
-                         "NOT a claim that '%s' is dead. Retry shortly." % (bare, bare)}
+                "error": "can't tell whether '%s' is live right now: %s. Nothing was sent, and this is "
+                         "NOT a claim that '%s' is dead. Retry shortly." % (bare, _listing_unanswered(answered), bare)}
     fresh = set()
     for r in rows:
         if isinstance(r, dict):
@@ -4457,8 +4528,9 @@ def _local_presence():
     if _LOCAL_PRESENCE_GOOD[1]:
         if not _PRESENCE_SERVE_WARNED[0]:
             _PRESENCE_SERVE_WARNED[0] = True
-            sys.stderr.write("postal: the local listing didn't answer — presence serves the last "
-                             "answered rows until it does\n")
+            sys.stderr.write("postal: the local listing %s — presence serves the last answered rows until "
+                             "it answers\n" % ("was refused by the kernel" if isinstance(answered, ListingRefused)
+                                                else "didn't answer"))
         return list(_LOCAL_PRESENCE_GOOD[0])
     return rows                                     # never answered ANYWHERE yet → claim nothing either way
 
@@ -4620,8 +4692,8 @@ def quarantine_decide(mid, action, text=None, feedback=None, sid=None):
         # is not absence, so it refuses retryably instead (the held message stays put).
         agents, answered = local_agents_checked()
         if not answered:
-            return False, ("the liveness source (the romp kernel) didn't answer — likely "
-                           "mid-restart. The held message is untouched; retry the approve shortly.")
+            return False, ("%s. The held message is untouched; retry the approve shortly."
+                           % _listing_unanswered(answered))
         live = {a["id"] for a in agents}
         if to_id not in live:                         # the held sid is gone: renamed/revived, or ended
             wire = str(rec.get("toWireId") or "")

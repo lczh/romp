@@ -3335,20 +3335,51 @@ def reg_rev() -> int:
     return REG_REV[0]
 
 
-_FS_CLOCK = getattr(time, "CLOCK_REALTIME_COARSE", None)   # the clock Linux takes file timestamps from (current_time())
+_CLOCK_REALTIME_COARSE = 5   # linux/time.h's clock id, part of the kernel's ABI; CPython names no constant for it (the
+#                              getattr(time, "CLOCK_REALTIME_COARSE") this replaced was always None, so the rule fell to
+#                              time.time_ns(), which reads ahead of every stamp a write is about to take: 3000 of 3000 scans
+#                              counted as settled on a Linux 6.8 host, and a same-tick write was missed; the 2026-10-08 review)
+_FS_CLOCK_FAULT = []         # the error the coarse clock raised, said once (an empty list: it reads)
 
 
-def _fs_clock_ns() -> int:
-    """Now, on the clock a file's mtime is stamped from: Linux stamps it from the coarse realtime clock, which ticks every
-    few milliseconds, so a file written twice inside one tick keeps one mtime; elsewhere the realtime clock. Read by
-    SdkBackend._rows_table to tell a scan the registry directory's timestamp can vouch for from one taken inside the tick
-    of the directory's last write."""
-    if _FS_CLOCK is not None:
-        try:
-            return time.clock_gettime_ns(_FS_CLOCK)
-        except OSError:
-            pass
-    return time.time_ns()
+def _fs_clock_ns() -> "int | None":
+    """Now, on the clock the filesystem stamps a file's or directory's ctime and mtime from, or None when that clock cannot
+    be read. Linux stamps from the coarse realtime clock (current_time(): the time at the last tick, every 1 to 10 ms
+    by HZ), so two writes inside one tick can keep one stamp, and a fine reading such as time.time_ns() runs up to a tick
+    ahead of the stamp a write takes a moment later. From Linux 6.13 a multigrain filesystem (ext4, xfs, btrfs, tmpfs)
+    gives the first change after a stat a fine stamp, and an unwatched one max(coarse, the newest fine stamp handed
+    out), both at or past the coarse clock, so the coarse clock is the one no later stamp can fall behind on every
+    kernel. macOS stamps from the fine realtime clock (APFS keeps nanoseconds, taken when the change happens, with no
+    tick between), so there time.time_ns() is that clock. Both claims are checked against real directory stamps wherever
+    the suite runs (tests/test_sessions_listing.py, the clock's own test). Read by _fs_stamp_settled."""
+    if not sys.platform.startswith("linux"):
+        return time.time_ns()
+    try:
+        return time.clock_gettime_ns(_CLOCK_REALTIME_COARSE)
+    except OSError as e:                              # no coarse clock (a sandbox that refuses it): no stamp is vouched for
+        if not _FS_CLOCK_FAULT:
+            _FS_CLOCK_FAULT.append(e)
+            sys.stderr.write("sdk_backend: the coarse realtime clock will not read (%s), so no directory stamp is trusted to "
+                             "keep a registry scan; every read scans\n" % e)
+        return None
+
+
+def _fs_stamp_settled(stamp_ns: int) -> bool:
+    """Whether the filesystem clock has passed the whole granule of a stamp it gave, so that every later change will stamp
+    past it (the racy-index rule git applies to its index). A filesystem storing coarser stamps truncates each to the start
+    of its granule (whole seconds on HFS+ or on ext4 with 128-byte inodes, two on FAT, 10 ms on exFAT), and a stamp a
+    filesystem truncated to 10^k ns ends in k zeros, so the stamp's own digits bound the granule: 1 ns for a stamp that
+    ends in a nonzero digit, two seconds once all nine sub-second digits are zero. A nanosecond stamp ends in k zeros by
+    chance once in 10^k, at the cost of one more scan. False when the clock cannot be read."""
+    now = _fs_clock_ns()
+    if now is None:
+        return False
+    granule = 1
+    while granule < 1_000_000_000 and stamp_ns % (granule * 10) == 0:
+        granule *= 10
+    if granule == 1_000_000_000:
+        granule = 2_000_000_000                       # FAT stores even seconds
+    return now >= stamp_ns + granule
 
 
 REG_ROWS_FIELDS = ("lastSid", "threadOf", "alive")   # the registration fields the kernel's /sessions rows key reads THROUGH THIS
@@ -4448,6 +4479,16 @@ def read_lease(state_dir, sid: str, strict: bool = False) -> dict | None:
     return d
 
 
+def lease_file_present(state_dir, sid: str) -> bool:
+    """Whether `sid`'s lease file is there, read or not: False only when it is gone (ENOENT, or a path that cannot hold it).
+    The wait for a lease's REMOVAL keys on this, never on read_lease's None, which an unreadable lease also gives."""
+    try:
+        os.stat(lease_path(state_dir, sid))
+        return True
+    except OSError as e:
+        return e.errno not in (errno.ENOENT, errno.ENOTDIR)
+
+
 # Guards SdkBackend._lease_episode's per-session record of leases it could not read (one problem row per episode).
 _LEASE_EPISODE_LOCK = threading.Lock()
 
@@ -4461,9 +4502,11 @@ def remove_lease(state_dir, sid: str) -> bool:
         return False
 
 
-def list_leases(state_dir) -> list[dict]:
+def list_leases(state_dir, unreadable: "list | None" = None) -> list[dict]:
     """Every parseable lease under STATE/leases/, in name order. A file that does not parse is skipped
-    (a half-written temp is never a `.json`; a corrupt one is nobody's claim)."""
+    (a half-written temp is never a `.json`). `unreadable`, when the caller passes a list, gets the sid of each lease file
+    that exists but cannot be read (an I/O error, or not a lease record): no evidence its host is gone, so a caller that
+    would end a process or a unit for want of a valid lease spares that session's (the boot's reapers, 2026-10-08)."""
     d = Path(state_dir) / LEASE_DIR
     out = []
     try:
@@ -4473,7 +4516,11 @@ def list_leases(state_dir) -> list[dict]:
     for n in names:
         if not n.endswith(".json"):
             continue
-        lease = read_lease(state_dir, n[:-len(".json")])
+        try:
+            lease = read_lease(state_dir, n[:-len(".json")], strict=unreadable is not None)
+        except Exception:
+            unreadable.append(n[:-len(".json")])
+            continue
         if lease is not None:
             out.append(lease)
     return out
@@ -8730,8 +8777,8 @@ class SdkSession:
         problem_row(st, "session %s: could not complete an attach to its live session host after %d tries (%s); the host keeps "
                     "the CLI; the next message tries again" % (self.name, self._host_attach_retries, type(exc).__name__),
                     "host.attach-failed", sid=self.sid, name=self.name, log=self.backend._log, tries=self._host_attach_retries)
-        lease = read_lease(st, self.sid)
-        if _ht().host_lease_state(lease, time.time()) == "attach":
+        lease, lstate = self.backend._host_lease(self.sid, if_unreadable="unreadable")
+        if lstate == "attach":
             try:
                 # the marker _ensure reads: no automatic revival (the timer sweep, a boot, a heal) attaches this host
                 # again; a user's send or a change of the lease clears it (new information, not a timer). Keyed by
@@ -8742,6 +8789,10 @@ class SdkSession:
                                                                       "t": time.time(), "tries": self._host_attach_retries})
             except Exception as e:
                 self.backend._log("host (%s): stand-down marker write failed: %s" % (self.name, e))
+        elif lstate == "unreadable":
+            # no marker: it names the host by the lease's holder, which cannot be read; never a claim the host is gone
+            self.backend._log("host (%s): the host's lease cannot be read at the stand-down, so no marker naming its host; "
+                              "the next connect reads the lease again" % self.name)
         else:
             self.backend._log("host (%s): the host's lease no longer holds at the stand-down; no marker, the next connect "
                               "walks the orphan road" % self.name)
@@ -12382,8 +12433,10 @@ class SdkBackend:
         lease, with records no kernel consumed) replayed and cleared, whatever the setting says now. Keyed on
         the lease alone, the leftover was never entered with the setting off: its tail was lost and its
         directory, hostAck and hostLogPos stood until the setting came back and the stale tail replayed into a
-        session that had run turns as a plain child since (the commit-8 review's item 1)."""
-        if _ht().host_lease_state(read_lease(self.state_dir, sess.sid), time.time()) in ("attach", "orphan"):
+        session that had run turns as a plain child since (the commit-8 review's item 1). A lease that exists but cannot be
+        read applies too: a host may hold the CLI, and the road's connect reads the lease again and refuses to launch beside
+        it (_host_transport_for); taken for no lease, the setting off launched a kernel child beside a live host."""
+        if self._host_lease(sess.sid, if_unreadable="unreadable")[1] in ("attach", "orphan", "unreadable"):
             return True
         hdir = _ht().host_dir(self.state_dir, sess.sid)
         return (hdir / "identity.json").exists() or any(hdir.glob("journal-*.jsonl"))
@@ -12404,8 +12457,7 @@ class SdkBackend:
         # to hosts off recorded nothing for the fresh child's first turn, once per connect (T354 review, M6)
         sess._host_is_attach = False
         now = time.time()
-        lease = read_lease(self.state_dir, sess.sid)
-        state = ht.host_lease_state(lease, now)
+        lease, state = self._host_lease(sess.sid, if_unreadable="unreadable")
         if state == "attach":
             # a live host on other code re-execs first, and its wait can outlast the host it waits for (a re-executed host
             # that dies in its start), so the lease is read again after it: a dead holder takes the orphan road below,
@@ -12420,10 +12472,15 @@ class SdkBackend:
                 # read again too: past the whole bound, a lease that has not beaten within LEASE_TTL_S reads as it does at
                 # any connect's first read, the orphan it would be on the next pass (2026-09-23, the review of this lane)
                 now = time.time()
-                lease = read_lease(self.state_dir, sess.sid)
-                state = ht.host_lease_state(lease, now)
+                lease, state = self._host_lease(sess.sid, if_unreadable="unreadable")
                 if wait == "ended" and state == "attach":
                     state = "orphan"    # the host's own log recorded its end, which it writes before the process is gone
+        if state == "unreadable":
+            # the lease exists and cannot be read: a live host may hold the CLI, so nothing is launched beside it (a fresh
+            # host or a kernel child would be a second CLI on one conversation) and no journal is replayed on a guess. The
+            # connect loop files the refusal and the next connect reads the lease again; _lease_episode has said it
+            raise CLIConnectionErrorLike("this session's host lease cannot be read, so the kernel cannot tell whether a live "
+                                         "host holds its CLI; not starting a second")
         if state != "attach":
             # no attach, no handover: a handover this kernel asked for was the host's that is now gone, so the next host's
             # hello files no host.reexeced row for it and the next attach waits for nothing (2026-09-23, the review of this
@@ -12435,7 +12492,7 @@ class SdkBackend:
             # the host this kernel just asked to end (an effort change's reconnect, a kill): its lease removal
             # races our reconnect; it ended, it did not die. Wait for the lease to go (bounded), then proceed.
             deadline = time.time() + 5.0
-            while read_lease(self.state_dir, sess.sid) is not None and time.time() < deadline:   # loop-ok: bounded, on the lease's removal
+            while lease_file_present(self.state_dir, sess.sid) and time.time() < deadline:   # loop-ok: bounded, on the lease's removal
                 await asyncio.sleep(0.1)
             self._host_recently_ended.pop(sess.sid, None)
             lease, state = None, "none"
@@ -12603,7 +12660,12 @@ class SdkBackend:
         deadline = time.time() + ht.SOCKET_WAIT_S
         fresh = None
         while time.time() < deadline:                 # loop-ok: a bounded wait on the re-executed host's lease and its listener
-            fresh = read_lease(self.state_dir, sess.sid)
+            fresh, readable = self._lease_read(sess.sid)
+            if not readable:
+                # no evidence either way (a lease that cannot be read names no holder, which read as the host dying in its
+                # start): the wait goes on toward its bound, and the connect after it reads the lease again
+                await asyncio.sleep(0.05)
+                continue
             fh = (fresh or {}).get("holder") or {}
             # the new version under the same holder pid AND a listener that accepts: the host serves its socket before it
             # writes the lease, and the path alone proves nothing (the old process's path can outlive its listener and
@@ -12713,8 +12775,14 @@ class SdkBackend:
             if getattr(sess, "_host_reexec_closed", False) or getattr(sess, "_host_reexec_from", None) is None:
                 return                  # the frame arrived (its reconnect is armed), or no handover stands
             h = ((getattr(t, "hello", None) or {}).get("host") or {})
-            lease = read_lease(self.state_dir, sess.sid)
-            if _ht().host_lease_state(lease, time.time()) != "attach" or self._holder_ident(lease) != "%s:%s" % (h.get("pid"), h.get("start")):
+            lease, lstate = self._host_lease(sess.sid, if_unreadable="unreadable")
+            if lstate == "unreadable":
+                # the handover cannot be confirmed without the holder: the lost host's road, which only reconnects, and the
+                # connect reads the lease again (_host_transport_for refuses to launch while it cannot)
+                self._log("host (%s): the socket closed under an accepted handover and the host's lease cannot be read; read "
+                          "as a lost host, and the connect reads the lease again" % sess.name)
+                return
+            if lstate != "attach" or self._holder_ident(lease) != "%s:%s" % (h.get("pid"), h.get("start")):
                 return                  # the host is gone, or the lease names another: a lost host
             if not self._host_logged_exec(sess, t):
                 # the host lives on its old code (a deferral, a failure, a fault on this connection): a lost host
@@ -13058,7 +13126,9 @@ class SdkBackend:
             ps = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10)
             reg = read_reg(self.state_dir, session.sid) or {}
             sids = [session.sid, str(reg.get("lastSid") or "")]
-            return find_session_cli(ps.stdout.splitlines(), sids, os.getpid(), lease=read_lease(self.state_dir, session.sid))
+            # an unreadable lease is said (_lease_read) and the escalation looks among this kernel's own children alone; a
+            # host's CLI is not found, and the caller logs that no process was found, never that the host is gone
+            return find_session_cli(ps.stdout.splitlines(), sids, os.getpid(), lease=self._lease_read(session.sid)[0])
         except Exception as e:
             self._log("session cli pid (%s): %s" % (session.name, e))
             return None
@@ -13188,6 +13258,13 @@ class SdkBackend:
                   "(systemctl --user stop <unit> for a scope, kill <pid> for a claude process)"
                   % (len(items), state_tag_of(self.state_dir), said))
 
+    def _log_lease_left(self, items) -> None:
+        """ONE log line naming what a boot reap left alone because its session's host lease cannot be read (list_leases'
+        `unreadable`): a live host may hold it, and an unreadable lease is no evidence the host is gone. Nothing, no line."""
+        if items:
+            self._log("boot reconcile: left alone %d process(es) and unit(s) whose session's host lease cannot be read, so a "
+                      "live host may still hold them: %s" % (len(items), ", ".join(items)))
+
     def _stop_leftover_scopes(self, lastsids: list[str], run=None, owned=(), left=None) -> int:
         """Stop the session scopes of OUR sessions whose CLI is not OWNED — `owned` is lease_census's
         set of owned pids (a valid lease, or a live kernel's child; T305) — and not a live child of this
@@ -13241,9 +13318,14 @@ class SdkBackend:
             hl = ""
         if isinstance(hl, str) and hl.strip():
             now = time.time()
-            leases = {str(l.get("sid")): l for l in list_leases(self.state_dir)}
+            unreadable: list = []
+            leases = {str(l.get("sid")): l for l in list_leases(self.state_dir, unreadable=unreadable)}
             htags = unit_state_tags(hl.splitlines())
-            for unit, sid8 in _ht().host_scope_units(hl.splitlines(), list(lastsids) + list(leases)).items():
+            lease_left = []
+            for unit, sid8 in _ht().host_scope_units(hl.splitlines(), list(lastsids) + list(leases) + unreadable).items():
+                if any(u[:8].lower() == sid8 for u in unreadable):
+                    lease_left.append(unit)          # its host's lease cannot be read: never stopped for want of a valid one
+                    continue
                 lease = next((l for s, l in leases.items() if s[:8].lower() == sid8), None)
                 if lease is not None and lease_state(lease, now) == "valid":
                     continue
@@ -13255,6 +13337,7 @@ class SdkBackend:
                     stopped += 1
                 except Exception as e:
                     self._log("cut-turn reap: stopping leftover host scope %s failed: %s" % (unit, e))
+            self._log_lease_left(lease_left)
         if left is None:
             self._log_left_alone(spared)
         return stopped
@@ -13347,9 +13430,15 @@ class SdkBackend:
                                     pids=",".join(str(p) for p in unchecked), n=len(unchecked))
                     # Ownership by lease (T305): a CLI with a valid lease is owned whatever its parent; every
                     # anomaly is a problem row (lease_census documents the rules and the kinds)
-                    leases = list_leases(self.state_dir)
+                    unreadable: list = []
+                    leases = list_leases(self.state_dir, unreadable=unreadable)
                     census = lease_census(ps_lines, lastsids, os.getpid(), leases, version=self.code_version,
                                           sids=list(by_sid_reg))
+                    # a CLI launched for a session whose host lease cannot be read (by_sid: each CLI's own session) is
+                    # no orphan the census can prove: that lease may be a live host's, which it can no more read than a
+                    # valid one's. Spared, and its session stays down with it (spared_fsids below)
+                    lease_held = {pid for u in unreadable for pid in by_sid.get(u, ())}
+                    lease_left = []
                     # Only what this kernel can PROVE it started is reaped (state_tag_of, 2026-09-23): the listing is
                     # machine-wide and a session id is not a kernel's, so an orphan by the census's rules whose
                     # environment carries another kernel's tag, or none, is left alone, its scope with it, and named on
@@ -13359,6 +13448,9 @@ class SdkBackend:
                     orphans = []
                     for pid in census["orphans"]:
                         if pid == os.getpid():
+                            continue
+                        if pid in lease_held:
+                            lease_left.append("claude pid %d" % pid)
                             continue
                         tag = proc_state_tag(pid)
                         if tag == own_tag:
@@ -13422,6 +13514,7 @@ class SdkBackend:
                     # does a spared one's: left alone means its whole cgroup)
                     scopes_stopped = self._stop_leftover_scopes(lastsids, owned=set(census["owned"]) | spared, left=left)
                     self._log_left_alone(left)
+                    self._log_lease_left(lease_left)
                     if census["owned"] or problems:
                         by_lease = sum(1 for why in census["owned"].values() if why == "lease")
                         self._log("boot reconcile: %d CLI(s) owned (%d by lease), %d lease anomaly(ies) filed"
@@ -13506,7 +13599,16 @@ class SdkBackend:
                                   % (r.get("name") or sid[:8]))
                         continue
                     queued = [t for t in (r.get("queue") or []) if isinstance(t, str) and t]
-                    if _ht().host_lease_state(read_lease(self.state_dir, sid), time.time()) == "attach":
+                    lstate = self._host_lease(sid, if_unreadable="unreadable")[1]
+                    if lstate == "unreadable":
+                        # a host may still hold this session's CLI and its turn: no resume (a second CLI on its
+                        # conversation), no restart notice and no machine-cut stamp (a turn a host kept was never cut),
+                        # no attach on a lease nobody can read. It stays as it stands until the lease reads: the next
+                        # message connects, and that connect reads the lease again
+                        self._log("boot reconcile: %s stays down: its host lease cannot be read, so a host may still hold "
+                                  "its CLI and its turn" % (r.get("name") or sid[:8]))
+                        continue
+                    if lstate == "attach":
                         if self._attach_stand_down_holds(sid, r):
                             # the last kernel stood down from this very host (four attaches never completed): a boot
                             # is not new information; no attach, no count, no set entry (the commit-12 review's
@@ -15557,9 +15659,9 @@ class SdkBackend:
             if reg is None or not reg.get("alive"):
                 return False
             marker = reg.get("hostAttachFailed")
-            lease = read_lease(self.state_dir, sid)
-            still = (isinstance(marker, dict) and _ht().host_lease_state(lease, time.time()) == "attach"
-                     and self._holder_ident(lease) == str(marker.get("host") or ""))
+            lease, lstate = self._host_lease(sid, if_unreadable="unreadable")
+            still = isinstance(marker, dict) and (lstate == "unreadable" or (   # an unreadable lease is no change of the lease
+                lstate == "attach" and self._holder_ident(lease) == str(marker.get("host") or "")))
             if not still or sid in self.sessions:
                 return False
             have = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
@@ -15578,13 +15680,14 @@ class SdkBackend:
         a LIVE host lease ('attach': its CLI and host alive, the beat fresh) held by the very host the marker
         names. Anything else is new information and the marker is dropped on the way: another holder, a lease
         that no longer holds (the host died or was killed: the orphan road must run, not a stand-down; the
-        commit-12 review's first item), no lease at all (a fresh spawn would succeed; its fifth item)."""
+        commit-12 review's first item), no lease at all (a fresh spawn would succeed; its fifth item). A lease that cannot be
+        read is no information about the host, so the marker holds and is kept (_host_lease says it once per episode)."""
         reg = reg if isinstance(reg, dict) else (read_reg(self.state_dir, sid) or {})
         marker = reg.get("hostAttachFailed")
         if not isinstance(marker, dict):
             return False
-        lease = read_lease(self.state_dir, sid)
-        if _ht().host_lease_state(lease, time.time()) == "attach" and self._holder_ident(lease) == str(marker.get("host") or ""):
+        lease, lstate = self._host_lease(sid, if_unreadable="unreadable")
+        if lstate == "unreadable" or (lstate == "attach" and self._holder_ident(lease) == str(marker.get("host") or "")):
             return True
         self._update_reg_dropping(sid, drop=("hostAttachFailed",))   # _reg_lock, not self._lock
         reg.pop("hostAttachFailed", None)
@@ -15638,7 +15741,9 @@ class SdkBackend:
                     reg["model"] = nm
                     reg["liveModel"] = _alias_label(nm)
                     self._update_reg(sid, model=nm, liveModel=_alias_label(nm))   # _reg_lock, not self._lock
-            hosted = _ht().host_lease_state(read_lease(self.state_dir, sid), time.time()) == "attach"
+            # an unreadable lease reads as hosted: what a host may have kept alive is not reported dead, and the flags stand
+            # for a wake that can read the lease
+            hosted = self._host_lease(sid, if_unreadable="attach")[1] == "attach"
             if reg.get("threadOf") and not hosted:   # a thread whose host kept it alive lost nothing (T315)
                 # A dormant thread's DEAD LIFE, reported at its explicit wake. The boot sweep never
                 # resumes a thread for it (T223), so what the sweep tells a resumed top-level session
@@ -16020,13 +16125,37 @@ class SdkBackend:
         (it read as 'no host' until the 2026-10-08 review, silently): the problem log says so once per episode
         (_lease_episode) and the answer is `if_unreadable`, which every caller states: its own answer, chosen so that a host
         that may be alive is never treated as gone."""
+        return self._host_lease(sid, if_unreadable="attach" if if_unreadable else "none")[1] == "attach"
+
+    def _host_lease(self, sid: str, *, if_unreadable: str) -> tuple:
+        """(lease, state) for `sid`'s lease, every reader that decides something about the session's host reads it here:
+        `state` is host_lease_state's 'attach' (a live host holds it), 'orphan' (a host held it and is gone) or 'none' (no
+        lease file, or a kernel's), with the lease as written (None when there is none). A lease that exists but cannot be
+        read (an I/O error, a file that is not a lease record) or a reading that fails is no evidence about the host either
+        way: the problem log says so once per episode (_lease_episode), the lease is None, and the state is `if_unreadable`,
+        which every caller states, either the reading that keeps a host that may be alive from being treated as gone, or
+        'unreadable' for a caller with a road of its own for it (the 2026-10-08 review: six readers took such a lease for
+        no host, among them the connect's launch decision and the boot's cut-turn resume)."""
         try:
-            alive = _ht().host_lease_state(read_lease(self.state_dir, sid, strict=True), time.time()) == "attach"
+            lease = read_lease(self.state_dir, sid, strict=True)
+            state = _ht().host_lease_state(lease, time.time())
         except Exception as e:
             self._lease_episode(sid, e)
-            return if_unreadable
+            return None, if_unreadable
         self._lease_episode(sid, None)
-        return alive
+        return lease, state
+
+    def _lease_read(self, sid: str) -> tuple:
+        """(lease, readable): `sid`'s lease as written (None when there is no lease file) and whether it read, under
+        _host_lease's rule (an unreadable lease is said once per episode and is no evidence either way), for a reader that
+        needs the lease itself and not its state, whose reading costs two process-start reads (a `ps` run each on macOS)."""
+        try:
+            lease = read_lease(self.state_dir, sid, strict=True)
+        except Exception as e:
+            self._lease_episode(sid, e)
+            return None, False
+        self._lease_episode(sid, None)
+        return lease, True
 
     def _lease_episode(self, sid: str, err) -> None:
         """One problem row when `sid`'s lease turns unreadable (`err`), none while it stays so, and one plain line when it reads
@@ -16790,10 +16919,12 @@ class SdkBackend:
         """`end` (the kill bound) to the live host a session's lease names, with no SdkSession attached: a
         HostTransport connects, is refused nothing (a kernel is not attached; a `busy` answer means one is, and
         that kernel's own kill road applies) and closes in end mode. Runs on a daemon thread: kill() is a route
-        handler and the end waits up to the bound. False when no live host lease holds."""
+        handler and the end waits up to the bound. False when no live host lease holds. A lease that cannot be read may name a
+        live host: the end is sent through the session's host socket all the same (only this session's host listens there),
+        and a socket nobody serves fails the connect, which is logged."""
         ht = _ht()
-        lease = read_lease(self.state_dir, sid)
-        if ht.host_lease_state(lease, time.time()) != "attach":
+        lease, lstate = self._host_lease(sid, if_unreadable="unreadable")
+        if lstate not in ("attach", "unreadable"):
             return False
         sock = ht.host_sock(self.state_dir, sid)
         ident = self._kernel_identity()
@@ -16841,8 +16972,12 @@ class SdkBackend:
             if prev is not None and prev.is_alive():
                 self._log("host (%s): an end through the lease is already under way" % sid[:8])
                 return True                     # one end thread per sid: a second End click starts no second socket
-            self._log("host (%s): kill with no session object; ending the live host (pid %s) through its lease"
-                      % (sid[:8], ((lease or {}).get("holder") or {}).get("pid")))
+            if lstate == "unreadable":
+                self._log("host (%s): kill with no session object and a host lease that cannot be read; ending whatever host "
+                          "serves the session's socket" % sid[:8])
+            else:
+                self._log("host (%s): kill with no session object; ending the live host (pid %s) through its lease"
+                          % (sid[:8], ((lease or {}).get("holder") or {}).get("pid")))
             th = threading.Thread(target=run, name="end-host:" + sid[:8], daemon=True)   # kind:payload: the stack sample keeps the kind
             threads[sid] = th
             th.start()
@@ -16943,25 +17078,34 @@ class SdkBackend:
 
         Kept until the registry directory moves, the one key every writer moves: a registration is published by renaming a
         temp file into the directory (write_reg, in this process or in the outgoing kernel during a handover), which moves
-        the directory's mtime. Two bounds make that key exact. The directory's timestamp is coarse (Linux stamps it from a
-        clock that ticks every few milliseconds), so a write landing after a scan but inside the same tick would leave it
-        unchanged: a scan is kept only when the clock those timestamps come from (_fs_clock_ns) had already passed the
-        directory's own when the scan began, the racy-index rule, and is otherwise taken again on the next call. And a
-        scan that met a registration it could not read (list_regs' faults: one served from its last good copy, or dropped
-        because it had none) is used for this call and never kept, so a thread whose registration faulted on the scan is
-        listed, and an ended one leaves, as soon as the read heals. This process's own write count (REG_REV) rides the key
-        too, so its writes need no clock at all. A scan of 312 registrations costs about 3 ms; between writes a call costs a
-        directory stat. Every caller reads the table's own dicts, so none may write to them."""
+        the directory's mtime and ctime. The key is the directory's inode, mtime and ctime: the ctime because rsync -a,
+        cp -a and tar set a directory's mtime back after writing into it, and nothing but a change sets a ctime (the
+        kernel's _stat_ident carries it for the same reason). Two bounds make that key exact. The stamps are coarse (Linux
+        stamps from a clock that ticks every few milliseconds), so a write landing after a scan but inside the same tick
+        would leave them unchanged: a scan is kept only when the filesystem clock had already passed the ctime's whole
+        granule when the scan began (_fs_stamp_settled, the racy-index rule; the ctime, because every change of any kind
+        sets it to that clock's now, where an mtime can be set anywhere, the future included), and is otherwise taken again
+        on the next call. And a scan that met a registration it could not read (list_regs' faults: one served from its
+        last good copy, or dropped because it had none) is never kept as a good one: no file event says when such a read
+        heals (an EIO or an EMFILE moves nothing on disk), so it is served for the rest of the kernel cycle that took it
+        and taken again by the next cycle's first read (rows_table_cycle), and a thread whose registration faulted is
+        listed, and an ended one leaves, the cycle after the read heals. Each call used to scan again, about 3 ms a call
+        from every chat build while a registration stayed unreadable (the 2026-10-08 review). A backend no kernel cycles
+        (rows_table_cycle never called) keeps no faulted scan at all. This process's own write count (REG_REV) rides the
+        key too, so its writes need no clock at all. A scan of 312 registrations costs about 3 ms; between writes a call
+        costs a directory stat. Every caller reads the table's own dicts, so none may write to them. Not vouched for on a
+        filesystem stamped by another machine's clock (NFS), as the kernel's directory memos are not."""
         d = os.path.join(str(self.state_dir), "sdk")
         try:
             st = os.stat(d)
-            stamp = (st.st_ino, st.st_mtime_ns, REG_REV[0])
+            stamp = (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, REG_REV[0])
         except OSError:
             stamp = None                                  # no registry yet, or one that will not stat: list_regs answers
+        cycle = getattr(self, "_rows_cycle", None)        # the kernel cycle a faulted scan is served for (rows_table_cycle)
         memo = getattr(self, "_rows_table_memo", None)
-        if stamp is not None and memo is not None and memo[0] == stamp:
+        if stamp is not None and memo is not None and memo[0] in (stamp, ("faulted", stamp, cycle)):
             return memo[1]
-        settled = stamp is not None and _fs_clock_ns() > stamp[1]   # read BEFORE the scan: a later write stamps later
+        settled = stamp is not None and _fs_stamp_settled(stamp[2])   # read BEFORE the scan: a later change stamps past it
         faults: list = []
         threads, parents, children = {}, {}, {}
         for reg in list_regs(self.state_dir, faults=faults):
@@ -16980,8 +17124,20 @@ class SdkBackend:
         for kids in children.values():
             kids.sort(key=lambda k: k["t"])
         table = {"threads": threads, "forkParents": parents, "forkChildren": children}
-        self._rows_table_memo = ((stamp if settled and not faults else None), table)   # a racy or faulted scan: taken again
+        if not settled:
+            key = None                                    # a racy scan: taken again by the next call
+        elif faults:
+            key = ("faulted", stamp, cycle) if cycle is not None else None   # served until the next cycle, never as a good scan
+        else:
+            key = stamp
+        self._rows_table_memo = (key, table)
         return table
+
+    def rows_table_cycle(self) -> None:
+        """A kernel cycle began (the pusher calls this at each cycle's start, _pusher_cycle): a registry scan that met an
+        unreadable registration, served since the cycle that took it, is taken again by this cycle's first read
+        (_rows_table). The cycle is the event: nothing on disk moves when such a read heals."""
+        self._rows_cycle = (getattr(self, "_rows_cycle", None) or 0) + 1
 
     def session_state(self, sid: str) -> str:
         """Live state ('working'/'waiting'/…) for ONE sid, comment threads included — live_sessions

@@ -817,9 +817,9 @@ class HandoverGuards(unittest.TestCase):
         s = self._connect_sess(_host_reexec_closed=False)
         reads, real = [], sb.read_lease
 
-        def counted(state_dir, sid):
+        def counted(state_dir, sid, strict=False):                  # every reader that decides on the host reads strictly
             reads.append(sid)
-            return real(state_dir, sid)
+            return real(state_dir, sid, strict=strict)
         got, roads = self._connect(s, mock.patch.object(sb, "read_lease", counted))
         self.assertIsInstance(got, ht.HostTransport)
         self.assertEqual(len(reads), 1, "one read of the lease for an attach that waited for nothing")

@@ -744,6 +744,7 @@ def make_backend(sbmod, state, dormant_rows, all_regs):
         #   build raises on the attribute instead of answering
         "_fork_children_memo": None,   # fork_children's own memo, in revisions before the registry's rows table took it over
         "_rows_table_memo": None,      # the rows table (_rows_table: the thread set, the fork lineage and the branch chips)
+        "_rows_cycle": None,           # the kernel cycle a faulted rows-table scan is served for (rows_table_cycle): none here
         "_work_key_pin": "", "work_key": "",   # a property with a pin at
         #   HEAD (the pin wins), a plain attribute in older revisions (the instance value wins)
         "_problems": [], "_problem_seq": 0,
