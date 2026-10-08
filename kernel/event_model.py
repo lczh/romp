@@ -1133,13 +1133,16 @@ _DROP_OWED_MAX = 4096             # over it the OLDEST owed entry is popped unwr
 # document write at a drop or a hand-off (the exit writes its own checkpoints, and a write begun beside it competes with it for the interpreter).
 _DOC_WRITER = {"thread": None}    # the ident of the thread holding document_writer, or None
 _DOC_STOP = [None]                # a predicate (set_document_stop): True once the process is leaving
+_DOC_PROGRESS = [None]            # the kernel's tracker of the writer's writes (set_document_progress): begin/end around each one
 _DROP_HANDOFF = {}                # path -> (the reader entry's generation, pop): a drop that needs a write, met off the writer,
 #                                   oldest first; paid by the writer over the entry of that generation (documents_pay_handoffs)
 _ASM_REFUSAL_HANDOFF = {}         # leaf realpath -> (leaf_path, rompuuid, sdk_human, tree, why, refused cut offset, the whole entry the
-#                                   parse installed): a parse's rewrite after the chain proof refused the standing document, met off the
-#                                   writer (parse_session). The entry rides with it (the review of PR 155): the writer writes from it
-#                                   when the assembly cache evicted it before the writer's turn, so the cache's churn never turns the
-#                                   rewrite into nothing; bounded like the cache (_ASM_CACHE_MAX), since each one holds a whole entry
+#                                   parse installed, the reader entries its records came from): a parse's rewrite after the chain proof
+#                                   refused the standing document, met off the writer (parse_session). The entry rides with it (the
+#                                   review of PR 155): the writer writes from it when the assembly cache evicted it before the writer's
+#                                   turn, so the cache's churn never turns the rewrite into nothing, and the reader entries ride beside
+#                                   it for their record offsets, which nothing keeps resident once the entry is evicted (review of PR
+#                                   158); bounded like the cache (_ASM_CACHE_MAX), since each one holds a whole entry
 _HANDOFF_FAULTS = {}              # (hand-off kind, key) -> the kind of the fault its write raised, while its hand-offs keep failing: one
 #                                   line per episode (_handoff_fault), the episode ending when a hand-off of that kind and key pays
 _DROP_HOLD = threading.local()    # the converge pass holds this thread's quiescence drops while it heals and primes a leaf, then pays
@@ -1182,6 +1185,45 @@ def set_document_stop(pred):
     """Kernel wiring (once, at its import): `pred()` is True once the process is leaving (the exit's stand-down); from then no
     thread starts a document write at a drop or a hand-off. None removes it."""
     _DOC_STOP[0] = pred
+
+
+def set_document_progress(tracker):
+    """Kernel wiring (once, at its import): `tracker.begin(kind, path, nbytes)` and `tracker.end()` are called around every
+    write the writer's turn makes here (a handed drop's fold document, a handed rewrite's assembly document, an owed drop),
+    so the kernel can say when its document writer has spent longer on one write than its own history gives (review of
+    PR 158). None removes it."""
+    _DOC_PROGRESS[0] = tracker
+
+
+class _doc_progress:
+    """`with _doc_progress(kind, path, nbytes):` the write's progress events to the kernel's tracker, when one is wired; the
+    tracker records them on the document writer's own thread alone, and a tracker that raises never fails the write."""
+
+    def __init__(self, kind, path, nbytes):
+        self.args, self.t, self.wrote = (kind, str(path), int(nbytes or 0)), _DOC_PROGRESS[0], None
+
+    def __enter__(self):
+        if self.t is not None:
+            try:
+                self.t.begin(*self.args)
+            except Exception:
+                self.t = None
+        return self
+
+    def __exit__(self, exc_type, *exc):
+        if self.t is not None:
+            try:
+                self.t.end(wrote=(exc_type is None and self.wrote is not False))   # a write that wrote nothing teaches nothing
+            except Exception:
+                pass
+        return False
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(str(path))
+    except OSError:
+        return 0
 
 
 def documents_write_here():
@@ -1278,7 +1320,8 @@ def documents_pay_handoffs():
         if ent is None or ent[6] != gen:
             continue
         try:
-            _write_then_drop(key, ent, pop=pop)
+            with _doc_progress("fold", key, ent[1]) as _w:
+                _w.wrote = bool(_write_then_drop(key, ent, pop=pop)[0])
         except Exception as e:                            # noqa: BLE001 — this drop's failure, never the turn's
             _handoff_fault("drop", key, e)
             continue
@@ -1291,7 +1334,8 @@ def documents_pay_handoffs():
                     _ASM_REFUSAL_HANDOFF.setdefault(k, v)
             break
         try:
-            _asm_write_after_refusal(*args)
+            with _doc_progress("assembly", args[0], _file_size(args[0])) as _w:
+                _w.wrote = bool(_asm_write_after_refusal(*args))
         except Exception as e:                            # noqa: BLE001 — as at the parse: the rewrite is not retried here
             _handoff_fault(_REWRITE_HANDOFF, rk, e)
             continue
@@ -2000,7 +2044,9 @@ def checkpoint_pay_owed_drops():
             if ent is not None:                           # the file is gone: nothing to write, everything to release (round two,
                 _pop_owed_entry(key)                      #  low 2: the memory the drop was owed for)
             continue
-        _drop_quiescent_entry(key, ent, pop=True)         # takes the owed mark itself; over the budget again it re-defers
+        with _doc_progress("fold", key, ent[1]) as _w:
+            _w.wrote = bool(_drop_quiescent_entry(key, ent, pop=True))   # takes the owed mark itself; over the budget again it
+            #                                                                re-defers
         with _CKPT_LOCK:
             if key not in _DROP_OWED:
                 paid += 1
@@ -2544,6 +2590,43 @@ def _entry_offsets_gen(path):
     if ent is None or len(ent) < 8 or ent[5] > 0:
         return None, None
     offs = ent[7]
+    return [(offs[i], offs[i + 1]) for i in range(0, len(offs), 2)], ent[6]
+
+
+def _reader_entries_of(entry):
+    """{path: the reader's entry tuple} for every file whose records the assembly `entry`'s adapter took from the reader (its
+    recs row: (generation, base, count)), taken now while the parse that installed `entry` has just read them, whole entries
+    at that very generation only. A handed rewrite keeps them beside the entry (review of PR 158): the writer needs the
+    records' byte offsets, which only the reader's entry carries, and once the assembly entry is evicted nothing keeps that
+    entry resident (the assembly pin goes with it, and the reader's count cap and byte budget pin nothing). The records
+    themselves are the ones the kept adapter already holds, so this keeps the offsets alone alive."""
+    out = {}
+    rows = (entry or {}).get("recs") or {}
+    with _JSONL_CACHE_LOCK:
+        for fp, row in rows.items():
+            ent = _JSONL_CACHE.get(fp)
+            if (ent is not None and len(ent) >= 8 and not ent[5] and isinstance(row, tuple) and len(row) == 3
+                    and row[0] == ent[6]):
+                out[fp] = ent
+    return out
+
+
+def _kept_reader_offsets(path, ent):
+    """(record offsets, generation) from a kept reader entry `ent` for `path` (_reader_entries_of), or (None, None) when the
+    file no longer holds the bytes the entry read: its witness, the bytes before the entry's offset, read from the file now
+    and compared, the reader's own test for an append against a rewrite (_read_jsonl_entry, checkpoint_write). An append
+    since leaves the prefix and its offsets standing; a rewrite or a truncation fails it, and the writer declines for
+    offsets, a blip that marks nothing (_ASM_SKIP_BLIP)."""
+    try:
+        offset, tail = int(ent[2]), ent[3]
+        with open(str(path), "rb") as fh:
+            fh.seek(max(0, offset - len(tail)))
+            if fh.read(len(tail)) != tail:
+                return None, None
+    except (OSError, TypeError, ValueError, IndexError):
+        return None, None
+    offs = ent[7]
+    _asm_stat("write:keptOffsets")
     return [(offs[i], offs[i + 1]) for i in range(0, len(offs), 2)], ent[6]
 
 
@@ -8276,6 +8359,9 @@ def _pre_tree_identity(atoms, rompuuid):
 
 
 _ASM_SKIP_STRUCTURAL = ("unsplittable", "reconstruction", "unencodable", "oversize", "noCut", "reuse", "closure", "young")   # true of a cut until it moves
+_ASM_SKIP_BLIP = ("stat", "offsets", "write")   # the writer's declines of the MOMENT (a stat or a guard read the filesystem refused, the reader's
+#                                       record offsets not in memory, a write the disk refused): they say nothing about the document's shape,
+#                                       and the same parse a moment later writes (the rewrite after a refusal marks none: review of PR 158)
 _ASM_FIRST_DOC_MIN = _env_or("ROMP_CKPT_FIRST_DOC_KB", _CKPT_FOLD_CAP // 8, 1024)   # the young-session floor (the 1695 read, low 1): no FIRST
 #                                       document until the pre-cut part holds this many bytes (an eighth of the fold cap: 1 MB by default, moving with
 #                                       ROMP_CKPT_FOLD_CAP_KB; ROMP_CKPT_FIRST_DOC_KB sets it outright, 0 turns the floor off, as the test suite does
@@ -8327,7 +8413,8 @@ class _DocWriterScope:
         return False
 
 
-def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", from_entry=None, held=None):
+def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason_out=None, who="settle", from_entry=None, held=None,
+                         held_readers=None):
     """Write the leaf's assembly checkpoint from its WHOLE assembly entry. False when there is nothing to write: no
     entry, an entry restored from a document (its cut stands until a whole parse replaces the entry), no compaction boundary in
     the tree (the whole file would be the tail), a cut that would not split the chronological order the fold's gate
@@ -8338,8 +8425,12 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
     to write from in place of the leaf's own (the document refresh's private parse, asm_refresh_document). `held`, when given,
     is the whole entry a parse installed for this key (a handed rewrite after a refused document): written from, under the
     key lock, when the cache no longer holds any entry for the key (evicted or released since, so no reader folds it now),
-    counted write:fromHeld; an entry the cache does hold is written as always. The kernel's exit never calls it
-    (2026-10-08): its callers run while the kernel lives."""
+    counted write:fromHeld; an entry the cache does hold is written as always. `held_readers`, beside `held`, are the reader
+    entries the parse's records came from ({path: entry tuple}, _reader_entries_of): written from the kept entry, a file whose
+    reader entry the cache no longer holds at that generation takes its record offsets from the kept one, once its witness
+    bytes still stand in the file (_kept_reader_offsets; the review of PR 158: nothing pins the reader entry once the
+    assembly entry is evicted, and the write declined for offsets). The kernel's exit never calls it (2026-10-08): its
+    callers run while the kernel lives."""
     cp = _asm_ckpt_file(leaf_path)
     if cp is None:
         return False
@@ -8360,6 +8451,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             if entry is None and held is not None:
                 entry = held                    # evicted since its parse installed it: the hand-off kept it (the review of PR 155)
                 _asm_stat("write:fromHeld")
+            else:
+                held_readers = None             # the cache's own entry: its reader entries are the cache's to answer for
         if entry is None:
             return _skip("noEntry")
         if entry.get("prefix") or entry.get("preTurns"):
@@ -8528,6 +8621,9 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             # after the parse (its own session resumed elsewhere, the case _asm_gates demotes as nonleaf) would be stamped
             # as wholly before the cut with the appended record missing from every restore of this leaf's kernel life.
             src_gen, src_base = ((getattr(ad, "_src_keys", {}) or {}).get(fp, (None, None)) + (None, None))[:2]
+            if held_readers and fp in held_readers and (offs is None or ent_gen != src_gen):
+                offs, ent_gen = _kept_reader_offsets(fp, held_readers[fp])   # the kept entry's own reader entry (review of PR 158):
+                #                                            the cache's left (a quiet drop, its bounds) or was replaced by a later read
             # The prefix is accepted for the leaf under the tree's own generation AND from base zero: a seeded adapter that
             # read the file from its cut (a degenerate document whose pre-cut part holds records but no atoms restores unseen
             # as restored) holds records the entry's prefix does not begin with, so a whole reader upgrading the entry to
@@ -10141,14 +10237,15 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
         _refused = _ASM_CHAIN_REFUSED_PATHS.pop(_rk, None)
     _why, _refused_off = _refused if _refused is not None else (None, None)
     if _why is not None and _CKPT_DIR_FN is not None:
-        _held = _installed[-1] if _installed else None   # the entry this parse installed: the writer writes from it even once evicted
+        _held = _installed[-1] if _installed else None   # the entry this parse installed: the writer writes from it even once evicted,
+        _readers = _reader_entries_of(_held) if _held is not None else {}   # at the offsets of the reader entries it came from
         if documents_write_here():                  # the chain proof refused the standing document and this whole parse produced a
-            _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, out, _why, _refused_off, _held)   # sound tree: its document now
+            _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, out, _why, _refused_off, _held, _readers)   # sound tree: now
         else:                                       # a parse on a frame thread (the pusher's build, a request): the rewrite is the
             let_go = 0                              #  document writer's, at its next cycle, from the entry this parse installed
             with _ASM_CKPT_LOCK:
                 _ASM_REFUSAL_HANDOFF.pop(_rk, None)
-                _ASM_REFUSAL_HANDOFF[_rk] = (leaf_path, rompuuid, sdk_human, out, _why, _refused_off, _held)
+                _ASM_REFUSAL_HANDOFF[_rk] = (leaf_path, rompuuid, sdk_human, out, _why, _refused_off, _held, _readers)
                 while len(_ASM_REFUSAL_HANDOFF) > _ASM_CACHE_MAX:   # each holds a whole entry: bounded like the cache. One let go
                     _ASM_REFUSAL_HANDOFF.pop(next(iter(_ASM_REFUSAL_HANDOFF)))   # leaves no mark, so the leaf's next parse proves
                     let_go += 1                     #  and rewrites again; counted, never silent
@@ -10163,7 +10260,7 @@ _ASM_REFUSAL_MOOT = ("written", "noEntry", "restored")   # the writer's skips th
 #                                                          installed none to hand over, a fallback road's)
 
 
-def _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, tree, why, refused_off, held=None):
+def _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, tree, why, refused_off, held=None, held_readers=None):
     """The rewrite after a refused document (T402 follow-up): the whole parse that followed the refusal installed a sound entry,
     and its document is written from it, carrying the childless bit, so the next restore takes it. Run by the parse itself
     on the document writer's thread, and otherwise by the writer at its write phase (documents_pay_handoffs, 2026-10-08), which
@@ -10172,12 +10269,21 @@ def _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, tree, why, refused_
     proven against. `held` is the entry the parse installed (the review of PR 155): when the assembly cache has evicted it
     by the writer's turn (or a release let it go), the document is written from it, as the parse would have written it on
     its own thread; before, that was "no entry", nothing written and nothing marked, and every later parse of the leaf paid
-    the proof and the whole parse again. Any other decline is marked like a shape, as before."""
+    the proof and the whole parse again. `held_readers` are the reader entries that entry's records came from, whose record
+    offsets the writer takes when the cache no longer holds them (review of PR 158). A decline for a blip of the moment
+    (_ASM_SKIP_BLIP: a stat or a guard read refused, the offsets not in memory, a write refused) marks nothing of its own:
+    it says nothing about the document, and marking it sent every later parse of the leaf straight to a whole parse until
+    the leaf changed (an idle leaf: every boot); a refusal the proof made for the tail's shape is marked all the same, since
+    that is the proof's evidence. Any other decline is marked like a shape, as before. Returns whether a document was
+    written (the writer's progress events learn from writes that wrote)."""
     _rk = os.path.realpath(str(leaf_path))
+    wrote = False
     try:
         reasons = []
-        if asm_checkpoint_write(leaf_path, rompuuid, sdk_human, tree=tree, reason_out=reasons, who="refusal", held=held):
+        if asm_checkpoint_write(leaf_path, rompuuid, sdk_human, tree=tree, reason_out=reasons, who="refusal", held=held,
+                                held_readers=held_readers):
             _asm_stat("write:afterRefusal")         # carrying the childless bit, so the next restore takes it (T402 follow-up)
+            wrote = True
             with _ASM_CKPT_LOCK:
                 _new_off = _ASM_LAST_WRITE_CUT.get(_rk)
             if why == "shape" and _new_off is not None and _new_off != refused_off:
@@ -10186,7 +10292,11 @@ def _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, tree, why, refused_
                 #                                      the refused cut's shape does not stand over it (the writer retired the old mark)
         elif reasons and reasons[-1] in _ASM_REFUSAL_MOOT:
             _asm_stat("write:afterRefusalMoot")     # the entry moved on: the next parse proves whatever stands then
-            return
+            return False
+        elif reasons and reasons[-1] in _ASM_SKIP_BLIP:
+            _asm_stat("write:afterRefusalBlip")     # a blip of the moment (review of PR 158): no evidence about the document, so
+            #                                         no mark of its own; the proof's verdict stands as it was (a refused shape is
+            #                                         still marked below), and the next parse proves and offers the rewrite again
         else:
             _asm_stat("write:afterRefusalSkipped")   # the writer declined (its own skip reason is counted under asmCheckpoint.skipped)
             why = "shape"                           # a declined offer, whatever the refusal's reason (a legacy document whose
@@ -10198,6 +10308,7 @@ def _asm_write_after_refusal(leaf_path, rompuuid, sdk_human, tree, why, refused_
     if why == "shape":
         _asm_mark_refused(leaf_path, "shape", rompuuid, sdk_human)   # AFTER the write, so an accepted write cannot erase it: the same cut
         #                                     reproduces the same refusal until the leaf moves (round two, medium 1)
+    return wrote
 
 
 

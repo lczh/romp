@@ -2911,7 +2911,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   cycle's stage split (its `jobs.settleWrites`, `jobs.beginCheckpointCycle`
   and `jobs.convergeCheckpoints`). A long document write shows here, as a
   long cycle, and no longer as a long jobs pass; the writer's jobs count
-  their CPU under `jobs.cpuByJob` by their own names.
+  their CPU under `jobs.cpuByJob` by their own names. Its live part:
+  `inFlight`, the writes under way (innermost last: `kind` assembly, fold or
+  heal, `path`, `bytes`, `ageS`, `expectS`, `overdue`, `cpuClock`);
+  `byKind`, what each kind's completed writes that did work taught (`writes`,
+  `longestS`, `worstSPerMB`); `overdue`, the writes said stuck; and `handed`
+  and `handedPeak`, the backlog (`drops`, `rewrites`, `settles`, `owed`) now
+  and at its largest. A write is said stuck, once, on stderr and as a problem
+  row naming it, its size and how long, when at a jobs pass's end it has
+  outlasted what its kind's completed writes give a write of its size (the
+  longer of the longest one and its bytes at the slowest rate per byte) and
+  the writer's thread has spent no CPU since the previous pass's end, so a
+  slow write that is working is never called stuck. A kind with no completed
+  write yet, or a platform with no per-thread CPU clock (macOS), is not
+  judged; its age and the backlog show here either way.
 - `jobs.gate`: the event-driven jobs pass, stage one, which observes and
   skips nothing. The jobs loop rests half a second after a pass and then
   runs every job again, whether or not anything a job reads changed, so a
@@ -3171,14 +3184,25 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   threads plus the judges' parses churns the cache's 256 entries), the document
   is written from the kept entry all the same (`write:fromHeld`), where before
   the rewrite was dropped with no mark and every later parse of the leaf paid
-  the proof and the whole parse again; the hand-off table is bounded like the
-  cache, and one let go over the bound (`write:afterRefusalLetGo`) leaves no
-  mark, so the leaf's next parse proves and rewrites again. When the writer
-  declines that rewrite (`write:afterRefusalSkipped`) nothing is taken and the
-  document is marked as below, except when its skip says the entry moved on
-  since the parse (its document written meanwhile, or the entry replaced by a
-  restore: `write:afterRefusalMoot`, no mark, since a mark there would refuse
-  the document just written, and the next parse proves whatever stands then); a document refused for the tail's SHAPE (a
+  the proof and the whole parse again. Beside the entry the hand-off keeps the
+  reader entries its records came from, since the document is written at
+  their record offsets and nothing keeps them in memory once the entry is
+  evicted: a file whose reader entry has left the cache lends its offsets from
+  the kept one, after that entry's witness bytes are found still in the file
+  (`write:keptOffsets`; a rewrite of the file fails the witness and lends
+  none). The hand-off table is bounded like the cache, and one let go over the
+  bound (`write:afterRefusalLetGo`) leaves no mark, so the leaf's next parse
+  proves and rewrites again. When the writer declines that rewrite
+  (`write:afterRefusalSkipped`) nothing is taken and the document is marked as
+  below, except when its skip says the entry moved on since the parse (its
+  document written meanwhile, or the entry replaced by a restore:
+  `write:afterRefusalMoot`, no mark, since a mark there would refuse the
+  document just written, and the next parse proves whatever stands then), and
+  except a decline of the moment, a stat or guard read refused, the record
+  offsets not in memory, a write the disk refused (`write:afterRefusalBlip`):
+  that says nothing about the document, so it makes no mark of its own and the
+  next parse proves and offers the rewrite again; a refusal the proof made for
+  the tail's shape is marked all the same, as the proof's evidence; a document refused for the tail's SHAPE (a
   re-rooted tail, a reused pre-cut uuid), or whose offered rewrite the writer
   declined for any other reason, is marked refused in its sidecar at the
   leaf's stat (under

@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 from test_asm_checkpoint import em, G, SID, NOW, Harness, kernel_module, _strip   # noqa: E402
@@ -582,6 +583,84 @@ class AssemblyRoadCounters(Harness):
         self.assertEqual((parse2.get("restore"), parse2.get("restore:chainRefused", 0), parse2.get("full", 0)), (1, 0, 0),
                          "the next restore takes it: %s" % parse2)
         self.assertEqual(tree2, self._cold(path))
+
+    def test_a_kept_entry_whose_reader_entry_was_dropped_too_is_still_written_and_never_marked(self):
+        """The review of PR 158: the document is written from the entry's records at the reader's record offsets, and once the
+        cache evicted the assembly entry nothing pinned the reader's entry for the leaf, so a quiet drop or the reader's own
+        bounds could let it go before the writer's turn. The writer then declined for want of offsets, and that decline was
+        marked like a refused shape: every later parse went straight to a whole parse until the leaf changed (for an idle
+        leaf, every boot). The hand-off now keeps the reader entries the parse's records came from beside the entry, and the
+        writer takes a file's offsets from them, its witness bytes checked against the file, when the cache no longer holds
+        that reader entry: written, the bit carried, no mark, the next restore takes it. At the base: write:fromHeld, skipped
+        for offsets, the mark, and the next parse restore:refusedStanding."""
+        import contextlib
+        path, t0 = self._documented("handoff-evicted-reader"); self._strip_bit(path)
+        other = self._five_shape_file("handoff-evictor-2")[0]
+        self.fresh(); self._reset()
+        with getattr(em, "document_writer", contextlib.nullcontext)():
+            self._off_the_writer(path)
+            saved = em._ASM_CACHE_MAX
+            em._ASM_CACHE_MAX = 1
+            try:
+                self._parse_lineage(other, [other])                     # the cache at its cap evicts the leaf's assembly entry
+            finally:
+                em._ASM_CACHE_MAX = saved
+            with em._JSONL_CACHE_LOCK:                                  # and the leaf's reader entry leaves too (a quiet drop, the
+                em._cache_pop_locked(path)                              #  reader's count cap or byte budget): nothing pins it now
+            em.documents_pay_handoffs()
+        parse = em.asm_checkpoint_stats()["parse"]
+        skipped = em.asm_checkpoint_stats()["skipped"]
+        self.assertEqual(parse.get("write:afterRefusal"), 1, "written: %s, skipped %s" % (parse, skipped))
+        self.assertEqual((parse.get("write:fromHeld"), parse.get("write:keptOffsets")), (1, 1), parse)
+        self.assertIs(self._bit(path), True, "from the kept entry at the kept reader entry's offsets")
+        self.assertFalse(em._asm_refusal_stands(path), "no mark")
+        self.fresh(); self._reset()
+        tree2, parse2, reads2 = self._served(path)
+        self.assertEqual((parse2.get("restore"), parse2.get("restore:refusedStanding", 0), parse2.get("full", 0)), (1, 0, 0),
+                         "the next restore takes it: %s" % parse2)
+        self.assertEqual(tree2, self._cold(path))
+
+    def test_a_kept_reader_entry_lends_its_offsets_only_while_its_witness_stands_in_the_file(self):
+        """The kept reader entry's offsets stand for the file only while the bytes it read are still there: an append leaves
+        its witness (the bytes before its offset) in place and the offsets are lent; a rewrite of the same length fails the
+        witness and none are lent, so the writer declines for offsets, a blip that marks nothing."""
+        path, t0 = self._documented("kept-witness")
+        self.fresh(); self._reset()
+        self._parse_lineage(path, [path])
+        with em._JSONL_CACHE_LOCK:
+            ent = em._JSONL_CACHE.get(path)
+        self.assertIsNotNone(ent, "the parse left the leaf's reader entry")
+        offs, gen = em._kept_reader_offsets(path, ent)
+        self.assertEqual((len(offs), gen), (len(ent[4]), ent[6]), "the file as read: its offsets lent")
+        self._append(path, [G.uline(t0 + 900, "an appended question", "u_app", "a5")])
+        self.assertIsNotNone(em._kept_reader_offsets(path, ent)[0], "an append leaves the witness: still lent")
+        data = open(path, "rb").read()
+        open(path, "wb").write(data.replace(b"a", b"b"))              # a rewrite of the same length: the witness bytes change
+        self.assertEqual(em._kept_reader_offsets(path, ent), (None, None), "a rewrite fails the witness: none lent")
+
+    def test_a_rewrite_the_writer_declines_for_a_blip_leaves_no_mark(self):
+        """A missing record offset (or a stat that fails, or a write the disk refuses) is a blip of the moment, not evidence
+        that the document's shape is refused: the same parse a moment later writes. The rewrite after a refusal marked every
+        decline but the moot ones like a refused shape, so one blip sent every later parse of the leaf straight to a whole
+        parse until it changed. A blip now leaves no mark (write:afterRefusalBlip); the next parse proves the document and
+        offers the rewrite again, which lands. Driven on the parse's own thread, the reader's offsets for the leaf missing
+        at the write. At the base the decline was marked and the next parse took restore:refusedStanding."""
+        path, t0 = self._documented("blip-offsets"); self._strip_bit(path)
+        self.fresh(); self._reset()
+        real = em._entry_offsets_gen
+        with mock.patch.object(em, "_entry_offsets_gen", lambda p: (None, None) if str(p) == path else real(p)):
+            tree, parse, reads = self._served(path)
+        self.assertEqual((parse.get("restore:chainRefused"), parse.get("full:refused")), (1, 1), parse)
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"].get("offsets"), 1, em.asm_checkpoint_stats()["skipped"])
+        self.assertEqual(parse.get("write:afterRefusalBlip"), 1, parse)
+        self.assertFalse(em._asm_refusal_stands(path), "a blip is no mark")
+        self.fresh(); self._reset()
+        tree2, parse2, reads2 = self._served(path)
+        self.assertEqual((parse2.get("restore:refusedStanding", 0), parse2.get("restore:chainRefused"), parse2.get("write:afterRefusal")),
+                         (0, 1, 1), "the next parse proves and rewrites: %s" % parse2)
+        self.fresh(); self._reset()
+        tree3, parse3, reads3 = self._served(path)
+        self.assertEqual((parse3.get("restore"), parse3.get("full", 0)), (1, 0), "and the restore after it takes it: %s" % parse3)
 
     def test_a_handed_rewrite_whose_entry_was_written_meanwhile_marks_nothing(self):
         """The hand-off's one new outcome: between the parse and the writer's turn, the entry's document was written by another
