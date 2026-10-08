@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """T323 stage 4a, served: a REAL hermetic kernel over a large synthetic session whose transcript compacted several times;
-a chat client (the stage 3 websocket client) looks at it, so the kernel parses it whole; the kernel is stopped with
-SIGTERM and its drain writes the assembly document. A SECOND kernel over the same state root, same client: the parse
+a chat client (the stage 3 websocket client) looks at it, so the kernel parses it whole; a turn end (a states-log row,
+the event the settle write keys on) has the settle write the assembly document from that parse, and the kernel is
+stopped with SIGTERM once the document is on disk (the exit's own drain wrote it until 2026-10-08, when the exit stopped
+writing documents). A SECOND kernel over the same state root, same client: the parse
 restores from the document (asmCheckpoint.restored, no fallback), the first session frame arrives (its time is
 printed), the kernel log holds no LazyBodyRead, and the leaf's bytes read before the frame are the document plus the
 tail plus what the frame hydrated, less than the whole file read twice. What stays whole is on the record: a full
@@ -108,6 +110,7 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         Path(cls.leaf).write_text("".join(json.dumps(r) + "\n" for r in transcript(t0)))
         Path(cls.state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         cls.token = "testtok-t323s4a"
+        cls.t0 = t0
 
     @classmethod
     def tearDownClass(cls):
@@ -204,17 +207,47 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         k.send_signal(signal.SIGTERM)
         k.wait(timeout=30)
 
+    def _docs(self):
+        ckdir = os.path.join(self.state, "checkpoints")
+        return [f for f in os.listdir(ckdir) if f.endswith(".asm.json.gz")] if os.path.isdir(ckdir) else []
+
+    def _settle_document(self, port):
+        """web's turn ends once the jobs pass has taken its first sight of web, and the settle write then writes web's assembly
+        document from the parse a tab just made; returns once the document is on disk (the event a test's stop waits for), or
+        after 60 s. The turn end is a later lastStopAt in web's registry entry (what the Stop hook records, the settle write's
+        primary evidence), published by a rename the way every writer of the file does: a states-log row would serve the
+        settle too, but it is one of the files the judges key their memos on, and the next kernel would find those memos
+        stale and re-plan the session (its caption tasks read every pre-cut body). The exit's drain wrote the document until
+        2026-10-08, when the exit stopped writing documents."""
+        for _ in range(120):                       # loop-ok: bounded; a pass ran, so its first sight of web is on record
+            if (self._get(port, "/perf").get("jobs") or {}).get("passes", 0) >= 1:
+                break
+            time.sleep(0.5)
+        reg = Path(self.state, "sdk", WEB + ".json")
+        rec = json.loads(reg.read_text())
+        rec["lastStopAt"] = self.t0 + 95
+        tmp = reg.with_name(reg.name + ".tmp.%d.0.1" % os.getpid())
+        tmp.write_text(json.dumps(rec))
+        os.replace(tmp, reg)
+        for _ in range(120):                       # loop-ok: bounded; the document on disk is the event
+            if self._docs():
+                break
+            time.sleep(0.5)
+        return self._docs()
+
     def test_the_second_kernel_restores_the_assembly_from_the_first_kernels_document(self):
         k1, p1, log1 = self._boot()
         try:
             dt1, _ = self._open_tab(p1)
-            time.sleep(2.0)
+            self._settle_document(p1)
             perf1 = self._get(p1, "/perf")["asmCheckpoint"]
             self.assertEqual(perf1["fallbacks"], {}, "a first boot has nothing to fall back from")
         finally:
             self._stop(k1)
-        docs = [f for f in os.listdir(os.path.join(self.state, "checkpoints")) if f.endswith(".asm.json.gz")]
-        self.assertEqual(len(docs), 1, "the exit wrote web's assembly document; wrote: %s" % docs)
+        docs = self._docs()
+        self.assertEqual(len(docs), 1, "the settle wrote web's assembly document while the kernel ran (the exit writes none); "
+                                       "wrote: %s; the writer's skips: %s; the kernel's last lines:%s"
+                         % (docs, perf1.get("skipped"), self._log_tail(log1)))
         import gzip
         doc = json.loads(gzip.decompress(open(os.path.join(self.state, "checkpoints", docs[0]), "rb").read()))
         self.assertEqual(doc["path"], os.path.realpath(self.leaf))

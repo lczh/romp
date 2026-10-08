@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """T401 (5a), served: a REAL hermetic kernel over two synthetic sessions whose transcripts compacted, each with an assembly
-document seeded before the boot through the writer every kernel path calls (em.asm_checkpoint_write, the settle's and the exit
-drain's): the judge tiers' first pass builds through their per-session pools, a proto-2 chat client drives one real history
+document seeded before the boot through the writer every kernel path calls (em.asm_checkpoint_write, the settle's and the
+converge pass's): the judge tiers' first pass builds through their per-session pools, a proto-2 chat client drives one real history
 request over the socket, and /perf then reads NO `none` key in asmIndex.materializedByStage or asmCheckpoint.hydratedByStage, a
 pool build under `judge.triage:<caller>`, and the socket request's build under `http.GET.ws:<caller>`. The request comes AFTER
 the judge's pass and the push, the race a slower runner produced staged on purpose, and the kernel's resident index cap is tiny,
