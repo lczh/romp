@@ -728,7 +728,8 @@ class PusherRecords(unittest.TestCase):
             "_auto_pause_on_limit", "_usage_poll_tick", "_auto_pause_on_spend_limit", "_auto_resume_retry",
             "_auto_resume_session_retry", "_auto_retry_tick", "_idle_queue_drive_tick",
             "_clear_done_working_notes", "_spend_guard_tick", "_push_all",
-            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell; the spend guard (T350, "_converge_checkpoints")
+            "_api_health_frame", "_api_health_push",   # the bottom bar's API cell; the spend guard (T350, "_converge_checkpoints")
+            "_sessions_listing_refresh")   # the /sessions listing: its thread rows build the SDK backend, whose boot starts threads
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -839,12 +840,19 @@ class PusherRecords(unittest.TestCase):
         # the stub plus the read that closes it: 2 ms exactly), `jobs` the rest of the function (the reads outside
         # the push: a count of clock reads, never negative). A wall-clock ratio here (push >= a 5 ms sleep, jobs
         # below two pushes) was green alone and a coin toss under the suite (2026-09-12, 2026-09-14); a stubbed
-        # clock makes both stages counts
+        # clock makes both stages counts.
+        # The stub steps for THIS thread's reads only. `km.time` is the process's one time module, so the patch is
+        # process-wide, and a read by any other thread took one of the scripted steps: on CI (2026-10-08) the listing
+        # job, not yet a no-op here, built the SDK backend inside the first cycle, its boot started the test-root
+        # sweep, the sweep read the clock between the two cycles, and the no-client cycle came out one read short
+        # (18 != 19). Another thread's read gets the real clock; one is made in that same gap below to keep it so.
         for nm in self.JOBS:
             setattr(km, nm, lambda *a, **k: None)
         km._push_all = lambda live_map=None: time.monotonic()
-        reads = [0]
+        reads, mine, real_clock = [0], threading.get_ident(), time.monotonic
         def _clock():
+            if threading.get_ident() != mine:
+                return real_clock()
             reads[0] += 1
             return reads[0] * 0.001
         with mock.patch.object(km.time, "monotonic", _clock):
@@ -856,6 +864,9 @@ class PusherRecords(unittest.TestCase):
             self.assertAlmostEqual(push, 2.0, places=6, msg="the push stage spans the stub's read and the closing read")
             self.assertGreaterEqual(jobs, 0.0, "jobs is the function minus the push, never negative")
             self.assertAlmostEqual(push + jobs, (n_first - 1) * 1.0, places=6, msg="push plus jobs is the function's whole span: every read but the first")
+            other = threading.Thread(target=time.monotonic, name="another-thread-reads-the-clock")
+            other.start()
+            other.join()                  # a read between the cycles, off this thread: not one of the cycle's
             before = km._PERF_STATS.snapshot()["stages_ms"]
             km._pusher_cycle_jobs(int(time.time()), {}, False)   # no client: no push, the jobs still run
             after = km._PERF_STATS.snapshot()["stages_ms"]
