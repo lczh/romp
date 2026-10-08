@@ -12370,13 +12370,18 @@ def _spend_record_stands(e, tm, lifted_at=0):
     """Whether a session's spendLimit record `e` is still news, the ONE rule the engage (_spend_capped_session) and the
     hold (_limit_hold) read (2026-10-07): not older than the global pause's last lift (`lifted_at`, _retry_pause_lifted_at:
     the evidence that outranked it) nor than the moment the session's CLI came up on a new billing (its live row's
-    authSwitchedAt, stamped by the backend at the connect that carried a switch, or at a pick on a session with no CLI
-    running: the record describes an account the session no longer runs on). A cap error the new account answers with
-    is a newer record and stands again. Compared as they are, as the engage always did: a record with no readable time
-    (t 0) is not proof of staleness and stands."""
+    authSwitchedAt, stamped by the backend when a switch lands: the record describes an account the session no longer
+    runs on). A cap error the new account answers with is a newer record and stands again. Each floor is compared in its
+    own clock's precision: the lift's evidence is the lifting output's own whole-second stamp (or a Resume's instant), read
+    against the record's whole-second `t` as the engage always read it (a record in that same second reads as new, the
+    side to err on); the landing is this kernel's clock to the sub-second, read against the record's own millisecond
+    stamp (`tExact`), so a cap error in the landing's second is ordered exactly. A record with no readable time is not
+    proof of staleness and stands."""
     t = float(e.get("t") or 0)
-    floor = max(float(lifted_at or 0), float((tm or {}).get("authSwitchedAt") or 0))
-    return not (floor and 0 < t < floor)
+    if lifted_at and 0 < t < float(lifted_at):
+        return False
+    landed, te = float((tm or {}).get("authSwitchedAt") or 0), float(e.get("tExact") or 0)
+    return not (landed and 0 < te < landed)
 
 
 def _auto_pause_on_spend_limit(now, live_map):
@@ -36135,6 +36140,10 @@ def _api_error_pass(path, start):
                                      # the record's own time, the event stamp the API health frame's `since`
                                      # carries (never the clock, so an unchanged world serializes identically)
                                      "t": int(em.parse_z(o.get("timestamp")) or 0),
+                                     # …and to the millisecond the CLI stamps it: the spend hold orders the record
+                                     # against a billing switch's landing, which this kernel's clock stamps exactly
+                                     # (_spend_record_stands); whole seconds read a record of the landing's second as older
+                                     "tExact": _msg_epoch(o) or 0.0,
                                      "tooLong": "too long" in text.lower(),
                                      # a spend cap is on YOU (raise it), like tooLong — but ALSO stops the
                                      # auto-retry entirely (no reset to wait out); see _auto_pause_on_spend_limit
@@ -40493,13 +40502,18 @@ def _limit_hold(sid):
     # landing on a new billing.
     on, bills, lifted = _spend_pause_reading() if getattr(_live_scope, "spend_pause", None) is None \
         else _live_scope.spend_pause
-    # the live row is read only where a verdict needs it (a pause that recorded a billing, a cap record): the cycle's
-    # snapshot inside a drain, a liveness read on a handler thread
-    if on and (not bills or _on_paused_billing((_live_map() or {}).get(str(sid)), bills)):
+    # the live row is read at most ONCE, and only where a verdict needs it (a pause that recorded a billing, a cap record):
+    # the cycle's snapshot inside a drain, a liveness read (every backend's rows) on a handler thread
+    row = [_UNSET]
+    def live_row():
+        if row[0] is _UNSET:
+            row[0] = (_live_map() or {}).get(str(sid))
+        return row[0]
+    if on and (not bills or _on_paused_billing(live_row(), bills)):
         return dict(_SPEND_HOLD)
     path = _path_of(sid)                              # the pause is account-wide, but the transcript is the
     e = _api_error(path) if path else None            # first place the cap shows — hold from that edge too
-    if e and e.get("spendLimit") and _spend_record_stands(e, (_live_map() or {}).get(str(sid)), lifted):
+    if e and e.get("spendLimit") and _spend_record_stands(e, live_row(), lifted):
         return dict(_SPEND_HOLD)
     return None
 
